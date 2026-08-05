@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod extract;
 pub mod opencode;
 pub mod pi;
@@ -17,6 +18,8 @@ use std::path::{Path, PathBuf};
 pub enum Surface {
     /// A coding agent in a terminal.
     Cli,
+    /// An agent hosted by an editor rather than a dedicated CLI process.
+    Editor,
     /// Claude for Mac, running Claude Code locally.
     DesktopCode,
     /// Claude for Mac, running in a cloud VM.
@@ -30,10 +33,12 @@ impl Surface {
 
     pub fn label(&self, provider: Provider) -> &'static str {
         match (self, provider) {
+            (Surface::Editor, Provider::Cursor) => "Cursor",
             (Surface::DesktopCowork, _) => "Claude Cowork",
             (Surface::DesktopCode, _) => "Claude Code",
             (_, Provider::Claude) => "Claude",
             (_, Provider::Codex) => "Codex",
+            (_, Provider::Cursor) => "Cursor",
             (_, Provider::OpenCode) => "OpenCode",
             (_, Provider::Pi) => "Pi",
         }
@@ -76,6 +81,9 @@ pub struct Session {
     pub started_at: String,
     pub last_active: String,
     pub model: String,
+    /// Where the agent is hosted, when it can be inferred (for example Cursor
+    /// versus a terminal CLI). This is intentionally distinct from `model`.
+    pub harness: String,
     /// Working directory the session was launched from.
     pub label_source: String,
     pub data_file: Option<PathBuf>,
@@ -89,6 +97,8 @@ pub struct Session {
     pub tool_count: u64,
     /// `None` when the active plan bundles this provider's usage.
     pub total_cost: Option<f64>,
+    /// False when the provider's transcript contains no billable usage data.
+    pub cost_available: bool,
     pub cost_hour: f64,
     pub cost_today: f64,
     pub costs_by_day: HashMap<String, HashMap<String, f64>>,
@@ -98,6 +108,9 @@ pub struct Session {
     pub context: Option<ContextUsage>,
     pub last_tool: String,
     pub process: Option<crate::proc::ProcInfo>,
+    /// Liveness inferred from a growing transcript when no per-session process
+    /// exists (currently Cursor native agents).
+    pub inferred_running: bool,
 
     // --- Rate tracking ---
     pub tokens_per_min: f64,
@@ -113,6 +126,7 @@ impl Session {
             started_at: String::new(),
             last_active: String::new(),
             model: String::new(),
+            harness: String::new(),
             label_source: String::new(),
             data_file: None,
             title: None,
@@ -122,6 +136,7 @@ impl Session {
             output_tokens: 0,
             tool_count: 0,
             total_cost: Some(0.0),
+            cost_available: true,
             cost_hour: 0.0,
             cost_today: 0.0,
             costs_by_day: HashMap::new(),
@@ -131,6 +146,7 @@ impl Session {
             context: None,
             last_tool: String::new(),
             process: None,
+            inferred_running: false,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
         }
@@ -142,7 +158,7 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        self.process.is_some()
+        self.process.is_some() || self.inferred_running
     }
 
     /// Title if renamed, else the abbreviated working directory.
@@ -320,6 +336,9 @@ pub struct SessionData {
     pub ai_title: Option<String>,
     /// Latest model seen in the *main* transcript, excluding subagent sidechains.
     pub last_model: String,
+    /// Provider-reported reasoning effort, when the transcript exposes it.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub models: Vec<String>,
     pub model_breakdown: Vec<ModelBreakdown>,
     pub tokens: Tokens,
@@ -372,10 +391,20 @@ impl SessionData {
 
 /// All sessions from every known provider and surface, newest first.
 pub fn list_all() -> Vec<Session> {
-    let mut sessions = codex::list_sessions();
-    sessions.extend(claude::list_sessions());
-    sessions.extend(opencode::list_sessions());
-    sessions.extend(pi::list_sessions());
+    let ((mut codex, claude), ((opencode, pi), cursor)) = rayon::join(
+        || rayon::join(codex::list_sessions, claude::list_sessions),
+        || {
+            rayon::join(
+                || rayon::join(opencode::list_sessions, pi::list_sessions),
+                cursor::list_sessions,
+            )
+        },
+    );
+    codex.extend(claude);
+    codex.extend(opencode);
+    codex.extend(pi);
+    codex.extend(cursor);
+    let mut sessions = codex;
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     sessions
 }
@@ -409,7 +438,7 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
             .map(|p| crate::config::file_mtime_ms(p))
             .max()
             .unwrap_or(0),
-        Provider::Codex | Provider::Pi => crate::config::file_mtime_ms(f),
+        Provider::Codex | Provider::Cursor | Provider::Pi => crate::config::file_mtime_ms(f),
         // Every OpenCode session shares one WAL-backed database. Using the DB
         // mtime would invalidate hundreds of unchanged sessions whenever one
         // message lands; its per-session updated timestamp is the right key.

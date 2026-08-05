@@ -10,9 +10,12 @@ use std::sync::Mutex;
 /// Bumped whenever `SessionData`'s shape changes. A mismatch discards the whole
 /// cache, which replaces the pile of ad-hoc `_hasSubagentsField`-style probes
 /// the JS version accumulated as its schema drifted.
-// Version 3 also invalidates sessions previously cached before the
-// codex-auto-review -> GPT-5.2 pricing alias existed.
-const CACHE_VERSION: u32 = 3;
+// Version 3 invalidated sessions cached before the codex-auto-review -> GPT-5.2
+// pricing alias existed. Version 4 re-extracted Codex tool activity after `exec`
+// wrappers began being unwrapped. Version 5 avoided mistaking `tools.*` text
+// inside a patch for the wrapper's actual nested call. Version 6 also ignores
+// `await tools.*` text inside quoted patch content.
+const CACHE_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct DiskCache {
@@ -70,6 +73,18 @@ pub struct CostCache {
 impl Default for CostCache {
     fn default() -> Self {
         Self::load()
+    }
+}
+
+/// Remove only the persisted session extraction cache.
+///
+/// UI preferences and the downloaded pricing table are intentionally retained:
+/// this is the cache that can otherwise preserve outdated parser output.
+pub fn clear_session_cache() -> anyhow::Result<bool> {
+    match std::fs::remove_file(&*config::COST_CACHE_FILE) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -196,6 +211,7 @@ impl Store {
         let data = match session.provider {
             crate::pricing::Provider::Claude => crate::session::claude::extract(file),
             crate::pricing::Provider::Codex => crate::session::codex::extract(file),
+            crate::pricing::Provider::Cursor => crate::session::cursor::extract(file),
             crate::pricing::Provider::OpenCode => {
                 crate::session::opencode::extract(file, &session.session_id)
             }

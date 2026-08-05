@@ -12,7 +12,7 @@ use serde::Serialize;
     name = "cctop",
     about = "An htop-like monitor for AI coding agent sessions",
     long_about = "cctop — an htop-like monitor for AI coding agent sessions\n\n\
-Tracks Claude Code, Codex, OpenCode, and Pi sessions on your machine, showing\n\
+Tracks Claude Code, Codex, Cursor, OpenCode, and Pi sessions on your machine, showing\n\
 real-time cost estimation, token usage, tool invocations, and OS-level metrics.\n\n\
 COST ESTIMATION\n  \
 Cost figures are estimates based on per-token API pricing from the LiteLLM\n  \
@@ -41,6 +41,10 @@ pub struct Args {
     /// Refresh interval in seconds
     #[arg(short, long, default_value_t = 2.0, value_parser = parse_delay)]
     pub delay: f64,
+
+    /// Clear persisted session extraction data before starting (keeps preferences and pricing)
+    #[arg(long)]
+    pub clear_cache: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {
@@ -83,6 +87,7 @@ fn format_row(index: usize, s: &Session, label: &str, width: usize) -> String {
     let now = chrono::Utc::now();
     let (label_w, model_w) = flex_widths(width);
     let cost = match s.total_cost {
+        _ if !s.cost_available => "—".into(),
         Some(c) => util::compact_usd(c),
         None => "incl".into(),
     };
@@ -142,6 +147,7 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
     for (name, provider) in [
         ("Codex", Provider::Codex),
         ("Claude", Provider::Claude),
+        ("Cursor", Provider::Cursor),
         ("OpenCode", Provider::OpenCode),
         ("Pi", Provider::Pi),
     ] {
@@ -171,6 +177,7 @@ struct JsonAccount {
 
 #[derive(Serialize)]
 struct JsonCost {
+    available: bool,
     /// `null` when the plan bundles this provider's usage.
     total: Option<String>,
     included: bool,
@@ -214,6 +221,8 @@ struct JsonSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<JsonAccount>,
     model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
     models: Vec<String>,
     plan: &'static str,
     running: bool,
@@ -239,11 +248,11 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
         .map(|s| {
             let data = loader.store().session_data(s);
             let m = &data.metrics;
-            let included = plan.includes(s.provider);
+            let included = s.cost_available && plan.includes(s.provider);
             let account = match s.provider {
                 Provider::Claude => claude_account.as_ref(),
                 Provider::Codex => codex_account.as_ref(),
-                Provider::OpenCode | Provider::Pi => None,
+                Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
             }
             .map(|a| JsonAccount {
                 email: a.email.clone(),
@@ -254,6 +263,7 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 provider: s.provider.as_str(),
                 surface: match s.surface {
                     crate::session::Surface::Cli => "cli",
+                    crate::session::Surface::Editor => "editor",
                     crate::session::Surface::DesktopCode => "desktop-code",
                     crate::session::Surface::DesktopCowork => "desktop-cowork",
                 },
@@ -264,13 +274,15 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 title: s.title.clone(),
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
+                harness: (!s.harness.is_empty()).then(|| s.harness.clone()),
                 models: data.models.clone(),
                 plan: plan.as_str(),
                 running: s.is_running(),
                 cost: JsonCost {
-                    total: (!included).then(|| util::money(data.costs.total)),
+                    available: s.cost_available,
+                    total: (s.cost_available && !included).then(|| util::money(data.costs.total)),
                     included,
-                    breakdown: (!included).then(|| data.costs.clone()),
+                    breakdown: (s.cost_available && !included).then(|| data.costs.clone()),
                 },
                 tokens: JsonTokens {
                     input: s.input_tokens,
@@ -325,5 +337,11 @@ mod tests {
     fn plan_parsing_rejects_unknown() {
         assert!(parse_plan("max").is_ok());
         assert!(parse_plan("nonsense").is_err());
+    }
+
+    #[test]
+    fn clear_cache_flag_is_accepted() {
+        let args = Args::try_parse_from(["cctop", "--clear-cache"]).expect("valid args");
+        assert!(args.clear_cache);
     }
 }

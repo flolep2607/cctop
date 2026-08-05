@@ -117,6 +117,10 @@ enum Request {
 }
 
 enum Response {
+    /// Cheap discovery result, shown before transcript extraction completes.
+    Discovered(Vec<Session>),
+    /// One row whose transcript has finished loading.
+    Annotated(Box<Session>),
     Sessions(Box<(Vec<Session>, Stats)>),
     Data(String, Box<SessionData>),
     Quota(Box<Quota>),
@@ -126,13 +130,30 @@ enum Response {
 
 /// Owns the `Loader` and does all filesystem and parsing work off the UI thread,
 /// so a slow scan can never stall input or rendering.
-fn spawn_worker(plan: Plan, rx: Receiver<Request>, tx: Sender<Response>) {
+fn spawn_worker(
+    plan: Plan,
+    rx: Receiver<Request>,
+    tx: Sender<Response>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut loader = Loader::new();
+        let mut sent_initial_discovery = false;
         while let Ok(req) = rx.recv() {
             match req {
                 Request::Refresh => {
-                    let sessions = loader.load(plan);
+                    let publish_discovery = !sent_initial_discovery;
+                    sent_initial_discovery = true;
+                    let sessions = loader.load_progressive(
+                        plan,
+                        |sessions| {
+                            if publish_discovery {
+                                let _ = tx.send(Response::Discovered(sessions.to_vec()));
+                            }
+                        },
+                        |session| {
+                            let _ = tx.send(Response::Annotated(Box::new(session.clone())));
+                        },
+                    );
                     let stats = crate::loader::compute_stats(&sessions);
                     if tx
                         .send(Response::Sessions(Box::new((sessions, stats))))
@@ -158,6 +179,9 @@ fn spawn_worker(plan: Plan, rx: Receiver<Request>, tx: Sender<Response>) {
                         Provider::Codex => {
                             crate::session::codex::delete(&session);
                         }
+                        Provider::Cursor => {
+                            crate::session::cursor::delete(&session);
+                        }
                         Provider::OpenCode => {
                             let _ = crate::session::opencode::delete(&session);
                         }
@@ -171,7 +195,7 @@ fn spawn_worker(plan: Plan, rx: Receiver<Request>, tx: Sender<Response>) {
             }
         }
         loader.store().save();
-    });
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -376,9 +400,10 @@ impl App {
                 }
                 if !query.is_empty() {
                     let haystack = format!(
-                        "{} {} {} {}",
+                        "{} {} {} {} {}",
                         s.display_label(),
                         s.model,
+                        s.harness,
                         s.provider.as_str(),
                         s.session_id
                     )
@@ -578,6 +603,11 @@ impl App {
             0 => match s.provider {
                 Provider::Claude => format!("claude --resume {}", s.session_id),
                 Provider::Codex => format!("codex resume {}", s.session_id),
+                Provider::Cursor => s
+                    .data_file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| s.session_id.clone()),
                 Provider::OpenCode => format!("opencode --session {}", s.session_id),
                 Provider::Pi => format!("pi --session {}", s.session_id),
             },
@@ -833,7 +863,7 @@ impl App {
 pub fn run(args: &Args) -> anyhow::Result<()> {
     let (req_tx, req_rx) = channel::<Request>();
     let (res_tx, res_rx) = channel::<Response>();
-    spawn_worker(args.plan, req_rx, res_tx.clone());
+    let worker = spawn_worker(args.plan, req_rx, res_tx.clone());
 
     // Pricing and quota are network-bound; keep both off the UI thread.
     {
@@ -866,6 +896,11 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     ratatui::restore();
 
     let _ = req_tx.send(Request::Shutdown);
+    // The worker persists newly extracted transcript data while shutting down.
+    // Joining it matters: returning from main immediately would otherwise kill
+    // the detached thread mid-save, forcing every launch to parse all sessions
+    // from scratch again.
+    let _ = worker.join();
     app.save_prefs();
     result
 }
@@ -920,8 +955,23 @@ fn event_loop(
 
     loop {
         // Drain everything the workers have produced.
+        let mut annotated_rows_changed = false;
         loop {
             match res_rx.try_recv() {
+                Ok(Response::Discovered(sessions)) => {
+                    app.sessions = sessions;
+                    app.stats = crate::loader::compute_stats(&app.sessions);
+                    app.refilter();
+                }
+                Ok(Response::Annotated(session)) => {
+                    let key = session.key();
+                    if let Some(existing) = app.sessions.iter_mut().find(|s| s.key() == key) {
+                        *existing = *session;
+                    } else {
+                        app.sessions.push(*session);
+                    }
+                    annotated_rows_changed = true;
+                }
                 Ok(Response::Sessions(payload)) => {
                     let (sessions, stats) = *payload;
                     app.sessions = sessions;
@@ -929,6 +979,7 @@ fn event_loop(
                     app.push_history();
                     app.refilter();
                     refresh_in_flight = false;
+                    annotated_rows_changed = false;
                 }
                 Ok(Response::Data(key, data)) => {
                     // Discard results for a session the user has already left.
@@ -948,6 +999,12 @@ fn event_loop(
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
+        }
+        if annotated_rows_changed {
+            // A burst can contain hundreds of rows. Recompute and sort once
+            // after draining it rather than once per transcript.
+            app.stats = crate::loader::compute_stats(&app.sessions);
+            app.refilter();
         }
 
         app.sync_panel_data();
@@ -1035,6 +1092,21 @@ mod tests {
         app.refilter();
         assert_eq!(app.visible.len(), 1);
         assert_eq!(app.sessions[app.visible[0]].session_id, "a");
+    }
+
+    #[test]
+    fn live_filter_includes_transcript_inferred_cursor_session() {
+        let mut app = test_app();
+        let mut cursor = Session::new(Provider::Cursor, "cursor".into());
+        cursor.started_at = chrono::Utc::now().to_rfc3339();
+        cursor.last_active = cursor.started_at.clone();
+        cursor.inferred_running = true;
+        app.sessions = vec![cursor];
+        app.live_only = true;
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+        assert!(app.sessions[app.visible[0]].is_running());
+        assert!(app.sessions[app.visible[0]].process.is_none());
     }
 
     #[test]

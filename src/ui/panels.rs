@@ -68,9 +68,11 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let provider_color = match session.surface {
         Surface::DesktopCowork => theme::DESKTOP_COWORK,
         Surface::DesktopCode => theme::DESKTOP_CODE,
+        Surface::Editor => theme::CURSOR,
         Surface::Cli => match session.provider {
             Provider::Claude => theme::CLAUDE,
             Provider::Codex => theme::OPENAI,
+            Provider::Cursor => theme::CURSOR,
             Provider::OpenCode => theme::OPENCODE,
             Provider::Pi => theme::PI,
         },
@@ -102,6 +104,9 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     ]));
 
     lines.push(field("ID", session.session_id.clone()));
+    if !session.harness.is_empty() {
+        lines.push(field("Harness", session.harness.clone()));
+    }
     if let Some(t) = &session.title {
         lines.push(field("Title", t.clone()));
     }
@@ -116,16 +121,26 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let cmd = match session.provider {
         Provider::Claude => format!("claude --resume {}", session.session_id),
         Provider::Codex => format!("codex resume {}", session.session_id),
+        Provider::Cursor => "Open from Cursor history".to_string(),
         Provider::OpenCode => format!("opencode --session {}", session.session_id),
         Provider::Pi => format!("pi --session {}", session.session_id),
     };
     lines.push(field("Cmd", cmd));
     lines.push(field("Plan", plan.as_str()));
+    if let Some(effort) = &data.reasoning_effort {
+        lines.push(field("Effort", effort.clone()));
+    }
+    if data.tokens.reasoning_output > 0 {
+        lines.push(field(
+            "Reasoning",
+            format!("{} tokens", util::with_commas(data.tokens.reasoning_output)),
+        ));
+    }
 
     let account = match session.provider {
         Provider::Claude => crate::quota::claude_account(),
         Provider::Codex => crate::quota::codex_account(),
-        Provider::OpenCode | Provider::Pi => None,
+        Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
     };
     if let Some(a) = account {
         if let Some(email) = a.email {
@@ -241,6 +256,9 @@ fn bar(ratio: f64, width: usize, color: ratatui::style::Color) -> Span<'static> 
 pub fn processes(session: &Session, width: usize) -> Vec<Line<'static>> {
     if session.surface == Surface::DesktopCowork {
         return note("Cowork sessions run in a cloud VM — no local process tree.");
+    }
+    if session.surface == Surface::Editor && session.provider == Provider::Cursor {
+        return note("Cursor uses a shared editor process — no per-session process tree.");
     }
     let Some(pm) = &session.process else {
         return note("Process data is only available for running sessions.");
@@ -742,6 +760,10 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let included = plan.includes(session.provider);
     let mut lines = Vec::new();
 
+    if !session.cost_available {
+        return note("Cost and token usage are not present in Cursor transcripts.");
+    }
+
     if included {
         lines.push(Line::from(vec![
             label("Total cost"),
@@ -972,6 +994,23 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 theme::title(),
             )));
             lines.extend(mcp_from_toml(&toml));
+        }
+        Provider::Cursor => {
+            lines.push(Line::from(Span::styled(
+                "── Cursor ──".to_string(),
+                theme::title(),
+            )));
+            lines.push(Line::from(dim(
+                "Native agent transcripts do not expose model, token, context, or cost data.",
+            )));
+            lines.push(Line::from(dim(format!(
+                "Transcript: {}",
+                session
+                    .data_file
+                    .as_ref()
+                    .map(|p| util::tildify(&p.to_string_lossy()))
+                    .unwrap_or_else(|| "unknown".into())
+            ))));
         }
         Provider::OpenCode => {
             lines.push(Line::from(Span::styled(

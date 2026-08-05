@@ -1,8 +1,12 @@
 # cctop
 
 An htop-like monitor for AI coding agent sessions. Tracks Claude Code, Codex,
-OpenCode, and Pi sessions on your machine: cost estimation, token usage, tool invocations,
-subagents, and OS-level process metrics — refreshed live.
+Cursor, OpenCode, and Pi sessions on your machine: cost estimation, token usage,
+tool invocations, subagents, and OS-level process metrics — refreshed live.
+
+For active sessions, the **HARNESS** column distinguishes the host application
+(for example, Cursor) from the model. Unknown launchers remain `─` rather than
+being guessed.
 
 A Rust rewrite of an earlier Node implementation.
 
@@ -74,6 +78,7 @@ cctop --list          # print a table and exit
 cctop --json          # dump full session data as JSON
 cctop --plan max      # treat Claude usage as bundled
 cctop --delay 5       # refresh every 5 seconds
+cctop --clear-cache   # re-extract all session activity; keeps preferences/pricing
 ```
 
 ### Keys
@@ -108,10 +113,11 @@ argument, and click the sidebar to filter by tool.
 | Claude Code (CLI) | `~/.claude/projects/<slug>/<uuid>.jsonl` |
 | Claude for Mac | `~/Library/Application Support/Claude/{claude-code,local-agent-mode}-sessions/` |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Cursor | `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` |
 | OpenCode | `~/.local/share/opencode/opencode*.db` (platform data directory) |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` |
 
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_DATA_DIR`,
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`, `OPENCODE_DATA_DIR`,
 `PI_CODING_AGENT_DIR`, and `PI_CODING_AGENT_SESSION_DIR` are honoured. Caches
 live in `~/.cache/cctop/`.
 
@@ -122,6 +128,11 @@ per-token rates, taken from built-in tables and falling back to the
 [LiteLLM](https://github.com/BerriAI/litellm) database (cached for 24 hours).
 OpenCode and Pi already persist provider-calculated costs, which cctop reads
 directly.
+
+Cursor native-agent transcripts expose projects, conversation activity, and
+tool calls, but not model names, tokens, context usage, costs, or a dedicated
+per-session process. Those fields display as unavailable; live status means the
+transcript has changed within the last 90 seconds.
 
 Subscription plans — Claude Max, Pro, Team — are flat-rate or bundle tokens
 differently, so these numbers will not match your invoice. Treat the `$` column

@@ -4,6 +4,7 @@ use super::columns::{self, COLUMNS, ColumnId};
 use super::spark;
 use super::theme::{self, Gradient};
 use super::{AGE_OPTIONS, App, Mode, panels};
+use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
 use ratatui::Frame;
@@ -317,7 +318,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         } else if !app.search.is_empty() || app.age_filter.is_some() {
             "No sessions match the current filters. Esc clears them."
         } else {
-            "No Claude, Codex, OpenCode, or Pi sessions found."
+            "No Claude, Codex, Cursor, OpenCode, or Pi sessions found."
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(msg, theme::dim()))),
@@ -399,6 +400,8 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
         ColumnId::Project => match s.surface {
             Surface::DesktopCowork => theme::DESKTOP_COWORK,
             Surface::DesktopCode => theme::DESKTOP_CODE,
+            Surface::Editor => theme::CURSOR,
+            Surface::Cli if s.provider == Provider::Cursor => theme::CURSOR,
             Surface::Cli => Color::Reset,
         },
         ColumnId::Cost => s.total_cost.map(theme::cost_color).unwrap_or(theme::DIM),
@@ -659,6 +662,22 @@ fn draw_performance(
                 )),
                 Line::from(Span::styled(
                     "No local CPU or memory metrics are available.",
+                    theme::dim(),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+    if session.surface == Surface::Editor && session.provider == Provider::Cursor {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Cursor uses a shared editor process.",
+                    theme::dim(),
+                )),
+                Line::from(Span::styled(
+                    "No per-session CPU or memory metrics are available.",
                     theme::dim(),
                 )),
             ]),

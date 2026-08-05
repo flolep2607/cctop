@@ -7,6 +7,7 @@ use super::{
 use crate::config::{self, CODEX_DEFAULT_CTX};
 use crate::pricing::{self, Provider};
 use crate::util;
+use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,151 @@ struct StaticParts {
     started_at: String,
     model: String,
     cwd: String,
+}
+
+/// A Codex `exec` wrapper delegates to a concrete nested tool.  The rollout
+/// records the wrapper as the call name, but showing that in the activity pane
+/// obscures whether the agent read, edited, or ran a command.
+fn unwrap_exec(source: &str) -> Option<(String, Value)> {
+    // The source can contain a patch or shell command mentioning `tools.`.
+    // Only the awaited invocation is the tool delegated by the wrapper.
+    let start = awaited_tool_start(source)?;
+    let name_end =
+        source[start..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))? + start;
+    let name = &source[start..name_end];
+    let open = source[name_end..].find('(')? + name_end;
+    let body = parenthesized(source, open)?;
+    let args = serde_json::from_str(body.trim())
+        .unwrap_or_else(|_| bound_json_string(source, open, body.trim()).unwrap_or(Value::Null));
+    Some((name.to_string(), args))
+}
+
+/// Byte offset immediately after `await tools.` in executable JavaScript, not
+/// inside a quoted patch/string argument.
+fn awaited_tool_start(source: &str) -> Option<usize> {
+    const PREFIX: &[u8] = b"await tools.";
+    let bytes = source.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == q {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'\"' | b'`' => quote = Some(byte),
+            _ if bytes[index..].starts_with(PREFIX) => return Some(index + PREFIX.len()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Resolve the common `const patch = "..."; tools.apply_patch(patch)` shape.
+/// `exec` receives JavaScript source rather than structured arguments, so a
+/// bare identifier otherwise loses the patch text needed for file and delta
+/// extraction. Intentionally only JSON double-quoted strings are resolved.
+fn bound_json_string(source: &str, before: usize, identifier: &str) -> Option<Value> {
+    if identifier.is_empty()
+        || !identifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let prefix = format!("const {identifier} =");
+    let start = source[..before].rfind(&prefix)? + prefix.len();
+    let value = source[start..].trim_start();
+    if !value.starts_with('"') {
+        return None;
+    }
+
+    let mut escaped = false;
+    for (offset, byte) in value.as_bytes().iter().enumerate().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if *byte == b'\\' {
+            escaped = true;
+        } else if *byte == b'"' {
+            return serde_json::from_str(&value[..=offset]).ok();
+        }
+    }
+    None
+}
+
+/// Contents of a balanced call argument list, excluding the outer parens.
+/// Tool payloads are JSON, so handling quoted strings and escapes is enough
+/// to avoid mistaking parentheses inside shell commands for the call boundary.
+fn parenthesized(source: &str, open: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, &byte) in bytes[open..].iter().enumerate() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == q {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'\"' | b'`' => quote = Some(byte),
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return source.get(open + 1..open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Convert the functions used inside Codex's `exec` wrapper into the common
+/// tool names and argument shapes understood by the activity renderer.
+fn normalise_exec_tool(name: String, mut args: Value) -> (String, Value) {
+    match name.as_str() {
+        "exec_command" => {
+            if let Some(object) = args.as_object_mut()
+                && let Some(cmd) = object.remove("cmd")
+            {
+                object.insert("command".to_string(), cmd);
+            }
+            ("Bash".to_string(), args)
+        }
+        "view_image" => {
+            if let Some(object) = args.as_object_mut()
+                && let Some(path) = object.remove("path")
+            {
+                object.insert("file_path".to_string(), path);
+            }
+            ("Read".to_string(), args)
+        }
+        "read_mcp_resource" => {
+            if let Some(object) = args.as_object_mut()
+                && let Some(uri) = object.remove("uri")
+            {
+                object.insert("file_path".to_string(), uri);
+            }
+            ("Read".to_string(), args)
+        }
+        _ => (name, args),
+    }
 }
 
 static STATIC_CACHE: LazyLock<Mutex<HashMap<PathBuf, StaticParts>>> =
@@ -42,17 +188,26 @@ fn collect_static(path: &Path) -> StaticParts {
         match item.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
                 if let Some(p) = payload {
-                    if let Some(id) = p.get("id").and_then(Value::as_str) {
+                    // A forked rollout carries a second session_meta naming the
+                    // original session it was forked from. The filename UUID (or
+                    // the first session_meta) is this file's own identity; later
+                    // session_meta entries must not overwrite it.
+                    if parts.session_id.is_empty()
+                        && let Some(id) = p.get("id").and_then(Value::as_str)
+                    {
                         parts.session_id = id.to_string();
                     }
-                    if let Some(ts) = p
-                        .get("timestamp")
-                        .and_then(Value::as_str)
-                        .or_else(|| item.get("timestamp").and_then(Value::as_str))
+                    if parts.started_at.is_empty()
+                        && let Some(ts) = p
+                            .get("timestamp")
+                            .and_then(Value::as_str)
+                            .or_else(|| item.get("timestamp").and_then(Value::as_str))
                     {
                         parts.started_at = ts.to_string();
                     }
-                    if let Some(cwd) = p.get("cwd").and_then(Value::as_str) {
+                    if parts.cwd.is_empty()
+                        && let Some(cwd) = p.get("cwd").and_then(Value::as_str)
+                    {
                         parts.cwd = cwd.to_string();
                     }
                 }
@@ -91,7 +246,7 @@ pub fn list_sessions() -> Vec<Session> {
     files.reverse();
 
     files
-        .into_iter()
+        .into_par_iter()
         .map(|path| {
             let statics = collect_static(&path);
             let mtime = config::file_mtime_ms(&path);
@@ -125,6 +280,7 @@ struct RawBucket {
 /// Parse a Codex rollout into cost, token, and activity data.
 pub fn extract(path: &Path) -> SessionData {
     let mut model = String::new();
+    let mut reasoning_effort: Option<String> = None;
     let mut totals = Tokens::default();
     let mut saw_usage = false;
     let mut by_day: HashMap<String, RawBucket> = HashMap::new();
@@ -144,6 +300,13 @@ pub fn extract(path: &Path) -> SessionData {
             && let Some(m) = payload.and_then(|p| p.get("model")).and_then(Value::as_str)
         {
             model = m.to_string();
+        }
+        if item_type == "turn_context"
+            && let Some(effort) = payload
+                .and_then(|p| p.get("effort").or_else(|| p.get("reasoning_effort")))
+                .and_then(Value::as_str)
+        {
+            reasoning_effort = Some(effort.to_string());
         }
 
         if item_type == "event_msg"
@@ -198,32 +361,42 @@ pub fn extract(path: &Path) -> SessionData {
                 {
                     return;
                 }
-                let name = p.get("name").and_then(Value::as_str).unwrap_or("unknown");
-                if effective_type == "custom_tool_call" {
-                    metrics.mcp_tool_count += 1;
-                    if !metrics.mcp_tools.iter().any(|t| t == name) {
-                        metrics.mcp_tools.push(name.to_string());
-                    }
-                }
-                *metrics.tools.entry(name.to_string()).or_insert(0) += 1;
-                metrics.tool_count += 1;
-
                 // `arguments` is usually a JSON-encoded string, but some tools
                 // (notably `apply_patch`) pass a raw payload instead.
                 // `function_call` carries `arguments`; `custom_tool_call` (which
                 // is how `apply_patch` arrives) carries `input` instead.
                 let raw_field = p.get("arguments").or_else(|| p.get("input"));
                 let raw_args = raw_field.and_then(Value::as_str);
-                let args: Value = match raw_field {
+                let mut args: Value = match raw_field {
                     Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
                     Some(other) => other.clone(),
                     None => Value::Null,
                 };
+                let outer_name = p.get("name").and_then(Value::as_str).unwrap_or("unknown");
+                let name = if outer_name == "exec" {
+                    raw_args
+                        .and_then(unwrap_exec)
+                        .map(|(nested_name, nested_args)| {
+                            let (name, nested_args) = normalise_exec_tool(nested_name, nested_args);
+                            args = nested_args;
+                            name
+                        })
+                        .unwrap_or_else(|| outer_name.to_string())
+                } else {
+                    outer_name.to_string()
+                };
+                if effective_type == "custom_tool_call" {
+                    metrics.mcp_tool_count += 1;
+                    if !metrics.mcp_tools.iter().any(|t| t == &name) {
+                        metrics.mcp_tools.push(name.clone());
+                    }
+                }
+                *metrics.tools.entry(name.clone()).or_insert(0) += 1;
+                metrics.tool_count += 1;
 
                 let mut delta = None;
                 let (short, full) = if name == "apply_patch"
-                    && let Some(raw) = raw_args
-                    && args.is_null()
+                    && let Some(raw) = args.as_str().or(raw_args.filter(|_| args.is_null()))
                 {
                     let (summary, d) = extract::parse_apply_patch(raw);
                     delta = Some(d);
@@ -234,12 +407,12 @@ pub fn extract(path: &Path) -> SessionData {
                     // Non-JSON arguments are still worth showing verbatim.
                     (extract::flatten_public(raw, 300), Some(raw.to_string()))
                 } else {
-                    extract::tool_detail(name, &args)
+                    extract::tool_detail(&name, &args)
                 };
 
                 extract::push_tool_detail(
                     &mut metrics.tool_details,
-                    name,
+                    &name,
                     short,
                     full,
                     ts.to_string(),
@@ -247,7 +420,7 @@ pub fn extract(path: &Path) -> SessionData {
                     None,
                 );
                 if let Some(d) = delta
-                    && let Some(list) = metrics.tool_details.get_mut(name)
+                    && let Some(list) = metrics.tool_details.get_mut(&name)
                     && let Some(last) = list.last_mut()
                 {
                     metrics.lines_added += d.added as u64;
@@ -294,6 +467,7 @@ pub fn extract(path: &Path) -> SessionData {
     if !saw_usage {
         return SessionData {
             last_model: model.clone(),
+            reasoning_effort,
             models: if model.is_empty() {
                 vec![]
             } else {
@@ -331,6 +505,7 @@ pub fn extract(path: &Path) -> SessionData {
 
     SessionData {
         last_model: model.clone(),
+        reasoning_effort,
         models: vec![model.clone()],
         model_breakdown: vec![ModelBreakdown {
             model: model.clone(),
@@ -413,6 +588,15 @@ pub fn extract_last_tool(session: &Session) -> String {
             || (t == "response_item"
                 && p.get("type").and_then(Value::as_str) == Some("function_call"));
         if is_call && let Some(name) = p.get("name").and_then(Value::as_str) {
+            if name == "exec"
+                && let Some(source) = p
+                    .get("arguments")
+                    .or_else(|| p.get("input"))
+                    .and_then(Value::as_str)
+                && let Some((nested_name, nested_args)) = unwrap_exec(source)
+            {
+                return normalise_exec_tool(nested_name, nested_args).0;
+            }
             return name.to_string();
         }
     }
@@ -423,5 +607,100 @@ pub fn extract_last_tool(session: &Session) -> String {
 pub fn delete(session: &Session) {
     if let Some(file) = session.data_file.as_ref() {
         let _ = std::fs::remove_file(file);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unwraps_exec_command_into_bash_with_its_command() {
+        let source = r#"const result = await tools.exec_command({"cmd":"rg -n \"exec\" src","workdir":"/repo"});
+text(result.output);"#;
+        let (name, args) = unwrap_exec(source).expect("nested tool call");
+        let (name, args) = normalise_exec_tool(name, args);
+        assert_eq!(name, "Bash");
+        assert_eq!(
+            args,
+            json!({"command": "rg -n \"exec\" src", "workdir": "/repo"})
+        );
+    }
+
+    #[test]
+    fn unwraps_raw_apply_patch_payload() {
+        let source = r#"await tools.apply_patch("*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch");"#;
+        let (name, args) = unwrap_exec(source).expect("nested patch call");
+        assert_eq!(name, "apply_patch");
+        assert_eq!(
+            args.as_str(),
+            Some("*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch")
+        );
+    }
+
+    #[test]
+    fn resolves_patch_variable_for_file_and_delta_extraction() {
+        let source = r#"const patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch";
+const result = await tools.apply_patch(patch);"#;
+        let (name, args) = unwrap_exec(source).expect("nested patch call");
+        assert_eq!(name, "apply_patch");
+        let (file, delta) = extract::parse_apply_patch(args.as_str().expect("patch text"));
+        assert_eq!(file, "src/lib.rs");
+        assert_eq!((delta.added, delta.removed), (1, 1));
+    }
+
+    #[test]
+    fn ignores_tools_mentions_inside_patch_text() {
+        let source = r#"const patch = "*** Begin Patch\n*** Update File: src/lib.rs\n+metrics.tools.entry(\"Bash\")\n+source.find(\"await tools.\")\n*** End Patch";
+const result = await tools.apply_patch(patch);"#;
+        let (name, args) = unwrap_exec(source).expect("nested patch call");
+        assert_eq!(name, "apply_patch");
+        let (file, delta) = extract::parse_apply_patch(args.as_str().expect("patch text"));
+        assert_eq!(file, "src/lib.rs");
+        assert_eq!((delta.added, delta.removed), (2, 0));
+    }
+
+    #[test]
+    fn exec_image_view_is_presented_as_a_read() {
+        let (name, args) = normalise_exec_tool(
+            "view_image".to_string(),
+            json!({"path": "/tmp/chart.png", "detail": "high"}),
+        );
+        assert_eq!(name, "Read");
+        assert_eq!(args["file_path"], "/tmp/chart.png");
+    }
+
+    #[test]
+    fn extraction_counts_nested_exec_tool_instead_of_exec() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-codex-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let item = json!({
+            "type": "function_call",
+            "timestamp": "2026-08-06T00:00:00Z",
+            "payload": {
+                "call_id": "call-1",
+                "name": "exec",
+                "arguments": "const result = await tools.exec_command({\"cmd\":\"rg --files\"});\ntext(result.output);"
+            }
+        });
+        std::fs::write(&path, format!("{item}\n")).expect("write rollout");
+
+        let data = extract(&path);
+        let mut session = Session::new(Provider::Codex, "test".to_string());
+        session.data_file = Some(path.clone());
+
+        assert_eq!(data.metrics.tool_count, 1);
+        assert_eq!(data.metrics.tools.get("Bash"), Some(&1));
+        assert!(!data.metrics.tools.contains_key("exec"));
+        assert_eq!(data.metrics.tool_details["Bash"][0].d, "rg --files");
+        assert_eq!(extract_last_tool(&session), "Bash");
+        let _ = std::fs::remove_file(&path);
     }
 }
