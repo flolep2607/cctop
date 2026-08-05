@@ -19,7 +19,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use spark::History;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,25 @@ pub enum Mode {
     DeleteConfirm,
     /// Explaining why a running session can't be deleted.
     DeleteBlocked,
+    /// Confirming termination of the selected live session.
+    KillConfirm,
+    /// Explaining why a live session cannot be terminated locally.
+    KillBlocked,
+    /// Confirming a batch action over all marked sessions.
+    BatchConfirm,
+    /// Explaining why a batch delete couldn't proceed (a marked session is running).
+    BatchDeleteBlocked,
+    /// Explaining why a batch kill couldn't proceed (a marked session has no root PID).
+    BatchKillBlocked,
+    /// Numeric input for the cost floor filter.
+    CostFilter,
+}
+
+/// The pending batch action shown in `Mode::BatchConfirm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchKind {
+    Delete,
+    Kill,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +132,10 @@ enum Request {
     /// Extract full data for one session, to populate the bottom panels.
     Data(Box<Session>),
     Delete(Box<Session>),
+    Terminate {
+        session_key: String,
+        pid: u32,
+    },
     Shutdown,
 }
 
@@ -126,6 +149,10 @@ enum Response {
     Quota(Box<Quota>),
     /// Pricing landed, so cached costs are stale and a reload is due.
     PricingReady,
+    Terminated {
+        session_key: String,
+        result: Result<(), String>,
+    },
 }
 
 /// Owns the `Loader` and does all filesystem and parsing work off the UI thread,
@@ -191,6 +218,18 @@ fn spawn_worker(
                     }
                     loader.store().evict(&session);
                 }
+                Request::Terminate { session_key, pid } => {
+                    let result = crate::proc::terminate(pid);
+                    if tx
+                        .send(Response::Terminated {
+                            session_key,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Request::Shutdown => break,
             }
         }
@@ -220,6 +259,22 @@ pub struct App {
     pub age_filter: Option<AgeFilter>,
     pub age_cursor: usize,
     pub live_only: bool,
+
+    /// Session keys the user has marked (Space) for a batch action.
+    pub marked: HashSet<String>,
+    /// The action pending confirmation in `Mode::BatchConfirm`.
+    pub batch: BatchKind,
+    /// Follow mode: keep the selected row centered.
+    pub follow: bool,
+    /// Seconds between automatic refreshes (adjustable live with +/-/=).
+    pub refresh_secs: f64,
+    /// Only show sessions whose total cost reaches this floor.
+    pub cost_floor: f64,
+    /// Raw digits being typed into the cost-floor modal.
+    pub cost_input: String,
+    /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
+    /// page by half a screen.
+    pub list_height: u16,
 
     pub bottom_tab: usize,
     pub panel_data: Option<SessionData>,
@@ -303,6 +358,13 @@ impl App {
             age_filter,
             age_cursor,
             live_only: prefs.live_only,
+            marked: HashSet::new(),
+            batch: BatchKind::Delete,
+            follow: false,
+            refresh_secs: 2.0,
+            cost_floor: prefs.cost_floor,
+            cost_input: String::new(),
+            list_height: 0,
             bottom_tab: prefs.bottom_tab.min(panels::TABS.len() - 1),
             panel_data: None,
             panel_key: String::new(),
@@ -360,6 +422,7 @@ impl App {
         self.prefs.tool_show_diff = self.tool_show_diff;
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
+        self.prefs.cost_floor = self.cost_floor;
         self.prefs.save();
     }
 
@@ -409,6 +472,19 @@ impl App {
                     )
                     .to_ascii_lowercase();
                     if !haystack.contains(&query) {
+                        return false;
+                    }
+                }
+                if self.cost_floor > 0.0 {
+                    // Sessions with unknown cost are kept: the floor can't say
+                    // they're below it. "Included" cost (None) counts as zero.
+                    let cost = if s.cost_available {
+                        s.total_cost.unwrap_or(0.0)
+                    } else {
+                        // Unknown — can't disqualify.
+                        return true;
+                    };
+                    if cost < self.cost_floor {
                         return false;
                     }
                 }
@@ -620,6 +696,184 @@ impl App {
         render::copy_to_clipboard(&text);
         self.set_status(format!("Copied: {}", crate::util::truncate(&text, 60)));
     }
+
+    /// Whether the session matches the active text search.
+    fn matches_search(&self, s: &Session) -> bool {
+        let query = self.search.to_ascii_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let haystack = format!(
+            "{} {} {} {} {}",
+            s.display_label(),
+            s.model,
+            s.harness,
+            s.provider.as_str(),
+            s.session_id
+        )
+        .to_ascii_lowercase();
+        haystack.contains(&query)
+    }
+
+    /// Jump to the next/previous session matching the active search, wrapping
+    /// around both ends. With no search active every visible session matches.
+    fn cycle_matches(&mut self, delta: isize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let matches: Vec<usize> = self
+            .visible
+            .iter()
+            .copied()
+            .filter(|&i| self.matches_search(&self.sessions[i]))
+            .collect();
+        if matches.is_empty() {
+            return;
+        }
+        let current = self.visible.get(self.selected).copied();
+        let pos = current.and_then(|key| matches.iter().position(|&i| i == key));
+        let n = matches.len() as isize;
+        let next = ((pos.unwrap_or(0) as isize + delta).rem_euclid(n)) as usize;
+        self.selected = self
+            .visible
+            .iter()
+            .position(|&i| i == matches[next])
+            .unwrap_or(self.selected);
+        self.ensure_available_tab();
+        self.needs_redraw = true;
+    }
+
+    /// Toggle whether the selected session is marked for a batch action.
+    fn toggle_mark(&mut self) {
+        let Some(s) = self.selected_session() else {
+            return;
+        };
+        let key = s.key();
+        if !self.marked.remove(&key) {
+            self.marked.insert(key);
+        }
+        self.needs_redraw = true;
+    }
+
+    /// The session keys currently marked, in table order for a stable listing.
+    fn marked_sessions(&self) -> Vec<&Session> {
+        self.visible
+            .iter()
+            .filter_map(|&i| self.sessions.get(i))
+            .filter(|s| self.marked.contains(&s.key()))
+            .collect()
+    }
+
+    /// True when every marked session is ready for the given batch action.
+    fn batch_ok(&self, kind: BatchKind) -> bool {
+        self.marked_sessions().iter().all(|s| match kind {
+            BatchKind::Delete => !s.is_running(),
+            BatchKind::Kill => session_root_pid(s).is_some(),
+        })
+    }
+
+    fn unmark_all(&mut self) {
+        if self.marked.is_empty() {
+            return;
+        }
+        self.marked.clear();
+        self.needs_redraw = true;
+    }
+
+    /// Enter the batch-confirm modal if there's anything to do.
+    fn batch(&mut self, kind: BatchKind) {
+        if self.marked_sessions().is_empty() {
+            self.set_status("No sessions marked — press Space to mark");
+            return;
+        }
+        self.batch = kind;
+        self.mode = if self.batch_ok(kind) {
+            Mode::BatchConfirm
+        } else {
+            match kind {
+                BatchKind::Delete => Mode::BatchDeleteBlocked,
+                BatchKind::Kill => Mode::BatchKillBlocked,
+            }
+        };
+        self.needs_redraw = true;
+    }
+
+    /// Confirm and run the pending batch action over all marked sessions.
+    fn batch_execute(&mut self) {
+        let kind = self.batch;
+        let marked = self.marked_sessions();
+        let mut removed: Vec<String> = Vec::new();
+        let mut failed = 0;
+        for s in marked {
+            let key = s.key();
+            match kind {
+                BatchKind::Delete => {
+                    self.tx.send(Request::Delete(Box::new(s.clone()))).ok();
+                    removed.push(key);
+                }
+                BatchKind::Kill => match session_root_pid(s) {
+                    Some(pid) => {
+                        self.tx
+                            .send(Request::Terminate {
+                                session_key: key.clone(),
+                                pid,
+                            })
+                            .ok();
+                        removed.push(key);
+                    }
+                    None => failed += 1,
+                },
+            }
+        }
+        for key in &removed {
+            self.marked.remove(key);
+        }
+        self.sessions.retain(|s| !removed.contains(&s.key()));
+        self.refilter();
+        self.set_status(match kind {
+            BatchKind::Delete => {
+                if failed == 0 {
+                    format!("Deleted {} session(s)", removed.len())
+                } else {
+                    format!("Deleted {}, {} failed", removed.len(), failed)
+                }
+            }
+            BatchKind::Kill => format!(
+                "Kill sent to {} session(s){}",
+                removed.len(),
+                if failed > 0 {
+                    format!(" ({} skipped)", failed)
+                } else {
+                    String::new()
+                }
+            ),
+        });
+    }
+
+    /// Adjust the live refresh interval, clamping to sane bounds.
+    fn adjust_refresh(&mut self, delta: f64) {
+        self.refresh_secs = (self.refresh_secs + delta).clamp(0.5, 60.0);
+        self.needs_redraw = true;
+    }
+
+    /// Half the visible table height, used by Ctrl+U/Ctrl+D. Falls back to a
+    /// page size before the first draw has recorded a viewport.
+    fn half_page(&self) -> usize {
+        ((self.list_height as usize / 2).max(1)).min(PAGE as usize)
+    }
+}
+
+/// Rows moved by PageUp/PageDown and the fallback for half-page scrolls.
+const PAGE: isize = 10;
+
+/// PID of the currently live agent root, excluding briefly retained exits.
+fn session_root_pid(session: &Session) -> Option<u32> {
+    session
+        .process
+        .as_ref()?
+        .process_list
+        .iter()
+        .find_map(|process| (process.is_root && !process.ghost).then_some(process.pid))
 }
 
 // ---------------------------------------------------------------------------
@@ -644,7 +898,12 @@ impl App {
             Mode::SortBy => self.on_key_sortby(key),
             Mode::AgeFilter => self.on_key_age(key),
             Mode::DeleteConfirm => self.on_key_delete(key),
-            Mode::Help | Mode::DeleteBlocked => self.mode = Mode::List,
+            Mode::KillConfirm => self.on_key_kill(key),
+            Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
+                self.on_key_batch(key)
+            }
+            Mode::CostFilter => self.on_key_cost(key),
+            Mode::Help | Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
         }
     }
@@ -709,9 +968,56 @@ impl App {
         self.mode = Mode::List;
     }
 
+    fn on_key_kill(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('y')
+            && let Some(pid) = self.selected_session().and_then(session_root_pid)
+            && let Some(session) = self.selected_session()
+        {
+            let _ = self.tx.send(Request::Terminate {
+                session_key: session.key(),
+                pid,
+            });
+            self.set_status(format!("Stopping session {}…", session.session_id));
+        }
+        self.mode = Mode::List;
+    }
+
+    fn on_key_batch(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('y') && self.mode == Mode::BatchConfirm {
+            self.batch_execute();
+        }
+        self.mode = Mode::List;
+    }
+
+    fn on_key_cost(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Enter => {
+                if let Ok(v) = self.cost_input.parse::<f64>() {
+                    self.cost_floor = v.max(0.0);
+                    self.refilter();
+                    self.save_prefs();
+                    self.set_status(if v > 0.0 {
+                        format!("Cost floor: ${v:.2}")
+                    } else {
+                        "Cost floor cleared".into()
+                    });
+                }
+                self.mode = Mode::List;
+            }
+            KeyCode::Backspace => {
+                self.cost_input.pop();
+            }
+            KeyCode::Char(c) if (c.is_ascii_digit() || c == '.') && self.cost_input.len() < 12 => {
+                self.cost_input.push(c);
+            }
+            _ => {}
+        }
+    }
+
     fn on_key_list(&mut self, key: KeyEvent) {
-        const PAGE: isize = 10;
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         // Shift+Up/Down scrolls inside the active bottom panel, since the plain
         // arrows are taken by list navigation and panel switching.
@@ -722,10 +1028,20 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::F(10) => self.should_quit = true,
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Up => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageUp => self.move_selection(-PAGE),
+            KeyCode::PageUp | KeyCode::Char('b') => self.move_selection(-PAGE),
             KeyCode::PageDown => self.move_selection(PAGE),
+            KeyCode::Char('g') => {
+                self.selected = 0;
+                self.ensure_available_tab();
+                self.needs_redraw = true;
+            }
+            KeyCode::Char('G') => {
+                self.selected = self.visible.len().saturating_sub(1);
+                self.ensure_available_tab();
+                self.needs_redraw = true;
+            }
             KeyCode::Home => {
                 self.selected = 0;
                 self.ensure_available_tab();
@@ -734,6 +1050,39 @@ impl App {
                 self.selected = self.visible.len().saturating_sub(1);
                 self.ensure_available_tab();
             }
+            KeyCode::Char('u') if ctrl => {
+                self.move_selection(-(self.half_page() as isize));
+            }
+            KeyCode::Char('d') if ctrl => {
+                self.move_selection(self.half_page() as isize);
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_refresh(0.5),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_refresh(-0.5),
+            KeyCode::Char('f') => {
+                self.follow = !self.follow;
+                self.set_status(if self.follow {
+                    "Follow mode on"
+                } else {
+                    "Follow mode off"
+                });
+            }
+            KeyCode::Char(' ') => self.toggle_mark(),
+            KeyCode::Char('U') => self.unmark_all(),
+            KeyCode::Char('D') => self.batch(BatchKind::Delete),
+            KeyCode::Char('K') => self.batch(BatchKind::Kill),
+            KeyCode::Char('n') => self.cycle_matches(1),
+            KeyCode::Char('N') => self.cycle_matches(-1),
+            KeyCode::Char('#') => {
+                self.cost_input = if self.cost_floor > 0.0 {
+                    format!("{:.2}", self.cost_floor)
+                } else {
+                    String::new()
+                };
+                self.mode = Mode::CostFilter;
+            }
+            KeyCode::Char('H') => self.set_sort(ColumnId::Harness),
+            KeyCode::Char('X') => self.set_sort(ColumnId::Context),
+            KeyCode::Char('S') => self.set_sort(ColumnId::Tools),
 
             KeyCode::Tab => self.cycle_tab(1),
             KeyCode::BackTab => self.cycle_tab(-1),
@@ -773,6 +1122,12 @@ impl App {
             KeyCode::Char('d') => match self.selected_session() {
                 Some(s) if s.is_running() => self.mode = Mode::DeleteBlocked,
                 Some(_) => self.mode = Mode::DeleteConfirm,
+                None => {}
+            },
+            KeyCode::Char('k') => match self.selected_session() {
+                Some(s) if session_root_pid(s).is_some() => self.mode = Mode::KillConfirm,
+                Some(s) if s.is_running() => self.mode = Mode::KillBlocked,
+                Some(_) => self.set_status("Selected session is not running"),
                 None => {}
             },
             KeyCode::Char('y') => self.copy_selection(),
@@ -876,6 +1231,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     spawn_quota_poller(res_tx);
 
     let mut app = App::new(args.plan, req_tx.clone());
+    app.refresh_secs = args.delay;
     let _ = req_tx.send(Request::Refresh);
 
     // `ratatui::init` installs a hook that leaves the alt screen and raw mode on
@@ -890,7 +1246,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
 
-    let result = event_loop(&mut app, &mut terminal, &res_rx, &req_tx, args.delay);
+    let result = event_loop(&mut app, &mut terminal, &res_rx, &req_tx);
 
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -946,9 +1302,7 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     res_rx: &Receiver<Response>,
     req_tx: &Sender<Request>,
-    delay: f64,
 ) -> anyhow::Result<()> {
-    let refresh_every = Duration::from_secs_f64(delay);
     let mut last_refresh = Instant::now();
     let mut layout = render::Layout::default();
     let mut refresh_in_flight = true;
@@ -997,6 +1351,19 @@ fn event_loop(
                     let _ = req_tx.send(Request::Refresh);
                     refresh_in_flight = true;
                 }
+                Ok(Response::Terminated {
+                    session_key,
+                    result,
+                }) => match result {
+                    Ok(()) => {
+                        app.set_status("Termination signal sent");
+                        let _ = req_tx.send(Request::Refresh);
+                        refresh_in_flight = true;
+                    }
+                    Err(error) => {
+                        app.set_status(format!("Could not stop {session_key}: {error}"));
+                    }
+                },
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -1022,7 +1389,9 @@ fn event_loop(
             app.needs_redraw = false;
         }
 
-        // Wait for input, but never past the next scheduled refresh.
+        // Wait for input, but never past the next scheduled refresh. The
+        // interval is read live so +/- changes apply on the very next poll.
+        let refresh_every = Duration::from_secs_f64(app.refresh_secs);
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())
             .unwrap_or(Duration::ZERO)
@@ -1042,6 +1411,7 @@ fn event_loop(
 
         // Only one refresh in flight: a scan slower than the interval must not
         // queue up behind itself.
+        let refresh_every = Duration::from_secs_f64(app.refresh_secs);
         if last_refresh.elapsed() >= refresh_every && !refresh_in_flight {
             last_refresh = Instant::now();
             refresh_in_flight = true;
@@ -1107,6 +1477,39 @@ mod tests {
         assert_eq!(app.visible.len(), 1);
         assert!(app.sessions[app.visible[0]].is_running());
         assert!(app.sessions[app.visible[0]].process.is_none());
+    }
+
+    #[test]
+    fn session_root_pid_excludes_ghost_and_child_processes() {
+        let mut session = session("a", true, "x");
+        session.process.as_mut().unwrap().process_list = vec![
+            crate::proc::ProcEntry {
+                pid: 1,
+                is_root: true,
+                ghost: true,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            },
+            crate::proc::ProcEntry {
+                pid: 2,
+                is_root: false,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            },
+            crate::proc::ProcEntry {
+                pid: 3,
+                is_root: true,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            },
+        ];
+
+        assert_eq!(session_root_pid(&session), Some(3));
     }
 
     #[test]
@@ -1221,5 +1624,101 @@ mod tests {
         app.refilter();
         assert_eq!(app.visible.len(), 1);
         assert_eq!(app.sessions[app.visible[0]].session_id, "new");
+    }
+
+    #[test]
+    fn cost_floor_filters_by_total_cost() {
+        let mut app = test_app();
+        let mut cheap = session("cheap", false, "/x");
+        cheap.total_cost = Some(0.50);
+        let mut pricey = session("pricey", false, "/x");
+        pricey.total_cost = Some(5.00);
+        app.sessions = vec![cheap, pricey];
+        app.cost_floor = 1.0;
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.sessions[app.visible[0]].session_id, "pricey");
+    }
+
+    #[test]
+    fn cost_floor_zero_shows_everything() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, "/x"), session("b", false, "/x")];
+        app.cost_floor = 0.0;
+        app.refilter();
+        assert_eq!(app.visible.len(), 2);
+    }
+
+    #[test]
+    fn cycle_matches_wraps_around_search_matches() {
+        let mut app = test_app();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mk = |id: &str, label: &str| {
+            let mut s = session(id, false, label);
+            s.last_active = now.clone();
+            s.started_at = now.clone();
+            s
+        };
+        app.sessions = vec![mk("a", "/x/match"), mk("b", "/y"), mk("c", "/z/match")];
+        app.search = "match".into();
+        app.refilter();
+        assert_eq!(app.visible.len(), 2);
+        app.selected = 0;
+        app.cycle_matches(1);
+        assert_eq!(app.selected_session().unwrap().session_id, "c");
+        app.cycle_matches(1);
+        assert_eq!(app.selected_session().unwrap().session_id, "a");
+        app.cycle_matches(-1);
+        assert_eq!(app.selected_session().unwrap().session_id, "c");
+    }
+
+    #[test]
+    fn mark_toggle_and_batch_delete_remove_marked_sessions() {
+        let mut app = test_app();
+        app.sessions = vec![
+            session("a", false, "/x"),
+            session("b", false, "/x"),
+            session("c", false, "/x"),
+        ];
+        app.refilter();
+        // Mark a and c.
+        app.selected = 0;
+        app.toggle_mark();
+        app.selected = 2;
+        app.toggle_mark();
+        assert_eq!(app.marked.len(), 2);
+        assert_eq!(app.marked_sessions().len(), 2);
+
+        app.batch(BatchKind::Delete);
+        assert_eq!(app.mode, Mode::BatchConfirm);
+        app.batch_execute();
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].session_id, "b");
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn batch_delete_refuses_when_marked_session_is_running() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, "/x"), session("b", true, "/x")];
+        app.refilter();
+        app.selected = 0;
+        app.toggle_mark();
+        app.selected = 1;
+        app.toggle_mark();
+        app.batch(BatchKind::Delete);
+        assert_eq!(app.mode, Mode::BatchDeleteBlocked);
+    }
+
+    #[test]
+    fn refresh_interval_adjusts_and_clamps() {
+        let mut app = test_app();
+        app.refresh_secs = 2.0;
+        app.adjust_refresh(0.5);
+        assert_eq!(app.refresh_secs, 2.5);
+        app.adjust_refresh(-10.0);
+        assert_eq!(app.refresh_secs, 0.5);
+        app.adjust_refresh(100.0);
+        assert_eq!(app.refresh_secs, 60.0);
     }
 }

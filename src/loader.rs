@@ -288,6 +288,10 @@ pub struct Stats {
     pub active_1h: usize,
     pub active_24h: usize,
     pub active_7d: usize,
+    /// Sessions that are currently backed by a detected process or a trusted
+    /// provider-specific liveness inference. This deliberately differs from
+    /// the recent-activity windows above.
+    pub running: usize,
     pub total_input: u64,
     pub total_output: u64,
     pub total_cpu: f32,
@@ -352,6 +356,9 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             if age < 604_800_000 {
                 st.active_7d += 1;
             }
+        }
+        if s.is_running() {
+            st.running += 1;
         }
 
         st.total_input += s.input_tokens;
@@ -441,6 +448,19 @@ mod tests {
         assert!((st.spend_today - 2.5).abs() < 1e-9);
         assert!((st.spend_calendar_month - 2.5).abs() < 1e-9);
         assert_eq!(st.active_1h, 1);
+        assert_eq!(st.running, 0);
+    }
+
+    #[test]
+    fn stats_count_only_running_sessions_as_live() {
+        let mut running = session_with_day(&util::local_date_key(&Utc::now()), 0.0);
+        running.process = Some(crate::proc::ProcInfo::default());
+        let recently_stopped = session_with_day(&util::local_date_key(&Utc::now()), 0.0);
+
+        let st = compute_stats(&[running, recently_stopped]);
+
+        assert_eq!(st.active_1h, 2);
+        assert_eq!(st.running, 1);
     }
 
     #[test]

@@ -276,6 +276,8 @@ pub struct UiPrefs {
     pub tool_show_diff: bool,
     pub subagent_sort_col: String,
     pub subagent_sort_asc: bool,
+    /// Only show sessions whose cost reaches this floor (0 disables it).
+    pub cost_floor: f64,
 }
 
 impl Default for UiPrefs {
@@ -290,6 +292,7 @@ impl Default for UiPrefs {
             tool_show_diff: false,
             subagent_sort_col: "last".into(),
             subagent_sort_asc: false,
+            cost_floor: 0.0,
         }
     }
 }

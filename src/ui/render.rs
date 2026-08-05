@@ -3,7 +3,7 @@
 use super::columns::{self, COLUMNS, ColumnId};
 use super::spark;
 use super::theme::{self, Gradient};
-use super::{AGE_OPTIONS, App, Mode, panels};
+use super::{AGE_OPTIONS, App, BatchKind, Mode, panels, session_root_pid};
 use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
@@ -121,6 +121,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::AgeFilter => draw_age_filter(frame, area, app),
         Mode::DeleteConfirm => draw_delete_confirm(frame, area, app),
         Mode::DeleteBlocked => draw_delete_blocked(frame, area, app),
+        Mode::KillConfirm => draw_kill_confirm(frame, area, app),
+        Mode::KillBlocked => draw_kill_blocked(frame, area, app),
+        Mode::BatchConfirm => draw_batch_confirm(frame, area, app),
+        Mode::BatchDeleteBlocked => draw_batch_blocked(frame, area, app, true),
+        Mode::BatchKillBlocked => draw_batch_blocked(frame, area, app, false),
+        Mode::CostFilter => draw_cost_filter(frame, area, app),
         Mode::List => {}
     }
     layout
@@ -227,7 +233,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::raw("  "),
             Span::styled(
-                format!("{} active", app.stats.active_1h),
+                format!("{} active", app.stats.running),
                 Style::default().fg(theme::COST_LOW),
             ),
         ]),
@@ -327,13 +333,20 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         return;
     }
 
-    // Keep the cursor on screen.
+    // Keep the cursor on screen; in follow mode it's held centered.
     let height = list_area.height as usize;
-    if app.selected < app.scroll {
-        app.scroll = app.selected;
-    } else if app.selected >= app.scroll + height {
-        app.scroll = app.selected + 1 - height;
-    }
+    app.list_height = height as u16;
+    app.scroll = if app.follow {
+        app.selected.saturating_sub(height / 2)
+    } else {
+        if app.selected < app.scroll {
+            app.selected
+        } else if app.selected >= app.scroll + height {
+            app.selected + 1 - height
+        } else {
+            app.scroll
+        }
+    };
     app.scroll = app
         .scroll
         .min(app.visible.len().saturating_sub(height.max(1)));
@@ -348,7 +361,8 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         .map(|(i, &idx)| {
             let s = &app.sessions[idx];
             let selected = app.scroll + i == app.selected;
-            session_row(s, &widths, selected, &now)
+            let marked = app.marked.contains(&s.key());
+            session_row(s, &widths, selected, marked, &now)
         })
         .collect();
 
@@ -359,6 +373,7 @@ fn session_row(
     s: &crate::session::Session,
     widths: &[u16],
     selected: bool,
+    marked: bool,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Line<'static> {
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
@@ -367,6 +382,8 @@ fn session_row(
             .bg(theme::SELECTED_BG)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
+    } else if marked {
+        Style::default().bg(theme::MARKED_BG)
     } else {
         Style::default()
     };
@@ -374,9 +391,18 @@ fn session_row(
     let mut spans = Vec::with_capacity(COLUMNS.len() * 2);
     for (c, w) in COLUMNS.iter().zip(widths) {
         let text = columns::render_cell(c.id, s, now);
-        // Selection styling wins so the highlighted row stays readable.
+        // Selection keeps the row's highlight but the status dot must stay
+        // colored, otherwise you can't tell a running session from a stopped
+        // one on the selected line.
         let style = if selected {
-            base
+            if c.id == ColumnId::Status {
+                Style::default()
+                    .bg(theme::SELECTED_BG)
+                    .fg(cell_color(c.id, s, age_secs))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                base
+            }
         } else {
             base.fg(cell_color(c.id, s, age_secs))
         };
@@ -926,12 +952,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ("F1", "Help"),
         ("F3", "Filter"),
         ("F5", "Refresh"),
-        ("F6", "Sort"),
         ("F7", "Age"),
         ("←→", "Panel"),
-        ("`", "Live"),
+        ("Space", "Mark"),
+        ("D", "Batch"),
         ("y", "Copy"),
         ("d", "Delete"),
+        ("k", "Kill"),
+        ("+/-", "Speed"),
         ("F10", "Quit"),
     ] {
         spans.push(Span::styled(key, key_style));
@@ -947,6 +975,30 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" Filter: {} ", app.search),
             Style::default().fg(Color::Cyan),
+        ));
+    }
+    if app.cost_floor > 0.0 {
+        spans.push(Span::styled(
+            format!(" ≥${:.2} ", app.cost_floor),
+            Style::default().fg(theme::COST_HIGH),
+        ));
+    }
+    if !app.marked.is_empty() {
+        spans.push(Span::styled(
+            format!(" [{} marked] ", app.marked.len()),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::styled(
+        format!(" {}s ", app.refresh_secs),
+        Style::default().fg(theme::DIMMER),
+    ));
+    if app.follow {
+        spans.push(Span::styled(
+            " FOLLOW ",
+            Style::default().fg(theme::COST_MID),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -991,15 +1043,20 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     };
     let lines = vec![
         section("Navigation"),
-        item("↑/k  ↓/j", "Move between sessions"),
+        item("↑  ↓/j", "Move between sessions"),
         item("PgUp / PgDn", "Page through the list"),
+        item("Ctrl+U / Ctrl+D", "Half a page up / down"),
+        item("b / PgUp", "Page up"),
+        item("g / G", "Jump to first / last"),
         item("Home / End", "Jump to first / last"),
+        item("n / N", "Next / previous search match (wraps)"),
         Line::default(),
         section("Panels"),
         item("←  →", "Move between bottom panels"),
         item("Tab / Shift+Tab", "Same, either direction"),
         item("1 – 7", "Jump to a panel directly"),
         item("Shift+↑ / ↓", "Scroll inside the active panel"),
+        item("f", "Follow mode: keep the selection centered"),
         item("L", "Toggle the Tool Activity live filter"),
         item("v", "Toggle inline diffs for edits"),
         Line::default(),
@@ -1007,13 +1064,23 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         item("/ or F3", "Filter sessions by text"),
         item("F6  >  <", "Open the sort-by panel"),
         item("F7", "Filter by age (1d / 1w / 1mo)"),
+        item("#", "Cost floor: only sessions costing ≥ $X"),
         item("`", "Show only running sessions"),
         item("P / M / T", "Sort by status / memory / cost"),
+        item("H / X / S", "Sort by harness / context / tools"),
+        item("+ / - / =", "Speed up / slow down / reset refresh"),
         item("Esc", "Clear the active filter"),
+        Line::default(),
+        section("Batch actions"),
+        item("Space", "Mark / unmark the selected session"),
+        item("D", "Delete all marked sessions"),
+        item("K", "Terminate all marked live sessions"),
+        item("U", "Clear all marks"),
         Line::default(),
         section("Other"),
         item("y", "Copy resume command or transcript path"),
         item("d", "Delete the selected session (not running)"),
+        item("k", "Terminate the selected live session"),
         item("r or F5", "Refresh now"),
         item("q or F10", "Quit"),
         Line::default(),
@@ -1169,6 +1236,167 @@ fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled("  [any key] dismiss", theme::dim())),
     ];
     modal(frame, area, "Cannot delete", lines, 62);
+}
+
+fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  {}", s.display_label()),
+            theme::value(),
+        )),
+        Line::from(Span::styled(format!("  {}", s.session_id), theme::dim())),
+        Line::default(),
+        Line::from(Span::styled(
+            "  Send a termination signal to this agent process?",
+            Style::default().fg(theme::COST_MID),
+        )),
+        Line::from(Span::raw("  Unsaved work in the agent may be interrupted.")),
+        Line::default(),
+        Line::from(Span::styled(
+            "  [y] terminate    [n / Esc] cancel",
+            theme::dim(),
+        )),
+    ];
+    modal(frame, area, "Terminate session?", lines, 62);
+}
+
+fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  {}", s.display_label()),
+            theme::value(),
+        )),
+        Line::default(),
+        Line::from(Span::raw(
+            "  This session has no locally controllable process.",
+        )),
+        Line::from(Span::raw("  It may be running in a remote or shared host.")),
+        Line::default(),
+        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+    ];
+    modal(frame, area, "Cannot terminate", lines, 62);
+}
+
+fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App) {
+    let ms = app.marked_sessions();
+    let (verb, noun) = match app.batch {
+        BatchKind::Delete => ("delete", "sessions"),
+        BatchKind::Kill => ("terminate", "live sessions"),
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("  {} marked {noun}", ms.len()),
+            theme::value(),
+        )),
+        Line::default(),
+    ];
+    for s in ms.iter().take(8) {
+        lines.push(Line::from(Span::styled(
+            format!("    · {}", s.display_label()),
+            theme::dim(),
+        )));
+    }
+    if ms.len() > 8 {
+        lines.push(Line::from(Span::styled(
+            format!("    … and {} more", ms.len() - 8),
+            theme::dim(),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        match app.batch {
+            BatchKind::Delete => "  This permanently removes their transcripts from disk.",
+            BatchKind::Kill => "  Unsaved work in the agents may be interrupted.",
+        },
+        Style::default().fg(theme::COST_MID),
+    )));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        format!("  [y] {verb} all    [n / Esc] cancel"),
+        theme::dim(),
+    )));
+    modal(frame, area, &format!("{verb} all?"), lines, 62);
+}
+
+fn draw_batch_blocked(frame: &mut Frame, area: Rect, app: &App, deleting: bool) {
+    let ms = app.marked_sessions();
+    // First one that can't be processed, for the explanation.
+    let (explain, name) = match app.batch {
+        BatchKind::Delete => (
+            "running — stop the agent first",
+            ms.iter().find(|s| s.is_running()),
+        ),
+        BatchKind::Kill => (
+            "has no locally controllable process",
+            ms.iter().find(|s| session_root_pid(s).is_none()),
+        ),
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  {} marked sessions", ms.len()),
+            theme::value(),
+        )),
+        Line::default(),
+        Line::from(Span::raw(format!(
+            "  Not all can be {}.",
+            if deleting { "deleted" } else { "killed" }
+        ))),
+        match name {
+            Some(s) => Line::from(Span::styled(
+                format!("  · {} {}", s.display_label(), explain),
+                theme::dim(),
+            )),
+            None => Line::from(Span::raw("  At least one is not ready.")),
+        },
+        Line::default(),
+        Line::from(Span::styled(
+            "  e.g. unmark the running / remote sessions first.",
+            theme::dim(),
+        )),
+        Line::default(),
+        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+    ];
+    let title = if deleting {
+        "Cannot delete all"
+    } else {
+        "Cannot terminate all"
+    };
+    modal(frame, area, title, lines, 62);
+}
+
+fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
+    let mut input = app.cost_input.clone();
+    if input.is_empty() {
+        input = "0.00".to_string();
+    }
+    let lines = vec![
+        Line::from(Span::styled(
+            " Only show sessions whose total cost is at least:",
+            theme::dim(),
+        )),
+        Line::from(vec![
+            Span::raw(" $ "),
+            Span::styled(
+                input,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(theme::ACCENT)),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            " 0 clears the filter   Enter apply   Esc cancel",
+            theme::dim(),
+        )),
+    ];
+    modal(frame, area, "Cost floor", lines, 50);
 }
 
 // ---------------------------------------------------------------------------

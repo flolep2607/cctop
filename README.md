@@ -85,20 +85,33 @@ cctop --clear-cache   # re-extract all session activity; keeps preferences/prici
 
 | Key | Action |
 |-----|--------|
-| `↑`/`k`, `↓`/`j` | Move between sessions |
+| `↑`, `↓`/`j` | Move between sessions |
+| `PgUp`, `PgDn`, `b` | Page up / down |
+| `Ctrl+U`, `Ctrl+D` | Half a page up / down |
+| `g`, `G` | Jump to first / last |
+| `Home`, `End` | Jump to first / last |
+| `n`, `N` | Next / previous search match (wraps) |
 | `←`, `→` | Move between bottom panels |
 | `1`–`7` | Jump to a panel directly |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
+| `f` | Follow mode: keep the selection centered |
 | `/` or `F3` | Filter sessions by text |
 | `F6`, `>`, `<` | Sort-by panel |
 | `F7` | Filter by age (1d / 1w / 1mo) |
+| `#` | Cost floor: only sessions costing ≥ `$X` |
 | `` ` `` | Show only running sessions |
 | `[`, `]` | Move through the Tool Activity tool filter |
 | `v` | Toggle inline diffs for edits |
 | `L` | Toggle the Tool Activity live filter |
 | `P` / `M` / `T` | Sort by status / memory / cost |
+| `H` / `X` / `S` | Sort by harness / context / tools |
+| `+`, `-`, `=` | Speed up / slow down / reset refresh interval |
+| `Space` | Mark / unmark the selected session |
+| `D`, `K` | Delete / terminate all marked sessions (with confirmation) |
+| `U` | Clear all marks |
 | `y` | Copy resume command or transcript path |
 | `d` | Delete the selected session (not running) |
+| `k` | Terminate the selected live session (with confirmation) |
 | `Esc` | Clear the active filter |
 | `q` or `F10` | Quit |
 
