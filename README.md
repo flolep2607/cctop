@@ -195,3 +195,10 @@ A few things that are less obvious from the code:
 cargo test
 cargo clippy --all-targets
 ```
+
+## Releasing
+
+Change the package `version` in `Cargo.toml` and push that commit to `main`.
+GitHub Actions derives the matching `v<version>` tag, creates the GitHub
+release, builds the platform archives, and publishes the crate. Do not create a
+separate release tag for a normal version bump.

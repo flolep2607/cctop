@@ -1,13 +1,13 @@
 name: Release
 
-# Tag a commit and push it to cut a release:
-#
-#   git tag v0.1.0 && git push origin v0.1.0
-#
-# This builds a binary for every supported platform, attaches the archives and
-# their checksums to the GitHub release, and publishes the crate.
+# Changing the package version on main cuts a release. The workflow derives a
+# `v<version>` tag from Cargo.toml, then builds the tagged commit, attaches the
+# archives and checksums, and publishes the crate. Existing tags can still be
+# released manually, but they must agree with Cargo.toml.
 on:
   push:
+    branches: [main]
+    paths: [Cargo.toml]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -21,35 +21,61 @@ env:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # Refuse to release if the tag and Cargo.toml disagree — a mismatch ships
-  # binaries whose `--version` contradicts the release they're attached to.
-  check-version:
+  prepare-release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      - name: Tag must match the crate version
+          ref: ${{ inputs.tag || github.sha }}
+          fetch-depth: 0
+      - id: version
+        name: Derive and validate release tag
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          crate="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          echo "tag=$tag  Cargo.toml=$crate"
-          if [ "$tag" != "$crate" ]; then
-            echo "::error::tag $tag does not match Cargo.toml version $crate"
+          crate_tag="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            tag="$crate_tag"
+          fi
+
+          echo "tag=$tag  Cargo.toml=$crate_tag"
+          if [ "$tag" != "$crate_tag" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $crate_tag"
             exit 1
           fi
 
+          # A version change on main owns its tag. Refuse to republish or move
+          # an existing tag, and otherwise tag this exact checked-out commit.
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "branch" ]; then
+            if git rev-parse --verify --quiet "refs/tags/$tag"; then
+              echo "::error::release tag $tag already exists; bump Cargo.toml before releasing"
+              exit 1
+            fi
+            git tag --annotate "$tag" --message "Release $tag"
+            git push origin "refs/tags/$tag"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   create-release:
-    needs: check-version
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.tag }}
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
           draft: false
           generate_release_notes: true
 
@@ -75,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -90,7 +116,7 @@ jobs:
           target: ${{ matrix.target }}
           archive: $bin-$target
           checksum: sha256
-          ref: refs/tags/${{ github.event.inputs.tag || github.ref_name }}
+          ref: refs/tags/${{ needs.prepare-release.outputs.tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   publish-crate:
@@ -99,7 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
         env:
