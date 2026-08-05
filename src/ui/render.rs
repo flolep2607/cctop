@@ -766,6 +766,36 @@ fn draw_performance(
 // Limits
 // ---------------------------------------------------------------------------
 
+/// Colour quota usage by whether it is being spent faster than an even budget
+/// across its reset window. Falling back to absolute pressure keeps windows
+/// useful when a provider omits either its reset time or duration.
+fn quota_color(window: &crate::quota::Window, now: i64) -> Color {
+    if let (Some(duration), Some(reset)) = (window.duration, window.resets_at) {
+        let duration_secs = duration.as_secs() as i64;
+        let elapsed_secs = (now - (reset - duration_secs)).clamp(1, duration_secs);
+        let pace_ratio = window.pct as f64 * duration_secs as f64 / (100.0 * elapsed_secs as f64);
+
+        // A small overspend is worth noticing, while 50% above the sustainable
+        // rate should be unmistakable. For a 7d window the sustainable rate is
+        // 100 / (7 * 24), or roughly 0.6 percentage points per hour.
+        if pace_ratio >= 1.5 {
+            return theme::COST_HIGH;
+        }
+        if pace_ratio >= 1.1 {
+            return theme::COST_MID;
+        }
+        return theme::COST_LOW;
+    }
+
+    if window.pct >= 90 {
+        theme::COST_HIGH
+    } else if window.pct >= 70 {
+        theme::COST_MID
+    } else {
+        theme::COST_LOW
+    }
+}
+
 fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel_block("Limits");
     let inner = block.inner(area);
@@ -826,17 +856,12 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 ));
             }
             crate::quota::ProviderStatus::Ok(q) => {
+                let now = chrono::Utc::now().timestamp();
                 if let Some(plan) = &q.plan {
                     spans.push(Span::styled(format!("({plan}) "), theme::dim()));
                 }
                 for w in &q.windows {
-                    let color = if w.pct >= 90 {
-                        theme::COST_HIGH
-                    } else if w.pct >= 70 {
-                        theme::COST_MID
-                    } else {
-                        theme::COST_LOW
-                    };
+                    let color = quota_color(w, now);
                     spans.push(Span::styled(format!("{} ", w.label), theme::label()));
                     spans.push(Span::styled(
                         format!("{:>3}% ", w.pct),
@@ -852,7 +877,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                         Style::default().fg(Color::Indexed(244)),
                     ));
                     if let Some(reset) = w.resets_at {
-                        let remaining = reset - chrono::Utc::now().timestamp();
+                        let remaining = reset - now;
                         if remaining > 0 {
                             spans.push(Span::styled(
                                 format!(" {}h{:02}m", remaining / 3600, (remaining % 3600) / 60),
@@ -1265,5 +1290,27 @@ mod tests {
         let r = centered(area, 100, 100);
         assert!(r.width <= area.width && r.height <= area.height);
         assert!(r.x + r.width <= area.width);
+    }
+
+    #[test]
+    fn quota_colour_tracks_spending_pace() {
+        let duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+        let reset = 1_000_000;
+        let window = crate::quota::Window {
+            label: "7d",
+            pct: 80,
+            duration: Some(duration),
+            // 80% used halfway through a seven-day window is well ahead of
+            // the even 100/(7*24) percentage-points-per-hour pace.
+            resets_at: Some(reset + duration.as_secs() as i64 / 2),
+        };
+        assert_eq!(quota_color(&window, reset), theme::COST_HIGH);
+
+        let sustainable = crate::quota::Window {
+            pct: 50,
+            resets_at: Some(reset + duration.as_secs() as i64 / 2),
+            ..window
+        };
+        assert_eq!(quota_color(&sustainable, reset), theme::COST_LOW);
     }
 }
