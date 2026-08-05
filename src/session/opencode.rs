@@ -144,6 +144,7 @@ fn is_api_failure(message: &Value) -> bool {
         "api error",
         "apierror",
         "internal server",
+        "queue is full",
     ]
     .iter()
     .any(|needle| text.contains(needle))
@@ -589,6 +590,16 @@ mod tests {
             ],
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_queue_full",
+                "ses_queue_full",
+                1i64,
+                r#"{"role":"assistant","time":{"completed":1},"error":{"name":"APIError","data":{"message":"Streaming response failed: [503] The request queue is full."}}}"#
+            ],
+        )
+        .unwrap();
         drop(db);
 
         assert_eq!(
@@ -597,6 +608,10 @@ mod tests {
         );
         assert_eq!(
             extract_activity_state(&path, "ses_timeout"),
+            ActivityState::ApiError
+        );
+        assert_eq!(
+            extract_activity_state(&path, "ses_queue_full"),
             ActivityState::ApiError
         );
         std::fs::remove_file(path).unwrap();
