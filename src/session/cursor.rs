@@ -130,11 +130,9 @@ mod tests {
 
     #[test]
     fn extracts_cursor_tool_calls_without_inventing_usage() {
-        let path = std::env::temp_dir().join(format!(
-            "cctop-cursor-{}-{}.jsonl",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        // The test thread name is the `::`-separated test path, which is not a
+        // legal Windows filename. The pid alone is unique enough here.
+        let path = std::env::temp_dir().join(format!("cctop-cursor-{}.jsonl", std::process::id()));
         std::fs::write(
             &path,
             concat!(
