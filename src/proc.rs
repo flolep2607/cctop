@@ -6,6 +6,7 @@
 //! data on every platform, so all of that goes away.
 
 use crate::session::Session;
+use crate::util;
 use std::collections::{HashMap, HashSet};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
 
@@ -288,6 +289,9 @@ impl Collector {
             cwd: String,
             cpu: f32,
             memory: u64,
+            /// Seconds since the epoch, used to pair concurrent processes in one
+            /// directory with the sessions they most plausibly started.
+            start_time: u64,
         }
         let snapshot: HashMap<u32, Snap> = self
             .sys
@@ -324,6 +328,7 @@ impl Collector {
                             .unwrap_or_default(),
                         cpu: p.cpu_usage(),
                         memory: p.memory(),
+                        start_time: p.start_time(),
                     },
                 )
             })
@@ -353,17 +358,25 @@ impl Collector {
         let mut roots: HashMap<String, u32> = HashMap::new();
         let mut unmatched: Vec<(u32, crate::pricing::Provider)> = Vec::new();
 
-        // Most recent session per working directory, for cwd-based fallback.
-        let mut cwd_index: HashMap<(crate::pricing::Provider, &str), &Session> = HashMap::new();
+        // Candidate sessions per working directory, most recently active first,
+        // for the cwd-based fallback. A directory usually holds many finished
+        // sessions and only the newest are plausibly live, but more than one can
+        // be running at once, so keep them all and rank rather than collapsing
+        // to a single winner.
+        let mut cwd_index: HashMap<(crate::pricing::Provider, &str), Vec<&Session>> =
+            HashMap::new();
         for s in sessions.iter().filter(|s| !s.label_source.is_empty()) {
             cwd_index
                 .entry((s.provider, s.label_source.as_str()))
-                .and_modify(|existing| {
-                    if s.last_active > existing.last_active {
-                        *existing = s;
-                    }
-                })
-                .or_insert(s);
+                .or_default()
+                .push(s);
+        }
+        for candidates in cwd_index.values_mut() {
+            candidates.sort_by(|a, b| {
+                b.last_active
+                    .cmp(&a.last_active)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            });
         }
 
         for (&pid, snap) in &snapshot {
@@ -422,6 +435,11 @@ impl Collector {
         // carry a rollout UUID in its command line, so an unmatched Codex PID
         // cannot be safely attributed to a transcript. Do not manufacture a
         // running session for it; only a real rollout may own a Codex PID.
+        // Resolve every unmatched PID to a directory first, then attribute each
+        // directory's processes as a group. Handling them one at a time pointed
+        // every process in a directory at that directory's newest session, so a
+        // second concurrent agent in the same checkout always looked stopped.
+        let mut by_cwd: HashMap<(crate::pricing::Provider, String), Vec<u32>> = HashMap::new();
         for (pid, provider) in unmatched {
             // The Codex worker is often a child of `codex-linux-sandbox`; the
             // child has no useful cwd, while the parent carries the managed
@@ -447,24 +465,48 @@ impl Collector {
                 }
                 current = (s.ppid != 0).then_some(s.ppid);
             };
+            by_cwd
+                .entry((provider, cwd.to_string()))
+                .or_default()
+                .push(pid);
+        }
+
+        // Map order is not stable, so fix it before attributing anything.
+        let mut groups: Vec<((crate::pricing::Provider, String), Vec<u32>)> =
+            by_cwd.into_iter().collect();
+        groups.sort_by(|a, b| (a.0.0.as_str(), &a.0.1).cmp(&(b.0.0.as_str(), &b.0.1)));
+
+        for ((provider, cwd), mut pids) in groups {
+            // Oldest process first, so it pairs with the session that started
+            // first and each keeps its own CPU and memory.
+            pids.sort_by_key(|pid| (snapshot.get(pid).map_or(0, |s| s.start_time), *pid));
+
+            let mut claimed = 0;
             if !cwd.is_empty()
-                && let Some(session) = cwd_index.get(&(provider, cwd))
+                && let Some(candidates) = cwd_index.get(&(provider, cwd.as_str()))
             {
-                claim_root(&mut roots, session.key(), pid);
-                continue;
+                let live = live_sessions_for_group(candidates, pids.len(), &roots);
+                for (pid, session) in pids.iter().zip(&live) {
+                    claim_root(&mut roots, session.key(), *pid);
+                    claimed += 1;
+                }
             }
-            if provider == crate::pricing::Provider::Codex {
-                continue;
+
+            // Whatever is left has no transcript that can own it.
+            for &pid in &pids[claimed..] {
+                if provider == crate::pricing::Provider::Codex {
+                    continue;
+                }
+                let key = format!("{}:_pid_{}", provider.as_str(), pid);
+                claim_root(&mut roots, key.clone(), pid);
+                self.orphans.insert(
+                    key,
+                    Orphan {
+                        provider,
+                        cwd: cwd.clone(),
+                    },
+                );
             }
-            let key = format!("{}:_pid_{}", provider.as_str(), pid);
-            claim_root(&mut roots, key.clone(), pid);
-            self.orphans.insert(
-                key,
-                Orphan {
-                    provider,
-                    cwd: cwd.to_string(),
-                },
-            );
         }
 
         // --- Aggregate each root's process subtree ---
@@ -535,6 +577,31 @@ impl Collector {
 /// re-launched, or a wrapper that re-execs). Taking whichever the process map
 /// happened to yield first made the choice vary between refreshes; the lowest
 /// PID is stable and is virtually always the ancestor of the others.
+/// Pick which of a directory's sessions are the live ones, ordered oldest first.
+///
+/// `candidates` must be ranked most-recently-active first: a directory
+/// accumulates finished sessions and at most `process_count` of them can be
+/// running. Sessions an exact UUID or title match already claimed are skipped,
+/// since that attribution is stronger than a shared working directory.
+///
+/// The result is ordered by start time so the caller can pair it against
+/// processes ordered the same way, keeping CPU and memory with the session that
+/// actually incurred them.
+fn live_sessions_for_group<'a>(
+    candidates: &[&'a Session],
+    process_count: usize,
+    claimed: &HashMap<String, u32>,
+) -> Vec<&'a Session> {
+    let mut live: Vec<&Session> = candidates
+        .iter()
+        .copied()
+        .filter(|s| !claimed.contains_key(&s.key()))
+        .take(process_count)
+        .collect();
+    live.sort_by_key(|s| util::parse_ts(&s.started_at));
+    live
+}
+
 fn claim_root(roots: &mut HashMap<String, u32>, key: String, pid: u32) {
     roots
         .entry(key)
@@ -574,6 +641,84 @@ mod tests {
     }
 
     const UUID: &str = "7026d578-8cba-4880-b464-9700f1b77b71";
+
+    fn session_at(id: &str, started_at: &str, last_active: &str) -> Session {
+        let mut s = Session::new(crate::pricing::Provider::Claude, id.to_string());
+        s.started_at = started_at.to_string();
+        s.last_active = last_active.to_string();
+        s
+    }
+
+    /// Regression: every process in a directory used to resolve to that
+    /// directory's newest session, so a second agent running in the same
+    /// checkout was reported as stopped.
+    #[test]
+    fn concurrent_sessions_in_one_directory_each_claim_a_process() {
+        // Ranked most-recently-active first, as the cwd index provides them.
+        let newest = session_at(
+            "newest",
+            "2026-08-05T12:00:00+00:00",
+            "2026-08-05T15:00:00+00:00",
+        );
+        let older = session_at(
+            "older",
+            "2026-08-05T09:00:00+00:00",
+            "2026-08-05T14:00:00+00:00",
+        );
+        let stale = session_at(
+            "stale",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+        );
+        let candidates = vec![&newest, &older, &stale];
+
+        // Two live processes: the two newest sessions are claimed, not just one.
+        let live = live_sessions_for_group(&candidates, 2, &HashMap::new());
+        let ids: Vec<&str> = live.iter().map(|s| s.session_id.as_str()).collect();
+        // Oldest start first, so it pairs with the oldest process.
+        assert_eq!(ids, vec!["older", "newest"]);
+
+        // One process still resolves to the newest session alone, as before.
+        let single = live_sessions_for_group(&candidates, 1, &HashMap::new());
+        assert_eq!(
+            single
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newest"]
+        );
+
+        // Nothing is attributed when no process is running in the directory.
+        assert!(live_sessions_for_group(&candidates, 0, &HashMap::new()).is_empty());
+    }
+
+    /// An exact UUID or title match owns its session; a shared working directory
+    /// must not steal it and leave the other process unattributed.
+    #[test]
+    fn exact_matches_are_not_reclaimed_by_directory_matching() {
+        let newest = session_at(
+            "newest",
+            "2026-08-05T12:00:00+00:00",
+            "2026-08-05T15:00:00+00:00",
+        );
+        let older = session_at(
+            "older",
+            "2026-08-05T09:00:00+00:00",
+            "2026-08-05T14:00:00+00:00",
+        );
+        let candidates = vec![&newest, &older];
+
+        let mut claimed = HashMap::new();
+        claimed.insert(newest.key(), 4242);
+
+        let live = live_sessions_for_group(&candidates, 1, &claimed);
+        assert_eq!(
+            live.iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["older"]
+        );
+    }
 
     #[test]
     fn resume_uuid_extraction() {
