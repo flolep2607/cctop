@@ -26,7 +26,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Tagging is irreversible and publishing to crates.io cannot be undone, so the
+  # full test matrix has to pass before `prepare-release` creates the tag. CI
+  # runs these same checks independently; releasing must not depend on that run.
+  verify:
+    uses: ./.github/workflows/verify.yml
+    with:
+      ref: ${{ inputs.tag || '' }}
+
   prepare-release:
+    needs: verify
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
