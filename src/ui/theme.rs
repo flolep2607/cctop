@@ -26,6 +26,9 @@ pub const DESKTOP_CODE: Color = Color::Indexed(141);
 pub const DESKTOP_COWORK: Color = Color::Indexed(183);
 
 pub const SELECTED_BG: Color = Color::Indexed(236);
+/// Wash behind a tool call that reported an error. Dark enough to stay behind
+/// the row's own foreground colours rather than competing with them.
+pub const FAILED_BG: Color = Color::Indexed(52);
 pub const HEADER_BG: Color = Color::Indexed(236);
 /// Tint for rows the user has marked for a batch action, so marks read at a
 /// glance even when nothing is selected. Kept dim so it stays behind the data.

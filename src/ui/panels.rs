@@ -472,7 +472,17 @@ pub fn tool_activity(
         let ts = util::parse_ts(&d.ts)
             .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
             .unwrap_or_else(|| "     ".into());
-        let mut spans = vec![dim(ts), Span::raw(" ")];
+        // The gap after the timestamp doubles as a failure marker, so a failed
+        // call is legible without relying on the background colour alone — and
+        // the row's width is unchanged either way.
+        let mut spans = vec![
+            dim(ts),
+            if d.failed {
+                Span::styled("✗", Style::default().fg(theme::COST_HIGH))
+            } else {
+                Span::raw(" ")
+            },
+        ];
         let mut used = 6;
 
         // Who made the call: the main session, or one of its subagents. Subagent
@@ -543,20 +553,28 @@ pub fn tool_activity(
             util::truncate(&text, detail_w)
         )));
         spans.extend(trailing);
-        out.push(Line::from(spans));
+        let row_style = if d.failed {
+            Style::default().bg(theme::FAILED_BG)
+        } else {
+            Style::default()
+        };
+        out.push(Line::from(spans).style(row_style));
         owners.push(Some(key.clone()));
 
         // Expanded: show the untruncated argument, wrapped.
         if is_open {
             let full = d.full.as_deref().unwrap_or(&d.d);
             for line in wrap(full, width.saturating_sub(10)) {
-                out.push(Line::from(vec![
-                    Span::raw("        "),
-                    Span::styled(
-                        line,
-                        Style::default().fg(ratatui::style::Color::Indexed(252)),
-                    ),
-                ]));
+                out.push(
+                    Line::from(vec![
+                        Span::raw("        "),
+                        Span::styled(
+                            line,
+                            Style::default().fg(ratatui::style::Color::Indexed(252)),
+                        ),
+                    ])
+                    .style(row_style),
+                );
                 owners.push(Some(key.clone()));
             }
         }
@@ -1190,6 +1208,46 @@ fn mcp_from_toml(path: &Path) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use crate::session::{ContextUsage, SubagentStatus};
+
+    /// A failed call is marked two ways on purpose: the red wash, and a glyph in
+    /// the gap after the timestamp so the row still reads on a terminal that
+    /// drops background colour.
+    #[test]
+    fn failed_tool_calls_are_marked_in_the_activity_rows() {
+        let mut data = SessionData::default();
+        for (command, failed) in [("true", false), ("exit 1", true)] {
+            data.metrics
+                .tool_details
+                .entry("Bash".to_string())
+                .or_default()
+                .push(crate::session::ToolDetail {
+                    d: command.to_string(),
+                    ts: "2026-08-05T10:00:00+00:00".to_string(),
+                    failed,
+                    ..Default::default()
+                });
+        }
+        data.metrics.tool_count = 2;
+
+        let (lines, _) = tool_activity(&data, 0, None, false, None, 120);
+        let row_of = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains(needle)))
+                .unwrap_or_else(|| panic!("no row for {needle}"))
+        };
+
+        let ok = row_of("true");
+        assert_eq!(ok.style.bg, None, "a successful call keeps the normal row");
+        assert!(!ok.spans.iter().any(|s| s.content.contains('✗')));
+
+        let bad = row_of("exit 1");
+        assert_eq!(bad.style.bg, Some(theme::FAILED_BG));
+        assert!(
+            bad.spans.iter().any(|s| s.content.contains('✗')),
+            "the failure must not be conveyed by colour alone"
+        );
+    }
 
     fn subagent(id: &str, cost: f64, ghost: bool) -> Subagent {
         Subagent {

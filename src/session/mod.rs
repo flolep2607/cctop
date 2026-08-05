@@ -504,6 +504,10 @@ pub struct ToolDetail {
     pub shared: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
+    /// The call reported an error. Providers that do not record a per-call
+    /// outcome leave this false rather than guessing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
     /// Subagent that issued the call, or `None` for the main session. Tool
     /// activity from subagents is interleaved into the same log, so without this
     /// there is no way to tell who did what.

@@ -164,11 +164,16 @@ supports it — what it did:
 ```
 19:16 main    ~/cctop/src/ui/render.rs     +43 -24   122ms ↓498.5K ↑ 1.2K
 19:34 ↳aa1b82 ~/cctop/src/quota.rs          +2 -0    88ms ↓ 41.2K ↑  310
+19:41✗main    cargo test --all-targets               1.4s  ↓ 12.0K ↑  180
 ```
 
 - **origin** — `main` for the session itself, or `↳<agent-id>` for a subagent.
   Subagent activity is interleaved into the same log, so without this there's no
   way to tell an agent's edits from the parent's.
+- **`✗` and a red row** — the call reported an error. Claude records this per
+  call, OpenCode records a tool status, and Codex is read from the sandbox's own
+  result line and exit code. Cursor transcripts don't record tool outcomes, so
+  their calls are never marked.
 - **`+N -M`** — lines added and removed, from the edit result's patch.
   Press `v` to expand the diff inline beneath the row.
 - **duration** — wall time from the call being issued to its result arriving.
