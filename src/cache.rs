@@ -14,8 +14,9 @@ use std::sync::Mutex;
 // pricing alias existed. Version 4 re-extracted Codex tool activity after `exec`
 // wrappers began being unwrapped. Version 5 avoided mistaking `tools.*` text
 // inside a patch for the wrapper's actual nested call. Version 6 also ignores
-// `await tools.*` text inside quoted patch content.
-const CACHE_VERSION: u32 = 6;
+// `await tools.*` text inside quoted patch content. Version 7 re-extracts
+// Codex web calls so their query is shown instead of `response_length`.
+const CACHE_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize)]
 struct DiskCache {
