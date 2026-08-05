@@ -17,7 +17,7 @@ pub enum ColumnId {
     Cpu,
     Memory,
     Tools,
-    ToolRate,
+    TokenTotal,
     TokenRate,
     Model,
     Project,
@@ -73,7 +73,7 @@ pub const COLUMNS: &[Column] = &[
         label: "$/1H",
         width: Some(7),
         right_align: true,
-        desc: "Estimated cost in the last hour",
+        desc: "Estimated cost in the current local clock hour",
     },
     Column {
         id: ColumnId::CostToday,
@@ -116,12 +116,12 @@ pub const COLUMNS: &[Column] = &[
         desc: "Total tool invocations in the session",
     },
     Column {
-        id: ColumnId::ToolRate,
-        key: "tools_rate",
-        label: "+TL",
-        width: Some(5),
+        id: ColumnId::TokenTotal,
+        key: "tokens",
+        label: "TOKENS",
+        width: Some(8),
         right_align: true,
-        desc: "Tool invocations since cctop started",
+        desc: "Total input and output tokens used by the session",
     },
     Column {
         id: ColumnId::TokenRate,
@@ -218,9 +218,10 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
                 String::new()
             }
         }
-        ColumnId::ToolRate => {
-            if s.tools_since_start > 0 {
-                s.tools_since_start.to_string()
+        ColumnId::TokenTotal => {
+            let total = s.input_tokens + s.output_tokens;
+            if total > 0 {
+                util::compact_tokens(total)
             } else {
                 String::new()
             }
@@ -281,7 +282,9 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
             .unwrap_or(0)
             .cmp(&b.process.as_ref().map(|p| p.memory).unwrap_or(0)),
         ColumnId::Tools => a.tool_count.cmp(&b.tool_count),
-        ColumnId::ToolRate => a.tools_since_start.cmp(&b.tools_since_start),
+        ColumnId::TokenTotal => {
+            (a.input_tokens + a.output_tokens).cmp(&(b.input_tokens + b.output_tokens))
+        }
         ColumnId::TokenRate => num(a.tokens_per_min, b.tokens_per_min),
         ColumnId::Model => a.model.cmp(&b.model),
         ColumnId::Project => a
@@ -373,6 +376,15 @@ mod tests {
         s.total_cost = None;
         assert_eq!(render_cell(ColumnId::Cost, &s, &now), "incl");
         assert_eq!(render_cell(ColumnId::CostHour, &s, &now), "incl");
+    }
+
+    #[test]
+    fn token_total_combines_input_and_output() {
+        let now = Utc::now();
+        let mut s = session("a");
+        s.input_tokens = 12_000;
+        s.output_tokens = 345;
+        assert_eq!(render_cell(ColumnId::TokenTotal, &s, &now), "12.3K");
     }
 
     #[test]

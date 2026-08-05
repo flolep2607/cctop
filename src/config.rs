@@ -25,6 +25,31 @@ pub static CODEX_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
 
 pub static CODEX_SESSIONS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| CODEX_HOME.join("sessions"));
 
+/// `$PI_CODING_AGENT_DIR`, falling back to `~/.pi/agent`.
+pub static PI_AGENT_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| HOME.join(".pi").join("agent"))
+});
+
+/// `$PI_CODING_AGENT_SESSION_DIR`, falling back to Pi's standard session root.
+pub static PI_SESSIONS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PI_AGENT_DIR.join("sessions"))
+});
+
+/// OpenCode follows the platform data directory (`~/.local/share` on Linux).
+pub static OPENCODE_DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::var_os("OPENCODE_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| HOME.join(".local").join("share"))
+                .join("opencode")
+        })
+});
+
 /// Cowork (VM) sessions. macOS only.
 pub static CLAUDE_MAC_COWORK_ROOT: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     cfg!(target_os = "macos").then(|| {

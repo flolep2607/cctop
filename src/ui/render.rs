@@ -138,10 +138,9 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         RLayout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
     let (left, right) = (cols[0], cols[1]);
 
-    // The newest sample of the spend series is the spend in the last tick.
-    let realtime = app.global_spend.values().last().copied().unwrap_or(0.0);
+    let realtime = app.stats.spend_per_min;
     let label_w = 15usize;
-    let value_w = 10usize;
+    let value_w = 12usize;
     let chart_w = left.width.saturating_sub((label_w + value_w + 2) as u16) as usize;
 
     let row = |name: &str, amount: f64, series: &[f64], now_idx: Option<usize>| -> Line<'static> {
@@ -165,19 +164,19 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
 
     let left_lines = vec![
         row(
-            "Real-time Spend",
+            "Live Spend/min",
             realtime,
             app.global_spend.values(),
             rt_idx,
         ),
         row(
-            "Daily Spend",
+            "Today Spend",
             app.stats.spend_today,
             &app.stats.daily_hourly,
             hour_idx,
         ),
         row(
-            "Monthly Spend",
+            "Month-to-date",
             app.stats.spend_calendar_month,
             &app.stats.monthly_daily,
             day_idx,
@@ -318,7 +317,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         } else if !app.search.is_empty() || app.age_filter.is_some() {
             "No sessions match the current filters. Esc clears them."
         } else {
-            "No sessions found in ~/.claude/projects or ~/.codex/sessions."
+            "No Claude, Codex, OpenCode, or Pi sessions found."
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(msg, theme::dim()))),
@@ -447,6 +446,7 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
 // ---------------------------------------------------------------------------
 
 fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
+    app.ensure_available_tab();
     layout.bottom_start = area.y;
     layout.tab_row = area.y;
     layout.tool_sidebar = None;
@@ -463,6 +463,9 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     let mut pos = area.x + 2;
     layout.tab_spans.clear();
     for (i, name) in panels::TABS.iter().enumerate() {
+        if !app.tab_available(i) {
+            continue;
+        }
         let style = if i == app.bottom_tab {
             theme::title().add_modifier(Modifier::UNDERLINED)
         } else {

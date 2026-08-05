@@ -152,8 +152,18 @@ fn spawn_worker(plan: Plan, rx: Receiver<Request>, tx: Sender<Response>) {
                 }
                 Request::Delete(session) => {
                     match session.provider {
-                        Provider::Claude => crate::session::claude::delete(&session),
-                        Provider::Codex => crate::session::codex::delete(&session),
+                        Provider::Claude => {
+                            crate::session::claude::delete(&session);
+                        }
+                        Provider::Codex => {
+                            crate::session::codex::delete(&session);
+                        }
+                        Provider::OpenCode => {
+                            let _ = crate::session::opencode::delete(&session);
+                        }
+                        Provider::Pi => {
+                            let _ = crate::session::pi::delete(&session);
+                        }
                     }
                     loader.store().evict(&session);
                 }
@@ -220,8 +230,6 @@ pub struct App {
     pub mem_history: HashMap<String, History>,
     pub global_cpu: History,
     pub global_spend: History,
-    prev_spend_total: Option<f64>,
-    spend_warmup: u8,
 
     pub quota: Quota,
     pub status: Option<(String, Instant)>,
@@ -296,8 +304,6 @@ impl App {
             mem_history: HashMap::new(),
             global_cpu: History::default(),
             global_spend: History::default(),
-            prev_spend_total: None,
-            spend_warmup: 0,
             quota: Quota::default(),
             status: None,
             started_at: chrono::Utc::now().to_rfc3339(),
@@ -401,21 +407,15 @@ impl App {
             })
             .unwrap_or(self.selected)
             .min(self.visible.len().saturating_sub(1));
+        self.ensure_available_tab();
         self.needs_redraw = true;
     }
 
     /// Fold this refresh's figures into the overview history buffers.
     fn push_history(&mut self) {
-        let current = self.stats.spend_total;
-        // Skip the first few samples: the initial load reports each session's
-        // whole lifetime spend at once, which would spike the real-time chart.
-        self.spend_warmup = self.spend_warmup.saturating_add(1);
-        if let Some(prev) = self.prev_spend_total
-            && self.spend_warmup > 3
-        {
-            self.global_spend.push((current - prev).max(0.0));
-        }
-        self.prev_spend_total = Some(current);
+        // This is a rate, not a refresh delta, so its meaning is stable when
+        // the user changes --delay or a filesystem scan takes longer.
+        self.global_spend.push(self.stats.spend_per_min);
         self.global_cpu.push(self.stats.total_cpu as f64);
 
         for s in &self.sessions {
@@ -477,7 +477,18 @@ impl App {
         }
         let last = self.visible.len() - 1;
         self.selected = (self.selected as isize + delta).clamp(0, last as isize) as usize;
+        self.ensure_available_tab();
         self.needs_redraw = true;
+    }
+
+    fn tab_available(&self, tab: usize) -> bool {
+        !matches!(tab, 1 | 2) || self.selected_session().is_some_and(Session::is_running)
+    }
+
+    fn ensure_available_tab(&mut self) {
+        if !self.tab_available(self.bottom_tab) {
+            self.bottom_tab = 0;
+        }
     }
 
     fn set_sort(&mut self, col: ColumnId) {
@@ -526,7 +537,14 @@ impl App {
     /// Move to the next or previous bottom panel, wrapping at both ends.
     fn cycle_tab(&mut self, delta: isize) {
         let n = panels::TABS.len() as isize;
-        self.bottom_tab = (((self.bottom_tab as isize + delta) % n + n) % n) as usize;
+        let mut next = self.bottom_tab;
+        for _ in 0..panels::TABS.len() {
+            next = (((next as isize + delta) % n + n) % n) as usize;
+            if self.tab_available(next) {
+                self.bottom_tab = next;
+                break;
+            }
+        }
         self.save_prefs();
         self.needs_redraw = true;
     }
@@ -560,6 +578,8 @@ impl App {
             0 => match s.provider {
                 Provider::Claude => format!("claude --resume {}", s.session_id),
                 Provider::Codex => format!("codex resume {}", s.session_id),
+                Provider::OpenCode => format!("opencode --session {}", s.session_id),
+                Provider::Pi => format!("pi --session {}", s.session_id),
             },
             _ => s
                 .data_file
@@ -676,14 +696,23 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-PAGE),
             KeyCode::PageDown => self.move_selection(PAGE),
-            KeyCode::Home => self.selected = 0,
-            KeyCode::End => self.selected = self.visible.len().saturating_sub(1),
+            KeyCode::Home => {
+                self.selected = 0;
+                self.ensure_available_tab();
+            }
+            KeyCode::End => {
+                self.selected = self.visible.len().saturating_sub(1);
+                self.ensure_available_tab();
+            }
 
             KeyCode::Tab => self.cycle_tab(1),
             KeyCode::BackTab => self.cycle_tab(-1),
             KeyCode::Char(c @ '1'..='7') => {
-                self.bottom_tab = c as usize - '1' as usize;
-                self.save_prefs();
+                let tab = c as usize - '1' as usize;
+                if self.tab_available(tab) {
+                    self.bottom_tab = tab;
+                    self.save_prefs();
+                }
             }
             KeyCode::Char('`') => {
                 self.live_only = !self.live_only;
@@ -787,6 +816,7 @@ impl App {
                     let idx = self.scroll + row;
                     if idx < self.visible.len() {
                         self.selected = idx;
+                        self.ensure_available_tab();
                         self.needs_redraw = true;
                     }
                 }
@@ -1005,6 +1035,32 @@ mod tests {
         app.refilter();
         assert_eq!(app.visible.len(), 1);
         assert_eq!(app.sessions[app.visible[0]].session_id, "a");
+    }
+
+    #[test]
+    fn runtime_tabs_are_unavailable_for_stopped_sessions() {
+        let mut app = test_app();
+        app.sessions = vec![session("stopped", false, "x")];
+        app.refilter();
+        assert!(!app.tab_available(1));
+        assert!(!app.tab_available(2));
+
+        app.bottom_tab = 0;
+        app.cycle_tab(1);
+        assert_eq!(app.bottom_tab, 3);
+    }
+
+    #[test]
+    fn selecting_stopped_session_leaves_runtime_tab() {
+        let mut app = test_app();
+        app.sessions = vec![
+            session("running", true, "x"),
+            session("stopped", false, "y"),
+        ];
+        app.visible = vec![0, 1];
+        app.bottom_tab = 1;
+        app.move_selection(1);
+        assert_eq!(app.bottom_tab, 0);
     }
 
     #[test]

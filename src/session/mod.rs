@@ -3,8 +3,11 @@
 pub mod claude;
 pub mod codex;
 pub mod extract;
+pub mod opencode;
+pub mod pi;
 
 use crate::pricing::Provider;
+use crate::util;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// Where a session is being driven from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Surface {
-    /// `claude` / `codex` in a terminal.
+    /// A coding agent in a terminal.
     Cli,
     /// Claude for Mac, running Claude Code locally.
     DesktopCode,
@@ -31,6 +34,8 @@ impl Surface {
             (Surface::DesktopCode, _) => "Claude Code",
             (_, Provider::Claude) => "Claude",
             (_, Provider::Codex) => "Codex",
+            (_, Provider::OpenCode) => "OpenCode",
+            (_, Provider::Pi) => "Pi",
         }
     }
 }
@@ -97,7 +102,6 @@ pub struct Session {
     // --- Rate tracking ---
     pub tokens_per_min: f64,
     pub cost_per_min: f64,
-    pub tools_since_start: u64,
 }
 
 impl Session {
@@ -129,7 +133,6 @@ impl Session {
             process: None,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
-            tools_since_start: 0,
         }
     }
 
@@ -371,6 +374,8 @@ impl SessionData {
 pub fn list_all() -> Vec<Session> {
     let mut sessions = codex::list_sessions();
     sessions.extend(claude::list_sessions());
+    sessions.extend(opencode::list_sessions());
+    sessions.extend(pi::list_sessions());
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     sessions
 }
@@ -404,6 +409,12 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
             .map(|p| crate::config::file_mtime_ms(p))
             .max()
             .unwrap_or(0),
-        Provider::Codex => crate::config::file_mtime_ms(f),
+        Provider::Codex | Provider::Pi => crate::config::file_mtime_ms(f),
+        // Every OpenCode session shares one WAL-backed database. Using the DB
+        // mtime would invalidate hundreds of unchanged sessions whenever one
+        // message lands; its per-session updated timestamp is the right key.
+        Provider::OpenCode => util::parse_ts(&session.last_active)
+            .map(|d| d.timestamp_millis().max(0) as u64)
+            .unwrap_or_else(|| crate::config::file_mtime_ms(f)),
     }
 }

@@ -12,7 +12,7 @@ use serde::Serialize;
     name = "cctop",
     about = "An htop-like monitor for AI coding agent sessions",
     long_about = "cctop — an htop-like monitor for AI coding agent sessions\n\n\
-Tracks Claude Code and Codex sessions running on your machine, showing\n\
+Tracks Claude Code, Codex, OpenCode, and Pi sessions on your machine, showing\n\
 real-time cost estimation, token usage, tool invocations, and OS-level metrics.\n\n\
 COST ESTIMATION\n  \
 Cost figures are estimates based on per-token API pricing from the LiteLLM\n  \
@@ -21,7 +21,7 @@ Claude Max, Pro, or Team — charge a flat rate or bundle tokens differently,\n 
 so reported costs may not reflect your actual bill. Treat the $ column as a\n  \
 rough indicator of resource consumption, not as an authoritative invoice.\n\n\
 NOTES\n  \
-Session data is read from ~/.claude/projects/ and ~/.codex/sessions/.\n  \
+Session data is read from each agent's standard local session store.\n  \
 UI preferences (active tab, sort order, filters) persist across runs.",
     version
 )]
@@ -138,18 +138,23 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
         .max(60);
     let cost_label = if plan == Plan::Retail { "est" } else { "cost" };
 
-    let codex: Vec<&Session> = sessions
-        .iter()
-        .filter(|s| s.provider == Provider::Codex)
-        .collect();
-    let claude: Vec<&Session> = sessions
-        .iter()
-        .filter(|s| s.provider == Provider::Claude)
-        .collect();
-
-    print_group("Codex", &codex, 0, cost_label, width);
-    println!();
-    print_group("Claude", &claude, codex.len(), cost_label, width);
+    let mut offset = 0;
+    for (name, provider) in [
+        ("Codex", Provider::Codex),
+        ("Claude", Provider::Claude),
+        ("OpenCode", Provider::OpenCode),
+        ("Pi", Provider::Pi),
+    ] {
+        let group: Vec<&Session> = sessions.iter().filter(|s| s.provider == provider).collect();
+        if group.is_empty() {
+            continue;
+        }
+        if offset > 0 {
+            println!();
+        }
+        print_group(name, &group, offset, cost_label, width);
+        offset += group.len();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +243,7 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
             let account = match s.provider {
                 Provider::Claude => claude_account.as_ref(),
                 Provider::Codex => codex_account.as_ref(),
+                Provider::OpenCode | Provider::Pi => None,
             }
             .map(|a| JsonAccount {
                 email: a.email.clone(),

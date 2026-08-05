@@ -1,7 +1,7 @@
 # cctop
 
-An htop-like monitor for AI coding agent sessions. Tracks Claude Code and Codex
-sessions on your machine: cost estimation, token usage, tool invocations,
+An htop-like monitor for AI coding agent sessions. Tracks Claude Code, Codex,
+OpenCode, and Pi sessions on your machine: cost estimation, token usage, tool invocations,
 subagents, and OS-level process metrics — refreshed live.
 
 A Rust rewrite of an earlier Node implementation.
@@ -108,15 +108,20 @@ argument, and click the sidebar to filter by tool.
 | Claude Code (CLI) | `~/.claude/projects/<slug>/<uuid>.jsonl` |
 | Claude for Mac | `~/Library/Application Support/Claude/{claude-code,local-agent-mode}-sessions/` |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| OpenCode | `~/.local/share/opencode/opencode*.db` (platform data directory) |
+| Pi | `~/.pi/agent/sessions/**/*.jsonl` |
 
-`CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honoured. Caches live in
-`~/.cache/cctop/`.
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_DATA_DIR`,
+`PI_CODING_AGENT_DIR`, and `PI_CODING_AGENT_SESSION_DIR` are honoured. Caches
+live in `~/.cache/cctop/`.
 
 ## A note on cost figures
 
-Costs are **estimates**: tokens multiplied by published per-token rates, taken
-from built-in tables and falling back to the
+Claude and Codex costs are **estimates**: tokens multiplied by published
+per-token rates, taken from built-in tables and falling back to the
 [LiteLLM](https://github.com/BerriAI/litellm) database (cached for 24 hours).
+OpenCode and Pi already persist provider-calculated costs, which cctop reads
+directly.
 
 Subscription plans — Claude Max, Pro, Team — are flat-rate or bundle tokens
 differently, so these numbers will not match your invoice. Treat the `$` column
