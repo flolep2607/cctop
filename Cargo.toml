@@ -1,8 +1,7 @@
 [package]
 name = "cctop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-# let-chains (1.88) and `int::is_multiple_of` (1.87) are both used throughout.
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions (Claude Code, Codex)"
 authors = ["Florian Leprat <florian.leprat@xtracta.com>"]

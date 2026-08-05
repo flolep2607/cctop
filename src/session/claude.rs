@@ -8,6 +8,7 @@ use super::{
 use crate::config::{self, CLAUDE_1M_CTX, CLAUDE_DEFAULT_CTX};
 use crate::pricing::{self, Provider};
 use crate::util;
+use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -141,7 +142,7 @@ fn summarize(transcript: &Path) -> Option<Session> {
 
 /// All Claude sessions: CLI transcripts plus any Claude for Mac sessions.
 pub fn list_sessions() -> Vec<Session> {
-    let mut sessions = Vec::new();
+    let mut transcripts = Vec::new();
 
     if config::dir_exists(&config::CLAUDE_PROJECTS_ROOT) {
         for project in config::list_dir(&config::CLAUDE_PROJECTS_ROOT) {
@@ -156,13 +157,15 @@ pub fn list_sessions() -> Vec<Session> {
                 if !config::is_full_uuid(stem) {
                     continue;
                 }
-                if let Some(s) = summarize(&project_dir.join(&entry)) {
-                    sessions.push(s);
-                }
+                transcripts.push(project_dir.join(entry));
             }
         }
     }
 
+    let mut sessions: Vec<_> = transcripts
+        .par_iter()
+        .filter_map(|path| summarize(path))
+        .collect();
     sessions.extend(list_mac_sessions());
     sessions
 }
@@ -881,6 +884,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         } else {
             ext.last_main_model
         },
+        reasoning_effort: None,
         models,
         model_breakdown,
         tokens,

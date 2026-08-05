@@ -89,6 +89,49 @@ fn is_node_hosted_codex(tokens: &[String]) -> bool {
     is_node_hosted_agent(tokens, "codex")
 }
 
+fn is_codex_process(name: &str, tokens: &[String]) -> bool {
+    is_codex_binary(name)
+        || is_sandboxed_codex_launcher(name, tokens)
+        // The managed sandbox can expose only its argv[0] as the process name;
+        // `app-server` is the Codex-specific proof that this is the agent
+        // root, rather than a generic sandbox helper.
+        || (name == "codex-linux-sandbox" && tokens.iter().any(|t| t == "app-server"))
+        || (name == "node" && is_node_hosted_codex(tokens))
+}
+
+fn is_sandboxed_codex_launcher(name: &str, tokens: &[String]) -> bool {
+    if !matches!(name, "bwrap" | "codex-linux-sandbox") {
+        return false;
+    }
+    let launches_codex = tokens
+        .iter()
+        .any(|token| is_codex_binary(&command_stem(token)));
+    launches_codex
+        && (flag_value(tokens, "--command-cwd").is_some()
+            || flag_value(tokens, "--sandbox-policy-cwd").is_some())
+}
+
+/// Codex release archives keep the target triple in the executable name when
+/// users run them without renaming (for example
+/// `codex-x86_64-unknown-linux-musl`). Do not use a broad `codex-` prefix here:
+/// helper processes such as `codex-linux-sandbox` are descendants, not agent
+/// roots in their own right.
+fn is_codex_binary(name: &str) -> bool {
+    name == "codex"
+        || (name.starts_with("codex-")
+            && (name.contains("-unknown-linux-")
+                || name.ends_with("-apple-darwin")
+                || name.ends_with("-pc-windows-msvc")))
+}
+
+/// Generic agent daemons do not represent an interactive session, but Codex
+/// editor integrations run active sessions through `codex app-server`. Those
+/// processes have no UUID argument, so they must reach the cwd-based fallback
+/// below instead of being discarded as daemons up front.
+fn exclude_agent_process(name: &str, tokens: &[String], args: &str) -> bool {
+    is_app_bundle(args) || (is_daemon(args) && !is_codex_process(name, tokens))
+}
+
 fn is_node_hosted_agent(tokens: &[String], agent: &str) -> bool {
     tokens
         .iter()
@@ -144,6 +187,18 @@ fn session_value(tokens: &[String]) -> Option<&str> {
             return (!value.is_empty()).then_some(value);
         }
         if token == "--session" || token == "-s" {
+            return tokens.get(i + 1).map(String::as_str);
+        }
+    }
+    None
+}
+
+fn flag_value<'a>(tokens: &'a [String], flag: &str) -> Option<&'a str> {
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(value) = token.strip_prefix(&format!("{flag}=")) {
+            return (!value.is_empty()).then_some(value);
+        }
+        if token == flag {
             return tokens.get(i + 1).map(String::as_str);
         }
     }
@@ -246,6 +301,21 @@ impl Collector {
             children.entry(s.ppid).or_default().push(*pid);
         }
 
+        // A cctop launched inside the managed Codex sandbox has a bwrap
+        // ancestor whose command line contains the Codex launcher. Other
+        // bwrap processes are short-lived tool sandboxes and must not affect
+        // session liveness.
+        let mut current_ancestors = HashSet::new();
+        let mut current = Some(std::process::id());
+        while let Some(pid) = current {
+            if !current_ancestors.insert(pid) {
+                break;
+            }
+            current = snapshot
+                .get(&pid)
+                .and_then(|s| (s.ppid != 0).then_some(s.ppid));
+        }
+
         // --- Identify agent root processes and attribute them to sessions ---
         let mut roots: HashMap<String, u32> = HashMap::new();
         let mut unmatched: Vec<(u32, crate::pricing::Provider)> = Vec::new();
@@ -264,12 +334,12 @@ impl Collector {
         }
 
         for (&pid, snap) in &snapshot {
-            if is_app_bundle(&snap.args) || is_daemon(&snap.args) {
+            if exclude_agent_process(&snap.name, &snap.tokens, &snap.args) {
                 continue;
             }
             let is_claude = is_claude_binary(&snap.name, &snap.tokens);
-            let is_codex =
-                snap.name == "codex" || (snap.name == "node" && is_node_hosted_codex(&snap.tokens));
+            let is_codex = is_codex_process(&snap.name, &snap.tokens)
+                && (snap.name != "bwrap" || current_ancestors.contains(&pid));
             let is_opencode = matches!(snap.name.as_str(), "opencode" | "opencode-cli")
                 || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "opencode"));
             let is_pi = snap.name == "pi"
@@ -315,13 +385,42 @@ impl Collector {
             unmatched.push((pid, provider));
         }
 
-        // Fallback: match by working directory, then give up and call it an orphan.
+        // Fallback: match by working directory. Codex's app-server does not
+        // carry a rollout UUID in its command line, so an unmatched Codex PID
+        // cannot be safely attributed to a transcript. Do not manufacture a
+        // running session for it; only a real rollout may own a Codex PID.
         for (pid, provider) in unmatched {
-            let cwd = snapshot.get(&pid).map(|s| s.cwd.as_str()).unwrap_or("");
+            // The Codex worker is often a child of `codex-linux-sandbox`; the
+            // child has no useful cwd, while the parent carries the managed
+            // workspace in `--command-cwd`. Walk ancestors so the PID still
+            // resolves to the rollout that owns that workspace.
+            let mut current = Some(pid);
+            let mut seen = HashSet::new();
+            let cwd = loop {
+                let Some(current_pid) = current else { break "" };
+                if !seen.insert(current_pid) {
+                    break "";
+                }
+                let Some(s) = snapshot.get(&current_pid) else {
+                    break "";
+                };
+                if !s.cwd.is_empty() {
+                    break s.cwd.as_str();
+                }
+                if let Some(value) = flag_value(&s.tokens, "--command-cwd")
+                    .or_else(|| flag_value(&s.tokens, "--sandbox-policy-cwd"))
+                {
+                    break value;
+                }
+                current = (s.ppid != 0).then_some(s.ppid);
+            };
             if !cwd.is_empty()
                 && let Some(session) = cwd_index.get(&(provider, cwd))
             {
                 claim_root(&mut roots, session.key(), pid);
+                continue;
+            }
+            if provider == crate::pricing::Provider::Codex {
                 continue;
             }
             let key = format!("{}:_pid_{}", provider.as_str(), pid);
@@ -501,6 +600,39 @@ mod tests {
     }
 
     #[test]
+    fn platform_named_codex_binaries_are_agent_roots() {
+        assert!(is_codex_binary("codex"));
+        assert!(is_codex_binary("codex-x86_64-unknown-linux-musl"));
+        assert!(is_codex_binary("codex-aarch64-apple-darwin"));
+        assert!(is_codex_binary("codex-x86_64-pc-windows-msvc"));
+        // This is spawned by Codex and must remain part of the root's process
+        // tree instead of competing with it for session attribution.
+        assert!(!is_codex_binary("codex-linux-sandbox"));
+    }
+
+    #[test]
+    fn sandbox_wrapper_with_codex_executable_is_an_agent_root() {
+        let argv = toks("/home/f/.cursor-server/extensions/openai.chatgpt/bin/codex app-server");
+        assert!(is_codex_process("codex-linux-sandbox", &argv));
+        assert!(!is_codex_process(
+            "codex-linux-sandbox",
+            &toks("codex-linux-sandbox --helper")
+        ));
+    }
+
+    #[test]
+    fn codex_app_server_reaches_cwd_session_matching() {
+        let native = toks("/opt/codex -c features.code_mode_host=true app-server");
+        assert!(is_daemon(&native.join(" ")));
+        assert!(!exclude_agent_process("codex", &native, &native.join(" ")));
+
+        let claude = toks("claude app-server");
+        assert!(exclude_agent_process("claude", &claude, &claude.join(" ")));
+        let helper = toks("codex-code-mode-host");
+        assert!(!is_codex_process("codex-code-mode-host", &helper));
+    }
+
+    #[test]
     fn node_hosted_agents_are_identified_by_script_name() {
         assert!(is_node_hosted_agent(
             &toks("node /usr/lib/opencode.js --session ses_1"),
@@ -521,6 +653,22 @@ mod tests {
         );
         assert_eq!(session_value(&toks("opencode -s=ses_123")), Some("ses_123"));
         assert_eq!(session_value(&toks("pi --session=abc123")), Some("abc123"));
+    }
+
+    #[test]
+    fn sandbox_codex_app_server_uses_command_cwd() {
+        let tokens = toks("codex-linux-sandbox --command-cwd /home/f/cctop app-server");
+        assert!(is_codex_process("codex-linux-sandbox", &tokens));
+        assert_eq!(flag_value(&tokens, "--command-cwd"), Some("/home/f/cctop"));
+    }
+
+    #[test]
+    fn bwrap_codex_launcher_is_recognized_with_workspace_flags() {
+        let tokens = toks(
+            "codex-linux-sandbox -- /opt/codex --sandbox-policy-cwd /home/f/cctop --command-cwd /home/f/cctop app-server",
+        );
+        assert!(is_codex_process("codex-linux-sandbox", &tokens));
+        assert!(is_codex_process("bwrap", &tokens));
     }
 
     #[test]

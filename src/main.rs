@@ -15,6 +15,12 @@ use std::io::IsTerminal;
 fn main() -> anyhow::Result<()> {
     let args = cli::Args::parse();
 
+    if args.clear_cache {
+        if cache::clear_session_cache()? {
+            eprintln!("Cleared cctop session extraction cache.");
+        }
+    }
+
     if args.list || args.json {
         // Non-interactive modes need pricing before they can print anything, so
         // fetch synchronously. The TUI refreshes it on a background thread.

@@ -143,15 +143,25 @@ pub fn compact_bytes(value: u64) -> String {
 
 /// Two-decimal dollars for table cells.
 pub fn compact_usd(value: f64) -> String {
-    format!("${value:.2}")
+    format!("${:.2}", normalize_usd_zero(value))
 }
 
 /// Sub-cent amounts keep four decimals so small spends stay visible.
 pub fn adaptive_usd(value: f64) -> String {
+    let value = normalize_usd_zero(value);
     if value > 0.0 && value < 0.01 {
         format!("${value:.4}")
     } else {
         format!("${value:.2}")
+    }
+}
+
+/// Avoid displaying floating-point noise as a negative zero amount.
+fn normalize_usd_zero(value: f64) -> f64 {
+    if value == 0.0 || (-0.005..0.0).contains(&value) {
+        0.0
+    } else {
+        value
     }
 }
 
@@ -456,6 +466,13 @@ mod tests {
         assert_eq!(compact_bytes(0), "");
         assert_eq!(compact_bytes(2048), "2K");
         assert_eq!(with_commas(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn usd_does_not_display_negative_zero() {
+        assert_eq!(compact_usd(-0.0), "$0.00");
+        assert_eq!(adaptive_usd(-0.000_001), "$0.00");
+        assert_eq!(adaptive_usd(-0.01), "$-0.01");
     }
 
     #[test]

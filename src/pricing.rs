@@ -300,6 +300,7 @@ impl Plan {
 pub enum Provider {
     Claude,
     Codex,
+    Cursor,
     OpenCode,
     Pi,
 }
@@ -309,6 +310,7 @@ impl Provider {
         match self {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Cursor => "cursor",
             Provider::OpenCode => "opencode",
             Provider::Pi => "pi",
         }
