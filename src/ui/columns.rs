@@ -1,6 +1,6 @@
 //! Session-table column definitions: rendering, sorting, and tooltips.
 
-use crate::session::Session;
+use crate::session::{ActivityState, Session};
 use crate::util;
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
@@ -42,7 +42,7 @@ pub const COLUMNS: &[Column] = &[
         label: " ",
         width: Some(1),
         right_align: false,
-        desc: "Running status: ● running (brighter = more recent), ○ stopped",
+        desc: "Status: green ● working (brighter = more recent), amber ● awaiting input, red ● API error, ○ stopped",
     },
     Column {
         id: ColumnId::Last,
@@ -174,7 +174,11 @@ fn age_secs(s: &Session, now: &DateTime<Utc>) -> Option<i64> {
 /// Cell text for one column. Empty means "nothing worth showing".
 pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
     match id {
-        ColumnId::Status => if s.is_running() { "●" } else { "○" }.into(),
+        ColumnId::Status => match s.activity_state {
+            ActivityState::WaitingForInput | ActivityState::ApiError => "●".into(),
+            ActivityState::Working if s.is_running() => "●".into(),
+            ActivityState::Working => "○".into(),
+        },
         ColumnId::Last => util::relative_age(&s.last_active, now),
         ColumnId::Duration => util::session_duration(&s.started_at, &s.last_active),
         ColumnId::Cost => match s.total_cost {

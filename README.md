@@ -121,6 +121,10 @@ argument, and click the sidebar to filter by tool.
 `PI_CODING_AGENT_DIR`, and `PI_CODING_AGENT_SESSION_DIR` are honoured. Caches
 live in `~/.cache/cctop/`.
 
+The left status dot is green while an agent is working, amber after its latest
+response is waiting for your input, and red when the newest transcript event is
+an API error. A hollow grey dot is a stopped session.
+
 ## A note on cost figures
 
 Claude and Codex costs are **estimates**: tokens multiplied by published
