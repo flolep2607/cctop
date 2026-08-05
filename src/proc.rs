@@ -165,16 +165,27 @@ fn is_node_hosted_agent(tokens: &[String], agent: &str) -> bool {
 
 /// Claude Code is not always installed as a file called `claude`.
 ///
-/// The remote/web harness ships it as a version-named binary under
-/// `~/.claude/remote/ccd-cli/<version>`, so the file name is something like
-/// `2.1.221`. Fall back to matching the install path in that case.
+/// Both the native installer (`~/.local/share/claude/versions/<version>`) and
+/// the remote/web harness (`~/.claude/remote/ccd-cli/<version>`) ship it as a
+/// version-named binary, so the executable name is something like `2.1.222`.
+/// Since the name is derived from the executable path, it never says `claude`
+/// for those installs and the process would be discarded as unrelated.
+///
+/// `argv[0]` still says `claude`, so trust it first and only fall back to
+/// matching the install path for launchers that exec by absolute path.
 fn is_claude_binary(name: &str, tokens: &[String]) -> bool {
     if name == "claude" {
         return true;
     }
-    tokens.first().is_some_and(|p| {
-        p.contains("/.claude/remote/ccd-cli/") || p.contains("\\.claude\\remote\\ccd-cli\\")
-    })
+    tokens
+        .first()
+        .is_some_and(|argv0| command_stem(argv0) == "claude")
+        || tokens.first().is_some_and(|p| {
+            p.contains("/.claude/remote/ccd-cli/")
+                || p.contains("\\.claude\\remote\\ccd-cli\\")
+                || p.contains("/claude/versions/")
+                || p.contains("\\claude\\versions\\")
+        })
 }
 
 /// Locate a `resume` argument and return its value plus the index it came from.
@@ -582,6 +593,29 @@ mod tests {
             "/home/f/.claude/remote/ccd-cli/2.1.221 --verbose --resume={UUID} -"
         ));
         assert_eq!(resume_uuid(&t), Some(UUID));
+    }
+
+    /// Regression: the native installer lives at
+    /// `~/.local/share/claude/versions/<version>`, so the executable name is a
+    /// version string. Matching only on the name marked every locally
+    /// installed session as stopped, including the one running cctop.
+    #[test]
+    fn version_named_claude_binaries_are_recognised() {
+        // `name` comes from the exe path, so it is the version, not `claude`.
+        assert!(is_claude_binary("2.1.222", &toks("claude")));
+        assert!(is_claude_binary("2.1.222", &toks("claude --resume")));
+        // Launchers that exec by absolute path lose the `claude` argv[0] too.
+        assert!(is_claude_binary(
+            "2.1.222",
+            &toks("/home/f/.local/share/claude/versions/2.1.222")
+        ));
+        assert!(is_claude_binary(
+            "2.1.221",
+            &toks("/home/f/.claude/remote/ccd-cli/2.1.221 --verbose")
+        ));
+        // Unrelated version-named binaries must stay out.
+        assert!(!is_claude_binary("2.1.222", &toks("/opt/other/2.1.222")));
+        assert!(!is_claude_binary("node", &toks("node server.js")));
     }
 
     #[test]
