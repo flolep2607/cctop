@@ -184,6 +184,42 @@ fn count_spaces(bytes: &[u8]) -> usize {
     bytes.iter().take_while(|b| b.is_ascii_whitespace()).count()
 }
 
+/// Whether a tool's recorded output reports a failure.
+///
+/// Codex has no `is_error` flag. What it does record is the sandbox's own
+/// summary line — `Script completed` on success against `Script failed` or
+/// `Script error:` — and, for the structured form, a process exit code. Both are
+/// checked; anything unrecognised counts as success, so an unfamiliar output
+/// shape leaves the call unmarked rather than falsely flagged.
+fn output_failed(output: Option<&Value>) -> bool {
+    let Some(output) = output else {
+        return false;
+    };
+    match output {
+        // `[{type, text}]` content blocks, or a bare string.
+        Value::Array(items) => items.iter().any(|item| {
+            item.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(text_reports_failure)
+        }),
+        Value::String(text) => {
+            // The structured form arrives as JSON inside the string.
+            if let Ok(parsed) = serde_json::from_str::<Value>(text)
+                && let Some(code) = parsed.get("metadata").and_then(|m| m.get("exit_code"))
+            {
+                return code.as_i64().is_some_and(|c| c != 0);
+            }
+            text_reports_failure(text)
+        }
+        _ => false,
+    }
+}
+
+fn text_reports_failure(text: &str) -> bool {
+    let head = text.trim_start();
+    head.starts_with("Script failed") || head.starts_with("Script error")
+}
+
 /// Resolve the common `const patch = "..."; tools.apply_patch(patch)` shape.
 /// `exec` receives JavaScript source rather than structured arguments, so a
 /// bare identifier otherwise loses the patch text needed for file and delta
@@ -409,6 +445,7 @@ pub fn extract(path: &Path) -> SessionData {
     let mut seen_queries: HashSet<String> = HashSet::new();
     // call_id -> when its output arrived, so calls can be timed.
     let mut result_ts: HashMap<String, String> = HashMap::new();
+    let mut failed_calls: HashSet<String> = HashSet::new();
 
     let _ = for_each_jsonl(path, |item| {
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
@@ -562,10 +599,13 @@ pub fn extract(path: &Path) -> SessionData {
                 }
             }
             "function_call_output" | "custom_tool_call_output" => {
-                if let Some(call_id) = p.get("call_id").and_then(Value::as_str)
-                    && !ts.is_empty()
-                {
-                    result_ts.insert(call_id.to_string(), ts.to_string());
+                if let Some(call_id) = p.get("call_id").and_then(Value::as_str) {
+                    if !ts.is_empty() {
+                        result_ts.insert(call_id.to_string(), ts.to_string());
+                    }
+                    if output_failed(p.get("output")) {
+                        failed_calls.insert(call_id.to_string());
+                    }
                 }
             }
             "web_search_call" => {
@@ -594,6 +634,7 @@ pub fn extract(path: &Path) -> SessionData {
             {
                 d.dur_ms = Some((b.timestamp_millis() - a.timestamp_millis()).max(0));
             }
+            d.failed = failed_calls.contains(id);
         }
     }
 
@@ -826,6 +867,29 @@ const r = await Promise.all([tools.exec_command({cmd:"ls"})]);"#;
 
         // A truncated call yields nothing but still terminates.
         assert!(unwrap_exec_all("await tools.exec_command({cmd:").is_empty());
+    }
+
+    /// Codex records no `is_error` flag, so the outcome comes from the sandbox's
+    /// own summary line or the process exit code.
+    #[test]
+    fn tool_output_failure_is_recognised() {
+        let failed = json!([{"type": "text", "text": "Script failed\nboom"}]);
+        let errored = json!([{"type": "text", "text": "Script error: no such file"}]);
+        let ok = json!([{"type": "text", "text": "Script completed Wall time 0.1 sec"}]);
+        assert!(output_failed(Some(&failed)));
+        assert!(output_failed(Some(&errored)));
+        assert!(!output_failed(Some(&ok)));
+
+        // The structured form carries a real exit code.
+        let bad = json!(r#"{"output":"boom","metadata":{"exit_code":2,"duration_seconds":0.1}}"#);
+        let good = json!(r#"{"output":"Success.","metadata":{"exit_code":0}}"#);
+        assert!(output_failed(Some(&bad)));
+        assert!(!output_failed(Some(&good)));
+
+        // Anything unrecognised stays unflagged rather than falsely marked.
+        assert!(!output_failed(Some(&json!("some plain output"))));
+        assert!(!output_failed(Some(&Value::Null)));
+        assert!(!output_failed(None));
     }
 
     /// Mixed and already-quoted keys must survive untouched, and a colon inside

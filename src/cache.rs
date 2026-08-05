@@ -16,8 +16,9 @@ use std::sync::Mutex;
 // inside a patch for the wrapper's actual nested call. Version 6 also ignores
 // `await tools.*` text inside quoted patch content. Version 7 re-extracts
 // Codex web calls so their query is shown instead of `response_length`.
-// Version 8 captures OpenCode edit detail, deltas, and duration.
-const CACHE_VERSION: u32 = 8;
+// Version 8 captures OpenCode edit detail, deltas, and duration. Version 9
+// records whether each tool call failed.
+const CACHE_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 struct DiskCache {

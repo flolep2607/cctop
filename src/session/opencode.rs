@@ -405,6 +405,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             {
                 detail.delta = delta;
                 detail.dur_ms = duration_ms;
+                detail.failed = state.get("status").and_then(Value::as_str) == Some("error");
             }
         }
     }
@@ -521,6 +522,16 @@ mod tests {
             ],
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "part_3",
+                "ses_1",
+                1_785_888_063_000i64,
+                r#"{"type":"tool","tool":"bash","callID":"call_3","state":{"input":{"command":"exit 1"},"time":{"start":1785888063000},"status":"error","output":"exit status 1"}}"#
+            ],
+        )
+        .unwrap();
         drop(db);
 
         let data = extract(&path, "ses_1");
@@ -528,12 +539,20 @@ mod tests {
         assert_eq!(data.last_model, "claude-test");
         assert_eq!(data.tokens.total, 240);
         assert!((data.costs.total - 0.75).abs() < 1e-9);
-        assert_eq!(data.metrics.tools.get("bash"), Some(&1));
+        // Two bash calls: one that completed and one that errored.
+        assert_eq!(data.metrics.tools.get("bash"), Some(&2));
         let edit = &data.metrics.tool_details["edit"][0];
         assert_eq!(edit.d, "src/main.rs");
         assert_eq!(edit.dur_ms, Some(750));
         let delta = edit.delta.as_ref().unwrap();
         assert_eq!((delta.added, delta.removed), (3, 2));
+        assert!(!edit.failed);
+
+        // `status: "error"` is the outcome OpenCode records for a failed call.
+        let bash = &data.metrics.tool_details["bash"];
+        assert_eq!(bash.len(), 2);
+        assert!(!bash[0].failed, "a completed call must not be flagged");
+        assert!(bash[1].failed, "status=error must be flagged");
 
         std::fs::remove_file(path).unwrap();
     }
