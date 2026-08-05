@@ -45,6 +45,10 @@ pub struct Args {
     /// Clear persisted session extraction data before starting (keeps preferences and pricing)
     #[arg(long)]
     pub clear_cache: bool,
+
+    /// Replace this binary with the newest GitHub release and exit
+    #[arg(long)]
+    pub update: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {

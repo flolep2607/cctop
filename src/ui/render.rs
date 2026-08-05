@@ -763,6 +763,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::COST_MID),
         ));
     }
+    // Last, so it never pushes a key hint off the end of a narrow footer.
+    if let Some(version) = &app.update_available {
+        spans.push(Span::styled(
+            format!(" v{version} available — cctop --update "),
+            Style::default()
+                .fg(theme::COST_MID)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
