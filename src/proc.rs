@@ -1,0 +1,522 @@
+//! OS process attribution: map running agent processes onto sessions.
+//!
+//! The Node original shelled out to `ps`, then `lsof` in PID chunks, then
+//! PowerShell on Windows, re-parsing text output twice a second. `sysinfo`
+//! exposes the same facts (parent, cmdline, cwd, start time, CPU, RSS) as typed
+//! data on every platform, so all of that goes away.
+
+use crate::session::Session;
+use std::collections::{HashMap, HashSet};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+/// Cycles an exited child stays visible before being dropped from the list.
+/// Without this, short-lived tool subprocesses flicker in and out.
+const PROC_LINGER_TICKS: u8 = 3;
+
+#[derive(Debug, Clone)]
+pub struct ProcEntry {
+    pub pid: u32,
+    pub cpu: f32,
+    pub memory: u64,
+    pub args: String,
+    pub is_root: bool,
+    /// Recently exited; retained briefly so the list doesn't flicker.
+    pub ghost: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProcInfo {
+    pub pids: usize,
+    pub cpu: f32,
+    pub memory: u64,
+    pub command: String,
+    pub process_list: Vec<ProcEntry>,
+}
+
+/// A running agent with no matching transcript yet.
+#[derive(Debug, Clone)]
+pub struct Orphan {
+    pub pid: u32,
+    pub provider: crate::pricing::Provider,
+    pub cwd: String,
+}
+
+pub struct Collector {
+    sys: System,
+    /// Session key -> pid -> (entry, remaining linger ticks).
+    ghosts: HashMap<String, HashMap<u32, (ProcEntry, u8)>>,
+    orphans: HashMap<String, Orphan>,
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Background daemons that are not interactive sessions.
+fn is_daemon(args: &str) -> bool {
+    args.split_whitespace().any(|tok| {
+        matches!(tok, "app-server" | "server" | "daemon")
+            || tok.ends_with("/app-server")
+            || tok.ends_with("/daemon")
+    })
+}
+
+/// macOS `.app` bundle paths, excluding the Claude Code binary that Claude for
+/// Mac ships inside one.
+fn is_app_bundle(args: &str) -> bool {
+    (args.contains(".app/") || args.contains(".app\\")) && !args.contains("/claude-code/")
+}
+
+fn basename(s: &str) -> &str {
+    s.rsplit(['/', '\\']).next().unwrap_or(s)
+}
+
+/// Strip a path and any `.js`/`.exe` suffix to get a comparable command name.
+fn command_stem(s: &str) -> String {
+    let base = basename(s);
+    base.strip_suffix(".js")
+        .or_else(|| base.strip_suffix(".exe"))
+        .unwrap_or(base)
+        .to_ascii_lowercase()
+}
+
+/// Detect a Node process whose *script argument* is `codex`.
+///
+/// Checking only that "codex" appears somewhere in the command line would match
+/// any process with `~/.codex/...` in its arguments.
+fn is_node_hosted_codex(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .skip(1)
+        .take(3)
+        .find(|t| !t.starts_with('-'))
+        .is_some_and(|script| command_stem(script) == "codex")
+}
+
+/// Claude Code is not always installed as a file called `claude`.
+///
+/// The remote/web harness ships it as a version-named binary under
+/// `~/.claude/remote/ccd-cli/<version>`, so the file name is something like
+/// `2.1.221`. Fall back to matching the install path in that case.
+fn is_claude_binary(name: &str, tokens: &[String]) -> bool {
+    if name == "claude" {
+        return true;
+    }
+    tokens.first().is_some_and(|p| {
+        p.contains("/.claude/remote/ccd-cli/") || p.contains("\\.claude\\remote\\ccd-cli\\")
+    })
+}
+
+/// Locate a `resume` argument and return its value plus the index it came from.
+///
+/// Both spellings occur in the wild: `--resume VALUE` as separate tokens, and
+/// `--resume=VALUE` as one. Handling only the first form silently loses every
+/// session started by a harness that uses the second.
+fn resume_value(tokens: &[String]) -> Option<(&str, usize)> {
+    for (i, t) in tokens.iter().enumerate() {
+        if let Some(v) = t.strip_prefix("--resume=") {
+            return Some((v, i));
+        }
+        if t == "resume" || t == "--resume" {
+            return tokens.get(i + 1).map(|v| (v.as_str(), i + 1));
+        }
+    }
+    None
+}
+
+/// The session UUID a process was resumed with, if it was resumed by UUID.
+fn resume_uuid(tokens: &[String]) -> Option<&str> {
+    let (value, _) = resume_value(tokens)?;
+    crate::config::is_full_uuid(value).then_some(value)
+}
+
+/// The free-text title a process was resumed with (Claude for Mac form).
+///
+/// Titles can contain spaces, so for the separate-token spelling everything
+/// after the flag belongs to the title.
+fn resume_title(tokens: &[String]) -> Option<String> {
+    let (value, idx) = resume_value(tokens)?;
+    if tokens.get(idx).is_some_and(|t| t.starts_with("--resume=")) {
+        return (!value.is_empty()).then(|| value.to_string());
+    }
+    let rest = tokens.get(idx..)?;
+    (!rest.is_empty()).then(|| rest.join(" ").trim().to_string())
+}
+
+impl Collector {
+    pub fn new() -> Self {
+        Collector {
+            sys: System::new(),
+            ghosts: HashMap::new(),
+            orphans: HashMap::new(),
+        }
+    }
+
+    pub fn orphans(&self) -> &HashMap<String, Orphan> {
+        &self.orphans
+    }
+
+    /// Aggregate CPU/memory per session, keyed by `provider:session_id`.
+    pub fn collect(&mut self, sessions: &[Session]) -> HashMap<String, ProcInfo> {
+        self.sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::Always)
+                .with_cwd(UpdateKind::Always)
+                .with_exe(UpdateKind::Always)
+                .with_memory()
+                .with_cpu()
+                .without_tasks(),
+        );
+        self.orphans.clear();
+
+        // Snapshot into plain data so we're not holding borrows on `self.sys`.
+        struct Snap {
+            ppid: u32,
+            args: String,
+            tokens: Vec<String>,
+            name: String,
+            cwd: String,
+            cpu: f32,
+            memory: u64,
+        }
+        let snapshot: HashMap<u32, Snap> = self
+            .sys
+            .processes()
+            .iter()
+            // Threads share their process's command line, so every one of them
+            // matches the same session. Left in, they compete to be picked as
+            // the root — nondeterministically, since map order isn't stable —
+            // and whichever thread wins reports its own CPU and no children.
+            .filter(|(_, p)| p.thread_kind().is_none())
+            .map(|(pid, p)| {
+                let tokens: Vec<String> = p
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect();
+                let args = tokens.join(" ");
+                let name = p
+                    .exe()
+                    .map(|e| command_stem(&e.to_string_lossy()))
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| tokens.first().map(|t| command_stem(t)))
+                    .unwrap_or_else(|| command_stem(&p.name().to_string_lossy()));
+                (
+                    pid.as_u32(),
+                    Snap {
+                        ppid: p.parent().map(Pid::as_u32).unwrap_or(0),
+                        args,
+                        tokens,
+                        name,
+                        cwd: p
+                            .cwd()
+                            .map(|c| c.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        cpu: p.cpu_usage(),
+                        memory: p.memory(),
+                    },
+                )
+            })
+            .collect();
+
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, s) in &snapshot {
+            children.entry(s.ppid).or_default().push(*pid);
+        }
+
+        // --- Identify agent root processes and attribute them to sessions ---
+        let mut roots: HashMap<String, u32> = HashMap::new();
+        let mut unmatched: Vec<(u32, crate::pricing::Provider)> = Vec::new();
+
+        // Most recent session per working directory, for cwd-based fallback.
+        let mut cwd_index: HashMap<&str, &Session> = HashMap::new();
+        for s in sessions.iter().filter(|s| !s.label_source.is_empty()) {
+            cwd_index
+                .entry(s.label_source.as_str())
+                .and_modify(|existing| {
+                    if s.last_active > existing.last_active {
+                        *existing = s;
+                    }
+                })
+                .or_insert(s);
+        }
+
+        for (&pid, snap) in &snapshot {
+            if is_app_bundle(&snap.args) || is_daemon(&snap.args) {
+                continue;
+            }
+            let is_claude = is_claude_binary(&snap.name, &snap.tokens);
+            let is_codex =
+                snap.name == "codex" || (snap.name == "node" && is_node_hosted_codex(&snap.tokens));
+            if !is_claude && !is_codex {
+                continue;
+            }
+            let provider = if is_codex {
+                crate::pricing::Provider::Codex
+            } else {
+                crate::pricing::Provider::Claude
+            };
+
+            if let Some(uuid) = resume_uuid(&snap.tokens) {
+                claim_root(&mut roots, format!("{}:{}", provider.as_str(), uuid), pid);
+                continue;
+            }
+
+            // Claude for Mac resumes by title rather than UUID.
+            if is_claude
+                && let Some(title) = resume_title(&snap.tokens)
+                && let Some(session) = sessions
+                    .iter()
+                    .find(|s| s.surface.is_desktop() && s.title.as_deref() == Some(title.as_str()))
+            {
+                roots.entry(session.key()).or_insert(pid);
+                continue;
+            }
+
+            unmatched.push((pid, provider));
+        }
+
+        // Fallback: match by working directory, then give up and call it an orphan.
+        for (pid, provider) in unmatched {
+            let cwd = snapshot.get(&pid).map(|s| s.cwd.as_str()).unwrap_or("");
+            if !cwd.is_empty()
+                && let Some(session) = cwd_index.get(cwd)
+                && session.provider == provider
+            {
+                claim_root(&mut roots, session.key(), pid);
+                continue;
+            }
+            let key = format!("{}:_pid_{}", provider.as_str(), pid);
+            claim_root(&mut roots, key.clone(), pid);
+            self.orphans.insert(
+                key,
+                Orphan {
+                    pid,
+                    provider,
+                    cwd: cwd.to_string(),
+                },
+            );
+        }
+
+        // --- Aggregate each root's process subtree ---
+        let mut result = HashMap::new();
+        for (key, root_pid) in roots {
+            let pids = descendants(root_pid, &children);
+            let mut info = ProcInfo {
+                command: snapshot
+                    .get(&root_pid)
+                    .map(|s| s.args.clone())
+                    .unwrap_or_default(),
+                ..Default::default()
+            };
+            for pid in &pids {
+                let Some(snap) = snapshot.get(pid) else {
+                    continue;
+                };
+                info.cpu += snap.cpu;
+                info.memory += snap.memory;
+                info.process_list.push(ProcEntry {
+                    pid: *pid,
+                    cpu: snap.cpu,
+                    memory: snap.memory,
+                    args: snap.args.clone(),
+                    is_root: *pid == root_pid,
+                    ghost: false,
+                });
+            }
+            info.pids = pids.len();
+            info.cpu = (info.cpu * 10.0).round() / 10.0;
+            self.apply_linger(&key, &mut info);
+            result.insert(key, info);
+        }
+
+        // Drop linger state for sessions that are no longer running at all.
+        self.ghosts.retain(|k, _| result.contains_key(k));
+        result
+    }
+
+    /// Re-inject recently exited children so the Processes panel doesn't flicker.
+    fn apply_linger(&mut self, key: &str, info: &mut ProcInfo) {
+        let cache = self.ghosts.entry(key.to_string()).or_default();
+        let live: HashSet<u32> = info.process_list.iter().map(|p| p.pid).collect();
+
+        for p in &info.process_list {
+            cache.insert(p.pid, (p.clone(), PROC_LINGER_TICKS));
+        }
+        cache.retain(|pid, (entry, remaining)| {
+            if live.contains(pid) {
+                return true;
+            }
+            if *remaining == 0 {
+                return false;
+            }
+            *remaining -= 1;
+            let mut ghost = entry.clone();
+            ghost.ghost = true;
+            ghost.cpu = 0.0;
+            info.process_list.push(ghost);
+            true
+        });
+    }
+}
+
+/// Record a candidate root for a session, keeping the lowest PID.
+///
+/// Several live processes can legitimately claim one session (a resumed session
+/// re-launched, or a wrapper that re-execs). Taking whichever the process map
+/// happened to yield first made the choice vary between refreshes; the lowest
+/// PID is stable and is virtually always the ancestor of the others.
+fn claim_root(roots: &mut HashMap<String, u32>, key: String, pid: u32) {
+    roots
+        .entry(key)
+        .and_modify(|existing| {
+            if pid < *existing {
+                *existing = pid;
+            }
+        })
+        .or_insert(pid);
+}
+
+/// Breadth-first collection of a PID and all its descendants.
+fn descendants(root: u32, children: &HashMap<u32, Vec<u32>>) -> Vec<u32> {
+    let mut seen = HashSet::from([root]);
+    let mut out = vec![root];
+    let mut queue = vec![root];
+    while let Some(pid) = queue.pop() {
+        let Some(kids) = children.get(&pid) else {
+            continue;
+        };
+        for &child in kids {
+            if seen.insert(child) {
+                out.push(child);
+                queue.push(child);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toks(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    const UUID: &str = "7026d578-8cba-4880-b464-9700f1b77b71";
+
+    #[test]
+    fn resume_uuid_extraction() {
+        assert_eq!(
+            resume_uuid(&toks(&format!("claude --resume {UUID}"))),
+            Some(UUID)
+        );
+        assert_eq!(resume_uuid(&toks("claude --resume My Session")), None);
+        assert_eq!(resume_uuid(&toks("claude")), None);
+    }
+
+    /// Regression: the remote harness spells this `--resume=UUID`. Handling only
+    /// the space-separated form loses every session it starts.
+    #[test]
+    fn resume_uuid_accepts_equals_form() {
+        let t = toks(&format!(
+            "/home/f/.claude/remote/ccd-cli/2.1.221 --verbose --resume={UUID} -"
+        ));
+        assert_eq!(resume_uuid(&t), Some(UUID));
+    }
+
+    #[test]
+    fn resume_title_joins_remaining_args() {
+        assert_eq!(
+            resume_title(&toks("claude --resume My Long Title")).as_deref(),
+            Some("My Long Title")
+        );
+        // The `=` form carries the whole title in one token.
+        assert_eq!(
+            resume_title(&toks("claude --resume=Solo")).as_deref(),
+            Some("Solo")
+        );
+    }
+
+    /// Regression: Claude Code installs as a version-named binary under
+    /// `~/.claude/remote/ccd-cli/`, so a name check alone never matches it.
+    #[test]
+    fn version_named_remote_binary_is_recognised() {
+        let t = toks("/home/flo/.claude/remote/ccd-cli/2.1.221 --verbose");
+        assert!(is_claude_binary(&command_stem(&t[0]), &t));
+        assert!(is_claude_binary("claude", &toks("claude")));
+        assert!(!is_claude_binary("node", &toks("node server.js")));
+        // The remote *server* daemon lives elsewhere and must not match.
+        assert!(!is_claude_binary(
+            "server",
+            &toks("/home/flo/.claude/remote/srv/abc/server --serve")
+        ));
+    }
+
+    #[test]
+    fn node_codex_requires_script_arg_not_stray_path() {
+        assert!(is_node_hosted_codex(&toks("node /usr/lib/codex.js run")));
+        // A path mentioning .codex must not count as the codex binary.
+        assert!(!is_node_hosted_codex(&toks(
+            "node /home/f/app.js --config /home/f/.codex/config.toml"
+        )));
+    }
+
+    #[test]
+    fn daemons_and_bundles_excluded() {
+        assert!(is_daemon("codex app-server"));
+        assert!(!is_daemon("codex resume abc"));
+        assert!(is_app_bundle(
+            "/Applications/Claude.app/Contents/MacOS/Claude"
+        ));
+        // The bundled Claude Code binary is a real session process.
+        assert!(!is_app_bundle(
+            "/Users/x/claude-code/versions/1.2/claude.app/Contents/MacOS/claude"
+        ));
+    }
+
+    #[test]
+    fn command_stem_strips_path_and_extension() {
+        assert_eq!(command_stem("/usr/local/bin/claude"), "claude");
+        assert_eq!(command_stem("C:\\bin\\codex.exe"), "codex");
+        assert_eq!(command_stem("codex.js"), "codex");
+    }
+
+    /// Regression: root choice must not depend on hash-map iteration order,
+    /// or CPU and the process tree change shape between refreshes.
+    #[test]
+    fn root_claim_is_order_independent() {
+        let mut a = HashMap::new();
+        for pid in [900u32, 120, 4000] {
+            claim_root(&mut a, "claude:x".into(), pid);
+        }
+        let mut b = HashMap::new();
+        for pid in [4000u32, 900, 120] {
+            claim_root(&mut b, "claude:x".into(), pid);
+        }
+        assert_eq!(a["claude:x"], 120);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn descendants_walks_full_subtree() {
+        let children = HashMap::from([(1, vec![2, 3]), (2, vec![4]), (3, vec![]), (4, vec![5])]);
+        let mut got = descendants(1, &children);
+        got.sort();
+        assert_eq!(got, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn descendants_survives_cycles() {
+        // A malformed parent chain must not hang the collector.
+        let children = HashMap::from([(1, vec![2]), (2, vec![1])]);
+        let mut got = descendants(1, &children);
+        got.sort();
+        assert_eq!(got, vec![1, 2]);
+    }
+}
