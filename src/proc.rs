@@ -36,7 +36,6 @@ pub struct ProcInfo {
 /// A running agent with no matching transcript yet.
 #[derive(Debug, Clone)]
 pub struct Orphan {
-    pub pid: u32,
     pub provider: crate::pricing::Provider,
     pub cwd: String,
 }
@@ -87,12 +86,16 @@ fn command_stem(s: &str) -> String {
 /// Checking only that "codex" appears somewhere in the command line would match
 /// any process with `~/.codex/...` in its arguments.
 fn is_node_hosted_codex(tokens: &[String]) -> bool {
+    is_node_hosted_agent(tokens, "codex")
+}
+
+fn is_node_hosted_agent(tokens: &[String], agent: &str) -> bool {
     tokens
         .iter()
         .skip(1)
         .take(3)
         .find(|t| !t.starts_with('-'))
-        .is_some_and(|script| command_stem(script) == "codex")
+        .is_some_and(|script| command_stem(script) == agent)
 }
 
 /// Claude Code is not always installed as a file called `claude`.
@@ -130,6 +133,21 @@ fn resume_value(tokens: &[String]) -> Option<(&str, usize)> {
 fn resume_uuid(tokens: &[String]) -> Option<&str> {
     let (value, _) = resume_value(tokens)?;
     crate::config::is_full_uuid(value).then_some(value)
+}
+
+fn session_value(tokens: &[String]) -> Option<&str> {
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(value) = token.strip_prefix("--session=") {
+            return (!value.is_empty()).then_some(value);
+        }
+        if let Some(value) = token.strip_prefix("-s=") {
+            return (!value.is_empty()).then_some(value);
+        }
+        if token == "--session" || token == "-s" {
+            return tokens.get(i + 1).map(String::as_str);
+        }
+    }
+    None
 }
 
 /// The free-text title a process was resumed with (Claude for Mac form).
@@ -233,10 +251,10 @@ impl Collector {
         let mut unmatched: Vec<(u32, crate::pricing::Provider)> = Vec::new();
 
         // Most recent session per working directory, for cwd-based fallback.
-        let mut cwd_index: HashMap<&str, &Session> = HashMap::new();
+        let mut cwd_index: HashMap<(crate::pricing::Provider, &str), &Session> = HashMap::new();
         for s in sessions.iter().filter(|s| !s.label_source.is_empty()) {
             cwd_index
-                .entry(s.label_source.as_str())
+                .entry((s.provider, s.label_source.as_str()))
                 .and_modify(|existing| {
                     if s.last_active > existing.last_active {
                         *existing = s;
@@ -252,14 +270,31 @@ impl Collector {
             let is_claude = is_claude_binary(&snap.name, &snap.tokens);
             let is_codex =
                 snap.name == "codex" || (snap.name == "node" && is_node_hosted_codex(&snap.tokens));
-            if !is_claude && !is_codex {
+            let is_opencode = matches!(snap.name.as_str(), "opencode" | "opencode-cli")
+                || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "opencode"));
+            let is_pi = snap.name == "pi"
+                || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "pi"));
+            if !is_claude && !is_codex && !is_opencode && !is_pi {
                 continue;
             }
-            let provider = if is_codex {
+            let provider = if is_opencode {
+                crate::pricing::Provider::OpenCode
+            } else if is_pi {
+                crate::pricing::Provider::Pi
+            } else if is_codex {
                 crate::pricing::Provider::Codex
             } else {
                 crate::pricing::Provider::Claude
             };
+
+            if matches!(
+                provider,
+                crate::pricing::Provider::OpenCode | crate::pricing::Provider::Pi
+            ) && let Some(id) = session_value(&snap.tokens)
+            {
+                claim_root(&mut roots, format!("{}:{id}", provider.as_str()), pid);
+                continue;
+            }
 
             if let Some(uuid) = resume_uuid(&snap.tokens) {
                 claim_root(&mut roots, format!("{}:{}", provider.as_str(), uuid), pid);
@@ -284,8 +319,7 @@ impl Collector {
         for (pid, provider) in unmatched {
             let cwd = snapshot.get(&pid).map(|s| s.cwd.as_str()).unwrap_or("");
             if !cwd.is_empty()
-                && let Some(session) = cwd_index.get(cwd)
-                && session.provider == provider
+                && let Some(session) = cwd_index.get(&(provider, cwd))
             {
                 claim_root(&mut roots, session.key(), pid);
                 continue;
@@ -295,7 +329,6 @@ impl Collector {
             self.orphans.insert(
                 key,
                 Orphan {
-                    pid,
                     provider,
                     cwd: cwd.to_string(),
                 },
@@ -465,6 +498,29 @@ mod tests {
         assert!(!is_node_hosted_codex(&toks(
             "node /home/f/app.js --config /home/f/.codex/config.toml"
         )));
+    }
+
+    #[test]
+    fn node_hosted_agents_are_identified_by_script_name() {
+        assert!(is_node_hosted_agent(
+            &toks("node /usr/lib/opencode.js --session ses_1"),
+            "opencode"
+        ));
+        assert!(is_node_hosted_agent(&toks("node /usr/lib/pi.js -c"), "pi"));
+        assert!(!is_node_hosted_agent(
+            &toks("node app.js --config /home/f/.pi/settings.json"),
+            "pi"
+        ));
+    }
+
+    #[test]
+    fn session_flag_supports_opencode_and_pi_forms() {
+        assert_eq!(
+            session_value(&toks("opencode --session ses_123")),
+            Some("ses_123")
+        );
+        assert_eq!(session_value(&toks("opencode -s=ses_123")), Some("ses_123"));
+        assert_eq!(session_value(&toks("pi --session=abc123")), Some("abc123"));
     }
 
     #[test]

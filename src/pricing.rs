@@ -59,7 +59,18 @@ static CLAUDE_TABLE: LazyLock<HashMap<&'static str, ClaudePricing>> = LazyLock::
 });
 
 static CODEX_TABLE: LazyLock<HashMap<&'static str, CodexPricing>> = LazyLock::new(|| {
+    // `codex-auto-review` is an internal label emitted by Codex review
+    // sessions. It runs GPT-5.2, so retain the useful label in the UI while
+    // applying GPT-5.2's published token rates.
+    let gpt_5_2 = CodexPricing {
+        input: 1.75,
+        cached_input: 0.175,
+        output: 14.0,
+    };
     HashMap::from([
+        ("gpt-5.2", gpt_5_2),
+        ("gpt-5.2-codex", gpt_5_2),
+        ("codex-auto-review", gpt_5_2),
         (
             "gpt-5.3-codex",
             CodexPricing {
@@ -289,6 +300,8 @@ impl Plan {
 pub enum Provider {
     Claude,
     Codex,
+    OpenCode,
+    Pi,
 }
 
 impl Provider {
@@ -296,6 +309,8 @@ impl Provider {
         match self {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::OpenCode => "opencode",
+            Provider::Pi => "pi",
         }
     }
 }
@@ -318,6 +333,15 @@ mod tests {
         assert_eq!(p.input, 0.0);
         let c = resolve_codex("gpt-nope");
         assert_eq!(c.output, 0.0);
+    }
+
+    #[test]
+    fn auto_review_uses_gpt_5_2_pricing_without_renaming() {
+        let auto = resolve_codex("codex-auto-review");
+        let gpt = resolve_codex("gpt-5.2");
+        assert_eq!(auto.input, gpt.input);
+        assert_eq!(auto.cached_input, gpt.cached_input);
+        assert_eq!(auto.output, gpt.output);
     }
 
     #[test]

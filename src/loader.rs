@@ -19,9 +19,6 @@ struct RateState {
     ts_ms: i64,
     tokens: u64,
     cost: f64,
-    /// Tool count when this session was first seen, so the `+TL` column shows
-    /// activity since cctop started rather than the session's lifetime total.
-    baseline_tools: u64,
     ema_tokens: f64,
     ema_cost: f64,
 }
@@ -146,9 +143,6 @@ impl Loader {
             s.started_at = now.clone();
             s.last_active = now;
             s.label_source = cwd;
-            // Name it by PID: there's no transcript to take a title from yet,
-            // and the PID is what lets the user find the process.
-            s.title = orphan.map(|o| format!("(starting — pid {})", o.pid));
             s.process = Some(pm.clone());
             sessions.push(s);
         }
@@ -162,12 +156,15 @@ impl Loader {
                 s.last_tool = match s.provider {
                     Provider::Claude => session::claude::extract_last_tool(s),
                     Provider::Codex => session::codex::extract_last_tool(s),
+                    Provider::OpenCode => session::opencode::extract_last_tool(s),
+                    Provider::Pi => session::pi::extract_last_tool(s),
                 };
             }
             if s.is_running() || !self.context_cache.contains_key(&key) {
                 let fresh = match s.provider {
                     Provider::Claude => session::claude::extract_context(s),
                     Provider::Codex => session::codex::extract_context(s),
+                    Provider::OpenCode | Provider::Pi => None,
                 };
                 if let Some(ctx) = fresh {
                     self.context_cache.insert(key.clone(), ctx);
@@ -184,7 +181,6 @@ impl Loader {
             let key = s.key();
             let tokens = s.input_tokens + s.output_tokens;
             let cost = s.total_cost.unwrap_or(0.0);
-            let tools = s.tool_count;
 
             let Some(prev) = self.rates.get_mut(&key) else {
                 // First sighting: no interval to measure a rate over yet.
@@ -194,7 +190,6 @@ impl Loader {
                         ts_ms: now,
                         tokens,
                         cost,
-                        baseline_tools: tools,
                         ema_tokens: 0.0,
                         ema_cost: 0.0,
                     },
@@ -203,7 +198,6 @@ impl Loader {
             };
 
             let dt_ms = (now - prev.ts_ms) as f64;
-            s.tools_since_start = tools.saturating_sub(prev.baseline_tools);
             if dt_ms < 100.0 {
                 s.tokens_per_min = prev.ema_tokens;
                 s.cost_per_min = prev.ema_cost;
@@ -236,6 +230,8 @@ pub struct Stats {
     pub total: usize,
     pub total_claude: usize,
     pub total_codex: usize,
+    pub total_opencode: usize,
+    pub total_pi: usize,
     pub active_1h: usize,
     pub active_24h: usize,
     pub active_7d: usize,
@@ -247,10 +243,14 @@ pub struct Stats {
     pub spend_total: f64,
     pub spend_claude: f64,
     pub spend_codex: f64,
+    pub spend_opencode: f64,
+    pub spend_pi: f64,
     pub spend_hour: f64,
     pub spend_today: f64,
     pub spend_week: f64,
     pub spend_month: f64,
+    /// Smoothed live spend rate across billable sessions, in USD per minute.
+    pub spend_per_min: f64,
     /// Spend since the 1st of the current calendar month.
     pub spend_calendar_month: f64,
     /// Today's spend bucketed by hour (24 entries).
@@ -283,6 +283,8 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         match s.provider {
             Provider::Claude => st.total_claude += 1,
             Provider::Codex => st.total_codex += 1,
+            Provider::OpenCode => st.total_opencode += 1,
+            Provider::Pi => st.total_pi += 1,
         }
         if let Some(la) = util::parse_ts(&s.last_active) {
             let age = now_ms - la.timestamp_millis();
@@ -308,37 +310,45 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             match s.provider {
                 Provider::Claude => st.spend_claude += cost,
                 Provider::Codex => st.spend_codex += cost,
+                Provider::OpenCode => st.spend_opencode += cost,
+                Provider::Pi => st.spend_pi += cost,
             }
-        }
+            st.spend_per_min += s.cost_per_min;
 
-        for (day, models) in &s.costs_by_day {
-            let amount: f64 = models.values().sum();
-            if day.as_str() >= month_key.as_str() {
-                st.spend_month += amount;
+            // A missing total means this provider is included in the selected
+            // billing plan. Its retail-equivalent buckets must not leak back
+            // into the overview totals.
+            for (day, models) in &s.costs_by_day {
+                let amount: f64 = models.values().sum();
+                if day.as_str() >= month_key.as_str() {
+                    st.spend_month += amount;
+                }
+                if day.as_str() >= week_key.as_str() {
+                    st.spend_week += amount;
+                }
+                if day.as_str() >= today_key.as_str() {
+                    st.spend_today += amount;
+                }
+                if day.as_str() >= month_start_key.as_str()
+                    && let Some(day_part) = day.get(8..10)
+                    && let Ok(day_num) = day_part.parse::<usize>()
+                    && (1..=days).contains(&day_num)
+                {
+                    st.monthly_daily[day_num - 1] += amount;
+                }
             }
-            if day.as_str() >= week_key.as_str() {
-                st.spend_week += amount;
-            }
-            if day.as_str() >= today_key.as_str() {
-                st.spend_today += amount;
-            }
-            if day.as_str() >= month_start_key.as_str()
-                && let Ok(day_num) = day[8..10].parse::<usize>()
-                && (1..=days).contains(&day_num)
-            {
-                st.monthly_daily[day_num - 1] += amount;
-            }
-        }
-        for (key, models) in &s.costs_by_hour {
-            let amount: f64 = models.values().sum();
-            if key == &hour_key {
-                st.spend_hour += amount;
-            }
-            if key.starts_with(&today_key)
-                && let Ok(hour) = key[11..13].parse::<usize>()
-                && hour < 24
-            {
-                st.daily_hourly[hour] += amount;
+            for (key, models) in &s.costs_by_hour {
+                let amount: f64 = models.values().sum();
+                if key == &hour_key {
+                    st.spend_hour += amount;
+                }
+                if key.starts_with(&today_key)
+                    && let Some(hour_part) = key.get(11..13)
+                    && let Ok(hour) = hour_part.parse::<usize>()
+                    && hour < 24
+                {
+                    st.daily_hourly[hour] += amount;
+                }
             }
         }
 
@@ -347,7 +357,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         }
     }
 
-    st.spend_total = st.spend_claude + st.spend_codex;
+    st.spend_total = st.spend_claude + st.spend_codex + st.spend_opencode + st.spend_pi;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
     st
 }
@@ -391,8 +401,32 @@ mod tests {
         let mut s = Session::new(Provider::Claude, "x".into());
         s.total_cost = None;
         s.input_tokens = 100;
+        s.cost_per_min = 1.25;
+        let today = util::local_date_key(&Utc::now());
+        let hour = util::local_hour_key(&Utc::now());
+        s.costs_by_day
+            .insert(today, HashMap::from([("m".into(), 3.0)]));
+        s.costs_by_hour
+            .insert(hour, HashMap::from([("m".into(), 2.0)]));
         let st = compute_stats(&[s]);
         assert_eq!(st.spend_claude, 0.0);
+        assert_eq!(st.spend_today, 0.0);
+        assert_eq!(st.spend_hour, 0.0);
+        assert_eq!(st.spend_calendar_month, 0.0);
+        assert_eq!(st.spend_per_min, 0.0);
         assert_eq!(st.total_input, 100);
+    }
+
+    #[test]
+    fn stats_sum_billable_live_spend_rate() {
+        let mut a = Session::new(Provider::Claude, "a".into());
+        a.total_cost = Some(4.0);
+        a.cost_per_min = 0.25;
+        let mut b = Session::new(Provider::Codex, "b".into());
+        b.total_cost = Some(6.0);
+        b.cost_per_min = 0.75;
+
+        let st = compute_stats(&[a, b]);
+        assert!((st.spend_per_min - 1.0).abs() < 1e-9);
     }
 }

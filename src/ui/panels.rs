@@ -71,6 +71,8 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         Surface::Cli => match session.provider {
             Provider::Claude => theme::CLAUDE,
             Provider::Codex => theme::OPENAI,
+            Provider::OpenCode => theme::OPENCODE,
+            Provider::Pi => theme::PI,
         },
     };
     let model = if data.last_model.is_empty() {
@@ -114,6 +116,8 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let cmd = match session.provider {
         Provider::Claude => format!("claude --resume {}", session.session_id),
         Provider::Codex => format!("codex resume {}", session.session_id),
+        Provider::OpenCode => format!("opencode --session {}", session.session_id),
+        Provider::Pi => format!("pi --session {}", session.session_id),
     };
     lines.push(field("Cmd", cmd));
     lines.push(field("Plan", plan.as_str()));
@@ -121,6 +125,7 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let account = match session.provider {
         Provider::Claude => crate::quota::claude_account(),
         Provider::Codex => crate::quota::codex_account(),
+        Provider::OpenCode | Provider::Pi => None,
     };
     if let Some(a) = account {
         if let Some(email) = a.email {
@@ -766,7 +771,7 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     )));
     lines.push(Line::default());
 
-    // Rolling spend windows.
+    // Calendar-bucket spend windows.
     let now = chrono::Utc::now();
     let midnight = util::local_midnight_today();
     let today = util::local_date_key(&midnight);
@@ -788,7 +793,7 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         .unwrap_or(0.0);
 
     for (name, amount) in [
-        ("last hour", hour_cost),
+        ("this hour", hour_cost),
         ("today", sum_day(&today)),
         ("7 days", sum_day(&week)),
         ("30 days", sum_day(&month)),
@@ -967,6 +972,61 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 theme::title(),
             )));
             lines.extend(mcp_from_toml(&toml));
+        }
+        Provider::OpenCode => {
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            if !session.label_source.is_empty() {
+                match file_section(&cwd.join("AGENTS.md"), "./AGENTS.md", 40) {
+                    Some(block) => lines.extend(block),
+                    None => lines.push(missing("./AGENTS.md not found".into())),
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Config ──".to_string(),
+                theme::title(),
+            )));
+            let config = dirs::config_dir()
+                .unwrap_or_else(|| crate::config::HOME.join(".config"))
+                .join("opencode")
+                .join("opencode.json");
+            match file_section(&config, &util::tildify(&config.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", config.display()))),
+            }
+        }
+        Provider::Pi => {
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            let global = crate::config::PI_AGENT_DIR.join("AGENTS.md");
+            match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", global.display()))),
+            }
+            if !session.label_source.is_empty() {
+                match file_section(&cwd.join("AGENTS.md"), "./AGENTS.md", 40) {
+                    Some(block) => lines.extend(block),
+                    None => lines.push(missing("./AGENTS.md not found".into())),
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Config ──".to_string(),
+                theme::title(),
+            )));
+            let settings = crate::config::PI_AGENT_DIR.join("settings.json");
+            match file_section(&settings, &util::tildify(&settings.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", settings.display()))),
+            }
+            lines.push(Line::from(Span::styled(
+                "── Skills ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(skill_list(&crate::config::PI_AGENT_DIR.join("skills")));
         }
     }
     lines

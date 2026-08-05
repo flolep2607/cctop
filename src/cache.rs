@@ -10,7 +10,9 @@ use std::sync::Mutex;
 /// Bumped whenever `SessionData`'s shape changes. A mismatch discards the whole
 /// cache, which replaces the pile of ad-hoc `_hasSubagentsField`-style probes
 /// the JS version accumulated as its schema drifted.
-const CACHE_VERSION: u32 = 2;
+// Version 3 also invalidates sessions previously cached before the
+// codex-auto-review -> GPT-5.2 pricing alias existed.
+const CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct DiskCache {
@@ -169,7 +171,12 @@ impl Store {
             return entry.data.clone();
         }
 
-        let disk_key = cache_key(file);
+        // OpenCode stores every session in one database. A path-only disk key
+        // would make all sessions alias the first extracted row, so keep those
+        // entries in the session-keyed memory cache only.
+        let disk_key = (session.provider != crate::pricing::Provider::OpenCode)
+            .then(|| cache_key(file))
+            .flatten();
         if let Some(key) = &disk_key
             && let Some(data) = self.disk.get(key)
         {
@@ -189,6 +196,10 @@ impl Store {
         let data = match session.provider {
             crate::pricing::Provider::Claude => crate::session::claude::extract(file),
             crate::pricing::Provider::Codex => crate::session::codex::extract(file),
+            crate::pricing::Provider::OpenCode => {
+                crate::session::opencode::extract(file, &session.session_id)
+            }
+            crate::pricing::Provider::Pi => crate::session::pi::extract(file),
         };
         if let Ok(mut mem) = self.mem.lock() {
             mem.insert(
