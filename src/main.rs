@@ -15,10 +15,8 @@ use std::io::IsTerminal;
 fn main() -> anyhow::Result<()> {
     let args = cli::Args::parse();
 
-    if args.clear_cache {
-        if cache::clear_session_cache()? {
-            eprintln!("Cleared cctop session extraction cache.");
-        }
+    if args.clear_cache && cache::clear_session_cache()? {
+        eprintln!("Cleared cctop session extraction cache.");
     }
 
     if args.list || args.json {

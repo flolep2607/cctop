@@ -107,13 +107,7 @@ fn latest_activity(transcript: &Path) -> String {
         .map(|p| config::file_mtime_ms(p))
         .max()
         .unwrap_or(0);
-    ms_to_rfc3339(newest)
-}
-
-fn ms_to_rfc3339(ms: u64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_default()
+    util::ms_to_rfc3339(newest as i64)
 }
 
 fn summarize(transcript: &Path) -> Option<Session> {

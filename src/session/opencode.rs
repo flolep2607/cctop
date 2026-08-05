@@ -5,7 +5,6 @@ use super::{ActivityState, Costs, ModelBreakdown, Session, SessionData, Tokens};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -150,12 +149,6 @@ fn is_api_failure(message: &Value) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-fn millis_rfc3339(ms: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(ms)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_default()
-}
-
 /// Stable releases use `opencode.db`; nonstandard channels suffix the filename.
 fn database_paths() -> Vec<PathBuf> {
     config::list_dir(&config::OPENCODE_DATA_DIR)
@@ -196,8 +189,8 @@ pub fn list_sessions() -> Vec<Session> {
                 .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_default();
             let mut session = Session::new(Provider::OpenCode, id);
-            session.started_at = millis_rfc3339(created);
-            session.last_active = millis_rfc3339(updated);
+            session.started_at = util::ms_to_rfc3339(created);
+            session.last_active = util::ms_to_rfc3339(updated);
             session.label_source = directory;
             session.title = (!title.is_empty()).then_some(title);
             session.model = model;
@@ -230,7 +223,7 @@ fn assistant_usage(value: &Value) -> (String, String, Tokens, Costs) {
         .get("time")
         .and_then(|v| v.get("created"))
         .and_then(Value::as_i64)
-        .map(millis_rfc3339)
+        .map(util::ms_to_rfc3339)
         .unwrap_or_default();
     let input = u64_at(value, &["tokens", "input"]);
     let output = u64_at(value, &["tokens", "output"]);
@@ -389,7 +382,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
                 .get("time")
                 .and_then(|v| v.get("start"))
                 .and_then(Value::as_i64)
-                .map(millis_rfc3339)
+                .map(util::ms_to_rfc3339)
                 .unwrap_or_default();
             extract::push_tool_detail(
                 &mut data.metrics.tool_details,

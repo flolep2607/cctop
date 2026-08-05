@@ -5,22 +5,15 @@ use super::{Costs, ModelBreakdown, Session, SessionData, Tokens};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-
-fn millis_rfc3339(ms: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(ms)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_default()
-}
 
 fn message_ts(item: &Value, message: &Value) -> String {
     message
         .get("timestamp")
         .and_then(Value::as_i64)
-        .map(millis_rfc3339)
+        .map(util::ms_to_rfc3339)
         .filter(|s| !s.is_empty())
         .or_else(|| {
             item.get("timestamp")
