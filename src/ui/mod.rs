@@ -1,0 +1,1097 @@
+//! Terminal UI: application state, the worker thread, and the event loop.
+
+pub mod columns;
+pub mod panels;
+pub mod render;
+pub mod spark;
+pub mod theme;
+
+use crate::cache::UiPrefs;
+use crate::cli::Args;
+use crate::loader::{Loader, Stats};
+use crate::pricing::{Plan, Provider};
+use crate::quota::Quota;
+use crate::session::{Session, SessionData};
+use columns::{COLUMNS, ColumnId};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use spark::History;
+use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::time::{Duration, Instant};
+
+/// Baseline gap between usage checks.
+///
+/// Quota moves slowly, and the endpoints throttle aggressively — a 30s poll was
+/// enough to earn a sustained 429 with a ~15 minute `retry-after`. When a
+/// provider asks for longer, `retry_delay_secs` honours that instead.
+const QUOTA_INTERVAL_SECS: u64 = 300;
+
+/// How often the poller wakes to see whether any provider is due.
+const QUOTA_TICK: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    List,
+    Help,
+    Search,
+    SortBy,
+    AgeFilter,
+    /// Confirming deletion of the selected session.
+    DeleteConfirm,
+    /// Explaining why a running session can't be deleted.
+    DeleteBlocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeFilter {
+    Day,
+    Week,
+    Month,
+}
+
+impl AgeFilter {
+    pub fn max_age_ms(&self) -> i64 {
+        match self {
+            AgeFilter::Day => 86_400_000,
+            AgeFilter::Week => 604_800_000,
+            AgeFilter::Month => 2_592_000_000,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            AgeFilter::Day => "Last 24 hours",
+            AgeFilter::Week => "Last 7 days",
+            AgeFilter::Month => "Last 30 days",
+        }
+    }
+
+    pub fn short(&self) -> &'static str {
+        match self {
+            AgeFilter::Day => "1 day",
+            AgeFilter::Week => "1 week",
+            AgeFilter::Month => "1 month",
+        }
+    }
+
+    pub fn key(&self) -> &'static str {
+        match self {
+            AgeFilter::Day => "1d",
+            AgeFilter::Week => "1w",
+            AgeFilter::Month => "1mo",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "1d" => Some(AgeFilter::Day),
+            "1w" => Some(AgeFilter::Week),
+            "1mo" => Some(AgeFilter::Month),
+            _ => None,
+        }
+    }
+}
+
+/// Options offered by the age-filter modal, "no filter" last.
+pub const AGE_OPTIONS: [Option<AgeFilter>; 4] = [
+    Some(AgeFilter::Day),
+    Some(AgeFilter::Week),
+    Some(AgeFilter::Month),
+    None,
+];
+
+// ---------------------------------------------------------------------------
+// Worker protocol
+// ---------------------------------------------------------------------------
+
+enum Request {
+    Refresh,
+    /// Extract full data for one session, to populate the bottom panels.
+    Data(Box<Session>),
+    Delete(Box<Session>),
+    Shutdown,
+}
+
+enum Response {
+    Sessions(Box<(Vec<Session>, Stats)>),
+    Data(String, Box<SessionData>),
+    Quota(Box<Quota>),
+    /// Pricing landed, so cached costs are stale and a reload is due.
+    PricingReady,
+}
+
+/// Owns the `Loader` and does all filesystem and parsing work off the UI thread,
+/// so a slow scan can never stall input or rendering.
+fn spawn_worker(plan: Plan, rx: Receiver<Request>, tx: Sender<Response>) {
+    std::thread::spawn(move || {
+        let mut loader = Loader::new();
+        while let Ok(req) = rx.recv() {
+            match req {
+                Request::Refresh => {
+                    let sessions = loader.load(plan);
+                    let stats = crate::loader::compute_stats(&sessions);
+                    if tx
+                        .send(Response::Sessions(Box::new((sessions, stats))))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Request::Data(session) => {
+                    let data = loader.store().session_data(&session);
+                    if tx
+                        .send(Response::Data(session.key(), Box::new(data)))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Request::Delete(session) => {
+                    match session.provider {
+                        Provider::Claude => crate::session::claude::delete(&session),
+                        Provider::Codex => crate::session::codex::delete(&session),
+                    }
+                    loader.store().evict(&session);
+                }
+                Request::Shutdown => break,
+            }
+        }
+        loader.store().save();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Application state
+// ---------------------------------------------------------------------------
+
+pub struct App {
+    pub sessions: Vec<Session>,
+    /// Indices into `sessions`, after filtering and sorting.
+    pub visible: Vec<usize>,
+    pub stats: Stats,
+    pub selected: usize,
+    pub scroll: usize,
+    pub plan: Plan,
+    pub mode: Mode,
+
+    pub sort_col: ColumnId,
+    pub sort_asc: bool,
+    pub sortby_cursor: usize,
+
+    pub search: String,
+    pub age_filter: Option<AgeFilter>,
+    pub age_cursor: usize,
+    pub live_only: bool,
+
+    pub bottom_tab: usize,
+    pub panel_data: Option<SessionData>,
+    panel_key: String,
+    /// `last_active` of the session when its panel data was requested, so an
+    /// append can be told apart from an unchanged session.
+    panel_stamp: String,
+    pub info_scroll: u16,
+    pub cost_scroll: u16,
+    pub config_scroll: u16,
+    pub proc_scroll: u16,
+    pub subagent_scroll: u16,
+    pub tool_scroll: u16,
+    /// Pin the tool log to its newest entry. Tool Activity is an append-only
+    /// feed, so following the tail is the useful default; scrolling up releases
+    /// the pin, and scrolling back to the bottom restores it.
+    pub tool_follow: bool,
+    /// Last computed maximum scroll for the tool log, recorded during draw so
+    /// the key handler knows where the bottom is.
+    pub tool_max_scroll: u16,
+    pub tool_tab: usize,
+    pub tool_live_only: bool,
+    /// Show each edit's diff inline beneath its row.
+    pub tool_show_diff: bool,
+    /// Invocation whose full argument is expanded, keyed by `detail_key`.
+    pub tool_expanded: Option<String>,
+    /// Which invocation owns each rendered line, so a click maps to an entry.
+    pub tool_owners: Vec<Option<String>>,
+    pub subagent_sort: (panels::SubagentSort, bool),
+
+    pub cpu_history: HashMap<String, History>,
+    pub mem_history: HashMap<String, History>,
+    pub global_cpu: History,
+    pub global_spend: History,
+    prev_spend_total: Option<f64>,
+    spend_warmup: u8,
+
+    pub quota: Quota,
+    pub status: Option<(String, Instant)>,
+    /// When cctop started, used by the tool-activity "live" filter.
+    pub started_at: String,
+
+    prefs: UiPrefs,
+    tx: Sender<Request>,
+    pub needs_redraw: bool,
+    pub should_quit: bool,
+}
+
+impl App {
+    fn new(plan: Plan, tx: Sender<Request>) -> Self {
+        Self::with_prefs(plan, tx, UiPrefs::load())
+    }
+
+    /// Build with explicit preferences.
+    ///
+    /// Tests use this with `UiPrefs::default()`; going through `new` would load
+    /// whatever is on the developer's disk and make results machine-dependent.
+    fn with_prefs(plan: Plan, tx: Sender<Request>, prefs: UiPrefs) -> Self {
+        let sort_col = columns::column_by_key(&prefs.sort_col)
+            .map(|c| c.id)
+            .unwrap_or(ColumnId::Last);
+        let age_filter = prefs
+            .inactivity_filter
+            .as_deref()
+            .and_then(AgeFilter::parse);
+        let age_cursor = AGE_OPTIONS
+            .iter()
+            .position(|o| *o == age_filter)
+            .unwrap_or(AGE_OPTIONS.len() - 1);
+
+        App {
+            sessions: Vec::new(),
+            visible: Vec::new(),
+            stats: Stats::default(),
+            selected: 0,
+            scroll: 0,
+            plan,
+            mode: Mode::List,
+            sort_col,
+            sort_asc: prefs.sort_asc,
+            sortby_cursor: 0,
+            search: String::new(),
+            age_filter,
+            age_cursor,
+            live_only: prefs.live_only,
+            bottom_tab: prefs.bottom_tab.min(panels::TABS.len() - 1),
+            panel_data: None,
+            panel_key: String::new(),
+            panel_stamp: String::new(),
+            info_scroll: 0,
+            cost_scroll: 0,
+            config_scroll: 0,
+            proc_scroll: 0,
+            subagent_scroll: 0,
+            tool_scroll: 0,
+            tool_follow: true,
+            tool_max_scroll: 0,
+            tool_tab: 0,
+            tool_live_only: prefs.agent_live_filter,
+            tool_show_diff: prefs.tool_show_diff,
+            tool_expanded: None,
+            tool_owners: Vec::new(),
+            subagent_sort: (
+                panels::SubagentSort::parse(&prefs.subagent_sort_col),
+                prefs.subagent_sort_asc,
+            ),
+            cpu_history: HashMap::new(),
+            mem_history: HashMap::new(),
+            global_cpu: History::default(),
+            global_spend: History::default(),
+            prev_spend_total: None,
+            spend_warmup: 0,
+            quota: Quota::default(),
+            status: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            prefs,
+            tx,
+            needs_redraw: true,
+            should_quit: false,
+        }
+    }
+
+    /// The highlighted session, if there is one.
+    ///
+    /// `visible` holds indices into `sessions`, and a refresh replaces
+    /// `sessions` before `refilter` rebuilds `visible` — so between those two
+    /// steps the indices can outrun the list. Resolving through `get` keeps this
+    /// accessor total instead of panicking on that window.
+    pub fn selected_session(&self) -> Option<&Session> {
+        self.visible
+            .get(self.selected)
+            .and_then(|&i| self.sessions.get(i))
+    }
+
+    fn save_prefs(&mut self) {
+        self.prefs.bottom_tab = self.bottom_tab;
+        self.prefs.live_only = self.live_only;
+        self.prefs.sort_col = columns::column(self.sort_col).key.to_string();
+        self.prefs.sort_asc = self.sort_asc;
+        self.prefs.inactivity_filter = self.age_filter.map(|a| a.key().to_string());
+        self.prefs.agent_live_filter = self.tool_live_only;
+        self.prefs.tool_show_diff = self.tool_show_diff;
+        self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
+        self.prefs.subagent_sort_asc = self.subagent_sort.1;
+        self.prefs.save();
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = Some((msg.into(), Instant::now()));
+        self.needs_redraw = true;
+    }
+
+    /// Apply filters and sorting, then rebuild the visible index list.
+    ///
+    /// Selection is tracked by session key rather than row number, so a refresh
+    /// that reorders the table doesn't move the cursor off whatever the user was
+    /// looking at.
+    pub fn refilter(&mut self) {
+        let anchor = self.selected_session().map(|s| s.key());
+        let now = chrono::Utc::now();
+        let now_ms = now.timestamp_millis();
+        let query = self.search.to_ascii_lowercase();
+
+        let mut visible: Vec<usize> = (0..self.sessions.len())
+            .filter(|&i| {
+                let s = &self.sessions[i];
+                if self.live_only && !s.is_running() {
+                    return false;
+                }
+                if let Some(age) = self.age_filter {
+                    let ts = if s.last_active.is_empty() {
+                        &s.started_at
+                    } else {
+                        &s.last_active
+                    };
+                    let within = crate::util::parse_ts(ts)
+                        .map(|d| now_ms - d.timestamp_millis() <= age.max_age_ms())
+                        .unwrap_or(false);
+                    if !within {
+                        return false;
+                    }
+                }
+                if !query.is_empty() {
+                    let haystack = format!(
+                        "{} {} {} {}",
+                        s.display_label(),
+                        s.model,
+                        s.provider.as_str(),
+                        s.session_id
+                    )
+                    .to_ascii_lowercase();
+                    if !haystack.contains(&query) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let col = self.sort_col;
+        let asc = self.sort_asc;
+        visible.sort_by(|&a, &b| {
+            let ord = columns::compare(col, &self.sessions[a], &self.sessions[b], &now);
+            if asc { ord } else { ord.reverse() }
+        });
+
+        self.visible = visible;
+        self.selected = anchor
+            .and_then(|key| {
+                self.visible
+                    .iter()
+                    .position(|&i| self.sessions[i].key() == key)
+            })
+            .unwrap_or(self.selected)
+            .min(self.visible.len().saturating_sub(1));
+        self.needs_redraw = true;
+    }
+
+    /// Fold this refresh's figures into the overview history buffers.
+    fn push_history(&mut self) {
+        let current = self.stats.spend_total;
+        // Skip the first few samples: the initial load reports each session's
+        // whole lifetime spend at once, which would spike the real-time chart.
+        self.spend_warmup = self.spend_warmup.saturating_add(1);
+        if let Some(prev) = self.prev_spend_total
+            && self.spend_warmup > 3
+        {
+            self.global_spend.push((current - prev).max(0.0));
+        }
+        self.prev_spend_total = Some(current);
+        self.global_cpu.push(self.stats.total_cpu as f64);
+
+        for s in &self.sessions {
+            let Some(p) = &s.process else { continue };
+            let key = s.key();
+            self.cpu_history
+                .entry(key.clone())
+                .or_default()
+                .push(p.cpu as f64);
+            self.mem_history
+                .entry(key)
+                .or_default()
+                .push(p.memory as f64 / (1024.0 * 1024.0));
+        }
+    }
+
+    /// Ask the worker for the selected session's full data if it isn't loaded.
+    fn sync_panel_data(&mut self) {
+        let Some(session) = self.selected_session() else {
+            self.panel_data = None;
+            self.panel_key.clear();
+            return;
+        };
+        let key = session.key();
+        let stamp = session.last_active.clone();
+        let switched = key != self.panel_key;
+        // A live session keeps growing, so re-request whenever its newest
+        // activity moves — otherwise the panels freeze at whatever the session
+        // looked like when it was selected.
+        let grew = !switched && stamp != self.panel_stamp;
+        if !switched && !grew {
+            return;
+        }
+
+        let session = session.clone();
+        self.panel_key = key;
+        self.panel_stamp = stamp;
+
+        if switched {
+            // Only blank the panels when moving to a different session; doing it
+            // on every append would flash "Loading…" twice a second.
+            self.panel_data = None;
+            self.info_scroll = 0;
+            self.cost_scroll = 0;
+            self.config_scroll = 0;
+            self.proc_scroll = 0;
+            self.subagent_scroll = 0;
+            self.tool_scroll = 0;
+            self.tool_follow = true;
+            self.tool_tab = 0;
+            self.tool_expanded = None;
+        }
+        let _ = self.tx.send(Request::Data(Box::new(session)));
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let last = self.visible.len() - 1;
+        self.selected = (self.selected as isize + delta).clamp(0, last as isize) as usize;
+        self.needs_redraw = true;
+    }
+
+    fn set_sort(&mut self, col: ColumnId) {
+        if self.sort_col == col {
+            self.sort_asc = !self.sort_asc;
+        } else {
+            self.sort_col = col;
+            self.sort_asc = true;
+        }
+        self.refilter();
+        self.save_prefs();
+    }
+
+    /// Expand or collapse the invocation under a clicked log row.
+    fn toggle_tool_expansion(&mut self, row_offset: usize) {
+        let line = self.tool_scroll as usize + row_offset;
+        let Some(Some(key)) = self.tool_owners.get(line) else {
+            return;
+        };
+        let key = key.clone();
+        // Clicking the open entry again closes it.
+        self.tool_expanded = (self.tool_expanded.as_deref() != Some(key.as_str())).then_some(key);
+        // Expanding grows the log, which would otherwise slide the row away.
+        self.tool_follow = false;
+        self.needs_redraw = true;
+    }
+
+    /// Move through the Tool Activity sidebar, which filters the log by tool.
+    fn cycle_tool_filter(&mut self, delta: isize) {
+        let n = self
+            .panel_data
+            .as_ref()
+            .map(|d| panels::tool_tabs(d).len())
+            .unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let n = n as isize;
+        self.tool_tab = (((self.tool_tab as isize + delta) % n + n) % n) as usize;
+        // A different filter is a different log, so start at its newest entry.
+        self.tool_follow = true;
+        self.bottom_tab = 3;
+        self.needs_redraw = true;
+    }
+
+    /// Move to the next or previous bottom panel, wrapping at both ends.
+    fn cycle_tab(&mut self, delta: isize) {
+        let n = panels::TABS.len() as isize;
+        self.bottom_tab = (((self.bottom_tab as isize + delta) % n + n) % n) as usize;
+        self.save_prefs();
+        self.needs_redraw = true;
+    }
+
+    fn scroll_active_panel(&mut self, delta: i32) {
+        let bump = |v: &mut u16| *v = (*v as i32 + delta).max(0) as u16;
+        match self.bottom_tab {
+            0 => bump(&mut self.info_scroll),
+            1 => {} // Performance is a fixed-size chart pair
+            2 => bump(&mut self.proc_scroll),
+            3 => {
+                let next = (self.tool_scroll as i32 + delta).clamp(0, self.tool_max_scroll as i32);
+                self.tool_scroll = next as u16;
+                // Re-pin once the user scrolls back down to the newest entry.
+                self.tool_follow = self.tool_scroll >= self.tool_max_scroll;
+            }
+            4 => bump(&mut self.subagent_scroll),
+            5 => bump(&mut self.cost_scroll),
+            _ => bump(&mut self.config_scroll),
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Copy something useful about the selection to the clipboard.
+    fn copy_selection(&mut self) {
+        let Some(s) = self.selected_session() else {
+            return;
+        };
+        let text = match self.bottom_tab {
+            // From the Info tab, the resume command is the most useful thing.
+            0 => match s.provider {
+                Provider::Claude => format!("claude --resume {}", s.session_id),
+                Provider::Codex => format!("codex resume {}", s.session_id),
+            },
+            _ => s
+                .data_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| s.session_id.clone()),
+        };
+        render::copy_to_clipboard(&text);
+        self.set_status(format!("Copied: {}", crate::util::truncate(&text, 60)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event handling
+// ---------------------------------------------------------------------------
+
+impl App {
+    fn on_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        self.needs_redraw = true;
+
+        // Ctrl-C quits from any mode.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+
+        match self.mode {
+            Mode::Search => self.on_key_search(key),
+            Mode::SortBy => self.on_key_sortby(key),
+            Mode::AgeFilter => self.on_key_age(key),
+            Mode::DeleteConfirm => self.on_key_delete(key),
+            Mode::Help | Mode::DeleteBlocked => self.mode = Mode::List,
+            Mode::List => self.on_key_list(key),
+        }
+    }
+
+    fn on_key_search(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => self.mode = Mode::List,
+            KeyCode::Backspace => {
+                self.search.pop();
+                self.refilter();
+            }
+            KeyCode::Char(c) => {
+                self.search.push(c);
+                self.refilter();
+            }
+            _ => {}
+        }
+    }
+
+    fn on_key_sortby(&mut self, key: KeyEvent) {
+        let n = COLUMNS.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::F(6) => self.mode = Mode::List,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.sortby_cursor = (self.sortby_cursor + n - 1) % n
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.sortby_cursor = (self.sortby_cursor + 1) % n,
+            KeyCode::Enter => {
+                self.set_sort(COLUMNS[self.sortby_cursor].id);
+                self.mode = Mode::List;
+            }
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn on_key_age(&mut self, key: KeyEvent) {
+        let n = AGE_OPTIONS.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::F(7) => self.mode = Mode::List,
+            KeyCode::Up | KeyCode::Char('k') => self.age_cursor = (self.age_cursor + n - 1) % n,
+            KeyCode::Down | KeyCode::Char('j') => self.age_cursor = (self.age_cursor + 1) % n,
+            KeyCode::Enter => {
+                self.age_filter = AGE_OPTIONS[self.age_cursor];
+                self.refilter();
+                self.save_prefs();
+                self.mode = Mode::List;
+            }
+            _ => {}
+        }
+    }
+
+    fn on_key_delete(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('y')
+            && let Some(s) = self.selected_session().cloned()
+        {
+            let _ = self.tx.send(Request::Delete(Box::new(s.clone())));
+            self.sessions.retain(|x| x.key() != s.key());
+            self.refilter();
+            self.set_status(format!("Deleted session {}", s.session_id));
+        }
+        self.mode = Mode::List;
+    }
+
+    fn on_key_list(&mut self, key: KeyEvent) {
+        const PAGE: isize = 10;
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        // Shift+Up/Down scrolls inside the active bottom panel, since the plain
+        // arrows are taken by list navigation and panel switching.
+        if shift && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            self.scroll_active_panel(if key.code == KeyCode::Up { -1 } else { 1 });
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::F(10) => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::PageUp => self.move_selection(-PAGE),
+            KeyCode::PageDown => self.move_selection(PAGE),
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = self.visible.len().saturating_sub(1),
+
+            KeyCode::Tab => self.cycle_tab(1),
+            KeyCode::BackTab => self.cycle_tab(-1),
+            KeyCode::Char(c @ '1'..='7') => {
+                self.bottom_tab = c as usize - '1' as usize;
+                self.save_prefs();
+            }
+            KeyCode::Char('`') => {
+                self.live_only = !self.live_only;
+                self.refilter();
+                self.save_prefs();
+            }
+
+            KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
+            KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
+            KeyCode::Char('>') | KeyCode::Char('<') | KeyCode::F(6) => {
+                self.sortby_cursor = COLUMNS
+                    .iter()
+                    .position(|c| c.id == self.sort_col)
+                    .unwrap_or(0);
+                self.mode = Mode::SortBy;
+            }
+            KeyCode::F(7) => {
+                self.age_cursor = AGE_OPTIONS
+                    .iter()
+                    .position(|o| *o == self.age_filter)
+                    .unwrap_or(AGE_OPTIONS.len() - 1);
+                self.mode = Mode::AgeFilter;
+            }
+            KeyCode::Char('r') | KeyCode::F(5) => {
+                let _ = self.tx.send(Request::Refresh);
+                self.set_status("Refreshing…");
+            }
+            KeyCode::Char('d') => match self.selected_session() {
+                Some(s) if s.is_running() => self.mode = Mode::DeleteBlocked,
+                Some(_) => self.mode = Mode::DeleteConfirm,
+                None => {}
+            },
+            KeyCode::Char('y') => self.copy_selection(),
+            KeyCode::Char('L') => {
+                self.tool_live_only = !self.tool_live_only;
+                self.save_prefs();
+            }
+            KeyCode::Char('v') => {
+                self.tool_show_diff = !self.tool_show_diff;
+                self.save_prefs();
+            }
+            // Move through the Tool Activity filter sidebar.
+            KeyCode::Char('[') => self.cycle_tool_filter(-1),
+            KeyCode::Char(']') => self.cycle_tool_filter(1),
+
+            // htop muscle memory.
+            KeyCode::Char('P') => self.set_sort(ColumnId::Status),
+            KeyCode::Char('M') => self.set_sort(ColumnId::Memory),
+            KeyCode::Char('T') => self.set_sort(ColumnId::Cost),
+
+            // Arrows move between bottom panels; Shift+arrows scroll within one.
+            KeyCode::Left => self.cycle_tab(-1),
+            KeyCode::Right => self.cycle_tab(1),
+            KeyCode::Esc => {
+                // Clear the narrowest active filter first.
+                if !self.search.is_empty() {
+                    self.search.clear();
+                    self.refilter();
+                } else if self.age_filter.is_some() {
+                    self.age_filter = None;
+                    self.refilter();
+                    self.save_prefs();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
+        match ev.kind {
+            MouseEventKind::ScrollDown => {
+                if layout.in_bottom_panel(ev.row) {
+                    self.scroll_active_panel(1);
+                } else {
+                    self.move_selection(1);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if layout.in_bottom_panel(ev.row) {
+                    self.scroll_active_panel(-1);
+                } else {
+                    self.move_selection(-1);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.bottom_tab == 3
+                    && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
+                {
+                    self.toggle_tool_expansion(offset);
+                } else if let Some(idx) = layout.tool_sidebar_at(ev.column, ev.row) {
+                    self.tool_tab = idx;
+                    self.tool_follow = true;
+                    self.needs_redraw = true;
+                } else if let Some(tab) = layout.tab_at(ev.column, ev.row) {
+                    self.bottom_tab = tab;
+                    self.save_prefs();
+                    self.needs_redraw = true;
+                } else if let Some(col) = layout.header_column_at(ev.column, ev.row) {
+                    self.set_sort(col);
+                } else if let Some(row) = layout.row_at(ev.row) {
+                    let idx = self.scroll + row;
+                    if idx < self.visible.len() {
+                        self.selected = idx;
+                        self.needs_redraw = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+pub fn run(args: &Args) -> anyhow::Result<()> {
+    let (req_tx, req_rx) = channel::<Request>();
+    let (res_tx, res_rx) = channel::<Response>();
+    spawn_worker(args.plan, req_rx, res_tx.clone());
+
+    // Pricing and quota are network-bound; keep both off the UI thread.
+    {
+        let tx = res_tx.clone();
+        std::thread::spawn(move || {
+            crate::pricing::refresh_pricing_blocking();
+            let _ = tx.send(Response::PricingReady);
+        });
+    }
+    spawn_quota_poller(res_tx);
+
+    let mut app = App::new(args.plan, req_tx.clone());
+    let _ = req_tx.send(Request::Refresh);
+
+    // `ratatui::init` installs a hook that leaves the alt screen and raw mode on
+    // panic, but it knows nothing about the mouse capture enabled below. Without
+    // this, a panic leaves the terminal emitting mouse escape sequences into the
+    // user's shell. Installed after `init` so it runs before ratatui's restore.
+    let mut terminal = ratatui::init();
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        previous_hook(info);
+    }));
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+
+    let result = event_loop(&mut app, &mut terminal, &res_rx, &req_tx, args.delay);
+
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+
+    let _ = req_tx.send(Request::Shutdown);
+    app.save_prefs();
+    result
+}
+
+fn spawn_quota_poller(tx: Sender<Response>) {
+    std::thread::spawn(move || {
+        let mut quota = Quota::default();
+        let (mut claude_due, mut codex_due) = (Instant::now(), Instant::now());
+
+        loop {
+            let now = Instant::now();
+            let mut changed = false;
+
+            // Each provider is paced by its own last outcome: a throttled one
+            // backs off without stalling the other.
+            if now >= claude_due {
+                let status = crate::quota::fetch_claude();
+                claude_due =
+                    now + Duration::from_secs(status.retry_delay_secs(QUOTA_INTERVAL_SECS));
+                quota.claude = status;
+                changed = true;
+            }
+            if now >= codex_due {
+                let status = crate::quota::fetch_codex();
+                codex_due = now + Duration::from_secs(status.retry_delay_secs(QUOTA_INTERVAL_SECS));
+                quota.codex = status;
+                changed = true;
+            }
+
+            if changed {
+                quota.fetched = true;
+                if tx.send(Response::Quota(Box::new(quota.clone()))).is_err() {
+                    break;
+                }
+            }
+            std::thread::sleep(QUOTA_TICK);
+        }
+    });
+}
+
+fn event_loop(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    res_rx: &Receiver<Response>,
+    req_tx: &Sender<Request>,
+    delay: f64,
+) -> anyhow::Result<()> {
+    let refresh_every = Duration::from_secs_f64(delay);
+    let mut last_refresh = Instant::now();
+    let mut layout = render::Layout::default();
+    let mut refresh_in_flight = true;
+
+    loop {
+        // Drain everything the workers have produced.
+        loop {
+            match res_rx.try_recv() {
+                Ok(Response::Sessions(payload)) => {
+                    let (sessions, stats) = *payload;
+                    app.sessions = sessions;
+                    app.stats = stats;
+                    app.push_history();
+                    app.refilter();
+                    refresh_in_flight = false;
+                }
+                Ok(Response::Data(key, data)) => {
+                    // Discard results for a session the user has already left.
+                    if key == app.panel_key {
+                        app.panel_data = Some(*data);
+                        app.needs_redraw = true;
+                    }
+                }
+                Ok(Response::Quota(q)) => {
+                    app.quota = *q;
+                    app.needs_redraw = true;
+                }
+                Ok(Response::PricingReady) => {
+                    // Cached costs were computed without rates; recompute them.
+                    let _ = req_tx.send(Request::Refresh);
+                    refresh_in_flight = true;
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        app.sync_panel_data();
+
+        // Expire the transient status line.
+        if let Some((_, at)) = &app.status
+            && at.elapsed() > Duration::from_secs(3)
+        {
+            app.status = None;
+            app.needs_redraw = true;
+        }
+
+        if app.needs_redraw {
+            terminal.draw(|frame| layout = render::draw(frame, app))?;
+            app.needs_redraw = false;
+        }
+
+        // Wait for input, but never past the next scheduled refresh.
+        let wait = refresh_every
+            .checked_sub(last_refresh.elapsed())
+            .unwrap_or(Duration::ZERO)
+            .min(Duration::from_millis(200));
+        if event::poll(wait)? {
+            match event::read()? {
+                Event::Key(key) => app.on_key(key),
+                Event::Mouse(m) => app.on_mouse(m, &layout),
+                Event::Resize(_, _) => app.needs_redraw = true,
+                _ => {}
+            }
+        }
+
+        if app.should_quit {
+            break;
+        }
+
+        // Only one refresh in flight: a scan slower than the interval must not
+        // queue up behind itself.
+        if last_refresh.elapsed() >= refresh_every && !refresh_in_flight {
+            last_refresh = Instant::now();
+            refresh_in_flight = true;
+            let _ = req_tx.send(Request::Refresh);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let (tx, rx) = channel();
+        // Keep the receiver alive so sends in tests don't fail.
+        std::mem::forget(rx);
+        App::with_prefs(Plan::Retail, tx, UiPrefs::default())
+    }
+
+    /// Regression: these tests once read the developer's real prefs file, so a
+    /// persisted `live_only` or age filter silently failed unrelated assertions.
+    #[test]
+    fn test_app_starts_from_default_prefs() {
+        let app = test_app();
+        assert!(!app.live_only);
+        assert!(app.age_filter.is_none());
+        assert!(app.search.is_empty());
+        assert_eq!(app.sort_col, ColumnId::Last);
+    }
+
+    fn session(id: &str, running: bool, label: &str) -> Session {
+        let mut s = Session::new(Provider::Claude, id.into());
+        s.label_source = label.into();
+        s.last_active = chrono::Utc::now().to_rfc3339();
+        s.started_at = s.last_active.clone();
+        if running {
+            s.process = Some(crate::proc::ProcInfo::default());
+        }
+        s
+    }
+
+    #[test]
+    fn live_filter_hides_stopped_sessions() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "x"), session("b", false, "y")];
+        app.live_only = true;
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.sessions[app.visible[0]].session_id, "a");
+    }
+
+    #[test]
+    fn search_matches_label_and_id_case_insensitively() {
+        let mut app = test_app();
+        app.sessions = vec![
+            session("aaa", false, "/home/x/alpha"),
+            session("bbb", false, "/home/x/beta"),
+        ];
+        app.search = "alpha".into();
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+
+        app.search = "BBB".into();
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.sessions[app.visible[0]].session_id, "bbb");
+    }
+
+    #[test]
+    fn selection_follows_the_session_across_a_resort() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, "/x/a"), session("b", false, "/x/b")];
+        app.sort_col = ColumnId::Project;
+        app.sort_asc = true;
+        app.refilter();
+        app.selected = 1;
+        let before = app.selected_session().unwrap().key();
+
+        app.sort_asc = false;
+        app.refilter();
+        assert_eq!(app.selected_session().unwrap().key(), before);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn selection_stays_in_bounds_when_sessions_disappear() {
+        let mut app = test_app();
+        app.sessions = (0..5)
+            .map(|i| session(&i.to_string(), false, "/x"))
+            .collect();
+        app.refilter();
+        app.selected = 4;
+        app.sessions.truncate(2);
+        app.refilter();
+        assert!(app.selected < app.visible.len());
+    }
+
+    #[test]
+    fn empty_list_does_not_panic_on_navigation() {
+        let mut app = test_app();
+        app.refilter();
+        app.move_selection(1);
+        app.move_selection(-1);
+        assert_eq!(app.selected, 0);
+        assert!(app.selected_session().is_none());
+    }
+
+    #[test]
+    fn sort_toggles_on_repeat_and_resets_on_change() {
+        let mut app = test_app();
+        app.sort_col = ColumnId::Cost;
+        app.sort_asc = true;
+        app.set_sort(ColumnId::Cost);
+        assert!(!app.sort_asc, "same column must flip direction");
+        app.set_sort(ColumnId::Cpu);
+        assert!(app.sort_asc, "new column starts ascending");
+        assert_eq!(app.sort_col, ColumnId::Cpu);
+    }
+
+    #[test]
+    fn age_filter_roundtrips_through_prefs_keys() {
+        for f in [AgeFilter::Day, AgeFilter::Week, AgeFilter::Month] {
+            assert_eq!(AgeFilter::parse(f.key()), Some(f));
+        }
+        assert_eq!(AgeFilter::parse("nope"), None);
+    }
+
+    #[test]
+    fn age_filter_excludes_old_sessions() {
+        let mut app = test_app();
+        let mut old = session("old", false, "/x");
+        old.last_active = (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        app.sessions = vec![session("new", false, "/x"), old];
+        app.age_filter = Some(AgeFilter::Day);
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.sessions[app.visible[0]].session_id, "new");
+    }
+}

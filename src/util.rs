@@ -1,0 +1,511 @@
+//! Formatting and timestamp helpers shared by the CLI and TUI.
+
+use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
+use std::path::Path;
+
+/// Parse an ISO-8601 timestamp into a UTC instant.
+pub fn parse_ts(value: &str) -> Option<DateTime<Utc>> {
+    if value.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
+/// Milliseconds since the Unix epoch.
+pub fn now_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+/// Local-time day key, `YYYY-MM-DD`.
+pub fn local_date_key(dt: &DateTime<Utc>) -> String {
+    let l = dt.with_timezone(&Local);
+    format!("{:04}-{:02}-{:02}", l.year(), l.month(), l.day())
+}
+
+/// Local-time hour key, `YYYY-MM-DDTHH`.
+pub fn local_hour_key(dt: &DateTime<Utc>) -> String {
+    let l = dt.with_timezone(&Local);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}",
+        l.year(),
+        l.month(),
+        l.day(),
+        l.hour()
+    )
+}
+
+/// Local midnight today, as a UTC instant.
+pub fn local_midnight_today() -> DateTime<Utc> {
+    let now = Local::now();
+    Local
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+        .single()
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now)
+}
+
+/// Number of days in the current local calendar month.
+pub fn days_in_current_month() -> u32 {
+    let now = Local::now();
+    let (y, m) = (now.year(), now.month());
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let first_next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1).unwrap();
+    let first_this = chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+    (first_next - first_this).num_days() as u32
+}
+
+/// htop-style relative age: `now`, `5m`, `3h`, `2d`, `4w`, `7mo`, `1y`.
+pub fn relative_age(value: &str, now: &DateTime<Utc>) -> String {
+    let Some(parsed) = parse_ts(value) else {
+        return "n/a".into();
+    };
+    let secs = (now.timestamp() - parsed.timestamp()).max(0);
+    match secs {
+        s if s < 60 => "now".into(),
+        s if s < 3_600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3_600),
+        s if s < 604_800 => format!("{}d", s / 86_400),
+        s if s < 2_592_000 => format!("{}w", s / 604_800),
+        s if s < 31_536_000 => format!("{}mo", s / 2_592_000),
+        s => format!("{}y", s / 31_536_000),
+    }
+}
+
+/// Compact duration for the DUR column: `45s`, `3m12s`, `2h05m`.
+pub fn compact_duration(ms: i64) -> String {
+    if ms <= 0 {
+        return "—".into();
+    }
+    let s = (ms as f64 / 1000.0).round() as i64;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3_600 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h{:02}m", s / 3_600, (s % 3_600) / 60)
+    }
+}
+
+/// Long-form duration used in the Info panel: `1h 04m 09s`.
+pub fn long_duration(ms: i64) -> String {
+    let s = (ms.max(0) as f64 / 1000.0).round() as i64;
+    let (h, m, sec) = (s / 3_600, (s % 3_600) / 60, s % 60);
+    if h > 0 {
+        format!("{h}h {m}m {sec}s")
+    } else if m > 0 {
+        format!("{m}m {sec}s")
+    } else {
+        format!("{sec}s")
+    }
+}
+
+/// Wall-clock span between a session's first and last activity.
+pub fn session_duration(started: &str, last: &str) -> String {
+    let (Some(start), Some(end)) = (
+        parse_ts(started),
+        parse_ts(last).or_else(|| parse_ts(started)),
+    ) else {
+        return String::new();
+    };
+    let secs = (end.timestamp() - start.timestamp()).max(0);
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3_600),
+        s if s < 604_800 => format!("{}d", s / 86_400),
+        s => format!("{}w", s / 604_800),
+    }
+}
+
+/// `1.2K`, `3.4M`, `5.6G`.
+pub fn compact_tokens(value: u64) -> String {
+    match value {
+        v if v >= 1_000_000_000 => format!("{:.1}G", v as f64 / 1e9),
+        v if v >= 1_000_000 => format!("{:.1}M", v as f64 / 1e6),
+        v if v >= 1_000 => format!("{:.1}K", v as f64 / 1e3),
+        v => v.to_string(),
+    }
+}
+
+/// `512B`, `40K`, `1.5M`, `2.1G`. Empty string for zero.
+pub fn compact_bytes(value: u64) -> String {
+    const K: u64 = 1024;
+    match value {
+        0 => String::new(),
+        v if v >= K * K * K => format!("{:.1}G", v as f64 / (K * K * K) as f64),
+        v if v >= K * K => format!("{:.1}M", v as f64 / (K * K) as f64),
+        v if v >= K => format!("{:.0}K", v as f64 / K as f64),
+        v => format!("{v}B"),
+    }
+}
+
+/// Two-decimal dollars for table cells.
+pub fn compact_usd(value: f64) -> String {
+    format!("${value:.2}")
+}
+
+/// Sub-cent amounts keep four decimals so small spends stay visible.
+pub fn adaptive_usd(value: f64) -> String {
+    if value > 0.0 && value < 0.01 {
+        format!("${value:.4}")
+    } else {
+        format!("${value:.2}")
+    }
+}
+
+/// Six-decimal dollars, matching the JSON cost breakdown fields.
+pub fn money(value: f64) -> String {
+    format!("{value:.6}")
+}
+
+pub fn token_cost(tokens: u64, rate_per_million: f64) -> f64 {
+    tokens as f64 * rate_per_million / 1_000_000.0
+}
+
+/// `1234567` -> `1,234,567`.
+pub fn with_commas(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Round up to a "nice" chart maximum: 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10 × 10^n.
+pub fn nice_max(val: f64) -> f64 {
+    if val <= 0.0 {
+        return 1.0;
+    }
+    let mag = 10f64.powf(val.log10().floor());
+    for step in [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.5, 10.0] {
+        if step * mag >= val {
+            return step * mag;
+        }
+    }
+    10.0 * mag
+}
+
+/// Truncate to `width` display cells, appending `…` when it doesn't fit.
+pub fn truncate(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    if width <= 1 {
+        return s.chars().take(width).collect();
+    }
+    let mut out: String = s.chars().take(width - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Strip a leading `$HOME` and replace it with `~`.
+pub fn tildify(path: &str) -> String {
+    let home = crate::config::HOME.to_string_lossy();
+    if !home.is_empty() && path.starts_with(home.as_ref()) {
+        let rest = &path[home.len()..];
+        if rest.is_empty() {
+            return "~".into();
+        }
+        if rest.starts_with('/') {
+            return format!("~{rest}");
+        }
+    }
+    path.to_string()
+}
+
+/// Drop version-date suffixes and the `claude-` vendor prefix.
+///
+/// `gpt-` is deliberately kept: dropping it leaves bare version numbers like
+/// `5.5`, which say nothing about which model they are, whereas `claude-opus-5`
+/// still reads clearly as `opus-5`.
+pub fn short_model(model: &str) -> String {
+    let m = model.strip_prefix("claude-").unwrap_or(model);
+    // Trim a trailing `-YYYYMMDD` release stamp.
+    if m.len() > 9 {
+        let (head, tail) = m.split_at(m.len() - 9);
+        if tail.starts_with('-') && tail[1..].chars().all(|c| c.is_ascii_digit()) {
+            return head.to_string();
+        }
+    }
+    m.to_string()
+}
+
+/// Split a path into non-empty components, tolerating both separators.
+fn path_parts(value: &str) -> Vec<&str> {
+    value.split(['/', '\\']).filter(|p| !p.is_empty()).collect()
+}
+
+/// Shorten each path to its shortest unique trailing segments.
+///
+/// Every path starts as just its leaf name and grows one component at a time
+/// only while it collides with another path, so unambiguous entries stay short.
+pub fn abbreviate_paths(values: &[String]) -> Vec<String> {
+    let home = crate::config::HOME.to_string_lossy().to_string();
+    let home_parts = path_parts(&home);
+
+    let parts_list: Vec<Vec<&str>> = values
+        .iter()
+        .map(|v| {
+            let parts = path_parts(v);
+            if parts.len() >= home_parts.len()
+                && home_parts.iter().enumerate().all(|(i, hp)| parts[i] == *hp)
+            {
+                let rest = parts[home_parts.len()..].to_vec();
+                if rest.is_empty() { vec!["~"] } else { rest }
+            } else {
+                parts
+            }
+        })
+        .collect();
+
+    let mut widths: Vec<usize> = parts_list
+        .iter()
+        .map(|p| usize::from(!p.is_empty()))
+        .collect();
+
+    loop {
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, parts) in parts_list.iter().enumerate() {
+            if parts.is_empty() {
+                continue;
+            }
+            let label = parts[parts.len() - widths[i]..].join("/");
+            groups.entry(label).or_default().push(i);
+        }
+        let mut changed = false;
+        for indices in groups.values() {
+            if indices.len() < 2 {
+                continue;
+            }
+            for &idx in indices {
+                if widths[idx] < parts_list[idx].len() {
+                    widths[idx] += 1;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    parts_list
+        .iter()
+        .enumerate()
+        .map(|(i, parts)| {
+            if parts.is_empty() {
+                "unknown".to_string()
+            } else {
+                parts[parts.len() - widths[i]..].join("/")
+            }
+        })
+        .collect()
+}
+
+/// Pretty-print an MCP tool name.
+///
+/// `mcp__Claude_in_Chrome__tabs_context_mcp` -> `Claude in Chrome: tabs context`.
+/// Non-MCP names pass through unchanged.
+pub fn pretty_mcp_name(name: &str) -> String {
+    let Some(without_prefix) = name.strip_prefix("mcp__") else {
+        return name.to_string();
+    };
+    let Some(sep) = without_prefix.find("__") else {
+        return without_prefix.replace('_', " ");
+    };
+    let server = &without_prefix[..sep];
+    let tool = &without_prefix[sep + 2..];
+
+    // Anonymous/dynamic servers are named by UUID; showing it helps nobody.
+    if crate::config::is_full_uuid(&server.to_ascii_lowercase()) {
+        return tool.replace('_', " ").trim().to_string();
+    }
+
+    // Unwrap `plugin_<name>_<name>` into just `<name>`.
+    let server_stripped = server
+        .strip_prefix("plugin_")
+        .and_then(|rest| {
+            let mid = rest.find('_')?;
+            let (a, b) = (&rest[..mid], &rest[mid + 1..]);
+            (a.eq_ignore_ascii_case(b)).then(|| a.to_string())
+        })
+        .unwrap_or_else(|| server.to_string());
+
+    let server_clean = server_stripped
+        .strip_suffix("_mcp")
+        .unwrap_or(&server_stripped)
+        .replace(['-', '_'], " ")
+        .trim()
+        .to_string();
+
+    let server_word = server_clean
+        .split(' ')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let tool_stripped = tool
+        .strip_prefix(&format!("{server_word}_"))
+        .unwrap_or(tool);
+    let tool_clean = tool_stripped
+        .strip_suffix("_mcp")
+        .unwrap_or(tool_stripped)
+        .replace('_', " ")
+        .trim()
+        .to_string();
+
+    format!("{server_clean}: {tool_clean}")
+}
+
+// ---------------------------------------------------------------------------
+// Base64
+// ---------------------------------------------------------------------------
+
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 with padding. Used for OSC 52 clipboard writes.
+pub fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
+        let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+        out.push(B64_ALPHABET[idx[0] as usize] as char);
+        out.push(B64_ALPHABET[idx[1] as usize] as char);
+        out.push(if chunk.len() > 1 {
+            B64_ALPHABET[idx[2] as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64_ALPHABET[idx[3] as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode base64, accepting both the standard and URL-safe alphabets and
+/// tolerating missing padding (JWT payloads omit it).
+pub fn b64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut acc: u32 = 0;
+    let mut bits: u8 = 0;
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    for c in input.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' | b'\n' | b'\r' => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Read at most `max_bytes` from the start of a file.
+pub fn read_head(path: &Path, max_bytes: usize) -> Option<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; max_bytes];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Read the last `max_bytes` of a file as lossy UTF-8.
+pub fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let size = f.metadata().ok()?.len();
+    let want = max_bytes.min(size);
+    f.seek(SeekFrom::Start(size - want)).ok()?;
+    let mut buf = vec![0u8; want as usize];
+    f.read_exact(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_formats() {
+        assert_eq!(compact_tokens(999), "999");
+        assert_eq!(compact_tokens(1_500), "1.5K");
+        assert_eq!(compact_tokens(2_400_000), "2.4M");
+        assert_eq!(compact_bytes(0), "");
+        assert_eq!(compact_bytes(2048), "2K");
+        assert_eq!(with_commas(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(compact_duration(45_000), "45s");
+        assert_eq!(compact_duration(192_000), "3m12s");
+        assert_eq!(compact_duration(7_500_000), "2h05m");
+        assert_eq!(compact_duration(0), "—");
+    }
+
+    #[test]
+    fn model_shortening() {
+        assert_eq!(short_model("claude-opus-4-5-20251101"), "opus-4-5");
+        assert_eq!(short_model("claude-opus-5"), "opus-5");
+        assert_eq!(short_model("gpt-5.3-codex"), "gpt-5.3-codex");
+        assert_eq!(short_model("gpt-5.5"), "gpt-5.5");
+    }
+
+    #[test]
+    fn mcp_names() {
+        assert_eq!(
+            pretty_mcp_name("mcp__Claude_in_Chrome__tabs_context_mcp"),
+            "Claude in Chrome: tabs context"
+        );
+        assert_eq!(
+            pretty_mcp_name("mcp__github__search_code"),
+            "github: search code"
+        );
+        // Server prefix repeated in the tool name is redundant.
+        assert_eq!(pretty_mcp_name("mcp__slack__slack_send"), "slack: send");
+        assert_eq!(pretty_mcp_name("Bash"), "Bash");
+    }
+
+    #[test]
+    fn abbreviation_expands_only_on_collision() {
+        let paths = vec![
+            "/home/flo/work/api".to_string(),
+            "/home/flo/personal/api".to_string(),
+            "/home/flo/cctop".to_string(),
+        ];
+        let out = abbreviate_paths(&paths);
+        assert_eq!(out[0], "work/api");
+        assert_eq!(out[1], "personal/api");
+        assert_eq!(out[2], "cctop"); // no collision, stays a leaf
+    }
+
+    #[test]
+    fn nice_maxima() {
+        assert_eq!(nice_max(0.0), 1.0);
+        assert_eq!(nice_max(87.0), 100.0);
+        assert_eq!(nice_max(230.0), 250.0);
+    }
+}
