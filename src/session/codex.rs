@@ -28,16 +28,54 @@ fn unwrap_exec(source: &str) -> Option<(String, Value)> {
     // The source can contain a patch or shell command mentioning `tools.`.
     // Only a real invocation is the tool delegated by the wrapper.
     let start = tool_call_start(source)?;
+    parse_tool_call(source, start).map(|(name, args, _)| (name, args))
+}
+
+/// Every `tools.*` call in an `exec` payload, in source order.
+///
+/// One entry can delegate to several tools at once — the agent batches them as
+/// `await Promise.all([tools.a(…), tools.b(…)])` — and each element is a real
+/// call that belongs in the activity pane. Returning only the first undercounted
+/// tool use and hid whichever commands came after it.
+///
+// ponytail: counts calls written in the source. A runtime fan-out such as
+// `ids.map(id => tools.write_stdin({session_id: id}))` is one call textually but
+// many at execution, so it still counts once. Reading the matching
+// `function_call_output` entries would recover the real number, if it matters.
+fn unwrap_exec_all(source: &str) -> Vec<(String, Value)> {
+    let mut calls = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = find_outside_strings(&source[from..], b"tools.") {
+        // `find_outside_strings` reports the offset *after* the match, so `start`
+        // always advances and the loop cannot spin on an unparseable call.
+        let start = from + offset;
+        match parse_tool_call(source, start) {
+            Some((name, args, end)) => {
+                calls.push((name, args));
+                from = end;
+            }
+            None => from = start,
+        }
+    }
+    calls
+}
+
+/// Parse one `tools.<name>(<args>)` call whose name begins at `start`, returning
+/// the name, its arguments, and the offset just past the closing parenthesis.
+fn parse_tool_call(source: &str, start: usize) -> Option<(String, Value, usize)> {
     let name_end =
         source[start..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))? + start;
     let name = &source[start..name_end];
     let open = source[name_end..].find('(')? + name_end;
     let body = parenthesized(source, open)?;
-    let body = body.trim();
-    let args = serde_json::from_str(body)
-        .or_else(|_| serde_json::from_str(&quote_bare_keys(body)))
-        .unwrap_or_else(|_| bound_json_string(source, open, body).unwrap_or(Value::Null));
-    Some((name.to_string(), args))
+    let trimmed = body.trim();
+    let args = serde_json::from_str(trimmed)
+        .or_else(|_| serde_json::from_str(&quote_bare_keys(trimmed)))
+        .unwrap_or_else(|_| bound_json_string(source, open, trimmed).unwrap_or(Value::Null));
+    // `parenthesized` yields `open + 1 .. open + offset`, so the closing paren
+    // sits at `open + offset` and the call ends one byte past it.
+    let end = open + body.len() + 2;
+    Some((name.to_string(), args, end))
 }
 
 /// Byte offset immediately after `tools.` in executable JavaScript, not inside
@@ -46,9 +84,10 @@ fn unwrap_exec(source: &str) -> Option<(String, Value)> {
 /// A directly awaited call is the most reliable signal, so it wins. But the
 /// agent also batches tools inside a wrapper — `await Promise.all([tools.a(…),
 /// tools.b(…)])` — where nothing is awaited directly and requiring `await
-/// tools.` left the raw JavaScript on screen. Fall back to the first call in
-/// that case; only its arguments are shown, as before, since the activity pane
-/// describes one tool per rollout entry.
+/// tools.` left the raw JavaScript on screen. Fall back to the first call there.
+///
+/// This picks a single representative call, for callers that want one name.
+/// Extraction records every call via `unwrap_exec_all`.
 fn tool_call_start(source: &str) -> Option<usize> {
     find_outside_strings(source, b"await tools.")
         .or_else(|| find_outside_strings(source, b"tools."))
@@ -453,59 +492,73 @@ pub fn extract(path: &Path) -> SessionData {
                     None => Value::Null,
                 };
                 let outer_name = p.get("name").and_then(Value::as_str).unwrap_or("unknown");
-                let name = if outer_name == "exec" {
-                    raw_args
-                        .and_then(unwrap_exec)
+                // An `exec` entry can delegate to more than one tool, so collect
+                // every delegated call and record each of them. Anything that
+                // resolves to nothing stays attributed to the wrapper itself.
+                let calls: Vec<(String, Value)> = if outer_name == "exec" {
+                    let nested: Vec<(String, Value)> = raw_args
+                        .map(unwrap_exec_all)
+                        .unwrap_or_default()
+                        .into_iter()
                         .map(|(nested_name, nested_args)| {
-                            let (name, nested_args) = normalise_exec_tool(nested_name, nested_args);
-                            args = nested_args;
-                            name
+                            normalise_exec_tool(nested_name, nested_args)
                         })
-                        .unwrap_or_else(|| outer_name.to_string())
-                } else {
-                    outer_name.to_string()
-                };
-                if effective_type == "custom_tool_call" {
-                    metrics.mcp_tool_count += 1;
-                    if !metrics.mcp_tools.iter().any(|t| t == &name) {
-                        metrics.mcp_tools.push(name.clone());
+                        .collect();
+                    if nested.is_empty() {
+                        vec![(outer_name.to_string(), std::mem::take(&mut args))]
+                    } else {
+                        nested
                     }
-                }
-                *metrics.tools.entry(name.clone()).or_insert(0) += 1;
-                metrics.tool_count += 1;
-
-                let mut delta = None;
-                let (short, full) = if name == "apply_patch"
-                    && let Some(raw) = args.as_str().or(raw_args.filter(|_| args.is_null()))
-                {
-                    let (summary, d) = extract::parse_apply_patch(raw);
-                    delta = Some(d);
-                    (summary, Some(raw.to_string()))
-                } else if args.is_null()
-                    && let Some(raw) = raw_args.filter(|r| !r.is_empty())
-                {
-                    // Non-JSON arguments are still worth showing verbatim.
-                    (extract::flatten_public(raw, 300), Some(raw.to_string()))
                 } else {
-                    extract::tool_detail(&name, &args)
+                    vec![(outer_name.to_string(), std::mem::take(&mut args))]
                 };
 
-                extract::push_tool_detail(
-                    &mut metrics.tool_details,
-                    &name,
-                    short,
-                    full,
-                    ts.to_string(),
-                    p.get("call_id").and_then(Value::as_str).map(str::to_string),
-                    None,
-                );
-                if let Some(d) = delta
-                    && let Some(list) = metrics.tool_details.get_mut(&name)
-                    && let Some(last) = list.last_mut()
-                {
-                    metrics.lines_added += d.added as u64;
-                    metrics.lines_removed += d.removed as u64;
-                    last.delta = Some(d);
+                for (name, args) in calls {
+                    if effective_type == "custom_tool_call" {
+                        metrics.mcp_tool_count += 1;
+                        if !metrics.mcp_tools.iter().any(|t| t == &name) {
+                            metrics.mcp_tools.push(name.clone());
+                        }
+                    }
+                    *metrics.tools.entry(name.clone()).or_insert(0) += 1;
+                    metrics.tool_count += 1;
+
+                    let mut delta = None;
+                    let (short, full) = if name == "apply_patch"
+                        && let Some(raw) = args.as_str().or(raw_args.filter(|_| args.is_null()))
+                    {
+                        let (summary, d) = extract::parse_apply_patch(raw);
+                        delta = Some(d);
+                        (summary, Some(raw.to_string()))
+                    } else if args.is_null()
+                        && let Some(raw) = raw_args.filter(|r| !r.is_empty())
+                    {
+                        // Non-JSON arguments are still worth showing verbatim.
+                        (extract::flatten_public(raw, 300), Some(raw.to_string()))
+                    } else {
+                        extract::tool_detail(&name, &args)
+                    };
+
+                    // Batched calls share the entry's `call_id`, so they also
+                    // share its measured duration. They ran concurrently, so a
+                    // common window is the honest reading.
+                    extract::push_tool_detail(
+                        &mut metrics.tool_details,
+                        &name,
+                        short,
+                        full,
+                        ts.to_string(),
+                        p.get("call_id").and_then(Value::as_str).map(str::to_string),
+                        None,
+                    );
+                    if let Some(d) = delta
+                        && let Some(list) = metrics.tool_details.get_mut(&name)
+                        && let Some(last) = list.last_mut()
+                    {
+                        metrics.lines_added += d.added as u64;
+                        metrics.lines_removed += d.removed as u64;
+                        last.delta = Some(d);
+                    }
                 }
             }
             "function_call_output" | "custom_tool_call_output" => {
@@ -738,6 +791,41 @@ text(r.output);"#;
             args,
             json!({"command": "sed -n '1,20p' Cargo.toml", "workdir": "/repo"})
         );
+    }
+
+    /// Regression: a batched entry is several tool calls, not one. Returning
+    /// only the first undercounted tool use and hid the later commands.
+    #[test]
+    fn collects_every_tool_in_a_batched_entry() {
+        let source = r#"const results = await Promise.all([
+  tools.exec_command({cmd:"ls -la","workdir":"/repo"}),
+  tools.exec_command({cmd:"cat Cargo.toml","workdir":"/repo"}),
+  tools.read_file({path:"src/main.rs"}),
+]);"#;
+        let calls = unwrap_exec_all(source);
+        let names: Vec<&str> = calls.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["exec_command", "exec_command", "read_file"]);
+        // Each keeps its own arguments, in source order.
+        assert_eq!(calls[0].1["cmd"], json!("ls -la"));
+        assert_eq!(calls[1].1["cmd"], json!("cat Cargo.toml"));
+        assert_eq!(calls[2].1["path"], json!("src/main.rs"));
+    }
+
+    /// A mention inside a patch string is not a call, even when real calls
+    /// surround it, and an unparseable call must not stall the scan.
+    #[test]
+    fn batched_scan_skips_strings_and_survives_bad_calls() {
+        let source = r#"const patch = "*** Begin Patch\n+source.find(\"await tools.\")\n*** End Patch";
+text(await tools.apply_patch(patch));
+const r = await Promise.all([tools.exec_command({cmd:"ls"})]);"#;
+        let names: Vec<String> = unwrap_exec_all(source)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, vec!["apply_patch", "exec_command"]);
+
+        // A truncated call yields nothing but still terminates.
+        assert!(unwrap_exec_all("await tools.exec_command({cmd:").is_empty());
     }
 
     /// Mixed and already-quoted keys must survive untouched, and a colon inside
