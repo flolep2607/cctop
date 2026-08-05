@@ -26,22 +26,36 @@ struct StaticParts {
 /// obscures whether the agent read, edited, or ran a command.
 fn unwrap_exec(source: &str) -> Option<(String, Value)> {
     // The source can contain a patch or shell command mentioning `tools.`.
-    // Only the awaited invocation is the tool delegated by the wrapper.
-    let start = awaited_tool_start(source)?;
+    // Only a real invocation is the tool delegated by the wrapper.
+    let start = tool_call_start(source)?;
     let name_end =
         source[start..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))? + start;
     let name = &source[start..name_end];
     let open = source[name_end..].find('(')? + name_end;
     let body = parenthesized(source, open)?;
-    let args = serde_json::from_str(body.trim())
-        .unwrap_or_else(|_| bound_json_string(source, open, body.trim()).unwrap_or(Value::Null));
+    let body = body.trim();
+    let args = serde_json::from_str(body)
+        .or_else(|_| serde_json::from_str(&quote_bare_keys(body)))
+        .unwrap_or_else(|_| bound_json_string(source, open, body).unwrap_or(Value::Null));
     Some((name.to_string(), args))
 }
 
-/// Byte offset immediately after `await tools.` in executable JavaScript, not
-/// inside a quoted patch/string argument.
-fn awaited_tool_start(source: &str) -> Option<usize> {
-    const PREFIX: &[u8] = b"await tools.";
+/// Byte offset immediately after `tools.` in executable JavaScript, not inside
+/// a quoted patch/string argument.
+///
+/// A directly awaited call is the most reliable signal, so it wins. But the
+/// agent also batches tools inside a wrapper — `await Promise.all([tools.a(…),
+/// tools.b(…)])` — where nothing is awaited directly and requiring `await
+/// tools.` left the raw JavaScript on screen. Fall back to the first call in
+/// that case; only its arguments are shown, as before, since the activity pane
+/// describes one tool per rollout entry.
+fn tool_call_start(source: &str) -> Option<usize> {
+    find_outside_strings(source, b"await tools.")
+        .or_else(|| find_outside_strings(source, b"tools."))
+}
+
+/// Byte offset immediately after `needle`, skipping string literals.
+fn find_outside_strings(source: &str, needle: &[u8]) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut quote = None;
     let mut escaped = false;
@@ -58,11 +72,77 @@ fn awaited_tool_start(source: &str) -> Option<usize> {
         }
         match byte {
             b'\'' | b'\"' | b'`' => quote = Some(byte),
-            _ if bytes[index..].starts_with(PREFIX) => return Some(index + PREFIX.len()),
+            _ if bytes[index..].starts_with(needle) => return Some(index + needle.len()),
             _ => {}
         }
     }
     None
+}
+
+/// Quote bare object keys so a JavaScript object literal parses as JSON.
+///
+/// `exec` is handed JavaScript, so payloads are literals like `{cmd:"ls"}`
+/// rather than JSON. Left unparsed, roughly two thirds of Codex tool calls
+/// reached the activity pane with no arguments, losing the command or file
+/// that makes the entry worth reading.
+///
+/// Only keys are rewritten. Values that are JavaScript expressions rather than
+/// literals still will not parse, and fall through to `bound_json_string`.
+fn quote_bare_keys(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 16);
+    let mut quote = None;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == q {
+                quote = None;
+            }
+            out.push(byte);
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'\"' | b'`') {
+            quote = Some(byte);
+            out.push(byte);
+            index += 1;
+            continue;
+        }
+        // A key can only start right after the object opens or a comma.
+        if matches!(byte, b'{' | b',') {
+            let key_start = index + 1 + count_spaces(&bytes[index + 1..]);
+            let key_end = key_start
+                + bytes[key_start..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+                    .count();
+            let colon = key_end + count_spaces(&bytes[key_end..]);
+            if key_end > key_start && bytes.get(colon) == Some(&b':') {
+                out.push(byte);
+                out.extend_from_slice(&bytes[index + 1..key_start]);
+                out.push(b'"');
+                out.extend_from_slice(&bytes[key_start..key_end]);
+                out.push(b'"');
+                // Leave the spacing and the colon to the normal path.
+                index = key_end;
+                continue;
+            }
+        }
+        out.push(byte);
+        index += 1;
+    }
+    // Only ASCII quotes were inserted, at ASCII boundaries.
+    String::from_utf8(out).unwrap_or_else(|_| source.to_string())
+}
+
+fn count_spaces(bytes: &[u8]) -> usize {
+    bytes.iter().take_while(|b| b.is_ascii_whitespace()).count()
 }
 
 /// Resolve the common `const patch = "..."; tools.apply_patch(patch)` shape.
@@ -625,6 +705,58 @@ text(result.output);"#;
         assert_eq!(
             args,
             json!({"command": "rg -n \"exec\" src", "workdir": "/repo"})
+        );
+    }
+
+    /// Regression: payloads are JavaScript object literals, so bare keys are
+    /// the norm. Requiring strict JSON dropped the arguments — and with them
+    /// the command shown in the activity pane.
+    #[test]
+    fn unwraps_bare_object_keys_from_javascript_literals() {
+        let source = r#"const r = await tools.write_stdin({session_id:50042,chars:"",yield_time_ms:1000});
+text(r.output);"#;
+        let (name, args) = unwrap_exec(source).expect("nested tool call");
+        assert_eq!(name, "write_stdin");
+        assert_eq!(
+            args,
+            json!({"session_id": 50042, "chars": "", "yield_time_ms": 1000})
+        );
+    }
+
+    /// Regression: batched calls are wrapped, so nothing is awaited directly
+    /// and the raw JavaScript was rendered instead of the delegated tool.
+    #[test]
+    fn unwraps_tools_batched_inside_a_wrapper() {
+        let source = r#"const results = await Promise.all([
+  tools.exec_command({cmd:"sed -n '1,20p' Cargo.toml","workdir":"/repo"}),
+  tools.exec_command({cmd:"ls -la","workdir":"/repo"}),
+]);"#;
+        let (name, args) = unwrap_exec(source).expect("nested tool call");
+        let (name, args) = normalise_exec_tool(name, args);
+        assert_eq!(name, "Bash");
+        assert_eq!(
+            args,
+            json!({"command": "sed -n '1,20p' Cargo.toml", "workdir": "/repo"})
+        );
+    }
+
+    /// Mixed and already-quoted keys must survive untouched, and a colon inside
+    /// a string value must not be mistaken for a key separator.
+    #[test]
+    fn key_quoting_leaves_strings_and_arrays_alone() {
+        assert_eq!(quote_bare_keys(r#"{"a":1}"#), r#"{"a":1}"#);
+        assert_eq!(quote_bare_keys(r#"{a:1,"b":2}"#), r#"{"a":1,"b":2}"#);
+        // Array elements are not keys.
+        assert_eq!(quote_bare_keys("[78591,8570]"), "[78591,8570]");
+        // A `key:` shape inside a string value is data, not syntax.
+        assert_eq!(
+            quote_bare_keys(r#"{cmd:"git log --format=x:y"}"#),
+            r#"{"cmd":"git log --format=x:y"}"#
+        );
+        // Nested objects in arrays still get their keys quoted.
+        assert_eq!(
+            quote_bare_keys(r#"{plan:[{step:"a",status:"done"}]}"#),
+            r#"{"plan":[{"step":"a","status":"done"}]}"#
         );
     }
 
