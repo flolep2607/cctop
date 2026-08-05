@@ -11,6 +11,49 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// Exact line deltas from OpenCode's built-in editing tools.  `write` can
+/// replace an existing file wholesale, so its removed lines cannot be known
+/// from the recorded input and are deliberately not guessed.
+fn tool_delta(name: &str, state: &Value) -> Option<super::Delta> {
+    if state.get("status").and_then(Value::as_str) != Some("completed") {
+        return None;
+    }
+    let input = state.get("input")?;
+    match name {
+        "edit" => {
+            let removed = input
+                .get("oldString")
+                .or_else(|| input.get("old_string"))
+                .and_then(Value::as_str)?
+                .lines()
+                .count() as u32;
+            let added = input
+                .get("newString")
+                .or_else(|| input.get("new_string"))
+                .and_then(Value::as_str)?
+                .lines()
+                .count() as u32;
+            Some(super::Delta {
+                added,
+                removed,
+                ..Default::default()
+            })
+        }
+        "apply_patch" => input
+            .get("patch")
+            .and_then(Value::as_str)
+            .map(|patch| extract::parse_apply_patch(patch).1),
+        _ => None,
+    }
+}
+
+fn tool_duration_ms(state: &Value) -> Option<i64> {
+    let time = state.get("time")?;
+    let start = time.get("start")?.as_i64()?;
+    let end = time.get("end")?.as_i64()?;
+    Some((end - start).max(0))
+}
+
 fn readonly(path: &Path) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
         path,
@@ -251,6 +294,8 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             let state = part.get("state").unwrap_or(&Value::Null);
             let args = state.get("input").unwrap_or(&Value::Null);
             let (short, full) = extract::tool_detail(name, args);
+            let delta = tool_delta(name, state);
+            let duration_ms = tool_duration_ms(state);
             let ts = state
                 .get("time")
                 .and_then(|v| v.get("start"))
@@ -270,6 +315,15 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             );
             *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
             data.metrics.tool_count += 1;
+            if let Some(detail) = data
+                .metrics
+                .tool_details
+                .get_mut(name)
+                .and_then(|details| details.last_mut())
+            {
+                detail.delta = delta;
+                detail.dur_ms = duration_ms;
+            }
         }
     }
 
@@ -356,6 +410,16 @@ mod tests {
         )
         .unwrap();
         db.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "part_2",
+                "ses_1",
+                1_785_888_062_000i64,
+                r#"{"type":"tool","tool":"edit","callID":"call_2","state":{"input":{"filePath":"src/main.rs","oldString":"old\nline","newString":"new\nlines\nhere"},"time":{"start":1785888062000,"end":1785888062750},"status":"completed","output":"Updated file"}}"#
+            ],
+        )
+        .unwrap();
+        db.execute(
             "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
             params![
                 "msg_1",
@@ -383,6 +447,11 @@ mod tests {
         assert_eq!(data.tokens.total, 240);
         assert!((data.costs.total - 0.75).abs() < 1e-9);
         assert_eq!(data.metrics.tools.get("bash"), Some(&1));
+        let edit = &data.metrics.tool_details["edit"][0];
+        assert_eq!(edit.d, "src/main.rs");
+        assert_eq!(edit.dur_ms, Some(750));
+        let delta = edit.delta.as_ref().unwrap();
+        assert_eq!((delta.added, delta.removed), (3, 2));
 
         std::fs::remove_file(path).unwrap();
     }

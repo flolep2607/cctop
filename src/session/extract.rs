@@ -161,6 +161,13 @@ fn str_field<'a>(input: &'a Value, key: &str) -> &'a str {
     input.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
+fn file_field(input: &Value) -> &str {
+    ["file_path", "filePath", "path"]
+        .into_iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
 /// Short display text and full clipboard text for a tool invocation.
 ///
 /// The two differ only where the display form is truncated (Bash commands,
@@ -172,19 +179,19 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
 
     // Tools whose full argument is worth keeping for the clipboard.
     match name {
-        "Bash" => {
+        "Bash" | "bash" => {
             let cmd = str_field(input, "command");
             let short = flatten(cmd, 300);
             let full = (full_differs(&short, cmd)).then(|| cmd.to_string());
             return (short, full);
         }
-        "Agent" => {
+        "Agent" | "agent" => {
             let p = str_field(input, "prompt");
             let short = flatten(p, 200);
             let full = (full_differs(&short, p)).then(|| p.to_string());
             return (short, full);
         }
-        "TaskCreate" => {
+        "TaskCreate" | "task" => {
             let d = str_field(input, "description");
             let short = flatten(d, 200);
             let full = (full_differs(&short, d)).then(|| d.to_string());
@@ -194,11 +201,11 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
     }
 
     let s = match name {
-        "Read" | "Edit" | "Write" => str_field(input, "file_path").to_string(),
-        "Glob" => str_field(input, "pattern").to_string(),
-        "WebFetch" => str_field(input, "url").to_string(),
-        "WebSearch" => str_field(input, "query").to_string(),
-        "Grep" => {
+        "Read" | "read" | "Edit" | "edit" | "Write" | "write" => file_field(input).to_string(),
+        "Glob" | "glob" => str_field(input, "pattern").to_string(),
+        "WebFetch" | "webfetch" => str_field(input, "url").to_string(),
+        "WebSearch" | "websearch" => str_field(input, "query").to_string(),
+        "Grep" | "grep" => {
             let pattern = str_field(input, "pattern");
             let path = str_field(input, "path");
             if path.is_empty() {
@@ -207,6 +214,12 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
                 format!("{pattern} in {path}")
             }
         }
+        "ApplyPatch" | "apply_patch" => input
+            .get("patch")
+            .or_else(|| input.get("input"))
+            .and_then(Value::as_str)
+            .map(|patch| parse_apply_patch(patch).0)
+            .unwrap_or_default(),
         "ToolSearch" => MCP_UUID_PREFIX
             .replace_all(str_field(input, "query"), "")
             .into_owned(),

@@ -99,6 +99,9 @@ pub struct Session {
     pub total_cost: Option<f64>,
     /// False when the provider's transcript contains no billable usage data.
     pub cost_available: bool,
+    /// Recorded usage has a zero total cost, as with a free model. This stays
+    /// distinct from a session that simply has not recorded any usage yet.
+    pub cost_is_free: bool,
     pub cost_hour: f64,
     pub cost_today: f64,
     pub costs_by_day: HashMap<String, HashMap<String, f64>>,
@@ -137,6 +140,7 @@ impl Session {
             tool_count: 0,
             total_cost: Some(0.0),
             cost_available: true,
+            cost_is_free: false,
             cost_hour: 0.0,
             cost_today: 0.0,
             costs_by_day: HashMap::new(),
