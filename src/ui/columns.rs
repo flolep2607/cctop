@@ -42,7 +42,7 @@ pub const COLUMNS: &[Column] = &[
         label: " ",
         width: Some(1),
         right_align: false,
-        desc: "Status: green ● working (brighter = more recent), amber ● awaiting input, red ● API error, ○ stopped",
+        desc: "Status: ● working (green = fresh, greyer = idle), amber ● awaiting input, red ● API error, ○ stopped",
     },
     Column {
         id: ColumnId::Last,

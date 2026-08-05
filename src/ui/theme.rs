@@ -27,6 +27,9 @@ pub const DESKTOP_COWORK: Color = Color::Indexed(183);
 
 pub const SELECTED_BG: Color = Color::Indexed(236);
 pub const HEADER_BG: Color = Color::Indexed(236);
+/// Tint for rows the user has marked for a batch action, so marks read at a
+/// glance even when nothing is selected. Kept dim so it stays behind the data.
+pub const MARKED_BG: Color = Color::Indexed(53);
 
 pub fn label() -> Style {
     Style::default().fg(LABEL).add_modifier(Modifier::BOLD)
@@ -83,15 +86,17 @@ pub fn age_color(last_active_secs: Option<i64>, running: bool) -> Color {
     Color::Indexed(255 - (ratio * 17.0).round() as u8)
 }
 
-/// Shade of green by how recently a running session did anything.
+/// How a running session's dot reads: bright green when freshly active, fading
+/// toward grey as it goes quiet. The shape already carries running-vs-stopped,
+/// so hue may dim without the dot disappearing into the background.
 pub fn running_dot_color(age_secs: Option<i64>) -> Color {
     match age_secs {
-        None => COST_LOW,
+        None => Color::Indexed(82),
         Some(s) if s < 30 => Color::Indexed(82),
         Some(s) if s < 300 => COST_LOW,
         Some(s) if s < 1_800 => Color::Indexed(71),
-        Some(s) if s < 7_200 => Color::Indexed(28),
-        _ => Color::Indexed(22),
+        Some(s) if s < 7_200 => DIM,
+        _ => DIMMER,
     }
 }
 
@@ -121,7 +126,7 @@ pub fn context_color(percent: f64) -> Color {
 /// Gradient for CPU-like series: green through amber to red.
 pub fn spark_cpu(ratio: f64) -> Color {
     match ratio {
-        r if r <= 0.01 => Color::Indexed(22),
+        r if r <= 0.01 => Color::Indexed(236),
         r if r <= 0.30 => Color::Indexed(71),
         r if r <= 0.50 => Color::Indexed(114),
         r if r <= 0.70 => Color::Indexed(186),
@@ -133,7 +138,7 @@ pub fn spark_cpu(ratio: f64) -> Color {
 /// Gradient for spend series, same shape as CPU but tuned a shade cooler.
 pub fn spark_spend(ratio: f64) -> Color {
     match ratio {
-        r if r <= 0.01 => Color::Indexed(22),
+        r if r <= 0.01 => Color::Indexed(236),
         r if r <= 0.25 => Color::Indexed(71),
         r if r <= 0.50 => Color::Indexed(114),
         r if r <= 0.75 => Color::Indexed(186),
@@ -172,10 +177,7 @@ impl Gradient {
 
     /// Colour for an empty slot, so the baseline stays visible.
     pub fn baseline(&self) -> Color {
-        match self {
-            Gradient::Cpu | Gradient::Spend => Color::Indexed(22),
-            Gradient::Accent => Color::Indexed(236),
-        }
+        Color::Indexed(236)
     }
 }
 

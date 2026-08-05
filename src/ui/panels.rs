@@ -7,6 +7,7 @@ use super::theme;
 use crate::pricing::{Plan, Provider};
 use crate::session::{Session, SessionData, Subagent, SubagentStatus, Surface};
 use crate::util;
+use chrono::{DateTime, Utc};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
@@ -65,6 +66,18 @@ fn field(name: &str, val: impl Into<String>) -> Line<'static> {
         Span::raw(" "),
         value(val),
     ])
+}
+
+/// Wall time advances while a local agent is live, including pauses between
+/// transcript events. Once it exits, preserve the final activity span.
+fn wall_duration_ms(session: &Session, now: DateTime<Utc>) -> Option<i64> {
+    let started = util::parse_ts(&session.started_at)?;
+    let ended = if session.is_running() {
+        now
+    } else {
+        util::parse_ts(&session.last_active)?
+    };
+    Some((ended.timestamp_millis() - started.timestamp_millis()).max(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -189,14 +202,8 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
             util::long_duration(data.metrics.api_duration_ms as i64),
         ));
     }
-    if let (Some(a), Some(b)) = (
-        util::parse_ts(&session.started_at),
-        util::parse_ts(&session.last_active),
-    ) {
-        lines.push(field(
-            "Wall",
-            util::long_duration(b.timestamp_millis() - a.timestamp_millis()),
-        ));
+    if let Some(wall_ms) = wall_duration_ms(session, Utc::now()) {
+        lines.push(field("Wall", util::long_duration(wall_ms)));
     }
 
     let m = &data.metrics;
@@ -1286,6 +1293,21 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect();
         assert!(text.contains("boom"));
+    }
+
+    #[test]
+    fn wall_time_advances_for_live_sessions_and_freezes_when_stopped() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:02:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut session = Session::new(Provider::Claude, "x".into());
+        session.started_at = "2026-01-01T00:00:00Z".into();
+        session.last_active = "2026-01-01T00:00:49Z".into();
+
+        assert_eq!(wall_duration_ms(&session, now), Some(49_000));
+
+        session.process = Some(crate::proc::ProcInfo::default());
+        assert_eq!(wall_duration_ms(&session, now), Some(120_000));
     }
 
     #[test]

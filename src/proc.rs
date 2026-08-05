@@ -7,7 +7,7 @@
 
 use crate::session::Session;
 use std::collections::{HashMap, HashSet};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
 
 /// Cycles an exited child stays visible before being dropped from the list.
 /// Without this, short-lived tool subprocesses flicker in and out.
@@ -31,6 +31,28 @@ pub struct ProcInfo {
     pub memory: u64,
     pub command: String,
     pub process_list: Vec<ProcEntry>,
+}
+
+/// Gracefully stop an agent root process by PID.
+///
+/// The process table is refreshed immediately before sending the signal, so a
+/// PID that exited after the confirmation dialog is never treated as a success.
+pub fn terminate(pid: u32) -> Result<(), String> {
+    let mut sys = System::new();
+    let process_pid = Pid::from_u32(pid);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[process_pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let process = sys
+        .process(process_pid)
+        .ok_or_else(|| format!("process {pid} has already exited"))?;
+    match process.kill_with(Signal::Term) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!("permission denied stopping process {pid}")),
+        None => Err("graceful termination is not supported on this platform".into()),
+    }
 }
 
 /// A running agent with no matching transcript yet.
