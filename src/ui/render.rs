@@ -404,16 +404,26 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
             Surface::Cli if s.provider == Provider::Cursor => theme::CURSOR,
             Surface::Cli => Color::Reset,
         },
-        ColumnId::Cost => s.total_cost.map(theme::cost_color).unwrap_or(theme::DIM),
+        ColumnId::Cost => {
+            if s.cost_is_free {
+                theme::DIMMER
+            } else {
+                s.total_cost.map(theme::cost_color).unwrap_or(theme::DIM)
+            }
+        }
         ColumnId::CostHour => {
-            if s.cost_hour > 0.0 {
+            if s.cost_is_free {
+                theme::DIMMER
+            } else if s.cost_hour > 0.0 {
                 theme::cost_color(s.cost_hour)
             } else {
                 theme::DIMMER
             }
         }
         ColumnId::CostToday => {
-            if s.cost_today > 0.0 {
+            if s.cost_is_free {
+                theme::DIMMER
+            } else if s.cost_today > 0.0 {
                 theme::cost_color(s.cost_today)
             } else {
                 theme::DIMMER

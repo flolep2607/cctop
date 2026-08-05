@@ -88,6 +88,7 @@ fn format_row(index: usize, s: &Session, label: &str, width: usize) -> String {
     let (label_w, model_w) = flex_widths(width);
     let cost = match s.total_cost {
         _ if !s.cost_available => "—".into(),
+        _ if s.cost_is_free => "FREE".into(),
         Some(c) => util::compact_usd(c),
         None => "incl".into(),
     };

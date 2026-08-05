@@ -37,6 +37,27 @@ fn note(text: &str) -> Vec<Line<'static>> {
     vec![Line::from(dim(text.to_string()))]
 }
 
+fn is_free_model(model: &crate::session::ModelBreakdown) -> bool {
+    model.total == 0.0
+        && model.tokens.all_input() + model.tokens.output + model.tokens.reasoning_output > 0
+}
+
+fn displayed_cost(amount: f64, free: bool) -> String {
+    if free {
+        "FREE".into()
+    } else {
+        util::adaptive_usd(amount)
+    }
+}
+
+fn cost_style(amount: f64, free: bool) -> Style {
+    Style::default().fg(if free {
+        theme::DIMMER
+    } else {
+        theme::cost_color(amount)
+    })
+}
+
 /// `LABEL   value`, with labels padded to a shared column.
 fn field(name: &str, val: impl Into<String>) -> Line<'static> {
     Line::from(vec![
@@ -764,7 +785,7 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         return note("Cost and token usage are not present in Cursor transcripts.");
     }
 
-    if included {
+    if included && !session.cost_is_free {
         lines.push(Line::from(vec![
             label("Total cost"),
             Span::raw("  "),
@@ -782,10 +803,8 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         label("Total cost"),
         Span::raw("  "),
         Span::styled(
-            util::compact_usd(data.costs.total),
-            Style::default()
-                .fg(theme::cost_color(data.costs.total))
-                .add_modifier(Modifier::BOLD),
+            displayed_cost(data.costs.total, session.cost_is_free),
+            cost_style(data.costs.total, session.cost_is_free).add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(dim(
@@ -823,21 +842,22 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         lines.push(Line::from(vec![
             label(&format!("  {name:<10}")),
             Span::styled(
-                format!("{:>10}", util::adaptive_usd(amount)),
-                Style::default().fg(theme::cost_color(amount)),
+                format!("{:>10}", displayed_cost(amount, session.cost_is_free)),
+                cost_style(amount, session.cost_is_free),
             ),
         ]));
     }
 
     // Per-model breakdown.
     for mb in &data.model_breakdown {
+        let free_model = is_free_model(mb);
         lines.push(Line::default());
         lines.push(Line::from(vec![
             value(mb.model.clone()),
             Span::raw("  "),
             Span::styled(
-                util::compact_usd(mb.total),
-                Style::default().fg(theme::cost_color(mb.total)),
+                displayed_cost(mb.total, free_model),
+                cost_style(mb.total, free_model),
             ),
         ]));
         let rows: [(&str, u64, f64); 5] = [
@@ -864,8 +884,8 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
                 value(format!("{:>8}", util::compact_tokens(tokens))),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{:>10}", util::adaptive_usd(amount)),
-                    Style::default().fg(theme::cost_color(amount)),
+                    format!("{:>10}", displayed_cost(amount, free_model)),
+                    cost_style(amount, free_model),
                 ),
             ]));
         }
@@ -1285,6 +1305,36 @@ mod tests {
             .collect();
         assert!(text.contains("included in plan"));
         assert!(text.contains("$4.25"));
+    }
+
+    #[test]
+    fn cost_panel_labels_free_model_usage() {
+        let mut s = Session::new(Provider::OpenCode, "x".into());
+        s.cost_is_free = true;
+        let data = SessionData {
+            model_breakdown: vec![crate::session::ModelBreakdown {
+                model: "deepseek-v4-flash-free".into(),
+                tokens: crate::session::Tokens {
+                    input: 100,
+                    output: 20,
+                    cache_read: 50,
+                    reasoning_output: 10,
+                    total: 180,
+                    ..Default::default()
+                },
+                costs: crate::session::Costs::default(),
+                total: 0.0,
+            }],
+            ..Default::default()
+        };
+        let lines = cost(&s, Some(&data), Plan::Retail);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("deepseek-v4-flash-free  FREE"));
+        assert!(!text.contains("$0.00"));
+        assert!(text.matches("FREE").count() >= 8, "{text}");
     }
 
     #[test]

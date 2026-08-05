@@ -91,6 +91,9 @@ impl Loader {
             s.tool_count = m.tool_count;
             s.total_cost =
                 (s.cost_available && !plan.includes(s.provider)).then_some(data.costs.total);
+            s.cost_is_free = s.cost_available
+                && data.costs.total == 0.0
+                && data.tokens.all_input() + data.tokens.output > 0;
             if !data.last_model.is_empty() {
                 s.model = data.last_model.clone();
             }

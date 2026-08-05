@@ -179,12 +179,15 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         ColumnId::Duration => util::session_duration(&s.started_at, &s.last_active),
         ColumnId::Cost => match s.total_cost {
             _ if !s.cost_available => "─".into(),
+            _ if s.cost_is_free => "FREE".into(),
             Some(c) => util::compact_usd(c),
             None => "incl".into(),
         },
         ColumnId::CostHour => {
             if !s.cost_available {
                 "─".into()
+            } else if s.cost_is_free {
+                "FREE".into()
             } else if s.total_cost.is_none() {
                 "incl".into()
             } else if s.cost_hour > 0.0 {
@@ -196,6 +199,8 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         ColumnId::CostToday => {
             if !s.cost_available {
                 "─".into()
+            } else if s.cost_is_free {
+                "FREE".into()
             } else if s.total_cost.is_none() {
                 "incl".into()
             } else if s.cost_today > 0.0 {
@@ -358,6 +363,18 @@ mod tests {
         let mut paid = session("b");
         paid.total_cost = Some(0.0);
         assert_eq!(compare(ColumnId::Cost, &free, &paid, &now), Ordering::Less);
+    }
+
+    #[test]
+    fn free_usage_is_labeled_in_every_cost_column() {
+        let mut s = session("free");
+        s.cost_is_free = true;
+        s.total_cost = Some(0.0);
+
+        let now = chrono::Utc::now();
+        assert_eq!(render_cell(ColumnId::Cost, &s, &now), "FREE");
+        assert_eq!(render_cell(ColumnId::CostHour, &s, &now), "FREE");
+        assert_eq!(render_cell(ColumnId::CostToday, &s, &now), "FREE");
     }
 
     #[test]
