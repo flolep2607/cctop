@@ -231,6 +231,7 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
             None => String::new(),
         },
         "TaskList" => "(list)".to_string(),
+        "web__run" | "web.run" => web_run_detail(input),
         "write_stdin" => {
             // Codex names this field `chars`; an empty one means the call is
             // just polling the session for more output, not writing anything.
@@ -285,6 +286,39 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
         _ => generic_detail(input),
     };
     (s, None)
+}
+
+/// Summarise the meaningful target of Codex's bundled web tool. Its payload
+/// commonly also carries `response_length`, which is display configuration,
+/// not what the agent actually asked the web service to do.
+fn web_run_detail(input: &Value) -> String {
+    // Keep the query-like operations first: a single call can include several
+    // operation types, but the search is normally the useful activity detail.
+    for (key, field, label) in [
+        ("search_query", "q", "search"),
+        ("image_query", "q", "images"),
+        ("open", "ref_id", "open"),
+        ("find", "pattern", "find"),
+        ("click", "ref_id", "click"),
+        ("finance", "ticker", "finance"),
+        ("weather", "location", "weather"),
+        ("sports", "league", "sports"),
+        ("time", "utc_offset", "time"),
+    ] {
+        let Some(items) = input.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let targets = items
+            .iter()
+            .filter_map(|item| item.get(field).and_then(Value::as_str))
+            .filter(|value| !value.is_empty())
+            .take(4)
+            .collect::<Vec<_>>();
+        if !targets.is_empty() {
+            return format!("{label}: {}", truncate_chars(&targets.join(" · "), 120));
+        }
+    }
+    generic_detail(input)
 }
 
 fn truncate_chars(s: &str, limit: usize) -> String {
@@ -517,6 +551,27 @@ mod tests {
     fn generic_joins_arrays() {
         let (s, _) = tool_detail("mcp__x__y", &json!({"keywords": ["a", "b", "c"]}));
         assert_eq!(s, "a, b, c");
+    }
+
+    #[test]
+    fn codex_web_run_shows_queries_not_response_length() {
+        let (s, _) = tool_detail(
+            "web__run",
+            &json!({
+                "search_query": [{"q": "GitHub Actions tag from Cargo version"}],
+                "response_length": "medium"
+            }),
+        );
+        assert_eq!(s, "search: GitHub Actions tag from Cargo version");
+    }
+
+    #[test]
+    fn codex_web_run_summarises_multiple_request_targets() {
+        let (s, _) = tool_detail(
+            "web__run",
+            &json!({"open": [{"ref_id": "turn1search0"}, {"ref_id": "turn1search1"}]}),
+        );
+        assert_eq!(s, "open: turn1search0 · turn1search1");
     }
 
     #[test]
