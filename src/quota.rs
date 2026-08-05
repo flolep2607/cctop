@@ -12,6 +12,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Window {
     pub label: &'static str,
     pub pct: u32,
+    /// Fixed length of this window, when the provider documents one.
+    pub duration: Option<Duration>,
     /// Reset time as a Unix timestamp in seconds.
     pub resets_at: Option<i64>,
 }
@@ -300,14 +302,22 @@ fn short_error(e: &impl std::fmt::Display) -> String {
     crate::util::truncate(one_line, 40)
 }
 
-/// Accept either seconds or milliseconds; the two providers differ.
+/// Accept numeric epochs (seconds or milliseconds) and RFC 3339 timestamps.
+///
+/// Claude's OAuth endpoint uses the latter while Codex uses the former.
 fn as_epoch_secs(v: Option<&Value>) -> Option<i64> {
-    let n = v?.as_f64()?;
-    Some(if n > 1e12 {
-        (n / 1000.0) as i64
-    } else {
-        n as i64
-    })
+    match v? {
+        Value::Number(n) => {
+            let n = n.as_f64()?;
+            Some(if n > 1e12 {
+                (n / 1000.0) as i64
+            } else {
+                n as i64
+            })
+        }
+        Value::String(timestamp) => util::parse_ts(timestamp).map(|dt| dt.timestamp()),
+        _ => None,
+    }
 }
 
 pub fn fetch_claude() -> ProviderStatus {
@@ -334,13 +344,17 @@ pub fn fetch_claude() -> ProviderStatus {
             .map(str::to_string),
         ..Default::default()
     };
-    for (key, label) in [("five_hour", "5h"), ("seven_day", "7d")] {
+    for (key, label, duration) in [
+        ("five_hour", "5h", Duration::from_secs(5 * 60 * 60)),
+        ("seven_day", "7d", Duration::from_secs(7 * 24 * 60 * 60)),
+    ] {
         if let Some(w) = data.get(key)
             && let Some(util) = w.get("utilization").and_then(Value::as_f64)
         {
             q.windows.push(Window {
                 label,
                 pct: util.round() as u32,
+                duration: Some(duration),
                 resets_at: as_epoch_secs(w.get("resets_at")),
             });
         }
@@ -390,6 +404,7 @@ pub fn fetch_codex() -> ProviderStatus {
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0)
                 .round() as u32,
+            duration: Some(Duration::from_secs(5 * 60 * 60)),
             resets_at: as_epoch_secs(w.get("reset_at")),
         });
     }
@@ -403,6 +418,7 @@ pub fn fetch_codex() -> ProviderStatus {
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0)
                 .round() as u32,
+            duration: Some(Duration::from_secs(5 * 60 * 60)),
             resets_at: as_epoch_secs(w.get("reset_at")),
         });
         if crl.get("limit_reached").and_then(Value::as_bool) == Some(true) {
@@ -481,6 +497,14 @@ mod tests {
             Some(1782705509)
         );
         assert_eq!(as_epoch_secs(None), None);
+    }
+
+    #[test]
+    fn epoch_accepts_claude_rfc3339_reset_times() {
+        assert_eq!(
+            as_epoch_secs(Some(&serde_json::json!("2026-08-06T12:34:56Z"))),
+            Some(1_786_019_696)
+        );
     }
 
     #[test]
