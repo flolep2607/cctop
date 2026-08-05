@@ -45,6 +45,23 @@ macOS will quarantine an unsigned download. If Gatekeeper blocks it:
 xattr -d com.apple.quarantine /usr/local/bin/cctop
 ```
 
+### Staying up to date
+
+A downloaded binary has no package manager behind it, so `cctop --update`
+fetches the newest release for your platform and replaces the running
+executable in place:
+
+```bash
+cctop --update
+```
+
+cctop checks for a new release once a day in the background and, when one
+exists, says so in the footer. It never updates itself: the check only reports,
+and replacing the binary always takes an explicit `--update`. If you installed
+with `cargo install` or a package manager, update it the same way you installed
+it — `--update` will refuse rather than overwrite a managed install it cannot
+write to.
+
 ### With cargo
 
 ```bash
@@ -79,6 +96,7 @@ cctop --json          # dump full session data as JSON
 cctop --plan max      # treat Claude usage as bundled
 cctop --delay 5       # refresh every 5 seconds
 cctop --clear-cache   # re-extract all session activity; keeps preferences/pricing
+cctop --update        # replace this binary with the newest release
 ```
 
 ### Keys

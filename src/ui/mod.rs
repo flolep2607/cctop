@@ -149,6 +149,8 @@ enum Response {
     Quota(Box<Quota>),
     /// Pricing landed, so cached costs are stale and a reload is due.
     PricingReady,
+    /// A newer release exists. Reported once; cctop never updates itself.
+    UpdateAvailable(String),
     Terminated {
         session_key: String,
         result: Result<(), String>,
@@ -311,6 +313,8 @@ pub struct App {
     pub global_spend: History,
 
     pub quota: Quota,
+    /// Version of a newer published release, when one exists.
+    pub update_available: Option<String>,
     pub status: Option<(String, Instant)>,
     /// When cctop started, used by the tool-activity "live" filter.
     pub started_at: String,
@@ -391,6 +395,7 @@ impl App {
             global_cpu: History::default(),
             global_spend: History::default(),
             quota: Quota::default(),
+            update_available: None,
             status: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             prefs,
@@ -897,7 +902,15 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
             let _ = tx.send(Response::PricingReady);
         });
     }
-    spawn_quota_poller(res_tx);
+    spawn_quota_poller(res_tx.clone());
+
+    // One cached check per day, off the UI thread. Only ever reports: replacing
+    // the binary stays behind an explicit `--update`.
+    std::thread::spawn(move || {
+        if let Some(version) = crate::update::available_update() {
+            let _ = res_tx.send(Response::UpdateAvailable(version));
+        }
+    });
 
     let mut app = App::new(args.plan, req_tx.clone());
     app.refresh_secs = args.delay;
@@ -1013,6 +1026,10 @@ fn event_loop(
                 }
                 Ok(Response::Quota(q)) => {
                     app.quota = *q;
+                    app.needs_redraw = true;
+                }
+                Ok(Response::UpdateAvailable(version)) => {
+                    app.update_available = Some(version);
                     app.needs_redraw = true;
                 }
                 Ok(Response::PricingReady) => {
