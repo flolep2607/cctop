@@ -82,7 +82,7 @@ jobs:
           generate_release_notes: true
 
   build:
-    needs: create-release
+    needs: [prepare-release, create-release]
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -122,7 +122,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   publish-crate:
-    needs: build
+    needs: [prepare-release, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
