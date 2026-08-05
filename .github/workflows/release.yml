@@ -60,6 +60,8 @@ jobs:
               echo "::error::release tag $tag already exists; bump Cargo.toml before releasing"
               exit 1
             fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag --annotate "$tag" --message "Release $tag"
             git push origin "refs/tags/$tag"
           fi

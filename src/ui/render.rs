@@ -388,13 +388,14 @@ fn session_row(
 
 fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) -> Color {
     match id {
-        ColumnId::Status => {
-            if s.is_running() {
+        ColumnId::Status => match s.activity_state {
+            crate::session::ActivityState::WaitingForInput => theme::COST_MID,
+            crate::session::ActivityState::ApiError => theme::COST_HIGH,
+            crate::session::ActivityState::Working if s.is_running() => {
                 theme::running_dot_color(age_secs)
-            } else {
-                theme::DIM
             }
-        }
+            crate::session::ActivityState::Working => theme::DIM,
+        },
         ColumnId::Last => theme::age_color(age_secs, s.is_running()),
         ColumnId::Model => theme::model_color(&s.model),
         ColumnId::Project => match s.surface {

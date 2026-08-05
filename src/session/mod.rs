@@ -26,6 +26,19 @@ pub enum Surface {
     DesktopCowork,
 }
 
+/// What a live agent is doing, inferred from the newest transcript event.
+///
+/// This deliberately captures only states that have a clear user-facing
+/// meaning.  A missing or unrecognised event remains normal work rather than
+/// guessing that the agent is stalled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActivityState {
+    #[default]
+    Working,
+    WaitingForInput,
+    ApiError,
+}
+
 impl Surface {
     pub fn is_desktop(&self) -> bool {
         matches!(self, Surface::DesktopCode | Surface::DesktopCowork)
@@ -114,6 +127,8 @@ pub struct Session {
     /// Liveness inferred from a growing transcript when no per-session process
     /// exists (currently Cursor native agents).
     pub inferred_running: bool,
+    /// A transcript-derived state that refines the liveness dot.
+    pub activity_state: ActivityState,
 
     // --- Rate tracking ---
     pub tokens_per_min: f64,
@@ -151,6 +166,7 @@ impl Session {
             last_tool: String::new(),
             process: None,
             inferred_running: false,
+            activity_state: ActivityState::Working,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
         }
@@ -181,6 +197,213 @@ impl Session {
                     &self.abbrev_label
                 }
             })
+    }
+}
+
+/// Infer a meaningful state from the newest session event.
+pub fn extract_activity_state(session: &Session) -> ActivityState {
+    let Some(file) = session.data_file.as_ref() else {
+        return ActivityState::Working;
+    };
+    if session.provider == crate::pricing::Provider::OpenCode {
+        return opencode::extract_activity_state(file, &session.session_id);
+    }
+    let Some(text) = crate::util::read_tail(file, 65_536) else {
+        return ActivityState::Working;
+    };
+
+    for line in text.lines().rev() {
+        let Ok(item) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if is_api_error_event(&item) {
+            return ActivityState::ApiError;
+        }
+        if is_waiting_for_input_event(session.provider, &item) {
+            return ActivityState::WaitingForInput;
+        }
+        if is_passive_event(&item) {
+            continue;
+        }
+        // The newest meaningful event was ordinary progress (a tool call,
+        // result, or stream event), so do not let an older completed answer
+        // make the row look like it is awaiting input.
+        return ActivityState::Working;
+    }
+    ActivityState::Working
+}
+
+/// Token counters and turn metadata are often appended after the event that
+/// actually describes the agent's state.  Ignore them while walking backwards
+/// so a finished response is still shown as waiting for the user.
+fn is_passive_event(item: &serde_json::Value) -> bool {
+    let kind = item
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if matches!(kind, "session_meta" | "turn_context") {
+        return true;
+    }
+    kind == "event_msg"
+        && item
+            .get("payload")
+            .and_then(|p| p.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some("token_count")
+}
+
+fn is_api_error_event(item: &serde_json::Value) -> bool {
+    let kind = item
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let subtype = item
+        .get("subtype")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if matches!(kind, "error" | "api_error") || matches!(subtype, "api_error" | "error") {
+        return true;
+    }
+    let payload = item.get("payload").unwrap_or(item);
+    matches!(
+        payload.get("type").and_then(serde_json::Value::as_str),
+        Some("error" | "api_error" | "stream_error" | "turn_aborted")
+    )
+}
+
+fn is_waiting_for_input_event(
+    provider: crate::pricing::Provider,
+    item: &serde_json::Value,
+) -> bool {
+    match provider {
+        crate::pricing::Provider::Claude | crate::pricing::Provider::Cursor => {
+            if item.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+                return false;
+            }
+            let Some(blocks) = item
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                return false;
+            };
+            blocks.iter().any(|b| {
+                matches!(
+                    b.get("type").and_then(serde_json::Value::as_str),
+                    Some("tool_use" | "toolCall")
+                ) && b
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_input_request_tool)
+            })
+        }
+        crate::pricing::Provider::Codex => {
+            let payload = item.get("payload").unwrap_or(item);
+            matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("function_call" | "custom_tool_call" | "response_item")
+            ) && payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_input_request_tool)
+        }
+        crate::pricing::Provider::Pi => {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                && item
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|b| {
+                            b.get("type").and_then(serde_json::Value::as_str) == Some("toolCall")
+                                && b.get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(is_input_request_tool)
+                        })
+                    })
+        }
+        crate::pricing::Provider::OpenCode => false,
+    }
+}
+
+fn is_input_request_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "askuserquestion"
+            | "ask_user_question"
+            | "ask_user"
+            | "askuser"
+            | "question"
+            | "request_user_input"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn classifies_completed_assistant_responses_as_waiting() {
+        let claude = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "AskUserQuestion"}]}
+        });
+        assert!(is_waiting_for_input_event(Provider::Claude, &claude));
+
+        let codex = json!({
+            "type": "function_call",
+            "payload": {"name": "request_user_input"}
+        });
+        assert!(is_waiting_for_input_event(Provider::Codex, &codex));
+    }
+
+    #[test]
+    fn keeps_tool_turns_and_api_errors_distinct() {
+        let tool_turn = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Read"}]}
+        });
+        assert!(!is_waiting_for_input_event(Provider::Claude, &tool_turn));
+
+        let error = json!({"type": "system", "subtype": "api_error"});
+        assert!(is_api_error_event(&error));
+    }
+
+    #[test]
+    fn ignores_codex_token_bookkeeping_when_finding_last_state() {
+        let item = json!({
+            "type": "event_msg",
+            "payload": {"type": "token_count"}
+        });
+        assert!(is_passive_event(&item));
+    }
+
+    #[test]
+    fn tail_state_uses_the_last_meaningful_codex_event() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-activity-state-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"function_call\",\"payload\":{\"name\":\"request_user_input\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\"}}\n"
+            ),
+        )
+        .expect("write transcript");
+        let mut session = Session::new(Provider::Codex, "test".into());
+        session.data_file = Some(path.clone());
+        assert_eq!(
+            extract_activity_state(&session),
+            ActivityState::WaitingForInput
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
 

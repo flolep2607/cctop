@@ -174,6 +174,7 @@ impl Loader {
     fn attach_tail_state(&mut self, sessions: &mut [Session]) {
         for s in sessions.iter_mut() {
             let key = s.key();
+            s.activity_state = session::extract_activity_state(s);
             if s.is_running() {
                 s.last_tool = match s.provider {
                     Provider::Claude => session::claude::extract_last_tool(s),

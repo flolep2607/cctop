@@ -1,7 +1,7 @@
 //! OpenCode session discovery and extraction from its current SQLite store.
 
 use super::extract;
-use super::{Costs, ModelBreakdown, Session, SessionData, Tokens};
+use super::{ActivityState, Costs, ModelBreakdown, Session, SessionData, Tokens};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
@@ -59,6 +59,94 @@ fn readonly(path: &Path) -> rusqlite::Result<Connection> {
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
+}
+
+/// State of the newest OpenCode message. OpenCode keeps events in SQLite rather
+/// than a transcript file, but its assistant messages record both completion
+/// and provider errors.
+pub fn extract_activity_state(path: &Path, session_id: &str) -> ActivityState {
+    let Ok(db) = readonly(path) else {
+        return ActivityState::Working;
+    };
+    let message = db
+        .query_row(
+            "SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT 1",
+            params![session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let Some((message_id, raw)) = message else {
+        return ActivityState::Working;
+    };
+    let Ok(message) = serde_json::from_str::<Value>(&raw) else {
+        return ActivityState::Working;
+    };
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return ActivityState::Working;
+    }
+    if is_api_failure(&message) {
+        ActivityState::ApiError
+    } else if has_input_request(&db, &message_id) {
+        ActivityState::WaitingForInput
+    } else {
+        ActivityState::Working
+    }
+}
+
+fn has_input_request(db: &Connection, message_id: &str) -> bool {
+    let Ok(mut stmt) = db.prepare("SELECT data FROM part WHERE message_id = ?1") else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map(params![message_id], |row| row.get::<_, String>(0)) else {
+        return false;
+    };
+    rows.flatten().any(|raw| {
+        let Ok(part) = serde_json::from_str::<Value>(&raw) else {
+            return false;
+        };
+        matches!(
+            part.get("type").and_then(Value::as_str),
+            Some("tool" | "toolCall")
+        ) && part
+            .get("tool")
+            .or_else(|| part.get("name"))
+            .and_then(Value::as_str)
+            .is_some_and(super::is_input_request_tool)
+    })
+}
+
+fn is_api_failure(message: &Value) -> bool {
+    let Some(error) = message.get("error") else {
+        return false;
+    };
+    let text = [
+        error.get("name").and_then(Value::as_str),
+        error
+            .get("data")
+            .and_then(|data| data.get("message"))
+            .and_then(Value::as_str),
+        error.get("message").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "rate limit",
+        "overloaded",
+        "connection",
+        "network",
+        "api error",
+        "apierror",
+        "internal server",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn millis_rfc3339(ms: i64) -> String {
@@ -453,6 +541,64 @@ mod tests {
         let delta = edit.delta.as_ref().unwrap();
         assert_eq!((delta.added, delta.removed), (3, 2));
 
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn input_request_waits_and_api_timeout_is_red() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-opencode-state-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3)",
+            params![
+                "part_question",
+                "msg_done",
+                r#"{"type":"tool","tool":"question"}"#
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_done",
+                "ses_done",
+                1i64,
+                r#"{"role":"assistant","time":{"completed":1},"error":{"name":"MessageAbortedError"}}"#
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_timeout",
+                "ses_timeout",
+                1i64,
+                r#"{"role":"assistant","time":{"completed":1},"error":{"name":"APIError","data":{"message":"Request timed out"}}}"#
+            ],
+        )
+        .unwrap();
+        drop(db);
+
+        assert_eq!(
+            extract_activity_state(&path, "ses_done"),
+            ActivityState::WaitingForInput
+        );
+        assert_eq!(
+            extract_activity_state(&path, "ses_timeout"),
+            ActivityState::ApiError
+        );
         std::fs::remove_file(path).unwrap();
     }
 }
