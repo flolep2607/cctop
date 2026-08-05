@@ -18,6 +18,13 @@ pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
+/// Format epoch milliseconds as RFC-3339; empty string if out of range.
+pub fn ms_to_rfc3339(ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_default()
+}
+
 /// Local-time day key, `YYYY-MM-DD`.
 pub fn local_date_key(dt: &DateTime<Utc>) -> String {
     let l = dt.with_timezone(&Local);
@@ -481,6 +488,16 @@ mod tests {
         assert_eq!(compact_duration(192_000), "3m12s");
         assert_eq!(compact_duration(7_500_000), "2h05m");
         assert_eq!(compact_duration(0), "—");
+    }
+
+    #[test]
+    fn epoch_millis_format_and_reject_out_of_range() {
+        assert_eq!(
+            parse_ts(&ms_to_rfc3339(1_700_000_000_000)).map(|d| d.timestamp_millis()),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(ms_to_rfc3339(0), "1970-01-01T00:00:00+00:00");
+        assert_eq!(ms_to_rfc3339(i64::MAX), "");
     }
 
     #[test]

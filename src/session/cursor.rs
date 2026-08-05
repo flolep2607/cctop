@@ -8,16 +8,11 @@ use super::extract::{for_each_jsonl, push_tool_detail, tool_detail};
 use super::{Session, SessionData, Surface};
 use crate::config;
 use crate::pricing::Provider;
+use crate::util;
 use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-
-fn ms_to_rfc3339(ms: u64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_default()
-}
 
 fn created_ms(path: &Path) -> u64 {
     std::fs::metadata(path)
@@ -55,8 +50,8 @@ fn summarize(path: PathBuf) -> Option<Session> {
     let mut session = Session::new(Provider::Cursor, session_id);
     session.surface = Surface::Editor;
     session.harness = "Cursor".into();
-    session.started_at = ms_to_rfc3339(created_ms(&path));
-    session.last_active = ms_to_rfc3339(config::file_mtime_ms(&path));
+    session.started_at = util::ms_to_rfc3339(created_ms(&path) as i64);
+    session.last_active = util::ms_to_rfc3339(config::file_mtime_ms(&path) as i64);
     session.label_source = project_slug(&path);
     session.data_file = Some(path);
     session.cost_available = false;
