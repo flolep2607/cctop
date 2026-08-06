@@ -207,6 +207,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "flate2",
+ "libc",
  "ratatui",
  "rayon",
  "regex",

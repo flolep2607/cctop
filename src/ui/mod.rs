@@ -56,6 +56,8 @@ pub enum Mode {
     BatchKillBlocked,
     /// Numeric input for the cost floor filter.
     CostFilter,
+    /// Text input typed into the selected session's tmux pane.
+    SendKeys,
 }
 
 /// The pending batch action shown in `Mode::BatchConfirm`.
@@ -136,6 +138,11 @@ enum Request {
         session_key: String,
         pid: u32,
     },
+    /// Type a line into the terminal hosting a live session.
+    SendKeys {
+        pid: u32,
+        text: String,
+    },
     Shutdown,
 }
 
@@ -153,6 +160,9 @@ enum Response {
     UpdateAvailable(String),
     Terminated {
         session_key: String,
+        result: Result<(), String>,
+    },
+    KeysSent {
         result: Result<(), String>,
     },
 }
@@ -232,6 +242,12 @@ fn spawn_worker(
                         break;
                     }
                 }
+                Request::SendKeys { pid, text } => {
+                    let result = crate::inject::send_line(pid, &text);
+                    if tx.send(Response::KeysSent { result }).is_err() {
+                        break;
+                    }
+                }
                 Request::Shutdown => break,
             }
         }
@@ -274,6 +290,8 @@ pub struct App {
     pub cost_floor: f64,
     /// Raw digits being typed into the cost-floor modal.
     pub cost_input: String,
+    /// Line being typed into the selected session's terminal.
+    pub send_input: String,
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
     /// page by half a screen.
     pub list_height: u16,
@@ -368,6 +386,7 @@ impl App {
             refresh_secs: 2.0,
             cost_floor: prefs.cost_floor,
             cost_input: String::new(),
+            send_input: String::new(),
             list_height: 0,
             bottom_tab: prefs.bottom_tab.min(panels::TABS.len() - 1),
             panel_data: None,
@@ -1049,6 +1068,10 @@ fn event_loop(
                     Err(error) => {
                         app.set_status(format!("Could not stop {session_key}: {error}"));
                     }
+                },
+                Ok(Response::KeysSent { result }) => match result {
+                    Ok(()) => app.set_status("Sent to the session's terminal"),
+                    Err(error) => app.set_status(error),
                 },
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }

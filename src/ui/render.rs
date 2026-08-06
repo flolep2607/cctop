@@ -129,6 +129,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true),
         Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
+        Mode::SendKeys => modals::draw_send_keys(frame, area, app),
         Mode::List => {}
     }
     layout
