@@ -107,8 +107,10 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
             Provider::Claude => theme::CLAUDE,
             Provider::Codex => theme::OPENAI,
             Provider::Cursor => theme::CURSOR,
+            Provider::Gemini => theme::GEMINI,
             Provider::OpenCode => theme::OPENCODE,
             Provider::Pi => theme::PI,
+            Provider::Windsurf => theme::WINDSURF,
         },
     };
     let model = if data.last_model.is_empty() {
@@ -156,8 +158,10 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         Provider::Claude => format!("claude --resume {}", session.session_id),
         Provider::Codex => format!("codex resume {}", session.session_id),
         Provider::Cursor => "Open from Cursor history".to_string(),
+        Provider::Gemini => "gemini, then /chat resume".to_string(),
         Provider::OpenCode => format!("opencode --session {}", session.session_id),
         Provider::Pi => format!("pi --session {}", session.session_id),
+        Provider::Windsurf => "Open from Windsurf history".to_string(),
     };
     lines.push(field("Cmd", cmd));
     lines.push(field("Plan", plan.as_str()));
@@ -174,7 +178,11 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let account = match session.provider {
         Provider::Claude => crate::quota::claude_account(),
         Provider::Codex => crate::quota::codex_account(),
-        Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
+        Provider::Cursor
+        | Provider::Gemini
+        | Provider::OpenCode
+        | Provider::Pi
+        | Provider::Windsurf => None,
     };
     if let Some(a) = account {
         if let Some(email) = a.email {
@@ -1111,6 +1119,49 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 theme::title(),
             )));
             lines.extend(skill_list(&crate::config::PI_AGENT_DIR.join("skills")));
+        }
+        Provider::Gemini => {
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            let global = crate::config::GEMINI_HOME.join("GEMINI.md");
+            match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", global.display()))),
+            }
+            if !session.label_source.is_empty() {
+                match file_section(&cwd.join("GEMINI.md"), "./GEMINI.md", 40) {
+                    Some(block) => lines.extend(block),
+                    None => lines.push(missing("./GEMINI.md not found".into())),
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Config ──".to_string(),
+                theme::title(),
+            )));
+            let settings = crate::config::GEMINI_HOME.join("settings.json");
+            match file_section(&settings, &util::tildify(&settings.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", settings.display()))),
+            }
+            lines.push(Line::from(Span::styled(
+                "── Skills ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(skill_list(&crate::config::GEMINI_HOME.join("skills")));
+        }
+        Provider::Windsurf => {
+            // Windsurf's global rules live in the editor's own settings UI, not
+            // in a file cctop can point at; only the workspace rules are on disk.
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            match file_section(&cwd.join(".windsurfrules"), "./.windsurfrules", 40) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing("./.windsurfrules not found".into())),
+            }
         }
     }
     lines

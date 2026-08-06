@@ -31,8 +31,9 @@ Use --help for the full description.",
     // covers the same ground at length.
     after_long_help = "",
     long_about = "cctop — an htop-like monitor for AI coding agent sessions\n\n\
-Tracks Claude Code, Codex, Cursor, OpenCode, and Pi sessions on your machine, showing\n\
-real-time cost estimation, token usage, tool invocations, and OS-level metrics.\n\n\
+Tracks Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, and Windsurf\n\
+sessions on your machine, showing real-time cost estimation, token usage, tool\n\
+invocations, and OS-level metrics.\n\n\
 COST ESTIMATION\n  \
 Cost figures are estimates based on per-token API pricing from the LiteLLM\n  \
 database (cached locally for 24 hours). Many subscription plans — such as\n  \
@@ -195,6 +196,8 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
         ("Cursor", Provider::Cursor),
         ("OpenCode", Provider::OpenCode),
         ("Pi", Provider::Pi),
+        ("Gemini", Provider::Gemini),
+        ("Windsurf", Provider::Windsurf),
     ] {
         let group: Vec<&Session> = sessions.iter().filter(|s| s.provider == provider).collect();
         if group.is_empty() {
@@ -297,7 +300,11 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
             let account = match s.provider {
                 Provider::Claude => claude_account.as_ref(),
                 Provider::Codex => codex_account.as_ref(),
-                Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
+                Provider::Cursor
+                | Provider::Gemini
+                | Provider::OpenCode
+                | Provider::Pi
+                | Provider::Windsurf => None,
             }
             .map(|a| JsonAccount {
                 email: a.email.clone(),
