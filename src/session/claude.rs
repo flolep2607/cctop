@@ -8,6 +8,7 @@ use super::{
 use crate::config::{self, CLAUDE_1M_CTX, CLAUDE_DEFAULT_CTX};
 use crate::pricing::{self, Provider};
 use crate::util;
+use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -106,13 +107,7 @@ fn latest_activity(transcript: &Path) -> String {
         .map(|p| config::file_mtime_ms(p))
         .max()
         .unwrap_or(0);
-    ms_to_rfc3339(newest)
-}
-
-fn ms_to_rfc3339(ms: u64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_default()
+    util::ms_to_rfc3339(newest as i64)
 }
 
 fn summarize(transcript: &Path) -> Option<Session> {
@@ -141,7 +136,7 @@ fn summarize(transcript: &Path) -> Option<Session> {
 
 /// All Claude sessions: CLI transcripts plus any Claude for Mac sessions.
 pub fn list_sessions() -> Vec<Session> {
-    let mut sessions = Vec::new();
+    let mut transcripts = Vec::new();
 
     if config::dir_exists(&config::CLAUDE_PROJECTS_ROOT) {
         for project in config::list_dir(&config::CLAUDE_PROJECTS_ROOT) {
@@ -156,13 +151,15 @@ pub fn list_sessions() -> Vec<Session> {
                 if !config::is_full_uuid(stem) {
                     continue;
                 }
-                if let Some(s) = summarize(&project_dir.join(&entry)) {
-                    sessions.push(s);
-                }
+                transcripts.push(project_dir.join(entry));
             }
         }
     }
 
+    let mut sessions: Vec<_> = transcripts
+        .par_iter()
+        .filter_map(|path| summarize(path))
+        .collect();
     sessions.extend(list_mac_sessions());
     sessions
 }
@@ -366,6 +363,8 @@ struct Extractor {
     tool_turn: HashMap<String, (String, u8)>,
     /// tool_use id -> timestamp its result arrived.
     tool_result_ts: HashMap<String, String>,
+    /// tool_use ids whose result was flagged `is_error`.
+    tool_failed: HashSet<String>,
     /// tool_use id -> line changes reported by the result's patch.
     tool_delta: HashMap<String, super::Delta>,
     /// Request key -> final (input, output) tokens, filled when the file flushes.
@@ -568,6 +567,9 @@ impl Extractor {
                                 }
                                 if !ts.is_empty() {
                                     self.tool_result_ts.insert(id.to_string(), ts.to_string());
+                                }
+                                if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                                    self.tool_failed.insert(id.to_string());
                                 }
                                 if let Some(d) = delta.take() {
                                     self.tool_delta.insert(id.to_string(), d);
@@ -881,6 +883,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         } else {
             ext.last_main_model
         },
+        reasoning_effort: None,
         models,
         model_breakdown,
         tokens,
@@ -912,6 +915,7 @@ fn attach_call_details(ext: &mut Extractor) {
             if let Some(delta) = ext.tool_delta.get(&id) {
                 d.delta = Some(delta.clone());
             }
+            d.failed = ext.tool_failed.contains(&id);
             if let Some((key, shared)) = ext.tool_turn.get(&id) {
                 d.shared = *shared;
                 if let Some((tin, tout)) = ext.req_usage.get(key) {
@@ -1264,5 +1268,55 @@ pub fn delete(session: &Session) {
     if let Some(meta) = &session.mac_meta {
         let _ = std::fs::remove_file(&meta.meta_path);
         let _ = std::fs::remove_dir_all(&meta.session_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed call must be distinguishable from a successful one. Claude
+    /// records the outcome on the `tool_result`, which is a separate entry from
+    /// the call, linked only by `tool_use_id`.
+    #[test]
+    fn tool_results_marked_is_error_flag_their_call() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-claude-failed-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_1","message":{"id":"m1","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_ok","name":"Bash","input":{"command":"true"}}],"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                "\n",
+                r#"{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ok","content":"ok"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:02.000Z","requestId":"req_2","message":{"id":"m2","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_bad","name":"Bash","input":{"command":"exit 1"}}],"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                "\n",
+                r#"{"type":"user","timestamp":"2026-08-05T10:00:03.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bad","content":"Exit code 1","is_error":true}]}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let calls = &data.metrics.tool_details["Bash"];
+        assert_eq!(calls.len(), 2);
+        let ok = calls
+            .iter()
+            .find(|d| d.d.contains("true"))
+            .expect("ok call");
+        let bad = calls
+            .iter()
+            .find(|d| d.d.contains("exit 1"))
+            .expect("failed call");
+        assert!(!ok.failed, "a successful result must not be flagged");
+        assert!(bad.failed, "is_error must be flagged");
     }
 }

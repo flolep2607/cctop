@@ -18,6 +18,13 @@ pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
+/// Format epoch milliseconds as RFC-3339; empty string if out of range.
+pub fn ms_to_rfc3339(ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_default()
+}
+
 /// Local-time day key, `YYYY-MM-DD`.
 pub fn local_date_key(dt: &DateTime<Utc>) -> String {
     let l = dt.with_timezone(&Local);
@@ -143,15 +150,25 @@ pub fn compact_bytes(value: u64) -> String {
 
 /// Two-decimal dollars for table cells.
 pub fn compact_usd(value: f64) -> String {
-    format!("${value:.2}")
+    format!("${:.2}", normalize_usd_zero(value))
 }
 
 /// Sub-cent amounts keep four decimals so small spends stay visible.
 pub fn adaptive_usd(value: f64) -> String {
+    let value = normalize_usd_zero(value);
     if value > 0.0 && value < 0.01 {
         format!("${value:.4}")
     } else {
         format!("${value:.2}")
+    }
+}
+
+/// Avoid displaying floating-point noise as a negative zero amount.
+fn normalize_usd_zero(value: f64) -> f64 {
+    if value == 0.0 || (-0.005..0.0).contains(&value) {
+        0.0
+    } else {
+        value
     }
 }
 
@@ -459,11 +476,28 @@ mod tests {
     }
 
     #[test]
+    fn usd_does_not_display_negative_zero() {
+        assert_eq!(compact_usd(-0.0), "$0.00");
+        assert_eq!(adaptive_usd(-0.000_001), "$0.00");
+        assert_eq!(adaptive_usd(-0.01), "$-0.01");
+    }
+
+    #[test]
     fn durations() {
         assert_eq!(compact_duration(45_000), "45s");
         assert_eq!(compact_duration(192_000), "3m12s");
         assert_eq!(compact_duration(7_500_000), "2h05m");
         assert_eq!(compact_duration(0), "—");
+    }
+
+    #[test]
+    fn epoch_millis_format_and_reject_out_of_range() {
+        assert_eq!(
+            parse_ts(&ms_to_rfc3339(1_700_000_000_000)).map(|d| d.timestamp_millis()),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(ms_to_rfc3339(0), "1970-01-01T00:00:00+00:00");
+        assert_eq!(ms_to_rfc3339(i64::MAX), "");
     }
 
     #[test]

@@ -2,9 +2,13 @@
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod extract;
+pub mod opencode;
+pub mod pi;
 
 use crate::pricing::Provider;
+use crate::util;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,12 +16,27 @@ use std::path::{Path, PathBuf};
 /// Where a session is being driven from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Surface {
-    /// `claude` / `codex` in a terminal.
+    /// A coding agent in a terminal.
     Cli,
+    /// An agent hosted by an editor rather than a dedicated CLI process.
+    Editor,
     /// Claude for Mac, running Claude Code locally.
     DesktopCode,
     /// Claude for Mac, running in a cloud VM.
     DesktopCowork,
+}
+
+/// What a live agent is doing, inferred from the newest transcript event.
+///
+/// This deliberately captures only states that have a clear user-facing
+/// meaning.  A missing or unrecognised event remains normal work rather than
+/// guessing that the agent is stalled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActivityState {
+    #[default]
+    Working,
+    WaitingForInput,
+    ApiError,
 }
 
 impl Surface {
@@ -27,10 +46,14 @@ impl Surface {
 
     pub fn label(&self, provider: Provider) -> &'static str {
         match (self, provider) {
+            (Surface::Editor, Provider::Cursor) => "Cursor",
             (Surface::DesktopCowork, _) => "Claude Cowork",
             (Surface::DesktopCode, _) => "Claude Code",
             (_, Provider::Claude) => "Claude",
             (_, Provider::Codex) => "Codex",
+            (_, Provider::Cursor) => "Cursor",
+            (_, Provider::OpenCode) => "OpenCode",
+            (_, Provider::Pi) => "Pi",
         }
     }
 }
@@ -71,6 +94,9 @@ pub struct Session {
     pub started_at: String,
     pub last_active: String,
     pub model: String,
+    /// Where the agent is hosted, when it can be inferred (for example Cursor
+    /// versus a terminal CLI). This is intentionally distinct from `model`.
+    pub harness: String,
     /// Working directory the session was launched from.
     pub label_source: String,
     pub data_file: Option<PathBuf>,
@@ -84,6 +110,11 @@ pub struct Session {
     pub tool_count: u64,
     /// `None` when the active plan bundles this provider's usage.
     pub total_cost: Option<f64>,
+    /// False when the provider's transcript contains no billable usage data.
+    pub cost_available: bool,
+    /// Recorded usage has a zero total cost, as with a free model. This stays
+    /// distinct from a session that simply has not recorded any usage yet.
+    pub cost_is_free: bool,
     pub cost_hour: f64,
     pub cost_today: f64,
     pub costs_by_day: HashMap<String, HashMap<String, f64>>,
@@ -93,11 +124,15 @@ pub struct Session {
     pub context: Option<ContextUsage>,
     pub last_tool: String,
     pub process: Option<crate::proc::ProcInfo>,
+    /// Liveness inferred from a growing transcript when no per-session process
+    /// exists (currently Cursor native agents).
+    pub inferred_running: bool,
+    /// A transcript-derived state that refines the liveness dot.
+    pub activity_state: ActivityState,
 
     // --- Rate tracking ---
     pub tokens_per_min: f64,
     pub cost_per_min: f64,
-    pub tools_since_start: u64,
 }
 
 impl Session {
@@ -109,6 +144,7 @@ impl Session {
             started_at: String::new(),
             last_active: String::new(),
             model: String::new(),
+            harness: String::new(),
             label_source: String::new(),
             data_file: None,
             title: None,
@@ -118,6 +154,8 @@ impl Session {
             output_tokens: 0,
             tool_count: 0,
             total_cost: Some(0.0),
+            cost_available: true,
+            cost_is_free: false,
             cost_hour: 0.0,
             cost_today: 0.0,
             costs_by_day: HashMap::new(),
@@ -127,9 +165,10 @@ impl Session {
             context: None,
             last_tool: String::new(),
             process: None,
+            inferred_running: false,
+            activity_state: ActivityState::Working,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
-            tools_since_start: 0,
         }
     }
 
@@ -139,7 +178,7 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        self.process.is_some()
+        self.process.is_some() || self.inferred_running
     }
 
     /// Title if renamed, else the abbreviated working directory.
@@ -158,6 +197,213 @@ impl Session {
                     &self.abbrev_label
                 }
             })
+    }
+}
+
+/// Infer a meaningful state from the newest session event.
+pub fn extract_activity_state(session: &Session) -> ActivityState {
+    let Some(file) = session.data_file.as_ref() else {
+        return ActivityState::Working;
+    };
+    if session.provider == crate::pricing::Provider::OpenCode {
+        return opencode::extract_activity_state(file, &session.session_id);
+    }
+    let Some(text) = crate::util::read_tail(file, 65_536) else {
+        return ActivityState::Working;
+    };
+
+    for line in text.lines().rev() {
+        let Ok(item) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if is_api_error_event(&item) {
+            return ActivityState::ApiError;
+        }
+        if is_waiting_for_input_event(session.provider, &item) {
+            return ActivityState::WaitingForInput;
+        }
+        if is_passive_event(&item) {
+            continue;
+        }
+        // The newest meaningful event was ordinary progress (a tool call,
+        // result, or stream event), so do not let an older completed answer
+        // make the row look like it is awaiting input.
+        return ActivityState::Working;
+    }
+    ActivityState::Working
+}
+
+/// Token counters and turn metadata are often appended after the event that
+/// actually describes the agent's state.  Ignore them while walking backwards
+/// so a finished response is still shown as waiting for the user.
+fn is_passive_event(item: &serde_json::Value) -> bool {
+    let kind = item
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if matches!(kind, "session_meta" | "turn_context") {
+        return true;
+    }
+    kind == "event_msg"
+        && item
+            .get("payload")
+            .and_then(|p| p.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some("token_count")
+}
+
+fn is_api_error_event(item: &serde_json::Value) -> bool {
+    let kind = item
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let subtype = item
+        .get("subtype")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if matches!(kind, "error" | "api_error") || matches!(subtype, "api_error" | "error") {
+        return true;
+    }
+    let payload = item.get("payload").unwrap_or(item);
+    matches!(
+        payload.get("type").and_then(serde_json::Value::as_str),
+        Some("error" | "api_error" | "stream_error" | "turn_aborted")
+    )
+}
+
+fn is_waiting_for_input_event(
+    provider: crate::pricing::Provider,
+    item: &serde_json::Value,
+) -> bool {
+    match provider {
+        crate::pricing::Provider::Claude | crate::pricing::Provider::Cursor => {
+            if item.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+                return false;
+            }
+            let Some(blocks) = item
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                return false;
+            };
+            blocks.iter().any(|b| {
+                matches!(
+                    b.get("type").and_then(serde_json::Value::as_str),
+                    Some("tool_use" | "toolCall")
+                ) && b
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_input_request_tool)
+            })
+        }
+        crate::pricing::Provider::Codex => {
+            let payload = item.get("payload").unwrap_or(item);
+            matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("function_call" | "custom_tool_call" | "response_item")
+            ) && payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_input_request_tool)
+        }
+        crate::pricing::Provider::Pi => {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                && item
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|b| {
+                            b.get("type").and_then(serde_json::Value::as_str) == Some("toolCall")
+                                && b.get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(is_input_request_tool)
+                        })
+                    })
+        }
+        crate::pricing::Provider::OpenCode => false,
+    }
+}
+
+fn is_input_request_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "askuserquestion"
+            | "ask_user_question"
+            | "ask_user"
+            | "askuser"
+            | "question"
+            | "request_user_input"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn classifies_completed_assistant_responses_as_waiting() {
+        let claude = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "AskUserQuestion"}]}
+        });
+        assert!(is_waiting_for_input_event(Provider::Claude, &claude));
+
+        let codex = json!({
+            "type": "function_call",
+            "payload": {"name": "request_user_input"}
+        });
+        assert!(is_waiting_for_input_event(Provider::Codex, &codex));
+    }
+
+    #[test]
+    fn keeps_tool_turns_and_api_errors_distinct() {
+        let tool_turn = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Read"}]}
+        });
+        assert!(!is_waiting_for_input_event(Provider::Claude, &tool_turn));
+
+        let error = json!({"type": "system", "subtype": "api_error"});
+        assert!(is_api_error_event(&error));
+    }
+
+    #[test]
+    fn ignores_codex_token_bookkeeping_when_finding_last_state() {
+        let item = json!({
+            "type": "event_msg",
+            "payload": {"type": "token_count"}
+        });
+        assert!(is_passive_event(&item));
+    }
+
+    #[test]
+    fn tail_state_uses_the_last_meaningful_codex_event() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-activity-state-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"function_call\",\"payload\":{\"name\":\"request_user_input\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\"}}\n"
+            ),
+        )
+        .expect("write transcript");
+        let mut session = Session::new(Provider::Codex, "test".into());
+        session.data_file = Some(path.clone());
+        assert_eq!(
+            extract_activity_state(&session),
+            ActivityState::WaitingForInput
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -258,6 +504,10 @@ pub struct ToolDetail {
     pub shared: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
+    /// The call reported an error. Providers that do not record a per-call
+    /// outcome leave this false rather than guessing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
     /// Subagent that issued the call, or `None` for the main session. Tool
     /// activity from subagents is interleaved into the same log, so without this
     /// there is no way to tell who did what.
@@ -317,6 +567,9 @@ pub struct SessionData {
     pub ai_title: Option<String>,
     /// Latest model seen in the *main* transcript, excluding subagent sidechains.
     pub last_model: String,
+    /// Provider-reported reasoning effort, when the transcript exposes it.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub models: Vec<String>,
     pub model_breakdown: Vec<ModelBreakdown>,
     pub tokens: Tokens,
@@ -369,8 +622,20 @@ impl SessionData {
 
 /// All sessions from every known provider and surface, newest first.
 pub fn list_all() -> Vec<Session> {
-    let mut sessions = codex::list_sessions();
-    sessions.extend(claude::list_sessions());
+    let ((mut codex, claude), ((opencode, pi), cursor)) = rayon::join(
+        || rayon::join(codex::list_sessions, claude::list_sessions),
+        || {
+            rayon::join(
+                || rayon::join(opencode::list_sessions, pi::list_sessions),
+                cursor::list_sessions,
+            )
+        },
+    );
+    codex.extend(claude);
+    codex.extend(opencode);
+    codex.extend(pi);
+    codex.extend(cursor);
+    let mut sessions = codex;
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     sessions
 }
@@ -404,6 +669,12 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
             .map(|p| crate::config::file_mtime_ms(p))
             .max()
             .unwrap_or(0),
-        Provider::Codex => crate::config::file_mtime_ms(f),
+        Provider::Codex | Provider::Cursor | Provider::Pi => crate::config::file_mtime_ms(f),
+        // Every OpenCode session shares one WAL-backed database. Using the DB
+        // mtime would invalidate hundreds of unchanged sessions whenever one
+        // message lands; its per-session updated timestamp is the right key.
+        Provider::OpenCode => util::parse_ts(&session.last_active)
+            .map(|d| d.timestamp_millis().max(0) as u64)
+            .unwrap_or_else(|| crate::config::file_mtime_ms(f)),
     }
 }

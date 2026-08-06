@@ -161,6 +161,13 @@ fn str_field<'a>(input: &'a Value, key: &str) -> &'a str {
     input.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
+fn file_field(input: &Value) -> &str {
+    ["file_path", "filePath", "path"]
+        .into_iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
 /// Short display text and full clipboard text for a tool invocation.
 ///
 /// The two differ only where the display form is truncated (Bash commands,
@@ -172,19 +179,19 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
 
     // Tools whose full argument is worth keeping for the clipboard.
     match name {
-        "Bash" => {
+        "Bash" | "bash" => {
             let cmd = str_field(input, "command");
             let short = flatten(cmd, 300);
             let full = (full_differs(&short, cmd)).then(|| cmd.to_string());
             return (short, full);
         }
-        "Agent" => {
+        "Agent" | "agent" => {
             let p = str_field(input, "prompt");
             let short = flatten(p, 200);
             let full = (full_differs(&short, p)).then(|| p.to_string());
             return (short, full);
         }
-        "TaskCreate" => {
+        "TaskCreate" | "task" => {
             let d = str_field(input, "description");
             let short = flatten(d, 200);
             let full = (full_differs(&short, d)).then(|| d.to_string());
@@ -194,11 +201,11 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
     }
 
     let s = match name {
-        "Read" | "Edit" | "Write" => str_field(input, "file_path").to_string(),
-        "Glob" => str_field(input, "pattern").to_string(),
-        "WebFetch" => str_field(input, "url").to_string(),
-        "WebSearch" => str_field(input, "query").to_string(),
-        "Grep" => {
+        "Read" | "read" | "Edit" | "edit" | "Write" | "write" => file_field(input).to_string(),
+        "Glob" | "glob" => str_field(input, "pattern").to_string(),
+        "WebFetch" | "webfetch" => str_field(input, "url").to_string(),
+        "WebSearch" | "websearch" => str_field(input, "query").to_string(),
+        "Grep" | "grep" => {
             let pattern = str_field(input, "pattern");
             let path = str_field(input, "path");
             if path.is_empty() {
@@ -207,6 +214,12 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
                 format!("{pattern} in {path}")
             }
         }
+        "ApplyPatch" | "apply_patch" => input
+            .get("patch")
+            .or_else(|| input.get("input"))
+            .and_then(Value::as_str)
+            .map(|patch| parse_apply_patch(patch).0)
+            .unwrap_or_default(),
         "ToolSearch" => MCP_UUID_PREFIX
             .replace_all(str_field(input, "query"), "")
             .into_owned(),
@@ -231,6 +244,7 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
             None => String::new(),
         },
         "TaskList" => "(list)".to_string(),
+        "web__run" | "web.run" => web_run_detail(input),
         "write_stdin" => {
             // Codex names this field `chars`; an empty one means the call is
             // just polling the session for more output, not writing anything.
@@ -285,6 +299,39 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
         _ => generic_detail(input),
     };
     (s, None)
+}
+
+/// Summarise the meaningful target of Codex's bundled web tool. Its payload
+/// commonly also carries `response_length`, which is display configuration,
+/// not what the agent actually asked the web service to do.
+fn web_run_detail(input: &Value) -> String {
+    // Keep the query-like operations first: a single call can include several
+    // operation types, but the search is normally the useful activity detail.
+    for (key, field, label) in [
+        ("search_query", "q", "search"),
+        ("image_query", "q", "images"),
+        ("open", "ref_id", "open"),
+        ("find", "pattern", "find"),
+        ("click", "ref_id", "click"),
+        ("finance", "ticker", "finance"),
+        ("weather", "location", "weather"),
+        ("sports", "league", "sports"),
+        ("time", "utc_offset", "time"),
+    ] {
+        let Some(items) = input.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let targets = items
+            .iter()
+            .filter_map(|item| item.get(field).and_then(Value::as_str))
+            .filter(|value| !value.is_empty())
+            .take(4)
+            .collect::<Vec<_>>();
+        if !targets.is_empty() {
+            return format!("{label}: {}", truncate_chars(&targets.join(" · "), 120));
+        }
+    }
+    generic_detail(input)
 }
 
 fn truncate_chars(s: &str, limit: usize) -> String {
@@ -517,6 +564,27 @@ mod tests {
     fn generic_joins_arrays() {
         let (s, _) = tool_detail("mcp__x__y", &json!({"keywords": ["a", "b", "c"]}));
         assert_eq!(s, "a, b, c");
+    }
+
+    #[test]
+    fn codex_web_run_shows_queries_not_response_length() {
+        let (s, _) = tool_detail(
+            "web__run",
+            &json!({
+                "search_query": [{"q": "GitHub Actions tag from Cargo version"}],
+                "response_length": "medium"
+            }),
+        );
+        assert_eq!(s, "search: GitHub Actions tag from Cargo version");
+    }
+
+    #[test]
+    fn codex_web_run_summarises_multiple_request_targets() {
+        let (s, _) = tool_detail(
+            "web__run",
+            &json!({"open": [{"ref_id": "turn1search0"}, {"ref_id": "turn1search1"}]}),
+        );
+        assert_eq!(s, "open: turn1search0 · turn1search1");
     }
 
     #[test]

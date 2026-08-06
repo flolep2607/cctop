@@ -10,7 +10,15 @@ use std::sync::Mutex;
 /// Bumped whenever `SessionData`'s shape changes. A mismatch discards the whole
 /// cache, which replaces the pile of ad-hoc `_hasSubagentsField`-style probes
 /// the JS version accumulated as its schema drifted.
-const CACHE_VERSION: u32 = 2;
+// Version 3 invalidated sessions cached before the codex-auto-review -> GPT-5.2
+// pricing alias existed. Version 4 re-extracted Codex tool activity after `exec`
+// wrappers began being unwrapped. Version 5 avoided mistaking `tools.*` text
+// inside a patch for the wrapper's actual nested call. Version 6 also ignores
+// `await tools.*` text inside quoted patch content. Version 7 re-extracts
+// Codex web calls so their query is shown instead of `response_length`.
+// Version 8 captures OpenCode edit detail, deltas, and duration. Version 9
+// records whether each tool call failed.
+const CACHE_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 struct DiskCache {
@@ -68,6 +76,18 @@ pub struct CostCache {
 impl Default for CostCache {
     fn default() -> Self {
         Self::load()
+    }
+}
+
+/// Remove only the persisted session extraction cache.
+///
+/// UI preferences and the downloaded pricing table are intentionally retained:
+/// this is the cache that can otherwise preserve outdated parser output.
+pub fn clear_session_cache() -> anyhow::Result<bool> {
+    match std::fs::remove_file(&*config::COST_CACHE_FILE) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -135,6 +155,23 @@ struct MemEntry {
     mtime: u64,
     pricing_epoch: u64,
     data: SessionData,
+    /// How long the parse behind `data` took, and when it finished. Together
+    /// they bound how much of a core one growing transcript may consume.
+    parsed_in: std::time::Duration,
+    parsed_at: std::time::Instant,
+}
+
+/// How many times its own parse cost a transcript must wait before being parsed
+/// again, so each one costs at most `1/N` of a core no matter how large it is.
+const REPARSE_BACKOFF: u32 = 20;
+
+/// Whether stale-but-cached data should be served instead of re-parsing.
+///
+/// A live session appends every few seconds and the cache key is size+mtime, so
+/// every append invalidates the entry and the whole file is parsed again. Cheap
+/// transcripts stay effectively real-time; only the expensive ones back off.
+fn reuse_stale(parsed_in: std::time::Duration, since: std::time::Duration) -> bool {
+    since < parsed_in * REPARSE_BACKOFF
 }
 
 #[derive(Default)]
@@ -151,8 +188,22 @@ impl Store {
         }
     }
 
-    /// Extracted data for a session, from memory, then disk, then a fresh parse.
+    /// Extracted data for a table row, which may be served stale to bound CPU.
     pub fn session_data(&self, session: &Session) -> SessionData {
+        self.data(session, true)
+    }
+
+    /// Extracted data for the session the user has open, never served stale.
+    ///
+    /// The row-level refresh backs off on expensive transcripts because it pays
+    /// that cost once per session, thousands of times over. The open panels are
+    /// one session — the one place where a few seconds of lag is actually visible,
+    /// and the one place where a full parse per change is affordable.
+    pub fn session_data_fresh(&self, session: &Session) -> SessionData {
+        self.data(session, false)
+    }
+
+    fn data(&self, session: &Session, allow_stale: bool) -> SessionData {
         let Some(file) = session.data_file.as_ref() else {
             // A running process with no transcript yet.
             return SessionData::default();
@@ -163,13 +214,29 @@ impl Store {
 
         if let Ok(mem) = self.mem.lock()
             && let Some(entry) = mem.get(&mem_key)
-            && entry.mtime == mtime
             && entry.pricing_epoch == epoch
         {
-            return entry.data.clone();
+            if entry.mtime == mtime {
+                return entry.data.clone();
+            }
+            // ponytail: re-parse backoff, not incremental parsing. A transcript is
+            // append-only, so the right fix is to parse only the appended bytes —
+            // which means persisting each provider's mid-file extractor state,
+            // including Claude's per-request dedup map, or a request whose lines
+            // straddle the boundary gets counted twice. Until then, bound the
+            // waste: a transcript costing 500ms to parse is re-read every 10s
+            // instead of every 2s, while cheap ones stay effectively live.
+            if allow_stale && reuse_stale(entry.parsed_in, entry.parsed_at.elapsed()) {
+                return entry.data.clone();
+            }
         }
 
-        let disk_key = cache_key(file);
+        // OpenCode stores every session in one database. A path-only disk key
+        // would make all sessions alias the first extracted row, so keep those
+        // entries in the session-keyed memory cache only.
+        let disk_key = (session.provider != crate::pricing::Provider::OpenCode)
+            .then(|| cache_key(file))
+            .flatten();
         if let Some(key) = &disk_key
             && let Some(data) = self.disk.get(key)
         {
@@ -180,16 +247,27 @@ impl Store {
                         mtime,
                         pricing_epoch: epoch,
                         data: data.clone(),
+                        // A disk hit says nothing about what parsing this costs,
+                        // so claim nothing and let the next change be parsed.
+                        parsed_in: std::time::Duration::ZERO,
+                        parsed_at: std::time::Instant::now(),
                     },
                 );
             }
             return data;
         }
 
+        let started = std::time::Instant::now();
         let data = match session.provider {
             crate::pricing::Provider::Claude => crate::session::claude::extract(file),
             crate::pricing::Provider::Codex => crate::session::codex::extract(file),
+            crate::pricing::Provider::Cursor => crate::session::cursor::extract(file),
+            crate::pricing::Provider::OpenCode => {
+                crate::session::opencode::extract(file, &session.session_id)
+            }
+            crate::pricing::Provider::Pi => crate::session::pi::extract(file),
         };
+        let parsed_in = started.elapsed();
         if let Ok(mut mem) = self.mem.lock() {
             mem.insert(
                 mem_key,
@@ -197,6 +275,8 @@ impl Store {
                     mtime,
                     pricing_epoch: epoch,
                     data: data.clone(),
+                    parsed_in,
+                    parsed_at: std::time::Instant::now(),
                 },
             );
         }
@@ -247,6 +327,11 @@ pub struct UiPrefs {
     pub tool_show_diff: bool,
     pub subagent_sort_col: String,
     pub subagent_sort_asc: bool,
+    /// Only show sessions whose cost reaches this floor (0 disables it).
+    pub cost_floor: f64,
+    /// The shell alias block has been written once. Kept here so removing the
+    /// block — by flag or by hand — isn't undone by the next launch.
+    pub shell_alias_installed: bool,
 }
 
 impl Default for UiPrefs {
@@ -261,6 +346,8 @@ impl Default for UiPrefs {
             tool_show_diff: false,
             subagent_sort_col: "last".into(),
             subagent_sort_asc: false,
+            cost_floor: 0.0,
+            shell_alias_installed: false,
         }
     }
 }
@@ -284,6 +371,27 @@ impl UiPrefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reparse_backoff_scales_with_parse_cost() {
+        use std::time::Duration;
+        // A cheap transcript is re-read almost immediately…
+        assert!(!reuse_stale(
+            Duration::from_millis(5),
+            Duration::from_millis(200)
+        ));
+        // …an expensive one waits proportionally longer than the refresh interval.
+        assert!(reuse_stale(
+            Duration::from_millis(500),
+            Duration::from_secs(2)
+        ));
+        assert!(!reuse_stale(
+            Duration::from_millis(500),
+            Duration::from_secs(11)
+        ));
+        // Something never parsed here (a disk-cache hit) claims no budget.
+        assert!(!reuse_stale(Duration::ZERO, Duration::ZERO));
+    }
 
     #[test]
     fn cache_key_changes_with_content() {

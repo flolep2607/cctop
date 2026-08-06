@@ -1,34 +1,37 @@
 //! Frame layout, drawing, and mouse hit-testing.
 
-use super::columns::{self, COLUMNS, ColumnId};
+use super::columns::ColumnId;
+use super::modals;
 use super::spark;
+use super::table;
 use super::theme::{self, Gradient};
-use super::{AGE_OPTIONS, App, Mode, panels};
+use super::{App, Mode, panels};
+use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as RLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 
 /// Screen regions recorded during a draw, so mouse events can be mapped back to
 /// what was actually rendered rather than to a guessed layout.
 #[derive(Debug, Default, Clone)]
 pub struct Layout {
-    header_row: u16,
-    rows_start: u16,
-    rows_end: u16,
-    tab_row: u16,
-    bottom_start: u16,
+    pub(super) header_row: u16,
+    pub(super) rows_start: u16,
+    pub(super) rows_end: u16,
+    pub(super) tab_row: u16,
+    pub(super) bottom_start: u16,
     /// `(start_col, end_col, column)` spans in the table header.
-    column_spans: Vec<(u16, u16, ColumnId)>,
+    pub(super) column_spans: Vec<(u16, u16, ColumnId)>,
     /// `(start_col, end_col, tab_index)` spans in the bottom tab bar.
-    tab_spans: Vec<(u16, u16, usize)>,
+    pub(super) tab_spans: Vec<(u16, u16, usize)>,
     /// Tool Activity sidebar: `(x_end, y_start, first_index, row_count)`.
-    tool_sidebar: Option<(u16, u16, usize, usize)>,
+    pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
-    tool_log: Option<(u16, u16, u16)>,
+    pub(super) tool_log: Option<(u16, u16, u16)>,
 }
 
 impl Layout {
@@ -80,7 +83,7 @@ impl Layout {
     }
 }
 
-fn panel_block(title: &str) -> Block<'static> {
+pub(super) fn panel_block(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::BORDER))
@@ -99,7 +102,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         .min(body_height.saturating_sub(4));
 
     let chunks = RLayout::vertical([
-        Constraint::Length(5),
+        // Four spend rows plus the border.
+        Constraint::Length(6),
         Constraint::Min(4),
         Constraint::Length(bottom_height),
         Constraint::Length(3),
@@ -108,18 +112,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     .split(area);
 
     draw_overview(frame, chunks[0], app);
-    draw_table(frame, chunks[1], app, &mut layout);
+    table::draw_table(frame, chunks[1], app, &mut layout);
     draw_bottom(frame, chunks[2], app, &mut layout);
     draw_limits(frame, chunks[3], app);
     draw_footer(frame, chunks[4], app);
 
     match app.mode {
-        Mode::Help => draw_help(frame, area),
-        Mode::Search => draw_search(frame, area, app),
-        Mode::SortBy => draw_sortby(frame, area, app),
-        Mode::AgeFilter => draw_age_filter(frame, area, app),
-        Mode::DeleteConfirm => draw_delete_confirm(frame, area, app),
-        Mode::DeleteBlocked => draw_delete_blocked(frame, area, app),
+        Mode::Help => modals::draw_help(frame, area),
+        Mode::Search => modals::draw_search(frame, area, app),
+        Mode::SortBy => modals::draw_sortby(frame, area, app),
+        Mode::AgeFilter => modals::draw_age_filter(frame, area, app),
+        Mode::DeleteConfirm => modals::draw_delete_confirm(frame, area, app),
+        Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app),
+        Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
+        Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
+        Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),
+        Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true),
+        Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
+        Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
+        Mode::SendKeys => modals::draw_send_keys(frame, area, app),
         Mode::List => {}
     }
     layout
@@ -138,10 +149,9 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         RLayout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
     let (left, right) = (cols[0], cols[1]);
 
-    // The newest sample of the spend series is the spend in the last tick.
-    let realtime = app.global_spend.values().last().copied().unwrap_or(0.0);
+    let realtime = app.stats.spend_per_min;
     let label_w = 15usize;
-    let value_w = 10usize;
+    let value_w = 12usize;
     let chart_w = left.width.saturating_sub((label_w + value_w + 2) as u16) as usize;
 
     let row = |name: &str, amount: f64, series: &[f64], now_idx: Option<usize>| -> Line<'static> {
@@ -165,23 +175,35 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
 
     let left_lines = vec![
         row(
-            "Real-time Spend",
+            "Live Spend/min",
             realtime,
             app.global_spend.values(),
             rt_idx,
         ),
         row(
-            "Daily Spend",
+            "Today Spend",
             app.stats.spend_today,
             &app.stats.daily_hourly,
             hour_idx,
         ),
         row(
-            "Monthly Spend",
+            "Month-to-date",
             app.stats.spend_calendar_month,
             &app.stats.monthly_daily,
             day_idx,
         ),
+        // Every session ever recorded, across every provider. Deliberately without
+        // a sparkline: the others chart a window that scrolls, and a running total
+        // only ever climbs, so a chart of it says nothing the number doesn't.
+        Line::from(vec![
+            Span::styled(format!("{:<label_w$}", "Total Spend"), theme::label()),
+            Span::styled(
+                format!("{:>value_w$}", util::adaptive_usd(app.stats.spend_total)),
+                Style::default()
+                    .fg(Color::Indexed(221))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
     ];
     frame.render_widget(Paragraph::new(left_lines), left);
 
@@ -227,7 +249,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::raw("  "),
             Span::styled(
-                format!("{} active", app.stats.active_1h),
+                format!("{} active", app.stats.running),
                 Style::default().fg(theme::COST_LOW),
             ),
         ]),
@@ -236,217 +258,11 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 // ---------------------------------------------------------------------------
-// Session table
-// ---------------------------------------------------------------------------
-
-/// Resolve each column's width, giving the flexible column whatever is left.
-fn column_widths(total: u16) -> Vec<u16> {
-    let fixed: u16 = COLUMNS.iter().filter_map(|c| c.width).sum::<u16>()
-        + (COLUMNS.len().saturating_sub(1)) as u16; // single-space gutters
-    let flex = total.saturating_sub(fixed).max(8);
-    COLUMNS.iter().map(|c| c.width.unwrap_or(flex)).collect()
-}
-
-fn pad(text: &str, width: u16, right: bool) -> String {
-    let w = width as usize;
-    let t = util::truncate(text, w);
-    let len = t.chars().count();
-    if right {
-        format!("{}{}", " ".repeat(w.saturating_sub(len)), t)
-    } else {
-        format!("{}{}", t, " ".repeat(w.saturating_sub(len)))
-    }
-}
-
-fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
-    let title = if app.live_only {
-        format!(
-            "Sessions ({}/{}) — live",
-            app.visible.len(),
-            app.sessions.len()
-        )
-    } else {
-        format!("Sessions ({})", app.sessions.len())
-    };
-    let block = panel_block(&title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height == 0 {
-        return;
-    }
-    let widths = column_widths(inner.width);
-
-    // Header, recording click spans as we go.
-    let mut header_spans = Vec::new();
-    let mut col_pos = inner.x;
-    layout.column_spans.clear();
-    for (c, w) in COLUMNS.iter().zip(&widths) {
-        let arrow = if c.id == app.sort_col {
-            if app.sort_asc { "▲" } else { "▼" }
-        } else {
-            ""
-        };
-        let text = format!("{}{}", c.label, arrow);
-        header_spans.push(Span::raw(pad(&text, *w, c.right_align)));
-        header_spans.push(Span::raw(" "));
-        layout.column_spans.push((col_pos, col_pos + w + 1, c.id));
-        col_pos += w + 1;
-    }
-    layout.header_row = inner.y;
-    frame.render_widget(
-        Paragraph::new(Line::from(header_spans)).style(
-            Style::default()
-                .fg(Color::White)
-                .bg(theme::HEADER_BG)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect { height: 1, ..inner },
-    );
-
-    let list_area = Rect {
-        y: inner.y + 1,
-        height: inner.height.saturating_sub(1),
-        ..inner
-    };
-    layout.rows_start = list_area.y;
-    layout.rows_end = list_area.y + list_area.height;
-
-    if app.visible.is_empty() {
-        let msg = if app.live_only {
-            "No running sessions."
-        } else if !app.search.is_empty() || app.age_filter.is_some() {
-            "No sessions match the current filters. Esc clears them."
-        } else {
-            "No sessions found in ~/.claude/projects or ~/.codex/sessions."
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, theme::dim()))),
-            list_area,
-        );
-        return;
-    }
-
-    // Keep the cursor on screen.
-    let height = list_area.height as usize;
-    if app.selected < app.scroll {
-        app.scroll = app.selected;
-    } else if app.selected >= app.scroll + height {
-        app.scroll = app.selected + 1 - height;
-    }
-    app.scroll = app
-        .scroll
-        .min(app.visible.len().saturating_sub(height.max(1)));
-
-    let now = chrono::Utc::now();
-    let lines: Vec<Line> = app
-        .visible
-        .iter()
-        .skip(app.scroll)
-        .take(height)
-        .enumerate()
-        .map(|(i, &idx)| {
-            let s = &app.sessions[idx];
-            let selected = app.scroll + i == app.selected;
-            session_row(s, &widths, selected, &now)
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines), list_area);
-}
-
-fn session_row(
-    s: &crate::session::Session,
-    widths: &[u16],
-    selected: bool,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Line<'static> {
-    let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
-    let base = if selected {
-        Style::default()
-            .bg(theme::SELECTED_BG)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-
-    let mut spans = Vec::with_capacity(COLUMNS.len() * 2);
-    for (c, w) in COLUMNS.iter().zip(widths) {
-        let text = columns::render_cell(c.id, s, now);
-        // Selection styling wins so the highlighted row stays readable.
-        let style = if selected {
-            base
-        } else {
-            base.fg(cell_color(c.id, s, age_secs))
-        };
-        spans.push(Span::styled(pad(&text, *w, c.right_align), style));
-        spans.push(Span::styled(" ", base));
-    }
-    Line::from(spans)
-}
-
-fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) -> Color {
-    match id {
-        ColumnId::Status => {
-            if s.is_running() {
-                theme::running_dot_color(age_secs)
-            } else {
-                theme::DIM
-            }
-        }
-        ColumnId::Last => theme::age_color(age_secs, s.is_running()),
-        ColumnId::Model => theme::model_color(&s.model),
-        ColumnId::Project => match s.surface {
-            Surface::DesktopCowork => theme::DESKTOP_COWORK,
-            Surface::DesktopCode => theme::DESKTOP_CODE,
-            Surface::Cli => Color::Reset,
-        },
-        ColumnId::Cost => s.total_cost.map(theme::cost_color).unwrap_or(theme::DIM),
-        ColumnId::CostHour => {
-            if s.cost_hour > 0.0 {
-                theme::cost_color(s.cost_hour)
-            } else {
-                theme::DIMMER
-            }
-        }
-        ColumnId::CostToday => {
-            if s.cost_today > 0.0 {
-                theme::cost_color(s.cost_today)
-            } else {
-                theme::DIMMER
-            }
-        }
-        ColumnId::Context => match &s.context {
-            Some(c) if c.compacting => theme::COST_HIGH,
-            Some(c) => theme::context_color(c.percent_to_compact()),
-            None => theme::DIMMER,
-        },
-        ColumnId::Cpu => s
-            .process
-            .as_ref()
-            .map(|p| theme::cpu_color(p.cpu))
-            .unwrap_or(theme::DIMMER),
-        ColumnId::TokenRate => {
-            if s.tokens_per_min > 5000.0 {
-                theme::COST_HIGH
-            } else if s.tokens_per_min > 1000.0 {
-                theme::COST_MID
-            } else if s.tokens_per_min > 0.0 {
-                theme::COST_LOW
-            } else {
-                theme::DIM
-            }
-        }
-        _ => Color::Reset,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Bottom panels
 // ---------------------------------------------------------------------------
 
 fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
+    app.ensure_available_tab();
     layout.bottom_start = area.y;
     layout.tab_row = area.y;
     layout.tool_sidebar = None;
@@ -463,6 +279,9 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     let mut pos = area.x + 2;
     layout.tab_spans.clear();
     for (i, name) in panels::TABS.iter().enumerate() {
+        if !app.tab_available(i) {
+            continue;
+        }
         let style = if i == app.bottom_tab {
             theme::title().add_modifier(Modifier::UNDERLINED)
         } else {
@@ -663,6 +482,22 @@ fn draw_performance(
         );
         return;
     }
+    if session.surface == Surface::Editor && session.provider == Provider::Cursor {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Cursor uses a shared editor process.",
+                    theme::dim(),
+                )),
+                Line::from(Span::styled(
+                    "No per-session CPU or memory metrics are available.",
+                    theme::dim(),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
     let Some(pm) = &session.process else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -733,6 +568,36 @@ fn draw_performance(
 // Limits
 // ---------------------------------------------------------------------------
 
+/// Colour quota usage by whether it is being spent faster than an even budget
+/// across its reset window. Falling back to absolute pressure keeps windows
+/// useful when a provider omits either its reset time or duration.
+fn quota_color(window: &crate::quota::Window, now: i64) -> Color {
+    if let (Some(duration), Some(reset)) = (window.duration, window.resets_at) {
+        let duration_secs = duration.as_secs() as i64;
+        let elapsed_secs = (now - (reset - duration_secs)).clamp(1, duration_secs);
+        let pace_ratio = window.pct as f64 * duration_secs as f64 / (100.0 * elapsed_secs as f64);
+
+        // A small overspend is worth noticing, while 50% above the sustainable
+        // rate should be unmistakable. For a 7d window the sustainable rate is
+        // 100 / (7 * 24), or roughly 0.6 percentage points per hour.
+        if pace_ratio >= 1.5 {
+            return theme::COST_HIGH;
+        }
+        if pace_ratio >= 1.1 {
+            return theme::COST_MID;
+        }
+        return theme::COST_LOW;
+    }
+
+    if window.pct >= 90 {
+        theme::COST_HIGH
+    } else if window.pct >= 70 {
+        theme::COST_MID
+    } else {
+        theme::COST_LOW
+    }
+}
+
 fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel_block("Limits");
     let inner = block.inner(area);
@@ -793,17 +658,12 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 ));
             }
             crate::quota::ProviderStatus::Ok(q) => {
+                let now = chrono::Utc::now().timestamp();
                 if let Some(plan) = &q.plan {
                     spans.push(Span::styled(format!("({plan}) "), theme::dim()));
                 }
                 for w in &q.windows {
-                    let color = if w.pct >= 90 {
-                        theme::COST_HIGH
-                    } else if w.pct >= 70 {
-                        theme::COST_MID
-                    } else {
-                        theme::COST_LOW
-                    };
+                    let color = quota_color(w, now);
                     spans.push(Span::styled(format!("{} ", w.label), theme::label()));
                     spans.push(Span::styled(
                         format!("{:>3}% ", w.pct),
@@ -819,7 +679,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                         Style::default().fg(Color::Indexed(244)),
                     ));
                     if let Some(reset) = w.resets_at {
-                        let remaining = reset - chrono::Utc::now().timestamp();
+                        let remaining = reset - now;
                         if remaining > 0 {
                             spans.push(Span::styled(
                                 format!(" {}h{:02}m", remaining / 3600, (remaining % 3600) / 60),
@@ -868,12 +728,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ("F1", "Help"),
         ("F3", "Filter"),
         ("F5", "Refresh"),
-        ("F6", "Sort"),
         ("F7", "Age"),
         ("←→", "Panel"),
-        ("`", "Live"),
+        ("Space", "Mark"),
+        ("D", "Batch"),
         ("y", "Copy"),
         ("d", "Delete"),
+        ("k", "Kill"),
+        ("+/-", "Speed"),
         ("F10", "Quit"),
     ] {
         spans.push(Span::styled(key, key_style));
@@ -891,231 +753,41 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Cyan),
         ));
     }
+    if app.cost_floor > 0.0 {
+        spans.push(Span::styled(
+            format!(" ≥${:.2} ", app.cost_floor),
+            Style::default().fg(theme::COST_HIGH),
+        ));
+    }
+    if !app.marked.is_empty() {
+        spans.push(Span::styled(
+            format!(" [{} marked] ", app.marked.len()),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::styled(
+        format!(" {}s ", app.refresh_secs),
+        Style::default().fg(theme::DIMMER),
+    ));
+    if app.follow {
+        spans.push(Span::styled(
+            " FOLLOW ",
+            Style::default().fg(theme::COST_MID),
+        ));
+    }
+    // Last, so it never pushes a key hint off the end of a narrow footer.
+    if let Some(version) = &app.update_available {
+        spans.push(Span::styled(
+            format!(" v{version} available — cctop --update "),
+            Style::default()
+                .fg(theme::COST_MID)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
-
-// ---------------------------------------------------------------------------
-// Modals
-// ---------------------------------------------------------------------------
-
-/// A centred rectangle of the given size, clamped to the screen.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let w = width.min(area.width.saturating_sub(2));
-    let h = height.min(area.height.saturating_sub(2));
-    Rect {
-        x: area.x + (area.width.saturating_sub(w)) / 2,
-        y: area.y + (area.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    }
-}
-
-fn modal(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>, width: u16) {
-    let height = lines.len() as u16 + 2;
-    let rect = centered(area, width, height);
-    frame.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER_HI))
-        .title(Span::styled(format!(" {title} "), theme::title()));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
-    let item = |k: &str, d: &str| {
-        Line::from(vec![
-            Span::styled(format!("  {k:<16}"), Style::default().fg(theme::ACCENT)),
-            Span::raw(d.to_string()),
-        ])
-    };
-    let lines = vec![
-        section("Navigation"),
-        item("↑/k  ↓/j", "Move between sessions"),
-        item("PgUp / PgDn", "Page through the list"),
-        item("Home / End", "Jump to first / last"),
-        Line::default(),
-        section("Panels"),
-        item("←  →", "Move between bottom panels"),
-        item("Tab / Shift+Tab", "Same, either direction"),
-        item("1 – 7", "Jump to a panel directly"),
-        item("Shift+↑ / ↓", "Scroll inside the active panel"),
-        item("L", "Toggle the Tool Activity live filter"),
-        item("v", "Toggle inline diffs for edits"),
-        Line::default(),
-        section("Filter and sort"),
-        item("/ or F3", "Filter sessions by text"),
-        item("F6  >  <", "Open the sort-by panel"),
-        item("F7", "Filter by age (1d / 1w / 1mo)"),
-        item("`", "Show only running sessions"),
-        item("P / M / T", "Sort by status / memory / cost"),
-        item("Esc", "Clear the active filter"),
-        Line::default(),
-        section("Other"),
-        item("y", "Copy resume command or transcript path"),
-        item("d", "Delete the selected session (not running)"),
-        item("r or F5", "Refresh now"),
-        item("q or F10", "Quit"),
-        Line::default(),
-        Line::from(Span::styled(
-            "  Costs are estimates from published per-token rates. Flat-rate plans",
-            theme::dim(),
-        )),
-        Line::from(Span::styled(
-            "  (Max, Pro, Team) bill differently, so these may not match your invoice.",
-            theme::dim(),
-        )),
-        Line::default(),
-        Line::from(Span::styled("  Press any key to return", theme::dim())),
-    ];
-    modal(frame, area, "Help", lines, 76);
-}
-
-fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = vec![
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.search.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::ACCENT)),
-        ]),
-        Line::from(Span::styled(
-            format!(
-                " {} match{}   Enter/Esc to close",
-                app.visible.len(),
-                if app.visible.len() == 1 { "" } else { "es" }
-            ),
-            theme::dim(),
-        )),
-    ];
-    modal(frame, area, "Filter sessions", lines, 54);
-}
-
-fn draw_sortby(frame: &mut Frame, area: Rect, app: &App) {
-    let mut lines: Vec<Line> = COLUMNS
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let active = c.id == app.sort_col;
-            let arrow = if active {
-                if app.sort_asc { " ▲" } else { " ▼" }
-            } else {
-                ""
-            };
-            let text = format!(" {}{}", c.label.trim(), arrow);
-            let style = if i == app.sortby_cursor {
-                Style::default()
-                    .bg(theme::SELECTED_BG)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else if active {
-                Style::default().fg(theme::ACCENT)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(format!("{text:<26}"), style))
-        })
-        .collect();
-    // Explain the highlighted column, since several are non-obvious ($/1H, CTX%).
-    lines.push(Line::default());
-    for part in COLUMNS[app.sortby_cursor].desc.lines() {
-        lines.push(Line::from(Span::styled(format!(" {part}"), theme::dim())));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        " Enter select   Esc cancel",
-        theme::dim(),
-    )));
-    modal(frame, area, "Sort by", lines, 54);
-}
-
-fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
-    let mut lines: Vec<Line> = AGE_OPTIONS
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            let active = *opt == app.age_filter;
-            let marker = if active { "●" } else { "○" };
-            let text = opt.map(|o| o.label()).unwrap_or("No filter");
-            let style = if i == app.age_cursor {
-                Style::default()
-                    .bg(theme::SELECTED_BG)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!(" {marker} "),
-                    Style::default().fg(if active {
-                        theme::COST_LOW
-                    } else {
-                        theme::DIMMER
-                    }),
-                ),
-                Span::styled(format!("{text:<22}"), style),
-            ])
-        })
-        .collect();
-    lines.push(Line::from(Span::styled(
-        " ↑/↓  Enter apply  Esc cancel",
-        theme::dim(),
-    )));
-    modal(frame, area, "Show sessions active within", lines, 34);
-}
-
-fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(s) = app.selected_session() else {
-        return;
-    };
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("  {}", s.display_label()),
-            theme::value(),
-        )),
-        Line::from(Span::styled(format!("  {}", s.session_id), theme::dim())),
-        Line::default(),
-        Line::from(Span::styled(
-            "  This permanently removes the transcript from disk.",
-            Style::default().fg(theme::COST_MID),
-        )),
-        Line::default(),
-        Line::from(Span::styled(
-            "  [y] delete    [n / Esc] cancel",
-            theme::dim(),
-        )),
-    ];
-    modal(frame, area, "Delete session?", lines, 62);
-}
-
-fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(s) = app.selected_session() else {
-        return;
-    };
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("  {}", s.display_label()),
-            theme::value(),
-        )),
-        Line::default(),
-        Line::from(Span::raw("  This session is still running.")),
-        Line::from(Span::raw("  Stop the agent first, then delete it.")),
-        Line::default(),
-        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
-    ];
-    modal(frame, area, "Cannot delete", lines, 62);
-}
-
-// ---------------------------------------------------------------------------
-// Clipboard
-// ---------------------------------------------------------------------------
 
 /// Copy text via a platform helper, falling back to the OSC 52 escape sequence.
 ///
@@ -1163,32 +835,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn column_widths_fill_the_available_space() {
-        let widths = column_widths(200);
-        let total: u16 = widths.iter().sum::<u16>() + (COLUMNS.len() - 1) as u16;
-        assert_eq!(total, 200);
-    }
-
-    #[test]
-    fn column_widths_stay_positive_when_cramped() {
-        // A narrow terminal must not produce a zero or wrapped-around width.
-        for w in [10u16, 40, 80] {
-            let widths = column_widths(w);
-            assert!(
-                widths.iter().all(|&x| x > 0),
-                "width {w} produced {widths:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn pad_truncates_and_aligns() {
-        assert_eq!(pad("abc", 5, false), "abc  ");
-        assert_eq!(pad("abc", 5, true), "  abc");
-        assert_eq!(pad("abcdefgh", 4, false).chars().count(), 4);
-    }
-
-    #[test]
     fn hit_testing_maps_regions() {
         let layout = Layout {
             header_row: 6,
@@ -1222,15 +868,24 @@ mod tests {
     }
 
     #[test]
-    fn centered_rect_never_exceeds_screen() {
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 20,
-            height: 10,
+    fn quota_colour_tracks_spending_pace() {
+        let duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+        let reset = 1_000_000;
+        let window = crate::quota::Window {
+            label: "7d",
+            pct: 80,
+            duration: Some(duration),
+            // 80% used halfway through a seven-day window is well ahead of
+            // the even 100/(7*24) percentage-points-per-hour pace.
+            resets_at: Some(reset + duration.as_secs() as i64 / 2),
         };
-        let r = centered(area, 100, 100);
-        assert!(r.width <= area.width && r.height <= area.height);
-        assert!(r.x + r.width <= area.width);
+        assert_eq!(quota_color(&window, reset), theme::COST_HIGH);
+
+        let sustainable = crate::quota::Window {
+            pct: 50,
+            resets_at: Some(reset + duration.as_secs() as i64 / 2),
+            ..window
+        };
+        assert_eq!(quota_color(&sustainable, reset), theme::COST_LOW);
     }
 }

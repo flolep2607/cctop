@@ -7,6 +7,7 @@ use super::theme;
 use crate::pricing::{Plan, Provider};
 use crate::session::{Session, SessionData, Subagent, SubagentStatus, Surface};
 use crate::util;
+use chrono::{DateTime, Utc};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
@@ -37,6 +38,27 @@ fn note(text: &str) -> Vec<Line<'static>> {
     vec![Line::from(dim(text.to_string()))]
 }
 
+fn is_free_model(model: &crate::session::ModelBreakdown) -> bool {
+    model.total == 0.0
+        && model.tokens.all_input() + model.tokens.output + model.tokens.reasoning_output > 0
+}
+
+fn displayed_cost(amount: f64, free: bool) -> String {
+    if free {
+        "FREE".into()
+    } else {
+        util::adaptive_usd(amount)
+    }
+}
+
+fn cost_style(amount: f64, free: bool) -> Style {
+    Style::default().fg(if free {
+        theme::DIMMER
+    } else {
+        theme::cost_color(amount)
+    })
+}
+
 /// `LABEL   value`, with labels padded to a shared column.
 fn field(name: &str, val: impl Into<String>) -> Line<'static> {
     Line::from(vec![
@@ -44,6 +66,18 @@ fn field(name: &str, val: impl Into<String>) -> Line<'static> {
         Span::raw(" "),
         value(val),
     ])
+}
+
+/// Wall time advances while a local agent is live, including pauses between
+/// transcript events. Once it exits, preserve the final activity span.
+fn wall_duration_ms(session: &Session, now: DateTime<Utc>) -> Option<i64> {
+    let started = util::parse_ts(&session.started_at)?;
+    let ended = if session.is_running() {
+        now
+    } else {
+        util::parse_ts(&session.last_active)?
+    };
+    Some((ended.timestamp_millis() - started.timestamp_millis()).max(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -68,9 +102,13 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let provider_color = match session.surface {
         Surface::DesktopCowork => theme::DESKTOP_COWORK,
         Surface::DesktopCode => theme::DESKTOP_CODE,
+        Surface::Editor => theme::CURSOR,
         Surface::Cli => match session.provider {
             Provider::Claude => theme::CLAUDE,
             Provider::Codex => theme::OPENAI,
+            Provider::Cursor => theme::CURSOR,
+            Provider::OpenCode => theme::OPENCODE,
+            Provider::Pi => theme::PI,
         },
     };
     let model = if data.last_model.is_empty() {
@@ -100,6 +138,9 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     ]));
 
     lines.push(field("ID", session.session_id.clone()));
+    if !session.harness.is_empty() {
+        lines.push(field("Harness", session.harness.clone()));
+    }
     if let Some(t) = &session.title {
         lines.push(field("Title", t.clone()));
     }
@@ -114,13 +155,26 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let cmd = match session.provider {
         Provider::Claude => format!("claude --resume {}", session.session_id),
         Provider::Codex => format!("codex resume {}", session.session_id),
+        Provider::Cursor => "Open from Cursor history".to_string(),
+        Provider::OpenCode => format!("opencode --session {}", session.session_id),
+        Provider::Pi => format!("pi --session {}", session.session_id),
     };
     lines.push(field("Cmd", cmd));
     lines.push(field("Plan", plan.as_str()));
+    if let Some(effort) = &data.reasoning_effort {
+        lines.push(field("Effort", effort.clone()));
+    }
+    if data.tokens.reasoning_output > 0 {
+        lines.push(field(
+            "Reasoning",
+            format!("{} tokens", util::with_commas(data.tokens.reasoning_output)),
+        ));
+    }
 
     let account = match session.provider {
         Provider::Claude => crate::quota::claude_account(),
         Provider::Codex => crate::quota::codex_account(),
+        Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
     };
     if let Some(a) = account {
         if let Some(email) = a.email {
@@ -148,14 +202,8 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
             util::long_duration(data.metrics.api_duration_ms as i64),
         ));
     }
-    if let (Some(a), Some(b)) = (
-        util::parse_ts(&session.started_at),
-        util::parse_ts(&session.last_active),
-    ) {
-        lines.push(field(
-            "Wall",
-            util::long_duration(b.timestamp_millis() - a.timestamp_millis()),
-        ));
+    if let Some(wall_ms) = wall_duration_ms(session, Utc::now()) {
+        lines.push(field("Wall", util::long_duration(wall_ms)));
     }
 
     let m = &data.metrics;
@@ -236,6 +284,9 @@ fn bar(ratio: f64, width: usize, color: ratatui::style::Color) -> Span<'static> 
 pub fn processes(session: &Session, width: usize) -> Vec<Line<'static>> {
     if session.surface == Surface::DesktopCowork {
         return note("Cowork sessions run in a cloud VM — no local process tree.");
+    }
+    if session.surface == Surface::Editor && session.provider == Provider::Cursor {
+        return note("Cursor uses a shared editor process — no per-session process tree.");
     }
     let Some(pm) = &session.process else {
         return note("Process data is only available for running sessions.");
@@ -421,7 +472,17 @@ pub fn tool_activity(
         let ts = util::parse_ts(&d.ts)
             .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
             .unwrap_or_else(|| "     ".into());
-        let mut spans = vec![dim(ts), Span::raw(" ")];
+        // The gap after the timestamp doubles as a failure marker, so a failed
+        // call is legible without relying on the background colour alone — and
+        // the row's width is unchanged either way.
+        let mut spans = vec![
+            dim(ts),
+            if d.failed {
+                Span::styled("✗", Style::default().fg(theme::COST_HIGH))
+            } else {
+                Span::raw(" ")
+            },
+        ];
         let mut used = 6;
 
         // Who made the call: the main session, or one of its subagents. Subagent
@@ -492,20 +553,28 @@ pub fn tool_activity(
             util::truncate(&text, detail_w)
         )));
         spans.extend(trailing);
-        out.push(Line::from(spans));
+        let row_style = if d.failed {
+            Style::default().bg(theme::FAILED_BG)
+        } else {
+            Style::default()
+        };
+        out.push(Line::from(spans).style(row_style));
         owners.push(Some(key.clone()));
 
         // Expanded: show the untruncated argument, wrapped.
         if is_open {
             let full = d.full.as_deref().unwrap_or(&d.d);
             for line in wrap(full, width.saturating_sub(10)) {
-                out.push(Line::from(vec![
-                    Span::raw("        "),
-                    Span::styled(
-                        line,
-                        Style::default().fg(ratatui::style::Color::Indexed(252)),
-                    ),
-                ]));
+                out.push(
+                    Line::from(vec![
+                        Span::raw("        "),
+                        Span::styled(
+                            line,
+                            Style::default().fg(ratatui::style::Color::Indexed(252)),
+                        ),
+                    ])
+                    .style(row_style),
+                );
                 owners.push(Some(key.clone()));
             }
         }
@@ -737,7 +806,11 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let included = plan.includes(session.provider);
     let mut lines = Vec::new();
 
-    if included {
+    if !session.cost_available {
+        return note("Cost and token usage are not present in Cursor transcripts.");
+    }
+
+    if included && !session.cost_is_free {
         lines.push(Line::from(vec![
             label("Total cost"),
             Span::raw("  "),
@@ -755,10 +828,8 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         label("Total cost"),
         Span::raw("  "),
         Span::styled(
-            util::compact_usd(data.costs.total),
-            Style::default()
-                .fg(theme::cost_color(data.costs.total))
-                .add_modifier(Modifier::BOLD),
+            displayed_cost(data.costs.total, session.cost_is_free),
+            cost_style(data.costs.total, session.cost_is_free).add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(dim(
@@ -766,7 +837,7 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     )));
     lines.push(Line::default());
 
-    // Rolling spend windows.
+    // Calendar-bucket spend windows.
     let now = chrono::Utc::now();
     let midnight = util::local_midnight_today();
     let today = util::local_date_key(&midnight);
@@ -788,7 +859,7 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         .unwrap_or(0.0);
 
     for (name, amount) in [
-        ("last hour", hour_cost),
+        ("this hour", hour_cost),
         ("today", sum_day(&today)),
         ("7 days", sum_day(&week)),
         ("30 days", sum_day(&month)),
@@ -796,21 +867,22 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         lines.push(Line::from(vec![
             label(&format!("  {name:<10}")),
             Span::styled(
-                format!("{:>10}", util::adaptive_usd(amount)),
-                Style::default().fg(theme::cost_color(amount)),
+                format!("{:>10}", displayed_cost(amount, session.cost_is_free)),
+                cost_style(amount, session.cost_is_free),
             ),
         ]));
     }
 
     // Per-model breakdown.
     for mb in &data.model_breakdown {
+        let free_model = is_free_model(mb);
         lines.push(Line::default());
         lines.push(Line::from(vec![
             value(mb.model.clone()),
             Span::raw("  "),
             Span::styled(
-                util::compact_usd(mb.total),
-                Style::default().fg(theme::cost_color(mb.total)),
+                displayed_cost(mb.total, free_model),
+                cost_style(mb.total, free_model),
             ),
         ]));
         let rows: [(&str, u64, f64); 5] = [
@@ -837,8 +909,8 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
                 value(format!("{:>8}", util::compact_tokens(tokens))),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{:>10}", util::adaptive_usd(amount)),
-                    Style::default().fg(theme::cost_color(amount)),
+                    format!("{:>10}", displayed_cost(amount, free_model)),
+                    cost_style(amount, free_model),
                 ),
             ]));
         }
@@ -968,6 +1040,78 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
             )));
             lines.extend(mcp_from_toml(&toml));
         }
+        Provider::Cursor => {
+            lines.push(Line::from(Span::styled(
+                "── Cursor ──".to_string(),
+                theme::title(),
+            )));
+            lines.push(Line::from(dim(
+                "Native agent transcripts do not expose model, token, context, or cost data.",
+            )));
+            lines.push(Line::from(dim(format!(
+                "Transcript: {}",
+                session
+                    .data_file
+                    .as_ref()
+                    .map(|p| util::tildify(&p.to_string_lossy()))
+                    .unwrap_or_else(|| "unknown".into())
+            ))));
+        }
+        Provider::OpenCode => {
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            if !session.label_source.is_empty() {
+                match file_section(&cwd.join("AGENTS.md"), "./AGENTS.md", 40) {
+                    Some(block) => lines.extend(block),
+                    None => lines.push(missing("./AGENTS.md not found".into())),
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Config ──".to_string(),
+                theme::title(),
+            )));
+            let config = dirs::config_dir()
+                .unwrap_or_else(|| crate::config::HOME.join(".config"))
+                .join("opencode")
+                .join("opencode.json");
+            match file_section(&config, &util::tildify(&config.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", config.display()))),
+            }
+        }
+        Provider::Pi => {
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            let global = crate::config::PI_AGENT_DIR.join("AGENTS.md");
+            match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", global.display()))),
+            }
+            if !session.label_source.is_empty() {
+                match file_section(&cwd.join("AGENTS.md"), "./AGENTS.md", 40) {
+                    Some(block) => lines.extend(block),
+                    None => lines.push(missing("./AGENTS.md not found".into())),
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Config ──".to_string(),
+                theme::title(),
+            )));
+            let settings = crate::config::PI_AGENT_DIR.join("settings.json");
+            match file_section(&settings, &util::tildify(&settings.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", settings.display()))),
+            }
+            lines.push(Line::from(Span::styled(
+                "── Skills ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(skill_list(&crate::config::PI_AGENT_DIR.join("skills")));
+        }
     }
     lines
 }
@@ -1064,6 +1208,46 @@ fn mcp_from_toml(path: &Path) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use crate::session::{ContextUsage, SubagentStatus};
+
+    /// A failed call is marked two ways on purpose: the red wash, and a glyph in
+    /// the gap after the timestamp so the row still reads on a terminal that
+    /// drops background colour.
+    #[test]
+    fn failed_tool_calls_are_marked_in_the_activity_rows() {
+        let mut data = SessionData::default();
+        for (command, failed) in [("true", false), ("exit 1", true)] {
+            data.metrics
+                .tool_details
+                .entry("Bash".to_string())
+                .or_default()
+                .push(crate::session::ToolDetail {
+                    d: command.to_string(),
+                    ts: "2026-08-05T10:00:00+00:00".to_string(),
+                    failed,
+                    ..Default::default()
+                });
+        }
+        data.metrics.tool_count = 2;
+
+        let (lines, _) = tool_activity(&data, 0, None, false, None, 120);
+        let row_of = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains(needle)))
+                .unwrap_or_else(|| panic!("no row for {needle}"))
+        };
+
+        let ok = row_of("true");
+        assert_eq!(ok.style.bg, None, "a successful call keeps the normal row");
+        assert!(!ok.spans.iter().any(|s| s.content.contains('✗')));
+
+        let bad = row_of("exit 1");
+        assert_eq!(bad.style.bg, Some(theme::FAILED_BG));
+        assert!(
+            bad.spans.iter().any(|s| s.content.contains('✗')),
+            "the failure must not be conveyed by colour alone"
+        );
+    }
 
     fn subagent(id: &str, cost: f64, ghost: bool) -> Subagent {
         Subagent {
@@ -1170,6 +1354,21 @@ mod tests {
     }
 
     #[test]
+    fn wall_time_advances_for_live_sessions_and_freezes_when_stopped() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:02:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut session = Session::new(Provider::Claude, "x".into());
+        session.started_at = "2026-01-01T00:00:00Z".into();
+        session.last_active = "2026-01-01T00:00:49Z".into();
+
+        assert_eq!(wall_duration_ms(&session, now), Some(49_000));
+
+        session.process = Some(crate::proc::ProcInfo::default());
+        assert_eq!(wall_duration_ms(&session, now), Some(120_000));
+    }
+
+    #[test]
     fn bundled_plan_cost_panel_still_shows_retail_equivalent() {
         let s = Session::new(Provider::Claude, "x".into());
         let data = SessionData {
@@ -1186,6 +1385,36 @@ mod tests {
             .collect();
         assert!(text.contains("included in plan"));
         assert!(text.contains("$4.25"));
+    }
+
+    #[test]
+    fn cost_panel_labels_free_model_usage() {
+        let mut s = Session::new(Provider::OpenCode, "x".into());
+        s.cost_is_free = true;
+        let data = SessionData {
+            model_breakdown: vec![crate::session::ModelBreakdown {
+                model: "deepseek-v4-flash-free".into(),
+                tokens: crate::session::Tokens {
+                    input: 100,
+                    output: 20,
+                    cache_read: 50,
+                    reasoning_output: 10,
+                    total: 180,
+                    ..Default::default()
+                },
+                costs: crate::session::Costs::default(),
+                total: 0.0,
+            }],
+            ..Default::default()
+        };
+        let lines = cost(&s, Some(&data), Plan::Retail);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("deepseek-v4-flash-free  FREE"));
+        assert!(!text.contains("$0.00"));
+        assert!(text.matches("FREE").count() >= 8, "{text}");
     }
 
     #[test]

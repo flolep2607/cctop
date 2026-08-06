@@ -59,7 +59,18 @@ static CLAUDE_TABLE: LazyLock<HashMap<&'static str, ClaudePricing>> = LazyLock::
 });
 
 static CODEX_TABLE: LazyLock<HashMap<&'static str, CodexPricing>> = LazyLock::new(|| {
+    // `codex-auto-review` is an internal label emitted by Codex review
+    // sessions. It runs GPT-5.2, so retain the useful label in the UI while
+    // applying GPT-5.2's published token rates.
+    let gpt_5_2 = CodexPricing {
+        input: 1.75,
+        cached_input: 0.175,
+        output: 14.0,
+    };
     HashMap::from([
+        ("gpt-5.2", gpt_5_2),
+        ("gpt-5.2-codex", gpt_5_2),
+        ("codex-auto-review", gpt_5_2),
         (
             "gpt-5.3-codex",
             CodexPricing {
@@ -187,21 +198,68 @@ pub fn refresh_pricing_blocking() {
     install(data, now);
 }
 
-/// Look up a model in the LiteLLM table: exact, then `anthropic.`-prefixed,
-/// then the first key containing the model name.
-fn litellm_entry(model: &str) -> Option<LitellmEntry> {
-    let guard = LITELLM.read().ok()?;
-    let table = guard.as_ref()?;
-    if let Some(e) = table.get(model) {
-        return Some(e.clone());
-    }
-    if let Some(e) = table.get(&format!("anthropic.{model}")) {
-        return Some(e.clone());
-    }
+/// Whether `key` is LiteLLM's name for `model` under some route prefix.
+///
+/// Models arrive vendor-qualified (`moonshotai/kimi-k2.5`) while LiteLLM lists
+/// the same model once per route it can be reached by: `openrouter/moonshotai/
+/// kimi-k2.5`, `bedrock/us-east-1/moonshotai.kimi-k2.5`, `moonshotai.kimi-k2.5`.
+/// Lower-casing and treating `.` and `/` alike as separators makes those one
+/// name — safe here because an exact match is tried first, so nothing that is
+/// listed verbatim ever reaches this.
+fn names_model(key: &str, model: &str) -> bool {
+    let norm = |s: &str| s.to_ascii_lowercase().replace('.', "/");
+    let (key, model) = (norm(key), norm(model));
+    key == model || key.ends_with(&format!("/{model}"))
+}
+
+/// Whether an entry carries a rate worth using. Some rows exist only to record a
+/// route's context window and leave both costs at zero; matching one of those is
+/// no better than not matching at all, and it hides a real listing further down
+/// the ladder.
+fn priced(e: &LitellmEntry) -> bool {
+    e.input_cost_per_token > 0.0 || e.output_cost_per_token > 0.0
+}
+
+/// The shortest priced key satisfying `pred`, ties broken alphabetically.
+///
+/// Both parts matter. Shortest means fewest route prefixes, so a vendor listing
+/// wins over a reseller's. Deterministic means the same model prices the same on
+/// every run: `HashMap` iteration order is randomised per process, so picking any
+/// match made a session's cost jump between runs — and the figure gets cached, so
+/// it stuck.
+fn best_match(
+    table: &HashMap<String, LitellmEntry>,
+    pred: impl Fn(&str) -> bool,
+) -> Option<&LitellmEntry> {
     table
         .iter()
-        .find(|(k, _)| k.contains(model))
-        .map(|(_, v)| v.clone())
+        .filter(|(k, v)| priced(v) && pred(k))
+        .min_by(|a, b| (a.0.len(), a.0).cmp(&(b.0.len(), b.0)))
+        .map(|(_, v)| v)
+}
+
+/// Look up a model in the LiteLLM table.
+///
+/// Two names are tried — as given, and with the vendor prefix dropped, since
+/// `anthropic/claude-sonnet-4-5` is listed bare — and they are tried tier by tier
+/// so an exact listing always beats a fuzzy match on either form. Last tier is any
+/// key containing the name, which is what answers for an undated model whose only
+/// listing is dated.
+fn lookup<'a>(table: &'a HashMap<String, LitellmEntry>, model: &str) -> Option<&'a LitellmEntry> {
+    let stem = model.rsplit('/').next().filter(|s| *s != model);
+    let names = || std::iter::once(model).chain(stem);
+    table
+        .get(model)
+        .or_else(|| table.get(&format!("anthropic.{model}")))
+        // A stem is already a guess, so it has to land on a real rate to count.
+        .or_else(|| names().find_map(|n| table.get(n).filter(|e| priced(e))))
+        .or_else(|| names().find_map(|n| best_match(table, |k| names_model(k, n))))
+        .or_else(|| names().find_map(|n| best_match(table, |k| k.contains(n))))
+}
+
+fn litellm_entry(model: &str) -> Option<LitellmEntry> {
+    let guard = LITELLM.read().ok()?;
+    lookup(guard.as_ref()?, model).cloned()
 }
 
 /// Context window reported by LiteLLM, if known.
@@ -289,6 +347,9 @@ impl Plan {
 pub enum Provider {
     Claude,
     Codex,
+    Cursor,
+    OpenCode,
+    Pi,
 }
 
 impl Provider {
@@ -296,6 +357,9 @@ impl Provider {
         match self {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Cursor => "cursor",
+            Provider::OpenCode => "opencode",
+            Provider::Pi => "pi",
         }
     }
 }
@@ -318,6 +382,66 @@ mod tests {
         assert_eq!(p.input, 0.0);
         let c = resolve_codex("gpt-nope");
         assert_eq!(c.output, 0.0);
+    }
+
+    #[test]
+    fn auto_review_uses_gpt_5_2_pricing_without_renaming() {
+        let auto = resolve_codex("codex-auto-review");
+        let gpt = resolve_codex("gpt-5.2");
+        assert_eq!(auto.input, gpt.input);
+        assert_eq!(auto.cached_input, gpt.cached_input);
+        assert_eq!(auto.output, gpt.output);
+    }
+
+    /// Key shapes taken from the real LiteLLM table, which lists a model once per
+    /// route it can be reached by, at that route's price.
+    fn kimi_table() -> HashMap<String, LitellmEntry> {
+        let entry = |input: f64| LitellmEntry {
+            input_cost_per_token: input,
+            ..Default::default()
+        };
+        [
+            ("moonshotai.kimi-k2.5", 6e-7),
+            ("moonshot/kimi-k2.5", 6e-7),
+            ("openrouter/moonshotai/kimi-k2.5", 7e-7),
+            ("bedrock/ap-south-1/moonshotai.kimi-k2.5", 7.2e-7),
+            ("together_ai/moonshotai/Kimi-K2.5", 5e-7),
+            ("claude-sonnet-4-5-20250929", 3e-6),
+            ("gpt-5.2", 1.75e-6),
+            // Real shape of a route that records only a context window.
+            ("perplexity/anthropic/claude-sonnet-4-5", 0.0),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), entry(v)))
+        .collect()
+    }
+
+    /// A vendor-qualified model is listed only behind route prefixes, and the
+    /// route decides the price — so the match has to be the vendor's own listing
+    /// and it has to be the same one every run.
+    #[test]
+    fn a_routed_model_resolves_to_its_vendor_listing() {
+        let table = kimi_table();
+        for _ in 0..8 {
+            let e = lookup(&table, "moonshotai/kimi-k2.5").expect("no match");
+            assert_eq!(e.input_cost_per_token, 6e-7);
+        }
+        // A dated variant still answers for the undated name.
+        assert!(lookup(&table, "claude-sonnet-4-5").is_some());
+        assert!(lookup(&table, "gpt-nope").is_none());
+    }
+
+    /// A vendor-prefixed name whose bare form is listed must take the bare price,
+    /// not a reseller route that happens to be shorter — and never an unpriced row.
+    #[test]
+    fn a_vendor_prefix_falls_back_to_the_bare_listing() {
+        let table = kimi_table();
+        let e = lookup(&table, "anthropic/claude-sonnet-4-5").expect("no match");
+        assert_eq!(e.input_cost_per_token, 3e-6);
+        assert_eq!(
+            lookup(&table, "openai/gpt-5.2").map(|e| e.input_cost_per_token),
+            Some(1.75e-6)
+        );
     }
 
     #[test]
