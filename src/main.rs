@@ -12,6 +12,7 @@ mod shim;
 mod ui;
 mod update;
 mod util;
+mod watch;
 
 use clap::Parser;
 use std::io::IsTerminal;

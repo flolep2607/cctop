@@ -37,9 +37,11 @@ const QUOTA_TICK: Duration = Duration::from_secs(10);
 ///
 /// Only a walk can notice a session that didn't exist before, and it costs one
 /// `stat` per transcript ever recorded — thousands of them, nearly all belonging
-/// to sessions that ended long ago. A new session appearing 15 seconds late is
-/// not worth paying that every refresh; `r` still forces one immediately.
-const FULL_WALK_INTERVAL: Duration = Duration::from_secs(15);
+/// to sessions that ended long ago. A filesystem watch reports creations and
+/// removals as they happen, so this is the safety net for whatever the watch
+/// misses (or for when no watch could be established at all) rather than the way
+/// new sessions are normally found. `r` still forces one immediately.
+const FULL_WALK_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -992,7 +994,10 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
 
-    let result = event_loop(&mut app, &mut terminal, &res_rx, &req_tx);
+    // Established before the loop so the first tick already has it; `None` just
+    // means discovery falls back to the periodic walk.
+    let watch = crate::watch::Watch::start();
+    let result = event_loop(&mut app, &mut terminal, &res_rx, &req_tx, watch.as_ref());
 
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -1048,6 +1053,7 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     res_rx: &Receiver<Response>,
     req_tx: &Sender<Request>,
+    watch: Option<&crate::watch::Watch>,
 ) -> anyhow::Result<()> {
     let mut last_refresh = Instant::now();
     let mut last_full_walk = Instant::now();
@@ -1199,7 +1205,8 @@ fn event_loop(
             // number running now. So the fast tick updates the running rows and
             // the walk — the only thing that can notice a *new* session — runs on
             // its own slower cadence.
-            let full_due = last_full_walk.elapsed() >= FULL_WALK_INTERVAL;
+            let watched_change = watch.is_some_and(crate::watch::Watch::took_structural_change);
+            let full_due = watched_change || last_full_walk.elapsed() >= FULL_WALK_INTERVAL;
             if full_due {
                 last_full_walk = Instant::now();
             }
