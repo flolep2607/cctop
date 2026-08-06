@@ -24,6 +24,10 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// What a real Enter key sends on a pty in raw mode. A `\n` is read as Enter by
 /// some agents and ignored by others; `\r` is what the terminal would have sent.
+///
+/// Gated with its users: both backends that write raw bytes to a pty are unix-only,
+/// and tmux submits with a named `Enter` key instead, so on Windows this is dead.
+#[cfg(unix)]
 const SUBMIT: char = '\r';
 
 /// Type `text` into the terminal running the agent at `pid`, then submit it.
