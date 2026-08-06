@@ -180,17 +180,25 @@ fn spawn_worker(
         while let Ok(req) = rx.recv() {
             match req {
                 Request::Refresh => {
-                    let publish_discovery = !sent_initial_discovery;
+                    // Row-by-row publishing exists so the first table isn't
+                    // withheld for the slowest transcript. Later refreshes end
+                    // with a `Sessions` payload that replaces everything anyway,
+                    // so streaming them too only buys a redundant repaint — at the
+                    // cost of one message and one table scan per session, per
+                    // refresh, forever.
+                    let first_load = !sent_initial_discovery;
                     sent_initial_discovery = true;
                     let sessions = loader.load_progressive(
                         plan,
                         |sessions| {
-                            if publish_discovery {
+                            if first_load {
                                 let _ = tx.send(Response::Discovered(sessions.to_vec()));
                             }
                         },
                         |session| {
-                            let _ = tx.send(Response::Annotated(Box::new(session.clone())));
+                            if first_load {
+                                let _ = tx.send(Response::Annotated(Box::new(session.clone())));
+                            }
                         },
                     );
                     let stats = crate::loader::compute_stats(&sessions);
@@ -1019,8 +1027,14 @@ fn event_loop(
                     app.refilter();
                 }
                 Ok(Response::Annotated(session)) => {
-                    let key = session.key();
-                    if let Some(existing) = app.sessions.iter_mut().find(|s| s.key() == key) {
+                    // Match on the key's two fields rather than on `key()`: that
+                    // formats a String per candidate, so a scan over thousands of
+                    // rows allocated thousands of times — per arriving row, on the
+                    // thread that also has to answer the keyboard.
+                    let found = app.sessions.iter_mut().find(|s| {
+                        s.provider == session.provider && s.session_id == session.session_id
+                    });
+                    if let Some(existing) = found {
                         *existing = *session;
                     } else {
                         app.sessions.push(*session);
