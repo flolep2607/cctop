@@ -102,7 +102,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         .min(body_height.saturating_sub(4));
 
     let chunks = RLayout::vertical([
-        Constraint::Length(5),
+        // Four spend rows plus the border.
+        Constraint::Length(6),
         Constraint::Min(4),
         Constraint::Length(bottom_height),
         Constraint::Length(3),
@@ -191,6 +192,18 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             &app.stats.monthly_daily,
             day_idx,
         ),
+        // Every session ever recorded, across every provider. Deliberately without
+        // a sparkline: the others chart a window that scrolls, and a running total
+        // only ever climbs, so a chart of it says nothing the number doesn't.
+        Line::from(vec![
+            Span::styled(format!("{:<label_w$}", "Total Spend"), theme::label()),
+            Span::styled(
+                format!("{:>value_w$}", util::adaptive_usd(app.stats.spend_total)),
+                Style::default()
+                    .fg(Color::Indexed(221))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
     ];
     frame.render_widget(Paragraph::new(left_lines), left);
 
