@@ -33,7 +33,7 @@ impl App {
 
         // Ctrl-C quits from any mode.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
+            self.request_quit();
             return;
         }
 
@@ -43,6 +43,7 @@ impl App {
             Mode::AgeFilter => self.on_key_age(key),
             Mode::DeleteConfirm => self.on_key_delete(key),
             Mode::KillConfirm => self.on_key_kill(key),
+            Mode::QuitConfirm => self.on_key_quit(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
                 self.on_key_batch(key)
             }
@@ -80,7 +81,7 @@ impl App {
                 self.set_sort(COLUMNS[self.sortby_cursor].id);
                 self.mode = Mode::List;
             }
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             _ => {}
         }
     }
@@ -125,6 +126,27 @@ impl App {
             self.set_status(format!("Stopping session {}…", session.session_id));
         }
         self.mode = Mode::List;
+    }
+
+    /// Quit, or ask first when it would take the hosted agent down.
+    ///
+    /// `q` is muscle memory in an htop-like list, and here it would end a live
+    /// coding session: the agent runs on a pty this process owns, so there is
+    /// nothing left of it once cctop is gone.
+    fn request_quit(&mut self) {
+        match self.hosted.is_some() {
+            true => self.mode = Mode::QuitConfirm,
+            false => self.should_quit = true,
+        }
+    }
+
+    fn on_key_quit(&mut self, key: KeyEvent) {
+        self.mode = Mode::List;
+        match key.code {
+            KeyCode::Char('y') => self.should_quit = true,
+            KeyCode::Char('A') => self.attach_hosted(),
+            _ => {}
+        }
     }
 
     fn on_key_batch(&mut self, key: KeyEvent) {
@@ -193,7 +215,7 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::F(10) => self.should_quit = true,
+            KeyCode::Char('q') | KeyCode::F(10) => self.request_quit(),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp | KeyCode::Char('b') => self.move_selection(-PAGE),
@@ -307,6 +329,7 @@ impl App {
                 None => {}
             },
             KeyCode::Char('a') => self.attach_selected(),
+            KeyCode::Char('A') => self.attach_hosted(),
             KeyCode::Char('y') => self.copy_selection(),
             KeyCode::Char('L') => {
                 self.tool_live_only = !self.tool_live_only;

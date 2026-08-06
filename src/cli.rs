@@ -11,6 +11,25 @@ use serde::Serialize;
 #[command(
     name = "cctop",
     about = "An htop-like monitor for AI coding agent sessions",
+    // cctop takes no positionals — `run` and `attach` are intercepted in main
+    // before clap sees them, so clap cannot know they exist and would otherwise
+    // print a usage line claiming options are all there is.
+    override_usage = "cctop [OPTIONS]\n       \
+                      cctop <agent> [args…]\n       \
+                      cctop attach [pid]",
+    // Shown by `-h` as well as `--help`: the long description is the only place
+    // that mentioned launching agents, and nobody reads `--help` to find out a
+    // command exists.
+    after_help = "Running agents:\n  \
+cctop <agent> [args…]  Start claude, codex, opencode or pi on a pty cctop owns,\n                         \
+so the UI can watch it and type into it. Same as\n                         \
+`cctop run <agent>`; everything after the name goes to it.\n  \
+cctop attach [pid]     Put a running agent on this terminal. With no pid, lists\n                         \
+them. F12 detaches and leaves it running.\n\n\
+Use --help for the full description.",
+    // Otherwise clap repeats the block above under the long description, which
+    // covers the same ground at length.
+    after_long_help = "",
     long_about = "cctop — an htop-like monitor for AI coding agent sessions\n\n\
 Tracks Claude Code, Codex, Cursor, OpenCode, and Pi sessions on your machine, showing\n\
 real-time cost estimation, token usage, tool invocations, and OS-level metrics.\n\n\
@@ -25,6 +44,12 @@ LAUNCHING AGENTS\n  \
 cctop owns so the UI can type into it with `s`. Everything after the command,\n  \
 flags included, goes to the agent. The first interactive run aliases the known\n  \
 agents to this form in your shell startup files; --remove-alias undoes that.\n\n\
+ATTACHING\n  \
+Agents started that way can be watched and driven from anywhere. Press `a` in\n  \
+the UI, or run `cctop attach [pid]` to put one on the terminal directly —\n  \
+with no pid it lists what is running. F12 detaches and leaves it running. The\n  \
+agent is resized to the smallest window watching it, and gets its size back\n  \
+when that one detaches.\n\n\
 NOTES\n  \
 Session data is read from each agent's standard local session store.\n  \
 UI preferences (active tab, sort order, filters) persist across runs.",

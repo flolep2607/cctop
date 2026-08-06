@@ -27,19 +27,39 @@ fn main() -> anyhow::Result<()> {
     // `run`: cctop takes no positionals, so a command is the only thing it can
     // be. Anything else (a typo, a stray word) falls through to clap's usage
     // error rather than being exec'd.
+    //
+    // The two forms differ in what surrounds the agent. `cctop run claude` is a
+    // transparent stand-in for `claude` and hands over the terminal; `cctop
+    // claude` starts cctop with the agent attached inside it, which is the point
+    // of launching it through cctop at all.
+    #[cfg(unix)]
+    let mut agent: Option<Vec<String>> = None;
     #[cfg(unix)]
     {
         let argv: Vec<String> = std::env::args().collect();
-        let command = match argv.get(1).map(String::as_str) {
-            Some("run") => Some(&argv[2..]),
-            Some(word) if !word.starts_with('-') && shim::is_command(word) => Some(&argv[1..]),
-            _ => None,
-        };
-        if let Some(command) = command {
-            std::process::exit(shim::run(command)?);
+        // `cctop attach` puts a running agent on this terminal directly, with no
+        // UI around it. Handled here for the same reason as `run`: it takes a
+        // positional, and cctop otherwise has none.
+        if argv.get(1).map(String::as_str) == Some("attach") {
+            std::process::exit(attach::run_terminal(&argv[2..])?);
+        }
+        match argv.get(1).map(String::as_str) {
+            Some("run") => std::process::exit(shim::run(&argv[2..])?),
+            Some(word) if !word.starts_with('-') && shim::is_command(word) => {
+                agent = Some(argv[1..].to_vec());
+            }
+            _ => {}
         }
     }
 
+    #[cfg(unix)]
+    // Everything after the agent's name belongs to the agent, so clap must not
+    // be shown it; the UI wrapped around it runs on its defaults.
+    let args = match agent {
+        Some(_) => cli::Args::parse_from(["cctop"]),
+        None => cli::Args::parse(),
+    };
+    #[cfg(not(unix))]
     let args = cli::Args::parse();
 
     if args.update {
@@ -85,6 +105,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        // With no terminal there is no UI to wrap the agent in, but there is
+        // still an agent to run: `claude` is aliased to this, and a pipeline or
+        // a script must not be told to use --json instead.
+        #[cfg(unix)]
+        if let Some(agent) = agent {
+            std::process::exit(shim::run(&agent)?);
+        }
         anyhow::bail!("the interactive UI needs a TTY; use --list or --json instead");
     }
 
@@ -93,5 +120,13 @@ fn main() -> anyhow::Result<()> {
     // Load whatever pricing is already cached so the first frame isn't zeroed
     // while the network fetch is still in flight.
     pricing::load_cached_pricing();
-    ui::run(&args)
+
+    // Started before the UI so a failure to launch prints as an ordinary error
+    // rather than from inside the alternate screen.
+    #[cfg(unix)]
+    let hosted = agent.map(|agent| shim::host(&agent)).transpose()?;
+    #[cfg(not(unix))]
+    let hosted = None;
+
+    std::process::exit(ui::run(&args, hosted)?)
 }

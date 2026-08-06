@@ -57,6 +57,8 @@ pub enum Mode {
     DeleteBlocked,
     /// Confirming termination of the selected live session.
     KillConfirm,
+    /// Confirming a quit that would take the hosted agent down with it.
+    QuitConfirm,
     /// Explaining why a live session cannot be terminated locally.
     KillBlocked,
     /// Confirming a batch action over all marked sessions.
@@ -392,6 +394,13 @@ pub struct App {
     /// What to call it in the title — the session is gone from view while
     /// attached, so the label has to be carried.
     pub attached_label: String,
+    /// The agent this cctop launched, as `(pid, label)`.
+    ///
+    /// Set only for `cctop <agent>`, and only while it is alive — the loop exits
+    /// as soon as it is not. It is what `A` goes back to after F12, and the
+    /// reason quitting asks first: the agent is on a pty this process owns and
+    /// does not survive it.
+    pub hosted: Option<(u32, String)>,
 
     prefs: UiPrefs,
     tx: Sender<Request>,
@@ -477,6 +486,7 @@ impl App {
             tx,
             attached: None,
             attached_label: String::new(),
+            hosted: None,
             needs_redraw: true,
             should_quit: false,
         }
@@ -972,6 +982,24 @@ impl App {
             ),
         }
     }
+
+    /// Go back to the agent this cctop launched.
+    ///
+    /// Without this, F12 would be a one-way door: a freshly started agent has
+    /// written no transcript yet, so it has no row in the table to press `a` on.
+    pub(super) fn attach_hosted(&mut self) {
+        let Some((pid, label)) = self.hosted.clone() else {
+            self.set_status("No agent was launched by this cctop — start one as `cctop claude`");
+            return;
+        };
+        match crate::attach::attach(pid) {
+            Some(attached) => {
+                self.attached = Some(attached);
+                self.attached_label = label;
+            }
+            None => self.set_status("The agent's terminal is gone"),
+        }
+    }
 }
 
 /// PID of the currently live agent root, excluding briefly retained exits.
@@ -992,7 +1020,10 @@ fn session_root_pid(session: &Session) -> Option<u32> {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(args: &Args) -> anyhow::Result<()> {
+/// Run the UI. `hosted` is an agent cctop launched for this session, which it
+/// shows attached and outlives by nothing: when the agent exits, so does cctop,
+/// so `cctop claude` gets you back to your shell the way `claude` would.
+pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i32> {
     let (req_tx, req_rx) = channel::<Request>();
     let (res_tx, res_rx) = channel::<Response>();
     let worker = spawn_worker(args.plan, req_rx, res_tx.clone());
@@ -1019,6 +1050,15 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     app.refresh_secs = args.delay;
     let _ = req_tx.send(Request::Refresh);
 
+    // Attach before the first frame: the agent cctop was asked to launch is the
+    // reason it is running, so it should be on screen and not behind a keypress.
+    // Its own session row appears later, once it has written a transcript.
+    let mut hosted = hosted;
+    if let Some(hosted) = hosted.as_ref() {
+        app.hosted = Some((hosted.pid, hosted.label.clone()));
+        app.attach_hosted();
+    }
+
     // `ratatui::init` installs a hook that leaves the alt screen and raw mode on
     // panic, but it knows nothing about the mouse capture enabled below, nor does
     // its restore path make the cursor visible again. Without this, a panic can
@@ -1035,7 +1075,19 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     // Established before the loop so the first tick already has it; `None` just
     // means discovery falls back to the periodic walk.
     let watch = crate::watch::Watch::start();
-    let result = event_loop(&mut app, &mut terminal, &res_rx, &req_tx, watch.as_ref());
+    let result = event_loop(
+        &mut app,
+        &mut terminal,
+        &res_rx,
+        &req_tx,
+        watch.as_ref(),
+        hosted.as_mut(),
+    );
+
+    // Before the terminal is restored, so the agent's hangup does not race the
+    // screen being handed back.
+    drop(app.attached.take());
+    drop(hosted);
 
     restore_terminal();
 
@@ -1105,7 +1157,8 @@ fn event_loop(
     res_rx: &Receiver<Response>,
     req_tx: &Sender<Request>,
     watch: Option<&crate::watch::Watch>,
-) -> anyhow::Result<()> {
+    mut hosted: Option<&mut crate::shim::Hosted>,
+) -> anyhow::Result<i32> {
     let mut last_refresh = Instant::now();
     let mut last_full_walk = Instant::now();
     let mut layout = render::Layout::default();
@@ -1253,6 +1306,14 @@ fn event_loop(
             }
         }
 
+        // The agent cctop was launched to run has finished, so cctop has nothing
+        // left to do either: hand its exit code back and get out of the way.
+        if let Some(hosted) = hosted.as_mut()
+            && let Some(code) = hosted.finished()
+        {
+            return Ok(code);
+        }
+
         if app.should_quit {
             break;
         }
@@ -1280,7 +1341,9 @@ fn event_loop(
             });
         }
     }
-    Ok(())
+    // Quit was pressed rather than the agent exiting, so there is no exit code
+    // to inherit.
+    Ok(0)
 }
 
 #[cfg(test)]

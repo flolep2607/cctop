@@ -88,6 +88,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("k", "Terminate the selected live session"),
         item("s", "Type a line into the session's terminal"),
         item("a", "Attach to the session's terminal (F12 detaches)"),
+        item("A", "Attach to the agent this cctop launched"),
         item("r or F5", "Refresh now"),
         item("q or F10", "Quit"),
         Line::default(),
@@ -268,6 +269,32 @@ pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App) {
         )),
     ];
     modal(frame, area, "Terminate session?", lines, 62);
+}
+
+pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App) {
+    let label = match &app.hosted {
+        Some((_, label)) => label.clone(),
+        None => return,
+    };
+    let lines = vec![
+        Line::from(Span::styled(format!("  {label}"), theme::value())),
+        Line::default(),
+        Line::from(Span::styled(
+            "  This agent is running on a terminal cctop owns,",
+            Style::default().fg(theme::COST_MID),
+        )),
+        Line::from(Span::styled(
+            "  and quitting ends it.",
+            Style::default().fg(theme::COST_MID),
+        )),
+        Line::from(Span::raw("  Exit the agent itself to leave it cleanly.")),
+        Line::default(),
+        Line::from(Span::styled(
+            "  [y] quit anyway    [n / Esc] stay    [A] back to the agent",
+            theme::dim(),
+        )),
+    ];
+    modal(frame, area, "Quit and stop the agent?", lines, 62);
 }
 
 pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App) {
