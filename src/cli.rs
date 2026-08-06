@@ -96,8 +96,10 @@ fn parse_plan(s: &str) -> Result<Plan, String> {
 
 fn parse_delay(s: &str) -> Result<f64, String> {
     let v: f64 = s.parse().map_err(|_| "must be a number".to_string())?;
-    if v < 1.0 {
-        return Err("must be >= 1 (seconds)".into());
+    // `Duration::from_secs_f64` panics for values that do not fit its seconds
+    // field, so reject them here along with non-finite values.
+    if !v.is_finite() || !(1.0..(u64::MAX as f64)).contains(&v) {
+        return Err("must be a finite number from 1 up to the maximum duration (seconds)".into());
     }
     Ok(v)
 }
@@ -373,6 +375,10 @@ mod tests {
     fn delay_floor_enforced() {
         assert!(parse_delay("0.5").is_err());
         assert!(parse_delay("abc").is_err());
+        assert!(parse_delay("NaN").is_err());
+        assert!(parse_delay("inf").is_err());
+        assert!(parse_delay("-inf").is_err());
+        assert!(parse_delay(&f64::MAX.to_string()).is_err());
         assert_eq!(parse_delay("2.5").unwrap(), 2.5);
     }
 
