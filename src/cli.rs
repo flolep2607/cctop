@@ -23,7 +23,8 @@ rough indicator of resource consumption, not as an authoritative invoice.\n\n\
 LAUNCHING AGENTS\n  \
 `cctop <command> [args…]`, or `cctop run <command>`, starts the agent on a pty\n  \
 cctop owns so the UI can type into it with `s`. Everything after the command,\n  \
-flags included, goes to the agent.\n\n\
+flags included, goes to the agent. The first interactive run aliases the known\n  \
+agents to this form in your shell startup files; --remove-alias undoes that.\n\n\
 NOTES\n  \
 Session data is read from each agent's standard local session store.\n  \
 UI preferences (active tab, sort order, filters) persist across runs.",
@@ -53,6 +54,14 @@ pub struct Args {
     /// Replace this binary with the newest GitHub release and exit
     #[arg(long)]
     pub update: bool,
+
+    /// Write the agent aliases into your shell startup files and exit
+    #[arg(long)]
+    pub install_alias: bool,
+
+    /// Remove the agent aliases from your shell startup files and exit
+    #[arg(long)]
+    pub remove_alias: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {

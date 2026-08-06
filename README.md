@@ -106,6 +106,7 @@ cctop --clear-cache   # re-extract all session activity; keeps preferences/prici
 cctop --update        # replace this binary with the newest release
 cctop run claude      # start an agent on a pty cctop can type into (see Keys)
 cctop claude --help   # the same, without the `run`; flags go to the agent
+cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias adds them)
 ```
 
 ### Keys
@@ -166,11 +167,19 @@ to be true, and tries them in this order:
 | in a plain terminal | `TIOCSTI` pushes bytes into the tty's input queue | Linux, and cctop as root — `CAP_SYS_ADMIN` clears both of the kernel's gates. Without root it also needs `sysctl -w dev.tty.legacy_tiocsti=1` (off by default since 6.2) *and* cctop sharing the agent's controlling terminal, which in practice it doesn't |
 
 The first is the one worth adopting — no root, no multiplexer, and the session
-looks and behaves exactly like one started directly:
+looks and behaves exactly like one started directly. cctop sets it up for you: on
+its first interactive run it appends a marked block to `~/.zshrc` and `~/.bashrc`
+(whichever exist) aliasing `claude`, `codex`, `opencode`, and `pi` to `cctop <agent>`.
 
 ```bash
-alias claude='cctop run claude'   # then start sessions as usual
+cctop --remove-alias     # take it out again; deleting the block by hand also works
+cctop --install-alias    # put it back
 ```
+
+Every alias in that block is guarded by `command -v`, so it defines nothing
+unless both cctop and the agent are installed — uninstall cctop and `claude`
+goes back to meaning `claude`. The block is written once: remove it and cctop
+won't add it again.
 
 The `run` is optional: any first argument that names an executable is launched
 this way, so `cctop claude --dangerously-skip-permissions` works and the flags
