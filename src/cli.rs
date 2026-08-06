@@ -20,6 +20,10 @@ database (cached locally for 24 hours). Many subscription plans — such as\n  \
 Claude Max, Pro, or Team — charge a flat rate or bundle tokens differently,\n  \
 so reported costs may not reflect your actual bill. Treat the $ column as a\n  \
 rough indicator of resource consumption, not as an authoritative invoice.\n\n\
+LAUNCHING AGENTS\n  \
+`cctop <command> [args…]`, or `cctop run <command>`, starts the agent on a pty\n  \
+cctop owns so the UI can type into it with `s`. Everything after the command,\n  \
+flags included, goes to the agent.\n\n\
 NOTES\n  \
 Session data is read from each agent's standard local session store.\n  \
 UI preferences (active tab, sort order, filters) persist across runs.",

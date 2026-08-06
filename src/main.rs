@@ -19,12 +19,22 @@ use std::io::IsTerminal;
 
 fn main() -> anyhow::Result<()> {
     // `cctop run <agent> …` is handled before clap so the agent's own flags are
-    // never mistaken for cctop's.
+    // never mistaken for cctop's — `cctop claude --help` must reach claude.
+    //
+    // A first argument that names an executable is the same thing without the
+    // `run`: cctop takes no positionals, so a command is the only thing it can
+    // be. Anything else (a typo, a stray word) falls through to clap's usage
+    // error rather than being exec'd.
     #[cfg(unix)]
     {
         let argv: Vec<String> = std::env::args().collect();
-        if argv.get(1).is_some_and(|a| a == "run") {
-            std::process::exit(shim::run(&argv[2..])?);
+        let command = match argv.get(1).map(String::as_str) {
+            Some("run") => Some(&argv[2..]),
+            Some(word) if !word.starts_with('-') && shim::is_command(word) => Some(&argv[1..]),
+            _ => None,
+        };
+        if let Some(command) = command {
+            std::process::exit(shim::run(command)?);
         }
     }
 

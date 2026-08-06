@@ -57,6 +57,25 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     Ok(status?.code().unwrap_or(1))
 }
 
+/// Whether `word` names something a shell could run, which is how `cctop claude`
+/// is told apart from a mistyped flag or subcommand.
+///
+/// Resolved the way `execvp` does: a word containing a separator is a path taken
+/// as given, a bare word is looked up in `PATH`. The executable bit matters —
+/// without it `cctop notes.txt` would exec and fail instead of reaching clap's
+/// usage error.
+pub fn is_command(word: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |p: PathBuf| {
+        std::fs::metadata(&p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if word.contains('/') {
+        return executable(PathBuf::from(word));
+    }
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|dir| executable(dir.join(word)))
+}
+
 /// The control socket for the agent running as `pid`, if a base directory exists.
 ///
 /// Named after the agent rather than the shim so the UI, which knows a session
@@ -211,6 +230,17 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    /// `cctop <word> …` shims the word only when it is really a command, so this
+    /// is what stands between a typo and an exec attempt.
+    #[test]
+    fn a_command_is_told_apart_from_a_stray_word() {
+        assert!(is_command("sh"));
+        assert!(is_command("/bin/sh"));
+        assert!(!is_command("cctop-no-such-command"));
+        // A readable file that isn't executable, reached by path.
+        assert!(!is_command("/etc/hostname"));
+    }
 
     /// The point of the shim is that a line handed to the socket arrives as the
     /// child's keyboard input. `run` itself can't be tested — it seizes the
