@@ -85,6 +85,53 @@ impl ContextUsage {
     }
 }
 
+/// What is occupying a session's context window, split by category.
+///
+/// Two of these numbers are measured and the rest are estimated, which is the
+/// whole reason the type keeps them apart. `total` and `startup` come from the
+/// usage figures the API itself reported; every other field is inferred from how
+/// many characters the transcript holds. Nothing is scaled to make the parts add
+/// up to the window — whatever is left over is [`unaccounted`], and that gap is
+/// the honest answer to what the transcript cannot see.
+///
+/// [`unaccounted`]: ContextBreakdown::unaccounted
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ContextBreakdown {
+    /// Window size at the last request, from its own usage figures. Exact.
+    pub total: u64,
+    /// The first request of the live segment: system prompt, tool schemas,
+    /// CLAUDE.md, the skills index — everything sent before the conversation
+    /// starts, plus the summary when the segment follows a compaction. Exact,
+    /// but not decomposable: the transcript never records what the harness sent.
+    pub startup: u64,
+    /// Estimated from transcript characters.
+    pub tool_output: u64,
+    pub tool_input: u64,
+    pub attachments: u64,
+    pub user_text: u64,
+    pub assistant_text: u64,
+    /// The live segment begins at a compaction summary rather than at the start
+    /// of the session, so `startup` carries that summary too.
+    pub after_compaction: bool,
+}
+
+impl ContextBreakdown {
+    /// Everything the transcript could be read for, `startup` excluded.
+    pub fn estimated(&self) -> u64 {
+        self.tool_output + self.tool_input + self.attachments + self.user_text + self.assistant_text
+    }
+
+    /// The window minus everything attributed to it.
+    ///
+    /// Negative when the estimate overshoots, which happens when the harness has
+    /// dropped old tool results from the window that the transcript still holds.
+    /// Reported signed rather than clamped, because "the categories below add up
+    /// to more than the window" is information, not an error.
+    pub fn unaccounted(&self) -> i64 {
+        self.total as i64 - self.startup as i64 - self.estimated() as i64
+    }
+}
+
 /// A discovered session plus everything annotated onto it for display.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -579,6 +626,10 @@ pub struct SessionData {
     /// `YYYY-MM-DDTHH` -> model -> USD.
     pub costs_by_hour: HashMap<String, HashMap<String, f64>>,
     pub metrics: Metrics,
+    /// Claude only: what the live context window is filled with. Absent for
+    /// providers whose transcripts don't report per-request usage.
+    #[serde(default)]
+    pub context_breakdown: Option<ContextBreakdown>,
     pub subagents: Vec<Subagent>,
     /// Codex reports per-million rates directly; surfaced in the Cost panel.
     pub rates: Option<CodexRates>,

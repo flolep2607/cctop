@@ -12,7 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
 
-pub const TABS: [&str; 7] = [
+pub const TABS: [&str; 8] = [
     "Info",
     "Performance",
     "Processes",
@@ -20,6 +20,7 @@ pub const TABS: [&str; 7] = [
     "Subagents",
     "Cost",
     "Config",
+    "Context",
 ];
 
 fn label(text: &str) -> Span<'static> {
@@ -928,6 +929,114 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
 }
 
 // ---------------------------------------------------------------------------
+// Context breakdown
+// ---------------------------------------------------------------------------
+
+/// What the context window is filled with, largest share first.
+///
+/// The panel's job is to be believed, so it never pretends the parts add up.
+/// `Startup` is measured and the other categories are estimated from transcript
+/// characters, and whatever the two together fail to reach gets its own bar
+/// instead of being spread over the categories that happen to be measurable.
+pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> Vec<Line<'static>> {
+    let Some(data) = data else {
+        return note("Loading…");
+    };
+    let Some(b) = data.context_breakdown else {
+        return note("This transcript reports no per-request usage — nothing to break down.");
+    };
+
+    let mut rows: Vec<(&str, u64, ratatui::style::Color)> = vec![
+        // Named for what it holds rather than "system prompt", because after a
+        // compaction the summary is folded into the same number.
+        ("Startup", b.startup, theme::PANEL_TITLE),
+        (
+            "Tool output",
+            b.tool_output,
+            ratatui::style::Color::Indexed(75),
+        ),
+        (
+            "Tool input",
+            b.tool_input,
+            ratatui::style::Color::Indexed(109),
+        ),
+        (
+            "Attachments",
+            b.attachments,
+            ratatui::style::Color::Indexed(180),
+        ),
+        ("Your messages", b.user_text, theme::COST_LOW),
+        (
+            "Assistant text",
+            b.assistant_text,
+            ratatui::style::Color::Indexed(139),
+        ),
+    ];
+    let unaccounted = b.unaccounted();
+    if unaccounted > 0 {
+        rows.push(("Unaccounted", unaccounted as u64, theme::DIM));
+    }
+    rows.retain(|(_, tokens, _)| *tokens > 0);
+    rows.sort_by_key(|(_, tokens, _)| std::cmp::Reverse(*tokens));
+
+    // When the estimate overshoots there is no gap to draw, and scaling the bars
+    // to the window would push them past the panel edge. Measure them against
+    // whichever is larger and let the footer explain the discrepancy.
+    let scale = b.total.max(b.startup + b.estimated()).max(1);
+
+    let bar_w = width.saturating_sub(28).clamp(10, 48);
+    let mut lines = vec![Line::from(vec![
+        label("Window"),
+        Span::raw("    "),
+        value(util::compact_tokens(b.total)),
+        Span::raw(" "),
+        dim(match session.context {
+            Some(ctx) => format!("of {}", util::compact_tokens(ctx.max)),
+            None => "in the live conversation".to_string(),
+        }),
+    ])];
+    lines.push(Line::default());
+
+    for (name, tokens, color) in rows {
+        let ratio = tokens as f64 / scale as f64;
+        lines.push(Line::from(vec![
+            Span::styled(format!("{name:<14} "), theme::value()),
+            bar(ratio, bar_w, color),
+            Span::styled(
+                format!(" {:>7}", util::compact_tokens(tokens)),
+                Style::default().fg(color),
+            ),
+            dim(format!(" {:>3}%", (ratio * 100.0).round() as i64)),
+        ]));
+    }
+
+    // Which numbers were measured and which were guessed is the point of the
+    // panel, so the caveats belong next to the bars rather than in the README.
+    lines.push(Line::default());
+    let footnotes = [
+        if b.after_compaction {
+            "Startup is measured: this segment's first request — system prompt, tool schemas, CLAUDE.md, the skills index, and the compaction summary. The transcript never records its parts, so it cannot be split further."
+        } else {
+            "Startup is measured: the first request — system prompt, tool schemas, CLAUDE.md, the skills index. The transcript never records its parts, so it cannot be split further."
+        },
+        "Every other bar is estimated from how many characters the transcript holds, so read them as proportions rather than as counts.",
+        if unaccounted >= 0 {
+            "Unaccounted is what neither reaches: thinking, which is stored with its text stripped; the reminders the harness injects each turn; and estimation error."
+        } else {
+            "The estimate overshoots the window, which means the harness has dropped context that the transcript still holds."
+        },
+    ];
+    for note in footnotes {
+        lines.extend(
+            wrap(note, width.max(20))
+                .into_iter()
+                .map(|l| Line::from(dim(l))),
+        );
+    }
+    lines
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -1415,6 +1524,71 @@ mod tests {
         assert!(text.contains("deepseek-v4-flash-free  FREE"));
         assert!(!text.contains("$0.00"));
         assert!(text.matches("FREE").count() >= 8, "{text}");
+    }
+
+    /// The panel exists to say what is in the window, so the part it cannot
+    /// explain has to be as visible as the parts it can. Folding the shortfall
+    /// into the measurable categories would make every bar a lie.
+    #[test]
+    fn context_panel_shows_the_gap_rather_than_hiding_it() {
+        let s = Session::new(Provider::Claude, "x".into());
+        let data = SessionData {
+            context_breakdown: Some(crate::session::ContextBreakdown {
+                total: 100_000,
+                startup: 20_000,
+                tool_output: 30_000,
+                tool_input: 5_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let lines = context(&s, Some(&data), 100);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+
+        assert!(text.contains("Unaccounted"), "{text}");
+        // 100k window, 55k attributed: the gap is 45%, and it is the biggest
+        // single share, so it must sort to the top.
+        let first_bar = lines[2]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>();
+        assert!(first_bar.starts_with("Unaccounted"), "{first_bar}");
+        assert!(first_bar.contains("45%"), "{first_bar}");
+        assert!(
+            text.contains("estimated"),
+            "the estimate must say so: {text}"
+        );
+    }
+
+    /// When the estimate overshoots, saying so beats drawing bars that run off
+    /// the panel — the overshoot means the harness dropped context the
+    /// transcript still holds, which is worth knowing.
+    #[test]
+    fn context_panel_admits_when_the_estimate_exceeds_the_window() {
+        let s = Session::new(Provider::Claude, "x".into());
+        let data = SessionData {
+            context_breakdown: Some(crate::session::ContextBreakdown {
+                total: 50_000,
+                startup: 20_000,
+                tool_output: 60_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let lines = context(&s, Some(&data), 100);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(!text.contains("Unaccounted"), "there is no gap to report");
+        assert!(text.contains("overshoots"), "{text}");
+        // Bars are measured against the larger of the two, so none can exceed
+        // the panel width.
+        assert!(text.contains("75%"), "60k of 80k: {text}");
     }
 
     #[test]
