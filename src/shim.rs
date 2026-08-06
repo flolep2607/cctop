@@ -13,9 +13,12 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
 
 /// How often the outer terminal's size is compared against the pty's.
 ///
@@ -40,12 +43,17 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let socket = socket_path(pid);
 
     let raw = crossterm::terminal::enable_raw_mode().is_ok();
-    for task in [pump_output, pump_input, watch_resize] {
+    let fan = Arc::new(Mutex::new(Fanout::default()));
+    {
+        let (master, fan) = (master.try_clone()?, Arc::clone(&fan));
+        std::thread::spawn(move || pump_output(master, fan));
+    }
+    for task in [pump_input, watch_resize] {
         let master = master.try_clone()?;
         std::thread::spawn(move || task(master));
     }
     let control = master.try_clone()?;
-    std::thread::spawn(move || serve(listener, control));
+    std::thread::spawn(move || serve(listener, control, fan));
 
     let status = child.wait();
     if raw {
@@ -106,20 +114,116 @@ fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
     Ok(std::os::unix::net::UnixListener::bind(&path)?)
 }
 
-/// Type whatever each connection sends into the pty.
+/// First bytes of a connection that wants to *watch* the agent, not just type
+/// into it. A connection that doesn't send it stays what it always was — bytes
+/// in, nothing back — so an older cctop still injects into a newer shim.
+pub const ATTACH_MAGIC: &[u8] = b"\x00cctop-attach\n";
+
+/// How much recent output is kept for a client that connects mid-session. An
+/// agent's TUI redraws its whole screen often, so replaying this is enough to
+/// rebuild what's on it without waiting for the next repaint.
+const REPLAY_BYTES: usize = 256 * 1024;
+
+/// Everything the pty has said lately, and everyone listening.
+#[derive(Default)]
+struct Fanout {
+    recent: Vec<u8>,
+    subs: Vec<SyncSender<Vec<u8>>>,
+}
+
+impl Fanout {
+    fn push(&mut self, chunk: &[u8]) {
+        self.recent.extend_from_slice(chunk);
+        if self.recent.len() > REPLAY_BYTES {
+            self.recent.drain(..self.recent.len() - REPLAY_BYTES);
+        }
+        // ponytail: a subscriber that falls a channel behind is dropped rather
+        // than slowing the agent's own terminal down. It reconnects and gets the
+        // replay. Buffer per subscriber if that ever proves too twitchy.
+        self.subs.retain(|tx| tx.try_send(chunk.to_vec()).is_ok());
+    }
+}
+
+fn locked(fan: &Mutex<Fanout>) -> std::sync::MutexGuard<'_, Fanout> {
+    // A panicking subscriber thread must not take the agent's output with it.
+    fan.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Type whatever each connection sends into the pty, and stream the pty back to
+/// the ones that asked for it.
 ///
 /// Deliberately unauthenticated: the socket sits in an owner-only directory, so
 /// anyone who can reach it can already type into the terminal by other means.
-fn serve(listener: std::os::unix::net::UnixListener, mut master: File) {
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let mut line = String::new();
-        // Cap the read: a line typed into an agent, not a file transfer.
-        if stream.take(4096).read_to_string(&mut line).is_ok() && !line.is_empty() {
-            let _ = master.write_all(line.as_bytes());
-            let _ = master.flush();
+fn serve(listener: std::os::unix::net::UnixListener, master: File, fan: Arc<Mutex<Fanout>>) {
+    for stream in listener.incoming().flatten() {
+        let Ok(master) = master.try_clone() else {
+            continue;
+        };
+        let fan = Arc::clone(&fan);
+        // A watcher holds its connection open for the life of the session, so
+        // connections can't be served one after another on this thread.
+        std::thread::spawn(move || converse(stream, master, fan));
+    }
+}
+
+fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
+    let mut buf = [0u8; 4096];
+    let mut first = true;
+    while let Ok(n) = stream.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        let mut bytes = &buf[..n];
+        // The magic is written on its own, and a write that small arrives whole,
+        // so testing the first read for it is enough.
+        if std::mem::take(&mut first)
+            && let Some(rest) = bytes.strip_prefix(ATTACH_MAGIC)
+        {
+            subscribe(&stream, &master, &fan);
+            bytes = rest;
+        }
+        if !bytes.is_empty() && (master.write_all(bytes).is_err() || master.flush().is_err()) {
+            break;
         }
     }
+}
+
+/// Send this client the recent output and everything that follows.
+fn subscribe(stream: &UnixStream, master: &File, fan: &Arc<Mutex<Fanout>>) {
+    let Ok(mut out) = stream.try_clone() else {
+        return;
+    };
+    let (cols, rows) = pty_size(master);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+    {
+        // Held across the replay write so no chunk slips in between the replay
+        // and the subscription, which would reorder the client's screen.
+        let mut fan = locked(fan);
+        if writeln!(out, "cctop-size {cols} {rows}").is_err() || out.write_all(&fan.recent).is_err()
+        {
+            return;
+        }
+        fan.subs.push(tx);
+    }
+    std::thread::spawn(move || {
+        while let Ok(chunk) = rx.recv() {
+            if out.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// The pty's own geometry, which a watcher needs to wrap lines where the agent
+/// wrapped them. Asked of the pty rather than of this process's terminal: they
+/// agree, but only one of them is what the agent was told.
+fn pty_size(master: &File) -> (u16, u16) {
+    let mut ws = winsize(80, 24);
+    // SAFETY: a live pty master fd and a winsize that outlives the call.
+    if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCGWINSZ as _, &raw mut ws) } == -1 {
+        return (80, 24);
+    }
+    (ws.ws_col, ws.ws_row)
 }
 
 /// Spawn `argv` with a new pty as its controlling terminal, returning the master.
@@ -179,7 +283,7 @@ fn spawn_on_pty(argv: &[String]) -> anyhow::Result<(std::process::Child, File)> 
     Ok((child, master))
 }
 
-fn pump_output(mut master: File) {
+fn pump_output(mut master: File, fan: Arc<Mutex<Fanout>>) {
     let mut out = std::io::stdout();
     let mut buf = [0u8; 8192];
     // Flush every chunk: a TUI's escape sequences must not sit in a line buffer
@@ -188,6 +292,7 @@ fn pump_output(mut master: File) {
         if n == 0 || out.write_all(&buf[..n]).is_err() || out.flush().is_err() {
             break;
         }
+        locked(&fan).push(&buf[..n]);
     }
 }
 
@@ -264,7 +369,8 @@ mod tests {
         .unwrap();
         let pid = child.id();
         let listener = listen(pid).unwrap();
-        std::thread::spawn(move || serve(listener, master));
+        let fan = Arc::new(Mutex::new(Fanout::default()));
+        std::thread::spawn(move || serve(listener, master, fan));
 
         // Through the public entry point, so the socket lookup is covered too.
         let sent = crate::inject::send_line(pid, "continue");
@@ -282,6 +388,63 @@ mod tests {
         // The pty's default line discipline turns the CR we send into the
         // newline that completes the child's line, exactly as a real Enter does.
         assert_eq!(text.unwrap().trim_end(), "continue");
+    }
+
+    /// Attaching is the protocol's other half: a watcher must be handed what the
+    /// agent has already drawn, keep receiving what it draws next, and still be
+    /// able to type on the same connection.
+    #[test]
+    fn a_watcher_gets_the_screen_and_can_still_type() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (mut child, master) = spawn_on_pty(&[
+            "sh".into(),
+            "-c".into(),
+            "printf 'ALREADY-DRAWN\\r\\n'; cat".into(),
+        ])
+        .unwrap();
+        let pid = child.id();
+        let listener = listen(pid).unwrap();
+        let fan = Arc::new(Mutex::new(Fanout::default()));
+        for spawn in [0, 1] {
+            let (master, fan) = (master.try_clone().unwrap(), Arc::clone(&fan));
+            match spawn {
+                0 => std::thread::spawn(move || pump_output(master, fan)),
+                _ => {
+                    let listener = listener.try_clone().unwrap();
+                    std::thread::spawn(move || serve(listener, master, fan))
+                }
+            };
+        }
+
+        // Attach only after the child has spoken, so what arrives can only have
+        // come from the replay buffer.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut attach = crate::attach::attach(pid).expect("no attach connection");
+        let screen = |attach: &mut crate::attach::Attach, want: &str| {
+            (0..50).any(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                attach.pump();
+                attach.parser.screen().contents().contains(want)
+            })
+        };
+        let replayed = screen(&mut attach, "ALREADY-DRAWN");
+
+        // `cat` echoes through the pty, so what comes back proves the keystroke
+        // reached the child rather than just the socket.
+        attach.send_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        attach.send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let typed = screen(&mut attach, "z");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = socket_path(pid).map(std::fs::remove_file);
+
+        assert!(
+            replayed,
+            "the replay did not carry what the child had drawn"
+        );
+        assert!(typed, "the keystroke never reached the child");
     }
 
     /// Same pty child, no listener: the shim backend must fall through rather

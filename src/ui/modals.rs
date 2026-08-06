@@ -87,6 +87,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("d", "Delete the selected session (not running)"),
         item("k", "Terminate the selected live session"),
         item("s", "Type a line into the session's terminal"),
+        item("a", "Attach to the session's terminal (F12 detaches)"),
         item("r or F5", "Refresh now"),
         item("q or F10", "Quit"),
         Line::default(),
