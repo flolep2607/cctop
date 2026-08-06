@@ -895,6 +895,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::COST_MID),
         ));
     }
+    // Who rang, kept there until you are looking at them. A bell you heard from
+    // the next room has to still be answerable when you come back.
+    if let Some(bell) = app
+        .notify
+        .footer(app.selected_session().map(|s| s.key()).as_deref())
+    {
+        spans.push(Span::styled(
+            format!(" {bell} "),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     // Last, so it never pushes a key hint off the end of a narrow footer.
     if let Some(version) = &app.update_available {
         spans.push(Span::styled(

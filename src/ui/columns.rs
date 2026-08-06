@@ -4,6 +4,10 @@ use crate::session::{ActivityState, Session};
 use crate::util;
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnId {
@@ -21,6 +25,7 @@ pub enum ColumnId {
     TokenRate,
     Model,
     Harness,
+    Branch,
     Project,
 }
 
@@ -134,6 +139,13 @@ pub const COLUMNS: &[Column] = &[
         desc: "Where the agent is hosted, such as Cursor or a terminal CLI",
     },
     Column {
+        id: ColumnId::Branch,
+        label: "BRANCH",
+        width: Some(12),
+        right_align: false,
+        desc: "Git branch checked out in the session's working directory,\nor @<commit> when HEAD is detached",
+    },
+    Column {
         id: ColumnId::Project,
         label: "PROJECT",
         width: None,
@@ -240,7 +252,88 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
                 s.harness.clone()
             }
         }
+        ColumnId::Branch => branch(&s.label_source).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Git branch
+// ---------------------------------------------------------------------------
+
+/// How long a branch reading is trusted.
+///
+/// A checkout is a rare event and a name that is a few seconds out of date is
+/// harmless; walking the filesystem once per row per frame is not.
+const BRANCH_TTL: Duration = Duration::from_secs(15);
+
+/// A branch reading, and when it was taken. `None` is a real answer — the
+/// directory is not in a repository — and is cached just as a name is.
+type Reading = (Option<String>, Instant);
+
+/// Working directory -> its last reading.
+static BRANCHES: LazyLock<Mutex<HashMap<String, Reading>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Branch of a working directory, cached.
+///
+/// `git rev-parse` would be a subprocess per row per frame, and `git2` is a C
+/// library and a build step for what is one short file in a documented format.
+fn branch(dir: &str) -> Option<String> {
+    if dir.is_empty() {
+        return None;
+    }
+    let mut cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((branch, at)) = cache.get(dir)
+        && at.elapsed() < BRANCH_TTL
+    {
+        return branch.clone();
+    }
+    let branch = read_head(Path::new(dir));
+    cache.insert(dir.to_string(), (branch.clone(), Instant::now()));
+    branch
+}
+
+/// Read the branch straight out of the repository's `HEAD`.
+///
+/// Three shapes have to survive this: an ordinary `.git` directory; a `.git`
+/// *file* holding a `gitdir:` pointer, which is what a linked worktree or a
+/// submodule has and where the interesting branches usually live; and a HEAD
+/// carrying a commit id instead of a ref, as during a rebase or a bisect —
+/// reported as a short id, because "not on a branch" is itself worth seeing.
+fn read_head(start: &Path) -> Option<String> {
+    // A session is often launched from a subdirectory of its repository.
+    let git = start
+        .ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|p| p.exists())?;
+    let head = if git.is_dir() {
+        git.join("HEAD")
+    } else {
+        let pointer = std::fs::read_to_string(&git).ok()?;
+        let target = PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
+        // Absolute for a worktree, relative to the containing directory for a
+        // submodule.
+        let target = if target.is_absolute() {
+            target
+        } else {
+            git.parent()?.join(target)
+        };
+        target.join("HEAD")
+    };
+
+    let head = std::fs::read_to_string(head).ok()?;
+    let head = head.trim();
+    if let Some(name) = head.strip_prefix("ref: refs/heads/") {
+        Some(name.to_string())
+    } else if let Some(other) = head.strip_prefix("ref: ") {
+        // Some other ref namespace; show it whole rather than guess at a name.
+        Some(other.to_string())
+    } else if head.is_empty() {
+        None
+    } else {
+        // Detached. Take chars, not bytes: a corrupt HEAD must not panic here.
+        Some(std::iter::once('@').chain(head.chars().take(7)).collect())
     }
 }
 
@@ -294,6 +387,8 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::TokenRate => num(a.tokens_per_min, b.tokens_per_min),
         ColumnId::Model => a.model.cmp(&b.model),
         ColumnId::Harness => a.harness.cmp(&b.harness),
+        // Sessions outside a repository sort together, below every branch.
+        ColumnId::Branch => branch(&a.label_source).cmp(&branch(&b.label_source)),
         ColumnId::Project => a
             .display_label()
             .to_ascii_lowercase()
@@ -405,6 +500,51 @@ mod tests {
         s.input_tokens = 12_000;
         s.output_tokens = 345;
         assert_eq!(render_cell(ColumnId::TokenTotal, &s, &now), "12.3K");
+    }
+
+    /// The three HEAD shapes cctop actually meets: a checkout, a linked
+    /// worktree pointing elsewhere, and a detached HEAD mid-rebase.
+    #[test]
+    fn head_is_read_for_a_checkout_a_worktree_and_a_detached_commit() {
+        let root = std::env::temp_dir().join(format!("cctop-branch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/feat/idle\n").unwrap();
+        assert_eq!(read_head(&repo).as_deref(), Some("feat/idle"));
+
+        // From a subdirectory, since that is where agents are usually started.
+        let deep = repo.join("src/ui");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(read_head(&deep).as_deref(), Some("feat/idle"));
+
+        // A linked worktree: `.git` is a file pointing at the real git dir.
+        let gitdir = repo.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/other\n").unwrap();
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        assert_eq!(read_head(&worktree).as_deref(), Some("other"));
+
+        std::fs::write(repo.join(".git/HEAD"), "0123456789abcdef0123\n").unwrap();
+        assert_eq!(read_head(&repo).as_deref(), Some("@0123456"));
+
+        assert_eq!(read_head(&root.join("nowhere")), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_session_outside_a_repository_shows_no_branch() {
+        let now = Utc::now();
+        let mut s = session("a");
+        s.label_source = "/nonexistent/definitely/not/a/repo".into();
+        assert_eq!(render_cell(ColumnId::Branch, &s, &now), "─");
     }
 
     #[test]

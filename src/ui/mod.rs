@@ -415,6 +415,9 @@ pub struct App {
     /// When cctop started, used by the tool-activity "live" filter.
     pub started_at: String,
 
+    /// Bell and desktop notifications, and who rang last.
+    pub notify: crate::notify::Notifier,
+
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
     /// Which tab is on screen: `0` is the dashboard, `1..=tabs.len()` index
@@ -513,6 +516,7 @@ impl App {
             global_cpu: History::default(),
             global_spend: History::default(),
             quota: Quota::default(),
+            notify: crate::notify::Notifier::new(prefs.notify),
             update_available: None,
             status: None,
             started_at: chrono::Utc::now().to_rfc3339(),
@@ -550,6 +554,7 @@ impl App {
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;
+        self.prefs.notify = self.notify.enabled;
         self.prefs.save();
     }
 
@@ -981,6 +986,49 @@ impl App {
         });
     }
 
+    /// Let the notifier see this refresh, and ring if anything crossed.
+    ///
+    /// Called from the event loop only when the rows actually moved. It has to
+    /// run on this thread: the bell and the OSC 9 sequence go straight to
+    /// stdout, which ratatui owns, and only here is it certain that no frame is
+    /// halfway through being flushed.
+    fn check_bells(&mut self) {
+        self.notify.observe(&self.sessions);
+    }
+
+    /// Turn the bell on or off, and remember which.
+    fn toggle_notifications(&mut self) {
+        self.notify.enabled = !self.notify.enabled;
+        self.save_prefs();
+        self.set_status(if self.notify.enabled {
+            "Notifications on — bell and desktop alert when a session needs you"
+        } else {
+            "Notifications off"
+        });
+    }
+
+    /// Jump the selection to whichever session rang last.
+    fn jump_to_bell(&mut self) {
+        let Some(key) = self.notify.last.as_ref().map(|r| r.key.clone()) else {
+            self.set_status("Nothing has rung yet");
+            return;
+        };
+        match self
+            .visible
+            .iter()
+            .position(|&i| self.sessions[i].key() == key)
+        {
+            Some(row) => {
+                self.selected = row;
+                self.ensure_available_tab();
+                self.needs_redraw = true;
+            }
+            // Answering it is the point, so say why it can't be reached rather
+            // than moving the cursor somewhere arbitrary.
+            None => self.set_status("The session that rang is hidden by the current filter"),
+        }
+    }
+
     /// Adjust the live refresh interval, clamping to sane bounds.
     fn adjust_refresh(&mut self, delta: f64) {
         self.refresh_secs = (self.refresh_secs + delta).clamp(0.5, 60.0);
@@ -1342,12 +1390,17 @@ fn event_loop(
     loop {
         // Drain everything the workers have produced.
         let mut annotated_rows_changed = false;
+        // Only a refresh can move a session between busy and waiting, so the
+        // notifier is fed here rather than once per loop iteration — that would
+        // rebuild its map five times a second over rows that hadn't moved.
+        let mut rows_changed = false;
         loop {
             match res_rx.try_recv() {
                 Ok(Response::Discovered(sessions)) => {
                     app.sessions = sessions;
                     app.stats = crate::loader::compute_stats(&app.sessions);
                     app.refilter();
+                    rows_changed = true;
                 }
                 Ok(Response::Annotated(session)) => {
                     // Match on the key's two fields rather than on `key()`: that
@@ -1372,6 +1425,7 @@ fn event_loop(
                     app.refilter();
                     refresh_in_flight = false;
                     annotated_rows_changed = false;
+                    rows_changed = true;
                 }
                 Ok(Response::LiveRows(payload)) => {
                     let (rows, stats) = *payload;
@@ -1390,6 +1444,7 @@ fn event_loop(
                     app.push_history();
                     app.refilter();
                     refresh_in_flight = false;
+                    rows_changed = true;
                 }
                 Ok(Response::Data(key, data)) => {
                     // Discard results for a session the user has already left.
@@ -1454,6 +1509,9 @@ fn event_loop(
             // after draining it rather than once per transcript.
             app.stats = crate::loader::compute_stats(&app.sessions);
             app.refilter();
+        }
+        if rows_changed {
+            app.check_bells();
         }
 
         app.sync_panel_data();
@@ -1844,6 +1902,35 @@ mod tests {
         app.toggle_mark();
         app.batch(BatchKind::Delete);
         assert_eq!(app.mode, Mode::BatchDeleteBlocked);
+    }
+
+    /// The other half of the bell: hearing it is useless if the row it came
+    /// from is somewhere in a list of a dozen.
+    #[test]
+    fn b_jumps_the_selection_to_the_session_that_rang() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "/x/a"), session("b", true, "/x/b")];
+        app.refilter();
+        let target = app.sessions[1].key();
+        app.notify.last = Some(crate::notify::Rang {
+            key: target.clone(),
+            label: "b".into(),
+            reason: crate::notify::Reason::NeedsInput,
+            at: Instant::now(),
+        });
+
+        app.selected = 0;
+        app.jump_to_bell();
+        assert_eq!(app.selected_session().map(Session::key), Some(target));
+
+        // Filtered out of the table, the bell has nowhere to land — and says so
+        // rather than moving the cursor to an unrelated row.
+        app.search = "x/a".into();
+        app.refilter();
+        app.selected = 0;
+        app.jump_to_bell();
+        assert_eq!(app.selected, 0);
+        assert!(app.status.is_some());
     }
 
     #[test]
