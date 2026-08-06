@@ -153,7 +153,7 @@ to be true, and tries them in this order:
 
 | The session runs… | How | Requirements |
 |---|---|---|
-| under `cctop run <agent>` | cctop owns the pty and typing goes through a unix socket | none |
+| under `cctop run <agent>` | cctop owns the pty and typing goes through a unix socket | none; verified on Linux, unverified on macOS |
 | inside tmux | `tmux send-keys` into the pane holding the agent | tmux |
 | in a plain terminal | `TIOCSTI` pushes bytes into the tty's input queue | Linux, and cctop as root — `CAP_SYS_ADMIN` clears both of the kernel's gates. Without root it also needs `sysctl -w dev.tty.legacy_tiocsti=1` (off by default since 6.2) *and* cctop sharing the agent's controlling terminal, which in practice it doesn't |
 
