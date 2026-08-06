@@ -26,7 +26,6 @@ pub enum ColumnId {
 
 pub struct Column {
     pub id: ColumnId,
-    pub key: &'static str,
     pub label: &'static str,
     /// `None` for the flexible column that absorbs leftover width.
     pub width: Option<u16>,
@@ -38,7 +37,6 @@ pub struct Column {
 pub const COLUMNS: &[Column] = &[
     Column {
         id: ColumnId::Status,
-        key: "status",
         label: " ",
         width: Some(1),
         right_align: false,
@@ -46,7 +44,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Last,
-        key: "active",
         label: "LAST",
         width: Some(5),
         right_align: true,
@@ -54,7 +51,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Duration,
-        key: "duration",
         label: "DUR",
         width: Some(6),
         right_align: true,
@@ -62,7 +58,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Cost,
-        key: "cost",
         label: "$",
         width: Some(9),
         right_align: true,
@@ -70,7 +65,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::CostHour,
-        key: "cost_hour",
         label: "$/1H",
         width: Some(7),
         right_align: true,
@@ -78,7 +72,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::CostToday,
-        key: "cost_today",
         label: "$/24H",
         width: Some(7),
         right_align: true,
@@ -86,7 +79,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Context,
-        key: "ctx",
         label: "CTX%",
         width: Some(6),
         right_align: true,
@@ -94,7 +86,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Cpu,
-        key: "cpu",
         label: "CPU%",
         width: Some(5),
         right_align: true,
@@ -102,7 +93,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Memory,
-        key: "mem",
         label: "MEM",
         width: Some(6),
         right_align: true,
@@ -110,7 +100,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Tools,
-        key: "tools",
         label: "TOOLS",
         width: Some(6),
         right_align: true,
@@ -118,7 +107,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::TokenTotal,
-        key: "tokens",
         label: "TOKENS",
         width: Some(8),
         right_align: true,
@@ -126,7 +114,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::TokenRate,
-        key: "tok_rate",
         label: "TOK/m",
         width: Some(7),
         right_align: true,
@@ -134,7 +121,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Model,
-        key: "model",
         label: "MODEL",
         width: Some(14),
         right_align: false,
@@ -142,7 +128,6 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Harness,
-        key: "harness",
         label: "HARNESS",
         width: Some(10),
         right_align: false,
@@ -150,21 +135,12 @@ pub const COLUMNS: &[Column] = &[
     },
     Column {
         id: ColumnId::Project,
-        key: "project",
         label: "PROJECT",
         width: None,
         right_align: false,
         desc: "Session title if renamed, otherwise the working directory",
     },
 ];
-
-pub fn column(id: ColumnId) -> &'static Column {
-    COLUMNS.iter().find(|c| c.id == id).unwrap_or(&COLUMNS[0])
-}
-
-pub fn column_by_key(key: &str) -> Option<&'static Column> {
-    COLUMNS.iter().find(|c| c.key == key)
-}
 
 /// Seconds since a session last did anything.
 fn age_secs(s: &Session, now: &DateTime<Utc>) -> Option<i64> {
@@ -341,22 +317,12 @@ mod tests {
     }
 
     #[test]
-    fn every_column_has_a_tooltip_and_key() {
+    fn every_column_has_a_tooltip() {
         for c in COLUMNS {
-            assert!(!c.desc.is_empty(), "{} has no description", c.key);
-            assert!(!c.key.is_empty());
+            assert!(!c.desc.is_empty(), "{} has no description", c.label);
         }
         // Exactly one flexible column, or layout breaks.
         assert_eq!(COLUMNS.iter().filter(|c| c.width.is_none()).count(), 1);
-    }
-
-    #[test]
-    fn column_keys_are_unique() {
-        let mut keys: Vec<&str> = COLUMNS.iter().map(|c| c.key).collect();
-        keys.sort_unstable();
-        let before = keys.len();
-        keys.dedup();
-        assert_eq!(before, keys.len(), "duplicate column key");
     }
 
     #[test]

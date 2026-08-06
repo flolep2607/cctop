@@ -320,8 +320,11 @@ impl Store {
 pub struct UiPrefs {
     pub bottom_tab: usize,
     pub live_only: bool,
-    pub sort_col: String,
-    pub sort_asc: bool,
+    // The table's sort is deliberately not here. Clicking a column header is one
+    // pixel away from clicking the row under it, and persisting that turned a
+    // misclick on CPU% into every later launch opening sorted by CPU with
+    // nothing on screen explaining why. It resets to newest-first each run;
+    // sorting within a run is unchanged.
     pub inactivity_filter: Option<String>,
     pub agent_live_filter: bool,
     pub tool_show_diff: bool,
@@ -339,8 +342,6 @@ impl Default for UiPrefs {
         UiPrefs {
             bottom_tab: 0,
             live_only: false,
-            sort_col: "active".into(),
-            sort_asc: true,
             inactivity_filter: None,
             agent_live_filter: false,
             tool_show_diff: false,
@@ -434,14 +435,18 @@ mod tests {
         let p = UiPrefs::default();
         let text = serde_json::to_string(&p).unwrap();
         let back: UiPrefs = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.sort_col, "active");
-        assert!(back.sort_asc);
+        assert_eq!(back.subagent_sort_col, "last");
+        assert!(!back.live_only);
     }
 
+    /// Unknown fields must not fail the parse. Every prefs file written before
+    /// the table's sort stopped being persisted still carries `sort_col`, and a
+    /// hard error there would throw away the rest of the file with it.
     #[test]
     fn prefs_tolerate_missing_and_unknown_fields() {
-        let back: UiPrefs = serde_json::from_str(r#"{"bottom_tab":3,"future_field":1}"#).unwrap();
+        let back: UiPrefs =
+            serde_json::from_str(r#"{"bottom_tab":3,"sort_col":"cpu","future_field":1}"#).unwrap();
         assert_eq!(back.bottom_tab, 3);
-        assert_eq!(back.sort_col, "active"); // filled from Default
+        assert_eq!(back.subagent_sort_col, "last"); // filled from Default
     }
 }

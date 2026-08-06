@@ -452,9 +452,6 @@ impl App {
     /// Tests use this with `UiPrefs::default()`; going through `new` would load
     /// whatever is on the developer's disk and make results machine-dependent.
     fn with_prefs(plan: Plan, tx: Sender<Request>, prefs: UiPrefs) -> Self {
-        let sort_col = columns::column_by_key(&prefs.sort_col)
-            .map(|c| c.id)
-            .unwrap_or(ColumnId::Last);
         let age_filter = prefs
             .inactivity_filter
             .as_deref()
@@ -472,8 +469,10 @@ impl App {
             scroll: 0,
             plan,
             mode: Mode::List,
-            sort_col,
-            sort_asc: prefs.sort_asc,
+            // Newest first: `Last` compares reversed, so ascending is most
+            // recently active at the top.
+            sort_col: ColumnId::Last,
+            sort_asc: true,
             sortby_cursor: 0,
             search: String::new(),
             age_filter,
@@ -545,8 +544,6 @@ impl App {
     fn save_prefs(&mut self) {
         self.prefs.bottom_tab = self.bottom_tab;
         self.prefs.live_only = self.live_only;
-        self.prefs.sort_col = columns::column(self.sort_col).key.to_string();
-        self.prefs.sort_asc = self.sort_asc;
         self.prefs.inactivity_filter = self.age_filter.map(|a| a.key().to_string());
         self.prefs.agent_live_filter = self.tool_live_only;
         self.prefs.tool_show_diff = self.tool_show_diff;
