@@ -30,6 +30,21 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 #[cfg(unix)]
 const SUBMIT: char = '\r';
 
+/// Gap between the text and the Enter that submits it.
+///
+/// An agent's TUI reads its keyboard in chunks, and a `\r` arriving in the same
+/// chunk as the text is not a keypress — it is the newline in the middle of a
+/// paste, which Claude Code keeps in the prompt instead of sending. Whether the
+/// two land in one read is a race, so `s` submitted sometimes and left the line
+/// sitting there other times. tmux never sees this because its Enter is a
+/// second `send-keys` round trip; the paths that write bytes straight to the pty
+/// have to leave the gap themselves.
+///
+// ponytail: a fixed delay, tuned against Claude Code. If some agent still eats
+// the Enter, this is the number to raise.
+#[cfg(unix)]
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
+
 /// Type `text` into the terminal running the agent at `pid`, then submit it.
 ///
 /// Backends are tried strongest first; each reports `None` when it doesn't apply
@@ -50,17 +65,22 @@ pub fn send_line(pid: u32, text: &str) -> Result<(), String> {
 /// Hand the line to the `cctop run` shim that owns this agent's pty.
 #[cfg(unix)]
 fn shim_send(pid: u32, text: &str) -> Option<Result<(), String>> {
-    use std::io::Write;
-
     let path = crate::shim::socket_path(pid)?;
     // A stale socket file from a crashed shim refuses connections, which is
     // indistinguishable from "no shim" and correctly falls through.
     let mut stream = std::os::unix::net::UnixStream::connect(path).ok()?;
-    Some(
-        stream
-            .write_all(format!("{text}{SUBMIT}").as_bytes())
-            .map_err(|e| format!("cctop run socket: {e}")),
-    )
+    Some(write_then_submit(&mut stream, text).map_err(|e| format!("cctop run socket: {e}")))
+}
+
+/// Type `text`, let the agent take it in, then press Enter — see [`SETTLE`] for
+/// why those cannot be one write.
+#[cfg(unix)]
+fn write_then_submit(out: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
+    out.write_all(text.as_bytes())?;
+    out.flush()?;
+    std::thread::sleep(SETTLE);
+    out.write_all(&[SUBMIT as u8])?;
+    out.flush()
 }
 
 #[cfg(not(unix))]
@@ -95,28 +115,37 @@ fn tiocsti_send(pid: u32, text: &str) -> Option<Result<(), String>> {
         Ok(f) => f,
         Err(e) => return Some(Err(format!("{}: {e}", tty.display()))),
     };
-    for byte in text.bytes().chain(std::iter::once(SUBMIT as u8)) {
+    let push = |byte: u8| {
         // SAFETY: writing one byte through a live tty fd; TIOCSTI takes a
         // pointer to that single byte.
-        if unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSTI as _, &byte) } == -1 {
-            let err = std::io::Error::last_os_error();
-            // The kernel distinguishes the two preconditions: EIO is the disabled
-            // sysctl, EPERM is a tty that isn't ours and so needs CAP_SYS_ADMIN.
-            return Some(Err(match err.raw_os_error() {
-                // Checked before the tty-ownership gate, so CAP_SYS_ADMIN clears
-                // both and root never reaches this branch.
-                Some(libc::EIO) => "the kernel has TIOCSTI disabled: run cctop as root, or \
-                     sysctl -w dev.tty.legacy_tiocsti=1"
-                    .into(),
-                Some(libc::EPERM) => format!(
-                    "typing into {} needs cctop as root (or start the agent with `cctop run`)",
-                    tty.display()
-                ),
-                _ => format!("TIOCSTI: {err}"),
-            }));
+        if unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSTI as _, &byte) } != -1 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        // The kernel distinguishes the two preconditions: EIO is the disabled
+        // sysctl, EPERM is a tty that isn't ours and so needs CAP_SYS_ADMIN.
+        Err(match err.raw_os_error() {
+            // Checked before the tty-ownership gate, so CAP_SYS_ADMIN clears
+            // both and root never reaches this branch.
+            Some(libc::EIO) => "the kernel has TIOCSTI disabled: run cctop as root, or \
+                 sysctl -w dev.tty.legacy_tiocsti=1"
+                .into(),
+            Some(libc::EPERM) => format!(
+                "typing into {} needs cctop as root (or start the agent with `cctop run`)",
+                tty.display()
+            ),
+            _ => format!("TIOCSTI: {err}"),
+        })
+    };
+    for byte in text.bytes() {
+        if let Err(e) = push(byte) {
+            return Some(Err(e));
         }
     }
-    Some(Ok(()))
+    // Same reason as the shim path: the line reaches the input queue as one
+    // burst, so the Enter needs its own moment or it reads as a paste.
+    std::thread::sleep(SETTLE);
+    Some(push(SUBMIT as u8))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -203,6 +232,38 @@ fn tmux(args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Enter must reach the agent as its own write. Appended to the text it
+    /// can land in the same read, where a TUI takes it for the newline inside a
+    /// paste and the line is typed but never sent — which is what `s` did.
+    #[cfg(unix)]
+    #[test]
+    fn the_submit_key_is_written_apart_from_the_line() {
+        use std::io::Write;
+
+        /// Records what each `write_all` was given, which is exactly the
+        /// distinction the agent's read loop can see.
+        struct Writes(Vec<Vec<u8>>);
+        impl Write for Writes {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.push(buf.to_vec());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut out = Writes(Vec::new());
+        let start = std::time::Instant::now();
+        write_then_submit(&mut out, "continue").unwrap();
+
+        assert_eq!(out.0, vec![b"continue".to_vec(), vec![b'\r']]);
+        assert!(
+            start.elapsed() >= SETTLE,
+            "the two writes went out back to back, which is the race this avoids"
+        );
+    }
 
     /// The whole feature is the round trip: find the pane holding a process we
     /// only know by PID, then have what we send arrive as that process's input.
