@@ -33,6 +33,14 @@ const QUOTA_INTERVAL_SECS: u64 = 300;
 /// How often the poller wakes to see whether any provider is due.
 const QUOTA_TICK: Duration = Duration::from_secs(10);
 
+/// Gap between full directory walks.
+///
+/// Only a walk can notice a session that didn't exist before, and it costs one
+/// `stat` per transcript ever recorded — thousands of them, nearly all belonging
+/// to sessions that ended long ago. A new session appearing 15 seconds late is
+/// not worth paying that every refresh; `r` still forces one immediately.
+const FULL_WALK_INTERVAL: Duration = Duration::from_secs(15);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     List,
@@ -131,6 +139,8 @@ pub const AGE_OPTIONS: [Option<AgeFilter>; 4] = [
 
 enum Request {
     Refresh,
+    /// Update the running sessions without re-walking every provider directory.
+    RefreshLive,
     /// Extract full data for one session, to populate the bottom panels.
     Data(Box<Session>),
     Delete(Box<Session>),
@@ -152,6 +162,11 @@ enum Response {
     /// One row whose transcript has finished loading.
     Annotated(Box<Session>),
     Sessions(Box<(Vec<Session>, Stats)>),
+    /// Only the rows that moved during a light refresh, plus recomputed totals.
+    /// Shipping these instead of the whole table is the point of the light path:
+    /// copying thousands of rows back every couple of seconds is the cost being
+    /// avoided.
+    LiveRows(Box<(Vec<Session>, Stats)>),
     Data(String, Box<SessionData>),
     Quota(Box<Quota>),
     /// Pricing landed, so cached costs are stale and a reload is due.
@@ -177,6 +192,9 @@ fn spawn_worker(
     std::thread::spawn(move || {
         let mut loader = Loader::new();
         let mut sent_initial_discovery = false;
+        // The last full walk's rows, kept so a light refresh has something to
+        // update in place.
+        let mut live_rows: Vec<Session> = Vec::new();
         while let Ok(req) = rx.recv() {
             match req {
                 Request::Refresh => {
@@ -202,8 +220,25 @@ fn spawn_worker(
                         },
                     );
                     let stats = crate::loader::compute_stats(&sessions);
+                    // The light path needs its own copy to carry forward; one clone
+                    // per full walk replaces one per refresh.
+                    live_rows = sessions.clone();
                     if tx
                         .send(Response::Sessions(Box::new((sessions, stats))))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Request::RefreshLive => {
+                    if live_rows.is_empty() {
+                        // Nothing walked yet, so there is nothing to update.
+                        continue;
+                    }
+                    let moved = loader.refresh_live(plan, &mut live_rows);
+                    let stats = crate::loader::compute_stats(&live_rows);
+                    if tx
+                        .send(Response::LiveRows(Box::new((moved, stats))))
                         .is_err()
                     {
                         break;
@@ -1013,6 +1048,7 @@ fn event_loop(
     req_tx: &Sender<Request>,
 ) -> anyhow::Result<()> {
     let mut last_refresh = Instant::now();
+    let mut last_full_walk = Instant::now();
     let mut layout = render::Layout::default();
     let mut refresh_in_flight = true;
 
@@ -1049,6 +1085,24 @@ fn event_loop(
                     app.refilter();
                     refresh_in_flight = false;
                     annotated_rows_changed = false;
+                }
+                Ok(Response::LiveRows(payload)) => {
+                    let (rows, stats) = *payload;
+                    for row in rows {
+                        let found = app
+                            .sessions
+                            .iter_mut()
+                            .find(|s| s.provider == row.provider && s.session_id == row.session_id);
+                        match found {
+                            Some(existing) => *existing = row,
+                            // A session that started since the last full walk.
+                            None => app.sessions.push(row),
+                        }
+                    }
+                    app.stats = stats;
+                    app.push_history();
+                    app.refilter();
+                    refresh_in_flight = false;
                 }
                 Ok(Response::Data(key, data)) => {
                     // Discard results for a session the user has already left.
@@ -1138,7 +1192,20 @@ fn event_loop(
         if last_refresh.elapsed() >= refresh_every && !refresh_in_flight {
             last_refresh = Instant::now();
             refresh_in_flight = true;
-            let _ = req_tx.send(Request::Refresh);
+            // Walking every provider directory is what scales with the number of
+            // sessions ever created, while what the user watches scales with the
+            // number running now. So the fast tick updates the running rows and
+            // the walk — the only thing that can notice a *new* session — runs on
+            // its own slower cadence.
+            let full_due = last_full_walk.elapsed() >= FULL_WALK_INTERVAL;
+            if full_due {
+                last_full_walk = Instant::now();
+            }
+            let _ = req_tx.send(if full_due {
+                Request::Refresh
+            } else {
+                Request::RefreshLive
+            });
         }
     }
     Ok(())
