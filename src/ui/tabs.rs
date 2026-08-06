@@ -11,6 +11,29 @@
 //! these.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+/// How long a pane's screen has to sit still before the agent counts as idle.
+///
+/// An agent that is working repaints constantly — Claude Code's "✻ Baked for
+/// 5s" alone ticks every second — so silence is the signal, and it needs no
+/// per-harness parsing. Two seconds clears the gap between a spinner's frames
+/// without waiting so long that a finished turn goes unnoticed. A blinking
+/// cursor does not count: the terminal draws that, not the agent.
+///
+// ponytail: an agent that redraws nothing while thinking would read as idle.
+// None of the four do; if one appears, its transcript's activity state is the
+// tiebreak.
+const QUIET_IS_IDLE: Duration = Duration::from_secs(2);
+
+/// Why a tab is asking to be looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attention {
+    /// The agent has stopped drawing: its turn is over and the prompt is yours.
+    Idle,
+    /// The agent has explicitly asked something and is blocked on the answer.
+    NeedsInput,
+}
 
 /// One terminal on screen.
 pub struct Pane {
@@ -23,6 +46,16 @@ pub struct Pane {
     pub pid: u32,
     pub label: String,
     pub view: crate::attach::Attach,
+    /// When this pane's screen last changed, which is how idleness is told
+    /// without asking the agent or its transcript anything.
+    drew_at: Instant,
+}
+
+impl Pane {
+    /// Whether the agent has gone quiet long enough to count as waiting for you.
+    fn idle(&self) -> bool {
+        self.drew_at.elapsed() >= QUIET_IS_IDLE
+    }
 }
 
 impl Pane {
@@ -42,6 +75,7 @@ impl Pane {
             label: hosted.label.clone(),
             view,
             hosted: Some(hosted),
+            drew_at: Instant::now(),
         })
     }
 
@@ -52,6 +86,7 @@ impl Pane {
             pid,
             label,
             view: crate::attach::attach(pid)?,
+            drew_at: Instant::now(),
         })
     }
 
@@ -119,8 +154,35 @@ impl Tab {
     pub fn pump(&mut self) -> bool {
         self.panes.iter_mut().fold(false, |changed, pane| {
             // Not `||`: that short-circuits, and every pane must be drained.
-            pane.view.pump() | changed
+            let drew = pane.view.pump();
+            if drew {
+                pane.drew_at = Instant::now();
+            }
+            drew | changed
         })
+    }
+
+    /// What this tab wants, if anything — the most urgent of its panes.
+    ///
+    /// `asking` names the pids whose sessions have explicitly asked something.
+    /// That comes from the transcript and only exists once one has been written,
+    /// so a pane that is blocked on a question its session has not recorded yet
+    /// still reads as idle. Idle is the weaker claim of the two, so under-calling
+    /// it that way is the right direction to be wrong in.
+    ///
+    /// The focused pane never asks: you are looking straight at it.
+    pub fn attention(&self, focused: bool, asking: &dyn Fn(u32) -> bool) -> Option<Attention> {
+        self.panes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !(focused && *i == self.focus))
+            .filter_map(|(_, pane)| match asking(pane.pid) {
+                true => Some(Attention::NeedsInput),
+                false => pane.idle().then_some(Attention::Idle),
+            })
+            // A held question outranks a finished turn: one of them is blocking
+            // an agent, the other is only waiting on you when you get to it.
+            .max_by_key(|a| matches!(a, Attention::NeedsInput))
     }
 
     /// Drop the panes whose agents have exited. True once nothing is left.
@@ -172,6 +234,64 @@ mod tests {
                 crate::shim::is_command(&argv[0]),
                 "offered a command that is not installed: {argv:?}"
             );
+        }
+    }
+
+    /// A pane whose agent is still drawing must not claim to be idle, a held
+    /// question must outrank a finished turn, and the tab you are looking at
+    /// must stay quiet — blinking the title of the pane in front of you is
+    /// noise, and it is the case that fires most often.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tab_asks_for_attention_only_when_it_has_something_you_cannot_see() {
+        let mut kids = Vec::new();
+        let mut pane = |script: &str| {
+            let (child, pid) = crate::shim::test_session(&["sh", "-c", script], (80, 24));
+            kids.push(child);
+            (pid, Pane::view_of(pid, "agent".into()).expect("attach"))
+        };
+        // One agent that keeps painting, one that drew once and went quiet.
+        let (busy_pid, busy) = pane("while :; do printf '.'; sleep 0.2; done");
+        let (quiet_pid, quiet) = pane("printf 'done'; sleep 30");
+
+        let mut tab = Tab::new(busy);
+        tab.panes.push(quiet);
+        let nobody = |_: u32| false;
+
+        // Both panes have just been created, so neither has been quiet yet.
+        assert_eq!(tab.attention(false, &nobody), None);
+
+        // Past the threshold, only the one that stopped drawing is idle.
+        let deadline = Instant::now() + QUIET_IS_IDLE + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            tab.pump();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(tab.attention(false, &nobody), Some(Attention::Idle));
+
+        // The busy pane holding a question outranks the quiet one being idle.
+        assert_eq!(
+            tab.attention(false, &|pid| pid == busy_pid),
+            Some(Attention::NeedsInput)
+        );
+        // Focused tab: the focused pane is excluded, so the quiet one is left.
+        tab.focus = 0;
+        assert_eq!(
+            tab.attention(true, &|pid| pid == busy_pid),
+            Some(Attention::Idle)
+        );
+        // Focus the quiet one instead: it is the only pane with anything to
+        // report, and you are looking straight at it, so the tab stays quiet.
+        tab.focus = 1;
+        assert_eq!(tab.attention(true, &nobody), None);
+
+        drop(tab);
+        for child in &mut kids {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        for pid in [busy_pid, quiet_pid] {
+            let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
         }
     }
 

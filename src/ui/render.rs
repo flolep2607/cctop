@@ -5,7 +5,7 @@ use super::modals;
 use super::spark;
 use super::table;
 use super::theme::{self, Gradient};
-use super::{App, Mode, panels};
+use super::{App, Mode, panels, tabs};
 use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
@@ -187,18 +187,37 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let titles = std::iter::once("Dashboard".to_string()).chain(app.tabs.iter().map(|t| t.title()));
+    let on = app.blink_on();
     let mut spans = Vec::new();
     let mut pos = area.x;
     for (i, title) in titles.enumerate() {
         let text = format!(" {}:{} ", i + 1, title);
         let width = text.chars().count() as u16;
-        let style = if i == app.tab {
-            Style::default()
+        // A tab wanting something outranks the plain selected/unselected look:
+        // the whole point of the colour is to be seen while you are reading a
+        // different tab.
+        let style = match app.tab_attention(i) {
+            // Blinking by hand rather than with `Modifier::SLOW_BLINK`, which
+            // many terminals quietly drop — an attention cue that only works on
+            // some emulators is worse than none, because you stop trusting it.
+            Some(what) => {
+                let colour = match what {
+                    tabs::Attention::NeedsInput => theme::COST_MID,
+                    tabs::Attention::Idle => theme::COST_LOW,
+                };
+                match on {
+                    true => Style::default()
+                        .bg(colour)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                    false => Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                }
+            }
+            None if i == app.tab => Style::default()
                 .bg(theme::SELECTED_BG)
                 .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::DIM)
+                .add_modifier(Modifier::BOLD),
+            None => Style::default().fg(theme::DIM),
         };
         spans.push(Span::styled(text, style));
         layout.workspace_spans.push((pos, pos + width, i));
