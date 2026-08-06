@@ -210,6 +210,8 @@ fn spawn_worker(
                     sent_initial_discovery = true;
                     let sessions = loader.load_progressive(
                         plan,
+                        // Only the first table has someone waiting for it.
+                        first_load,
                         |sessions| {
                             if first_load {
                                 let _ = tx.send(Response::Discovered(sessions.to_vec()));

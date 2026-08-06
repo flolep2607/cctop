@@ -24,23 +24,49 @@ struct RateState {
     ema_cost: f64,
 }
 
+/// Threads used for background re-extraction.
+///
+/// Rayon defaults to one per core, which is right when someone is waiting for the
+/// first table and wrong forever after: it turns each refresh into a spike across
+/// every core, so the machine alternates between idle and fully committed. A
+/// monitor should hum rather than stampede, so background walks get a quarter of
+/// the machine and take proportionally longer, which nobody is waiting on.
+fn gentle_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() / 4)
+        .unwrap_or(2)
+        .clamp(2, 4)
+}
+
 #[derive(Default)]
 pub struct Loader {
     store: OnceLock<Store>,
+    /// Small pool for background extraction; `None` if one can't be built, which
+    /// just means falling back to rayon's default.
+    gentle: Option<rayon::ThreadPool>,
     collector: proc::Collector,
     rates: HashMap<String, RateState>,
     /// Last known-good context reading, so a tail read that misses doesn't
     /// blank the CTX% column for a frame.
     context_cache: HashMap<String, ContextUsage>,
+    /// Activity state and last tool per session, so a walk re-reads only the
+    /// transcripts that can still change.
+    tail_cache: HashMap<String, (session::ActivityState, String)>,
 }
 
 impl Loader {
     pub fn new() -> Self {
         Loader {
             store: OnceLock::new(),
+            gentle: rayon::ThreadPoolBuilder::new()
+                .num_threads(gentle_threads())
+                .thread_name(|i| format!("cctop-extract-{i}"))
+                .build()
+                .ok(),
             collector: proc::Collector::new(),
             rates: HashMap::new(),
             context_cache: HashMap::new(),
+            tail_cache: HashMap::new(),
         }
     }
 
@@ -50,7 +76,8 @@ impl Loader {
 
     /// Discover, extract, and annotate every session.
     pub fn load(&mut self, plan: Plan) -> Vec<Session> {
-        self.load_progressive(plan, |_| {}, |_| {})
+        // The CLI's caller is always waiting on the result.
+        self.load_progressive(plan, true, |_| {}, |_| {})
     }
 
     /// Discover sessions first, then report each fully annotated row as soon as
@@ -59,6 +86,7 @@ impl Loader {
     pub fn load_progressive<D, A>(
         &mut self,
         plan: Plan,
+        eager: bool,
         on_discovered: D,
         on_annotated: A,
     ) -> Vec<Session>
@@ -83,10 +111,18 @@ impl Loader {
         // Extraction dominates wall time on large transcripts, and each session
         // is independent, so fan out across cores and publish rows individually
         // instead of withholding the entire table for the slowest transcript.
-        sessions.par_iter_mut().for_each(|s| {
+        //
+        // How wide to fan out depends on who is waiting: the first table should
+        // arrive as fast as the machine allows, while a background refresh that
+        // nobody asked for should not seize every core to do it.
+        let step = |s: &mut Session| {
             annotate(s, &store.session_data(s), plan);
             on_annotated(s);
-        });
+        };
+        match self.gentle.as_ref().filter(|_| !eager) {
+            Some(pool) => pool.install(|| sessions.par_iter_mut().for_each(step)),
+            None => sessions.par_iter_mut().for_each(step),
+        }
 
         self.update_rates(&mut sessions);
 
@@ -159,6 +195,23 @@ impl Loader {
     /// Activity dot, last tool, and context window for one row.
     fn tail_state(&mut self, s: &mut Session) {
         let key = s.key();
+        // A stopped session's transcript cannot change, so its tail only needs
+        // reading once. Without this a walk opens and seeks every transcript ever
+        // recorded — thousands of files, serially, which is the half of the walk
+        // that no amount of capping the extraction pool can smooth out.
+        //
+        // ponytail: keyed by session, not by mtime, so a stopped session whose
+        // file is edited behind cctop's back keeps its old dot until it runs
+        // again. Extraction still notices, so only the tail-derived fields go
+        // stale; re-check the mtime here if that ever matters.
+        if !s.is_running()
+            && let Some((state, tool)) = self.tail_cache.get(&key)
+        {
+            s.activity_state = *state;
+            s.last_tool = tool.clone();
+            s.context = self.context_cache.get(&key).copied();
+            return;
+        }
         s.activity_state = session::extract_activity_state(s);
         if s.is_running() {
             s.last_tool = match s.provider {
@@ -180,6 +233,8 @@ impl Loader {
             }
         }
         s.context = self.context_cache.get(&key).copied();
+        self.tail_cache
+            .insert(key, (s.activity_state, s.last_tool.clone()));
     }
 
     /// Refresh only what can have moved since the last full walk.
