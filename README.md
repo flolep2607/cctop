@@ -141,6 +141,7 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `d` | Delete the selected session (not running) |
 | `k` | Terminate the selected live session (with confirmation) |
 | `s` | Type a line into the selected session's terminal (see below) |
+| `a` | Attach: put that terminal on screen and drive it (`F12` detaches) |
 | `Esc` | Clear the active filter |
 | `q` or `F10` | Quit |
 
@@ -193,6 +194,27 @@ usage error, so a typo doesn't silently try to run something.
 with the agent's own exit code, so it is a transparent stand-in. Sessions started
 any other way still show up in cctop; they just can't be typed into unless tmux
 or the root path applies.
+
+### Attaching to a session
+
+`a` goes further than `s`: it puts the agent's own terminal in the window,
+live — its spinner, its permission prompts, whatever it is drawing — and sends
+every keystroke to it until `F12`. The Overview stays above it, so cost and
+alerts remain visible while you answer an agent.
+
+This needs cctop to hold the pty, so it works for sessions started with
+`cctop <agent>` and no others; the aliases above make that every session you
+start from a shell. On attaching, the shim replays its recent output so the
+screen is rebuilt immediately rather than at the agent's next repaint.
+
+The pty has one size, fixed by the terminal that launched it, and cctop's panel
+is what's left under the Overview. When the panel is smaller the title says so
+(`98×30 of 120×40`) and the view is cropped rather than reflowed — resizing the
+pty would fix the crop and wreck the display in the window the agent runs in.
+
+`F12` is the detach key because function keys are the ones cctop doesn't forward.
+Everything else goes to the agent, `Ctrl-C` included: while attached, that
+interrupts the agent rather than quitting cctop.
 
 ## Where data comes from
 

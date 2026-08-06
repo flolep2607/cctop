@@ -13,6 +13,24 @@ impl App {
         }
         self.needs_redraw = true;
 
+        // While attached, the keyboard belongs to the agent — including Ctrl-C,
+        // which is how you interrupt it. Only the detach key is cctop's, and it
+        // is a function key because those are the ones never forwarded: any
+        // Ctrl- combination worth pressing is one an agent might want.
+        if self.attached.is_some() {
+            if key.code == KeyCode::F(12) {
+                self.attached = None;
+                return;
+            }
+            if let Some(attached) = self.attached.as_mut()
+                && !attached.send_key(key)
+            {
+                self.attached = None;
+                self.set_status("The agent's terminal closed");
+            }
+            return;
+        }
+
         // Ctrl-C quits from any mode.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -288,6 +306,7 @@ impl App {
                 Some(_) => self.set_status("Selected session has no local process to type into"),
                 None => {}
             },
+            KeyCode::Char('a') => self.attach_selected(),
             KeyCode::Char('y') => self.copy_selection(),
             KeyCode::Char('L') => {
                 self.tool_live_only = !self.tool_live_only;

@@ -94,6 +94,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     let area = frame.area();
     let mut layout = Layout::default();
 
+    // Attached: the agent's own screen replaces the table and panels, and the
+    // Overview stays put so the money and the alerts never leave the frame.
+    if app.attached.is_some() {
+        let chunks = RLayout::vertical([
+            Constraint::Length(6),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        draw_overview(frame, chunks[0], app);
+        draw_attached(frame, chunks[1], app);
+        draw_footer(frame, chunks[2], app);
+        return layout;
+    }
+
     // Overview and limits are fixed; the table and bottom panel split the rest,
     // with the bottom panel capped so the list never collapses to nothing.
     let body_height = area.height.saturating_sub(5 + 3 + 1);
@@ -134,6 +149,39 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::List => {}
     }
     layout
+}
+
+/// The attached agent's terminal, exactly as it is drawing it.
+///
+/// The pty has one size, set by the terminal that started it, and cctop's panel
+/// is whatever is left after the Overview — so when the panel is smaller the
+/// screen is shown from its top-left corner and the title says by how much it is
+/// cropped. Resizing the pty instead would fix the crop and break the display in
+/// the window the agent was launched from.
+fn draw_attached(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(attached) = app.attached.as_ref() else {
+        return;
+    };
+    let (cols, rows) = attached.size;
+    let block = panel_block("attached");
+    let inner = block.inner(area);
+    let cropped = cols > inner.width || rows > inner.height;
+    let title = if cropped {
+        format!(
+            "{} — {}×{} of {cols}×{rows}, F12 detaches",
+            app.attached_label, inner.width, inner.height
+        )
+    } else {
+        format!("{} — F12 detaches", app.attached_label)
+    };
+    frame.render_widget(
+        block.title(Span::styled(format!(" {title} "), theme::title())),
+        area,
+    );
+    frame.render_widget(
+        tui_term::widget::PseudoTerminal::new(attached.parser.screen()),
+        inner,
+    );
 }
 
 // ---------------------------------------------------------------------------

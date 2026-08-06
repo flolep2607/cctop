@@ -387,6 +387,12 @@ pub struct App {
     /// When cctop started, used by the tool-activity "live" filter.
     pub started_at: String,
 
+    /// The agent whose terminal is on screen, when one is.
+    pub attached: Option<crate::attach::Attach>,
+    /// What to call it in the title — the session is gone from view while
+    /// attached, so the label has to be carried.
+    pub attached_label: String,
+
     prefs: UiPrefs,
     tx: Sender<Request>,
     pub needs_redraw: bool,
@@ -469,6 +475,8 @@ impl App {
             started_at: chrono::Utc::now().to_rfc3339(),
             prefs,
             tx,
+            attached: None,
+            attached_label: String::new(),
             needs_redraw: true,
             should_quit: false,
         }
@@ -940,6 +948,32 @@ impl App {
 /// Rows moved by PageUp/PageDown and the fallback for half-page scrolls.
 const PAGE: isize = 10;
 
+impl App {
+    /// Put the selected agent's own terminal on screen.
+    ///
+    /// Only possible for sessions cctop launched: the shim holding the pty is
+    /// what has a copy of the output to give away.
+    pub(super) fn attach_selected(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let label = format!("{} · {}", session.abbrev_label, session.model);
+        let Some(pid) = session_root_pid(session) else {
+            self.set_status("Selected session has no local process");
+            return;
+        };
+        match crate::attach::attach(pid) {
+            Some(attached) => {
+                self.attached = Some(attached);
+                self.attached_label = label;
+            }
+            None => self.set_status(
+                "Only sessions started by cctop can be attached — start them as `cctop claude`",
+            ),
+        }
+    }
+}
+
 /// PID of the currently live agent root, excluding briefly retained exits.
 fn session_root_pid(session: &Session) -> Option<u32> {
     session
@@ -1178,6 +1212,12 @@ fn event_loop(
 
         app.sync_panel_data();
 
+        if let Some(attached) = app.attached.as_mut()
+            && attached.pump()
+        {
+            app.needs_redraw = true;
+        }
+
         // Expire the transient status line.
         if let Some((_, at)) = &app.status
             && at.elapsed() > Duration::from_secs(3)
@@ -1194,10 +1234,16 @@ fn event_loop(
         // Wait for input, but never past the next scheduled refresh. The
         // interval is read live so +/- changes apply on the very next poll.
         let refresh_every = Duration::from_secs_f64(app.refresh_secs);
+        // Attached, the same wait is what stands between a keystroke and seeing
+        // it echoed, so it drops to a frame's worth.
+        let idle_wait = match app.attached {
+            Some(_) => Duration::from_millis(16),
+            None => Duration::from_millis(200),
+        };
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())
             .unwrap_or(Duration::ZERO)
-            .min(Duration::from_millis(200));
+            .min(idle_wait);
         if event::poll(wait)? {
             match event::read()? {
                 Event::Key(key) => app.on_key(key),

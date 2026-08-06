@@ -1,4 +1,5 @@
 mod alias;
+mod attach;
 mod cache;
 mod cli;
 mod config;
