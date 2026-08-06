@@ -229,6 +229,11 @@ pub fn run(force: bool) -> Result<()> {
         })
         .ok_or_else(|| anyhow!("release {latest} has no archive for {target}"))?;
 
+    // Claim the staging directory before downloading: whether the new binary can
+    // be put in place is a permission question with an answer already available,
+    // and finding out afterwards means having spent the download for nothing.
+    let staging = staging_dir()?;
+
     println!("Downloading {}…", asset.name);
     let mut body = Vec::new();
     agent()
@@ -240,22 +245,6 @@ pub fn run(force: bool) -> Result<()> {
         .read_to_end(&mut body)
         .context("could not read the release archive")?;
 
-    // Stage the new binary beside the current one: replacing an executable is a
-    // rename, and a rename cannot cross a filesystem boundary.
-    let exe = std::env::current_exe().context("could not locate the running executable")?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| anyhow!("the running executable has no parent directory"))?;
-    let staging = tempfile::Builder::new()
-        .prefix(".cctop-update-")
-        .tempdir_in(dir)
-        .with_context(|| {
-            format!(
-                "could not write to {}; if cctop was installed by a package manager, update it with that instead",
-                dir.display()
-            )
-        })?;
-
     let new_binary = unpack(&body, target, staging.path())?;
     self_replace::self_replace(&new_binary).context("could not replace the running executable")?;
 
@@ -263,9 +252,72 @@ pub fn run(force: bool) -> Result<()> {
     Ok(())
 }
 
+/// How to retry with the privileges this platform needs.
+#[cfg(unix)]
+const ELEVATE: &str = "re-run it as `sudo cctop --update`";
+#[cfg(not(unix))]
+const ELEVATE: &str = "re-run `cctop --update` from an elevated prompt";
+
+/// A scratch directory beside the running binary, to stage the replacement in.
+///
+/// Replacing an executable is a rename and a rename cannot cross a filesystem
+/// boundary, so this has to sit next to the current binary rather than in a temp
+/// dir — which makes it a permission question wherever that binary lives.
+fn staging_dir() -> Result<tempfile::TempDir> {
+    let exe = std::env::current_exe().context("could not locate the running executable")?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("the running executable has no parent directory"))?;
+    stage_in(dir)
+}
+
+fn stage_in(dir: &Path) -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(".cctop-update-")
+        .tempdir_in(dir)
+        .map_err(|error| {
+            // The documented install puts cctop in /usr/local/bin with sudo, so a
+            // user-owned process being unable to replace it is the ordinary case,
+            // not an exotic one. Saying so beats reporting a bare EACCES.
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                anyhow!(
+                    "{} is not writable by this user, so the new binary cannot replace the old one: {ELEVATE}. \
+                     If a package manager installed cctop, update it with that instead.",
+                    dir.display()
+                )
+            } else {
+                anyhow::Error::new(error)
+                    .context(format!("could not stage an update in {}", dir.display()))
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure every user of the documented install hits, and the one place
+    /// the message has to name `sudo` rather than report a bare EACCES.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_install_directory_names_the_fix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let error = match stage_in(dir.path()) {
+            Err(error) => format!("{error:#}"),
+            // Running as root, where the mode bits don't apply.
+            Ok(_) => return,
+        };
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(error.contains("sudo cctop --update"), "got: {error}");
+        assert!(
+            error.contains(&dir.path().display().to_string()),
+            "got: {error}"
+        );
+    }
 
     #[test]
     fn version_ordering_only_moves_forward() {

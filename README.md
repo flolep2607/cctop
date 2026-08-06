@@ -55,6 +55,13 @@ executable in place:
 cctop --update
 ```
 
+Replacing the binary needs write access to the directory it lives in. The install
+above puts it in `/usr/local/bin` with `sudo`, so updating it needs `sudo` too:
+
+```bash
+sudo cctop --update
+```
+
 cctop checks for a new release once a day in the background and, when one
 exists, says so in the footer. It never updates itself: the check only reports,
 and replacing the binary always takes an explicit `--update`. If you installed
