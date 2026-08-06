@@ -133,9 +133,18 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
         .map(|(i, &idx)| {
             let s = &app.sessions[idx];
             let selected = app.scroll + i == app.selected;
-            let marked = app.marked.contains(&s.key());
-            let deleting = app.deleting.contains(&s.key());
-            session_row(s, &widths, selected, marked, deleting, &now)
+            let key = s.key();
+            let marked = app.marked.contains(&key);
+            let deleting = app.deleting.contains(&key);
+            session_row(
+                s,
+                &widths,
+                selected,
+                marked,
+                deleting,
+                app.notify.rang_recently(&key),
+                &now,
+            )
         })
         .collect();
 
@@ -148,6 +157,7 @@ fn session_row(
     selected: bool,
     marked: bool,
     deleting: bool,
+    rang: bool,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Line<'static> {
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
@@ -164,15 +174,25 @@ fn session_row(
 
     let mut spans = Vec::with_capacity(COLUMNS.len() * 2);
     for (c, w) in COLUMNS.iter().zip(widths) {
+        // The session that just rang takes over its own status dot for a
+        // moment. Without it a bell out of a dozen panes is a sound with no
+        // row attached — and its ordinary dot would be the same hollow grey as
+        // every other session that has stopped. A pending delete outranks it:
+        // that row is on its way out.
+        let bell = rang && !deleting && c.id == ColumnId::Status;
         let text = if deleting && c.id == ColumnId::Status {
             "…".to_string()
+        } else if bell {
+            "◉".to_string()
         } else {
             columns::render_cell(c.id, s, now)
         };
         // Selection keeps the row's highlight but the status dot must stay
         // colored, otherwise you can't tell a running session from a stopped
         // one on the selected line.
-        let style = if selected {
+        let style = if bell {
+            base.fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        } else if selected {
             if c.id == ColumnId::Status {
                 Style::default()
                     .bg(theme::SELECTED_BG)
@@ -284,6 +304,22 @@ mod tests {
                 "width {w} produced {widths:?}"
             );
         }
+    }
+
+    /// The bell has to land on a row, not only in the footer — and a stopped
+    /// session's ordinary hollow dot is exactly what it must not look like.
+    #[test]
+    fn the_session_that_rang_wears_its_own_marker() {
+        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        s.last_active = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let widths = column_widths(200);
+
+        let quiet = session_row(&s, &widths, false, false, false, false, &now);
+        let rang = session_row(&s, &widths, false, false, false, true, &now);
+        assert_eq!(quiet.spans[0].content, "○");
+        assert_eq!(rang.spans[0].content, "◉");
+        assert_eq!(rang.spans[0].style.fg, Some(theme::ACCENT));
     }
 
     #[test]
