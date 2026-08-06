@@ -182,6 +182,10 @@ enum Response {
         session_key: String,
         result: Result<(), String>,
     },
+    Deleted {
+        session_key: String,
+        result: Result<(), String>,
+    },
     KeysSent {
         result: Result<(), String>,
     },
@@ -263,24 +267,31 @@ fn spawn_worker(
                     }
                 }
                 Request::Delete(session) => {
-                    match session.provider {
-                        Provider::Claude => {
-                            crate::session::claude::delete(&session);
-                        }
-                        Provider::Codex => {
-                            crate::session::codex::delete(&session);
-                        }
-                        Provider::Cursor => {
-                            crate::session::cursor::delete(&session);
-                        }
-                        Provider::OpenCode => {
-                            let _ = crate::session::opencode::delete(&session);
-                        }
+                    let result = match session.provider {
+                        Provider::Claude => crate::session::claude::delete(&session)
+                            .map_err(|error| error.to_string()),
+                        Provider::Codex => crate::session::codex::delete(&session)
+                            .map_err(|error| error.to_string()),
+                        Provider::Cursor => crate::session::cursor::delete(&session)
+                            .map_err(|error| error.to_string()),
+                        Provider::OpenCode => crate::session::opencode::delete(&session)
+                            .map_err(|error| error.to_string()),
                         Provider::Pi => {
-                            let _ = crate::session::pi::delete(&session);
+                            crate::session::pi::delete(&session).map_err(|error| error.to_string())
                         }
+                    };
+                    if result.is_ok() {
+                        loader.store().evict(&session);
                     }
-                    loader.store().evict(&session);
+                    if tx
+                        .send(Response::Deleted {
+                            session_key: session.key(),
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Request::Terminate { session_key, pid } => {
                     let result = crate::proc::terminate(pid);
@@ -332,6 +343,9 @@ pub struct App {
 
     /// Session keys the user has marked (Space) for a batch action.
     pub marked: HashSet<String>,
+    /// Sessions whose deletion has been accepted by the worker but not yet
+    /// completed. They remain visible until the provider reports success.
+    pub deleting: HashSet<String>,
     /// The action pending confirmation in `Mode::BatchConfirm`.
     pub batch: BatchKind,
     /// Follow mode: keep the selected row centered.
@@ -446,6 +460,7 @@ impl App {
             age_cursor,
             live_only: prefs.live_only,
             marked: HashSet::new(),
+            deleting: HashSet::new(),
             batch: BatchKind::Delete,
             follow: false,
             refresh_secs: 2.0,
@@ -893,15 +908,21 @@ impl App {
     /// Confirm and run the pending batch action over all marked sessions.
     fn batch_execute(&mut self) {
         let kind = self.batch;
-        let marked = self.marked_sessions();
-        let mut removed: Vec<String> = Vec::new();
+        let marked: Vec<Session> = self.marked_sessions().into_iter().cloned().collect();
+        let mut requested = 0;
+        let mut acted_on: Vec<String> = Vec::new();
         let mut failed = 0;
-        for s in marked {
+        for s in &marked {
             let key = s.key();
             match kind {
                 BatchKind::Delete => {
-                    self.tx.send(Request::Delete(Box::new(s.clone()))).ok();
-                    removed.push(key);
+                    if self.tx.send(Request::Delete(Box::new(s.clone()))).is_ok() {
+                        self.deleting.insert(key.clone());
+                        requested += 1;
+                        acted_on.push(key);
+                    } else {
+                        failed += 1;
+                    }
                 }
                 BatchKind::Kill => match session_root_pid(s) {
                     Some(pid) => {
@@ -911,28 +932,26 @@ impl App {
                                 pid,
                             })
                             .ok();
-                        removed.push(key);
+                        acted_on.push(key);
                     }
                     None => failed += 1,
                 },
             }
         }
-        for key in &removed {
+        for key in &acted_on {
             self.marked.remove(key);
         }
-        self.sessions.retain(|s| !removed.contains(&s.key()));
-        self.refilter();
         self.set_status(match kind {
             BatchKind::Delete => {
                 if failed == 0 {
-                    format!("Deleted {} session(s)", removed.len())
+                    format!("Deleting {requested} session(s)…")
                 } else {
-                    format!("Deleted {}, {} failed", removed.len(), failed)
+                    format!("Deleting {requested} session(s), {failed} failed to start")
                 }
             }
             BatchKind::Kill => format!(
                 "Kill sent to {} session(s){}",
-                removed.len(),
+                acted_on.len(),
                 if failed > 0 {
                     format!(" ({} skipped)", failed)
                 } else {
@@ -1249,6 +1268,24 @@ fn event_loop(
                         app.set_status(format!("Could not stop {session_key}: {error}"));
                     }
                 },
+                Ok(Response::Deleted {
+                    session_key,
+                    result,
+                }) => {
+                    app.deleting.remove(&session_key);
+                    match result {
+                        Ok(()) => {
+                            app.sessions.retain(|session| session.key() != session_key);
+                            app.marked.remove(&session_key);
+                            app.stats = crate::loader::compute_stats(&app.sessions);
+                            app.refilter();
+                            app.set_status("Deleted session");
+                        }
+                        Err(error) => {
+                            app.set_status(format!("Could not delete {session_key}: {error}"))
+                        }
+                    }
+                }
                 Ok(Response::KeysSent { result }) => match result {
                     Ok(()) => app.set_status("Sent to the session's terminal"),
                     Err(error) => app.set_status(error),
@@ -1598,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_toggle_and_batch_delete_remove_marked_sessions() {
+    fn batch_delete_keeps_marked_sessions_visible_until_worker_confirms() {
         let mut app = test_app();
         app.sessions = vec![
             session("a", false, "/x"),
@@ -1627,8 +1664,8 @@ mod tests {
         app.batch(BatchKind::Delete);
         assert_eq!(app.mode, Mode::BatchConfirm);
         app.batch_execute();
-        assert_eq!(app.sessions.len(), 1);
-        assert_eq!(app.sessions[0].session_id, "b");
+        assert_eq!(app.sessions.len(), 3);
+        assert_eq!(app.deleting.len(), 2);
         assert!(app.marked.is_empty());
     }
 

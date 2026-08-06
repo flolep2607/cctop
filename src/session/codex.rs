@@ -778,10 +778,11 @@ pub fn extract_last_tool(session: &Session) -> String {
 }
 
 /// Remove a Codex rollout file.
-pub fn delete(session: &Session) {
+pub fn delete(session: &Session) -> std::io::Result<()> {
     if let Some(file) = session.data_file.as_ref() {
-        let _ = std::fs::remove_file(file);
+        std::fs::remove_file(file)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
