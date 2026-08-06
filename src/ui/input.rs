@@ -425,8 +425,13 @@ impl App {
     pub(super) fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
         // Inside a tab the only thing the mouse can hit is the tab bar: the
         // table and its panels are not on screen, so nothing else has a target.
+        // Only a click — mouse capture also reports movement, and switching tabs
+        // on a hover means the pointer resting anywhere near the bar drags you
+        // out of the agent you are typing into.
         if self.tab > 0 {
-            if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
+            if ev.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some(tab) = layout.workspace_at(ev.column, ev.row)
+            {
                 self.show_tab(tab);
             }
             return;
