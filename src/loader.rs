@@ -217,7 +217,7 @@ impl Loader {
             s.last_tool = match s.provider {
                 Provider::Claude => session::claude::extract_last_tool(s),
                 Provider::Codex => session::codex::extract_last_tool(s),
-                Provider::Cursor => String::new(),
+                Provider::Cursor | Provider::Gemini | Provider::Windsurf => String::new(),
                 Provider::OpenCode => session::opencode::extract_last_tool(s),
                 Provider::Pi => session::pi::extract_last_tool(s),
             };
@@ -226,7 +226,11 @@ impl Loader {
             let fresh = match s.provider {
                 Provider::Claude => session::claude::extract_context(s),
                 Provider::Codex => session::codex::extract_context(s),
-                Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
+                Provider::Cursor
+                | Provider::Gemini
+                | Provider::OpenCode
+                | Provider::Pi
+                | Provider::Windsurf => None,
             };
             if let Some(ctx) = fresh {
                 self.context_cache.insert(key.clone(), ctx);
@@ -380,8 +384,10 @@ fn harness_from_process(session: &Session, command: &str) -> &'static str {
             Provider::Claude => "ClaudeCode",
             Provider::Codex => "Codex",
             Provider::Cursor => "Cursor",
+            Provider::Gemini => "Gemini",
             Provider::OpenCode => "OpenCode",
             Provider::Pi => "Pi",
+            Provider::Windsurf => "Windsurf",
         },
     }
 }
@@ -396,8 +402,10 @@ pub struct Stats {
     pub total_claude: usize,
     pub total_codex: usize,
     pub total_cursor: usize,
+    pub total_gemini: usize,
     pub total_opencode: usize,
     pub total_pi: usize,
+    pub total_windsurf: usize,
     pub active_1h: usize,
     pub active_24h: usize,
     pub active_7d: usize,
@@ -414,8 +422,13 @@ pub struct Stats {
     pub spend_claude: f64,
     pub spend_codex: f64,
     pub spend_cursor: f64,
+    pub spend_gemini: f64,
     pub spend_opencode: f64,
     pub spend_pi: f64,
+    /// Always zero: Windsurf records no local accounting. Kept so the
+    /// per-provider breakdown stays exhaustive rather than silently skipping a
+    /// provider that might start reporting cost later.
+    pub spend_windsurf: f64,
     pub spend_hour: f64,
     pub spend_today: f64,
     pub spend_week: f64,
@@ -455,8 +468,10 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             Provider::Claude => st.total_claude += 1,
             Provider::Codex => st.total_codex += 1,
             Provider::Cursor => st.total_cursor += 1,
+            Provider::Gemini => st.total_gemini += 1,
             Provider::OpenCode => st.total_opencode += 1,
             Provider::Pi => st.total_pi += 1,
+            Provider::Windsurf => st.total_windsurf += 1,
         }
         if let Some(la) = util::parse_ts(&s.last_active) {
             let age = now_ms - la.timestamp_millis();
@@ -486,8 +501,10 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 Provider::Claude => st.spend_claude += cost,
                 Provider::Codex => st.spend_codex += cost,
                 Provider::Cursor => st.spend_cursor += cost,
+                Provider::Gemini => st.spend_gemini += cost,
                 Provider::OpenCode => st.spend_opencode += cost,
                 Provider::Pi => st.spend_pi += cost,
+                Provider::Windsurf => st.spend_windsurf += cost,
             }
             st.spend_per_min += s.cost_per_min;
 
@@ -533,8 +550,13 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         }
     }
 
-    st.spend_total =
-        st.spend_claude + st.spend_codex + st.spend_cursor + st.spend_opencode + st.spend_pi;
+    st.spend_total = st.spend_claude
+        + st.spend_codex
+        + st.spend_cursor
+        + st.spend_gemini
+        + st.spend_opencode
+        + st.spend_pi
+        + st.spend_windsurf;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
     st
 }

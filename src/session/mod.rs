@@ -4,8 +4,10 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod extract;
+pub mod gemini;
 pub mod opencode;
 pub mod pi;
+pub mod windsurf;
 
 use crate::pricing::Provider;
 use crate::util;
@@ -52,8 +54,10 @@ impl Surface {
             (_, Provider::Claude) => "Claude",
             (_, Provider::Codex) => "Codex",
             (_, Provider::Cursor) => "Cursor",
+            (_, Provider::Gemini) => "Gemini",
             (_, Provider::OpenCode) => "OpenCode",
             (_, Provider::Pi) => "Pi",
+            (_, Provider::Windsurf) => "Windsurf",
         }
     }
 }
@@ -322,7 +326,23 @@ fn is_waiting_for_input_event(
                         })
                     })
         }
-        crate::pricing::Provider::OpenCode => false,
+        crate::pricing::Provider::Gemini => {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("gemini")
+                && item
+                    .get("toolCalls")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            call.get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(is_input_request_tool)
+                        })
+                    })
+        }
+        // OpenCode keeps no transcript to tail, and Windsurf's conversation blob
+        // is one SQLite value rewritten wholesale rather than a growing log, so
+        // neither has a "newest event" this walk could read.
+        crate::pricing::Provider::OpenCode | crate::pricing::Provider::Windsurf => false,
     }
 }
 
@@ -622,12 +642,16 @@ impl SessionData {
 
 /// All sessions from every known provider and surface, newest first.
 pub fn list_all() -> Vec<Session> {
-    let ((mut codex, claude), ((opencode, pi), cursor)) = rayon::join(
+    let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, windsurf)))) = rayon::join(
         || rayon::join(codex::list_sessions, claude::list_sessions),
         || {
             rayon::join(
                 || rayon::join(opencode::list_sessions, pi::list_sessions),
-                cursor::list_sessions,
+                || {
+                    rayon::join(cursor::list_sessions, || {
+                        rayon::join(gemini::list_sessions, windsurf::list_sessions)
+                    })
+                },
             )
         },
     );
@@ -635,6 +659,8 @@ pub fn list_all() -> Vec<Session> {
     codex.extend(opencode);
     codex.extend(pi);
     codex.extend(cursor);
+    codex.extend(gemini);
+    codex.extend(windsurf);
     let mut sessions = codex;
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     sessions
@@ -669,11 +695,16 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
             .map(|p| crate::config::file_mtime_ms(p))
             .max()
             .unwrap_or(0),
-        Provider::Codex | Provider::Cursor | Provider::Pi => crate::config::file_mtime_ms(f),
-        // Every OpenCode session shares one WAL-backed database. Using the DB
-        // mtime would invalidate hundreds of unchanged sessions whenever one
-        // message lands; its per-session updated timestamp is the right key.
-        Provider::OpenCode => util::parse_ts(&session.last_active)
+        Provider::Codex | Provider::Cursor | Provider::Gemini | Provider::Pi => {
+            crate::config::file_mtime_ms(f)
+        }
+        // Every OpenCode session shares one WAL-backed database, as every
+        // Windsurf conversation in a workspace shares one `state.vscdb`. Using
+        // the file mtime would invalidate hundreds of unchanged sessions
+        // whenever one message lands; the per-session timestamp is the right
+        // key. Windsurf has no such timestamp of its own, so its rows fall back
+        // to the file and re-extract together — cheap, since the blob is small.
+        Provider::OpenCode | Provider::Windsurf => util::parse_ts(&session.last_active)
             .map(|d| d.timestamp_millis().max(0) as u64)
             .unwrap_or_else(|| crate::config::file_mtime_ms(f)),
     }
