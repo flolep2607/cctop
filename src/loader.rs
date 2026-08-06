@@ -3,7 +3,7 @@
 use crate::cache::Store;
 use crate::pricing::{Plan, Provider};
 use crate::proc;
-use crate::session::{self, ContextUsage, Session};
+use crate::session::{self, ContextUsage, Session, SessionData};
 use crate::util;
 use chrono::Utc;
 use rayon::prelude::*;
@@ -84,28 +84,7 @@ impl Loader {
         // is independent, so fan out across cores and publish rows individually
         // instead of withholding the entire table for the slowest transcript.
         sessions.par_iter_mut().for_each(|s| {
-            let data = store.session_data(s);
-            let m = &data.metrics;
-            s.input_tokens = data.tokens.all_input();
-            s.output_tokens = data.tokens.output;
-            s.tool_count = m.tool_count;
-            s.total_cost =
-                (s.cost_available && !plan.includes(s.provider)).then_some(data.costs.total);
-            s.cost_is_free = s.cost_available
-                && data.costs.total == 0.0
-                && data.tokens.all_input() + data.tokens.output > 0;
-            if !data.last_model.is_empty() {
-                s.model = data.last_model.clone();
-            }
-            if s.title.is_none() {
-                s.title = data.title.clone();
-            }
-            s.cost_hour = data.cost_this_hour();
-            s.cost_today = data.cost_today();
-            s.costs_by_day = data.costs_by_day.clone();
-            s.costs_by_hour = data.costs_by_hour.clone();
-            s.subagents_cost = data.subagents.iter().map(|sa| sa.cost).sum();
-            s.subagents = data.subagents.clone();
+            annotate(s, &store.session_data(s), plan);
             on_annotated(s);
         });
 
@@ -173,29 +152,81 @@ impl Loader {
     /// Read the last tool and context usage from transcript tails.
     fn attach_tail_state(&mut self, sessions: &mut [Session]) {
         for s in sessions.iter_mut() {
-            let key = s.key();
-            s.activity_state = session::extract_activity_state(s);
-            if s.is_running() {
-                s.last_tool = match s.provider {
-                    Provider::Claude => session::claude::extract_last_tool(s),
-                    Provider::Codex => session::codex::extract_last_tool(s),
-                    Provider::Cursor => String::new(),
-                    Provider::OpenCode => session::opencode::extract_last_tool(s),
-                    Provider::Pi => session::pi::extract_last_tool(s),
-                };
-            }
-            if s.is_running() || !self.context_cache.contains_key(&key) {
-                let fresh = match s.provider {
-                    Provider::Claude => session::claude::extract_context(s),
-                    Provider::Codex => session::codex::extract_context(s),
-                    Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
-                };
-                if let Some(ctx) = fresh {
-                    self.context_cache.insert(key.clone(), ctx);
-                }
-            }
-            s.context = self.context_cache.get(&key).copied();
+            self.tail_state(s);
         }
+    }
+
+    /// Activity dot, last tool, and context window for one row.
+    fn tail_state(&mut self, s: &mut Session) {
+        let key = s.key();
+        s.activity_state = session::extract_activity_state(s);
+        if s.is_running() {
+            s.last_tool = match s.provider {
+                Provider::Claude => session::claude::extract_last_tool(s),
+                Provider::Codex => session::codex::extract_last_tool(s),
+                Provider::Cursor => String::new(),
+                Provider::OpenCode => session::opencode::extract_last_tool(s),
+                Provider::Pi => session::pi::extract_last_tool(s),
+            };
+        }
+        if s.is_running() || !self.context_cache.contains_key(&key) {
+            let fresh = match s.provider {
+                Provider::Claude => session::claude::extract_context(s),
+                Provider::Codex => session::codex::extract_context(s),
+                Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
+            };
+            if let Some(ctx) = fresh {
+                self.context_cache.insert(key.clone(), ctx);
+            }
+        }
+        s.context = self.context_cache.get(&key).copied();
+    }
+
+    /// Refresh only what can have moved since the last full walk.
+    ///
+    /// Discovery is what costs at scale: walking every provider's directories and
+    /// stat-ing thousands of transcripts, nearly all of which belong to sessions
+    /// that ended days ago. New sessions appear rarely compared to how often the
+    /// running ones change, so the caller carries the last full result forward and
+    /// pays here only for the rows that are actually moving.
+    ///
+    /// Returns the rows that changed, so the caller can ship those instead of
+    /// copying the whole table back to the UI.
+    pub fn refresh_live(&mut self, plan: Plan, sessions: &mut Vec<Session>) -> Vec<Session> {
+        // A row that has just stopped changed too, and its cleared process has to
+        // reach the table, so remember who was live before the process sweep.
+        let was_live: std::collections::HashSet<String> = sessions
+            .iter()
+            .filter(|s| s.is_running())
+            .map(Session::key)
+            .collect();
+
+        // Runs first: it can also append a row for an agent that started since the
+        // last walk and has no transcript yet, and those need annotating too.
+        self.attach_processes(sessions);
+
+        let moved: Vec<usize> = sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_running() || was_live.contains(&s.key()))
+            .map(|(i, _)| i)
+            .collect();
+        {
+            let store = self.store();
+            for &i in &moved {
+                let s = &mut sessions[i];
+                annotate(s, &store.session_data(s), plan);
+            }
+        }
+        // Separate pass: `store()` borrows self immutably, `tail_state` mutably.
+        for &i in &moved {
+            self.tail_state(&mut sessions[i]);
+        }
+
+        // Rates are pure arithmetic over figures already in hand, and the EMAs
+        // decay with wall time, so every row still gets one.
+        self.update_rates(sessions);
+        moved.iter().map(|&i| sessions[i].clone()).collect()
     }
 
     /// Fold this refresh's deltas into each session's smoothed rates.
@@ -248,6 +279,33 @@ impl Loader {
 /// Infer the host application from a matched process without confusing it with
 /// the model. The Codex binary may be installed under Cursor's server
 /// extension directory, which does not make the running harness Cursor.
+/// Copy an extraction's figures onto the row that owns it.
+///
+/// Shared by the full walk and the light refresh so the two can never disagree
+/// about what a row's numbers mean.
+fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
+    let m = &data.metrics;
+    s.input_tokens = data.tokens.all_input();
+    s.output_tokens = data.tokens.output;
+    s.tool_count = m.tool_count;
+    s.total_cost = (s.cost_available && !plan.includes(s.provider)).then_some(data.costs.total);
+    s.cost_is_free = s.cost_available
+        && data.costs.total == 0.0
+        && data.tokens.all_input() + data.tokens.output > 0;
+    if !data.last_model.is_empty() {
+        s.model = data.last_model.clone();
+    }
+    if s.title.is_none() {
+        s.title = data.title.clone();
+    }
+    s.cost_hour = data.cost_this_hour();
+    s.cost_today = data.cost_today();
+    s.costs_by_day = data.costs_by_day.clone();
+    s.costs_by_hour = data.costs_by_hour.clone();
+    s.subagents_cost = data.subagents.iter().map(|sa| sa.cost).sum();
+    s.subagents = data.subagents.clone();
+}
+
 fn harness_from_process(session: &Session, command: &str) -> &'static str {
     let command = command.to_ascii_lowercase();
     if command.contains("anysphere.cursor")
