@@ -310,11 +310,11 @@ impl App {
             KeyCode::Char('U') => self.unmark_all(),
             KeyCode::Char('D') => self.batch(BatchKind::Delete),
             KeyCode::Char('K') => self.batch(BatchKind::Kill),
-            // Search-match cycling moves to the Ctrl pair so `n` can be the
-            // notification toggle it is in every other monitor that has one.
-            KeyCode::Char('n') if ctrl => self.cycle_matches(1),
-            KeyCode::Char('p') if ctrl => self.cycle_matches(-1),
-            KeyCode::Char('n') => self.toggle_notifications(),
+            KeyCode::Char('n') => self.cycle_matches(1),
+            KeyCode::Char('N') => self.cycle_matches(-1),
+            // `w` for the bell, not `n`: n/N is next/previous match everywhere
+            // a search exists, and there were free letters to spend instead.
+            KeyCode::Char('w') => self.toggle_notifications(),
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
                     format!("{:.2}", self.cost_floor)

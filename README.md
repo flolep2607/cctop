@@ -121,8 +121,8 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `Ctrl+U`, `Ctrl+D` | Half a page up / down |
 | `g`, `G` | Jump to first / last |
 | `Home`, `End` | Jump to first / last |
-| `Ctrl+N`, `Ctrl+P` | Next / previous search match (wraps) |
-| `n` | Toggle notifications (see below) |
+| `n`, `N` | Next / previous search match (wraps) |
+| `w` | Toggle notifications (see below) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
 | `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
@@ -245,7 +245,7 @@ never want, and `Alt` because `Ctrl` is the agent's.
 
 ### Getting pinged when a session needs you
 
-cctop is a monitor you look away from, so `n` turns on the other direction:
+cctop is a monitor you look away from, so `w` turns on the other direction:
 when a session that was working starts waiting for your input — or the agent
 exits — cctop rings the terminal bell and raises a desktop notification. The
 setting is off by default and remembered between runs.
