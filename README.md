@@ -234,6 +234,20 @@ drawing. That needs cctop to hold the pty, so it works for sessions started with
 start from a shell. On attaching, the shim replays its recent output so the
 screen is rebuilt immediately rather than at the agent's next repaint.
 
+A tab you are not looking at blinks when it wants you: **green** when its agent
+has stopped drawing — its turn is over and the prompt is yours — and **amber**
+when it has explicitly asked a question and is blocked on the answer. Amber wins
+when a tab has both. The tab you are on never blinks, since its focused pane is
+already in front of you.
+
+The two are measured differently, because only one of them is in the transcript.
+The question is: an agent that calls an ask-the-user tool records it. "Finished
+its turn" is not — in a transcript, answering you and still thinking look the
+same. So idleness is read off the pane's own screen instead: a working agent
+repaints constantly (a spinner's elapsed counter alone ticks every second), so
+two seconds of a still screen means the agent is waiting on you. That needs no
+per-harness parsing and works for anything you open in a tab, shells included.
+
 Panes cctop started are cctop's to end: closing one (`Alt+w`, or the agent
 exiting on its own) takes the agent with it, and quitting cctop takes them all.
 A pane opened onto someone else's session with `a` only stops watching.

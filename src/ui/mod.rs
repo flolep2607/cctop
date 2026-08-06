@@ -419,6 +419,10 @@ pub struct App {
     pub status: Option<(String, Instant)>,
     /// When cctop started, used by the tool-activity "live" filter.
     pub started_at: String,
+    /// The same moment as an `Instant`, which is what the tab-bar blink is
+    /// phased against — a wall clock can jump, and a blink that stutters when
+    /// NTP steps the clock looks like a bug.
+    started: Instant,
 
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
@@ -526,6 +530,7 @@ impl App {
             update_available: None,
             status: None,
             started_at: chrono::Utc::now().to_rfc3339(),
+            started: Instant::now(),
             prefs,
             tx,
             tabs: Vec::new(),
@@ -1069,6 +1074,10 @@ impl App {
 /// Rows moved by PageUp/PageDown and the fallback for half-page scrolls.
 const PAGE: isize = 10;
 
+/// Half-period of the tab-bar blink. Slow enough to read the title through,
+/// fast enough to catch the eye.
+const BLINK_MS: u128 = 600;
+
 // ---------------------------------------------------------------------------
 // Workspace tabs
 // ---------------------------------------------------------------------------
@@ -1082,6 +1091,38 @@ impl App {
     /// The pane the keyboard belongs to, or `None` on the dashboard.
     pub fn focused_pane(&mut self) -> Option<&mut tabs::Pane> {
         self.active_tab()?.focused_mut()
+    }
+
+    /// What tab `index` wants, if anything. `0` is the dashboard, which never
+    /// asks for itself.
+    ///
+    /// The tab you are already looking at is excluded — its own focused pane is
+    /// in front of you, so blinking its title tells you nothing you cannot see.
+    pub fn tab_attention(&self, index: usize) -> Option<tabs::Attention> {
+        let tab = self.tabs.get(index.checked_sub(1)?)?;
+        tab.attention(index == self.tab, &|pid| self.session_is_asking(pid))
+    }
+
+    /// Whether the session driven by `pid` has explicitly asked something.
+    ///
+    /// Scans the table rather than keeping an index: there are a handful of
+    /// panes and this runs once per frame, so a map would be state to keep
+    /// correct in exchange for nothing measurable.
+    fn session_is_asking(&self, pid: u32) -> bool {
+        self.sessions.iter().any(|session| {
+            session.activity_state == crate::session::ActivityState::WaitingForInput
+                && session_root_pid(session) == Some(pid)
+        })
+    }
+
+    /// Whether any tab is currently asking to be looked at.
+    pub fn any_attention(&self) -> bool {
+        (1..=self.tabs.len()).any(|i| self.tab_attention(i).is_some())
+    }
+
+    /// Which half of the blink cycle we are in.
+    pub fn blink_on(&self) -> bool {
+        (self.started.elapsed().as_millis() / BLINK_MS).is_multiple_of(2)
     }
 
     /// Show `tab`, clamped to what exists.
@@ -1410,6 +1451,7 @@ fn event_loop(
     let mut last_full_walk = Instant::now();
     let mut layout = render::Layout::default();
     let mut refresh_in_flight = true;
+    let mut last_blink = true;
 
     loop {
         // Drain everything the workers have produced.
@@ -1553,6 +1595,15 @@ fn event_loop(
         if drawn || closed {
             app.needs_redraw = true;
         }
+
+        // A blinking tab is the one thing on screen that changes with no event
+        // behind it, so the loop has to ask for the frame itself — but only on
+        // the half-cycle it actually flips, not on every poll.
+        let phase = app.blink_on();
+        if phase != last_blink && app.any_attention() {
+            app.needs_redraw = true;
+        }
+        last_blink = phase;
 
         // Expire the transient status line.
         if let Some((_, at)) = &app.status
