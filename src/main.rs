@@ -1,3 +1,4 @@
+mod alias;
 mod cache;
 mod cli;
 mod config;
@@ -44,6 +45,24 @@ fn main() -> anyhow::Result<()> {
         return update::run(false);
     }
 
+    if args.install_alias || args.remove_alias {
+        let changed = if args.install_alias {
+            alias::install()
+        } else {
+            alias::remove()
+        };
+        match changed.as_slice() {
+            [] => eprintln!("No shell startup file needed changing."),
+            files => {
+                for f in files {
+                    eprintln!("Updated {}", f.display());
+                }
+                eprintln!("Restart your shell, or source the file, to pick it up.");
+            }
+        }
+        return Ok(());
+    }
+
     if args.clear_cache && cache::clear_session_cache()? {
         eprintln!("Cleared cctop session extraction cache.");
     }
@@ -67,6 +86,8 @@ fn main() -> anyhow::Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("the interactive UI needs a TTY; use --list or --json instead");
     }
+
+    alias::install_once(&mut cache::UiPrefs::load());
 
     // Load whatever pricing is already cached so the first frame isn't zeroed
     // while the network fetch is still in flight.
