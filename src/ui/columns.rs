@@ -1,6 +1,6 @@
 //! Session-table column definitions: rendering, sorting, and tooltips.
 
-use crate::session::Session;
+use crate::session::{ActivityState, Session};
 use crate::util;
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
@@ -17,9 +17,10 @@ pub enum ColumnId {
     Cpu,
     Memory,
     Tools,
-    ToolRate,
+    TokenTotal,
     TokenRate,
     Model,
+    Harness,
     Project,
 }
 
@@ -41,7 +42,7 @@ pub const COLUMNS: &[Column] = &[
         label: " ",
         width: Some(1),
         right_align: false,
-        desc: "Running status: ● running (brighter = more recent), ○ stopped",
+        desc: "Status: ● working (green = fresh, greyer = idle), amber ● awaiting input, red ● API error, ○ stopped",
     },
     Column {
         id: ColumnId::Last,
@@ -73,12 +74,12 @@ pub const COLUMNS: &[Column] = &[
         label: "$/1H",
         width: Some(7),
         right_align: true,
-        desc: "Estimated cost in the last hour",
+        desc: "Estimated cost in the current local clock hour",
     },
     Column {
         id: ColumnId::CostToday,
         key: "cost_today",
-        label: "$/1D",
+        label: "$/24H",
         width: Some(7),
         right_align: true,
         desc: "Estimated cost since midnight (local time)",
@@ -116,12 +117,12 @@ pub const COLUMNS: &[Column] = &[
         desc: "Total tool invocations in the session",
     },
     Column {
-        id: ColumnId::ToolRate,
-        key: "tools_rate",
-        label: "+TL",
-        width: Some(5),
+        id: ColumnId::TokenTotal,
+        key: "tokens",
+        label: "TOKENS",
+        width: Some(8),
         right_align: true,
-        desc: "Tool invocations since cctop started",
+        desc: "Total input and output tokens used by the session",
     },
     Column {
         id: ColumnId::TokenRate,
@@ -138,6 +139,14 @@ pub const COLUMNS: &[Column] = &[
         width: Some(14),
         right_align: false,
         desc: "Model used by the session",
+    },
+    Column {
+        id: ColumnId::Harness,
+        key: "harness",
+        label: "HARNESS",
+        width: Some(10),
+        right_align: false,
+        desc: "Where the agent is hosted, such as Cursor or a terminal CLI",
     },
     Column {
         id: ColumnId::Project,
@@ -165,15 +174,25 @@ fn age_secs(s: &Session, now: &DateTime<Utc>) -> Option<i64> {
 /// Cell text for one column. Empty means "nothing worth showing".
 pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
     match id {
-        ColumnId::Status => if s.is_running() { "●" } else { "○" }.into(),
+        ColumnId::Status => match s.activity_state {
+            ActivityState::WaitingForInput | ActivityState::ApiError => "●".into(),
+            ActivityState::Working if s.is_running() => "●".into(),
+            ActivityState::Working => "○".into(),
+        },
         ColumnId::Last => util::relative_age(&s.last_active, now),
         ColumnId::Duration => util::session_duration(&s.started_at, &s.last_active),
         ColumnId::Cost => match s.total_cost {
+            _ if !s.cost_available => "─".into(),
+            _ if s.cost_is_free => "FREE".into(),
             Some(c) => util::compact_usd(c),
             None => "incl".into(),
         },
         ColumnId::CostHour => {
-            if s.total_cost.is_none() {
+            if !s.cost_available {
+                "─".into()
+            } else if s.cost_is_free {
+                "FREE".into()
+            } else if s.total_cost.is_none() {
                 "incl".into()
             } else if s.cost_hour > 0.0 {
                 util::compact_usd(s.cost_hour)
@@ -182,7 +201,11 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
             }
         }
         ColumnId::CostToday => {
-            if s.total_cost.is_none() {
+            if !s.cost_available {
+                "─".into()
+            } else if s.cost_is_free {
+                "FREE".into()
+            } else if s.total_cost.is_none() {
                 "incl".into()
             } else if s.cost_today > 0.0 {
                 util::compact_usd(s.cost_today)
@@ -218,9 +241,10 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
                 String::new()
             }
         }
-        ColumnId::ToolRate => {
-            if s.tools_since_start > 0 {
-                s.tools_since_start.to_string()
+        ColumnId::TokenTotal => {
+            let total = s.input_tokens + s.output_tokens;
+            if total > 0 {
+                util::compact_tokens(total)
             } else {
                 String::new()
             }
@@ -233,6 +257,13 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
             }
         }
         ColumnId::Model => util::short_model(&s.model),
+        ColumnId::Harness => {
+            if s.harness.is_empty() {
+                "─".into()
+            } else {
+                s.harness.clone()
+            }
+        }
         ColumnId::Project => s.display_label().to_string(),
     }
 }
@@ -281,9 +312,12 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
             .unwrap_or(0)
             .cmp(&b.process.as_ref().map(|p| p.memory).unwrap_or(0)),
         ColumnId::Tools => a.tool_count.cmp(&b.tool_count),
-        ColumnId::ToolRate => a.tools_since_start.cmp(&b.tools_since_start),
+        ColumnId::TokenTotal => {
+            (a.input_tokens + a.output_tokens).cmp(&(b.input_tokens + b.output_tokens))
+        }
         ColumnId::TokenRate => num(a.tokens_per_min, b.tokens_per_min),
         ColumnId::Model => a.model.cmp(&b.model),
+        ColumnId::Harness => a.harness.cmp(&b.harness),
         ColumnId::Project => a
             .display_label()
             .to_ascii_lowercase()
@@ -336,6 +370,18 @@ mod tests {
     }
 
     #[test]
+    fn free_usage_is_labeled_in_every_cost_column() {
+        let mut s = session("free");
+        s.cost_is_free = true;
+        s.total_cost = Some(0.0);
+
+        let now = chrono::Utc::now();
+        assert_eq!(render_cell(ColumnId::Cost, &s, &now), "FREE");
+        assert_eq!(render_cell(ColumnId::CostHour, &s, &now), "FREE");
+        assert_eq!(render_cell(ColumnId::CostToday, &s, &now), "FREE");
+    }
+
+    #[test]
     fn compacting_sessions_sort_highest_on_context() {
         let now = Utc::now();
         let mut a = session("a");
@@ -373,6 +419,26 @@ mod tests {
         s.total_cost = None;
         assert_eq!(render_cell(ColumnId::Cost, &s, &now), "incl");
         assert_eq!(render_cell(ColumnId::CostHour, &s, &now), "incl");
+    }
+
+    #[test]
+    fn unsupported_cursor_cost_shows_unavailable() {
+        let now = Utc::now();
+        let mut s = Session::new(Provider::Cursor, "cursor".into());
+        s.cost_available = false;
+        s.total_cost = None;
+        assert_eq!(render_cell(ColumnId::Cost, &s, &now), "─");
+        assert_eq!(render_cell(ColumnId::CostHour, &s, &now), "─");
+        assert_eq!(render_cell(ColumnId::CostToday, &s, &now), "─");
+    }
+
+    #[test]
+    fn token_total_combines_input_and_output() {
+        let now = Utc::now();
+        let mut s = session("a");
+        s.input_tokens = 12_000;
+        s.output_tokens = 345;
+        assert_eq!(render_cell(ColumnId::TokenTotal, &s, &now), "12.3K");
     }
 
     #[test]

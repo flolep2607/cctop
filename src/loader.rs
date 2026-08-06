@@ -3,11 +3,12 @@
 use crate::cache::Store;
 use crate::pricing::{Plan, Provider};
 use crate::proc;
-use crate::session::{self, ContextUsage, Session};
+use crate::session::{self, ContextUsage, Session, SessionData};
 use crate::util;
 use chrono::Utc;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Half-life for the token- and cost-rate exponential moving averages. Short
 /// enough to react to a burst, long enough not to jitter between refreshes.
@@ -19,91 +20,111 @@ struct RateState {
     ts_ms: i64,
     tokens: u64,
     cost: f64,
-    /// Tool count when this session was first seen, so the `+TL` column shows
-    /// activity since cctop started rather than the session's lifetime total.
-    baseline_tools: u64,
     ema_tokens: f64,
     ema_cost: f64,
 }
 
+/// Threads used for background re-extraction.
+///
+/// Rayon defaults to one per core, which is right when someone is waiting for the
+/// first table and wrong forever after: it turns each refresh into a spike across
+/// every core, so the machine alternates between idle and fully committed. A
+/// monitor should hum rather than stampede, so background walks get a quarter of
+/// the machine and take proportionally longer, which nobody is waiting on.
+fn gentle_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() / 4)
+        .unwrap_or(2)
+        .clamp(2, 4)
+}
+
 #[derive(Default)]
 pub struct Loader {
-    store: Store,
+    store: OnceLock<Store>,
+    /// Small pool for background extraction; `None` if one can't be built, which
+    /// just means falling back to rayon's default.
+    gentle: Option<rayon::ThreadPool>,
     collector: proc::Collector,
     rates: HashMap<String, RateState>,
     /// Last known-good context reading, so a tail read that misses doesn't
     /// blank the CTX% column for a frame.
     context_cache: HashMap<String, ContextUsage>,
+    /// Activity state and last tool per session, so a walk re-reads only the
+    /// transcripts that can still change.
+    tail_cache: HashMap<String, (session::ActivityState, String)>,
 }
 
 impl Loader {
     pub fn new() -> Self {
         Loader {
-            store: Store::new(),
+            store: OnceLock::new(),
+            gentle: rayon::ThreadPoolBuilder::new()
+                .num_threads(gentle_threads())
+                .thread_name(|i| format!("cctop-extract-{i}"))
+                .build()
+                .ok(),
             collector: proc::Collector::new(),
             rates: HashMap::new(),
             context_cache: HashMap::new(),
+            tail_cache: HashMap::new(),
         }
     }
 
     pub fn store(&self) -> &Store {
-        &self.store
+        self.store.get_or_init(Store::new)
     }
 
     /// Discover, extract, and annotate every session.
     pub fn load(&mut self, plan: Plan) -> Vec<Session> {
+        // The CLI's caller is always waiting on the result.
+        self.load_progressive(plan, true, |_| {}, |_| {})
+    }
+
+    /// Discover sessions first, then report each fully annotated row as soon as
+    /// its transcript finishes loading. Callbacks run on the loader worker and
+    /// Rayon threads respectively, so they must stay cheap and non-blocking.
+    pub fn load_progressive<D, A>(
+        &mut self,
+        plan: Plan,
+        eager: bool,
+        on_discovered: D,
+        on_annotated: A,
+    ) -> Vec<Session>
+    where
+        D: FnOnce(&[Session]),
+        A: Fn(&Session) + Sync,
+    {
         let mut sessions = session::list_all();
 
-        // Extraction dominates wall time on large transcripts, and each session
-        // is independent, so fan out across cores.
-        let annotations: Vec<_> = sessions
-            .par_iter()
-            .map(|s| {
-                let data = self.store.session_data(s);
-                let m = &data.metrics;
-                (
-                    data.tokens.all_input(),
-                    data.tokens.output,
-                    m.tool_count,
-                    data.costs.total,
-                    data.last_model.clone(),
-                    data.title.clone(),
-                    data.cost_this_hour(),
-                    data.cost_today(),
-                    data.costs_by_day.clone(),
-                    data.costs_by_hour.clone(),
-                    data.subagents.clone(),
-                )
-            })
-            .collect();
-
-        for (s, a) in sessions.iter_mut().zip(annotations) {
-            s.input_tokens = a.0;
-            s.output_tokens = a.1;
-            s.tool_count = a.2;
-            s.total_cost = (!plan.includes(s.provider)).then_some(a.3);
-            if !a.4.is_empty() {
-                s.model = a.4;
-            }
-            if s.title.is_none() {
-                s.title = a.5;
-            }
-            s.cost_hour = a.6;
-            s.cost_today = a.7;
-            s.costs_by_day = a.8;
-            s.costs_by_hour = a.9;
-            s.subagents_cost = a.10.iter().map(|sa| sa.cost).sum();
-            s.subagents = a.10;
-        }
-
+        // Process state and labels are cheap enough to include in the first
+        // visible rows; transcript tails and full extraction can follow.
         self.attach_processes(&mut sessions);
-        self.attach_tail_state(&mut sessions);
-        self.update_rates(&mut sessions);
-
         let labels: Vec<String> = sessions.iter().map(|s| s.label_source.clone()).collect();
         for (s, label) in sessions.iter_mut().zip(util::abbreviate_paths(&labels)) {
             s.abbrev_label = label;
         }
+        on_discovered(&sessions);
+
+        self.attach_tail_state(&mut sessions);
+        let store = self.store();
+
+        // Extraction dominates wall time on large transcripts, and each session
+        // is independent, so fan out across cores and publish rows individually
+        // instead of withholding the entire table for the slowest transcript.
+        //
+        // How wide to fan out depends on who is waiting: the first table should
+        // arrive as fast as the machine allows, while a background refresh that
+        // nobody asked for should not seize every core to do it.
+        let step = |s: &mut Session| {
+            annotate(s, &store.session_data(s), plan);
+            on_annotated(s);
+        };
+        match self.gentle.as_ref().filter(|_| !eager) {
+            Some(pool) => pool.install(|| sessions.par_iter_mut().for_each(step)),
+            None => sessions.par_iter_mut().for_each(step),
+        }
+
+        self.update_rates(&mut sessions);
 
         sessions
     }
@@ -116,6 +137,7 @@ impl Loader {
             let key = s.key();
             if let Some(pm) = metrics.get(&key) {
                 s.process = Some(pm.clone());
+                s.harness = harness_from_process(s, &pm.command).into();
                 matched.insert(key);
             } else if s.surface == session::Surface::DesktopCowork {
                 // Cowork runs in a cloud VM, so there is no local process. Recent
@@ -128,6 +150,13 @@ impl Loader {
                     command: "(cowork VM)".into(),
                     ..Default::default()
                 });
+            } else if s.provider == Provider::Cursor {
+                // Cursor has a shared editor process rather than one process
+                // per native-agent transcript. A freshly growing transcript is
+                // the only trustworthy per-session liveness signal available.
+                s.inferred_running = util::parse_ts(&s.last_active)
+                    .map(|d| util::now_ms() - d.timestamp_millis() < 90_000)
+                    .unwrap_or(false);
             }
         }
 
@@ -136,9 +165,13 @@ impl Loader {
             if matched.contains(key) {
                 continue;
             }
-            let orphan = self.collector.orphans().get(key);
-            let provider = orphan.map(|o| o.provider).unwrap_or(Provider::Claude);
-            let cwd = orphan.map(|o| o.cwd.clone()).unwrap_or_default();
+            let Some(orphan) = self.collector.orphans().get(key) else {
+                // In particular, never turn an unattributed Codex app-server
+                // PID into a synthetic session with no rollout file.
+                continue;
+            };
+            let provider = orphan.provider;
+            let cwd = orphan.cwd.clone();
             let now = Utc::now().to_rfc3339();
 
             let id = key.split(':').nth(1).unwrap_or(key).to_string();
@@ -146,10 +179,8 @@ impl Loader {
             s.started_at = now.clone();
             s.last_active = now;
             s.label_source = cwd;
-            // Name it by PID: there's no transcript to take a title from yet,
-            // and the PID is what lets the user find the process.
-            s.title = orphan.map(|o| format!("(starting — pid {})", o.pid));
             s.process = Some(pm.clone());
+            s.harness = harness_from_process(&s, &pm.command).into();
             sessions.push(s);
         }
     }
@@ -157,24 +188,100 @@ impl Loader {
     /// Read the last tool and context usage from transcript tails.
     fn attach_tail_state(&mut self, sessions: &mut [Session]) {
         for s in sessions.iter_mut() {
-            let key = s.key();
-            if s.is_running() {
-                s.last_tool = match s.provider {
-                    Provider::Claude => session::claude::extract_last_tool(s),
-                    Provider::Codex => session::codex::extract_last_tool(s),
-                };
-            }
-            if s.is_running() || !self.context_cache.contains_key(&key) {
-                let fresh = match s.provider {
-                    Provider::Claude => session::claude::extract_context(s),
-                    Provider::Codex => session::codex::extract_context(s),
-                };
-                if let Some(ctx) = fresh {
-                    self.context_cache.insert(key.clone(), ctx);
-                }
-            }
-            s.context = self.context_cache.get(&key).copied();
+            self.tail_state(s);
         }
+    }
+
+    /// Activity dot, last tool, and context window for one row.
+    fn tail_state(&mut self, s: &mut Session) {
+        let key = s.key();
+        // A stopped session's transcript cannot change, so its tail only needs
+        // reading once. Without this a walk opens and seeks every transcript ever
+        // recorded — thousands of files, serially, which is the half of the walk
+        // that no amount of capping the extraction pool can smooth out.
+        //
+        // ponytail: keyed by session, not by mtime, so a stopped session whose
+        // file is edited behind cctop's back keeps its old dot until it runs
+        // again. Extraction still notices, so only the tail-derived fields go
+        // stale; re-check the mtime here if that ever matters.
+        if !s.is_running()
+            && let Some((state, tool)) = self.tail_cache.get(&key)
+        {
+            s.activity_state = *state;
+            s.last_tool = tool.clone();
+            s.context = self.context_cache.get(&key).copied();
+            return;
+        }
+        s.activity_state = session::extract_activity_state(s);
+        if s.is_running() {
+            s.last_tool = match s.provider {
+                Provider::Claude => session::claude::extract_last_tool(s),
+                Provider::Codex => session::codex::extract_last_tool(s),
+                Provider::Cursor => String::new(),
+                Provider::OpenCode => session::opencode::extract_last_tool(s),
+                Provider::Pi => session::pi::extract_last_tool(s),
+            };
+        }
+        if s.is_running() || !self.context_cache.contains_key(&key) {
+            let fresh = match s.provider {
+                Provider::Claude => session::claude::extract_context(s),
+                Provider::Codex => session::codex::extract_context(s),
+                Provider::Cursor | Provider::OpenCode | Provider::Pi => None,
+            };
+            if let Some(ctx) = fresh {
+                self.context_cache.insert(key.clone(), ctx);
+            }
+        }
+        s.context = self.context_cache.get(&key).copied();
+        self.tail_cache
+            .insert(key, (s.activity_state, s.last_tool.clone()));
+    }
+
+    /// Refresh only what can have moved since the last full walk.
+    ///
+    /// Discovery is what costs at scale: walking every provider's directories and
+    /// stat-ing thousands of transcripts, nearly all of which belong to sessions
+    /// that ended days ago. New sessions appear rarely compared to how often the
+    /// running ones change, so the caller carries the last full result forward and
+    /// pays here only for the rows that are actually moving.
+    ///
+    /// Returns the rows that changed, so the caller can ship those instead of
+    /// copying the whole table back to the UI.
+    pub fn refresh_live(&mut self, plan: Plan, sessions: &mut Vec<Session>) -> Vec<Session> {
+        // A row that has just stopped changed too, and its cleared process has to
+        // reach the table, so remember who was live before the process sweep.
+        let was_live: std::collections::HashSet<String> = sessions
+            .iter()
+            .filter(|s| s.is_running())
+            .map(Session::key)
+            .collect();
+
+        // Runs first: it can also append a row for an agent that started since the
+        // last walk and has no transcript yet, and those need annotating too.
+        self.attach_processes(sessions);
+
+        let moved: Vec<usize> = sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_running() || was_live.contains(&s.key()))
+            .map(|(i, _)| i)
+            .collect();
+        {
+            let store = self.store();
+            for &i in &moved {
+                let s = &mut sessions[i];
+                annotate(s, &store.session_data(s), plan);
+            }
+        }
+        // Separate pass: `store()` borrows self immutably, `tail_state` mutably.
+        for &i in &moved {
+            self.tail_state(&mut sessions[i]);
+        }
+
+        // Rates are pure arithmetic over figures already in hand, and the EMAs
+        // decay with wall time, so every row still gets one.
+        self.update_rates(sessions);
+        moved.iter().map(|&i| sessions[i].clone()).collect()
     }
 
     /// Fold this refresh's deltas into each session's smoothed rates.
@@ -184,7 +291,6 @@ impl Loader {
             let key = s.key();
             let tokens = s.input_tokens + s.output_tokens;
             let cost = s.total_cost.unwrap_or(0.0);
-            let tools = s.tool_count;
 
             let Some(prev) = self.rates.get_mut(&key) else {
                 // First sighting: no interval to measure a rate over yet.
@@ -194,7 +300,6 @@ impl Loader {
                         ts_ms: now,
                         tokens,
                         cost,
-                        baseline_tools: tools,
                         ema_tokens: 0.0,
                         ema_cost: 0.0,
                     },
@@ -203,7 +308,6 @@ impl Loader {
             };
 
             let dt_ms = (now - prev.ts_ms) as f64;
-            s.tools_since_start = tools.saturating_sub(prev.baseline_tools);
             if dt_ms < 100.0 {
                 s.tokens_per_min = prev.ema_tokens;
                 s.cost_per_min = prev.ema_cost;
@@ -227,6 +331,61 @@ impl Loader {
     }
 }
 
+/// Infer the host application from a matched process without confusing it with
+/// the model. The Codex binary may be installed under Cursor's server
+/// extension directory, which does not make the running harness Cursor.
+/// Copy an extraction's figures onto the row that owns it.
+///
+/// Shared by the full walk and the light refresh so the two can never disagree
+/// about what a row's numbers mean.
+fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
+    let m = &data.metrics;
+    s.input_tokens = data.tokens.all_input();
+    s.output_tokens = data.tokens.output;
+    s.tool_count = m.tool_count;
+    s.total_cost = (s.cost_available && !plan.includes(s.provider)).then_some(data.costs.total);
+    s.cost_is_free = s.cost_available
+        && data.costs.total == 0.0
+        && data.tokens.all_input() + data.tokens.output > 0;
+    if !data.last_model.is_empty() {
+        s.model = data.last_model.clone();
+    }
+    if s.title.is_none() {
+        s.title = data.title.clone();
+    }
+    s.cost_hour = data.cost_this_hour();
+    s.cost_today = data.cost_today();
+    s.costs_by_day = data.costs_by_day.clone();
+    s.costs_by_hour = data.costs_by_hour.clone();
+    s.subagents_cost = data.subagents.iter().map(|sa| sa.cost).sum();
+    s.subagents = data.subagents.clone();
+}
+
+fn harness_from_process(session: &Session, command: &str) -> &'static str {
+    let command = command.to_ascii_lowercase();
+    if command.contains("anysphere.cursor")
+        || command.contains("cursor.app/")
+        || command.contains("/cursor-server/bin/")
+    {
+        return "Cursor";
+    }
+    if command.contains("hermes") {
+        return "Hermes";
+    }
+    match session.surface {
+        session::Surface::Editor => "Cursor",
+        session::Surface::DesktopCode => "Claude Desktop",
+        session::Surface::DesktopCowork => "Claude Cowork",
+        session::Surface::Cli => match session.provider {
+            Provider::Claude => "ClaudeCode",
+            Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
+            Provider::OpenCode => "OpenCode",
+            Provider::Pi => "Pi",
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Aggregate statistics
 // ---------------------------------------------------------------------------
@@ -236,9 +395,16 @@ pub struct Stats {
     pub total: usize,
     pub total_claude: usize,
     pub total_codex: usize,
+    pub total_cursor: usize,
+    pub total_opencode: usize,
+    pub total_pi: usize,
     pub active_1h: usize,
     pub active_24h: usize,
     pub active_7d: usize,
+    /// Sessions that are currently backed by a detected process or a trusted
+    /// provider-specific liveness inference. This deliberately differs from
+    /// the recent-activity windows above.
+    pub running: usize,
     pub total_input: u64,
     pub total_output: u64,
     pub total_cpu: f32,
@@ -247,10 +413,15 @@ pub struct Stats {
     pub spend_total: f64,
     pub spend_claude: f64,
     pub spend_codex: f64,
+    pub spend_cursor: f64,
+    pub spend_opencode: f64,
+    pub spend_pi: f64,
     pub spend_hour: f64,
     pub spend_today: f64,
     pub spend_week: f64,
     pub spend_month: f64,
+    /// Smoothed live spend rate across billable sessions, in USD per minute.
+    pub spend_per_min: f64,
     /// Spend since the 1st of the current calendar month.
     pub spend_calendar_month: f64,
     /// Today's spend bucketed by hour (24 entries).
@@ -283,6 +454,9 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         match s.provider {
             Provider::Claude => st.total_claude += 1,
             Provider::Codex => st.total_codex += 1,
+            Provider::Cursor => st.total_cursor += 1,
+            Provider::OpenCode => st.total_opencode += 1,
+            Provider::Pi => st.total_pi += 1,
         }
         if let Some(la) = util::parse_ts(&s.last_active) {
             let age = now_ms - la.timestamp_millis();
@@ -296,6 +470,9 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 st.active_7d += 1;
             }
         }
+        if s.is_running() {
+            st.running += 1;
+        }
 
         st.total_input += s.input_tokens;
         st.total_output += s.output_tokens;
@@ -308,37 +485,46 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             match s.provider {
                 Provider::Claude => st.spend_claude += cost,
                 Provider::Codex => st.spend_codex += cost,
+                Provider::Cursor => st.spend_cursor += cost,
+                Provider::OpenCode => st.spend_opencode += cost,
+                Provider::Pi => st.spend_pi += cost,
             }
-        }
+            st.spend_per_min += s.cost_per_min;
 
-        for (day, models) in &s.costs_by_day {
-            let amount: f64 = models.values().sum();
-            if day.as_str() >= month_key.as_str() {
-                st.spend_month += amount;
+            // A missing total means this provider is included in the selected
+            // billing plan. Its retail-equivalent buckets must not leak back
+            // into the overview totals.
+            for (day, models) in &s.costs_by_day {
+                let amount: f64 = models.values().sum();
+                if day.as_str() >= month_key.as_str() {
+                    st.spend_month += amount;
+                }
+                if day.as_str() >= week_key.as_str() {
+                    st.spend_week += amount;
+                }
+                if day.as_str() >= today_key.as_str() {
+                    st.spend_today += amount;
+                }
+                if day.as_str() >= month_start_key.as_str()
+                    && let Some(day_part) = day.get(8..10)
+                    && let Ok(day_num) = day_part.parse::<usize>()
+                    && (1..=days).contains(&day_num)
+                {
+                    st.monthly_daily[day_num - 1] += amount;
+                }
             }
-            if day.as_str() >= week_key.as_str() {
-                st.spend_week += amount;
-            }
-            if day.as_str() >= today_key.as_str() {
-                st.spend_today += amount;
-            }
-            if day.as_str() >= month_start_key.as_str()
-                && let Ok(day_num) = day[8..10].parse::<usize>()
-                && (1..=days).contains(&day_num)
-            {
-                st.monthly_daily[day_num - 1] += amount;
-            }
-        }
-        for (key, models) in &s.costs_by_hour {
-            let amount: f64 = models.values().sum();
-            if key == &hour_key {
-                st.spend_hour += amount;
-            }
-            if key.starts_with(&today_key)
-                && let Ok(hour) = key[11..13].parse::<usize>()
-                && hour < 24
-            {
-                st.daily_hourly[hour] += amount;
+            for (key, models) in &s.costs_by_hour {
+                let amount: f64 = models.values().sum();
+                if key == &hour_key {
+                    st.spend_hour += amount;
+                }
+                if key.starts_with(&today_key)
+                    && let Some(hour_part) = key.get(11..13)
+                    && let Ok(hour) = hour_part.parse::<usize>()
+                    && hour < 24
+                {
+                    st.daily_hourly[hour] += amount;
+                }
             }
         }
 
@@ -347,7 +533,8 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         }
     }
 
-    st.spend_total = st.spend_claude + st.spend_codex;
+    st.spend_total =
+        st.spend_claude + st.spend_codex + st.spend_cursor + st.spend_opencode + st.spend_pi;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
     st
 }
@@ -374,6 +561,19 @@ mod tests {
         assert!((st.spend_today - 2.5).abs() < 1e-9);
         assert!((st.spend_calendar_month - 2.5).abs() < 1e-9);
         assert_eq!(st.active_1h, 1);
+        assert_eq!(st.running, 0);
+    }
+
+    #[test]
+    fn stats_count_only_running_sessions_as_live() {
+        let mut running = session_with_day(&util::local_date_key(&Utc::now()), 0.0);
+        running.process = Some(crate::proc::ProcInfo::default());
+        let recently_stopped = session_with_day(&util::local_date_key(&Utc::now()), 0.0);
+
+        let st = compute_stats(&[running, recently_stopped]);
+
+        assert_eq!(st.active_1h, 2);
+        assert_eq!(st.running, 1);
     }
 
     #[test]
@@ -391,8 +591,63 @@ mod tests {
         let mut s = Session::new(Provider::Claude, "x".into());
         s.total_cost = None;
         s.input_tokens = 100;
+        s.cost_per_min = 1.25;
+        let today = util::local_date_key(&Utc::now());
+        let hour = util::local_hour_key(&Utc::now());
+        s.costs_by_day
+            .insert(today, HashMap::from([("m".into(), 3.0)]));
+        s.costs_by_hour
+            .insert(hour, HashMap::from([("m".into(), 2.0)]));
         let st = compute_stats(&[s]);
         assert_eq!(st.spend_claude, 0.0);
+        assert_eq!(st.spend_today, 0.0);
+        assert_eq!(st.spend_hour, 0.0);
+        assert_eq!(st.spend_calendar_month, 0.0);
+        assert_eq!(st.spend_per_min, 0.0);
         assert_eq!(st.total_input, 100);
+    }
+
+    #[test]
+    fn stats_sum_billable_live_spend_rate() {
+        let mut a = Session::new(Provider::Claude, "a".into());
+        a.total_cost = Some(4.0);
+        a.cost_per_min = 0.25;
+        let mut b = Session::new(Provider::Codex, "b".into());
+        b.total_cost = Some(6.0);
+        b.cost_per_min = 0.75;
+
+        let st = compute_stats(&[a, b]);
+        assert!((st.spend_per_min - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn harness_distinguishes_cursor_from_model() {
+        let s = Session::new(Provider::Codex, "x".into());
+        assert_eq!(
+            harness_from_process(
+                &s,
+                "/home/flo/.cursor-server/extensions/openai.chatgpt/bin/codex app-server"
+            ),
+            "Codex"
+        );
+        assert_eq!(
+            harness_from_process(&s, "/opt/Cursor.app/Contents/MacOS/Cursor"),
+            "Cursor"
+        );
+        assert_eq!(harness_from_process(&s, "codex resume x"), "Codex");
+
+        let mut other = Session::new(Provider::Claude, "x".into());
+        assert_eq!(
+            harness_from_process(&other, "claude --resume x"),
+            "ClaudeCode"
+        );
+        other.provider = Provider::OpenCode;
+        assert_eq!(
+            harness_from_process(&other, "opencode --session x"),
+            "OpenCode"
+        );
+        other.provider = Provider::Pi;
+        assert_eq!(harness_from_process(&other, "pi --session x"), "Pi");
+        assert_eq!(harness_from_process(&other, "hermes run"), "Hermes");
     }
 }

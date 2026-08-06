@@ -1,8 +1,12 @@
 # cctop
 
-An htop-like monitor for AI coding agent sessions. Tracks Claude Code and Codex
-sessions on your machine: cost estimation, token usage, tool invocations,
-subagents, and OS-level process metrics — refreshed live.
+An htop-like monitor for AI coding agent sessions. Tracks Claude Code, Codex,
+Cursor, OpenCode, and Pi sessions on your machine: cost estimation, token usage,
+tool invocations, subagents, and OS-level process metrics — refreshed live.
+
+For active sessions, the **HARNESS** column distinguishes the host application
+(for example, Cursor) from the model. Unknown launchers remain `─` rather than
+being guessed.
 
 A Rust rewrite of an earlier Node implementation.
 
@@ -41,6 +45,30 @@ macOS will quarantine an unsigned download. If Gatekeeper blocks it:
 xattr -d com.apple.quarantine /usr/local/bin/cctop
 ```
 
+### Staying up to date
+
+A downloaded binary has no package manager behind it, so `cctop --update`
+fetches the newest release for your platform and replaces the running
+executable in place:
+
+```bash
+cctop --update
+```
+
+Replacing the binary needs write access to the directory it lives in. The install
+above puts it in `/usr/local/bin` with `sudo`, so updating it needs `sudo` too:
+
+```bash
+sudo cctop --update
+```
+
+cctop checks for a new release once a day in the background and, when one
+exists, says so in the footer. It never updates itself: the check only reports,
+and replacing the binary always takes an explicit `--update`. If you installed
+with `cargo install` or a package manager, update it the same way you installed
+it — `--update` will refuse rather than overwrite a managed install it cannot
+write to.
+
 ### With cargo
 
 ```bash
@@ -74,32 +102,97 @@ cctop --list          # print a table and exit
 cctop --json          # dump full session data as JSON
 cctop --plan max      # treat Claude usage as bundled
 cctop --delay 5       # refresh every 5 seconds
+cctop --clear-cache   # re-extract all session activity; keeps preferences/pricing
+cctop --update        # replace this binary with the newest release
+cctop run claude      # start an agent on a pty cctop can type into (see Keys)
+cctop claude --help   # the same, without the `run`; flags go to the agent
+cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias adds them)
 ```
 
 ### Keys
 
 | Key | Action |
 |-----|--------|
-| `↑`/`k`, `↓`/`j` | Move between sessions |
+| `↑`, `↓`/`j` | Move between sessions |
+| `PgUp`, `PgDn`, `b` | Page up / down |
+| `Ctrl+U`, `Ctrl+D` | Half a page up / down |
+| `g`, `G` | Jump to first / last |
+| `Home`, `End` | Jump to first / last |
+| `n`, `N` | Next / previous search match (wraps) |
 | `←`, `→` | Move between bottom panels |
 | `1`–`7` | Jump to a panel directly |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
+| `f` | Follow mode: keep the selection centered |
 | `/` or `F3` | Filter sessions by text |
 | `F6`, `>`, `<` | Sort-by panel |
 | `F7` | Filter by age (1d / 1w / 1mo) |
+| `#` | Cost floor: only sessions costing ≥ `$X` |
 | `` ` `` | Show only running sessions |
 | `[`, `]` | Move through the Tool Activity tool filter |
 | `v` | Toggle inline diffs for edits |
 | `L` | Toggle the Tool Activity live filter |
 | `P` / `M` / `T` | Sort by status / memory / cost |
+| `H` / `X` / `S` | Sort by harness / context / tools |
+| `+`, `-`, `=` | Speed up / slow down / reset refresh interval |
+| `Space` | Mark / unmark the selected session |
+| `D`, `K` | Delete / terminate all marked sessions (with confirmation) |
+| `U` | Clear all marks |
 | `y` | Copy resume command or transcript path |
 | `d` | Delete the selected session (not running) |
+| `k` | Terminate the selected live session (with confirmation) |
+| `s` | Type a line into the selected session's terminal (see below) |
 | `Esc` | Clear the active filter |
 | `q` or `F10` | Quit |
 
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+### Typing into a session
+
+`s` opens a one-line prompt (prefilled with `continue`) and types it into the
+terminal driving the selected agent, as if you had typed it there — useful for
+the sessions whose status dot has gone yellow or red waiting on you.
+
+An agent reads its keyboard from a pty, and only whoever holds that pty's master
+side can put bytes into it — normally the terminal emulator, which offers no way
+in. (Writing to `/proc/<pid>/fd/0` or `/dev/pts/N` reaches the *output* side and
+just paints the screen; it does not reach the agent.) So cctop needs one of these
+to be true, and tries them in this order:
+
+| The session runs… | How | Requirements |
+|---|---|---|
+| under `cctop run <agent>` | cctop owns the pty and typing goes through a unix socket | none; verified on Linux, unverified on macOS |
+| inside tmux | `tmux send-keys` into the pane holding the agent | tmux |
+| in a plain terminal | `TIOCSTI` pushes bytes into the tty's input queue | Linux, and cctop as root — `CAP_SYS_ADMIN` clears both of the kernel's gates. Without root it also needs `sysctl -w dev.tty.legacy_tiocsti=1` (off by default since 6.2) *and* cctop sharing the agent's controlling terminal, which in practice it doesn't |
+
+The first is the one worth adopting — no root, no multiplexer, and the session
+looks and behaves exactly like one started directly. cctop sets it up for you: on
+its first interactive run it aliases `claude`, `codex`, `opencode`, and `pi` to
+`cctop <agent>` — a marked block appended to `~/.zshrc` and `~/.bashrc`, and
+`~/.config/fish/conf.d/cctop.fish` for fish (each only where that shell is
+already configured; the fish file is unverified, having been written on a machine
+without fish).
+
+```bash
+cctop --remove-alias     # take it out again; deleting the block by hand also works
+cctop --install-alias    # put it back
+```
+
+Every alias is guarded by a command-exists test, so it defines nothing
+unless both cctop and the agent are installed — uninstall cctop and `claude`
+goes back to meaning `claude`. The block is written once: remove it and cctop
+won't add it again.
+
+The `run` is optional: any first argument that names an executable is launched
+this way, so `cctop claude --dangerously-skip-permissions` works and the flags
+reach the agent rather than cctop. A word that isn't a command still gets cctop's
+usage error, so a typo doesn't silently try to run something.
+
+`cctop run` proxies your terminal byte-for-byte (including resizes) and exits
+with the agent's own exit code, so it is a transparent stand-in. Sessions started
+any other way still show up in cctop; they just can't be typed into unless tmux
+or the root path applies.
 
 ## Where data comes from
 
@@ -108,15 +201,30 @@ argument, and click the sidebar to filter by tool.
 | Claude Code (CLI) | `~/.claude/projects/<slug>/<uuid>.jsonl` |
 | Claude for Mac | `~/Library/Application Support/Claude/{claude-code,local-agent-mode}-sessions/` |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Cursor | `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` |
+| OpenCode | `~/.local/share/opencode/opencode*.db` (platform data directory) |
+| Pi | `~/.pi/agent/sessions/**/*.jsonl` |
 
-`CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honoured. Caches live in
-`~/.cache/cctop/`.
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`, `OPENCODE_DATA_DIR`,
+`PI_CODING_AGENT_DIR`, and `PI_CODING_AGENT_SESSION_DIR` are honoured. Caches
+live in `~/.cache/cctop/`.
+
+The left status dot is green while an agent is working, amber after its latest
+response is waiting for your input, and red when the newest transcript event is
+an API error. A hollow grey dot is a stopped session.
 
 ## A note on cost figures
 
-Costs are **estimates**: tokens multiplied by published per-token rates, taken
-from built-in tables and falling back to the
+Claude and Codex costs are **estimates**: tokens multiplied by published
+per-token rates, taken from built-in tables and falling back to the
 [LiteLLM](https://github.com/BerriAI/litellm) database (cached for 24 hours).
+OpenCode and Pi already persist provider-calculated costs, which cctop reads
+directly.
+
+Cursor native-agent transcripts expose projects, conversation activity, and
+tool calls, but not model names, tokens, context usage, costs, or a dedicated
+per-session process. Those fields display as unavailable; live status means the
+transcript has changed within the last 90 seconds.
 
 Subscription plans — Claude Max, Pro, Team — are flat-rate or bundle tokens
 differently, so these numbers will not match your invoice. Treat the `$` column
@@ -131,11 +239,16 @@ supports it — what it did:
 ```
 19:16 main    ~/cctop/src/ui/render.rs     +43 -24   122ms ↓498.5K ↑ 1.2K
 19:34 ↳aa1b82 ~/cctop/src/quota.rs          +2 -0    88ms ↓ 41.2K ↑  310
+19:41✗main    cargo test --all-targets               1.4s  ↓ 12.0K ↑  180
 ```
 
 - **origin** — `main` for the session itself, or `↳<agent-id>` for a subagent.
   Subagent activity is interleaved into the same log, so without this there's no
   way to tell an agent's edits from the parent's.
+- **`✗` and a red row** — the call reported an error. Claude records this per
+  call, OpenCode records a tool status, and Codex is read from the sandbox's own
+  result line and exit code. Cursor transcripts don't record tool outcomes, so
+  their calls are never marked.
 - **`+N -M`** — lines added and removed, from the edit result's patch.
   Press `v` to expand the diff inline beneath the row.
 - **duration** — wall time from the call being issued to its result arriving.
@@ -172,10 +285,3 @@ A few things that are less obvious from the code:
 - **Ghost subagents.** Claude Code purges old subagent transcripts but keeps the
   `tool_use`/`tool_result` pair in the parent. Those rows are reconstructed and
   marked `◌`, with `—` rather than `0` for figures that can no longer be measured.
-
-## Development
-
-```bash
-cargo test
-cargo clippy --all-targets
-```
