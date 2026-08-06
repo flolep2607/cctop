@@ -2,7 +2,7 @@
 
 use super::columns::COLUMNS;
 use super::theme;
-use super::{AGE_OPTIONS, App, BatchKind, session_root_pid};
+use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, session_root_pid, tabs};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -87,10 +87,19 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("d", "Delete the selected session (not running)"),
         item("k", "Terminate the selected live session"),
         item("s", "Type a line into the session's terminal"),
-        item("a", "Attach to the session's terminal (F12 detaches)"),
-        item("A", "Attach to the agent this cctop launched"),
+        item("a", "Open the session's terminal in a tab"),
+        item("A", "Open the agent this cctop launched"),
         item("r or F5", "Refresh now"),
         item("q or F10", "Quit"),
+        Line::default(),
+        section("Tabs and splits"),
+        item("t or Alt+n", "New tab: run an agent or a shell"),
+        item("Alt+v / Alt+s", "Split the tab right / down"),
+        item("Alt+← / →", "Previous / next tab"),
+        item("Alt+1 – 9", "Jump to a tab (1 is the dashboard)"),
+        item("Alt+o", "Move focus to the next pane"),
+        item("Alt+w", "Close the focused pane"),
+        item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
         Line::from(Span::styled(
             "  Costs are estimates from published per-token rates. Flat-rate plans",
@@ -202,6 +211,51 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
         theme::dim(),
     )));
     modal(frame, area, "Show sessions active within", lines, 34);
+}
+
+/// The launcher: which agent to start, and where it will run.
+pub(super) fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
+    let commands = tabs::harnesses();
+    let mut lines: Vec<Line> = commands
+        .iter()
+        .enumerate()
+        .map(|(i, argv)| {
+            let style = if i == app.launch_cursor {
+                Style::default()
+                    .bg(theme::SELECTED_BG)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(
+                format!(" {:<34}", tabs::label_of(argv)),
+                style,
+            ))
+        })
+        .collect();
+    // Where it starts is not a detail: a claude opened on the wrong project
+    // reads its way into the wrong repository before you notice.
+    lines.push(Line::from(Span::styled(
+        match &app.launch_cwd {
+            Some(dir) => format!(
+                " in {}",
+                crate::util::truncate(&dir.display().to_string(), 33)
+            ),
+            None => " in this directory".to_string(),
+        },
+        Style::default().fg(theme::LABEL),
+    )));
+    lines.push(Line::from(Span::styled(
+        " ↑/↓  Enter start  Esc cancel",
+        theme::dim(),
+    )));
+    let title = match app.launch_into {
+        LaunchInto::Tab => "New tab",
+        LaunchInto::Split { stacked: false } => "Split right",
+        LaunchInto::Split { stacked: true } => "Split down",
+    };
+    modal(frame, area, title, lines, 38);
 }
 
 pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {

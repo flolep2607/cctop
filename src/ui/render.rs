@@ -28,6 +28,8 @@ pub struct Layout {
     pub(super) column_spans: Vec<(u16, u16, ColumnId)>,
     /// `(start_col, end_col, tab_index)` spans in the bottom tab bar.
     pub(super) tab_spans: Vec<(u16, u16, usize)>,
+    /// `(start_col, end_col, workspace_index)` spans in the top tab bar.
+    pub(super) workspace_spans: Vec<(u16, u16, usize)>,
     /// Tool Activity sidebar: `(x_end, y_start, first_index, row_count)`.
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
@@ -81,6 +83,18 @@ impl Layout {
             .find(|(a, b, _)| col >= *a && col < *b)
             .map(|(_, _, i)| *i)
     }
+
+    /// Index of the workspace tab under the cursor. The bar is always the top
+    /// row when it is drawn at all.
+    pub fn workspace_at(&self, col: u16, row: u16) -> Option<usize> {
+        if row != 0 {
+            return None;
+        }
+        self.workspace_spans
+            .iter()
+            .find(|(a, b, _)| col >= *a && col < *b)
+            .map(|(_, _, i)| *i)
+    }
 }
 
 pub(super) fn panel_block(title: &str) -> Block<'static> {
@@ -91,14 +105,26 @@ pub(super) fn panel_block(title: &str) -> Block<'static> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
-    let area = frame.area();
+    let mut area = frame.area();
     let mut layout = Layout::default();
 
-    // Attached: the agent's screen replaces the table and panels, and the
-    // Overview stays put so the money and the alerts never leave the frame.
-    // The agent is resized to the space that leaves it rather than cropped to
-    // fit, so giving cctop these rows costs nothing but the rows.
-    if app.attached.is_some() {
+    // The tab bar only exists once there is more than the dashboard, so a cctop
+    // nobody has opened a tab in looks exactly as it always did.
+    if !app.tabs.is_empty() {
+        let bar = Rect { height: 1, ..area };
+        draw_workspace_bar(frame, bar, app, &mut layout);
+        area = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+    }
+
+    // A tab's terminals replace the table and panels, and the Overview stays put
+    // so the money and the alerts never leave the frame. Agents are resized to
+    // the space that leaves them rather than cropped to fit, so giving cctop
+    // these rows costs nothing but the rows.
+    if app.tab > 0 {
         let chunks = RLayout::vertical([
             Constraint::Length(6),
             Constraint::Min(3),
@@ -106,8 +132,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         ])
         .split(area);
         draw_overview(frame, chunks[0], app);
-        draw_attached(frame, chunks[1], app);
+        draw_panes(frame, chunks[1], app);
         draw_footer(frame, chunks[2], app);
+        if app.mode == Mode::Launch {
+            modals::draw_launch(frame, area, app);
+        }
         return layout;
     }
 
@@ -149,40 +178,80 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
+        Mode::Launch => modals::draw_launch(frame, area, app),
         Mode::List => {}
     }
     layout
 }
 
-/// The attached agent's terminal, exactly as it is drawing it, inside cctop
-/// rather than instead of it.
+/// The workspace tab bar: the dashboard first, then a tab per set of terminals.
+fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    let titles = std::iter::once("Dashboard".to_string()).chain(app.tabs.iter().map(|t| t.title()));
+    let mut spans = Vec::new();
+    let mut pos = area.x;
+    for (i, title) in titles.enumerate() {
+        let text = format!(" {}:{} ", i + 1, title);
+        let width = text.chars().count() as u16;
+        let style = if i == app.tab {
+            Style::default()
+                .bg(theme::SELECTED_BG)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::DIM)
+        };
+        spans.push(Span::styled(text, style));
+        layout.workspace_spans.push((pos, pos + width, i));
+        pos += width;
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Every terminal in the active tab, sharing the space evenly.
 ///
-/// The panel asks for the agent to be resized to fit it, so what is on screen is
-/// the agent's whole screen rather than its top-left corner. The shim may give
-/// less than was asked for — it has to satisfy the window `cctop run` was
-/// started in as well — so the answer, not the request, is what gets drawn, and
-/// the leftover is left blank rather than stretched into.
-fn draw_attached(frame: &mut Frame, area: Rect, app: &mut App) {
-    // Built before the mutable borrow below, since it reads from the same `app`.
-    let block = panel_block(&format!("attached: {}", app.attached_label))
-        .title_bottom(Span::styled(" F12 detaches ", theme::title()));
-    let Some(attached) = app.attached.as_mut() else {
+/// Sizing is the part that already worked: each pane asks the shim for exactly
+/// the rectangle it was given, so a split is two agents each drawing a real
+/// screen rather than two crops of one.
+fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(tab) = app.active_tab() else {
         return;
     };
-    let inner = block.inner(area);
-    attached.resize(inner.width, inner.height);
+    if tab.panes.is_empty() {
+        return;
+    }
+    let share = Constraint::Ratio(1, tab.panes.len() as u32);
+    let slots = match tab.stacked {
+        true => RLayout::vertical(vec![share; tab.panes.len()]),
+        false => RLayout::horizontal(vec![share; tab.panes.len()]),
+    }
+    .split(area);
 
-    let (cols, rows) = attached.size;
-    let screen = Rect {
-        width: cols.min(inner.width),
-        height: rows.min(inner.height),
-        ..inner
-    };
-    frame.render_widget(block, area);
-    frame.render_widget(
-        tui_term::widget::PseudoTerminal::new(attached.parser.screen()),
-        screen,
-    );
+    let focus = tab.focus;
+    for (i, pane) in tab.panes.iter_mut().enumerate() {
+        let mut block = panel_block(&pane.label);
+        if i == focus {
+            block = block
+                .border_style(Style::default().fg(theme::BORDER_HI))
+                .title_bottom(Span::styled(" F12 back · Alt+w close ", theme::title()));
+        }
+        let inner = block.inner(slots[i]);
+        pane.view.resize(inner.width, inner.height);
+
+        // The shim may grant less than was asked for — it has to satisfy every
+        // watcher at once — so the answer, not the request, is what gets drawn,
+        // and the leftover is left blank rather than stretched into.
+        let (cols, rows) = pane.view.size;
+        let screen = Rect {
+            width: cols.min(inner.width),
+            height: rows.min(inner.height),
+            ..inner
+        };
+        frame.render_widget(block, slots[i]);
+        frame.render_widget(
+            tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()),
+            screen,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +955,7 @@ mod tests {
     #[test]
     fn hit_testing_maps_regions() {
         let layout = Layout {
+            workspace_spans: Vec::new(),
             header_row: 6,
             rows_start: 7,
             rows_end: 12,
@@ -938,101 +1008,177 @@ mod tests {
         assert_eq!(quota_color(&sustainable, reset), theme::COST_LOW);
     }
 
-    /// Attaching keeps you inside cctop: the Overview and the footer stay, and
-    /// the agent is resized into what is left rather than cropped to it.
+    /// A test agent that draws `text` once and then sits there, so anything on
+    /// screen came from the replay and anything that moves came from a resize.
     ///
     /// Linux-only for the same reason as the shim's own tests — it needs a pty
     /// child, which hangs on the macOS runner.
     #[cfg(target_os = "linux")]
+    fn test_pane(text: &str) -> (std::process::Child, u32, super::super::tabs::Pane) {
+        let (child, pid) = crate::shim::test_session(
+            &["sh", "-c", &format!("printf '{text}'; sleep 30")],
+            // Wider and taller than any window below, so a crop would show.
+            (200, 60),
+        );
+        let pane =
+            super::super::tabs::Pane::view_of(pid, text.into()).expect("no attach connection");
+        (child, pid, pane)
+    }
+
+    /// Draw until every pane has been granted the size it asked for. The resize
+    /// is requested while drawing and answered a round trip later, so drawing
+    /// once is never enough.
+    #[cfg(target_os = "linux")]
+    fn draw_until_sized(
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        app: &mut App,
+        want: &[(u16, u16)],
+    ) -> bool {
+        for _ in 0..50 {
+            terminal
+                .draw(|frame| {
+                    draw(frame, app);
+                })
+                .expect("draw");
+            let sized = app.tabs.iter_mut().any(|tab| {
+                tab.pump();
+                tab.panes.len() == want.len()
+                    && tab.panes.iter().zip(want).all(|(p, w)| p.view.size == *w)
+            });
+            if sized {
+                // One more frame, so what is asserted was drawn at the final size.
+                terminal
+                    .draw(|frame| {
+                        draw(frame, app);
+                    })
+                    .expect("draw");
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    fn screen(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        cols: u16,
+        rows: u16,
+    ) -> Vec<String> {
+        let buffer = terminal.backend().buffer().clone();
+        (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// A tab keeps you inside cctop: the tab bar, the Overview and the footer
+    /// stay, and the agent is resized into what is left rather than cropped.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn an_attached_agent_is_resized_into_the_space_cctop_leaves_it() {
+    fn a_tab_resizes_its_agent_into_the_space_cctop_leaves_it() {
         use crate::cache::UiPrefs;
         use crate::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        // Draws once and then sits there, so anything on screen came from the
-        // replay and anything that changes came from the resize.
-        let (mut child, pid) = crate::shim::test_session(
-            &["sh", "-c", "printf 'HELLO-FROM-AGENT'; sleep 30"],
-            // Wider and taller than the window below, so a crop would show.
-            (200, 60),
-        );
-        let attached = crate::attach::attach(pid).expect("no attach connection");
-
+        let (mut child, pid, pane) = test_pane("HELLO-FROM-AGENT");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
-        app.attached = Some(attached);
-        app.attached_label = "agent".into();
+        app.tabs.push(super::super::tabs::Tab::new(pane));
+        app.tab = 1;
 
-        let (cols, rows) = (60u16, 20u16);
-        // Six rows of Overview, one of footer, and a border around the rest.
-        let want = (cols - 2, rows - 6 - 1 - 2);
+        let (cols, rows) = (60u16, 21u16);
+        // One row of tab bar, six of Overview, one of footer, and a border.
+        let want = (cols - 2, rows - 1 - 6 - 1 - 2);
         let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
-        // The resize is asked for while drawing and granted a round trip later,
-        // so drawing once is never enough.
-        let mut sized = false;
-        for _ in 0..50 {
-            terminal
-                .draw(|frame| {
-                    draw(frame, &mut app);
-                })
-                .expect("draw");
-            if let Some(attached) = app.attached.as_mut() {
-                attached.pump();
-                sized = attached.size == want;
-            }
-            if sized {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        // One more frame, so what is asserted below was drawn at the final size.
-        terminal
-            .draw(|frame| {
-                draw(frame, &mut app);
-            })
-            .expect("draw");
+        let sized = draw_until_sized(&mut terminal, &mut app, &[want]);
+        let screen = screen(&terminal, cols, rows);
 
-        let buffer = terminal.backend().buffer().clone();
-        let row = |y: u16| {
-            (0..cols)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        };
-        let screen: Vec<String> = (0..rows).map(row).collect();
-
-        drop(app.attached.take());
+        app.tabs.clear();
         let _ = child.kill();
         let _ = child.wait();
         let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
 
         assert!(
             sized,
-            "the pty was never resized to the panel; wanted {want:?}"
+            "the pty was never resized to the pane; wanted {want:?}"
         );
-        // Attaching must not throw cctop's own interface away: the Overview is
-        // still at the top, the agent is in the panel below it, and the footer
-        // is still the last row.
         assert!(
-            screen[0].contains("Overview"),
-            "the Overview is gone: {:?}",
+            screen[0].starts_with(" 1:Dashboard  2:HELLO-FROM-AGENT"),
+            "the tab bar is not the top row: {:?}",
             screen[0]
         );
         assert!(
-            screen[6].contains("attached: agent"),
-            "the attach panel is not below the Overview: {:?}",
-            screen[6]
+            screen[1].contains("Overview"),
+            "the Overview is gone: {:?}",
+            screen[1]
         );
         assert!(
-            screen[7].starts_with("│HELLO-FROM-AGENT"),
-            "the agent's screen is not inside the panel: {:?}",
-            &screen[6..9]
+            screen[8].starts_with("│HELLO-FROM-AGENT"),
+            "the agent's screen is not inside the pane: {:?}",
+            &screen[7..10]
         );
         assert!(
-            screen[rows as usize - 2].contains("F12 detaches"),
-            "the detach hint is missing: {:?}",
+            screen[rows as usize - 2].contains("F12 back"),
+            "the focused pane's hint is missing: {:?}",
             screen[rows as usize - 2]
+        );
+    }
+
+    /// A split gives each agent a real screen of its own, not two crops of one:
+    /// both are resized to their half and both draw in it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_split_sizes_both_agents_to_their_own_half() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut left_child, left_pid, left) = test_pane("LEFT-AGENT");
+        let (mut right_child, right_pid, right) = test_pane("RIGHT-AGENT");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        let mut tab = super::super::tabs::Tab::new(left);
+        tab.panes.push(right);
+        app.tabs.push(tab);
+        app.tab = 1;
+
+        let (cols, rows) = (80u16, 21u16);
+        // Half the width each, minus each pane's own left and right border.
+        let want = (cols / 2 - 2, rows - 1 - 6 - 1 - 2);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let sized = draw_until_sized(&mut terminal, &mut app, &[want, want]);
+        let screen = screen(&terminal, cols, rows);
+
+        app.tabs.clear();
+        for child in [&mut left_child, &mut right_child] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        for pid in [left_pid, right_pid] {
+            let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        }
+
+        assert!(
+            sized,
+            "one of the split panes was never resized; wanted {want:?} each"
+        );
+        // Both agents on one row, each starting just inside its own border.
+        let split_row = &screen[8];
+        assert!(
+            split_row.starts_with("│LEFT-AGENT"),
+            "the left agent is not in the left half: {split_row:?}"
+        );
+        // By character, not by byte: the borders are multi-byte.
+        let right_half: String = split_row.chars().skip((cols / 2) as usize).collect();
+        assert!(
+            right_half.starts_with("│RIGHT-AGENT"),
+            "the right agent is not in the right half: {split_row:?}"
         );
     }
 }

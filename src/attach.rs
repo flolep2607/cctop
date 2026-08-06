@@ -117,6 +117,10 @@ pub struct Attach {
     /// than a channel because the UI loop already wakes on a timer; a channel
     /// would add plumbing and arrive no sooner.
     pending: std::sync::Arc<std::sync::Mutex<Vec<Event>>>,
+    /// Set by the reader thread when the shim hangs up. A pane showing an agent
+    /// it does not own has nothing else to go on: there is no child to wait for,
+    /// so the closed socket is what says the agent is gone.
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Screen the agent believes it is drawing on, `(cols, rows)`. The shim
     /// decides this — a watcher asks, and may be given less because another
     /// watcher, or the window the agent was launched from, is narrower.
@@ -151,6 +155,11 @@ impl Attach {
             }
         }
         true
+    }
+
+    /// Whether the shim has hung up, so this screen will never change again.
+    pub fn closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Ask for the agent to be drawn at `cols`×`rows`.
@@ -231,7 +240,9 @@ pub fn attach(pid: u32) -> Option<Attach> {
     }
 
     let pending = std::sync::Arc::new(std::sync::Mutex::new(early));
+    let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let collector = std::sync::Arc::clone(&pending);
+    let hangup = std::sync::Arc::clone(&closed);
     let mut reader = stream.try_clone().ok()?;
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -247,6 +258,7 @@ pub fn attach(pid: u32) -> Option<Attach> {
                 pending.push(event);
             }
         }
+        hangup.store(true, std::sync::atomic::Ordering::Relaxed);
     });
     let closer = stream.try_clone().ok()?;
     Some(Attach {
@@ -255,6 +267,7 @@ pub fn attach(pid: u32) -> Option<Attach> {
             let _ = closer.shutdown(std::net::Shutdown::Both);
         }),
         pending,
+        closed,
         size,
         requested: (0, 0),
         // No scrollback: this shows what the agent is showing. Its own history

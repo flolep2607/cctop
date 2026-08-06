@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
     // Started before the UI so a failure to launch prints as an ordinary error
     // rather than from inside the alternate screen.
     #[cfg(unix)]
-    let hosted = agent.map(|agent| shim::host(&agent)).transpose()?;
+    let hosted = agent.map(|agent| shim::host(&agent, None)).transpose()?;
     #[cfg(not(unix))]
     let hosted = None;
 

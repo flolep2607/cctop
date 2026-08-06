@@ -1,7 +1,9 @@
 //! Key and mouse handling: translate input events into state changes.
 
 use super::columns::{COLUMNS, ColumnId};
-use super::{AGE_OPTIONS, App, BatchKind, Mode, PAGE, Request, render, session_root_pid};
+use super::{
+    AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render, session_root_pid, tabs,
+};
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -13,19 +15,25 @@ impl App {
         }
         self.needs_redraw = true;
 
-        // While attached, the keyboard belongs to the agent — including Ctrl-C,
-        // which is how you interrupt it. Only the detach key is cctop's, and it
-        // is a function key because those are the ones never forwarded: any
-        // Ctrl- combination worth pressing is one an agent might want.
-        if self.attached.is_some() {
+        // Moving between tabs and panes has to work from inside a pane, where
+        // every other key belongs to the agent. Alt is the modifier left over:
+        // Ctrl- is the agent's (Ctrl-C interrupts it), and the function keys are
+        // too few to also carry the splits.
+        if key.modifiers.contains(KeyModifiers::ALT) && self.on_key_workspace(key.code) {
+            return;
+        }
+
+        // Inside a pane the keyboard belongs to the agent. Only F12 is cctop's,
+        // and it is a function key because those are the ones never forwarded.
+        if self.tab > 0 && self.mode == Mode::List {
             if key.code == KeyCode::F(12) {
-                self.attached = None;
+                self.show_tab(0);
                 return;
             }
-            if let Some(attached) = self.attached.as_mut()
-                && !attached.send_key(key)
+            if let Some(pane) = self.focused_pane()
+                && !pane.view.send_key(key)
             {
-                self.attached = None;
+                self.close_pane();
                 self.set_status("The agent's terminal closed");
             }
             return;
@@ -49,8 +57,47 @@ impl App {
             }
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
+            Mode::Launch => self.on_key_launch(key),
             Mode::Help | Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
+        }
+    }
+
+    /// The multiplexer keys, live everywhere including inside a pane. Returns
+    /// false for an Alt- combination that means nothing here, so it still
+    /// reaches the agent.
+    fn on_key_workspace(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Left => self.cycle_workspace(-1),
+            KeyCode::Right => self.cycle_workspace(1),
+            // The dashboard is tab 1, matching where it sits in the tab bar.
+            KeyCode::Char(c @ '1'..='9') => self.show_tab(c as usize - '1' as usize),
+            KeyCode::Char('n') => self.launch_prompt(LaunchInto::Tab),
+            KeyCode::Char('v') => self.launch_prompt(LaunchInto::Split { stacked: false }),
+            KeyCode::Char('s') => self.launch_prompt(LaunchInto::Split { stacked: true }),
+            KeyCode::Char('o') => match self.active_tab() {
+                Some(tab) => tab.cycle_focus(),
+                None => return false,
+            },
+            KeyCode::Char('w') => self.close_pane(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn on_key_launch(&mut self, key: KeyEvent) {
+        let n = tabs::harnesses().len().max(1);
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.launch_cursor = (self.launch_cursor + n - 1) % n
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.launch_cursor = (self.launch_cursor + 1) % n,
+            KeyCode::Enter => {
+                self.mode = Mode::List;
+                self.launch_selected();
+            }
+            _ => {}
         }
     }
 
@@ -335,6 +382,10 @@ impl App {
             },
             KeyCode::Char('a') => self.attach_selected(),
             KeyCode::Char('A') => self.attach_hosted(),
+            // Alt+n does this too and works from inside a pane; here on the
+            // dashboard, where nothing is competing for the keyboard, a plain
+            // letter is what anyone will try first.
+            KeyCode::Char('t') => self.launch_prompt(LaunchInto::Tab),
             KeyCode::Char('y') => self.copy_selection(),
             KeyCode::Char('L') => {
                 self.tool_live_only = !self.tool_live_only;
@@ -372,6 +423,14 @@ impl App {
     }
 
     pub(super) fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
+        // Inside a tab the only thing the mouse can hit is the tab bar: the
+        // table and its panels are not on screen, so nothing else has a target.
+        if self.tab > 0 {
+            if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
+                self.show_tab(tab);
+            }
+            return;
+        }
         match ev.kind {
             MouseEventKind::ScrollDown => {
                 if layout.in_bottom_panel(ev.row) {
@@ -388,7 +447,9 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.bottom_tab == 3
+                if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
+                    self.show_tab(tab);
+                } else if self.bottom_tab == 3
                     && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
                 {
                     self.toggle_tool_expansion(offset);
