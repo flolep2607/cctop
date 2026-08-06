@@ -207,7 +207,8 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
     }
 }
 
-#[cfg(test)]
+// The whole module is Linux-only: see the note on the round-trip test below.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -221,7 +222,6 @@ mod tests {
     /// explicitly warns about, but it is unreproducible from a Linux host — so the
     /// test is pinned to where its result means something rather than left to
     /// stall every release. `cctop run` on macOS is unverified.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_line_sent_to_the_socket_becomes_the_childs_input() {
         let out = std::env::temp_dir().join("cctop-shim-test.txt");
@@ -258,7 +258,6 @@ mod tests {
     /// than fail, and land on the TIOCSTI path — which, unprivileged, can only
     /// name the precondition it lacks. Lives here because `spawn_on_pty` is the
     /// only way to get a process on a pty we can name by PID.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_pty_child_without_a_socket_reports_the_missing_precondition() {
         if unsafe { libc::geteuid() } == 0 {
