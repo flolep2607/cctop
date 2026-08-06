@@ -35,7 +35,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     if argv.is_empty() {
         anyhow::bail!("usage: cctop run <command> [args…]  (e.g. cctop run claude)");
     }
-    let (mut child, master) = spawn_on_pty(argv)?;
+    let (mut child, master) = spawn_on_pty(argv, None)?;
     let pid = child.id();
 
     // Bind before entering raw mode: a failure here should print normally.
@@ -121,11 +121,14 @@ impl Drop for Hosted {
 /// keyboard, no raw mode, and no size of its own. `cctop <agent>` draws the
 /// agent inside its own interface, so a shim also painting it would be two
 /// programs writing to one screen.
-pub fn host(argv: &[String]) -> anyhow::Result<Hosted> {
+///
+/// `cwd` is where the agent starts, which for a tab opened from a session's row
+/// is that session's project rather than wherever cctop was launched.
+pub fn host(argv: &[String], cwd: Option<&std::path::Path>) -> anyhow::Result<Hosted> {
     if argv.is_empty() {
         anyhow::bail!("usage: cctop <command> [args…]  (e.g. cctop claude)");
     }
-    let (child, master) = spawn_on_pty(argv)?;
+    let (child, master) = spawn_on_pty(argv, cwd)?;
     let pid = child.id();
     let listener = listen(pid)?;
     let socket = socket_path(pid);
@@ -491,7 +494,10 @@ fn pty_size(master: &File) -> (u16, u16) {
 }
 
 /// Spawn `argv` with a new pty as its controlling terminal, returning the master.
-fn spawn_on_pty(argv: &[String]) -> anyhow::Result<(std::process::Child, File)> {
+fn spawn_on_pty(
+    argv: &[String],
+    cwd: Option<&std::path::Path>,
+) -> anyhow::Result<(std::process::Child, File)> {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut size = winsize(cols, rows);
     let mut master_fd = -1;
@@ -519,6 +525,11 @@ fn spawn_on_pty(argv: &[String]) -> anyhow::Result<(std::process::Child, File)> 
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    // A directory that has since been removed would fail the spawn outright, so
+    // an unusable one is simply not applied.
+    if let Some(cwd) = cwd.filter(|dir| dir.is_dir()) {
+        cmd.current_dir(cwd);
+    }
     // SAFETY: runs between fork and exec, so only async-signal-safe calls are
     // allowed — these are all raw syscalls with no allocation.
     unsafe {
@@ -556,7 +567,7 @@ fn spawn_on_pty(argv: &[String]) -> anyhow::Result<(std::process::Child, File)> 
 #[cfg(test)]
 pub(crate) fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u32) {
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
-    let (child, master) = spawn_on_pty(&argv).expect("pty child");
+    let (child, master) = spawn_on_pty(&argv, None).expect("pty child");
     let pid = child.id();
     let listener = listen(pid).expect("control socket");
     let fan = Arc::new(Mutex::new(Fanout::new(
@@ -662,11 +673,14 @@ mod tests {
     fn a_line_sent_to_the_socket_becomes_the_childs_input() {
         let out = std::env::temp_dir().join("cctop-shim-test.txt");
         let _ = std::fs::remove_file(&out);
-        let (mut child, master) = spawn_on_pty(&[
-            "sh".into(),
-            "-c".into(),
-            format!("tee {} >/dev/null; :", out.display()),
-        ])
+        let (mut child, master) = spawn_on_pty(
+            &[
+                "sh".into(),
+                "-c".into(),
+                format!("tee {} >/dev/null; :", out.display()),
+            ],
+            None,
+        )
         .unwrap();
         let pid = child.id();
         let listener = listen(pid).unwrap();
@@ -701,11 +715,14 @@ mod tests {
     fn a_watcher_gets_the_screen_and_can_still_type() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        let (mut child, master) = spawn_on_pty(&[
-            "sh".into(),
-            "-c".into(),
-            "printf 'ALREADY-DRAWN\\r\\n'; cat".into(),
-        ])
+        let (mut child, master) = spawn_on_pty(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "printf 'ALREADY-DRAWN\\r\\n'; cat".into(),
+            ],
+            None,
+        )
         .unwrap();
         let pid = child.id();
         let listener = listen(pid).unwrap();
@@ -761,11 +778,14 @@ mod tests {
     fn a_watchers_size_reaches_the_agent_and_is_returned_when_it_leaves() {
         // `stty size` reports the pty's dimensions as the child sees them, so
         // this child narrates every resize it is given.
-        let (mut child, master) = spawn_on_pty(&[
-            "sh".into(),
-            "-c".into(),
-            "while :; do stty size; sleep 0.2; done".into(),
-        ])
+        let (mut child, master) = spawn_on_pty(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "while :; do stty size; sleep 0.2; done".into(),
+            ],
+            None,
+        )
         .unwrap();
         let pid = child.id();
         let listener = listen(pid).unwrap();
@@ -828,7 +848,7 @@ mod tests {
             return;
         }
         let (mut child, _master) =
-            spawn_on_pty(&["sh".into(), "-c".into(), "sleep 30".into()]).expect("pty child");
+            spawn_on_pty(&["sh".into(), "-c".into(), "sleep 30".into()], None).expect("pty child");
         let error = crate::inject::send_line(child.id(), "continue").unwrap_err();
         let _ = child.kill();
         let _ = child.wait();

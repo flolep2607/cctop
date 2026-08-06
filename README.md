@@ -141,9 +141,22 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `d` | Delete the selected session (not running) |
 | `k` | Terminate the selected live session (with confirmation) |
 | `s` | Type a line into the selected session's terminal (see below) |
-| `a` | Attach: put that terminal on screen and drive it (`F12` detaches) |
+| `a` | Open that session's terminal in a tab and drive it |
+| `t` | New tab: run an agent or a shell (see below) |
 | `Esc` | Clear the active filter |
 | `q` or `F10` | Quit |
+
+Tabs and splits, from anywhere including inside a running agent:
+
+| Key | Action |
+|---|---|
+| `t` or `Alt+n` | New tab: run an agent or a shell |
+| `Alt+v` / `Alt+s` | Split the current tab right / down |
+| `Alt+←` / `Alt+→` | Previous / next tab |
+| `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
+| `Alt+o` | Move focus to the next pane |
+| `Alt+w` | Close the focused pane |
+| `F12` | Back to the dashboard, leaving everything running |
 
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
@@ -195,26 +208,35 @@ with the agent's own exit code, so it is a transparent stand-in. Sessions starte
 any other way still show up in cctop; they just can't be typed into unless tmux
 or the root path applies.
 
-### Attaching to a session
+### Tabs and splits
 
-`a` goes further than `s`: it puts the agent's own terminal in the window,
-live — its spinner, its permission prompts, whatever it is drawing — and sends
-every keystroke to it until `F12`. The Overview stays above it, so cost and
-alerts remain visible while you answer an agent.
+The session table is tab 1. `t` opens another: pick an agent — whichever of
+`claude`, `codex`, `opencode`, and `pi` you have installed — or your shell, and
+it starts on a pty cctop owns and draws in the window. `Alt+v` and `Alt+s` split
+the tab you are in, side by side or stacked, so `claude` and a shell for
+`git diff` are one keystroke apart. A tab opened from a session's row starts in
+that session's project directory.
 
-This needs cctop to hold the pty, so it works for sessions started with
+Each pane is resized to the rectangle it is given rather than cropped to it, so
+a split is two agents each drawing a real screen — not two crops of one. The
+Overview stays above the panes, so cost and alerts remain visible while you
+answer an agent.
+
+`a` does the same for a session already running: it puts that agent's own
+terminal in a tab, live — its spinner, its permission prompts, whatever it is
+drawing. That needs cctop to hold the pty, so it works for sessions started with
 `cctop <agent>` and no others; the aliases above make that every session you
 start from a shell. On attaching, the shim replays its recent output so the
 screen is rebuilt immediately rather than at the agent's next repaint.
 
-The pty has one size, fixed by the terminal that launched it, and cctop's panel
-is what's left under the Overview. When the panel is smaller the title says so
-(`98×30 of 120×40`) and the view is cropped rather than reflowed — resizing the
-pty would fix the crop and wreck the display in the window the agent runs in.
+Panes cctop started are cctop's to end: closing one (`Alt+w`, or the agent
+exiting on its own) takes the agent with it, and quitting cctop takes them all.
+A pane opened onto someone else's session with `a` only stops watching.
 
-`F12` is the detach key because function keys are the ones cctop doesn't forward.
-Everything else goes to the agent, `Ctrl-C` included: while attached, that
-interrupts the agent rather than quitting cctop.
+Everything not in the table above goes to the focused agent, `Ctrl-C` included:
+inside a pane, that interrupts the agent rather than quitting cctop. `F12` and
+`Alt` are what cctop keeps — the function keys because they are the ones agents
+never want, and `Alt` because `Ctrl` is the agent's.
 
 ## Where data comes from
 

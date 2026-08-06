@@ -16,7 +16,7 @@ const END: &str = "# <<< cctop <<<";
 
 /// Agent commands worth routing through the shim. Absent ones are skipped by the
 /// block's own guard, so listing an agent the user doesn't have costs nothing.
-const AGENTS: &str = "claude codex opencode pi";
+pub const AGENTS: &str = "claude codex opencode pi";
 
 /// The managed block, in the bash/zsh syntax both shells share.
 fn block() -> String {

@@ -7,6 +7,7 @@ pub mod panels;
 pub mod render;
 pub mod spark;
 mod table;
+pub mod tabs;
 pub mod theme;
 
 use crate::cache::UiPrefs;
@@ -71,6 +72,17 @@ pub enum Mode {
     CostFilter,
     /// Text input typed into the selected session's tmux pane.
     SendKeys,
+    /// Picking which agent a new tab or split should run.
+    Launch,
+}
+
+/// Where the agent picked in `Mode::Launch` ends up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchInto {
+    /// A tab of its own.
+    Tab,
+    /// Alongside the panes already in the current tab, arranged the given way.
+    Split { stacked: bool },
 }
 
 /// The pending batch action shown in `Mode::BatchConfirm`.
@@ -403,11 +415,19 @@ pub struct App {
     /// When cctop started, used by the tool-activity "live" filter.
     pub started_at: String,
 
-    /// The agent whose terminal is on screen, when one is.
-    pub attached: Option<crate::attach::Attach>,
-    /// What to call it in the title — the session is gone from view while
-    /// attached, so the label has to be carried.
-    pub attached_label: String,
+    /// Workspace tabs beyond the dashboard, each holding one or more terminals.
+    pub tabs: Vec<tabs::Tab>,
+    /// Which tab is on screen: `0` is the dashboard, `1..=tabs.len()` index
+    /// `tabs`. Zero-length `tabs` is the ordinary case and costs nothing — no
+    /// tab bar is drawn and cctop looks exactly as it did before.
+    pub tab: usize,
+    /// The command highlighted in the launcher.
+    pub launch_cursor: usize,
+    /// Where the launcher's pick will go.
+    pub launch_into: LaunchInto,
+    /// Directory a launched agent starts in — the selected session's project,
+    /// captured when the launcher opens because the selection can move under it.
+    pub launch_cwd: Option<std::path::PathBuf>,
     /// The agent this cctop launched, as `(pid, label)`.
     ///
     /// Set only for `cctop <agent>`, and only while it is alive — the loop exits
@@ -499,8 +519,11 @@ impl App {
             started_at: chrono::Utc::now().to_rfc3339(),
             prefs,
             tx,
-            attached: None,
-            attached_label: String::new(),
+            tabs: Vec::new(),
+            tab: 0,
+            launch_cursor: 0,
+            launch_into: LaunchInto::Tab,
+            launch_cwd: None,
             hosted: None,
             needs_redraw: true,
             should_quit: false,
@@ -977,8 +1000,125 @@ impl App {
 /// Rows moved by PageUp/PageDown and the fallback for half-page scrolls.
 const PAGE: isize = 10;
 
+// ---------------------------------------------------------------------------
+// Workspace tabs
+// ---------------------------------------------------------------------------
+
 impl App {
-    /// Put the selected agent's own terminal on screen.
+    /// The tab on screen, or `None` on the dashboard.
+    pub fn active_tab(&mut self) -> Option<&mut tabs::Tab> {
+        self.tabs.get_mut(self.tab.checked_sub(1)?)
+    }
+
+    /// The pane the keyboard belongs to, or `None` on the dashboard.
+    pub fn focused_pane(&mut self) -> Option<&mut tabs::Pane> {
+        self.active_tab()?.focused_mut()
+    }
+
+    /// Show `tab`, clamped to what exists.
+    pub fn show_tab(&mut self, tab: usize) {
+        self.tab = tab.min(self.tabs.len());
+        self.needs_redraw = true;
+    }
+
+    /// Move `delta` tabs along, wrapping through the dashboard.
+    pub fn cycle_workspace(&mut self, delta: isize) {
+        let count = self.tabs.len() as isize + 1;
+        self.tab = (self.tab as isize + delta).rem_euclid(count) as usize;
+        self.needs_redraw = true;
+    }
+
+    /// Open the launcher, remembering where the pick should go and which
+    /// directory it should start in.
+    pub fn launch_prompt(&mut self, into: LaunchInto) {
+        if matches!(into, LaunchInto::Split { .. }) && self.active_tab().is_none() {
+            self.set_status("Nothing to split — open a tab first");
+            return;
+        }
+        if tabs::harnesses().is_empty() {
+            self.set_status("No agent found in PATH, and $SHELL is not set");
+            return;
+        }
+        self.launch_into = into;
+        self.launch_cursor = 0;
+        // A split lands next to an agent already working somewhere; a new tab
+        // takes its cue from whatever row the cursor is on.
+        self.launch_cwd = match into {
+            LaunchInto::Split { .. } => self.launch_cwd.clone(),
+            LaunchInto::Tab => self
+                .selected_session()
+                .map(|s| std::path::PathBuf::from(&s.label_source))
+                .filter(|dir| dir.is_dir()),
+        };
+        self.mode = Mode::Launch;
+    }
+
+    /// Start the launcher's pick.
+    pub fn launch_selected(&mut self) {
+        let commands = tabs::harnesses();
+        let Some(argv) = commands.get(self.launch_cursor) else {
+            return;
+        };
+        let cwd = self.launch_cwd.clone();
+        let pane = match tabs::Pane::launch(argv, cwd.as_deref()) {
+            Ok(pane) => pane,
+            Err(error) => {
+                self.set_status(format!("Could not start {}: {error}", tabs::label_of(argv)));
+                return;
+            }
+        };
+        let label = pane.label.clone();
+        match self.launch_into {
+            LaunchInto::Split { stacked } => {
+                let Some(tab) = self.active_tab() else { return };
+                tab.stacked = stacked;
+                tab.panes.push(pane);
+                tab.focus = tab.panes.len() - 1;
+            }
+            LaunchInto::Tab => {
+                self.tabs.push(tabs::Tab::new(pane));
+                self.tab = self.tabs.len();
+            }
+        }
+        let where_ = cwd
+            .map(|dir| format!(" in {}", dir.display()))
+            .unwrap_or_default();
+        self.set_status(format!("Started {label}{where_}"));
+    }
+
+    /// Close the focused pane, taking the agent with it when cctop started it.
+    pub fn close_pane(&mut self) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        if tab.focus < tab.panes.len() {
+            tab.panes.remove(tab.focus);
+        }
+        tab.focus = tab.focus.min(tab.panes.len().saturating_sub(1));
+        self.drop_empty_tabs();
+    }
+
+    /// Forget the tabs whose agents have all exited, keeping the view on
+    /// something that still exists.
+    pub fn drop_empty_tabs(&mut self) {
+        let mut index = 0;
+        self.tabs.retain(|tab| {
+            index += 1;
+            if !tab.panes.is_empty() {
+                return true;
+            }
+            // The tabs after this one shift down by one, so a view sitting on
+            // any of them has to follow — otherwise closing tab 1 silently
+            // moves you to what used to be tab 2.
+            if self.tab >= index {
+                self.tab -= 1;
+            }
+            false
+        });
+        self.tab = self.tab.min(self.tabs.len());
+    }
+
+    /// Put the selected agent's own terminal on screen, in a tab of its own.
     ///
     /// Only possible for sessions cctop launched: the shim holding the pty is
     /// what has a copy of the output to give away.
@@ -991,14 +1131,10 @@ impl App {
             self.set_status("Selected session has no local process");
             return;
         };
-        match crate::attach::attach(pid) {
-            Some(attached) => {
-                self.attached = Some(attached);
-                self.attached_label = label;
-            }
-            None => self.set_status(
+        if !self.open_view(pid, label) {
+            self.set_status(
                 "Only sessions started by cctop can be attached — start them as `cctop claude`",
-            ),
+            );
         }
     }
 
@@ -1011,13 +1147,36 @@ impl App {
             self.set_status("No agent was launched by this cctop — start one as `cctop claude`");
             return;
         };
-        match crate::attach::attach(pid) {
-            Some(attached) => {
-                self.attached = Some(attached);
-                self.attached_label = label;
-            }
-            None => self.set_status("The agent's terminal is gone"),
+        if !self.open_view(pid, label) {
+            self.set_status("The agent's terminal is gone");
         }
+    }
+
+    /// Show the agent running as `pid`, reusing the pane already on it rather
+    /// than opening a second window onto one terminal.
+    fn open_view(&mut self, pid: u32, label: String) -> bool {
+        if let Some((index, tab)) = self
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, tab)| tab.panes.iter().any(|pane| pane.pid == pid))
+        {
+            tab.focus = tab
+                .panes
+                .iter()
+                .position(|pane| pane.pid == pid)
+                .unwrap_or(0);
+            self.tab = index + 1;
+            self.needs_redraw = true;
+            return true;
+        }
+        let Some(pane) = tabs::Pane::view_of(pid, label) else {
+            return false;
+        };
+        self.tabs.push(tabs::Tab::new(pane));
+        self.tab = self.tabs.len();
+        self.needs_redraw = true;
+        true
     }
 }
 
@@ -1105,7 +1264,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 
     // Before the terminal is restored, so the agent's hangup does not race the
     // screen being handed back.
-    drop(app.attached.take());
+    app.tabs.clear();
     drop(hosted);
 
     restore_terminal();
@@ -1302,9 +1461,17 @@ fn event_loop(
 
         app.sync_panel_data();
 
-        if let Some(attached) = app.attached.as_mut()
-            && attached.pump()
-        {
+        // Every tab, not just the visible one: an agent whose output nobody
+        // reads eventually blocks on writing it.
+        let mut drawn = false;
+        for tab in &mut app.tabs {
+            drawn |= tab.pump();
+        }
+        let closed = app.tabs.iter_mut().fold(false, |any, tab| tab.reap() | any);
+        if closed {
+            app.drop_empty_tabs();
+        }
+        if drawn || closed {
             app.needs_redraw = true;
         }
 
@@ -1326,9 +1493,9 @@ fn event_loop(
         let refresh_every = Duration::from_secs_f64(app.refresh_secs);
         // Attached, the same wait is what stands between a keystroke and seeing
         // it echoed, so it drops to a frame's worth.
-        let idle_wait = match app.attached {
-            Some(_) => Duration::from_millis(16),
-            None => Duration::from_millis(200),
+        let idle_wait = match app.tab {
+            0 => Duration::from_millis(200),
+            _ => Duration::from_millis(16),
         };
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())
