@@ -47,6 +47,41 @@ pub static PI_SESSIONS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
         .unwrap_or_else(|| PI_AGENT_DIR.join("sessions"))
 });
 
+/// `$GEMINI_DIR`, falling back to `~/.gemini`.
+pub static GEMINI_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::var_os("GEMINI_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| HOME.join(".gemini"))
+});
+
+/// Gemini CLI files its chats under a scratch directory, one subtree per
+/// project: `tmp/<project>/chats/session-*.json{,l}`. The name reads like
+/// something disposable, but it is where the transcripts actually live.
+pub static GEMINI_CHATS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| GEMINI_HOME.join("tmp"));
+
+/// Windsurf keeps per-workspace editor state where its VS Code base does.
+///
+/// `$WINDSURF_USER_DIR` overrides the whole `User` directory, which is what a
+/// portable install moves; without it, follow the platform convention.
+pub static WINDSURF_USER_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    if let Some(dir) = std::env::var_os("WINDSURF_USER_DIR") {
+        return PathBuf::from(dir);
+    }
+    let base = if cfg!(target_os = "macos") {
+        HOME.join("Library").join("Application Support")
+    } else if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| HOME.join("AppData").join("Roaming"))
+    } else {
+        dirs::config_dir().unwrap_or_else(|| HOME.join(".config"))
+    };
+    base.join("Windsurf").join("User")
+});
+
+pub static WINDSURF_WORKSPACE_STORAGE: LazyLock<PathBuf> =
+    LazyLock::new(|| WINDSURF_USER_DIR.join("workspaceStorage"));
+
 /// OpenCode follows the platform data directory (`~/.local/share` on Linux).
 pub static OPENCODE_DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::var_os("OPENCODE_DATA_DIR")
