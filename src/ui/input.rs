@@ -106,10 +106,12 @@ impl App {
         if key.code == KeyCode::Char('y')
             && let Some(s) = self.selected_session().cloned()
         {
-            let _ = self.tx.send(Request::Delete(Box::new(s.clone())));
-            self.sessions.retain(|x| x.key() != s.key());
-            self.refilter();
-            self.set_status(format!("Deleted session {}", s.session_id));
+            if self.tx.send(Request::Delete(Box::new(s.clone()))).is_ok() {
+                self.deleting.insert(s.key());
+                self.set_status(format!("Deleting session {}…", s.session_id));
+            } else {
+                self.set_status("Could not start session deletion");
+            }
         }
         self.mode = Mode::List;
     }
@@ -308,6 +310,9 @@ impl App {
                 self.set_status("Refreshing…");
             }
             KeyCode::Char('d') => match self.selected_session() {
+                Some(s) if self.deleting.contains(&s.key()) => {
+                    self.set_status("Session deletion is already in progress")
+                }
                 Some(s) if s.is_running() => self.mode = Mode::DeleteBlocked,
                 Some(_) => self.mode = Mode::DeleteConfirm,
                 None => {}

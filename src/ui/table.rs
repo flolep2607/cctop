@@ -134,7 +134,8 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
             let s = &app.sessions[idx];
             let selected = app.scroll + i == app.selected;
             let marked = app.marked.contains(&s.key());
-            session_row(s, &widths, selected, marked, &now)
+            let deleting = app.deleting.contains(&s.key());
+            session_row(s, &widths, selected, marked, deleting, &now)
         })
         .collect();
 
@@ -146,6 +147,7 @@ fn session_row(
     widths: &[u16],
     selected: bool,
     marked: bool,
+    deleting: bool,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Line<'static> {
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
@@ -162,7 +164,11 @@ fn session_row(
 
     let mut spans = Vec::with_capacity(COLUMNS.len() * 2);
     for (c, w) in COLUMNS.iter().zip(widths) {
-        let text = columns::render_cell(c.id, s, now);
+        let text = if deleting && c.id == ColumnId::Status {
+            "…".to_string()
+        } else {
+            columns::render_cell(c.id, s, now)
+        };
         // Selection keeps the row's highlight but the status dot must stay
         // colored, otherwise you can't tell a running session from a stopped
         // one on the selected line.
@@ -176,7 +182,11 @@ fn session_row(
                 base
             }
         } else {
-            base.fg(cell_color(c.id, s, age_secs))
+            base.fg(if deleting && c.id == ColumnId::Status {
+                theme::COST_MID
+            } else {
+                cell_color(c.id, s, age_secs)
+            })
         };
         spans.push(Span::styled(pad(&text, *w, c.right_align), style));
         spans.push(Span::styled(" ", base));

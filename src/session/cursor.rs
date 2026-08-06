@@ -118,10 +118,11 @@ pub fn extract(path: &Path) -> SessionData {
     data
 }
 
-pub fn delete(session: &Session) {
+pub fn delete(session: &Session) -> std::io::Result<()> {
     if let Some(path) = &session.data_file {
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

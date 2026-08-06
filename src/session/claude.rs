@@ -1259,15 +1259,30 @@ pub fn extract_last_tool(session: &Session) -> String {
 }
 
 /// Remove a session's transcript, its subagent directory, and any desktop metadata.
-pub fn delete(session: &Session) {
+pub fn delete(session: &Session) -> std::io::Result<()> {
     let Some(file) = session.data_file.as_ref() else {
-        return;
+        return Ok(());
     };
-    let _ = std::fs::remove_file(file);
-    let _ = std::fs::remove_dir_all(file.with_extension(""));
+    std::fs::remove_file(file)?;
+    remove_dir_if_present(&file.with_extension(""))?;
     if let Some(meta) = &session.mac_meta {
-        let _ = std::fs::remove_file(&meta.meta_path);
-        let _ = std::fs::remove_dir_all(&meta.session_dir);
+        remove_file_if_present(&meta.meta_path)?;
+        remove_dir_if_present(&meta.session_dir)?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_present(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn remove_dir_if_present(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 
