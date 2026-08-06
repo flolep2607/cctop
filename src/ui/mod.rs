@@ -17,6 +17,7 @@ use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseButton, MouseEventKind,
 };
+use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::execute;
 use spark::History;
 use std::collections::HashMap;
@@ -819,25 +820,39 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let _ = req_tx.send(Request::Refresh);
 
     // `ratatui::init` installs a hook that leaves the alt screen and raw mode on
-    // panic, but it knows nothing about the mouse capture enabled below. Without
-    // this, a panic leaves the terminal emitting mouse escape sequences into the
-    // user's shell. Installed after `init` so it runs before ratatui's restore.
+    // panic, but it knows nothing about the mouse capture enabled below, nor does
+    // its restore path make the cursor visible again. Without this, a panic can
+    // leave the user's shell receiving mouse escape sequences or with no cursor.
+    // Installed after `init` so it runs before ratatui's restore hook.
     let mut terminal = ratatui::init();
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        restore_terminal();
         previous_hook(info);
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
 
     let result = event_loop(&mut app, &mut terminal, &res_rx, &req_tx, args.delay);
 
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    ratatui::restore();
+    restore_terminal();
 
     let _ = req_tx.send(Request::Shutdown);
     app.save_prefs();
     result
+}
+
+/// Undo every terminal mode the TUI may have changed.
+///
+/// `ratatui::restore` intentionally only disables raw mode and leaves the
+/// alternate screen; it does not restore cursor visibility. Keep this separate
+/// so regular exits, input errors, and panics all use the same cleanup path.
+fn restore_terminal() {
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(std::io::stdout(), Show);
+    ratatui::restore();
+    // Send Show once more after leaving the alternate screen. Some terminals
+    // scope cursor state to the active screen buffer.
+    let _ = execute!(std::io::stdout(), Show);
 }
 
 fn spawn_quota_poller(tx: Sender<Response>) {
