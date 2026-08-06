@@ -43,14 +43,26 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let socket = socket_path(pid);
 
     let raw = crossterm::terminal::enable_raw_mode().is_ok();
-    let fan = Arc::new(Mutex::new(Fanout::default()));
+    // Backgrounded (`setsid cctop claude </dev/null >/dev/null &`), there is no
+    // window here and nobody reading it, so this end gets no say in the size —
+    // a watcher would otherwise be held to a terminal that does not exist.
+    let has_window = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let local = match has_window {
+        true => crossterm::terminal::size().unwrap_or((80, 24)),
+        false => (0, 0),
+    };
+    let fan = Arc::new(Mutex::new(Fanout::new(master.try_clone()?, local)));
     {
         let (master, fan) = (master.try_clone()?, Arc::clone(&fan));
-        std::thread::spawn(move || pump_output(master, fan));
+        std::thread::spawn(move || pump_output(master, fan, Echo::Yes));
     }
-    for task in [pump_input, watch_resize] {
+    {
         let master = master.try_clone()?;
-        std::thread::spawn(move || task(master));
+        std::thread::spawn(move || pump_input(master));
+    }
+    if has_window {
+        let fan = Arc::clone(&fan);
+        std::thread::spawn(move || watch_resize(fan));
     }
     let control = master.try_clone()?;
     std::thread::spawn(move || serve(listener, control, fan));
@@ -63,6 +75,80 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         let _ = std::fs::remove_file(socket);
     }
     Ok(status?.code().unwrap_or(1))
+}
+
+/// An agent on a pty this process owns, drawing for whoever attaches rather
+/// than for a terminal.
+///
+/// Its life is this process's: the pty master closes when cctop exits, and the
+/// agent is hung up on. That is the same bargain `run` makes with the window it
+/// was started in.
+pub struct Hosted {
+    /// The agent's pid, which is also what its socket is named after.
+    pub pid: u32,
+    /// What to call it on screen until its own session row shows up.
+    pub label: String,
+    child: std::process::Child,
+    socket: Option<PathBuf>,
+}
+
+impl Hosted {
+    /// The agent's exit code, once it has one.
+    pub fn finished(&mut self) -> Option<i32> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.code().unwrap_or(1)),
+            // A child that cannot be waited on is one we cannot report on
+            // either, and leaving cctop running for it would hang the session.
+            Err(_) => Some(1),
+            Ok(None) => None,
+        }
+    }
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(socket) = &self.socket {
+            let _ = std::fs::remove_file(socket);
+        }
+    }
+}
+
+/// Run `argv` on a pty this process owns without taking the terminal.
+///
+/// The difference from [`run`] is what is *not* here: no echo to stdout, no
+/// keyboard, no raw mode, and no size of its own. `cctop <agent>` draws the
+/// agent inside its own interface, so a shim also painting it would be two
+/// programs writing to one screen.
+pub fn host(argv: &[String]) -> anyhow::Result<Hosted> {
+    if argv.is_empty() {
+        anyhow::bail!("usage: cctop <command> [args…]  (e.g. cctop claude)");
+    }
+    let (child, master) = spawn_on_pty(argv)?;
+    let pid = child.id();
+    let listener = listen(pid)?;
+    let socket = socket_path(pid);
+
+    // No window here at all, so the panel that attaches sets the size alone.
+    let fan = Arc::new(Mutex::new(Fanout::new(master.try_clone()?, (0, 0))));
+    {
+        let (master, fan) = (master.try_clone()?, Arc::clone(&fan));
+        std::thread::spawn(move || pump_output(master, fan, Echo::No));
+    }
+    std::thread::spawn(move || serve(listener, master, fan));
+    // The command as typed, minus any path, which is what the user called it.
+    let label = argv
+        .iter()
+        .map(|arg| arg.rsplit('/').next().unwrap_or(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(Hosted {
+        pid,
+        label,
+        child,
+        socket,
+    })
 }
 
 /// Whether `word` names something a shell could run, which is how `cctop claude`
@@ -100,6 +186,44 @@ fn base_dir() -> Option<PathBuf> {
         .map(|d| d.join("cctop"))
 }
 
+/// PIDs of the agents currently reachable through a shim, oldest socket first.
+///
+/// A socket whose shim has exited refuses connections rather than disappearing —
+/// the file only goes away if `cctop run` got to clean up — so liveness is tested
+/// by connecting, and the leftovers are swept up on the way past. Connecting is
+/// also the honest test: a pid can be recycled, but a socket cannot be.
+pub fn sessions() -> Vec<u32> {
+    let Some(dir) = base_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, u32)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(pid) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".sock"))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if UnixStream::connect(&path).is_err() {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        let created = entry
+            .metadata()
+            .and_then(|m| m.created().or_else(|_| m.modified()))
+            .unwrap_or(std::time::UNIX_EPOCH);
+        found.push((created, pid));
+    }
+    found.sort_unstable();
+    found.into_iter().map(|(_, pid)| pid).collect()
+}
+
 fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
     let path = socket_path(pid).ok_or_else(|| anyhow::anyhow!("no runtime or cache directory"))?;
     if let Some(parent) = path.parent() {
@@ -124,23 +248,107 @@ pub const ATTACH_MAGIC: &[u8] = b"\x00cctop-attach\n";
 /// rebuild what's on it without waiting for the next repaint.
 const REPLAY_BYTES: usize = 256 * 1024;
 
-/// Everything the pty has said lately, and everyone listening.
-#[derive(Default)]
+/// One watcher: where to send the pty's output, and how much room it has.
+struct Sub {
+    id: u64,
+    tx: SyncSender<Vec<u8>>,
+    size: (u16, u16),
+}
+
+/// Everything the pty has said lately, everyone listening, and the size that
+/// suits them all.
 struct Fanout {
+    /// Kept for setting the pty's size, which is the one thing here that must
+    /// reach the agent rather than a watcher.
+    master: File,
     recent: Vec<u8>,
-    subs: Vec<SyncSender<Vec<u8>>>,
+    subs: Vec<Sub>,
+    next_id: u64,
+    /// The window `cctop run` was started in, which is a viewer like any other
+    /// and the only one when nobody has attached.
+    local: (u16, u16),
+    /// What the pty was last set to, so an unchanged size costs no ioctl. Every
+    /// change is a SIGWINCH and a full repaint for the agent.
+    applied: (u16, u16),
 }
 
 impl Fanout {
+    fn new(master: File, local: (u16, u16)) -> Self {
+        Self {
+            recent: Vec::new(),
+            subs: Vec::new(),
+            next_id: 0,
+            local,
+            applied: pty_size(&master),
+            master,
+        }
+    }
+
     fn push(&mut self, chunk: &[u8]) {
         self.recent.extend_from_slice(chunk);
         if self.recent.len() > REPLAY_BYTES {
             self.recent.drain(..self.recent.len() - REPLAY_BYTES);
         }
+        let frame = crate::attach::frame::encode(crate::attach::frame::OUTPUT, chunk);
+        let before = self.subs.len();
         // ponytail: a subscriber that falls a channel behind is dropped rather
         // than slowing the agent's own terminal down. It reconnects and gets the
         // replay. Buffer per subscriber if that ever proves too twitchy.
-        self.subs.retain(|tx| tx.try_send(chunk.to_vec()).is_ok());
+        self.subs
+            .retain(|sub| sub.tx.try_send(frame.clone()).is_ok());
+        // A watcher that went away may have been the one holding the pty small.
+        if self.subs.len() != before {
+            self.fit();
+        }
+    }
+
+    fn set_local(&mut self, size: (u16, u16)) {
+        self.local = size;
+        self.fit();
+    }
+
+    fn remove(&mut self, id: u64) {
+        self.subs.retain(|sub| sub.id != id);
+        self.fit();
+    }
+
+    fn set_sub_size(&mut self, id: u64, size: (u16, u16)) {
+        if let Some(sub) = self.subs.iter_mut().find(|sub| sub.id == id) {
+            sub.size = size;
+        }
+        self.fit();
+    }
+
+    /// Resize the pty to the largest screen every viewer can show in full.
+    ///
+    /// A pty has one size and the agent draws to its edges, so with viewers of
+    /// different sizes something has to give: either the small ones crop what
+    /// they cannot fit, or everyone gets the small one's dimensions. tmux takes
+    /// the second, and so does this — a cropped agent hides exactly the thing
+    /// you attached to read, the prompt at the bottom of its screen. The window
+    /// `cctop run` was started in shrinks along with the rest and is restored
+    /// when the watcher detaches.
+    fn fit(&mut self) {
+        let size = std::iter::once(self.local)
+            .chain(self.subs.iter().map(|sub| sub.size))
+            .filter(|&(cols, rows)| cols > 0 && rows > 0)
+            .fold(None::<(u16, u16)>, |acc, (cols, rows)| match acc {
+                Some((c, r)) => Some((c.min(cols), r.min(rows))),
+                None => Some((cols, rows)),
+            });
+        let Some((cols, rows)) = size else { return };
+        if (cols, rows) == self.applied {
+            return;
+        }
+        self.applied = (cols, rows);
+        let ws = winsize(cols, rows);
+        // SAFETY: `master` is a live pty master and `ws` outlives the call.
+        unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) };
+        // Watchers size their own screens from this, not from what they asked
+        // for, since what they asked for is only ever an upper bound.
+        let frame = crate::attach::frame::size(crate::attach::frame::SIZE, cols, rows);
+        self.subs
+            .retain(|sub| sub.tx.try_send(frame.clone()).is_ok());
     }
 }
 
@@ -167,9 +375,15 @@ fn serve(listener: std::os::unix::net::UnixListener, master: File, fan: Arc<Mute
 }
 
 fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
+    use crate::attach::frame;
+
     let mut buf = [0u8; 4096];
     let mut first = true;
-    while let Ok(n) = stream.read(&mut buf) {
+    // Some once the connection has identified itself as a watcher, at which
+    // point what it sends stops being raw bytes and starts being frames.
+    let mut watcher: Option<(u64, frame::Decoder)> = None;
+
+    'connection: while let Ok(n) = stream.read(&mut buf) {
         if n == 0 {
             break;
         }
@@ -179,32 +393,81 @@ fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
         if std::mem::take(&mut first)
             && let Some(rest) = bytes.strip_prefix(ATTACH_MAGIC)
         {
-            subscribe(&stream, &master, &fan);
+            let Some(id) = subscribe(&stream, &fan) else {
+                break;
+            };
+            watcher = Some((id, frame::Decoder::default()));
             bytes = rest;
         }
-        if !bytes.is_empty() && (master.write_all(bytes).is_err() || master.flush().is_err()) {
-            break;
+        let Some((id, decoder)) = watcher.as_mut() else {
+            // An injector: everything it sends is meant for the keyboard.
+            if !bytes.is_empty() && (master.write_all(bytes).is_err() || master.flush().is_err()) {
+                break;
+            }
+            continue;
+        };
+        decoder.push(bytes);
+        while let Some((kind, payload)) = decoder.next() {
+            let delivered = match kind {
+                frame::KEYS => master
+                    .write_all(&payload)
+                    .and_then(|()| master.flush())
+                    .is_ok(),
+                frame::RESIZE => {
+                    if let Some(size) = frame::parse_size(&payload) {
+                        locked(&fan).set_sub_size(*id, size);
+                    }
+                    true
+                }
+                // Unknown kinds are skipped rather than fatal, so a newer cctop
+                // can add one and still drive a shim from an older release.
+                _ => true,
+            };
+            if !delivered {
+                break 'connection;
+            }
         }
+    }
+
+    // Drop the subscription now rather than when the next chunk finds it dead:
+    // this watcher may be the one keeping the pty small, and the window the
+    // agent runs in should come back the moment it detaches.
+    if let Some((id, _)) = watcher {
+        locked(&fan).remove(id);
     }
 }
 
-/// Send this client the recent output and everything that follows.
-fn subscribe(stream: &UnixStream, master: &File, fan: &Arc<Mutex<Fanout>>) {
-    let Ok(mut out) = stream.try_clone() else {
-        return;
-    };
-    let (cols, rows) = pty_size(master);
+/// Send this client the recent output and everything that follows, and return
+/// the id its size is tracked under.
+fn subscribe(stream: &UnixStream, fan: &Arc<Mutex<Fanout>>) -> Option<u64> {
+    use crate::attach::frame;
+
+    let mut out = stream.try_clone().ok()?;
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
-    {
+    let id = {
         // Held across the replay write so no chunk slips in between the replay
         // and the subscription, which would reorder the client's screen.
         let mut fan = locked(fan);
-        if writeln!(out, "cctop-size {cols} {rows}").is_err() || out.write_all(&fan.recent).is_err()
-        {
-            return;
+        let (cols, rows) = fan.applied;
+        // Size first: the replay is drawn for these dimensions, so a watcher
+        // that folded it into a differently sized screen would wrap every line
+        // in the wrong place.
+        let header = frame::size(frame::SIZE, cols, rows);
+        let replay = frame::encode(frame::OUTPUT, &fan.recent);
+        if out.write_all(&header).is_err() || out.write_all(&replay).is_err() {
+            return None;
         }
-        fan.subs.push(tx);
-    }
+        let id = fan.next_id;
+        fan.next_id += 1;
+        // No size yet: a watcher has no say until it asks for one, so attaching
+        // alone never resizes the agent.
+        fan.subs.push(Sub {
+            id,
+            tx,
+            size: (0, 0),
+        });
+        id
+    };
     std::thread::spawn(move || {
         while let Ok(chunk) = rx.recv() {
             if out.write_all(&chunk).is_err() {
@@ -212,6 +475,7 @@ fn subscribe(stream: &UnixStream, master: &File, fan: &Arc<Mutex<Fanout>>) {
             }
         }
     });
+    Some(id)
 }
 
 /// The pty's own geometry, which a watcher needs to wrap lines where the agent
@@ -283,13 +547,50 @@ fn spawn_on_pty(argv: &[String]) -> anyhow::Result<(std::process::Child, File)> 
     Ok((child, master))
 }
 
-fn pump_output(mut master: File, fan: Arc<Mutex<Fanout>>) {
+/// An agent on a pty with a live control socket, as `run` would leave one, minus
+/// the parts that need a real terminal. Returns the child and the pid its socket
+/// is named after.
+///
+/// Here rather than in the tests that use it because everything it touches is
+/// private to this module, and one of those tests lives in the UI.
+#[cfg(test)]
+pub(crate) fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u32) {
+    let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
+    let (child, master) = spawn_on_pty(&argv).expect("pty child");
+    let pid = child.id();
+    let listener = listen(pid).expect("control socket");
+    let fan = Arc::new(Mutex::new(Fanout::new(
+        master.try_clone().expect("master"),
+        local,
+    )));
+    locked(&fan).fit();
+    {
+        let (master, fan) = (master.try_clone().expect("master"), Arc::clone(&fan));
+        std::thread::spawn(move || pump_output(master, fan, Echo::No));
+    }
+    std::thread::spawn(move || serve(listener, master, fan));
+    (child, pid)
+}
+
+/// Whether the agent's output is also this process's output. It is for `run`,
+/// which stands in for the agent; it is not for `host`, whose stdout belongs to
+/// the UI drawing the agent.
+#[derive(PartialEq)]
+enum Echo {
+    Yes,
+    No,
+}
+
+fn pump_output(mut master: File, fan: Arc<Mutex<Fanout>>, echo: Echo) {
     let mut out = std::io::stdout();
     let mut buf = [0u8; 8192];
     // Flush every chunk: a TUI's escape sequences must not sit in a line buffer
     // waiting for a newline that never comes.
     while let Ok(n) = master.read(&mut buf) {
-        if n == 0 || out.write_all(&buf[..n]).is_err() || out.flush().is_err() {
+        if n == 0 {
+            break;
+        }
+        if echo == Echo::Yes && (out.write_all(&buf[..n]).is_err() || out.flush().is_err()) {
             break;
         }
         locked(&fan).push(&buf[..n]);
@@ -306,7 +607,9 @@ fn pump_input(mut master: File) {
     }
 }
 
-fn watch_resize(master: File) {
+/// Keep the fanout told how big the window `cctop run` was started in is. It
+/// decides what the pty does with that, since a watcher may be smaller.
+fn watch_resize(fan: Arc<Mutex<Fanout>>) {
     let mut last = crossterm::terminal::size().unwrap_or((80, 24));
     loop {
         std::thread::sleep(RESIZE_POLL);
@@ -315,9 +618,7 @@ fn watch_resize(master: File) {
         };
         if size != last {
             last = size;
-            let ws = winsize(size.0, size.1);
-            // SAFETY: `master` is a live pty master and `ws` outlives the call.
-            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) };
+            locked(&fan).set_local(size);
         }
     }
 }
@@ -369,7 +670,10 @@ mod tests {
         .unwrap();
         let pid = child.id();
         let listener = listen(pid).unwrap();
-        let fan = Arc::new(Mutex::new(Fanout::default()));
+        let fan = Arc::new(Mutex::new(Fanout::new(
+            master.try_clone().unwrap(),
+            (80, 24),
+        )));
         std::thread::spawn(move || serve(listener, master, fan));
 
         // Through the public entry point, so the socket lookup is covered too.
@@ -405,11 +709,14 @@ mod tests {
         .unwrap();
         let pid = child.id();
         let listener = listen(pid).unwrap();
-        let fan = Arc::new(Mutex::new(Fanout::default()));
+        let fan = Arc::new(Mutex::new(Fanout::new(
+            master.try_clone().unwrap(),
+            (80, 24),
+        )));
         for spawn in [0, 1] {
             let (master, fan) = (master.try_clone().unwrap(), Arc::clone(&fan));
             match spawn {
-                0 => std::thread::spawn(move || pump_output(master, fan)),
+                0 => std::thread::spawn(move || pump_output(master, fan, Echo::No)),
                 _ => {
                     let listener = listener.try_clone().unwrap();
                     std::thread::spawn(move || serve(listener, master, fan))
@@ -445,6 +752,69 @@ mod tests {
             "the replay did not carry what the child had drawn"
         );
         assert!(typed, "the keystroke never reached the child");
+    }
+
+    /// The point of the size negotiation: a watcher smaller than the window the
+    /// agent was launched in pulls the pty down to its size, the agent is told,
+    /// and detaching gives the window back what it had.
+    #[test]
+    fn a_watchers_size_reaches_the_agent_and_is_returned_when_it_leaves() {
+        // `stty size` reports the pty's dimensions as the child sees them, so
+        // this child narrates every resize it is given.
+        let (mut child, master) = spawn_on_pty(&[
+            "sh".into(),
+            "-c".into(),
+            "while :; do stty size; sleep 0.2; done".into(),
+        ])
+        .unwrap();
+        let pid = child.id();
+        let listener = listen(pid).unwrap();
+        let local = (100u16, 40u16);
+        let fan = Arc::new(Mutex::new(Fanout::new(master.try_clone().unwrap(), local)));
+        locked(&fan).fit();
+        {
+            let (master, fan) = (master.try_clone().unwrap(), Arc::clone(&fan));
+            std::thread::spawn(move || pump_output(master, fan, Echo::No));
+        }
+        {
+            let (master, fan) = (master.try_clone().unwrap(), Arc::clone(&fan));
+            std::thread::spawn(move || serve(listener, master, fan));
+        }
+
+        let settled = |want: (u16, u16)| {
+            (0..50).any(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                pty_size(&master) == want
+            })
+        };
+        let started_at_local = settled(local);
+
+        let mut attach = crate::attach::attach(pid).expect("no attach connection");
+        attach.resize(60, 20);
+        let shrank = settled((60, 20));
+        // The agent is told, not just the pty: without SIGWINCH reaching it, a
+        // TUI would go on painting at the old width.
+        let agent_told = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            attach.pump();
+            // stty prints rows first.
+            attach.parser.screen().contents().contains("20 60")
+        });
+        // And the shim's own answer, which is what sizes the watcher's screen.
+        let watcher_told = attach.size == (60, 20);
+
+        drop(attach);
+        let restored = settled(local);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = socket_path(pid).map(std::fs::remove_file);
+
+        assert!(started_at_local, "the pty did not start at the local size");
+        assert!(shrank, "the watcher's size never reached the pty");
+        assert!(agent_told, "the agent was not told its new size");
+        assert!(watcher_told, "the watcher was not told the granted size");
+        assert!(restored, "detaching did not give the window its size back");
     }
 
     /// Same pty child, no listener: the shim backend must fall through rather

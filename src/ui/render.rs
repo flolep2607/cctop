@@ -94,8 +94,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     let area = frame.area();
     let mut layout = Layout::default();
 
-    // Attached: the agent's own screen replaces the table and panels, and the
+    // Attached: the agent's screen replaces the table and panels, and the
     // Overview stays put so the money and the alerts never leave the frame.
+    // The agent is resized to the space that leaves it rather than cropped to
+    // fit, so giving cctop these rows costs nothing but the rows.
     if app.attached.is_some() {
         let chunks = RLayout::vertical([
             Constraint::Length(6),
@@ -140,6 +142,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::DeleteConfirm => modals::draw_delete_confirm(frame, area, app),
         Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app),
         Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
+        Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
         Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
         Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),
         Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true),
@@ -151,36 +154,34 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     layout
 }
 
-/// The attached agent's terminal, exactly as it is drawing it.
+/// The attached agent's terminal, exactly as it is drawing it, inside cctop
+/// rather than instead of it.
 ///
-/// The pty has one size, set by the terminal that started it, and cctop's panel
-/// is whatever is left after the Overview — so when the panel is smaller the
-/// screen is shown from its top-left corner and the title says by how much it is
-/// cropped. Resizing the pty instead would fix the crop and break the display in
-/// the window the agent was launched from.
-fn draw_attached(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(attached) = app.attached.as_ref() else {
+/// The panel asks for the agent to be resized to fit it, so what is on screen is
+/// the agent's whole screen rather than its top-left corner. The shim may give
+/// less than was asked for — it has to satisfy the window `cctop run` was
+/// started in as well — so the answer, not the request, is what gets drawn, and
+/// the leftover is left blank rather than stretched into.
+fn draw_attached(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Built before the mutable borrow below, since it reads from the same `app`.
+    let block = panel_block(&format!("attached: {}", app.attached_label))
+        .title_bottom(Span::styled(" F12 detaches ", theme::title()));
+    let Some(attached) = app.attached.as_mut() else {
         return;
     };
-    let (cols, rows) = attached.size;
-    let block = panel_block("attached");
     let inner = block.inner(area);
-    let cropped = cols > inner.width || rows > inner.height;
-    let title = if cropped {
-        format!(
-            "{} — {}×{} of {cols}×{rows}, F12 detaches",
-            app.attached_label, inner.width, inner.height
-        )
-    } else {
-        format!("{} — F12 detaches", app.attached_label)
+    attached.resize(inner.width, inner.height);
+
+    let (cols, rows) = attached.size;
+    let screen = Rect {
+        width: cols.min(inner.width),
+        height: rows.min(inner.height),
+        ..inner
     };
-    frame.render_widget(
-        block.title(Span::styled(format!(" {title} "), theme::title())),
-        area,
-    );
+    frame.render_widget(block, area);
     frame.render_widget(
         tui_term::widget::PseudoTerminal::new(attached.parser.screen()),
-        inner,
+        screen,
     );
 }
 
@@ -935,5 +936,103 @@ mod tests {
             ..window
         };
         assert_eq!(quota_color(&sustainable, reset), theme::COST_LOW);
+    }
+
+    /// Attaching keeps you inside cctop: the Overview and the footer stay, and
+    /// the agent is resized into what is left rather than cropped to it.
+    ///
+    /// Linux-only for the same reason as the shim's own tests — it needs a pty
+    /// child, which hangs on the macOS runner.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_attached_agent_is_resized_into_the_space_cctop_leaves_it() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // Draws once and then sits there, so anything on screen came from the
+        // replay and anything that changes came from the resize.
+        let (mut child, pid) = crate::shim::test_session(
+            &["sh", "-c", "printf 'HELLO-FROM-AGENT'; sleep 30"],
+            // Wider and taller than the window below, so a crop would show.
+            (200, 60),
+        );
+        let attached = crate::attach::attach(pid).expect("no attach connection");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.attached = Some(attached);
+        app.attached_label = "agent".into();
+
+        let (cols, rows) = (60u16, 20u16);
+        // Six rows of Overview, one of footer, and a border around the rest.
+        let want = (cols - 2, rows - 6 - 1 - 2);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        // The resize is asked for while drawing and granted a round trip later,
+        // so drawing once is never enough.
+        let mut sized = false;
+        for _ in 0..50 {
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            if let Some(attached) = app.attached.as_mut() {
+                attached.pump();
+                sized = attached.size == want;
+            }
+            if sized {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // One more frame, so what is asserted below was drawn at the final size.
+        terminal
+            .draw(|frame| {
+                draw(frame, &mut app);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let row = |y: u16| {
+            (0..cols)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let screen: Vec<String> = (0..rows).map(row).collect();
+
+        drop(app.attached.take());
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+
+        assert!(
+            sized,
+            "the pty was never resized to the panel; wanted {want:?}"
+        );
+        // Attaching must not throw cctop's own interface away: the Overview is
+        // still at the top, the agent is in the panel below it, and the footer
+        // is still the last row.
+        assert!(
+            screen[0].contains("Overview"),
+            "the Overview is gone: {:?}",
+            screen[0]
+        );
+        assert!(
+            screen[6].contains("attached: agent"),
+            "the attach panel is not below the Overview: {:?}",
+            screen[6]
+        );
+        assert!(
+            screen[7].starts_with("│HELLO-FROM-AGENT"),
+            "the agent's screen is not inside the panel: {:?}",
+            &screen[6..9]
+        );
+        assert!(
+            screen[rows as usize - 2].contains("F12 detaches"),
+            "the detach hint is missing: {:?}",
+            screen[rows as usize - 2]
+        );
     }
 }
