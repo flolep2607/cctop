@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod inject;
 mod loader;
+mod notify;
 mod pricing;
 mod proc;
 mod quota;
