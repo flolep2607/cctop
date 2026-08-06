@@ -245,7 +245,9 @@ fn spawn_worker(
                     }
                 }
                 Request::Data(session) => {
-                    let data = loader.store().session_data(&session);
+                    // The open panels are the one view where staleness shows, so
+                    // this path never accepts a backed-off entry.
+                    let data = loader.store().session_data_fresh(&session);
                     if tx
                         .send(Response::Data(session.key(), Box::new(data)))
                         .is_err()
