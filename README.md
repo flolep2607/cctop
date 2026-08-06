@@ -6,7 +6,9 @@ tool invocations, subagents, and OS-level process metrics — refreshed live.
 
 For active sessions, the **HARNESS** column distinguishes the host application
 (for example, Cursor) from the model. Unknown launchers remain `─` rather than
-being guessed.
+being guessed. **BRANCH** is the branch checked out in the session's working
+directory, read from the repository's `HEAD` — `@<commit>` when it is detached,
+and `─` when the directory is not in a repository at all.
 
 A Rust rewrite of an earlier Node implementation.
 
@@ -114,11 +116,13 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | Key | Action |
 |-----|--------|
 | `↑`, `↓`/`j` | Move between sessions |
-| `PgUp`, `PgDn`, `b` | Page up / down |
+| `PgUp`, `PgDn` | Page up / down |
 | `Ctrl+U`, `Ctrl+D` | Half a page up / down |
 | `g`, `G` | Jump to first / last |
 | `Home`, `End` | Jump to first / last |
-| `n`, `N` | Next / previous search match (wraps) |
+| `Ctrl+N`, `Ctrl+P` | Next / previous search match (wraps) |
+| `n` | Toggle notifications (see below) |
+| `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
 | `1`–`7` | Jump to a panel directly |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
@@ -238,6 +242,34 @@ inside a pane, that interrupts the agent rather than quitting cctop. `F12` and
 `Alt` are what cctop keeps — the function keys because they are the ones agents
 never want, and `Alt` because `Ctrl` is the agent's.
 
+### Getting pinged when a session needs you
+
+cctop is a monitor you look away from, so `n` turns on the other direction:
+when a session that was working starts waiting for your input — or the agent
+exits — cctop rings the terminal bell and raises a desktop notification. The
+setting is off by default and remembered between runs.
+
+Both are the terminal's own mechanisms, so nothing has to be installed. `BEL`
+is what tmux turns into a `monitor-bell` window flag; the desktop notification
+is OSC 9, which iTerm2, Ghostty, kitty, WezTerm and Windows Terminal raise as a
+real notification and everything else quietly ignores.
+
+It rings on the *crossing*, never on the state: a session that is waiting for
+you is still waiting on the next refresh, and ringing for that would be an
+alarm clock. For the same reason, turning notifications on doesn't ring for
+every session that happens to be idle at that moment — cctop tracks the states
+whether or not the bell is on, and starts from what it already knows.
+
+The session that rang keeps a bell marker (`◉`) on its row for 30 seconds, and
+the footer keeps naming it (`Bell: ◉ cctop · waiting for input · 12s ago`)
+until you select it. `b` jumps straight there. A bell out of a dozen panes is
+never a mystery, even if you were away when it rang.
+
+One thing it deliberately does *not* ring for: an agent that has simply
+finished its turn and is sitting at its prompt. In the transcript that looks
+the same as an agent still thinking, and a timer would fire in the middle of
+every long reasoning turn.
+
 ## Where data comes from
 
 | Source | Path |
@@ -255,7 +287,8 @@ live in `~/.cache/cctop/`.
 
 The left status dot is green while an agent is working, amber after its latest
 response is waiting for your input, and red when the newest transcript event is
-an API error. A hollow grey dot is a stopped session.
+an API error. A hollow grey dot is a stopped session, and a filled `◉` is the
+session that rang in the last 30 seconds.
 
 ## A note on cost figures
 

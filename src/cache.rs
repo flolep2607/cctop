@@ -332,6 +332,10 @@ pub struct UiPrefs {
     pub subagent_sort_asc: bool,
     /// Only show sessions whose cost reaches this floor (0 disables it).
     pub cost_floor: f64,
+    /// Ring the bell and raise a desktop notification when a session needs you.
+    /// Opt-in and remembered, because whether a terminal may make noise is a
+    /// property of the room you sit in, not of this run.
+    pub notify: bool,
     /// The shell alias block has been written once. Kept here so removing the
     /// block — by flag or by hand — isn't undone by the next launch.
     pub shell_alias_installed: bool,
@@ -348,6 +352,7 @@ impl Default for UiPrefs {
             subagent_sort_col: "last".into(),
             subagent_sort_asc: false,
             cost_floor: 0.0,
+            notify: false,
             shell_alias_installed: false,
         }
     }

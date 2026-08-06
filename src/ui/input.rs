@@ -267,8 +267,11 @@ impl App {
             KeyCode::Char('q') | KeyCode::F(10) => self.request_quit(),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageUp | KeyCode::Char('b') => self.move_selection(-PAGE),
+            KeyCode::PageUp => self.move_selection(-PAGE),
             KeyCode::PageDown => self.move_selection(PAGE),
+            // `b` was a second name for PageUp; answering a bell is worth more
+            // than a third way to scroll up, and PageUp and Ctrl+U both remain.
+            KeyCode::Char('b') => self.jump_to_bell(),
             KeyCode::Char('g') => {
                 self.selected = 0;
                 self.ensure_available_tab();
@@ -307,8 +310,11 @@ impl App {
             KeyCode::Char('U') => self.unmark_all(),
             KeyCode::Char('D') => self.batch(BatchKind::Delete),
             KeyCode::Char('K') => self.batch(BatchKind::Kill),
-            KeyCode::Char('n') => self.cycle_matches(1),
-            KeyCode::Char('N') => self.cycle_matches(-1),
+            // Search-match cycling moves to the Ctrl pair so `n` can be the
+            // notification toggle it is in every other monitor that has one.
+            KeyCode::Char('n') if ctrl => self.cycle_matches(1),
+            KeyCode::Char('p') if ctrl => self.cycle_matches(-1),
+            KeyCode::Char('n') => self.toggle_notifications(),
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
                     format!("{:.2}", self.cost_floor)
