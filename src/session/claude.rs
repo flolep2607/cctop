@@ -2,8 +2,8 @@
 
 use super::extract::{self, for_each_jsonl, read_first_lines, read_last_lines};
 use super::{
-    ContextUsage, Costs, MacMeta, Metrics, ModelBreakdown, Session, SessionData, Subagent,
-    SubagentStatus, Surface, Tokens, transcript_files,
+    ContextBreakdown, ContextUsage, Costs, MacMeta, Metrics, ModelBreakdown, Session, SessionData,
+    Subagent, SubagentStatus, Surface, Tokens, transcript_files,
 };
 use crate::config::{self, CLAUDE_1M_CTX, CLAUDE_DEFAULT_CTX};
 use crate::pricing::{self, Provider};
@@ -329,6 +329,54 @@ struct SubStats {
     latest_used_ts: String,
 }
 
+/// Characters of live-context content, by where it came from.
+///
+/// Counted in characters rather than tokens because the transcript is text and
+/// cctop has no tokenizer; [`CHARS_PER_TOKEN`] converts once, at the end.
+#[derive(Debug, Default)]
+struct CtxChars {
+    tool_output: u64,
+    tool_input: u64,
+    attachments: u64,
+    user_text: u64,
+    assistant_text: u64,
+}
+
+/// Characters per token for the text these transcripts carry.
+///
+/// Fitted, not assumed: across 167 local sessions, dividing the characters a
+/// transcript accumulated by the context growth the API reported over the same
+/// span lands at 2.75 — well under the usual prose rule of thumb, because this
+/// content is mostly code, JSON and file paths. The fit is stable within a
+/// session; it is the mix that moves it, not the length.
+// ponytail: a fitted constant, not a tokenizer. If a category ever needs to be
+// defensible on its own rather than as a share of the panel, swap in tiktoken.
+const CHARS_PER_TOKEN: f64 = 2.75;
+
+/// Whether an entry's content sits in the main conversation's context window.
+///
+/// Subagents run against their own window. Modern transcripts give them their
+/// own file, but older ones interleave their turns into the parent's, flagged
+/// `isSidechain` — and counting those would both credit another agent's tool
+/// output to this session and let its usage figures move the window size itself.
+/// Costs still count them, which is why this is separate from `is_main`: they
+/// were billed to this session even though they were never in its context.
+fn in_context(item: &Value, is_main: bool) -> bool {
+    is_main && item.get("isSidechain").and_then(Value::as_bool) != Some(true)
+}
+
+/// Serialized size of a content value, as a stand-in for its share of the window.
+///
+/// Strings are measured directly so the common case allocates nothing; anything
+/// structured is measured as the JSON the API is handed.
+fn content_chars(v: Option<&Value>) -> u64 {
+    match v {
+        Some(Value::String(s)) => s.len() as u64,
+        None | Some(Value::Null) => 0,
+        Some(other) => other.to_string().len() as u64,
+    }
+}
+
 /// A parent-side `Agent` tool_use block.
 #[derive(Debug, Clone, Default)]
 struct AgentUse {
@@ -369,6 +417,12 @@ struct Extractor {
     tool_delta: HashMap<String, super::Delta>,
     /// Request key -> final (input, output) tokens, filled when the file flushes.
     req_usage: HashMap<String, (u64, u64)>,
+    /// Main-transcript content still in the window, reset at each compaction.
+    ctx_chars: CtxChars,
+    /// Window size at the live segment's first request, and at its last.
+    ctx_startup: Option<u64>,
+    ctx_total: u64,
+    ctx_after_compaction: bool,
     error: Option<String>,
 }
 
@@ -516,6 +570,7 @@ impl Extractor {
 
     fn visit_user(&mut self, item: &Value, is_main: bool) {
         let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
+        let ctx = in_context(item, is_main);
 
         // Line counts, and the diff itself, from edit tool results.
         let mut delta: Option<super::Delta> = None;
@@ -550,18 +605,35 @@ impl Extractor {
         let content = item.get("message").and_then(|m| m.get("content"));
         let mut texts: Vec<&str> = Vec::new();
         match content {
-            Some(Value::String(s)) => texts.push(s),
+            Some(Value::String(s)) => {
+                texts.push(s);
+                if ctx {
+                    self.ctx_chars.user_text += s.len() as u64;
+                }
+            }
             Some(Value::Array(blocks)) => {
                 for block in blocks {
                     match block {
-                        Value::String(s) => texts.push(s),
+                        Value::String(s) => {
+                            texts.push(s);
+                            if ctx {
+                                self.ctx_chars.user_text += s.len() as u64;
+                            }
+                        }
                         Value::Object(_) => {
                             if let Some(t) = block.get("text").and_then(Value::as_str) {
                                 texts.push(t);
+                                if ctx {
+                                    self.ctx_chars.user_text += t.len() as u64;
+                                }
                             }
                             if block.get("type").and_then(Value::as_str) == Some("tool_result")
                                 && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
                             {
+                                if ctx {
+                                    self.ctx_chars.tool_output +=
+                                        content_chars(block.get("content"));
+                                }
                                 if is_main {
                                     self.agent_results.insert(id.to_string());
                                 }
@@ -594,6 +666,39 @@ impl Extractor {
         }
     }
 
+    /// Track how full the window was when this request was sent.
+    ///
+    /// The first request of a segment is the only place the harness's own
+    /// overhead is visible: its input is the system prompt, the tool schemas,
+    /// CLAUDE.md and the skills index, with nothing of the conversation in front
+    /// of it yet. Everything counted before it is discarded rather than added,
+    /// since that content is already inside the number.
+    fn note_window(&mut self, message: &Value) {
+        let Some(usage) = message.get("usage") else {
+            return;
+        };
+        let u = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let window =
+            u("input_tokens") + u("cache_read_input_tokens") + u("cache_creation_input_tokens");
+        if window == 0 {
+            return;
+        }
+        if self.ctx_startup.is_none() {
+            self.ctx_startup = Some(window);
+            self.ctx_chars = CtxChars::default();
+        }
+        self.ctx_total = window;
+    }
+
+    /// A compaction replaced the conversation with a summary, so everything
+    /// counted so far has left the window. Start the segment over; the next
+    /// request's input becomes the new baseline, summary included.
+    fn note_compaction(&mut self) {
+        self.ctx_chars = CtxChars::default();
+        self.ctx_startup = None;
+        self.ctx_after_compaction = true;
+    }
+
     fn visit_assistant(
         &mut self,
         item: &Value,
@@ -605,6 +710,14 @@ impl Extractor {
             return;
         };
         let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
+
+        // Before anything is counted: the request's own view of how full the
+        // window is. Done first so the segment's opening request resets the
+        // character counters before this entry's blocks land in them.
+        let ctx = in_context(item, is_main);
+        if ctx {
+            self.note_window(message);
+        }
 
         // The request key identifies the turn; tokens are attributed to it and
         // resolved once the file's streaming partials have been deduped.
@@ -631,6 +744,13 @@ impl Extractor {
         if let Some(blocks) = message.get("content").and_then(Value::as_array) {
             for block in blocks {
                 if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    // What the assistant said back. Its thinking is deliberately
+                    // not counted: Claude Code writes those blocks with an empty
+                    // `thinking` string and only the signature survives, so there
+                    // is nothing to measure and it stays in the unaccounted gap.
+                    if ctx && block.get("type").and_then(Value::as_str) == Some("text") {
+                        self.ctx_chars.assistant_text += content_chars(block.get("text"));
+                    }
                     continue;
                 }
                 let Some(name) = block.get("name").and_then(Value::as_str) else {
@@ -664,6 +784,10 @@ impl Extractor {
                             },
                         ));
                     }
+                }
+                if ctx {
+                    self.ctx_chars.tool_input +=
+                        content_chars(block.get("input")) + name.len() as u64;
                 }
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
                 let block_id = block.get("id").and_then(Value::as_str);
@@ -762,6 +886,15 @@ impl Extractor {
             }
         }
 
+        // Newer transcripts flag the summary entry itself; older ones wrote a
+        // `compact_boundary` system entry instead. Both mean the same thing.
+        if in_context(item, is_main)
+            && (item.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+                || item.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))
+        {
+            self.note_compaction();
+        }
+
         match item.get("type").and_then(Value::as_str) {
             Some("system") => {
                 if item.get("subtype").and_then(Value::as_str) == Some("turn_duration")
@@ -769,6 +902,18 @@ impl Extractor {
                 {
                     self.metrics.api_duration_ms += ms;
                 }
+            }
+            // Hook output, task reminders, IDE state, @-mentioned files and the
+            // skill listing: content the harness splices into the next user
+            // message, recorded as its own entry rather than inside one.
+            Some("attachment") if in_context(item, is_main) => {
+                let attachment = item.get("attachment");
+                // Some kinds carry no `content` and are the payload themselves,
+                // such as the file reference a compaction leaves behind.
+                self.ctx_chars.attachments += match attachment.and_then(|a| a.get("content")) {
+                    Some(content) => content_chars(Some(content)),
+                    None => content_chars(attachment),
+                };
             }
             Some("custom-title") if is_main => {
                 if let Some(t) = item.get("customTitle").and_then(Value::as_str) {
@@ -874,6 +1019,21 @@ pub fn extract(transcript: &Path) -> SessionData {
 
     let title = ext.custom_title.clone().or_else(|| ext.ai_title.clone());
 
+    // A session with no usage figures has no window to break down; the estimate
+    // alone would be a share of nothing.
+    let est = |chars: u64| (chars as f64 / CHARS_PER_TOKEN).round() as u64;
+    let c = &ext.ctx_chars;
+    let context_breakdown = (ext.ctx_total > 0).then(|| ContextBreakdown {
+        total: ext.ctx_total,
+        startup: ext.ctx_startup.unwrap_or(0),
+        tool_output: est(c.tool_output),
+        tool_input: est(c.tool_input),
+        attachments: est(c.attachments),
+        user_text: est(c.user_text),
+        assistant_text: est(c.assistant_text),
+        after_compaction: ext.ctx_after_compaction,
+    });
+
     SessionData {
         title,
         custom_title: ext.custom_title,
@@ -891,6 +1051,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         costs_by_day: ext.costs_by_day,
         costs_by_hour: ext.costs_by_hour,
         metrics: ext.metrics,
+        context_breakdown,
         subagents,
         rates: None,
         error: None,
@@ -1289,6 +1450,132 @@ fn remove_dir_if_present(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a transcript to a unique temp path and parse it.
+    fn extract_lines(tag: &str, lines: &[String]) -> SessionData {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-claude-{tag}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write transcript");
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+        data
+    }
+
+    fn assistant(request: &str, window: u64, content: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"{request}","message":{{"id":"m_{request}","role":"assistant","model":"claude-opus-5","content":[{content}],"usage":{{"input_tokens":{window},"output_tokens":5}}}}}}"#
+        )
+    }
+
+    /// The panel's whole claim is that it separates what was measured from what
+    /// was guessed. `startup` is the first request's own input count, so anything
+    /// the transcript recorded before it — the opening prompt here — is already
+    /// inside that number and must not be counted a second time.
+    #[test]
+    fn context_breakdown_measures_startup_and_estimates_the_rest() {
+        let result = "x".repeat(2750);
+        let data = extract_lines(
+            "ctx-split",
+            &[
+                r#"{"type":"user","timestamp":"2026-08-05T10:00:00.000Z","message":{"role":"user","content":"an opening prompt long enough to notice"}}"#.to_string(),
+                assistant("req_1", 1000, r#"{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}"#),
+                format!(
+                    r#"{{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"{result}"}}]}}}}"#
+                ),
+                assistant("req_2", 5000, r#"{"type":"text","text":"done"}"#),
+            ],
+        );
+
+        let b = data.context_breakdown.expect("a breakdown");
+        assert_eq!(b.total, 5000, "the window is the last request's own figure");
+        assert_eq!(b.startup, 1000, "startup is the first request's own figure");
+        assert_eq!(
+            b.user_text, 0,
+            "the opening prompt is already inside startup"
+        );
+        assert_eq!(b.tool_output, 1000, "2750 chars at 2.75 chars/token");
+        assert!(
+            b.tool_input > 0,
+            "the call's arguments occupy the window too"
+        );
+        assert!(!b.after_compaction);
+
+        // Nothing is scaled to fill the window; the shortfall is reported as-is.
+        assert_eq!(
+            b.unaccounted(),
+            5000 - 1000 - b.estimated() as i64,
+            "the gap must be the plain remainder"
+        );
+        assert!(b.unaccounted() > 0);
+    }
+
+    /// A compaction throws the conversation away and replaces it with a summary,
+    /// so a breakdown that kept counting across it would describe a window that
+    /// no longer exists.
+    #[test]
+    fn compaction_restarts_the_context_breakdown() {
+        let result = "x".repeat(2750);
+        let data = extract_lines(
+            "ctx-compact",
+            &[
+                assistant("req_1", 1000, r#"{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}"#),
+                format!(
+                    r#"{{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"{result}"}}]}}}}"#
+                ),
+                assistant("req_2", 5000, r#"{"type":"text","text":"done"}"#),
+                r#"{"type":"user","isCompactSummary":true,"timestamp":"2026-08-05T10:00:02.000Z","message":{"role":"user","content":"a summary of everything above"}}"#.to_string(),
+                assistant("req_3", 1500, r#"{"type":"text","text":"carrying on"}"#),
+            ],
+        );
+
+        let b = data.context_breakdown.expect("a breakdown");
+        assert!(b.after_compaction);
+        assert_eq!(b.total, 1500);
+        assert_eq!(
+            b.startup, 1500,
+            "the post-compaction baseline absorbs the summary"
+        );
+        assert_eq!(
+            b.tool_output, 0,
+            "the pre-compaction result has left the window"
+        );
+        assert_eq!(b.tool_input, 0);
+    }
+
+    /// Older transcripts write a subagent's turns into the parent's file. Those
+    /// run against their own window, so letting one in would both credit its
+    /// tool output to this session and let its usage figures resize the window.
+    #[test]
+    fn interleaved_subagent_turns_stay_out_of_the_context_breakdown() {
+        let result = "x".repeat(2750);
+        let sidechain = format!(
+            r#"{{"type":"user","isSidechain":true,"timestamp":"2026-08-05T10:00:01.000Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_sub","content":"{result}"}}]}}}}"#
+        );
+        let data = extract_lines(
+            "ctx-sidechain",
+            &[
+                assistant("req_1", 1000, r#"{"type":"text","text":"starting"}"#),
+                sidechain,
+                r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-08-05T10:00:02.000Z","requestId":"req_sub","message":{"id":"m_sub","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"agent reply"}],"usage":{"input_tokens":90000,"output_tokens":5}}}"#.to_string(),
+                assistant("req_2", 2000, r#"{"type":"text","text":"done"}"#),
+            ],
+        );
+
+        let b = data.context_breakdown.expect("a breakdown");
+        assert_eq!(b.total, 2000, "a subagent's window is not this session's");
+        assert_eq!(
+            b.tool_output, 0,
+            "its tool output never entered this window"
+        );
+        // Its cost still counts: it was billed to this session either way.
+        assert!(data.costs.total > 0.0);
+    }
 
     /// A failed call must be distinguishable from a successful one. Claude
     /// records the outcome on the `tool_result`, which is a separate entry from

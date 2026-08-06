@@ -471,7 +471,8 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
                 app.subagent_scroll,
             ),
             5 => (panels::cost(session, data, app.plan), app.cost_scroll),
-            _ => (panels::config(session), app.config_scroll),
+            6 => (panels::config(session), app.config_scroll),
+            _ => (panels::context(session, data, width), app.context_scroll),
         }
     };
 
