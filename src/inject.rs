@@ -251,17 +251,23 @@ mod tests {
         });
 
         let pane = reader.and_then(pane_for);
-        if let Some(pane) = &pane {
+        // Wait for the input to arrive *before* tearing the session down. Killing
+        // it first destroys the child mid-read, discarding the very thing under
+        // test — which is why this passed locally and failed on a loaded runner.
+        let text = pane.as_ref().and_then(|pane| {
             send(pane, "continue").unwrap();
-        }
+            wait_for(|| std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty()))
+        });
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", session])
             .status();
+        let _ = std::fs::remove_file(&out);
 
         assert!(pane.is_some(), "no pane found for the reader process");
-        let text = wait_for(|| std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty()));
-        let _ = std::fs::remove_file(&out);
-        assert_eq!(text.unwrap().trim(), "continue");
+        assert_eq!(
+            text.expect("nothing reached the child as input").trim(),
+            "continue"
+        );
     }
 
     /// tmux starts panes and flushes writes asynchronously; poll rather than
