@@ -248,6 +248,35 @@ repaints constantly (a spinner's elapsed counter alone ticks every second), so
 two seconds of a still screen means the agent is waiting on you. That needs no
 per-harness parsing and works for anything you open in a tab, shells included.
 
+#### Letting Claude Code tell cctop directly
+
+Both of those are cctop guessing. Claude Code can just say it:
+
+```bash
+cctop --install-hooks     # merge cctop's hooks into ~/.claude/settings.json
+cctop --remove-hooks      # take them back out
+```
+
+That registers four hooks — `Stop`, `Notification`, `UserPromptSubmit`,
+`PreToolUse` — each running `cctop hook <event>`, which forwards the event to a
+running cctop over a unix socket. A reported turn beats a still screen: the
+green appears the instant the turn ends rather than two seconds later, and the
+amber no longer waits for a transcript to be written. Sessions already running
+keep their old hooks until they restart.
+
+The installer merges into your settings rather than writing them, matches its
+own entries by command text so it is idempotent and removable, writes through a
+temporary file so an interrupted write cannot leave you with no settings, and
+refuses outright if the file is not valid JSON rather than replacing it.
+
+**`cctop hook` cannot break your session.** An agent reads a hook's exit code as
+a decision — exit 2 blocks the tool call — so this one exits 0 unconditionally,
+writes nothing to stdout, and is bounded by a 250ms deadline covering the whole
+exchange, on a thread the process abandons if it overruns. No cctop running, a
+stale socket, malformed input, a wedged cctop, an outright panic: every one of
+them is a silent, prompt success. Dropping an event is always cheaper than
+stalling an agent.
+
 Panes cctop started are cctop's to end: closing one (`Alt+w`, or the agent
 exiting on its own) takes the agent with it, and quitting cctop takes them all.
 A pane opened onto someone else's session with `a` only stops watching.
