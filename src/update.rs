@@ -151,7 +151,14 @@ pub fn available_update() -> Option<String> {
 /// attacker-controlled input in the general case, and honouring arbitrary paths
 /// inside one is how extraction escapes its destination directory.
 fn unpack(archive: &[u8], target: &str, into: &Path) -> Result<PathBuf> {
-    let binary_name = if cfg!(windows) { "cctop.exe" } else { "cctop" };
+    // Both the container format and the executable's name are properties of the
+    // archive's target, not of the host reading it. Deriving the name from
+    // `cfg!(windows)` instead made them disagree whenever the two differ.
+    let binary_name = if target.contains("windows") {
+        "cctop.exe"
+    } else {
+        "cctop"
+    };
     let out = into.join(binary_name);
 
     if target.contains("windows") {

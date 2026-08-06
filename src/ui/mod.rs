@@ -1390,10 +1390,20 @@ mod tests {
             session("c", false, "/x"),
         ];
         app.refilter();
-        // Mark a and c.
-        app.selected = 0;
+        // Mark a and c by identity, not by row: the three fixtures are created in
+        // the same instant, so which row each lands on depends on how the clock
+        // happened to tick. Selecting by index made this assert the sort order,
+        // and it failed on hosts where those timestamps came out equal or out of
+        // creation order.
+        let row = |app: &App, id: &str| {
+            app.visible
+                .iter()
+                .position(|&i| app.sessions[i].session_id == id)
+                .expect("fixture is visible")
+        };
+        app.selected = row(&app, "a");
         app.toggle_mark();
-        app.selected = 2;
+        app.selected = row(&app, "c");
         app.toggle_mark();
         assert_eq!(app.marked.len(), 2);
         assert_eq!(app.marked_sessions().len(), 2);
