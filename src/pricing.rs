@@ -348,8 +348,10 @@ pub enum Provider {
     Claude,
     Codex,
     Cursor,
+    Gemini,
     OpenCode,
     Pi,
+    Windsurf,
 }
 
 impl Provider {
@@ -358,8 +360,10 @@ impl Provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
             Provider::Cursor => "cursor",
+            Provider::Gemini => "gemini",
             Provider::OpenCode => "opencode",
             Provider::Pi => "pi",
+            Provider::Windsurf => "windsurf",
         }
     }
 }

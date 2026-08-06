@@ -22,6 +22,8 @@ pub const OPENAI: Color = Color::Indexed(110);
 pub const CURSOR: Color = Color::Indexed(141);
 pub const OPENCODE: Color = Color::Indexed(117);
 pub const PI: Color = Color::Indexed(150);
+pub const GEMINI: Color = Color::Indexed(74);
+pub const WINDSURF: Color = Color::Indexed(80);
 pub const DESKTOP_CODE: Color = Color::Indexed(141);
 pub const DESKTOP_COWORK: Color = Color::Indexed(183);
 

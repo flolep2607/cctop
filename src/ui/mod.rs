@@ -286,11 +286,15 @@ fn spawn_worker(
                             .map_err(|error| error.to_string()),
                         Provider::Cursor => crate::session::cursor::delete(&session)
                             .map_err(|error| error.to_string()),
+                        Provider::Gemini => crate::session::gemini::delete(&session)
+                            .map_err(|error| error.to_string()),
                         Provider::OpenCode => crate::session::opencode::delete(&session)
                             .map_err(|error| error.to_string()),
                         Provider::Pi => {
                             crate::session::pi::delete(&session).map_err(|error| error.to_string())
                         }
+                        Provider::Windsurf => crate::session::windsurf::delete(&session)
+                            .map_err(|error| error.to_string()),
                     };
                     if result.is_ok() {
                         loader.store().evict(&session);
@@ -818,6 +822,13 @@ impl App {
                     .unwrap_or_else(|| s.session_id.clone()),
                 Provider::OpenCode => format!("opencode --session {}", s.session_id),
                 Provider::Pi => format!("pi --session {}", s.session_id),
+                // Neither resumes from the shell, so the transcript's path is
+                // the useful thing to put on the clipboard.
+                Provider::Gemini | Provider::Windsurf => s
+                    .data_file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| s.session_id.clone()),
             },
             _ => s
                 .data_file

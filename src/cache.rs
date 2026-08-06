@@ -231,12 +231,16 @@ impl Store {
             }
         }
 
-        // OpenCode stores every session in one database. A path-only disk key
+        // OpenCode stores every session in one database, and Windsurf every
+        // conversation in a workspace in one settings blob. A path-only disk key
         // would make all sessions alias the first extracted row, so keep those
         // entries in the session-keyed memory cache only.
-        let disk_key = (session.provider != crate::pricing::Provider::OpenCode)
-            .then(|| cache_key(file))
-            .flatten();
+        let disk_key = (!matches!(
+            session.provider,
+            crate::pricing::Provider::OpenCode | crate::pricing::Provider::Windsurf
+        ))
+        .then(|| cache_key(file))
+        .flatten();
         if let Some(key) = &disk_key
             && let Some(data) = self.disk.get(key)
         {
@@ -265,7 +269,11 @@ impl Store {
             crate::pricing::Provider::OpenCode => {
                 crate::session::opencode::extract(file, &session.session_id)
             }
+            crate::pricing::Provider::Gemini => crate::session::gemini::extract(file),
             crate::pricing::Provider::Pi => crate::session::pi::extract(file),
+            crate::pricing::Provider::Windsurf => {
+                crate::session::windsurf::extract(file, &session.session_id)
+            }
         };
         let parsed_in = started.elapsed();
         if let Ok(mut mem) = self.mem.lock() {
