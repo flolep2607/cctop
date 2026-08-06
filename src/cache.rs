@@ -188,8 +188,22 @@ impl Store {
         }
     }
 
-    /// Extracted data for a session, from memory, then disk, then a fresh parse.
+    /// Extracted data for a table row, which may be served stale to bound CPU.
     pub fn session_data(&self, session: &Session) -> SessionData {
+        self.data(session, true)
+    }
+
+    /// Extracted data for the session the user has open, never served stale.
+    ///
+    /// The row-level refresh backs off on expensive transcripts because it pays
+    /// that cost once per session, thousands of times over. The open panels are
+    /// one session — the one place where a few seconds of lag is actually visible,
+    /// and the one place where a full parse per change is affordable.
+    pub fn session_data_fresh(&self, session: &Session) -> SessionData {
+        self.data(session, false)
+    }
+
+    fn data(&self, session: &Session, allow_stale: bool) -> SessionData {
         let Some(file) = session.data_file.as_ref() else {
             // A running process with no transcript yet.
             return SessionData::default();
@@ -212,7 +226,7 @@ impl Store {
             // straddle the boundary gets counted twice. Until then, bound the
             // waste: a transcript costing 500ms to parse is re-read every 10s
             // instead of every 2s, while cheap ones stay effectively live.
-            if reuse_stale(entry.parsed_in, entry.parsed_at.elapsed()) {
+            if allow_stale && reuse_stale(entry.parsed_in, entry.parsed_at.elapsed()) {
                 return entry.data.clone();
             }
         }
