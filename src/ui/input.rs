@@ -29,6 +29,7 @@ impl App {
                 self.on_key_batch(key)
             }
             Mode::CostFilter => self.on_key_cost(key),
+            Mode::SendKeys => self.on_key_send(key),
             Mode::Help | Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
         }
@@ -137,6 +138,27 @@ impl App {
             KeyCode::Char(c) if (c.is_ascii_digit() || c == '.') && self.cost_input.len() < 12 => {
                 self.cost_input.push(c);
             }
+            _ => {}
+        }
+    }
+
+    fn on_key_send(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Enter => {
+                let text = self.send_input.clone();
+                if !text.is_empty()
+                    && let Some(pid) = self.selected_session().and_then(session_root_pid)
+                {
+                    let _ = self.tx.send(Request::SendKeys { pid, text });
+                    self.set_status("Sending…");
+                }
+                self.mode = Mode::List;
+            }
+            KeyCode::Backspace => {
+                self.send_input.pop();
+            }
+            KeyCode::Char(c) if self.send_input.len() < 500 => self.send_input.push(c),
             _ => {}
         }
     }
@@ -254,6 +276,16 @@ impl App {
                 Some(s) if session_root_pid(s).is_some() => self.mode = Mode::KillConfirm,
                 Some(s) if s.is_running() => self.mode = Mode::KillBlocked,
                 Some(_) => self.set_status("Selected session is not running"),
+                None => {}
+            },
+            // Prefilled with the answer a stalled session usually wants, so
+            // s-Enter is the whole interaction.
+            KeyCode::Char('s') => match self.selected_session() {
+                Some(s) if session_root_pid(s).is_some() => {
+                    self.send_input = "continue".into();
+                    self.mode = Mode::SendKeys;
+                }
+                Some(_) => self.set_status("Selected session has no local process to type into"),
                 None => {}
             },
             KeyCode::Char('y') => self.copy_selection(),

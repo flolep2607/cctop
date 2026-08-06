@@ -86,6 +86,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("y", "Copy resume command or transcript path"),
         item("d", "Delete the selected session (not running)"),
         item("k", "Terminate the selected live session"),
+        item("s", "Type a line into the session's terminal"),
         item("r or F5", "Refresh now"),
         item("q or F10", "Quit"),
         Line::default(),
@@ -402,6 +403,40 @@ pub(super) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
         )),
     ];
     modal(frame, area, "Cost floor", lines, 50);
+}
+
+pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" {}", s.display_label()),
+            theme::value(),
+        )),
+        Line::from(Span::styled(
+            " Typed into the terminal running this agent, then submitted.",
+            theme::dim(),
+        )),
+        Line::from(Span::styled(
+            " Needs the agent under `cctop run`, tmux, or cctop as root.",
+            theme::dim(),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::raw(" > "),
+            Span::styled(
+                app.send_input.clone(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(theme::ACCENT)),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(" Enter send   Esc cancel", theme::dim())),
+    ];
+    modal(frame, area, "Send to session", lines, 64);
 }
 
 // ---------------------------------------------------------------------------

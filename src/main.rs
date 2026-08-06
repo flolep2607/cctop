@@ -1,11 +1,14 @@
 mod cache;
 mod cli;
 mod config;
+mod inject;
 mod loader;
 mod pricing;
 mod proc;
 mod quota;
 mod session;
+#[cfg(unix)]
+mod shim;
 mod ui;
 mod update;
 mod util;
@@ -14,6 +17,16 @@ use clap::Parser;
 use std::io::IsTerminal;
 
 fn main() -> anyhow::Result<()> {
+    // `cctop run <agent> …` is handled before clap so the agent's own flags are
+    // never mistaken for cctop's.
+    #[cfg(unix)]
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).is_some_and(|a| a == "run") {
+            std::process::exit(shim::run(&argv[2..])?);
+        }
+    }
+
     let args = cli::Args::parse();
 
     if args.update {

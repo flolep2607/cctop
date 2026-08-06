@@ -97,6 +97,7 @@ cctop --plan max      # treat Claude usage as bundled
 cctop --delay 5       # refresh every 5 seconds
 cctop --clear-cache   # re-extract all session activity; keeps preferences/pricing
 cctop --update        # replace this binary with the newest release
+cctop run claude      # start an agent on a pty cctop can type into (see Keys)
 ```
 
 ### Keys
@@ -130,12 +131,43 @@ cctop --update        # replace this binary with the newest release
 | `y` | Copy resume command or transcript path |
 | `d` | Delete the selected session (not running) |
 | `k` | Terminate the selected live session (with confirmation) |
+| `s` | Type a line into the selected session's terminal (see below) |
 | `Esc` | Clear the active filter |
 | `q` or `F10` | Quit |
 
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+### Typing into a session
+
+`s` opens a one-line prompt (prefilled with `continue`) and types it into the
+terminal driving the selected agent, as if you had typed it there — useful for
+the sessions whose status dot has gone yellow or red waiting on you.
+
+An agent reads its keyboard from a pty, and only whoever holds that pty's master
+side can put bytes into it — normally the terminal emulator, which offers no way
+in. (Writing to `/proc/<pid>/fd/0` or `/dev/pts/N` reaches the *output* side and
+just paints the screen; it does not reach the agent.) So cctop needs one of these
+to be true, and tries them in this order:
+
+| The session runs… | How | Requirements |
+|---|---|---|
+| under `cctop run <agent>` | cctop owns the pty and typing goes through a unix socket | none |
+| inside tmux | `tmux send-keys` into the pane holding the agent | tmux |
+| in a plain terminal | `TIOCSTI` pushes bytes into the tty's input queue | Linux, and cctop as root — `CAP_SYS_ADMIN` clears both of the kernel's gates. Without root it also needs `sysctl -w dev.tty.legacy_tiocsti=1` (off by default since 6.2) *and* cctop sharing the agent's controlling terminal, which in practice it doesn't |
+
+The first is the one worth adopting — no root, no multiplexer, and the session
+looks and behaves exactly like one started directly:
+
+```bash
+alias claude='cctop run claude'   # then start sessions as usual
+```
+
+`cctop run` proxies your terminal byte-for-byte (including resizes) and exits
+with the agent's own exit code, so it is a transparent stand-in. Sessions started
+any other way still show up in cctop; they just can't be typed into unless tmux
+or the root path applies.
 
 ## Where data comes from
 

@@ -13,6 +13,11 @@ keywords = ["tui", "monitoring", "claude", "codex", "htop"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.github", "/target"]
 
+# Only the pty shim and TIOCSTI injection need libc, both of which are unix-only.
+# It is already in the tree under sysinfo, so this adds no dependency.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
 [profile.release]
 # A monitoring tool is launched often and lives in the terminal; a smaller,
 # faster binary is worth the extra link time on release builds only.
