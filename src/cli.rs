@@ -88,6 +88,14 @@ pub struct Args {
     /// Remove the agent aliases from your shell startup files and exit
     #[arg(long)]
     pub remove_alias: bool,
+
+    /// Ask Claude Code to report turn and prompt events to cctop, and exit
+    #[arg(long)]
+    pub install_hooks: bool,
+
+    /// Stop Claude Code reporting events to cctop, and exit
+    #[arg(long)]
+    pub remove_hooks: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {

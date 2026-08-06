@@ -3,6 +3,7 @@ mod attach;
 mod cache;
 mod cli;
 mod config;
+mod hook;
 mod inject;
 mod loader;
 mod notify;
@@ -41,6 +42,12 @@ fn main() -> anyhow::Result<()> {
         // `cctop attach` puts a running agent on this terminal directly, with no
         // UI around it. Handled here for the same reason as `run`: it takes a
         // positional, and cctop otherwise has none.
+        // `cctop hook` is spawned by the agent itself, many times a session.
+        // It is answered before anything else is set up — no config, no
+        // pricing, no cache — because the agent is blocked until it returns.
+        if argv.get(1).map(String::as_str) == Some("hook") {
+            std::process::exit(hook::emit(&argv[2..]));
+        }
         if argv.get(1).map(String::as_str) == Some("attach") {
             std::process::exit(attach::run_terminal(&argv[2..])?);
         }
@@ -65,6 +72,16 @@ fn main() -> anyhow::Result<()> {
 
     if args.update {
         return update::run(false);
+    }
+
+    if args.install_hooks || args.remove_hooks {
+        let what = match args.install_hooks {
+            true => hook::install()?,
+            false => hook::remove()?,
+        };
+        eprintln!("{what}");
+        eprintln!("Sessions already running keep their old hooks until restarted.");
+        return Ok(());
     }
 
     if args.install_alias || args.remove_alias {

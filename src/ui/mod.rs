@@ -433,6 +433,12 @@ pub struct App {
     /// `tabs`. Zero-length `tabs` is the ordinary case and costs nothing — no
     /// tab bar is drawn and cctop looks exactly as it did before.
     pub tab: usize,
+    /// What each session's own hooks last said about it, keyed by session id.
+    ///
+    /// Only sessions whose agent has cctop's hooks installed appear here, so an
+    /// absent entry is the ordinary case and means "fall back to the transcript"
+    /// rather than "nothing is happening".
+    pub hooked: HashMap<String, crate::hook::Signal>,
     /// The command highlighted in the launcher.
     pub launch_cursor: usize,
     /// Where the launcher's pick will go.
@@ -535,6 +541,7 @@ impl App {
             tx,
             tabs: Vec::new(),
             tab: 0,
+            hooked: HashMap::new(),
             launch_cursor: 0,
             launch_into: LaunchInto::Tab,
             launch_cwd: None,
@@ -1100,19 +1107,50 @@ impl App {
     /// in front of you, so blinking its title tells you nothing you cannot see.
     pub fn tab_attention(&self, index: usize) -> Option<tabs::Attention> {
         let tab = self.tabs.get(index.checked_sub(1)?)?;
-        tab.attention(index == self.tab, &|pid| self.session_is_asking(pid))
+        tab.attention(index == self.tab, &|pid| self.pane_signal(pid))
     }
 
-    /// Whether the session driven by `pid` has explicitly asked something.
+    /// Fold in whatever the agents' hooks have reported.
+    ///
+    /// These outrank anything read off disk or off a screen: an agent saying
+    /// "my turn is over" is the fact those are both estimating.
+    fn apply_hooks(&mut self, events: Vec<crate::hook::Event>) -> bool {
+        let changed = !events.is_empty();
+        for event in events {
+            self.hooked.insert(event.session_id, event.signal);
+        }
+        changed
+    }
+
+    /// What a session's own hooks last said about it, if it has any.
+    fn hooked_signal(&self, session_id: &str) -> Option<crate::hook::Signal> {
+        self.hooked.get(session_id).copied()
+    }
+
+    /// What has been reported about the agent running as `pid`, if anything.
+    ///
+    /// Hooks first, because the agent said it outright; the transcript second,
+    /// which can only report the question and not the finished turn; nothing at
+    /// all if the session has not been discovered yet, which leaves the caller
+    /// to fall back to the pane's screen.
     ///
     /// Scans the table rather than keeping an index: there are a handful of
     /// panes and this runs once per frame, so a map would be state to keep
     /// correct in exchange for nothing measurable.
-    fn session_is_asking(&self, pid: u32) -> bool {
-        self.sessions.iter().any(|session| {
-            session.activity_state == crate::session::ActivityState::WaitingForInput
-                && session_root_pid(session) == Some(pid)
-        })
+    fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
+        self.sessions
+            .iter()
+            .filter(|session| session_root_pid(session) == Some(pid))
+            .find_map(|session| {
+                self.hooked_signal(&session.session_id).or({
+                    match session.activity_state {
+                        crate::session::ActivityState::WaitingForInput => {
+                            Some(crate::hook::Signal::NeedsInput)
+                        }
+                        _ => None,
+                    }
+                })
+            })
     }
 
     /// Whether any tab is currently asking to be looked at.
@@ -1363,12 +1401,16 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // Established before the loop so the first tick already has it; `None` just
     // means discovery falls back to the periodic walk.
     let watch = crate::watch::Watch::start();
+    // `None` when another cctop already holds the address, or when no hooks are
+    // installed at all — either way the estimates carry on as before.
+    let hooks = crate::hook::Listener::start();
     let result = event_loop(
         &mut app,
         &mut terminal,
         &res_rx,
         &req_tx,
         watch.as_ref(),
+        hooks.as_ref(),
         hosted.as_mut(),
     );
 
@@ -1445,6 +1487,7 @@ fn event_loop(
     res_rx: &Receiver<Response>,
     req_tx: &Sender<Request>,
     watch: Option<&crate::watch::Watch>,
+    hooks: Option<&crate::hook::Listener>,
     mut hosted: Option<&mut crate::shim::Hosted>,
 ) -> anyhow::Result<i32> {
     let mut last_refresh = Instant::now();
@@ -1593,6 +1636,14 @@ fn event_loop(
             app.drop_empty_tabs();
         }
         if drawn || closed {
+            app.needs_redraw = true;
+        }
+
+        // Hooks arrive whenever an agent hits one, which is not on any tick of
+        // ours, so they are drained here alongside everything else.
+        if let Some(hooks) = hooks
+            && app.apply_hooks(hooks.drain())
+        {
             app.needs_redraw = true;
         }
 

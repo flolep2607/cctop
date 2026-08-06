@@ -164,21 +164,30 @@ impl Tab {
 
     /// What this tab wants, if anything — the most urgent of its panes.
     ///
-    /// `asking` names the pids whose sessions have explicitly asked something.
-    /// That comes from the transcript and only exists once one has been written,
-    /// so a pane that is blocked on a question its session has not recorded yet
-    /// still reads as idle. Idle is the weaker claim of the two, so under-calling
-    /// it that way is the right direction to be wrong in.
+    /// `known` is what has actually been *reported* about a pane's agent, from
+    /// its hooks or its transcript. When it answers, it wins: an agent saying
+    /// its turn is over beats any inference drawn from the pixels. When it does
+    /// not — the agent has no hooks and has written nothing yet — the pane's own
+    /// screen is the fallback, and the only thing that can be read off a screen
+    /// is that it stopped moving.
     ///
     /// The focused pane never asks: you are looking straight at it.
-    pub fn attention(&self, focused: bool, asking: &dyn Fn(u32) -> bool) -> Option<Attention> {
+    pub fn attention(
+        &self,
+        focused: bool,
+        known: &dyn Fn(u32) -> Option<crate::hook::Signal>,
+    ) -> Option<Attention> {
         self.panes
             .iter()
             .enumerate()
             .filter(|(i, _)| !(focused && *i == self.focus))
-            .filter_map(|(_, pane)| match asking(pane.pid) {
-                true => Some(Attention::NeedsInput),
-                false => pane.idle().then_some(Attention::Idle),
+            .filter_map(|(_, pane)| match known(pane.pid) {
+                Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
+                Some(crate::hook::Signal::Idle) => Some(Attention::Idle),
+                // Reported as working: the screen is irrelevant, and this is the
+                // case the heuristic gets wrong for an agent that thinks quietly.
+                Some(crate::hook::Signal::Busy) => None,
+                None => pane.idle().then_some(Attention::Idle),
             })
             // A held question outranks a finished turn: one of them is blocking
             // an agent, the other is only waiting on you when you get to it.
@@ -256,10 +265,10 @@ mod tests {
 
         let mut tab = Tab::new(busy);
         tab.panes.push(quiet);
-        let nobody = |_: u32| false;
+        let unreported = |_: u32| None;
 
         // Both panes have just been created, so neither has been quiet yet.
-        assert_eq!(tab.attention(false, &nobody), None);
+        assert_eq!(tab.attention(false, &unreported), None);
 
         // Past the threshold, only the one that stopped drawing is idle.
         let deadline = Instant::now() + QUIET_IS_IDLE + Duration::from_secs(2);
@@ -267,23 +276,25 @@ mod tests {
             tab.pump();
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert_eq!(tab.attention(false, &nobody), Some(Attention::Idle));
+        assert_eq!(tab.attention(false, &unreported), Some(Attention::Idle));
 
         // The busy pane holding a question outranks the quiet one being idle.
         assert_eq!(
-            tab.attention(false, &|pid| pid == busy_pid),
+            tab.attention(false, &|pid| (pid == busy_pid)
+                .then_some(crate::hook::Signal::NeedsInput)),
             Some(Attention::NeedsInput)
         );
         // Focused tab: the focused pane is excluded, so the quiet one is left.
         tab.focus = 0;
         assert_eq!(
-            tab.attention(true, &|pid| pid == busy_pid),
+            tab.attention(true, &|pid| (pid == busy_pid)
+                .then_some(crate::hook::Signal::NeedsInput)),
             Some(Attention::Idle)
         );
         // Focus the quiet one instead: it is the only pane with anything to
         // report, and you are looking straight at it, so the tab stays quiet.
         tab.focus = 1;
-        assert_eq!(tab.attention(true, &nobody), None);
+        assert_eq!(tab.attention(true, &unreported), None);
 
         drop(tab);
         for child in &mut kids {
