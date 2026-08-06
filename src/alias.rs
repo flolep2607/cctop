@@ -19,9 +19,6 @@ const END: &str = "# <<< cctop <<<";
 const AGENTS: &str = "claude codex opencode pi";
 
 /// The managed block, in the bash/zsh syntax both shells share.
-///
-/// ponytail: no fish variant — its `for` and `alias` differ enough to need a
-/// second block. Add one when someone asks.
 fn block() -> String {
     format!(
         "{BEGIN}\n\
@@ -52,6 +49,41 @@ fn rc_files() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Fish's own file, which is a whole file rather than a block.
+///
+/// Fish sources everything in `conf.d` automatically, so the aliases get a file
+/// of their own: nothing to parse back out of `config.fish`, and removal is a
+/// deletion. `None` unless fish is configured on this machine.
+///
+/// Fish keeps its config under `~/.config/fish` on every platform, including
+/// macOS — which is why this doesn't go through `dirs::config_dir`.
+fn fish_file() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) => PathBuf::from(dir),
+        None => dirs::home_dir()?.join(".config"),
+    };
+    let fish = base.join("fish");
+    fish.is_dir()
+        .then(|| fish.join("conf.d").join("cctop.fish"))
+}
+
+/// Fish equivalent of [`block`]. Same guards, fish syntax.
+fn fish_config() -> String {
+    format!(
+        "# Added by cctop so it can type into these sessions (press `s` in the UI).\n\
+         # Remove with `cctop --remove-alias`, or delete this file. The guards make\n\
+         # each alias a no-op unless both commands exist, so removing cctop leaves\n\
+         # the agents working as before.\n\
+         if type -q cctop\n\
+         \x20   for _cctop_agent in {AGENTS}\n\
+         \x20       if type -q $_cctop_agent\n\
+         \x20           alias $_cctop_agent \"cctop $_cctop_agent\"\n\
+         \x20       end\n\
+         \x20   end\n\
+         end\n"
+    )
+}
+
 /// `text` with any previously written block removed.
 fn without_block(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -71,22 +103,39 @@ fn without_block(text: &str) -> String {
     out
 }
 
-/// Write the block into every managed rc file, replacing any earlier copy.
-/// Returns the files changed.
+/// Write the aliases into every shell's startup file, replacing any earlier
+/// copy. Returns the files changed.
 pub fn install() -> Vec<PathBuf> {
-    edit(|text| {
+    let mut changed = edit(|text| {
         let mut out = without_block(text);
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
         out.push_str(&block());
         out
-    })
+    });
+    if let Some(path) = fish_file()
+        && std::fs::read_to_string(&path).ok() != Some(fish_config())
+        && path
+            .parent()
+            .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+        && std::fs::write(&path, fish_config()).is_ok()
+    {
+        changed.push(path);
+    }
+    changed
 }
 
-/// Remove the block from every managed rc file. Returns the files changed.
+/// Remove the aliases from every shell's startup file. Returns the files changed.
 pub fn remove() -> Vec<PathBuf> {
-    edit(without_block)
+    let mut changed = edit(without_block);
+    if let Some(path) = fish_file()
+        && path.is_file()
+        && std::fs::remove_file(&path).is_ok()
+    {
+        changed.push(path);
+    }
+    changed
 }
 
 fn edit(f: impl Fn(&str) -> String) -> Vec<PathBuf> {
