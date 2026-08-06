@@ -15,12 +15,9 @@ use crate::loader::{Loader, Stats};
 use crate::pricing::{Plan, Provider};
 use crate::quota::Quota;
 use crate::session::{Session, SessionData};
-use columns::{COLUMNS, ColumnId};
-use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
-};
+use columns::ColumnId;
 use ratatui::crossterm::cursor::Show;
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
 use spark::History;
 use std::collections::{HashMap, HashSet};
