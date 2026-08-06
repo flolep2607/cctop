@@ -105,6 +105,7 @@ cctop --delay 5       # refresh every 5 seconds
 cctop --clear-cache   # re-extract all session activity; keeps preferences/pricing
 cctop --update        # replace this binary with the newest release
 cctop run claude      # start an agent on a pty cctop can type into (see Keys)
+cctop claude --help   # the same, without the `run`; flags go to the agent
 ```
 
 ### Keys
@@ -170,6 +171,11 @@ looks and behaves exactly like one started directly:
 ```bash
 alias claude='cctop run claude'   # then start sessions as usual
 ```
+
+The `run` is optional: any first argument that names an executable is launched
+this way, so `cctop claude --dangerously-skip-permissions` works and the flags
+reach the agent rather than cctop. A word that isn't a command still gets cctop's
+usage error, so a typo doesn't silently try to run something.
 
 `cctop run` proxies your terminal byte-for-byte (including resizes) and exits
 with the agent's own exit code, so it is a transparent stand-in. Sessions started
