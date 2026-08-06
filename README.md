@@ -125,7 +125,7 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `n` | Toggle notifications (see below) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
-| `1`–`7` | Jump to a panel directly |
+| `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
 | `f` | Follow mode: keep the selection centered |
 | `/` or `F3` | Filter sessions by text |
@@ -363,6 +363,56 @@ it tracks total context size rather than the size of any one call.
 Codex tools are decoded too: `apply_patch` shows the files it touched and its
 line counts, `update_plan` shows progress and the step in flight, and
 `write_stdin` distinguishes a real write from a poll for more output.
+
+## Context breakdown
+
+`CTX%` says the window is 68% full. The **Context** panel says what is in it —
+Claude sessions only, since no other provider's transcript reports per-request
+usage.
+
+```
+Window   181.4K of 200K
+
+Unaccounted    ━━━━━━━━━━━━━━━━────────────────────────   62.1K  34%
+Tool output    ━━━━━━━━━━━━────────────────────────────   43.5K  24%
+Startup        ━━━━━━━━━───────────────────────────────   34.5K  19%
+Tool input     ━━━━━━━━────────────────────────────────   29.0K  16%
+Attachments    ━━━━────────────────────────────────────    9.1K   5%
+Assistant text ━━──────────────────────────────────────    3.6K   2%
+```
+
+Two of those numbers are measured and the rest are estimated, and the panel
+never blurs the line:
+
+- **Window** and **Startup** come from the usage figures the API itself
+  reported. Startup is the first request of the live segment — everything the
+  harness sends before the conversation begins: the system prompt, the tool
+  schemas, CLAUDE.md, the skills index, and, after a compaction, the summary. It
+  cannot be split further, because the transcript never records what was sent,
+  only that it was.
+- **Tool output**, **Tool input**, **Attachments**, **Your messages** and
+  **Assistant text** are estimated from how many characters the transcript
+  holds, at 2.75 characters per token. That constant is fitted rather than
+  assumed: across 167 local sessions, the characters a transcript accumulates
+  divided by the context growth the API reports over the same span lands there,
+  well under the usual prose rule of thumb because this content is mostly code,
+  JSON and file paths.
+- **Unaccounted** is the remainder, and it is deliberately a bar of its own
+  rather than being spread across the categories that happen to be measurable.
+  It runs around a third of the window. Most of it is thinking — Claude Code
+  writes those blocks with the text stripped and only the signature left, so
+  there is nothing to measure — plus the `<system-reminder>` text the harness
+  splices into each turn without recording it, plus estimation error.
+
+A compaction resets the whole thing: everything before the summary has left the
+window, so counting across one would describe a context that no longer exists.
+Subagent turns are excluded too — they run against their own windows, and only
+the report a subagent hands back is in the parent's, where it lands in **Tool
+output** like any other result.
+
+When the estimate overshoots the window there is no gap to draw, and the panel
+says so instead of clamping: it means the harness has dropped context that the
+transcript still holds.
 
 ## Design notes
 

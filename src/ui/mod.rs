@@ -388,6 +388,7 @@ pub struct App {
     pub cost_scroll: u16,
     pub config_scroll: u16,
     pub proc_scroll: u16,
+    pub context_scroll: u16,
     pub subagent_scroll: u16,
     pub tool_scroll: u16,
     /// Pin the tool log to its newest entry. Tool Activity is an append-only
@@ -502,6 +503,7 @@ impl App {
             cost_scroll: 0,
             config_scroll: 0,
             proc_scroll: 0,
+            context_scroll: 0,
             subagent_scroll: 0,
             tool_scroll: 0,
             tool_follow: true,
@@ -719,7 +721,17 @@ impl App {
     }
 
     fn tab_available(&self, tab: usize) -> bool {
-        !matches!(tab, 1 | 2) || self.selected_session().is_some_and(Session::is_running)
+        match tab {
+            // Performance and Processes read a live process tree.
+            1 | 2 => self.selected_session().is_some_and(Session::is_running),
+            // Only Claude transcripts report the per-request usage the context
+            // breakdown is reconstructed from. Gated on the provider rather than
+            // on the extracted data, so the tab doesn't vanish while it loads.
+            7 => self
+                .selected_session()
+                .is_some_and(|s| s.provider == Provider::Claude),
+            _ => true,
+        }
     }
 
     fn ensure_available_tab(&mut self) {
@@ -800,7 +812,8 @@ impl App {
             }
             4 => bump(&mut self.subagent_scroll),
             5 => bump(&mut self.cost_scroll),
-            _ => bump(&mut self.config_scroll),
+            6 => bump(&mut self.config_scroll),
+            _ => bump(&mut self.context_scroll),
         }
         self.needs_redraw = true;
     }
