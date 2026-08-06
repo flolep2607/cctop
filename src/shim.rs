@@ -106,17 +106,21 @@ fn serve(listener: std::os::unix::net::UnixListener, mut master: File) {
 /// Spawn `argv` with a new pty as its controlling terminal, returning the master.
 fn spawn_on_pty(argv: &[String]) -> anyhow::Result<(std::process::Child, File)> {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let size = winsize(cols, rows);
+    let mut size = winsize(cols, rows);
     let mut master_fd = -1;
     let mut slave_fd = -1;
     // SAFETY: both fds are written by openpty and only read after it succeeds.
+    //
+    // The trailing two arguments are `*mut` on Apple and `*const` on Linux, so
+    // they are passed as `*mut` and left to coerce; writing `*const` compiles
+    // only on Linux.
     let rc = unsafe {
         libc::openpty(
             &mut master_fd,
             &mut slave_fd,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
+            std::ptr::null_mut::<libc::termios>(),
+            &raw mut size,
         )
     };
     if rc != 0 {
@@ -134,7 +138,7 @@ fn spawn_on_pty(argv: &[String]) -> anyhow::Result<(std::process::Child, File)> 
         cmd.pre_exec(move || {
             // A new session plus TIOCSCTTY makes the pty the child's controlling
             // terminal, without which it gets no SIGWINCH and no job control.
-            if libc::setsid() == -1 || libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) == -1 {
+            if libc::setsid() == -1 || libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             for target in 0..3 {
@@ -189,7 +193,7 @@ fn watch_resize(master: File) {
             last = size;
             let ws = winsize(size.0, size.1);
             // SAFETY: `master` is a live pty master and `ws` outlives the call.
-            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) };
         }
     }
 }

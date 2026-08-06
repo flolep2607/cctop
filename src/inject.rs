@@ -94,7 +94,7 @@ fn tiocsti_send(pid: u32, text: &str) -> Option<Result<(), String>> {
     for byte in text.bytes().chain(std::iter::once(SUBMIT as u8)) {
         // SAFETY: writing one byte through a live tty fd; TIOCSTI takes a
         // pointer to that single byte.
-        if unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSTI, &byte) } == -1 {
+        if unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSTI as _, &byte) } == -1 {
             let err = std::io::Error::last_os_error();
             // The kernel distinguishes the two preconditions: EIO is the disabled
             // sysctl, EPERM is a tty that isn't ours and so needs CAP_SYS_ADMIN.
