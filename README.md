@@ -168,15 +168,18 @@ to be true, and tries them in this order:
 
 The first is the one worth adopting — no root, no multiplexer, and the session
 looks and behaves exactly like one started directly. cctop sets it up for you: on
-its first interactive run it appends a marked block to `~/.zshrc` and `~/.bashrc`
-(whichever exist) aliasing `claude`, `codex`, `opencode`, and `pi` to `cctop <agent>`.
+its first interactive run it aliases `claude`, `codex`, `opencode`, and `pi` to
+`cctop <agent>` — a marked block appended to `~/.zshrc` and `~/.bashrc`, and
+`~/.config/fish/conf.d/cctop.fish` for fish (each only where that shell is
+already configured; the fish file is unverified, having been written on a machine
+without fish).
 
 ```bash
 cctop --remove-alias     # take it out again; deleting the block by hand also works
 cctop --install-alias    # put it back
 ```
 
-Every alias in that block is guarded by `command -v`, so it defines nothing
+Every alias is guarded by a command-exists test, so it defines nothing
 unless both cctop and the agent are installed — uninstall cctop and `claude`
 goes back to meaning `claude`. The block is written once: remove it and cctop
 won't add it again.
