@@ -1337,37 +1337,46 @@ fn settings_context(session: &Session) -> Option<u64> {
 /// parent's CTX% jump to an unrelated number.
 pub fn extract_context(session: &Session) -> Option<ContextUsage> {
     let file = session.data_file.as_ref()?;
-    let text = util::read_tail(file, 65_536)?;
 
     let settings_ctx = settings_context(session);
     let litellm_ctx = pricing::litellm_max_input_tokens(&session.model);
     let mut saw_compact_boundary = false;
 
-    for line in text.lines().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    // Widening rescans lines it has already rejected, but only ever from behind
+    // the newest usage entry, so the boundary flag keeps meaning "a compaction
+    // started after the last request" rather than "this session compacted once".
+    let used = util::scan_tail_escalating(file, |text| {
+        for line in text.lines().rev() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(item) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if item.get("type").and_then(Value::as_str) == Some("system")
+                && item.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+            {
+                saw_compact_boundary = true;
+            }
+            if item.get("type").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
+            let Some(u) = item.get("message").and_then(|m| m.get("usage")) else {
+                continue;
+            };
+            let g = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+            let used =
+                g("input_tokens") + g("cache_creation_input_tokens") + g("cache_read_input_tokens");
+            if used == 0 {
+                continue;
+            }
+            return Some(used);
         }
-        let Ok(item) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if item.get("type").and_then(Value::as_str) == Some("system")
-            && item.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-        {
-            saw_compact_boundary = true;
-        }
-        if item.get("type").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(u) = item.get("message").and_then(|m| m.get("usage")) else {
-            continue;
-        };
-        let g = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let used =
-            g("input_tokens") + g("cache_creation_input_tokens") + g("cache_read_input_tokens");
-        if used == 0 {
-            continue;
-        }
+        None
+    });
+
+    if let Some(used) = used {
         return Some(ContextUsage {
             used,
             max: resolve_ctx_max(settings_ctx, used, litellm_ctx),
@@ -1649,5 +1658,38 @@ mod tests {
             CLAUDE_DEFAULT_CTX
         );
         assert_eq!(resolve_ctx_max(None, 1, None), CLAUDE_DEFAULT_CTX);
+    }
+
+    /// A single transcript entry can be hundreds of kilobytes — a big file read,
+    /// a pasted log — so the newest request's usage is regularly further from EOF
+    /// than any one fixed tail window reaches. When the scan misses it the row
+    /// falls through to the compaction fallback and reports COMPCT with a full
+    /// context window, which reads as "this session is stalled" for a session
+    /// that is merely mid-answer.
+    #[test]
+    fn a_usage_entry_buried_behind_a_huge_line_is_still_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("buried.jsonl");
+        let filler = "x".repeat(200_000);
+        std::fs::write(
+            &path,
+            format!(
+                concat!(
+                    r#"{{"type":"assistant","message":{{"role":"assistant","usage":{{"input_tokens":14,"cache_creation_input_tokens":400,"cache_read_input_tokens":647000}}}}}}"#,
+                    "\n",
+                    r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","content":"{}"}}]}}}}"#,
+                    "\n",
+                ),
+                filler
+            ),
+        )
+        .expect("write transcript");
+
+        let mut session = Session::new(Provider::Claude, "buried".into());
+        session.data_file = Some(path);
+
+        let ctx = extract_context(&session).expect("usage past the first tail window");
+        assert_eq!(ctx.used, 647_414);
+        assert!(!ctx.compacting);
     }
 }
