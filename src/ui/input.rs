@@ -307,6 +307,8 @@ impl App {
                 });
             }
             KeyCode::Char(' ') => self.toggle_mark(),
+            KeyCode::Char('e') => self.toggle_expanded(),
+            KeyCode::Char('E') => self.toggle_expanded_all(),
             KeyCode::Char('U') => self.unmark_all(),
             KeyCode::Char('D') => self.batch(BatchKind::Delete),
             KeyCode::Char('K') => self.batch(BatchKind::Kill),
@@ -362,6 +364,9 @@ impl App {
                 let _ = self.tx.send(Request::Refresh);
                 self.set_status("Refreshing…");
             }
+            KeyCode::Char('d') if self.on_subagent() => {
+                self.set_status("A subagent cannot be deleted on its own")
+            }
             KeyCode::Char('d') => match self.selected_session() {
                 Some(s) if self.deleting.contains(&s.key()) => {
                     self.set_status("Session deletion is already in progress")
@@ -370,6 +375,9 @@ impl App {
                 Some(_) => self.mode = Mode::DeleteConfirm,
                 None => {}
             },
+            KeyCode::Char('k') if self.on_subagent() => {
+                self.set_status("A subagent cannot be stopped on its own")
+            }
             KeyCode::Char('k') => match self.selected_session() {
                 Some(s) if session_root_pid(s).is_some() => self.mode = Mode::KillConfirm,
                 Some(s) if s.is_running() => self.mode = Mode::KillBlocked,
@@ -378,6 +386,9 @@ impl App {
             },
             // Prefilled with the answer a stalled session usually wants, so
             // s-Enter is the whole interaction.
+            KeyCode::Char('s') if self.on_subagent() => {
+                self.set_status("A subagent cannot be typed into on its own")
+            }
             KeyCode::Char('s') => match self.selected_session() {
                 Some(s) if session_root_pid(s).is_some() => {
                     self.send_input = "continue".into();
@@ -386,6 +397,9 @@ impl App {
                 Some(_) => self.set_status("Selected session has no local process to type into"),
                 None => {}
             },
+            KeyCode::Char('a') if self.on_subagent() => {
+                self.set_status("A subagent has no terminal of its own to attach to")
+            }
             KeyCode::Char('a') => self.attach_selected(),
             KeyCode::Char('A') => self.attach_hosted(),
             // Alt+n does this too and works from inside a pane; here on the

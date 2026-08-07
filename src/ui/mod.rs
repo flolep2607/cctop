@@ -345,10 +345,49 @@ fn spawn_worker(
 // Application state
 // ---------------------------------------------------------------------------
 
+/// One line of the table: a session, or a subagent shown beneath its parent.
+///
+/// Rows rather than session indices, because an expanded session occupies
+/// several lines and everything that walks the table — scrolling, the cursor,
+/// search, the mouse — has to agree on how many there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    Session(usize),
+    /// `index` is into the parent's own `subagents`, which is the only place
+    /// they exist; they are not sessions and have no entry in `sessions`.
+    Subagent {
+        parent: usize,
+        index: usize,
+    },
+}
+
+impl Row {
+    /// The session this row belongs to, which for a child is its parent.
+    ///
+    /// Actions are addressed to sessions — a subagent has no process to signal
+    /// and no transcript of its own to delete — so every row resolves to one.
+    pub fn session(self) -> usize {
+        match self {
+            Row::Session(i) => i,
+            Row::Subagent { parent, .. } => parent,
+        }
+    }
+
+    pub fn is_subagent(self) -> bool {
+        matches!(self, Row::Subagent { .. })
+    }
+}
+
 pub struct App {
     pub sessions: Vec<Session>,
-    /// Indices into `sessions`, after filtering and sorting.
-    pub visible: Vec<usize>,
+    /// The table's lines, after filtering, sorting and expansion.
+    pub visible: Vec<Row>,
+    /// Keys of the sessions showing their subagents.
+    ///
+    /// Keyed rather than indexed because `sessions` is rebuilt wholesale on
+    /// every walk, which would leave an index pointing at whatever sorted into
+    /// that slot next.
+    pub expanded: std::collections::HashSet<String>,
     pub stats: Stats,
     pub selected: usize,
     pub scroll: usize,
@@ -489,6 +528,11 @@ impl App {
         App {
             sessions: Vec::new(),
             visible: Vec::new(),
+            expanded: prefs
+                .expanded
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
             stats: Stats::default(),
             selected: 0,
             scroll: 0,
@@ -567,7 +611,82 @@ impl App {
     pub fn selected_session(&self) -> Option<&Session> {
         self.visible
             .get(self.selected)
-            .and_then(|&i| self.sessions.get(i))
+            .and_then(|row| self.sessions.get(row.session()))
+    }
+
+    /// The highlighted row, whatever kind it is.
+    pub fn selected_row(&self) -> Option<Row> {
+        self.visible.get(self.selected).copied()
+    }
+
+    /// The highlighted subagent, when the cursor is on a child row.
+    pub fn selected_subagent(&self) -> Option<&crate::session::Subagent> {
+        match self.selected_row()? {
+            Row::Session(_) => None,
+            Row::Subagent { parent, index } => self.sessions.get(parent)?.subagents.get(index),
+        }
+    }
+
+    /// Whether the cursor is on a child row.
+    ///
+    /// The actions that ask this all address the operating system — a signal, a
+    /// file, a terminal — and a subagent has none of its own. Refusing is
+    /// clearer than silently acting on the parent, which is a live session the
+    /// user did not point at.
+    pub fn on_subagent(&self) -> bool {
+        self.selected_row().is_some_and(Row::is_subagent)
+    }
+
+    /// Whether a session is showing its subagents.
+    pub fn is_expanded(&self, session: &Session) -> bool {
+        self.expanded.contains(&session.key())
+    }
+
+    /// Show or hide the selected session's subagents.
+    ///
+    /// Anchored on the owning session, so pressing it on a child collapses the
+    /// parent that child came from rather than doing nothing — the row the
+    /// cursor lands on afterwards is then the parent, not a line that no longer
+    /// exists.
+    fn toggle_expanded(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let Some(session) = self.sessions.get(row.session()) else {
+            return;
+        };
+        if session.subagents.is_empty() {
+            self.set_status("No subagents to show");
+            return;
+        }
+        let key = session.key();
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
+        }
+        if row.is_subagent() {
+            self.selected = self.selected.saturating_sub(1);
+        }
+        self.refilter();
+        self.save_prefs();
+    }
+
+    /// Expand every session that has subagents, or collapse them all.
+    ///
+    /// Collapses when anything at all is open: with a mixture on screen, "close
+    /// them" is the intent that a single key can satisfy unambiguously.
+    fn toggle_expanded_all(&mut self) {
+        if self.expanded.is_empty() {
+            self.expanded = self
+                .sessions
+                .iter()
+                .filter(|s| !s.subagents.is_empty())
+                .map(Session::key)
+                .collect();
+        } else {
+            self.expanded.clear();
+        }
+        self.refilter();
+        self.save_prefs();
     }
 
     fn save_prefs(&mut self) {
@@ -576,6 +695,11 @@ impl App {
         self.prefs.inactivity_filter = self.age_filter.map(|a| a.key().to_string());
         self.prefs.agent_live_filter = self.tool_live_only;
         self.prefs.tool_show_diff = self.tool_show_diff;
+        // Sorted so the file does not churn on every save purely because a
+        // HashSet iterated in a different order.
+        let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();
+        expanded.sort();
+        self.prefs.expanded = expanded;
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;
@@ -594,7 +718,7 @@ impl App {
     /// that reorders the table doesn't move the cursor off whatever the user was
     /// looking at.
     pub fn refilter(&mut self) {
-        let anchor = self.selected_session().map(|s| s.key());
+        let anchor = self.selected_row().map(|r| self.row_key(r));
         let now = chrono::Utc::now();
         let now_ms = now.timestamp_millis();
         let query = self.search.to_ascii_lowercase();
@@ -656,17 +780,46 @@ impl App {
             if asc { ord } else { ord.reverse() }
         });
 
-        self.visible = visible;
-        self.selected = anchor
-            .and_then(|key| {
-                self.visible
-                    .iter()
-                    .position(|&i| self.sessions[i].key() == key)
+        // Sessions are sorted first, then each expanded one has its children
+        // spliced in beneath it: subagents belong to their parent's position in
+        // the table, not to the ordering the sort column would give them.
+        self.visible = visible
+            .into_iter()
+            .flat_map(|i| {
+                let session = &self.sessions[i];
+                let children = if self.expanded.contains(&session.key()) {
+                    session.subagents.len()
+                } else {
+                    0
+                };
+                std::iter::once(Row::Session(i))
+                    .chain((0..children).map(move |index| Row::Subagent { parent: i, index }))
             })
+            .collect();
+        self.selected = anchor
+            .and_then(|key| self.visible.iter().position(|&r| self.row_key(r) == key))
             .unwrap_or(self.selected)
             .min(self.visible.len().saturating_sub(1));
         self.ensure_available_tab();
         self.needs_redraw = true;
+    }
+
+    /// Identity of a row across refreshes.
+    ///
+    /// A subagent's own id is unique only within its parent, and a session key
+    /// alone cannot tell a parent from its children, so the cursor is anchored
+    /// on the pair.
+    fn row_key(&self, row: Row) -> String {
+        let Some(session) = self.sessions.get(row.session()) else {
+            return String::new();
+        };
+        match row {
+            Row::Session(_) => session.key(),
+            Row::Subagent { index, .. } => match session.subagents.get(index) {
+                Some(sub) => format!("{}/{}", session.key(), sub.agent_id),
+                None => session.key(),
+            },
+        }
     }
 
     /// Fold this refresh's figures into the overview history buffers.
@@ -690,9 +843,54 @@ impl App {
         }
     }
 
-    /// Ask the worker for the selected session's full data if it isn't loaded.
+    /// What the bottom panels should describe for a row.
+    ///
+    /// A subagent gets a stand-in `Session` pointed at its own transcript. That
+    /// file is the same JSONL a session writes, so the whole extraction path —
+    /// worker, cache, every panel — reads it without knowing the difference, and
+    /// the panels describe the subagent rather than the parent it ran under.
+    fn panel_subject(&self, row: Row) -> Option<Session> {
+        let session = self.sessions.get(row.session())?;
+        let Row::Subagent { index, .. } = row else {
+            return Some(session.clone());
+        };
+        let sub = session.subagents.get(index)?;
+        // A purged transcript leaves nothing to read; the parent's own data is
+        // the only thing left that describes the run.
+        if sub.ghost {
+            return None;
+        }
+
+        let mut stand_in = Session::new(session.provider, sub.agent_id.clone());
+        stand_in.surface = session.surface;
+        stand_in.model = sub.model.clone();
+        stand_in.label_source = session.label_source.clone();
+        stand_in.harness = session.harness.clone();
+        stand_in.title = Some(sub.description.clone()).filter(|d| !d.is_empty());
+        stand_in.started_at = sub.started_at.clone().unwrap_or_default();
+        stand_in.data_file = session
+            .data_file
+            .as_ref()
+            .map(|f| f.with_extension("").join("subagents"))
+            .map(|dir| dir.join(format!("{}.jsonl", sub.agent_id)));
+        // Its own mtime, so the panels refresh while the subagent is working and
+        // not merely when its parent writes something.
+        stand_in.last_active = stand_in
+            .data_file
+            .as_ref()
+            .map(|f| crate::util::ms_to_rfc3339(crate::config::file_mtime_ms(f) as i64))
+            .unwrap_or_default();
+        Some(stand_in)
+    }
+
+    /// Ask the worker for the selected row's full data if it isn't loaded.
     fn sync_panel_data(&mut self) {
-        let Some(session) = self.selected_session() else {
+        let Some(row) = self.selected_row() else {
+            self.panel_data = None;
+            self.panel_key.clear();
+            return;
+        };
+        let Some(session) = self.panel_subject(row) else {
             self.panel_data = None;
             self.panel_key.clear();
             return;
@@ -708,7 +906,6 @@ impl App {
             return;
         }
 
-        let session = session.clone();
         self.panel_key = key;
         self.panel_stamp = stamp;
 
@@ -896,24 +1093,23 @@ impl App {
         if self.visible.is_empty() {
             return;
         }
+        // Positions rather than rows: a child row matches on its parent's text,
+        // so several rows can share one session and `position` would keep
+        // sending the cursor back to the first of them.
         let matches: Vec<usize> = self
             .visible
             .iter()
-            .copied()
-            .filter(|&i| self.matches_search(&self.sessions[i]))
+            .enumerate()
+            .filter(|(_, row)| self.matches_search(&self.sessions[row.session()]))
+            .map(|(at, _)| at)
             .collect();
         if matches.is_empty() {
             return;
         }
-        let current = self.visible.get(self.selected).copied();
-        let pos = current.and_then(|key| matches.iter().position(|&i| i == key));
+        let pos = matches.iter().position(|&at| at == self.selected);
         let n = matches.len() as isize;
         let next = ((pos.unwrap_or(0) as isize + delta).rem_euclid(n)) as usize;
-        self.selected = self
-            .visible
-            .iter()
-            .position(|&i| i == matches[next])
-            .unwrap_or(self.selected);
+        self.selected = matches[next];
         self.ensure_available_tab();
         self.needs_redraw = true;
     }
@@ -934,7 +1130,11 @@ impl App {
     fn marked_sessions(&self) -> Vec<&Session> {
         self.visible
             .iter()
-            .filter_map(|&i| self.sessions.get(i))
+            .filter_map(|row| match row {
+                // Child rows would list their parent a second time.
+                Row::Session(i) => self.sessions.get(*i),
+                Row::Subagent { .. } => None,
+            })
             .filter(|s| self.marked.contains(&s.key()))
             .collect()
     }
@@ -1056,10 +1256,11 @@ impl App {
             self.set_status("Nothing has rung yet");
             return;
         };
+        // The parent row, not a child of it: the bell rang for the session.
         match self
             .visible
             .iter()
-            .position(|&i| self.sessions[i].key() == key)
+            .position(|&r| !r.is_subagent() && self.sessions[r.session()].key() == key)
         {
             Some(row) => {
                 self.selected = row;
@@ -1785,6 +1986,153 @@ mod tests {
         s
     }
 
+    fn with_subagents(id: &str, names: &[&str]) -> Session {
+        let mut s = session(id, true, id);
+        s.subagents = names
+            .iter()
+            .map(|n| crate::session::Subagent {
+                agent_id: format!("agent-{n}"),
+                agent_type: "general-purpose".into(),
+                description: (*n).into(),
+                model: "claude-opus-5".into(),
+                started_at: None,
+                last_active: None,
+                duration_ms: 0,
+                status: crate::session::SubagentStatus::Running,
+                cost: 0.0,
+                tool_count: 0,
+                tool_use_id: None,
+                context: None,
+                ghost: false,
+            })
+            .collect();
+        s
+    }
+
+    /// Children belong under the parent they ran for. Sorting them as peers
+    /// would scatter one session's subagents down a table ordered by cost or
+    /// age, which is the one arrangement that makes the tree meaningless.
+    #[test]
+    fn expanded_subagents_sit_directly_under_their_parent() {
+        let mut app = test_app();
+        app.sessions = vec![
+            with_subagents("a", &["one", "two"]),
+            session("b", true, "b"),
+        ];
+        app.refilter();
+        assert_eq!(app.visible.len(), 2, "collapsed: one row per session");
+
+        app.expanded.insert(app.sessions[0].key());
+        app.refilter();
+
+        // Asserted as a position relative to the parent rather than as a fixed
+        // list: where the parent lands is the sort's business, and these two
+        // sessions are equally recent.
+        let at = app
+            .visible
+            .iter()
+            .position(|&r| r == Row::Session(0))
+            .expect("parent row");
+        assert_eq!(app.visible.len(), 4);
+        assert_eq!(
+            &app.visible[at..at + 3],
+            &[
+                Row::Session(0),
+                Row::Subagent {
+                    parent: 0,
+                    index: 0
+                },
+                Row::Subagent {
+                    parent: 0,
+                    index: 1
+                },
+            ]
+        );
+    }
+
+    /// The cursor is anchored on what it was pointing at, and a child is only
+    /// identified by its parent *and* its own id — anchoring on the session key
+    /// alone would snap the cursor back to the parent on every refresh, two
+    /// times a second, while the user was reading a child row.
+    #[test]
+    fn the_cursor_stays_on_a_child_row_across_a_refresh() {
+        let mut app = test_app();
+        app.sessions = vec![with_subagents("a", &["one", "two"])];
+        app.expanded.insert(app.sessions[0].key());
+        app.refilter();
+        app.selected = 2;
+
+        app.refilter();
+
+        assert_eq!(
+            app.visible[app.selected],
+            Row::Subagent {
+                parent: 0,
+                index: 1
+            }
+        );
+        assert_eq!(
+            app.selected_subagent().map(|s| s.description.clone()),
+            Some("two".into())
+        );
+    }
+
+    /// A child row resolves to its parent for anything addressed to a session,
+    /// so every existing action keeps working — but the destructive ones have to
+    /// know the difference, because the cursor is on a subagent and the session
+    /// they would signal is not what the user pointed at.
+    #[test]
+    fn a_child_row_owns_its_parent_but_is_not_it() {
+        let mut app = test_app();
+        app.sessions = vec![with_subagents("a", &["one"])];
+        app.expanded.insert(app.sessions[0].key());
+        app.refilter();
+
+        app.selected = 0;
+        assert!(!app.on_subagent());
+        assert!(app.selected_subagent().is_none());
+
+        app.selected = 1;
+        assert!(app.on_subagent());
+        assert_eq!(
+            app.selected_session().map(|s| s.session_id.clone()),
+            Some("a".into()),
+            "a child still resolves to the session that owns it"
+        );
+        assert!(app.selected_subagent().is_some());
+    }
+
+    /// Collapsing from a child row must leave the cursor somewhere that still
+    /// exists; the row it was on is about to be removed.
+    #[test]
+    fn collapsing_from_a_child_lands_the_cursor_on_its_parent() {
+        let mut app = test_app();
+        app.sessions = vec![with_subagents("a", &["one", "two"])];
+        app.expanded.insert(app.sessions[0].key());
+        app.refilter();
+        app.selected = 1;
+
+        app.toggle_expanded();
+
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.visible[app.selected], Row::Session(0));
+        assert!(app.expanded.is_empty());
+    }
+
+    /// A session with nothing to show must not swallow the key and leave the
+    /// user pressing it at a row that never opens.
+    #[test]
+    fn expanding_a_session_without_subagents_says_so() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "a")];
+        app.refilter();
+
+        app.toggle_expanded();
+
+        assert!(app.expanded.is_empty());
+        assert!(app.status.is_some(), "the refusal has to be visible");
+    }
+
     #[test]
     fn live_filter_hides_stopped_sessions() {
         let mut app = test_app();
@@ -1792,7 +2140,7 @@ mod tests {
         app.live_only = true;
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0]].session_id, "a");
+        assert_eq!(app.sessions[app.visible[0].session()].session_id, "a");
     }
 
     #[test]
@@ -1806,8 +2154,8 @@ mod tests {
         app.live_only = true;
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert!(app.sessions[app.visible[0]].is_running());
-        assert!(app.sessions[app.visible[0]].process.is_none());
+        assert!(app.sessions[app.visible[0].session()].is_running());
+        assert!(app.sessions[app.visible[0].session()].process.is_none());
     }
 
     #[test]
@@ -1863,7 +2211,7 @@ mod tests {
             session("running", true, "x"),
             session("stopped", false, "y"),
         ];
-        app.visible = vec![0, 1];
+        app.visible = vec![Row::Session(0), Row::Session(1)];
         app.bottom_tab = 1;
         app.move_selection(1);
         assert_eq!(app.bottom_tab, 0);
@@ -1883,7 +2231,7 @@ mod tests {
         app.search = "BBB".into();
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0]].session_id, "bbb");
+        assert_eq!(app.sessions[app.visible[0].session()].session_id, "bbb");
     }
 
     #[test]
@@ -1954,7 +2302,7 @@ mod tests {
         app.age_filter = Some(AgeFilter::Day);
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0]].session_id, "new");
+        assert_eq!(app.sessions[app.visible[0].session()].session_id, "new");
     }
 
     #[test]
@@ -1968,7 +2316,7 @@ mod tests {
         app.cost_floor = 1.0;
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0]].session_id, "pricey");
+        assert_eq!(app.sessions[app.visible[0].session()].session_id, "pricey");
     }
 
     #[test]
@@ -2020,7 +2368,7 @@ mod tests {
         let row = |app: &App, id: &str| {
             app.visible
                 .iter()
-                .position(|&i| app.sessions[i].session_id == id)
+                .position(|&r| app.sessions[r.session()].session_id == id)
                 .expect("fixture is visible")
         };
         app.selected = row(&app, "a");

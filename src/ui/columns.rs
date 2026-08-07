@@ -1,6 +1,6 @@
 //! Session-table column definitions: rendering, sorting, and tooltips.
 
-use crate::session::{ActivityState, Session};
+use crate::session::{ActivityState, Session, Subagent, SubagentStatus};
 use crate::util;
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
@@ -257,6 +257,80 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         }
         ColumnId::Branch => branch(&s.label_source).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
+    }
+}
+
+/// One cell of a subagent's row, under the same columns as its parent.
+///
+/// A subagent is not a session and most columns have no answer for it: it runs
+/// inside the parent's process, so it has no CPU or memory of its own, and its
+/// branch and project are the parent's. Those read as `─` rather than repeating
+/// the parent's figure down every child row, which would look like the cost of
+/// the session had multiplied.
+///
+/// `last` is the tree glyph plus the agent's type and description, because the
+/// Project column is where the eye already looks for what a row *is*.
+pub fn render_subagent_cell(
+    id: ColumnId,
+    sub: &Subagent,
+    last: bool,
+    now: &DateTime<Utc>,
+) -> String {
+    match id {
+        ColumnId::Status => match sub.status {
+            SubagentStatus::Running => "●".into(),
+            SubagentStatus::Done => "○".into(),
+        },
+        ColumnId::Last => match &sub.last_active {
+            Some(ts) => util::relative_age(ts, now),
+            None => "─".into(),
+        },
+        ColumnId::Duration => {
+            if sub.duration_ms > 0 {
+                util::compact_duration(sub.duration_ms)
+            } else {
+                "─".into()
+            }
+        }
+        ColumnId::Cost => {
+            if sub.cost > 0.0 {
+                util::compact_usd(sub.cost)
+            } else {
+                "─".into()
+            }
+        }
+        ColumnId::Context => match &sub.context {
+            Some(c) => format!("{}%", c.percent_to_compact().round() as i64),
+            None => "─".into(),
+        },
+        ColumnId::Tools => {
+            if sub.tool_count > 0 {
+                sub.tool_count.to_string()
+            } else {
+                "─".into()
+            }
+        }
+        ColumnId::Model => util::short_model(&sub.model),
+        ColumnId::Project => {
+            let branch = if last { "└─" } else { "├─" };
+            let what = if sub.description.is_empty() {
+                sub.agent_type.clone()
+            } else {
+                format!("{}: {}", sub.agent_type, sub.description)
+            };
+            format!("{branch} {what}")
+        }
+        // Belongs to the parent, or is not measured per subagent. Left blank
+        // rather than dashed: a dozen `─` down a child row is noise the eye has
+        // to step over to reach the columns that do say something.
+        ColumnId::CostHour
+        | ColumnId::CostToday
+        | ColumnId::Cpu
+        | ColumnId::Memory
+        | ColumnId::TokenTotal
+        | ColumnId::TokenRate
+        | ColumnId::Harness
+        | ColumnId::Branch => String::new(),
     }
 }
 
