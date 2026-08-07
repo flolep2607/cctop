@@ -495,6 +495,13 @@ pub struct App {
     pub sessions: Vec<Session>,
     /// The table's lines, after filtering, sorting and expansion.
     pub visible: Vec<Row>,
+    /// Subagents whose own `SubagentStop` has arrived.
+    ///
+    /// Held for the run rather than per session: this is the only word cctop
+    /// gets that a background subagent has finished, and the transcript it would
+    /// otherwise be inferred from cannot say it. Ids are unique per run, so the
+    /// set does not need scoping to a parent.
+    pub finished_agents: std::collections::HashSet<String>,
     /// Keys of the sessions showing their subagents.
     ///
     /// Keyed rather than indexed because `sessions` is rebuilt wholesale on
@@ -673,6 +680,7 @@ impl App {
         App {
             sessions: Vec::new(),
             visible: Vec::new(),
+            finished_agents: std::collections::HashSet::new(),
             expanded: prefs
                 .expanded
                 .iter()
@@ -1597,6 +1605,9 @@ impl App {
         let mut lifecycle = false;
         for event in events {
             lifecycle |= event.reported.signal.is_lifecycle();
+            if let Some(agent) = event.finished_agent {
+                self.finished_agents.insert(agent);
+            }
             match event.reported.signal {
                 // Nothing more will be said about it, and leaving the last
                 // signal behind would have the row claim a state forever.
@@ -1608,7 +1619,30 @@ impl App {
                 }
             }
         }
+        self.apply_finished_agents();
         (changed, lifecycle)
+    }
+
+    /// Mark the subagents whose own hook has reported them finished.
+    ///
+    /// Stamped onto the rows rather than consulted at each draw, so every reader
+    /// of a `Subagent` — the child rows, the Subagents tab, `--json` — agrees
+    /// without being handed the UI's state. The hook outranks the transcript
+    /// heuristic: it is the agent saying so, where the heuristic is only the
+    /// absence of writing.
+    fn apply_finished_agents(&mut self) {
+        if self.finished_agents.is_empty() {
+            return;
+        }
+        for session in &mut self.sessions {
+            for sub in &mut session.subagents {
+                // The hook names the bare id; the transcript is `agent-<id>`.
+                let id = sub.agent_id.strip_prefix("agent-").unwrap_or(&sub.agent_id);
+                if self.finished_agents.contains(id) {
+                    sub.status = crate::session::SubagentStatus::Done;
+                }
+            }
+        }
     }
 
     /// Open the integration panel, reading the current state off disk.
@@ -1736,7 +1770,7 @@ impl App {
             self.set_status("Nothing to split — open a tab first");
             return;
         }
-        if tabs::harnesses().is_empty() {
+        if self.launch_choices().is_empty() {
             self.set_status("No agent found in PATH, and $SHELL is not set");
             return;
         }
@@ -1796,35 +1830,101 @@ impl App {
         // The transcript is full of paths relative to where the agent ran, so a
         // resumed session belongs in the same directory.
         let cwd = session.work_dir();
-        let name = format!("{} · {}", session.display_label(), argv[0]);
-        self.open_tab(&argv, cwd, &name);
+        let what = format!("{} · {}", session.display_label(), argv[0]);
+        // Named after the session, so resuming it a second time reattaches to
+        // the agent already doing it rather than starting a rival.
+        let tmux = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
+
+        // Already on screen: switch to it. tmux would attach a second client to
+        // the same agent, which works but leaves two panes fighting over one
+        // window's size for no reason.
+        if let Some(at) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.panes.iter().any(|p| p.tmux.as_deref() == Some(&tmux)))
+        {
+            self.tab = at + 1;
+            self.needs_redraw = true;
+            self.set_status(format!("Already open: {what}"));
+            return;
+        }
+
+        let own = tabs::Own::preferring_tmux(|| tmux);
+        // Reattaching is not resuming: the agent was never gone, so saying
+        // "resumed" would misdescribe what just happened.
+        let verb = match &own {
+            tabs::Own::Tmux(name) if crate::tmux::exists(name) => "Reattached to",
+            _ => "Resumed",
+        };
+        self.open_tab(&argv, cwd, &what, own, verb);
     }
 
     /// Start `argv` in a new tab, reporting what happened either way.
-    fn open_tab(&mut self, argv: &[String], cwd: Option<std::path::PathBuf>, what: &str) {
-        let pane = match tabs::Pane::launch(argv, cwd.as_deref()) {
+    fn open_tab(
+        &mut self,
+        argv: &[String],
+        cwd: Option<std::path::PathBuf>,
+        what: &str,
+        own: tabs::Own,
+        verb: &str,
+    ) {
+        let pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
             Err(error) => {
                 self.set_status(format!("Could not start {what}: {error}"));
                 return;
             }
         };
+        // Worth saying once per tab: it changes what quitting cctop means.
+        let kept = match pane.outlives_cctop() {
+            true => " — it will outlive cctop",
+            false => "",
+        };
         self.tabs.push(tabs::Tab::new(pane));
         self.tab = self.tabs.len();
         let where_ = cwd
             .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
             .unwrap_or_default();
-        self.set_status(format!("Resumed {what}{where_}"));
+        self.set_status(format!("{verb} {what}{where_}{kept}"));
+    }
+
+    /// The tmux sessions this cctop already has a pane onto.
+    pub fn open_tmux(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| pane.tmux.clone())
+            .collect()
+    }
+
+    /// What the launcher is offering right now.
+    pub fn launch_choices(&self) -> Vec<tabs::Choice> {
+        tabs::choices(&self.open_tmux())
     }
 
     /// Start the launcher's pick.
     pub fn launch_selected(&mut self) {
-        let commands = tabs::harnesses();
-        let Some(argv) = commands.get(self.launch_cursor) else {
+        let choices = self.launch_choices();
+        let Some(choice) = choices.get(self.launch_cursor) else {
             return;
         };
         let cwd = self.launch_cwd.clone();
-        let pane = match tabs::Pane::launch(argv, cwd.as_deref()) {
+        let (argv, own) = match choice {
+            // Reattaching: the agent chose its own command long ago, and the
+            // argv here only names the tab.
+            tabs::Choice::Waiting(name) => {
+                (vec![choice.label()], tabs::Own::TmuxExisting(name.clone()))
+            }
+            // A fresh agent has no identity to be idempotent about — two
+            // `claude` tabs are two agents — so this takes the next free name
+            // rather than a derived one.
+            tabs::Choice::Start(argv) => (
+                argv.clone(),
+                tabs::Own::preferring_tmux(|| crate::tmux::free_name(&tabs::label_of(argv))),
+            ),
+        };
+        let argv = &argv;
+        let pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
             Err(error) => {
                 self.set_status(format!("Could not start {}: {error}", tabs::label_of(argv)));
@@ -1832,6 +1932,10 @@ impl App {
             }
         };
         let label = pane.label.clone();
+        let kept = match pane.outlives_cctop() {
+            true => " — it will outlive cctop",
+            false => "",
+        };
         match self.launch_into {
             LaunchInto::Split { stacked } => {
                 let Some(tab) = self.active_tab() else { return };
@@ -1847,19 +1951,52 @@ impl App {
         let where_ = cwd
             .map(|dir| format!(" in {}", dir.display()))
             .unwrap_or_default();
-        self.set_status(format!("Started {label}{where_}"));
+        self.set_status(format!("Started {label}{where_}{kept}"));
     }
 
-    /// Close the focused pane, taking the agent with it when cctop started it.
+    /// Close the focused pane.
+    ///
+    /// What that costs depends on who owns the agent: a tmux-backed pane is
+    /// detached from and the agent carries on, while a pane holding cctop's own
+    /// pty takes the agent with it. The status line says which happened, because
+    /// the two look identical on screen and only one is undoable.
     pub fn close_pane(&mut self) {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        if tab.focus < tab.panes.len() {
-            tab.panes.remove(tab.focus);
-        }
+        let closed = (tab.focus < tab.panes.len()).then(|| {
+            let pane = tab.panes.remove(tab.focus);
+            (pane.label.clone(), pane.outlives_cctop())
+        });
         tab.focus = tab.focus.min(tab.panes.len().saturating_sub(1));
         self.drop_empty_tabs();
+        if let Some((label, detached)) = closed {
+            self.set_status(match detached {
+                true => format!("Detached from {label} — it is still running"),
+                false => format!("Closed {label}"),
+            });
+        }
+    }
+
+    /// End the focused pane's agent outright, rather than detaching from it.
+    ///
+    /// Only meaningful for a tmux-backed pane: everywhere else closing already
+    /// is the kill, so this is that same act by a name that says so.
+    pub fn kill_pane(&mut self) {
+        let Some(pane) = self.focused_pane() else {
+            return;
+        };
+        let (label, owned) = (pane.label.clone(), pane.outlives_cctop());
+        if let Err(error) = pane.kill_agent() {
+            self.set_status(format!("Could not stop {label}: {error}"));
+            return;
+        }
+        // The pane goes either way: for a cctop-owned agent dropping it is the
+        // kill, and for a tmux one the client exits with the session anyway.
+        self.close_pane();
+        if owned {
+            self.set_status(format!("Stopped {label}"));
+        }
     }
 
     /// Forget the tabs whose agents have all exited, keeping the view on
@@ -2049,11 +2186,29 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     );
 
     // Before the terminal is restored, so the agent's hangup does not race the
-    // screen being handed back.
+    // screen being handed back. Clearing the tabs only ends the panes; a
+    // tmux-backed one is a client, and the agent behind it is left running —
+    // which is the point, and so worth saying out loud on the way out.
+    let left_running = app.open_tmux();
     app.tabs.clear();
     drop(hosted);
 
     restore_terminal();
+
+    // After the restore, so it lands on the terminal the user is handed back
+    // rather than inside the alternate screen that is about to be torn down.
+    if !left_running.is_empty() {
+        println!(
+            "{} agent{} still running in tmux; `cctop` then `t` to get back to {}.",
+            left_running.len(),
+            if left_running.len() == 1 { "" } else { "s" },
+            if left_running.len() == 1 {
+                "it"
+            } else {
+                "them"
+            },
+        );
+    }
 
     let _ = req_tx.send(Request::Shutdown);
     // The worker persists newly extracted transcript data while shutting down.
@@ -2247,6 +2402,12 @@ fn event_loop(
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
+        if annotated_rows_changed || rows_changed {
+            // Extraction rebuilds each subagent from its transcript, which
+            // cannot know what a hook already reported, so the hook's answer is
+            // reapplied to every batch of rows that replaces them.
+            app.apply_finished_agents();
+        }
         if annotated_rows_changed {
             // A burst can contain hundreds of rows. Recompute and sort once
             // after draining it rather than once per transcript.
@@ -2421,6 +2582,9 @@ mod tests {
                 signal,
                 cwd: "/w/proj".into(),
             },
+            // This test is about the session's own state; subagent events are
+            // covered where subagents are.
+            finished_agent: None,
         };
         let mut app = test_app();
 
@@ -2597,6 +2761,35 @@ mod tests {
         assert_eq!(app.visible.len(), 1);
         assert_eq!(app.visible[app.selected], Row::Session(0));
         assert!(app.expanded.is_empty());
+    }
+
+    /// A background subagent is acknowledged by its parent the moment it
+    /// starts, so the transcript says "finished" while it is still working. The
+    /// hook is the agent reporting for itself, and it has to win — this is the
+    /// difference between a child row that tracks a live agent and one that
+    /// reads `done` for the whole run.
+    #[test]
+    fn a_hooks_word_retires_a_subagent_the_transcript_still_calls_running() {
+        let mut app = test_app();
+        app.sessions = vec![with_subagents("a", &["one", "two"])];
+        assert!(
+            app.sessions[0]
+                .subagents
+                .iter()
+                .all(|s| s.status == crate::session::SubagentStatus::Running)
+        );
+
+        // The hook names the bare id; the transcript is stored as `agent-<id>`.
+        app.finished_agents.insert("one".into());
+        app.apply_finished_agents();
+
+        let status = |i: usize| app.sessions[0].subagents[i].status;
+        assert_eq!(status(0), crate::session::SubagentStatus::Done);
+        assert_eq!(
+            status(1),
+            crate::session::SubagentStatus::Running,
+            "only the subagent named may be retired"
+        );
     }
 
     /// A session with nothing to show must not swallow the key and leave the
