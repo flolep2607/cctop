@@ -259,7 +259,10 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
             }
         }
         ColumnId::Context => match &s.context {
-            Some(c) if c.compacting => theme::COST_HIGH,
+            _ if s.is_compacting() => theme::COST_HIGH,
+            // Dim once compacted and stopped: the percentage is real but it
+            // measures a window the session has already thrown away.
+            Some(c) if c.compacted => theme::DIMMER,
             Some(c) => theme::context_color(c.percent_to_compact()),
             None => theme::DIMMER,
         },

@@ -342,6 +342,21 @@ struct CtxChars {
     assistant_text: u64,
 }
 
+/// One stretch of conversation the window was measured over: from a start, or
+/// from a compaction, up to the last request that reported its own size.
+///
+/// Grouped rather than left as loose fields so a compaction can retire the
+/// whole segment in one move. Retiring only part of it is what makes the
+/// measured total and the counted content describe different conversations.
+#[derive(Debug, Default)]
+struct CtxSegment {
+    /// Window size at the segment's first request, and at its last.
+    startup: Option<u64>,
+    total: u64,
+    chars: CtxChars,
+    after_compaction: bool,
+}
+
 /// Characters per token for the text these transcripts carry.
 ///
 /// Fitted, not assumed: across 167 local sessions, dividing the characters a
@@ -417,12 +432,12 @@ struct Extractor {
     tool_delta: HashMap<String, super::Delta>,
     /// Request key -> final (input, output) tokens, filled when the file flushes.
     req_usage: HashMap<String, (u64, u64)>,
-    /// Main-transcript content still in the window, reset at each compaction.
-    ctx_chars: CtxChars,
-    /// Window size at the live segment's first request, and at its last.
-    ctx_startup: Option<u64>,
-    ctx_total: u64,
-    ctx_after_compaction: bool,
+    /// The segment the window is being measured over, restarted at each
+    /// compaction.
+    ctx: CtxSegment,
+    /// The segment the last compaction retired, kept because the one that
+    /// replaced it may never receive a request to measure.
+    ctx_sealed: Option<CtxSegment>,
     error: Option<String>,
 }
 
@@ -608,7 +623,7 @@ impl Extractor {
             Some(Value::String(s)) => {
                 texts.push(s);
                 if ctx {
-                    self.ctx_chars.user_text += s.len() as u64;
+                    self.ctx.chars.user_text += s.len() as u64;
                 }
             }
             Some(Value::Array(blocks)) => {
@@ -617,21 +632,21 @@ impl Extractor {
                         Value::String(s) => {
                             texts.push(s);
                             if ctx {
-                                self.ctx_chars.user_text += s.len() as u64;
+                                self.ctx.chars.user_text += s.len() as u64;
                             }
                         }
                         Value::Object(_) => {
                             if let Some(t) = block.get("text").and_then(Value::as_str) {
                                 texts.push(t);
                                 if ctx {
-                                    self.ctx_chars.user_text += t.len() as u64;
+                                    self.ctx.chars.user_text += t.len() as u64;
                                 }
                             }
                             if block.get("type").and_then(Value::as_str) == Some("tool_result")
                                 && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
                             {
                                 if ctx {
-                                    self.ctx_chars.tool_output +=
+                                    self.ctx.chars.tool_output +=
                                         content_chars(block.get("content"));
                                 }
                                 if is_main {
@@ -683,20 +698,28 @@ impl Extractor {
         if window == 0 {
             return;
         }
-        if self.ctx_startup.is_none() {
-            self.ctx_startup = Some(window);
-            self.ctx_chars = CtxChars::default();
+        if self.ctx.startup.is_none() {
+            self.ctx.startup = Some(window);
+            self.ctx.chars = CtxChars::default();
         }
-        self.ctx_total = window;
+        self.ctx.total = window;
     }
 
     /// A compaction replaced the conversation with a summary, so everything
     /// counted so far has left the window. Start the segment over; the next
     /// request's input becomes the new baseline, summary included.
+    ///
+    /// The old segment is sealed rather than dropped: a session can compact and
+    /// then stop, and the segment opening here would then hold no request at
+    /// all. The window it describes is gone, but it is the last one that was
+    /// ever measured, and reporting it whole beats reporting a total from one
+    /// side of the boundary against parts from the other.
     fn note_compaction(&mut self) {
-        self.ctx_chars = CtxChars::default();
-        self.ctx_startup = None;
-        self.ctx_after_compaction = true;
+        let sealed = std::mem::take(&mut self.ctx);
+        if sealed.total > 0 {
+            self.ctx_sealed = Some(sealed);
+        }
+        self.ctx.after_compaction = true;
     }
 
     fn visit_assistant(
@@ -749,7 +772,7 @@ impl Extractor {
                     // `thinking` string and only the signature survives, so there
                     // is nothing to measure and it stays in the unaccounted gap.
                     if ctx && block.get("type").and_then(Value::as_str) == Some("text") {
-                        self.ctx_chars.assistant_text += content_chars(block.get("text"));
+                        self.ctx.chars.assistant_text += content_chars(block.get("text"));
                     }
                     continue;
                 }
@@ -786,7 +809,7 @@ impl Extractor {
                     }
                 }
                 if ctx {
-                    self.ctx_chars.tool_input +=
+                    self.ctx.chars.tool_input +=
                         content_chars(block.get("input")) + name.len() as u64;
                 }
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
@@ -910,7 +933,7 @@ impl Extractor {
                 let attachment = item.get("attachment");
                 // Some kinds carry no `content` and are the payload themselves,
                 // such as the file reference a compaction leaves behind.
-                self.ctx_chars.attachments += match attachment.and_then(|a| a.get("content")) {
+                self.ctx.chars.attachments += match attachment.and_then(|a| a.get("content")) {
                     Some(content) => content_chars(Some(content)),
                     None => content_chars(attachment),
                 };
@@ -1022,16 +1045,26 @@ pub fn extract(transcript: &Path) -> SessionData {
     // A session with no usage figures has no window to break down; the estimate
     // alone would be a share of nothing.
     let est = |chars: u64| (chars as f64 / CHARS_PER_TOKEN).round() as u64;
-    let c = &ext.ctx_chars;
-    let context_breakdown = (ext.ctx_total > 0).then(|| ContextBreakdown {
-        total: ext.ctx_total,
-        startup: ext.ctx_startup.unwrap_or(0),
+    // A compaction with no request behind it leaves the live segment unmeasured:
+    // fall back to the one it retired, whole, and say so. Splitting the
+    // difference would put a pre-compaction total next to post-compaction parts,
+    // and the entire conversation would surface as unaccounted.
+    let superseded = ext.ctx.startup.is_none() && ext.ctx_sealed.is_some();
+    let seg = match &ext.ctx_sealed {
+        Some(sealed) if superseded => sealed,
+        _ => &ext.ctx,
+    };
+    let c = &seg.chars;
+    let context_breakdown = (seg.total > 0).then(|| ContextBreakdown {
+        total: seg.total,
+        startup: seg.startup.unwrap_or(0),
         tool_output: est(c.tool_output),
         tool_input: est(c.tool_input),
         attachments: est(c.attachments),
         user_text: est(c.user_text),
         assistant_text: est(c.assistant_text),
-        after_compaction: ext.ctx_after_compaction,
+        after_compaction: seg.after_compaction,
+        superseded,
     });
 
     SessionData {
@@ -1175,7 +1208,7 @@ fn build_subagents(files: &[PathBuf], ext: &Extractor) -> Vec<Subagent> {
         let context = stats.filter(|s| s.latest_used > 0).map(|s| ContextUsage {
             used: s.latest_used,
             max: resolve_ctx_max(None, s.latest_used, None),
-            compacting: false,
+            compacted: false,
         });
 
         subagents.push(Subagent {
@@ -1340,11 +1373,12 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
 
     let settings_ctx = settings_context(session);
     let litellm_ctx = pricing::litellm_max_input_tokens(&session.model);
-    let mut saw_compact_boundary = false;
+    let mut compacted = false;
 
     // Widening rescans lines it has already rejected, but only ever from behind
     // the newest usage entry, so the boundary flag keeps meaning "a compaction
-    // started after the last request" rather than "this session compacted once".
+    // has replaced the window and nothing has measured the new one" rather than
+    // "this session compacted once".
     let used = util::scan_tail_escalating(file, |text| {
         for line in text.lines().rev() {
             let line = line.trim();
@@ -1354,10 +1388,16 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
             let Ok(item) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
-            if item.get("type").and_then(Value::as_str) == Some("system")
-                && item.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+            // Both spellings of a compaction, matching what the full extractor
+            // looks for: newer transcripts flag the summary entry itself, older
+            // ones wrote a `compact_boundary`. Reading only one of them here
+            // would let the column and the context panel disagree about whether
+            // the same transcript has been compacted.
+            if item.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+                || (item.get("type").and_then(Value::as_str) == Some("system")
+                    && item.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))
             {
-                saw_compact_boundary = true;
+                compacted = true;
             }
             if item.get("type").and_then(Value::as_str) != Some("assistant") {
                 continue;
@@ -1380,14 +1420,14 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
         return Some(ContextUsage {
             used,
             max: resolve_ctx_max(settings_ctx, used, litellm_ctx),
-            compacting: saw_compact_boundary,
+            compacted,
         });
     }
 
-    saw_compact_boundary.then(|| ContextUsage {
+    compacted.then(|| ContextUsage {
         used: 0,
         max: resolve_ctx_max(settings_ctx, 0, litellm_ctx),
-        compacting: true,
+        compacted: true,
     })
 }
 
@@ -1557,6 +1597,91 @@ mod tests {
             "the pre-compaction result has left the window"
         );
         assert_eq!(b.tool_input, 0);
+        assert!(
+            !b.superseded,
+            "a request measured the post-compaction window"
+        );
+    }
+
+    /// A session can compact and stop in the same breath, leaving the new
+    /// segment with no request in it at all. The last usage figure then predates
+    /// the boundary while every counted character postdates it, and pairing the
+    /// two would file the entire conversation under `unaccounted` — which is
+    /// supposed to hold only what the transcript cannot see. Reporting the
+    /// retired segment whole keeps the total and its parts talking about one
+    /// window.
+    #[test]
+    fn a_compaction_with_no_request_behind_it_reports_the_window_it_retired() {
+        let result = "x".repeat(2750);
+        let conversation = [
+            assistant(
+                "req_1",
+                1000,
+                r#"{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}"#,
+            ),
+            format!(
+                r#"{{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"{result}"}}]}}}}"#
+            ),
+            assistant("req_2", 5000, r#"{"type":"text","text":"done"}"#),
+        ];
+        let mut compacted = conversation.to_vec();
+        compacted.push(
+            r#"{"type":"system","subtype":"compact_boundary","timestamp":"2026-08-05T10:00:02.000Z"}"#
+                .to_string(),
+        );
+
+        let before = extract_lines("ctx-stop", &conversation)
+            .context_breakdown
+            .expect("a breakdown");
+        let b = extract_lines("ctx-compact-stop", &compacted)
+            .context_breakdown
+            .expect("a breakdown");
+
+        assert!(b.superseded, "nothing measured the window that replaced it");
+        assert_eq!(b.total, before.total, "the last window anyone measured");
+        assert_eq!(b.startup, before.startup, "from that same segment");
+        assert_eq!(b.tool_output, before.tool_output, "and so are its parts");
+        assert_eq!(
+            b.unaccounted(),
+            before.unaccounted(),
+            "a trailing boundary reveals nothing new about the window it closed, \
+             so it must not open a gap in it"
+        );
+    }
+
+    /// The ordinary post-compaction session: the summary lands, work resumes,
+    /// and the segment is measured from its own first request. If the retired
+    /// segment leaked into this one the window would be described twice over.
+    #[test]
+    fn a_session_that_kept_working_after_compacting_describes_only_the_new_segment() {
+        let result = "x".repeat(2750);
+        let data = extract_lines(
+            "ctx-compact-resume",
+            &[
+                assistant("req_1", 90_000, r#"{"type":"text","text":"before"}"#),
+                r#"{"type":"system","subtype":"compact_boundary","timestamp":"2026-08-05T10:00:02.000Z"}"#.to_string(),
+                r#"{"type":"user","isCompactSummary":true,"timestamp":"2026-08-05T10:00:03.000Z","message":{"role":"user","content":"a summary of everything above"}}"#.to_string(),
+                assistant("req_2", 20_000, r#"{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"ls"}}"#),
+                format!(
+                    r#"{{"type":"user","timestamp":"2026-08-05T10:00:04.000Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_2","content":"{result}"}}]}}}}"#
+                ),
+                assistant("req_3", 22_000, r#"{"type":"text","text":"carrying on"}"#),
+            ],
+        );
+
+        let b = data.context_breakdown.expect("a breakdown");
+        assert!(b.after_compaction, "this segment opens on a summary");
+        assert!(!b.superseded, "and a request has measured it");
+        assert_eq!(b.total, 22_000);
+        assert_eq!(
+            b.startup, 20_000,
+            "the summary is inside the segment's first request"
+        );
+        assert_eq!(b.tool_output, 1000, "counted from the boundary onwards");
+        assert!(
+            b.unaccounted() < 1_000,
+            "the pre-compaction window must not reappear as a gap"
+        );
     }
 
     /// Older transcripts write a subagent's turns into the parent's file. Those
@@ -1690,6 +1815,6 @@ mod tests {
 
         let ctx = extract_context(&session).expect("usage past the first tail window");
         assert_eq!(ctx.used, 647_414);
-        assert!(!ctx.compacting);
+        assert!(!ctx.compacted);
     }
 }
