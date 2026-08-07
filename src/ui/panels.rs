@@ -1659,17 +1659,18 @@ mod tests {
     use crate::session::{ContextUsage, SubagentStatus};
 
     fn series(windows: &[u64]) -> SessionData {
-        let mut data = SessionData::default();
-        data.context_series = windows
-            .iter()
-            .enumerate()
-            .map(|(i, w)| crate::session::CtxPoint {
-                ts: format!("2026-08-05T10:{i:02}:00+00:00"),
-                window: *w,
-                after_compaction: false,
-            })
-            .collect();
-        data
+        SessionData {
+            context_series: windows
+                .iter()
+                .enumerate()
+                .map(|(i, w)| crate::session::CtxPoint {
+                    ts: format!("2026-08-05T10:{i:02}:00+00:00"),
+                    window: *w,
+                    after_compaction: false,
+                })
+                .collect(),
+            ..SessionData::default()
+        }
     }
 
     /// The chart says how the window filled, which needs a shape to show. Two

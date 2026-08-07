@@ -31,7 +31,7 @@
 //! absent, stopped, or mid-crash is the *ordinary* case, not an error worth
 //! reporting.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Longest `cctop hook` may take, start to finish, whatever it is doing.
@@ -149,6 +149,10 @@ fn forward(args: &[String]) {
 /// Write one framed event to every cctop that will take it.
 #[cfg(unix)]
 fn deliver(line: &[u8]) {
+    // Both scoped here rather than at the top of the module: writing is what
+    // only the unix half does, and an import the Windows build cannot use is a
+    // warning, which CI treats as an error.
+    use std::io::Write;
     use std::os::unix::net::UnixStream;
 
     let Some(dir) = socket_dir() else { return };
@@ -2060,6 +2064,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_wedged_cctop_does_not_hold_the_agent_up() {
+        use std::io::Write;
+
         use std::os::unix::net::{UnixListener, UnixStream};
 
         let dir = scratch("wedge");
