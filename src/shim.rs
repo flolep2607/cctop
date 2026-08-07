@@ -571,7 +571,12 @@ fn spawn_on_pty(
 ///
 /// Here rather than in the tests that use it because everything it touches is
 /// private to this module, and one of those tests lives in the UI.
-#[cfg(test)]
+///
+/// Linux-gated to match every caller. The tests that drive a real pty are all
+/// `cfg(target_os = "linux")` — timing and pty semantics differ enough on macOS
+/// to make them flaky there — so without the same gate this is a function with
+/// no callers on macOS, which `-D warnings` in CI rejects.
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u32) {
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
     let (child, master) = spawn_on_pty(&argv, None).expect("pty child");
