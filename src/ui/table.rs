@@ -133,20 +133,37 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
         .skip(app.scroll)
         .take(height)
         .enumerate()
-        .map(|(i, &idx)| {
-            let s = &app.sessions[idx];
+        .map(|(i, &row)| {
+            let s = &app.sessions[row.session()];
             let selected = app.scroll + i == app.selected;
             let key = s.key();
-            let marked = app.marked.contains(&key);
-            let deleting = app.deleting.contains(&key);
-            let row = RowState {
-                selected,
-                marked,
-                deleting,
-                rang: app.notify.rang_recently(&key),
-                query: &query,
-            };
-            session_row(s, &widths, &row, &now)
+            match row {
+                crate::ui::Row::Session(_) => session_row(
+                    s,
+                    &widths,
+                    &RowState {
+                        selected,
+                        marked: app.marked.contains(&key),
+                        deleting: app.deleting.contains(&key),
+                        rang: app.notify.rang_recently(&key),
+                        query: &query,
+                        // Only sessions that have subagents get a marker, so the
+                        // glyph is an offer rather than decoration on every row.
+                        expand: match (s.subagents.is_empty(), app.is_expanded(s)) {
+                            (true, _) => None,
+                            (false, true) => Some('▾'),
+                            (false, false) => Some('▸'),
+                        },
+                    },
+                    &now,
+                ),
+                crate::ui::Row::Subagent { index, .. } => match s.subagents.get(index) {
+                    Some(sub) => {
+                        subagent_row(sub, &widths, selected, index + 1 == s.subagents.len(), &now)
+                    }
+                    None => Line::default(),
+                },
+            }
         })
         .collect();
 
@@ -196,6 +213,8 @@ struct RowState<'a> {
     deleting: bool,
     /// The active filter, lowercased, for marking the cells that matched.
     query: &'a str,
+    /// The expansion marker, for a session that has subagents.
+    expand: Option<char>,
 }
 
 fn session_row(
@@ -210,6 +229,7 @@ fn session_row(
         rang,
         deleting,
         query,
+        expand,
     } = row;
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
     let base = if selected {
@@ -235,6 +255,14 @@ fn session_row(
             "…".to_string()
         } else if bell {
             "◉".to_string()
+        } else if c.id == ColumnId::Project {
+            // Prefixed on the label rather than given a column of its own: one
+            // more column costs every row two cells of width to serve the few
+            // rows that have children.
+            match expand {
+                Some(glyph) => format!("{glyph} {}", columns::render_cell(c.id, s, now)),
+                None => columns::render_cell(c.id, s, now),
+            }
         } else {
             columns::render_cell(c.id, s, now)
         };
@@ -273,6 +301,60 @@ fn session_row(
         } else {
             spans.push(Span::styled(padded, style));
         }
+        spans.push(Span::styled(" ", base));
+    }
+    Line::from(spans)
+}
+
+/// A subagent's line, indented under the session that spawned it.
+///
+/// Dimmer than a session row throughout, so an expanded session still reads as
+/// one block with a heading rather than as several peers: the child rows are
+/// detail about the row above them, not more sessions.
+fn subagent_row(
+    sub: &crate::session::Subagent,
+    widths: &[u16],
+    selected: bool,
+    last: bool,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Line<'static> {
+    let running = matches!(sub.status, crate::session::SubagentStatus::Running);
+    let base = if selected {
+        Style::default()
+            .bg(theme::SELECTED_BG)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::DIM)
+    };
+
+    let mut spans = Vec::with_capacity(COLUMNS.len() * 2);
+    for (c, w) in COLUMNS.iter().zip(widths) {
+        let text = columns::render_subagent_cell(c.id, sub, last, now);
+        // The status dot keeps its colour on the selected row for the same
+        // reason a session's does: it is the one cell whose colour *is* the
+        // information. A ghost's transcript is gone, so its dot is hollow.
+        let style = match c.id {
+            ColumnId::Status => {
+                let fg = if sub.ghost {
+                    theme::DIMMER
+                } else if running {
+                    theme::COST_LOW
+                } else {
+                    theme::DIM
+                };
+                if selected {
+                    Style::default()
+                        .bg(theme::SELECTED_BG)
+                        .fg(fg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(fg)
+                }
+            }
+            _ => base,
+        };
+        spans.push(Span::styled(pad(&text, *w, c.right_align), style));
         spans.push(Span::styled(" ", base));
     }
     Line::from(spans)
@@ -323,7 +405,10 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
             }
         }
         ColumnId::Context => match &s.context {
-            Some(c) if c.compacting => theme::COST_HIGH,
+            _ if s.is_compacting() => theme::COST_HIGH,
+            // Dim once compacted and stopped: the percentage is real but it
+            // measures a window the session has already thrown away.
+            Some(c) if c.compacted => theme::DIMMER,
             Some(c) => theme::context_color(c.percent_to_compact()),
             None => theme::DIMMER,
         },
@@ -385,6 +470,7 @@ mod tests {
             rang,
             deleting: false,
             query: "",
+            expand: None,
         };
         let quiet = session_row(&s, &widths, &row(false), &now);
         let rang = session_row(&s, &widths, &row(true), &now);

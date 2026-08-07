@@ -748,7 +748,7 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
                 .get("model_context_window")
                 .and_then(Value::as_u64)
                 .unwrap_or(CODEX_DEFAULT_CTX),
-            compacting: false,
+            compacted: false,
         });
     }
     None
