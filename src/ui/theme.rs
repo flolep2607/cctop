@@ -133,6 +133,22 @@ pub fn running_dot_color(age_secs: Option<i64>) -> Color {
     }
 }
 
+/// The colour of a state an agent reported about itself through its hooks.
+///
+/// Ranked by what it costs to miss it, not by how active the agent is: a held
+/// question blocks work until it is answered, a finished turn waits patiently,
+/// and an agent that is busy needs nothing from anyone. Shared so the dot beside
+/// an agent and the word for its state never disagree.
+pub fn signal_color(signal: crate::hook::Signal) -> Color {
+    use crate::hook::Signal;
+    match signal {
+        Signal::NeedsInput => COST_HIGH,
+        Signal::Idle => COST_MID,
+        Signal::Busy | Signal::Started | Signal::Compacting => COST_LOW,
+        Signal::Ended => DIMMER,
+    }
+}
+
 pub fn cpu_color(cpu: f32) -> Color {
     if cpu > 80.0 {
         COST_HIGH

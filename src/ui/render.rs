@@ -30,10 +30,24 @@ pub struct Layout {
     pub(super) tab_spans: Vec<(u16, u16, usize)>,
     /// `(start_col, end_col, workspace_index)` spans in the top tab bar.
     pub(super) workspace_spans: Vec<(u16, u16, usize)>,
+    /// `(start_col, end_col)` of the bar's new-tab button.
+    pub(super) workspace_new: Option<(u16, u16)>,
+    /// The rectangle a modal covers while one is up. A click inside it belongs
+    /// to the modal, and a click outside it must not reach the dashboard the
+    /// modal is sitting on top of.
+    pub(super) modal_rect: Option<Rect>,
+    /// `(row, choice_index)` for each row of the launcher's list.
+    pub(super) launch_rows: Vec<(u16, usize)>,
     /// Tool Activity sidebar: `(x_end, y_start, first_index, row_count)`.
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
     pub(super) tool_log: Option<(u16, u16, u16)>,
+    /// Where each pane of the open tab has its agent's screen, in pane order.
+    ///
+    /// The agent's screen, not the pane: the border is cctop's and the shim may
+    /// have granted less room than the pane has, so this is the rectangle a
+    /// mouse position can be turned into a cell of.
+    pub(super) pane_rects: Vec<Rect>,
 }
 
 impl Layout {
@@ -95,6 +109,33 @@ impl Layout {
             .find(|(a, b, _)| col >= *a && col < *b)
             .map(|(_, _, i)| *i)
     }
+
+    /// Whether the cursor is on the bar's new-tab button.
+    pub fn workspace_new_at(&self, col: u16, row: u16) -> bool {
+        matches!(self.workspace_new, Some((a, b)) if row == 0 && col >= a && col < b)
+    }
+
+    /// Whether the cursor is inside the modal that is up, if one is.
+    pub fn in_modal(&self, col: u16, row: u16) -> bool {
+        self.modal_rect
+            .is_some_and(|r| r.contains((col, row).into()))
+    }
+
+    /// Index of the launcher choice under the cursor, if any.
+    /// The pane under `(col, row)`, and where in its agent's screen that is.
+    pub fn pane_at(&self, col: u16, row: u16) -> Option<(usize, u16, u16)> {
+        self.pane_rects.iter().enumerate().find_map(|(i, r)| {
+            (col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .then(|| (i, col - r.x, row - r.y))
+        })
+    }
+
+    pub fn launch_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.in_modal(col, row)
+            .then(|| self.launch_rows.iter().find(|(y, _)| *y == row))
+            .flatten()
+            .map(|(_, i)| *i)
+    }
 }
 
 pub(super) fn panel_block(title: &str) -> Block<'static> {
@@ -108,9 +149,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     let mut area = frame.area();
     let mut layout = Layout::default();
 
-    // The tab bar only exists once there is more than the dashboard, so a cctop
-    // nobody has opened a tab in looks exactly as it always did.
-    if !app.tabs.is_empty() {
+    // The bar is always there, even with only the dashboard in it: the way to
+    // open an agent has to be visible before you have opened one, or nobody
+    // finds it. One row is a cheap price for that.
+    {
         let bar = Rect { height: 1, ..area };
         draw_workspace_bar(frame, bar, app, &mut layout);
         area = Rect {
@@ -132,10 +174,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         ])
         .split(area);
         draw_overview(frame, chunks[0], app);
-        draw_panes(frame, chunks[1], app);
+        draw_panes(frame, chunks[1], app, &mut layout);
         draw_footer(frame, chunks[2], app);
         if app.mode == Mode::Launch {
-            modals::draw_launch(frame, area, app);
+            modals::draw_launch(frame, area, app, &mut layout);
         }
         return layout;
     }
@@ -172,6 +214,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app),
         Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
         Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app),
+        Mode::TmuxInstall => modals::draw_tmux_install(frame, area, app),
         Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
         Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
         Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),
@@ -179,7 +222,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
-        Mode::Launch => modals::draw_launch(frame, area, app),
+        Mode::Launch => modals::draw_launch(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::List => {}
     }
@@ -225,6 +268,25 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         layout.workspace_spans.push((pos, pos + width, i));
         pos += width;
     }
+
+    // The button that says the feature exists. It carries its key as well as
+    // its click target, because the keyboard is how anyone will use it twice.
+    // Which key to name depends on where the keyboard is: inside a pane it
+    // belongs to the agent, so only the Alt- form gets through.
+    let new_tab = match app.tab {
+        0 => " + Tab (t) ",
+        _ => " + Tab (Alt+n) ",
+    };
+    let width = new_tab.chars().count() as u16;
+    if pos + width <= area.x + area.width {
+        spans.push(Span::styled(
+            new_tab,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+        layout.workspace_new = Some((pos, pos + width));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -233,7 +295,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
 /// Sizing is the part that already worked: each pane asks the shim for exactly
 /// the rectangle it was given, so a split is two agents each drawing a real
 /// screen rather than two crops of one.
-fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
     let Some(tab) = app.active_tab() else {
         return;
     };
@@ -255,6 +317,20 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App) {
                 .border_style(Style::default().fg(theme::BORDER_HI))
                 .title_bottom(Span::styled(" F12 back · Alt+w close ", theme::title()));
         }
+        // Scrolled back, this pane is showing history rather than the agent, and
+        // there is nothing on a still screen to say so — the agent may well be
+        // working below it. Only cctop's own history says anything here: a pane
+        // scrolled inside tmux is in tmux's copy-mode, which draws its own.
+        let behind = pane.view.parser.screen().scrollback();
+        if behind > 0 {
+            block = block.title_bottom(
+                Line::from(Span::styled(
+                    format!(" ↑ {behind} — type to catch up "),
+                    theme::title(),
+                ))
+                .right_aligned(),
+            );
+        }
         let inner = block.inner(slots[i]);
         pane.view.resize(inner.width, inner.height);
 
@@ -272,6 +348,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App) {
             tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()),
             screen,
         );
+        layout.pane_rects.push(screen);
     }
 }
 
@@ -1012,7 +1089,8 @@ mod tests {
     #[test]
     fn hit_testing_maps_regions() {
         let layout = Layout {
-            workspace_spans: Vec::new(),
+            workspace_spans: vec![(0, 12, 0)],
+            workspace_new: Some((12, 23)),
             header_row: 6,
             rows_start: 7,
             rows_end: 12,
@@ -1022,7 +1100,25 @@ mod tests {
             tab_spans: vec![(2, 6, 0), (8, 19, 1)],
             tool_sidebar: Some((18, 21, 0, 3)),
             tool_log: Some((19, 21, 4)),
+            modal_rect: Some(Rect::new(10, 8, 20, 6)),
+            launch_rows: vec![(10, 0), (11, 1)],
+            pane_rects: vec![Rect::new(1, 7, 40, 10)],
         };
+        // A modal takes the clicks that land on it, and its rows resolve to the
+        // choice on them — not to the table underneath, which shares those rows.
+        assert_eq!(layout.launch_row_at(15, 11), Some(1));
+        assert_eq!(layout.launch_row_at(15, 12), None);
+        // Same row, but outside the modal: still not a choice.
+        assert_eq!(layout.launch_row_at(5, 11), None);
+        assert!(layout.in_modal(10, 8));
+        assert!(!layout.in_modal(30, 8));
+        // The bar's tabs and its new-tab button are separate targets, and both
+        // only exist on the top row.
+        assert_eq!(layout.workspace_at(3, 0), Some(0));
+        assert_eq!(layout.workspace_at(15, 0), None);
+        assert!(layout.workspace_new_at(15, 0));
+        assert!(!layout.workspace_new_at(3, 0));
+        assert!(!layout.workspace_new_at(15, 1));
         assert_eq!(layout.row_at(7), Some(0));
         assert_eq!(layout.row_at(11), Some(4));
         assert_eq!(layout.row_at(12), None);
@@ -1032,6 +1128,13 @@ mod tests {
         assert_eq!(layout.tab_at(9, 21), None);
         assert!(layout.in_bottom_panel(20));
         assert!(!layout.in_bottom_panel(19));
+        // A pane resolves to the cell of the agent's own screen under the
+        // pointer, so the agent is told where the wheel is, not where cctop
+        // happens to have drawn it.
+        assert_eq!(layout.pane_at(1, 7), Some((0, 0, 0)));
+        assert_eq!(layout.pane_at(10, 9), Some((0, 9, 2)));
+        assert_eq!(layout.pane_at(41, 9), None);
+        assert_eq!(layout.pane_at(10, 17), None);
         // Sidebar clicks map to a tool filter; clicks past its right edge don't.
         assert_eq!(layout.tool_sidebar_at(4, 22), Some(1));
         assert_eq!(layout.tool_sidebar_at(4, 24), None);
@@ -1114,6 +1217,36 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         false
+    }
+
+    /// The way in has to be on screen before anyone has used it: with no tabs
+    /// open the bar still names the dashboard and offers the new-tab button, and
+    /// clicking that button is what `t` does.
+    #[test]
+    fn the_bar_offers_a_new_tab_with_nothing_open() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let top: String = (0..cols).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(
+            top.starts_with(" 1:Dashboard  + Tab (t) "),
+            "the new-tab button is not on the bar: {top:?}"
+        );
+        let (a, _) = layout.workspace_new.expect("no new-tab hit region");
+        assert!(layout.workspace_new_at(a, 0));
+        assert!(!layout.workspace_new_at(a, 1));
     }
 
     #[cfg(target_os = "linux")]

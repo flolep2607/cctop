@@ -148,6 +148,7 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `k` | Terminate the selected live session (with confirmation) |
 | `s` | Type a line into the selected session's terminal (see below) |
 | `R` | Resume the selected session in a tab of its own (see below) |
+| `O` | Hand the selected session's context off to a different agent (see below) |
 | `a` | Open that session's terminal in a tab and drive it |
 | `t` | New tab: run an agent or a shell (see below) |
 | `Esc` | Clear the active filter |
@@ -157,12 +158,13 @@ Tabs and splits, from anywhere including inside a running agent:
 
 | Key | Action |
 |---|---|
-| `t` or `Alt+n` | New tab: run an agent or a shell |
+| `t` or `Alt+n` | New tab: an agent, a shell, or one still running |
 | `Alt+v` / `Alt+s` | Split the current tab right / down |
 | `Alt+←` / `Alt+→` | Previous / next tab |
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
 | `Alt+o` | Move focus to the next pane |
-| `Alt+w` | Close the focused pane |
+| `Alt+w` | Close the focused pane; a tmux-backed agent keeps running |
+| `Alt+W` | Stop the focused pane's agent for good |
 | `F12` | Back to the dashboard, leaving everything running |
 
 Mouse works too: click session rows, column headers, and panel tabs; scroll
@@ -208,6 +210,43 @@ no such command, so `R` says so rather than guessing at a flag; `y` copies their
 transcript path instead. Resuming a session that is *still running* asks first —
 two agents appending to one transcript is not something the harnesses
 coordinate.
+
+### Tabs outlive cctop
+
+When tmux is installed, every tab's agent runs inside a tmux session of its own
+and what cctop hosts is only the tmux client. Quitting cctop, or closing the pane
+with `Alt+w`, detaches — the agent notices neither and carries on. On the way out
+cctop says how many it left behind.
+
+To get back to them, open the launcher with `t`: agents still running appear
+above the commands that start a new one, under **Still running**, and picking one
+reattaches to it with its scrollback intact. `R` on a session's row does the same
+thing by another route — a resumed session's tmux session is named after it, so
+pressing `R` twice reattaches rather than starting a rival agent on one
+transcript. `Alt+W` is the one key that ends an agent outright.
+
+Each of those agents is listed by what the dashboard calls it, the directory it
+is working in, and what it last reported through its hooks — `asking`, `working`,
+`idle` — so which one to go back to is a decision rather than a guess. A ringed
+dot (`◉`) means something is already attached to it, in another terminal or
+another cctop; attaching a second client works, but the two then share one
+window's size.
+
+This is the same hook feed the dashboard uses, and it reaches these agents for
+the same reason: cctop looks up the process *inside* the tmux session rather than
+the client in front of it. So a tab whose agent is in tmux still blinks when that
+agent asks a question, and still keeps quiet while it is only thinking. `a` on a
+session's row uses that lookup in reverse and opens the agent's own terminal,
+whether cctop is holding its pty or tmux is.
+
+cctop turns the status bar off in the sessions it creates, and only in those. Its
+row is duplicate chrome inside a pane that already has a border and a footer, and
+its clock repaints on a timer — which, to anything watching for the screen to
+stop changing, is indistinguishable from an agent still at work.
+
+Without tmux installed, none of this applies and tabs behave as they always did:
+the agent runs on a pty cctop owns and goes when cctop goes. The fallback is
+silent — tmux is how this is better, not how it works.
 
 ### Typing into a session
 
@@ -295,7 +334,7 @@ per-harness parsing and works for anything you open in a tab, shells included.
 Both of those are cctop guessing. The agents can just say it:
 
 ```bash
-cctop --install-hooks           # for this user: Claude Code and Codex
+cctop --install-hooks           # for this user: every agent below
 cctop --install-hooks project   # only for the project in this directory
 cctop --remove-hooks            # take it back out; same scopes
 cctop --hooks-status            # what is installed, and whether it works
@@ -304,12 +343,28 @@ cctop --hooks-status            # what is installed, and whether it works
 Press `h` (or `F8`) in the UI for the same thing with the install and remove
 keys on it, so none of this needs you to leave cctop or restart it.
 
-For **Claude Code** that registers eight hooks — `Stop`, `Notification`,
-`UserPromptSubmit`, `PreToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`
-and `SubagentStop` — each running `cctop hook <event>`. For **Codex** it points
-`notify` in `~/.codex/config.toml` at `cctop hook codex`, which is how Codex
-reports a finished turn. Either way the event goes to every running cctop over
-a unix socket.
+One install covers five agents, each asked in its own dialect:
+
+| Agent | Where it is written | What is written |
+|---|---|---|
+| **Claude Code** | `~/.claude/settings.json`, or `<project>/.claude/` | nine hooks — `Stop`, `Notification`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`, `SubagentStop` |
+| **Gemini CLI** | `~/.gemini/settings.json`, or `<project>/.gemini/` | seven — `BeforeAgent`, `AfterAgent`, `BeforeTool`, `Notification`, `SessionStart`, `SessionEnd`, `PreCompress` |
+| **Cursor** | `~/.cursor/hooks.json`, or `<project>/.cursor/` | seven — `stop`, `beforeSubmitPrompt`, `beforeShellExecution`, `sessionStart`, `sessionEnd`, `preCompact`, `subagentStop` |
+| **Codex** | `~/.codex/config.toml` | `notify = ["cctop", "hook", "codex"]`, its one turn-complete report |
+| **OpenCode** | `~/.config/opencode/plugins/cctop.ts`, or `<project>/.opencode/` | a plugin, since OpenCode extends by code rather than by command |
+
+Each hook runs `cctop hook <event>`; the plugin and Codex's `notify` hand the
+event over as an argument instead. Whichever way it arrives, it is reduced to
+the same three facts — which session, what happened, which directory — and sent
+to every running cctop over a unix socket. The agents disagree about all three
+spellings (`session_id`, `thread-id`, `conversation_id`, `sessionID`; a `cwd` or
+a `workspace_roots` array), so each is read under every name anyone uses.
+
+If you installed before an event was added — `PostToolUse`, or a whole agent —
+the panel shows that install as partial, and installing again fills it in.
+Cursor also reads Claude Code's `settings.json` of its own accord, so with both
+installed each moment arrives twice; that costs a process spawn and nothing
+else, since the second event says exactly what the first did.
 
 A reported turn beats a still screen: the green appears the instant the turn
 ends rather than two seconds later, and the amber no longer waits for a
@@ -325,6 +380,15 @@ you with no settings, and refuses outright if the file is not valid JSON — or,
 for Codex, not valid TOML — rather than replacing it. Codex's config is edited
 in place, so the comments and layout around it survive. Codex allows only one
 `notify` program, so an entry that is not cctop's is reported and left alone.
+Agents are independent of each other: a `notify` slot already spoken for, or a
+settings file that will not parse, is one line of the report and does not undo
+the installs that worked.
+
+The OpenCode plugin is the one integration that runs *inside* an agent rather
+than beside it, so it is the one place the exit-code guarantee below cannot
+help. Its handler ignores everything it does not report, wraps the rest in a
+`try`, and never waits for the process it starts. cctop writes that file whole
+and deletes it whole — it is the only file here it owns outright.
 
 `--hooks-status` and the `h` panel exist because none of this is visible
 otherwise: an install that points at a cctop you have since moved or deleted
@@ -520,6 +584,76 @@ output** like any other result.
 When the estimate overshoots the window there is no gap to draw, and the panel
 says so instead of clamping: it means the harness has dropped context that the
 transcript still holds.
+
+Under the bar, **How it filled** charts the window across every request the
+session made. The bar answers "what is in there"; the chart answers "how did it
+get that full", which is the part that changes what you do next. A window that
+climbed evenly is a conversation that grew and will keep growing. One that
+stepped is a handful of large tool results, and the same call will do it again.
+A sawtooth is a session living on compactions, paying to rebuild its context
+over and over. The chart spans the whole session rather than the live segment,
+because a compaction is the most interesting thing that can happen to a context
+window and it is the only view that can show one.
+
+## Handing a session to a different agent
+
+`O` takes the selected session's context across to another harness. Where `R`
+puts the *same* agent back on the *same* transcript, a handoff carries what the
+session was doing over to a different agent entirely — the one thing no harness
+can do for itself, since each can only read its own transcripts.
+
+cctop writes a markdown brief, opens the launcher, and types a line at whichever
+agent you pick pointing it at the file. The brief holds the task, the plan the
+session was working to, the files it changed and read, the commands it ran, what
+it delegated, and what it looked up — with paths relative to the project, and
+every list bounded so a long session hands over its most recent and most-touched
+entries rather than all of them.
+
+It is deliberately not a transcript. Replaying a conversation into a fresh
+window spends the context it is supposed to save, and most of what it spends it
+on — tool output, file contents the new agent can read itself — is what the
+receiving agent should gather first-hand anyway. What does not survive a restart
+is the intent, and that is what gets carried.
+
+Because it is built from the normalised session data rather than from any one
+transcript format, it works from and to all seven harnesses.
+
+The same brief is available without the UI:
+
+```bash
+cctop --handoff            # the most recently active session, as markdown
+cctop --handoff 2abd15fe   # a session id, or any unique prefix of one
+```
+
+## Letting agents see each other
+
+```bash
+cctop --mcp
+```
+
+serves the Model Context Protocol on stdin/stdout, so an agent can ask cctop
+what the *other* agents on the machine are doing — the thing none of them can
+find out for themselves. Point a harness at it the way you would any stdio MCP
+server:
+
+```json
+{"mcpServers": {"cctop": {"command": "cctop", "args": ["--mcp"]}}}
+```
+
+Three tools, all read-only:
+
+- **`list_sessions`** — every session, any harness: model, directory, branch,
+  tokens, estimated cost, context occupancy, and whether it is still running.
+  Filterable by `running_only` and by `directory`, which is how an agent asks
+  who else is in this repo.
+- **`get_session_context`** — the same brief `O` writes, for one session.
+- **`search_sessions`** — the full text of every transcript on the machine,
+  with a snippet of each match. Where something was already discussed or
+  attempted, in any harness.
+
+Nothing here starts, stops, or types at anything. An agent that can *drive*
+other agents is a much larger proposition than one that can *see* them, and the
+visibility is the half with no downside.
 
 ## Design notes
 

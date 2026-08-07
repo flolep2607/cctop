@@ -525,6 +525,13 @@ fn spawn_on_pty(
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    // The child is on a pty of ours, which is not a tmux pane whatever the
+    // terminal cctop was started from happened to be. Inheriting `$TMUX` would
+    // tell it otherwise: any tmux integration it attempted would address the
+    // pane cctop is drawn in rather than its own, and `tmux new-session` — how a
+    // tab hands its agent to tmux — refuses outright inside one.
+    cmd.env_remove("TMUX");
+    cmd.env_remove("TMUX_PANE");
     // A directory that has since been removed would fail the spawn outright, so
     // an unusable one is simply not applied.
     if let Some(cwd) = cwd.filter(|dir| dir.is_dir()) {

@@ -25,13 +25,15 @@ pub static CODEX_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
 
 pub static CODEX_SESSIONS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| CODEX_HOME.join("sessions"));
 
-/// Cursor's native agent transcripts, grouped by project slug.
-pub static CURSOR_PROJECTS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+/// `$CURSOR_HOME`, falling back to `~/.cursor`.
+pub static CURSOR_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::var_os("CURSOR_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| HOME.join(".cursor"))
-        .join("projects")
 });
+
+/// Cursor's native agent transcripts, grouped by project slug.
+pub static CURSOR_PROJECTS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| CURSOR_HOME.join("projects"));
 
 /// `$PI_CODING_AGENT_DIR`, falling back to `~/.pi/agent`.
 pub static PI_AGENT_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -89,6 +91,18 @@ pub static OPENCODE_DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
         .unwrap_or_else(|| {
             dirs::data_dir()
                 .unwrap_or_else(|| HOME.join(".local").join("share"))
+                .join("opencode")
+        })
+});
+
+/// Where OpenCode reads its own configuration and global plugins, which is the
+/// *config* directory rather than the data one its sessions live in.
+pub static OPENCODE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::var_os("OPENCODE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::config_dir()
+                .unwrap_or_else(|| HOME.join(".config"))
                 .join("opencode")
         })
 });

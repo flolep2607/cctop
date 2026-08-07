@@ -25,7 +25,16 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn modal(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>, width: u16) {
+/// Draws the overlay and returns `(outer, inner)`: the frame it covers, which is
+/// what tells a click inside the modal from one meant for what it hides, and the
+/// text area, whose rows are the lines that were passed in.
+fn modal(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    width: u16,
+) -> (Rect, Rect) {
     let height = lines.len() as u16 + 2;
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
@@ -36,6 +45,7 @@ fn modal(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>, 
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    (rect, inner)
 }
 
 pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
@@ -91,6 +101,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("k", "Terminate the selected live session"),
         item("s", "Type a line into the session's terminal"),
         item("R", "Resume the session in a tab of its own"),
+        item("O", "Hand the session's context off to a different agent"),
         item("a", "Open the session's terminal in a tab"),
         item("A", "Open the agent this cctop launched"),
         item("h or F8", "Agent integration: what reports to cctop"),
@@ -98,12 +109,16 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("q or F10", "Quit"),
         Line::default(),
         section("Tabs and splits"),
-        item("t or Alt+n", "New tab: run an agent or a shell"),
+        item(
+            "t or Alt+n",
+            "New tab: an agent, a shell, or one still running",
+        ),
         item("Alt+v / Alt+s", "Split the tab right / down"),
         item("Alt+← / →", "Previous / next tab"),
         item("Alt+1 – 9", "Jump to a tab (1 is the dashboard)"),
         item("Alt+o", "Move focus to the next pane"),
-        item("Alt+w", "Close the focused pane"),
+        item("Alt+w", "Close the pane; a tmux-backed agent keeps running"),
+        item("Alt+W", "Stop the focused pane's agent for good"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
         Line::from(Span::styled(
@@ -238,6 +253,56 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Resume a running session?", lines, 62);
 }
 
+/// Offering to install tmux, which is what would have made the agent about to
+/// start outlive cctop.
+pub(super) fn draw_tmux_install(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(install) = app.tmux_install.as_ref() else {
+        return;
+    };
+    let command = install.shown();
+    let sudo = command.starts_with("sudo ");
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " tmux is not installed.",
+            Style::default().fg(theme::COST_MID),
+        )),
+        Line::default(),
+        Line::from(Span::raw(
+            " With it, agents run inside tmux and survive cctop",
+        )),
+        Line::from(Span::raw(
+            " closing. Without it, quitting takes them with it.",
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            format!("   {}", crate::util::truncate(command, 56)),
+            theme::value(),
+        )),
+    ];
+    if sudo {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            " Runs in a tab, so sudo can ask you for a password.",
+            theme::dim(),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " y to install · any other key to start without it",
+        theme::dim(),
+    )));
+    // The manager goes in the title rather than the footer: naming it inline
+    // takes that line past the 60 columns the box has, and a footer that wraps
+    // pushes itself out through the bottom border.
+    modal(
+        frame,
+        area,
+        &format!("Install tmux with {}?", install.manager),
+        lines,
+        62,
+    );
+}
+
 pub(super) fn draw_sortby(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = COLUMNS
         .iter()
@@ -312,49 +377,220 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Show sessions active within", lines, 34);
 }
 
-/// The launcher: which agent to start, and where it will run.
-pub(super) fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
-    let commands = tabs::harnesses();
-    let mut lines: Vec<Line> = commands
+/// The launcher: what to put in the tab, and where it will run.
+pub(super) fn draw_launch(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut super::render::Layout,
+) {
+    const WIDTH: u16 = 62;
+    /// Room for the name, then where it is working, then what it is doing. The
+    /// three together are what tells one `claude` from another `claude`.
+    const NAME: usize = 24;
+    const WHERE: usize = 20;
+    const STATE: usize = 12;
+    /// The lines held below the list: where it will run, and the keys.
+    const FOOTER: usize = 2;
+
+    let choices = app.launch_choices();
+    let waiting = choices
         .iter()
-        .enumerate()
-        .map(|(i, argv)| {
-            let style = if i == app.launch_cursor {
-                Style::default()
-                    .bg(theme::SELECTED_BG)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(
-                format!(" {:<34}", tabs::label_of(argv)),
-                style,
-            ))
-        })
+        .filter(|c| matches!(c, tabs::Choice::Waiting(_)))
+        .count();
+
+    // Abbreviated together rather than each truncated, because the column exists
+    // to tell two agents apart and the identifying part of a path is its tail.
+    // This keeps whatever is needed to make each one unique and drops the rest:
+    // one agent in ~/cctop reads `cctop`, and two in ~/a/api and ~/b/api read
+    // `a/api` and `b/api` instead of the same elided prefix twice.
+    let dirs: Vec<String> = choices
+        .iter()
+        .filter_map(|c| c.cwd())
+        .map(|d| d.to_string_lossy().into_owned())
         .collect();
-    // Where it starts is not a detail: a claude opened on the wrong project
-    // reads its way into the wrong repository before you notice.
-    lines.push(Line::from(Span::styled(
-        match &app.launch_cwd {
-            Some(dir) => format!(
-                " in {}",
-                crate::util::truncate(&dir.display().to_string(), 33)
+    let mut short = crate::util::abbreviate_paths(&dirs).into_iter();
+
+    // The list on its own, kept apart from the two lines under it: it is the
+    // part that scrolls, and they are the part that must stay on screen.
+    let mut rows: Vec<Line> = Vec::new();
+    // Which line each choice ends up on, so a click can be turned back into the
+    // choice it landed on rather than into whatever the modal is covering.
+    let mut choice_lines: Vec<usize> = Vec::new();
+    for (i, choice) in choices.iter().enumerate() {
+        // A heading above each group, so a still-running agent is never picked
+        // in the belief that it starts a fresh one.
+        if i == 0 && waiting > 0 {
+            rows.push(Line::from(Span::styled(" Still running", theme::label())));
+        }
+        if i == waiting && waiting > 0 {
+            rows.push(Line::from(Span::styled(" Start new", theme::label())));
+        }
+        let selected = i == app.launch_cursor;
+        let style = if selected {
+            Style::default()
+                .bg(theme::SELECTED_BG)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        // What the agent last said about itself, which is the whole reason to
+        // list it: an agent stuck on a question is the one to go back to, and it
+        // looks exactly like an idle one from a list of names.
+        let reported = match choice {
+            tabs::Choice::Waiting(agent) => app.waiting_state(agent),
+            tabs::Choice::Start(_) => None,
+        };
+        // The dot carries whether anyone is already looking, the word carries
+        // what the agent said about itself. Two facts that can both be true at
+        // once, so neither is made to wait for the other's column.
+        let dot = match choice {
+            // Ringed: a client is on this session already. Attaching a second
+            // works, but the two then fight over one window's size.
+            tabs::Choice::Waiting(agent) if agent.attached => "◉",
+            tabs::Choice::Waiting(_) => "●",
+            tabs::Choice::Start(_) => " ",
+        };
+        let dot_color = match (choice, reported) {
+            (tabs::Choice::Waiting(_), Some(signal)) => theme::signal_color(signal),
+            // Running, but it has never reported: no hooks installed, or nothing
+            // has happened since cctop started listening. Still a live agent, so
+            // it keeps a dot — just one that claims nothing.
+            (tabs::Choice::Waiting(_), None) => theme::DIM,
+            (tabs::Choice::Start(_), _) => theme::DIMMER,
+        };
+
+        let state = match reported {
+            Some(signal) => signal.label().to_string(),
+            None => String::new(),
+        };
+        let state_color = match reported {
+            Some(signal) => theme::signal_color(signal),
+            None => theme::DIM,
+        };
+
+        // Drawn from the same iterator the abbreviation was built from, so the
+        // paths stay lined up with the choices that have one.
+        let at = match choice.cwd().is_some() {
+            true => short.next().unwrap_or_default(),
+            false => String::new(),
+        };
+
+        // The session's own title where cctop knows it. A resumed session's tmux
+        // name carries the whole session id, which for Codex is a timestamp and a
+        // uuid — two of those are identical for far more characters than this
+        // column is wide, so the names alone would draw two rows that read the
+        // same and do different things.
+        let name = match choice {
+            tabs::Choice::Waiting(agent) => app.waiting_label(agent),
+            tabs::Choice::Start(_) => None,
+        }
+        .unwrap_or_else(|| choice.label());
+
+        choice_lines.push(rows.len());
+        rows.push(Line::from(vec![
+            Span::styled(format!(" {dot} "), Style::default().fg(dot_color)),
+            Span::styled(
+                format!("{:<NAME$}", crate::util::truncate(&name, NAME)),
+                style,
             ),
-            None => " in this directory".to_string(),
+            Span::styled(
+                format!("{:<WHERE$}", crate::util::truncate(&at, WHERE - 1)),
+                theme::dim(),
+            ),
+            Span::styled(
+                format!("{:<STATE$}", crate::util::truncate(&state, STATE)),
+                Style::default().fg(state_color),
+            ),
+        ]));
+    }
+
+    // The list scrolls rather than being cut off. `modal` sizes itself to its
+    // lines and `centered` then clamps that to the screen, so on a short
+    // terminal a long list loses its last rows silently — including, once the
+    // cursor walks into them, the highlight itself: nothing on screen would say
+    // what Enter is about to do.
+    //
+    // Two lines are held back for the footer below, which is where the working
+    // directory is stated; scrolling that off would answer "in which project?"
+    // with silence for exactly the launches that need asking about.
+    // Two for the borders, two more for what `centered` will not give.
+    let room = (area.height as usize).saturating_sub(4 + FOOTER).max(1);
+    let total = rows.len();
+    let scrolled = total > room;
+    let cursor_line = choice_lines.get(app.launch_cursor).copied().unwrap_or(0);
+    let offset = match scrolled {
+        // Keep the cursor in view, and never scroll past the final row.
+        true => cursor_line.saturating_sub(room - 1).min(total - room),
+        false => 0,
+    };
+    let shown = room.min(total - offset);
+    let mut lines: Vec<Line> = rows.into_iter().skip(offset).take(shown).collect();
+
+    // Where it starts is not a detail: a claude opened on the wrong project
+    // reads its way into the wrong repository before you notice. It says
+    // nothing about reattaching, which lands wherever the agent already is.
+    let picked = choices.get(app.launch_cursor);
+    let picked_waiting = matches!(picked, Some(tabs::Choice::Waiting(_)));
+    lines.push(Line::from(Span::styled(
+        match (picked, &app.launch_cwd) {
+            // The ring is the only unexplained mark on the row, and it is the one
+            // worth explaining: it is the difference between coming back to an
+            // agent and joining someone else on it.
+            (Some(tabs::Choice::Waiting(agent)), _) if agent.attached => {
+                " ◉ already open elsewhere — both windows share one size".to_string()
+            }
+            (Some(tabs::Choice::Waiting(_)), _) => " where it already is".to_string(),
+            (_, Some(dir)) => format!(
+                " in {}",
+                crate::util::truncate(
+                    &crate::util::tildify(&dir.to_string_lossy()),
+                    WIDTH as usize - 6
+                )
+            ),
+            (_, None) => " in this directory".to_string(),
         },
         Style::default().fg(theme::LABEL),
     )));
+    let keys = match picked_waiting {
+        true => " ↑/↓  Enter reattach  Esc cancel",
+        false => " ↑/↓  Enter start  Esc cancel",
+    };
     lines.push(Line::from(Span::styled(
-        " ↑/↓  Enter start  Esc cancel",
+        // A scrolled list has to say so, or the choices above and below the
+        // window are simply missing as far as anyone can tell.
+        match scrolled {
+            true => format!("{keys}   {} of {}", app.launch_cursor + 1, choices.len()),
+            false => keys.to_string(),
+        },
         theme::dim(),
     )));
-    let title = match app.launch_into {
-        LaunchInto::Tab => "New tab",
-        LaunchInto::Split { stacked: false } => "Split right",
-        LaunchInto::Split { stacked: true } => "Split down",
+    // A handoff opens the same launcher for a different reason, and the picked
+    // agent is about to be typed at rather than just started — which is worth
+    // saying before Enter, not after.
+    let title = match (app.pending_brief.is_some(), app.launch_into) {
+        (true, _) => "Hand the context to",
+        (false, LaunchInto::Tab) => "New tab",
+        (false, LaunchInto::Split { stacked: false }) => "Split right",
+        (false, LaunchInto::Split { stacked: true }) => "Split down",
     };
-    modal(frame, area, title, lines, 38);
+    let (outer, inner) = modal(frame, area, title, lines, WIDTH);
+    layout.modal_rect = Some(outer);
+    layout.launch_rows = choice_lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            // Scrolled out above, or below the window: no row to click. The
+            // indices stay attached to their choices either way, so a click
+            // still resolves to what is drawn on that row and not to whatever
+            // choice happens to sit that far down the list.
+            let drawn = line.checked_sub(offset).filter(|d| *d < shown)?;
+            let row = inner.y + drawn as u16;
+            (row < inner.y + inner.height).then_some((row, i))
+        })
+        .collect();
 }
 
 /// What the agents have been asked to report, and whether they are doing it.
@@ -424,7 +660,7 @@ pub(super) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
         theme::dim(),
     )));
     lines.push(Line::from(Span::styled(
-        " i / x  install / remove for this user (Claude Code and Codex)",
+        " i / x  install / remove for this user (every agent above)",
         theme::dim(),
     )));
     lines.push(Line::from(Span::styled(

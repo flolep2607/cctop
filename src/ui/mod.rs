@@ -59,6 +59,15 @@ const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 /// looking up finds the results already there.
 const SCAN_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// How long a freshly launched agent is given before a handoff brief is typed
+/// at it.
+///
+/// Tuned against Claude Code and Codex, both of which print a banner and build
+/// their prompt before the first keystroke registers. Too short and the line is
+/// lost; too long and the user is left looking at an idle agent wondering
+/// whether the handoff worked.
+const HANDOFF_SETTLE: Duration = Duration::from_secs(3);
+
 /// Shortest query worth reading every transcript for.
 const MIN_SCAN_CHARS: usize = 3;
 
@@ -97,6 +106,23 @@ pub enum Mode {
     /// The agent-integration panel: what is installed where, and whether the
     /// agents are actually reporting in.
     Hooks,
+    /// Offering to install tmux, a launch having found it missing.
+    TmuxInstall,
+}
+
+/// A launch that stopped to ask about tmux, and how to pick it up again.
+///
+/// The launch is re-run from the top rather than resumed mid-way, because
+/// answering the question changes the first thing it decides — where the agent
+/// is going to live. Both entry points derive everything they need from state
+/// the modal does not touch (the table selection, the launcher's snapshot), so
+/// running them twice starts one agent, not two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deferred {
+    /// [`App::resume_selected`], stopped at the ownership decision.
+    Resume,
+    /// [`App::launch_selected`], stopped at the same place.
+    Launch,
 }
 
 /// Where the agent picked in `Mode::Launch` ends up.
@@ -618,8 +644,8 @@ pub struct App {
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
     /// Which tab is on screen: `0` is the dashboard, `1..=tabs.len()` index
-    /// `tabs`. Zero-length `tabs` is the ordinary case and costs nothing — no
-    /// tab bar is drawn and cctop looks exactly as it did before.
+    /// `tabs`. Zero-length `tabs` is the ordinary case: the bar still shows the
+    /// dashboard and its new-tab button, so the feature is findable.
     pub tab: usize,
     /// What each session's own hooks last said about it, keyed by session id.
     ///
@@ -639,11 +665,50 @@ pub struct App {
     pub listener: Option<crate::hook::Listener>,
     /// The command highlighted in the launcher.
     pub launch_cursor: usize,
+    /// What the launcher is offering, as it was when it opened.
+    ///
+    /// A snapshot rather than a live look, for correctness before cost: the list
+    /// includes agents that can finish while the modal is up, and a list that
+    /// reshuffles under a cursor means Enter starts something other than the row
+    /// highlighted. It also keeps a `tmux` subprocess out of the draw loop.
+    pub launch_offer: Vec<tabs::Choice>,
     /// Where the launcher's pick will go.
     pub launch_into: LaunchInto,
     /// Directory a launched agent starts in — the selected session's project,
     /// captured when the launcher opens because the selection can move under it.
     pub launch_cwd: Option<std::path::PathBuf>,
+    /// The install the tmux offer is currently showing, so the modal draws the
+    /// command that will actually run rather than working it out again.
+    pub tmux_install: Option<crate::tmux::Install>,
+    /// The launch waiting on the tmux question, or on the install it started.
+    pub tmux_deferred: Option<Deferred>,
+    /// Whether the offer has been turned down. One "no" holds for the run:
+    /// asking again on the next tab would make declining tmux cost more than
+    /// accepting it, which is a way of not really offering a choice.
+    ///
+    /// Not persisted — a decision about this machine belongs in whether tmux is
+    /// installed on it, and cctop already reads that directly.
+    pub tmux_declined: bool,
+    /// The pane running the install, while one is running.
+    ///
+    /// Watched for two endings: tmux appearing, which releases the deferred
+    /// launch into a tmux-backed pane, and the pane going away without it,
+    /// which means the install failed and the launch should stop waiting.
+    pub tmux_installing: Option<u32>,
+    /// A handoff brief waiting for the agent the launcher is about to start.
+    ///
+    /// Held across the launcher rather than typed at the moment `H` is pressed,
+    /// because the agent that will receive it does not exist yet: `H` writes the
+    /// brief and opens the launcher, and whichever agent is picked inherits it.
+    pub pending_brief: Option<std::path::PathBuf>,
+    /// A brief handed to an agent that is still starting up, as
+    /// `(pid, line, not before)`.
+    ///
+    /// An agent cannot be typed at until its TUI is reading the keyboard, and
+    /// there is no signal for that — a line sent into the first half-second of
+    /// startup is swallowed by whatever the harness prints over it. So the line
+    /// waits here and the loop delivers it once the agent has had time to draw.
+    pub handoff_send: Option<(u32, String, Instant)>,
     /// The agent this cctop launched, as `(pid, label)`.
     ///
     /// Set only for `cctop <agent>`, and only while it is alive — the loop exits
@@ -756,8 +821,15 @@ impl App {
             hooks: None,
             listener: None,
             launch_cursor: 0,
+            launch_offer: Vec::new(),
             launch_into: LaunchInto::Tab,
             launch_cwd: None,
+            tmux_install: None,
+            tmux_deferred: None,
+            tmux_declined: false,
+            tmux_installing: None,
+            pending_brief: None,
+            handoff_send: None,
             hosted: None,
             needs_redraw: true,
             should_quit: false,
@@ -1666,24 +1738,24 @@ impl App {
     }
 
     /// Install or remove from the panel, and show what happened.
+    ///
+    /// Every harness at once. The status line gets a count rather than five
+    /// paths — the panel underneath is redrawn from disk immediately below, and
+    /// that is where the detail belongs.
     pub fn set_hooks(&mut self, scope: crate::hook::Scope, install: bool) {
-        let result = match install {
+        let done = match install {
             true => crate::hook::install(&scope),
             false => crate::hook::remove(&scope),
         };
-        // Codex is configured machine-wide or not at all, so it follows the user
-        // scope only. Its outcome is folded into the panel below either way, so
-        // a failure here needs no message of its own.
-        if scope == crate::hook::Scope::User {
-            let _ = match install {
-                true => crate::hook::codex_install(),
-                false => crate::hook::codex_remove(),
-            };
-        }
-        match result {
-            Ok(what) => self.set_status(&what),
-            Err(e) => self.set_status(e.to_string()),
-        }
+        self.set_status(format!(
+            "{} {} agents ({})",
+            match install {
+                true => "Asked",
+                false => "Stopped",
+            },
+            done.len(),
+            scope.label()
+        ));
         self.hooks = Some(self.hook_status());
     }
 
@@ -1711,7 +1783,19 @@ impl App {
 
     /// What a session's own hooks last said about it, if it has any.
     fn hooked_signal(&self, session_id: &str) -> Option<crate::hook::Signal> {
-        self.hooked.get(session_id).map(|r| r.signal)
+        if let Some(reported) = self.hooked.get(session_id) {
+            return Some(reported.signal);
+        }
+        // Gemini CLI reports a full session id, but names the chat file it
+        // writes — which is the only identity cctop's rows have, because
+        // resuming reuses the id across disjoint files — after the *first eight
+        // characters* of it. Without this last step every Gemini event lands on
+        // no row at all.
+        let tail = gemini_id_tail(session_id)?;
+        self.hooked
+            .iter()
+            .find(|(id, _)| id.starts_with(tail))
+            .map(|(_, reported)| reported.signal)
     }
 
     /// What has been reported about the agent running as `pid`, if anything.
@@ -1738,6 +1822,34 @@ impl App {
                     }
                 })
             })
+    }
+
+    /// Note that you have just typed into the terminal of the agent running as
+    /// `pid`, so it is no longer waiting on you.
+    ///
+    /// The hooks cannot report this themselves. A permission prompt's answer
+    /// produces no event of its own — the next thing Claude Code says is
+    /// `PostToolUse`, once the tool it just unblocked has *finished*, which for
+    /// a long command is a minute of a tab blinking at you about a question you
+    /// already answered.
+    ///
+    /// Only an existing report is overwritten. Inserting one for an agent
+    /// without hooks would shadow the transcript, which is that agent's only
+    /// source of state and the thing that would otherwise correct this.
+    fn mark_answered(&mut self, pid: u32) {
+        let answered: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|session| session_root_pid(session) == Some(pid))
+            .map(|session| session.session_id.clone())
+            .collect();
+        for id in answered {
+            if let Some(reported) = self.hooked.get_mut(&id)
+                && !reported.signal.is_working()
+            {
+                reported.signal = crate::hook::Signal::Busy;
+            }
+        }
     }
 
     /// Whether any tab is currently asking to be looked at.
@@ -1770,10 +1882,12 @@ impl App {
             self.set_status("Nothing to split — open a tab first");
             return;
         }
-        if self.launch_choices().is_empty() {
+        let offer = tabs::choices(&self.open_tmux());
+        if offer.is_empty() {
             self.set_status("No agent found in PATH, and $SHELL is not set");
             return;
         }
+        self.launch_offer = offer;
         self.launch_into = into;
         self.launch_cursor = 0;
         // A split lands next to an agent already working somewhere; a new tab
@@ -1786,6 +1900,70 @@ impl App {
                 .filter(|dir| dir.is_dir()),
         };
         self.mode = Mode::Launch;
+    }
+
+    /// Write the selected session's context brief and offer it to a new agent.
+    ///
+    /// This is the cross-harness counterpart to `R`. Resuming puts the *same*
+    /// harness back on the *same* transcript; a handoff carries what the session
+    /// was doing across to a different agent entirely, which is the one thing no
+    /// harness can do for itself — each one can only read its own transcripts.
+    ///
+    /// The brief is written before the launcher opens so a failure to write it
+    /// is reported instead of starting an agent that then has nothing to read.
+    pub(super) fn handoff_selected(&mut self) {
+        let Some(session) = self.selected_session().cloned() else {
+            return;
+        };
+        // The panels already hold the selected session's extraction; a brief
+        // built while the row is still loading, or while a subagent row owns the
+        // panels, falls back to the header alone rather than to another
+        // session's data.
+        let data = match self.panel_key == session.key() {
+            true => self.panel_data.as_ref(),
+            false => None,
+        };
+        let brief = crate::handoff::build(&session, data);
+        let path = match crate::handoff::write(&brief) {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_status(format!("Could not write the handoff brief: {error}"));
+                return;
+            }
+        };
+        self.pending_brief = Some(path);
+        // The receiving agent belongs in the directory the work is in, whatever
+        // row the cursor moves to while the launcher is up.
+        self.launch_prompt(LaunchInto::Tab);
+        // `launch_prompt` bails on its own when nothing can be launched, and
+        // leaving a brief pending for a launcher that never opened would attach
+        // it to the next unrelated agent instead.
+        if self.mode != Mode::Launch {
+            self.pending_brief = None;
+            return;
+        }
+        self.set_status(format!(
+            "Handing off {} — pick who takes it",
+            brief.summary()
+        ));
+    }
+
+    /// Deliver a brief to the agent it was launched for, once that agent has had
+    /// long enough to start reading its keyboard.
+    pub(super) fn tick_handoff(&mut self) {
+        let Some((pid, line, due)) = self.handoff_send.clone() else {
+            return;
+        };
+        if Instant::now() < due {
+            return;
+        }
+        self.handoff_send = None;
+        match crate::inject::send_line(pid, &line) {
+            Ok(()) => self.set_status("Handed the brief over"),
+            // The brief is on disk either way, so the failure is recoverable by
+            // hand — say where it is rather than only that this did not work.
+            Err(error) => self.set_status(format!("Could not hand the brief over: {error}")),
+        }
     }
 
     /// Reopen the selected session in a tab of its own.
@@ -1838,28 +2016,146 @@ impl App {
         // Already on screen: switch to it. tmux would attach a second client to
         // the same agent, which works but leaves two panes fighting over one
         // window's size for no reason.
-        if let Some(at) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.panes.iter().any(|p| p.tmux.as_deref() == Some(&tmux)))
-        {
+        //
+        // Asked of `resumed` as well as of `tmux`, because without tmux
+        // installed every pane's `tmux` is `None` and the question would answer
+        // "no" every time — putting a second agent on one transcript, which is
+        // the thing `ResumeConfirm` exists to warn about and which would happen
+        // here with no warning at all, the session having already stopped.
+        if let Some(at) = self.tabs.iter().position(|tab| {
+            tab.panes
+                .iter()
+                .any(|p| p.tmux.as_deref() == Some(&tmux) || p.resumed.as_deref() == Some(&tmux))
+        }) {
             self.tab = at + 1;
             self.needs_redraw = true;
             self.set_status(format!("Already open: {what}"));
             return;
         }
 
-        let own = tabs::Own::preferring_tmux(|| tmux);
+        let Some(own) = self.own_preferring_tmux(Deferred::Resume, || tmux.clone()) else {
+            return;
+        };
         // Reattaching is not resuming: the agent was never gone, so saying
         // "resumed" would misdescribe what just happened.
         let verb = match &own {
             tabs::Own::Tmux(name) if crate::tmux::exists(name) => "Reattached to",
             _ => "Resumed",
         };
-        self.open_tab(&argv, cwd, &what, own, verb);
+        self.open_tab(&argv, cwd, &what, own, verb, Some(tmux));
+    }
+
+    /// Where the agent about to start should live, offering to install tmux if
+    /// that is the only reason it would not be tmux-backed.
+    ///
+    /// `None` means the question is on screen and the caller must stop. The
+    /// launch is not held anywhere in the meantime — [`Deferred`] records only
+    /// which of the two entry points to run again once there is an answer.
+    ///
+    /// The silent fallback is kept for every machine where the question cannot
+    /// be usefully asked — no package manager, or no way to reach root. tmux is
+    /// how this is *better*, not how it works, and such a machine gets exactly
+    /// the behaviour cctop had before rather than a complaint about a program
+    /// the user never asked for. The offer exists for the machine where the
+    /// fallback would instead quietly cost the user a feature one keypress away.
+    fn own_preferring_tmux(
+        &mut self,
+        deferred: Deferred,
+        name: impl FnOnce() -> String,
+    ) -> Option<tabs::Own> {
+        if crate::tmux::available() {
+            return Some(tabs::Own::Tmux(name()));
+        }
+        // Asked in this order so that installing tmux in another window still
+        // works: `available` above is the live check, and neither a previous
+        // "no" nor a running install is consulted until it has said no.
+        if self.tmux_declined || self.tmux_installing.is_some() {
+            return Some(tabs::Own::Cctop);
+        }
+        let install = crate::tmux::installer()?;
+        self.tmux_install = Some(install);
+        self.tmux_deferred = Some(deferred);
+        self.mode = Mode::TmuxInstall;
+        self.needs_redraw = true;
+        None
+    }
+
+    /// Answer the tmux offer: run the install in a pane, or give up on tmux for
+    /// this run and start the agent on cctop's own pty.
+    pub(super) fn tmux_install_answer(&mut self, install: bool) {
+        self.mode = Mode::List;
+        let Some(offer) = self.tmux_install.take() else {
+            return;
+        };
+        if !install {
+            self.tmux_declined = true;
+            self.run_deferred_launch();
+            return;
+        }
+        // In a pane, not a subprocess: `sudo` wants a password, and a pane is a
+        // pty the user can type it into. It also puts the package manager's
+        // output somewhere it can be read, which is the difference between a
+        // failed install and a tab that closed for no stated reason.
+        match tabs::Pane::launch(&offer.argv, None, tabs::Own::Cctop) {
+            Ok(pane) => {
+                self.tmux_installing = Some(pane.pid);
+                self.tabs.push(tabs::Tab::new(pane));
+                self.tab = self.tabs.len();
+                self.set_status(format!("Installing tmux with {}", offer.manager));
+            }
+            Err(error) => {
+                self.set_status(format!("Could not run the install: {error}"));
+                self.tmux_declined = true;
+                self.run_deferred_launch();
+            }
+        }
+    }
+
+    /// Watch a running install to whichever of its two ends it reaches.
+    ///
+    /// Called from the poll loop after panes are reaped, so "the pane is gone"
+    /// is already true here rather than true one tick later.
+    pub(super) fn poll_tmux_install(&mut self) {
+        let Some(pid) = self.tmux_installing else {
+            return;
+        };
+        if crate::tmux::available() {
+            self.tmux_installing = None;
+            self.set_status("tmux installed");
+            self.run_deferred_launch();
+            return;
+        }
+        // The pane is gone and tmux is still not here: the install failed, or
+        // the user closed it. Either way the launch has waited long enough, and
+        // it goes where it would have gone had nothing been offered.
+        let open = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .any(|pane| pane.pid == pid);
+        if !open {
+            self.tmux_installing = None;
+            self.tmux_declined = true;
+            if self.tmux_deferred.is_some() {
+                self.set_status("tmux was not installed — starting without it");
+            }
+            self.run_deferred_launch();
+        }
+    }
+
+    /// Re-run whichever launch stopped to ask about tmux.
+    fn run_deferred_launch(&mut self) {
+        match self.tmux_deferred.take() {
+            Some(Deferred::Resume) => self.resume_now(),
+            Some(Deferred::Launch) => self.launch_selected(),
+            None => {}
+        }
     }
 
     /// Start `argv` in a new tab, reporting what happened either way.
+    ///
+    /// `resumed` names the session the tab is going back to, when it is going
+    /// back to one — what the next resume of it looks itself up by.
     fn open_tab(
         &mut self,
         argv: &[String],
@@ -1867,14 +2163,16 @@ impl App {
         what: &str,
         own: tabs::Own,
         verb: &str,
+        resumed: Option<String>,
     ) {
-        let pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
+        let mut pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
             Err(error) => {
                 self.set_status(format!("Could not start {what}: {error}"));
                 return;
             }
         };
+        pane.resumed = resumed;
         // Worth saying once per tab: it changes what quitting cctop means.
         let kept = match pane.outlives_cctop() {
             true => " — it will outlive cctop",
@@ -1897,32 +2195,75 @@ impl App {
             .collect()
     }
 
-    /// What the launcher is offering right now.
-    pub fn launch_choices(&self) -> Vec<tabs::Choice> {
-        tabs::choices(&self.open_tmux())
+    /// What the launcher is offering.
+    pub fn launch_choices(&self) -> &[tabs::Choice] {
+        &self.launch_offer
+    }
+
+    /// What a still-running agent in the launcher is doing, if it has said.
+    ///
+    /// This is the whole reason the offer carries a pid. A list of tmux session
+    /// names says which agents exist; this says which one is stuck on a question
+    /// and which finished ten minutes ago, from the same hooks the dashboard
+    /// reads — so choosing which to go back to is a decision rather than a guess.
+    pub fn waiting_state(&self, agent: &crate::tmux::Running) -> Option<crate::hook::Signal> {
+        self.pane_signal(agent.pid?)
+    }
+
+    /// What to call a still-running agent, when cctop can do better than its
+    /// tmux session name.
+    ///
+    /// That name is an identity and not something written to be read: a resumed
+    /// session's carries the whole session id, so it comes out as a timestamp
+    /// and a uuid that no two rows differ in until well past the width of the
+    /// column. The agent's pid finds its row, and the row already knows what the
+    /// dashboard calls it — which is the name the user recognises.
+    pub fn waiting_label(&self, agent: &crate::tmux::Running) -> Option<String> {
+        let pid = agent.pid?;
+        self.sessions
+            .iter()
+            .find(|session| session_root_pid(session) == Some(pid))
+            .map(|session| session.display_label().to_string())
     }
 
     /// Start the launcher's pick.
     pub fn launch_selected(&mut self) {
-        let choices = self.launch_choices();
-        let Some(choice) = choices.get(self.launch_cursor) else {
+        let Some(choice) = self.launch_offer.get(self.launch_cursor).cloned() else {
             return;
         };
         let cwd = self.launch_cwd.clone();
-        let (argv, own) = match choice {
+        let (argv, own) = match &choice {
             // Reattaching: the agent chose its own command long ago, and the
             // argv here only names the tab.
-            tabs::Choice::Waiting(name) => {
-                (vec![choice.label()], tabs::Own::TmuxExisting(name.clone()))
-            }
+            tabs::Choice::Waiting(agent) => (
+                vec![choice.label()],
+                tabs::Own::TmuxExisting(agent.name.clone()),
+            ),
             // A fresh agent has no identity to be idempotent about — two
             // `claude` tabs are two agents — so this takes the next free name
             // rather than a derived one.
-            tabs::Choice::Start(argv) => (
-                argv.clone(),
-                tabs::Own::preferring_tmux(|| crate::tmux::free_name(&tabs::label_of(argv))),
-            ),
+            tabs::Choice::Start(argv) => {
+                let own = self.own_preferring_tmux(Deferred::Launch, || {
+                    crate::tmux::free_name(&tabs::label_of(argv))
+                });
+                // The offer went up instead. This runs again from the top when
+                // it is answered, and the launcher's snapshot is still here to
+                // run it from.
+                let Some(own) = own else { return };
+                (argv.clone(), own)
+            }
         };
+        // The offer is a snapshot, and an agent can finish in the time the modal
+        // is up. Attaching to a session that has gone spawns a client that exits
+        // at once — a tab that flickers and vanishes, where the truth is simply
+        // that the agent ended while being looked at.
+        if let tabs::Choice::Waiting(agent) = &choice
+            && !crate::tmux::exists(&agent.name)
+        {
+            self.set_status(format!("{} has ended", choice.label()));
+            return;
+        }
+
         let argv = &argv;
         let pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
@@ -1932,6 +2273,18 @@ impl App {
             }
         };
         let label = pane.label.clone();
+        // A brief goes to an agent that is starting fresh. Reattaching lands in
+        // a conversation already under way, where typing a "read this and
+        // continue" line would interrupt whatever it is doing mid-turn.
+        if let Some(path) = self.pending_brief.take()
+            && matches!(choice, tabs::Choice::Start(_))
+        {
+            self.handoff_send = Some((
+                pane.pid,
+                crate::handoff::prompt_for(&path),
+                Instant::now() + HANDOFF_SETTLE,
+            ));
+        }
         let kept = match pane.outlives_cctop() {
             true => " — it will outlive cctop",
             false => "",
@@ -1948,10 +2301,26 @@ impl App {
                 self.tab = self.tabs.len();
             }
         }
-        let where_ = cwd
-            .map(|dir| format!(" in {}", dir.display()))
-            .unwrap_or_default();
-        self.set_status(format!("Started {label}{where_}{kept}"));
+        // Reattaching is not starting, and it does not land in the launcher's
+        // directory: the agent has been working somewhere since before any of
+        // this and stays there. Saying "Started ... in ~/here" would be wrong
+        // twice over.
+        self.set_status(match &choice {
+            tabs::Choice::Waiting(agent) => {
+                let at = agent
+                    .cwd
+                    .as_ref()
+                    .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
+                    .unwrap_or_default();
+                format!("Reattached to {label}{at} — it was never gone")
+            }
+            tabs::Choice::Start(_) => {
+                let where_ = cwd
+                    .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
+                    .unwrap_or_default();
+                format!("Started {label}{where_}{kept}")
+            }
+        });
     }
 
     /// Close the focused pane.
@@ -1986,6 +2355,17 @@ impl App {
         let Some(pane) = self.focused_pane() else {
             return;
         };
+        // A pane opened with `a` is a window onto somebody else's agent: there
+        // is nothing here to kill, and closing the window would look from the
+        // outside exactly like having stopped it. Saying so beats a key that is
+        // documented as irreversible and quietly does nothing.
+        if !pane.owns_agent() {
+            let label = pane.label.clone();
+            self.set_status(format!(
+                "{label} is not cctop's to stop — Alt+w closes this view of it"
+            ));
+            return;
+        }
         let (label, owned) = (pane.label.clone(), pane.outlives_cctop());
         if let Err(error) = pane.kill_agent() {
             self.set_status(format!("Could not stop {label}: {error}"));
@@ -2021,22 +2401,58 @@ impl App {
 
     /// Put the selected agent's own terminal on screen, in a tab of its own.
     ///
-    /// Only possible for sessions cctop launched: the shim holding the pty is
-    /// what has a copy of the output to give away.
+    /// Two ways in, because there are two ways an agent's terminal can belong to
+    /// cctop. A shim holding a pty has a copy of the output to give away; an agent
+    /// handed to tmux has none, and is reached by becoming another of its clients
+    /// instead. Either way this only *looks* at the agent — closing the pane
+    /// detaches from it and never ends it.
     pub(super) fn attach_selected(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
         };
         let label = format!("{} · {}", session.abbrev_label, session.model);
+        let title = session.display_label().to_string();
+        // How a resume names this same session. Recorded on the pane below so
+        // that `R` afterwards finds the agent already on screen instead of
+        // starting a second one on one transcript — `a` and `R` reach the same
+        // agent by different routes, and only this makes them agree.
+        let resumed = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
         let Some(pid) = session_root_pid(session) else {
             self.set_status("Selected session has no local process");
             return;
         };
-        if !self.open_view(pid, label) {
-            self.set_status(
-                "Only sessions started by cctop can be attached — start them as `cctop claude`",
-            );
+        if self.open_view(pid, label.clone()) {
+            return;
         }
+        // Started by cctop and then handed to tmux. Without this the message
+        // below would say cctop did not start an agent cctop started, and send
+        // the user to relaunch something that is already running.
+        if let Some(name) = crate::tmux::holding(pid) {
+            // A second client onto one session leaves the two panes arguing over
+            // one window's size, so an agent already on screen is switched to.
+            if let Some(at) = self
+                .tabs
+                .iter()
+                .position(|tab| tab.panes.iter().any(|p| p.tmux.as_deref() == Some(&name)))
+            {
+                self.tab = at + 1;
+                self.needs_redraw = true;
+                self.set_status(format!("Already open: {label}"));
+                return;
+            }
+            self.open_tab(
+                &[title],
+                None,
+                &label,
+                tabs::Own::TmuxExisting(name),
+                "Attached to",
+                Some(resumed),
+            );
+            return;
+        }
+        self.set_status(
+            "Only sessions started by cctop can be attached — start them as `cctop claude`",
+        );
     }
 
     /// Go back to the agent this cctop launched.
@@ -2055,18 +2471,20 @@ impl App {
 
     /// Show the agent running as `pid`, reusing the pane already on it rather
     /// than opening a second window onto one terminal.
+    ///
+    /// A pane is a match on either pid it has: the one cctop hosts, and — for a
+    /// tmux-backed pane, where that one is only the client — the agent's own.
+    /// Asking about the hosted pid alone missed every tmux-backed pane, so an
+    /// agent already on screen got a second window onto it.
     fn open_view(&mut self, pid: u32, label: String) -> bool {
+        let shows = |pane: &tabs::Pane| pane.pid == pid || pane.agent() == pid;
         if let Some((index, tab)) = self
             .tabs
             .iter_mut()
             .enumerate()
-            .find(|(_, tab)| tab.panes.iter().any(|pane| pane.pid == pid))
+            .find(|(_, tab)| tab.panes.iter().any(shows))
         {
-            tab.focus = tab
-                .panes
-                .iter()
-                .position(|pane| pane.pid == pid)
-                .unwrap_or(0);
+            tab.focus = tab.panes.iter().position(shows).unwrap_or(0);
             self.tab = index + 1;
             self.needs_redraw = true;
             return true;
@@ -2089,6 +2507,17 @@ fn session_root_pid(session: &Session) -> Option<u32> {
         .process_list
         .iter()
         .find_map(|process| (process.is_root && !process.ghost).then_some(process.pid))
+}
+
+/// The eight characters a Gemini chat file is named after, out of the row id
+/// that file produced: `session-2026-05-14T17-34-79709c93` yields `79709c93`.
+///
+/// `None` for every other harness's ids, which is what keeps this from matching
+/// on the tail of a uuid that happens to line up: only a stem shaped like
+/// Gemini's is looked up loosely, and only ever against a full id's prefix.
+fn gemini_id_tail(session_id: &str) -> Option<&str> {
+    let tail = session_id.strip_prefix("session-")?.rsplit_once('-')?.1;
+    (tail.len() == 8 && tail.chars().all(|c| c.is_ascii_alphanumeric())).then_some(tail)
 }
 
 // ---------------------------------------------------------------------------
@@ -2169,7 +2598,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // stop reading the status line.
     if app
         .hook_status()
-        .claude
+        .entries
         .iter()
         .any(|s| s.health.is_problem())
     {
@@ -2189,9 +2618,20 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // screen being handed back. Clearing the tabs only ends the panes; a
     // tmux-backed one is a client, and the agent behind it is left running —
     // which is the point, and so worth saying out loud on the way out.
-    let left_running = app.open_tmux();
+    let had_tabs = !app.open_tmux().is_empty();
     app.tabs.clear();
     drop(hosted);
+
+    // Asked after the clients are gone, and asked of tmux rather than of the
+    // tabs: an agent left running by an earlier cctop is just as reachable as
+    // one from this run, and the line below is the only thing that tells anyone
+    // they are there at all.
+    let left_running = match had_tabs {
+        true => crate::tmux::sessions(),
+        // Nothing here ever touched tmux, so nothing here is owed an account of
+        // what is in it.
+        false => Vec::new(),
+    };
 
     restore_terminal();
 
@@ -2431,6 +2871,9 @@ fn event_loop(
         if closed {
             app.drop_empty_tabs();
         }
+        // After the reap, so a finished install is seen as finished on the same
+        // tick its pane goes away.
+        app.poll_tmux_install();
         if drawn || closed {
             app.needs_redraw = true;
         }
@@ -2450,6 +2893,10 @@ fn event_loop(
                 last_refresh = Instant::now();
             }
         }
+
+        // A brief for a just-launched agent comes due on a timer rather than an
+        // event, so the loop is the only thing that can notice.
+        app.tick_handoff();
 
         // A blinking tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only on
@@ -2560,6 +3007,310 @@ mod tests {
         App::with_prefs(Plan::Retail, tx, UiPrefs::default())
     }
 
+    /// Regression: a click on the launcher used to be answered twice — once by
+    /// the modal and once by the dashboard drawn under it — so picking an agent
+    /// also switched the bottom panel the modal happened to cover.
+    #[test]
+    fn a_click_on_a_modal_does_not_reach_what_it_covers() {
+        use ratatui::layout::Rect;
+
+        let mut app = test_app();
+        app.mode = Mode::Launch;
+        let layout = render::Layout {
+            modal_rect: Some(Rect::new(10, 8, 20, 6)),
+            launch_rows: vec![(9, 0), (10, 1)],
+            // The panel tabs sit on a row the modal is covering.
+            tab_row: 10,
+            tab_spans: vec![(10, 20, 3)],
+            ..Default::default()
+        };
+        let click = |col, row| crossterm::event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        app.on_mouse(click(15, 10), &layout);
+        assert_eq!(app.bottom_tab, 0, "the click went through to the panels");
+        assert_eq!(app.launch_cursor, 1, "the click did not pick a choice");
+        assert_eq!(app.mode, Mode::Launch, "the launcher closed on a pick");
+
+        // Off the modal dismisses it, and still does not reach the panels.
+        app.needs_redraw = false;
+        app.on_mouse(click(40, 10), &layout);
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(app.bottom_tab, 0);
+        // Regression: dismissing it asked for no frame, so the modal stayed
+        // drawn over a dashboard that was already taking the clicks again.
+        assert!(app.needs_redraw, "the dismissal never repainted");
+    }
+
+    /// Regression: the guard above was keyed on "any mode but List", which took
+    /// the mouse away from the search box too — an overlay a few lines tall over
+    /// a table still being scrolled and clicked while the query is typed. Only a
+    /// modal that recorded its rectangle can claim the mouse, because that
+    /// rectangle is the only way to tell its clicks from the ones underneath.
+    #[test]
+    fn the_search_box_leaves_the_table_its_mouse() {
+        let mut app = test_app();
+        for id in ["a", "b", "c"] {
+            app.sessions
+                .push(crate::session::Session::new(Provider::Claude, id.into()));
+        }
+        app.visible = vec![Row::Session(0), Row::Session(1), Row::Session(2)];
+        // What `draw_search` leaves behind: no rectangle, so no claim.
+        let layout = render::Layout {
+            rows_start: 7,
+            rows_end: 12,
+            // Below the table, or the wheel scrolls a panel instead of the list.
+            bottom_start: 14,
+            modal_rect: None,
+            ..Default::default()
+        };
+        let at = |kind, row| crossterm::event::MouseEvent {
+            kind,
+            column: 5,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        app.mode = Mode::Search;
+        app.on_mouse(at(event::MouseEventKind::ScrollDown, 9), &layout);
+        assert_eq!(app.selected, 1, "the wheel is dead while searching");
+        app.on_mouse(
+            at(event::MouseEventKind::Down(event::MouseButton::Left), 9),
+            &layout,
+        );
+        assert_eq!(app.selected, 2, "a click cannot reach the row it landed on");
+        assert_eq!(app.mode, Mode::Search, "the click closed the search box");
+    }
+
+    /// Regression: `launch_prompt` set the mode and nothing asked for a frame, so
+    /// clicking the bar's new-tab button — the one advertisement the feature has
+    /// — looked like a dead button until an unrelated event repainted.
+    #[test]
+    fn clicking_the_new_tab_button_paints_the_launcher() {
+        let mut app = test_app();
+        let layout = render::Layout {
+            workspace_new: Some((12, 23)),
+            ..Default::default()
+        };
+        app.needs_redraw = false;
+        app.on_mouse(
+            crossterm::event::MouseEvent {
+                kind: event::MouseEventKind::Down(event::MouseButton::Left),
+                column: 15,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &layout,
+        );
+        // The launcher opens only where there is something to launch, which on a
+        // machine with no agent and no $SHELL there is not — but either way the
+        // click has to have asked for the frame that says so.
+        assert!(app.needs_redraw, "the click asked for no frame");
+        assert!(matches!(app.mode, Mode::Launch | Mode::List));
+    }
+
+    /// Regression: `Alt+W` is documented as the irreversible one, but on a pane
+    /// opened with `a` — a window onto an agent cctop never started — there was
+    /// nothing to kill, so it closed the window and reported nothing amiss. The
+    /// agent it claimed to have stopped went on running.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopping_an_agent_cctop_does_not_own_declines_instead_of_pretending() {
+        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let pane = tabs::Pane::view_of(pid, "agent".into()).expect("attach");
+        assert!(
+            !pane.owns_agent(),
+            "a borrowed pane claimed the agent as cctop's"
+        );
+
+        let mut app = test_app();
+        app.tabs.push(tabs::Tab::new(pane));
+        app.tab = 1;
+        app.kill_pane();
+
+        // The pane is still there, and the reason is on screen.
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "the view was closed as if it were a kill"
+        );
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("not cctop's to stop"), "{status}");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+    }
+
+    /// Regression: the "already open" guard asked only about `tmux`, which is
+    /// `None` on every pane when tmux is not installed — so `R` on a session
+    /// already resumed in a tab started a second agent on the one transcript,
+    /// and being stopped, it did so without even the confirmation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resuming_a_session_already_in_a_tab_goes_to_that_tab() {
+        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let mut pane = tabs::Pane::view_of(pid, "claude".into()).expect("attach");
+        // What a resumed tab records regardless of who carries the agent. The
+        // pane has no tmux, standing in for a machine without it.
+        pane.resumed = Some(crate::tmux::name_for_session("claude", "abc"));
+        assert!(pane.tmux.is_none());
+
+        let mut app = test_app();
+        app.sessions
+            .push(crate::session::Session::new(Provider::Claude, "abc".into()));
+        app.visible = vec![Row::Session(0)];
+        app.selected = 0;
+        app.tabs.push(tabs::Tab::new(pane));
+        app.tab = 0;
+
+        app.resume_now();
+
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "a second agent was put on one transcript"
+        );
+        assert_eq!(app.tab, 1, "the tab already holding it was not shown");
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("Already open"), "{status}");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+    }
+
+    /// Regression: the launcher sized itself to its list and let `centered` clamp
+    /// the result, so on a short terminal the rows past the bottom were dropped —
+    /// and once the cursor walked into them, nothing on screen said what Enter
+    /// was about to start.
+    #[test]
+    fn the_launcher_keeps_its_cursor_on_screen() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        // More choices than a short terminal can hold at once.
+        app.launch_offer = (0..20)
+            .map(|i| tabs::Choice::Start(vec![format!("agent-{i}")]))
+            .collect();
+        app.mode = Mode::Launch;
+        let (cols, rows) = (80u16, 14u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+
+        // Every choice, including the ones far past the bottom of the window.
+        for cursor in 0..app.launch_offer.len() {
+            app.launch_cursor = cursor;
+            let mut layout = render::Layout::default();
+            terminal
+                .draw(|frame| layout = render::draw(frame, &mut app))
+                .expect("draw");
+
+            let row = layout
+                .launch_rows
+                .iter()
+                .find(|(_, i)| *i == cursor)
+                .map(|(row, _)| *row);
+            let row = row.unwrap_or_else(|| panic!("choice {cursor} was not drawn"));
+            assert!(row < rows, "choice {cursor} drawn off screen at row {row}");
+
+            // Drawn, and drawn as the selection: the highlight is the only thing
+            // saying which of twenty agents Enter starts.
+            let buffer = terminal.backend().buffer().clone();
+            let label = format!("agent-{cursor}");
+            let line: String = (0..cols).map(|x| buffer[(x, row)].symbol()).collect();
+            assert!(
+                line.contains(&label),
+                "row {row} is not choice {cursor}: {line:?}"
+            );
+
+            // And what is under the list stays under it, never scrolled away.
+            let text: String = (0..rows)
+                .map(|y| {
+                    (0..cols)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect();
+            assert!(text.contains("Enter start"), "the keys scrolled off");
+            assert!(
+                text.contains("this directory") || text.contains(" in "),
+                "where it would run scrolled off"
+            );
+        }
+    }
+
+    /// The three ways the ownership decision can go, since only one of them is
+    /// new: tmux present is unchanged, tmux absent and uninstallable is the old
+    /// silent fallback, and only tmux absent but installable stops to ask.
+    #[test]
+    fn ownership_asks_only_when_tmux_could_actually_be_installed() {
+        let mut app = test_app();
+        let own = app.own_preferring_tmux(Deferred::Launch, || "cctop-x".into());
+        match (crate::tmux::available(), crate::tmux::installer()) {
+            (true, _) => assert!(matches!(own, Some(tabs::Own::Tmux(_)))),
+            (false, Some(_)) => {
+                assert!(own.is_none(), "the launch waits for the answer");
+                assert_eq!(app.mode, Mode::TmuxInstall);
+            }
+            (false, None) => assert!(matches!(own, Some(tabs::Own::Cctop))),
+        }
+    }
+
+    /// One "no" holds for the run. Asking again on the next tab would make
+    /// declining cost more than accepting, which is not offering a choice.
+    #[test]
+    fn a_declined_offer_is_not_made_again() {
+        let mut app = test_app();
+        app.tmux_declined = true;
+        let own = app.own_preferring_tmux(Deferred::Launch, || "cctop-x".into());
+        assert!(own.is_some(), "the launch goes ahead without asking");
+        assert_ne!(app.mode, Mode::TmuxInstall);
+    }
+
+    /// Declining still starts the agent — the offer interrupted a launch, and
+    /// saying no to tmux is not saying no to the agent.
+    #[test]
+    fn declining_the_offer_releases_the_launch() {
+        let mut app = test_app();
+        app.mode = Mode::TmuxInstall;
+        app.tmux_install = Some(crate::tmux::Install {
+            manager: "apt",
+            argv: vec!["sh".into(), "-c".into(), "apt-get install -y tmux".into()],
+        });
+        app.tmux_deferred = Some(Deferred::Launch);
+
+        app.tmux_install_answer(false);
+
+        assert!(app.tmux_declined);
+        assert!(app.tmux_install.is_none());
+        assert!(
+            app.tmux_deferred.is_none(),
+            "the launch was run, not dropped"
+        );
+        assert_eq!(app.mode, Mode::List);
+    }
+
+    /// The failure that would otherwise be invisible: an install that ends
+    /// without tmux — it errored, or the user closed the tab — leaves a launch
+    /// waiting on a pane that no longer exists.
+    #[test]
+    fn an_install_that_ends_without_tmux_releases_the_launch() {
+        let mut app = test_app();
+        // A pid no pane has, standing in for the install tab having gone.
+        app.tmux_installing = Some(u32::MAX);
+        app.tmux_deferred = Some(Deferred::Launch);
+
+        app.poll_tmux_install();
+
+        assert!(app.tmux_installing.is_none());
+        assert!(app.tmux_deferred.is_none());
+    }
+
     /// Regression: these tests once read the developer's real prefs file, so a
     /// persisted `live_only` or age filter silently failed unrelated assertions.
     #[test]
@@ -2617,6 +3368,95 @@ mod tests {
         );
         assert!(app.hooked_signal("a").is_none());
         assert!(app.reporting().is_empty());
+    }
+
+    /// Gemini CLI is the one harness whose rows are not named after the id it
+    /// reports: a chat file is named after the first eight characters of the
+    /// session id, and that filename is the row's identity because resuming
+    /// reuses the id across disjoint files. Without the loose match every Gemini
+    /// event would land on no row at all.
+    #[test]
+    fn a_gemini_event_finds_the_chat_file_it_belongs_to() {
+        let mut app = test_app();
+        app.apply_hooks(vec![crate::hook::Event {
+            session_id: "79709c93-1111-4111-8111-111111111111".into(),
+            reported: crate::hook::Reported {
+                signal: crate::hook::Signal::Idle,
+                cwd: "/w/proj".into(),
+            },
+            finished_agent: None,
+        }]);
+
+        assert_eq!(
+            app.hooked_signal("session-2026-05-14T17-34-79709c93"),
+            Some(crate::hook::Signal::Idle)
+        );
+        // And only that one: a stem whose tail belongs to another session, or an
+        // id that is not shaped like Gemini's at all, must not borrow it.
+        assert!(
+            app.hooked_signal("session-2026-05-14T17-34-deadbeef")
+                .is_none()
+        );
+        assert!(app.hooked_signal("79709c93").is_none());
+        assert_eq!(
+            gemini_id_tail("session-2026-05-14T17-34-79709c93"),
+            Some("79709c93")
+        );
+        assert_eq!(gemini_id_tail("019fda22-5315-7580-84de-033e4f6835b5"), None);
+    }
+
+    /// Answering a prompt in a pane stops the tab asking about it, without
+    /// waiting for a hook that only fires once the unblocked tool has finished.
+    #[test]
+    fn typing_into_a_pane_settles_the_question_it_answers() {
+        let mut app = test_app();
+        let mut session = session("a", true, "proj");
+        session.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+            pid: 7,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        app.sessions = vec![session];
+
+        // An agent with no hooks has only its transcript to speak for it, and
+        // fabricating a report here would shadow it for the rest of the session.
+        app.mark_answered(7);
+        assert!(app.hooked_signal("a").is_none());
+
+        app.apply_hooks(vec![crate::hook::Event {
+            session_id: "a".into(),
+            reported: crate::hook::Reported {
+                signal: crate::hook::Signal::NeedsInput,
+                cwd: "/w/proj".into(),
+            },
+            finished_agent: None,
+        }]);
+        assert_eq!(
+            app.hooked_signal("a"),
+            Some(crate::hook::Signal::NeedsInput)
+        );
+
+        // The keystroke is the answer, so the agent is working again.
+        app.mark_answered(7);
+        assert_eq!(app.hooked_signal("a"), Some(crate::hook::Signal::Busy));
+
+        // A different agent's keys settle nothing here.
+        app.apply_hooks(vec![crate::hook::Event {
+            session_id: "a".into(),
+            reported: crate::hook::Reported {
+                signal: crate::hook::Signal::NeedsInput,
+                cwd: "/w/proj".into(),
+            },
+            finished_agent: None,
+        }]);
+        app.mark_answered(8);
+        assert_eq!(
+            app.hooked_signal("a"),
+            Some(crate::hook::Signal::NeedsInput)
+        );
     }
 
     fn session(id: &str, running: bool, label: &str) -> Session {

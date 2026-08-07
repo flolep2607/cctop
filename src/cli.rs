@@ -98,8 +98,9 @@ pub struct Args {
     #[arg(long)]
     pub remove_alias: bool,
 
-    /// Ask the agents to report session events to cctop, and exit. Takes
-    /// `user` (the default) or `project` for the current directory's settings
+    /// Ask the agents — Claude Code, Gemini CLI, Cursor, Codex and OpenCode —
+    /// to report session events to cctop, and exit. Takes `user` (the default)
+    /// or `project` for the current directory's settings
     #[arg(long, num_args = 0..=1, default_missing_value = "user", value_name = "SCOPE")]
     pub install_hooks: Option<String>,
 
@@ -112,6 +113,17 @@ pub struct Args {
     /// and whether events are being received, then exit
     #[arg(long)]
     pub hooks_status: bool,
+
+    /// Print a context brief for a session as markdown, and exit. Takes a
+    /// session id or a unique prefix of one; with no argument, briefs the most
+    /// recently active session
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
+    pub handoff: Option<String>,
+
+    /// Serve the Model Context Protocol on stdin/stdout, so an agent can ask
+    /// what the other agents on this machine are doing. Read-only
+    #[arg(long)]
+    pub mcp: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {
@@ -309,6 +321,54 @@ struct JsonSession {
     context: Option<crate::session::ContextUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+/// Print one session's context brief to stdout.
+///
+/// The non-interactive half of `O` in the UI, and the half a script can use:
+/// the brief is plain markdown on stdout, so piping it into another agent's own
+/// prompt flag needs nothing of cctop beyond this call.
+///
+/// `which` is a session id or any unique prefix of one; empty means the most
+/// recently active session, which is nearly always the one just left.
+pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
+    let matched: Vec<&Session> = match which.is_empty() {
+        true => {
+            // `max_by_key` on the timestamps rather than on load order: the
+            // loader groups by provider, so "last in the list" is whichever
+            // provider sorted last, not whichever session ran last.
+            sessions
+                .iter()
+                .max_by_key(|s| s.last_active.clone())
+                .into_iter()
+                .collect()
+        }
+        false => sessions
+            .iter()
+            .filter(|s| s.session_id.starts_with(which))
+            .collect(),
+    };
+
+    let session = match matched.as_slice() {
+        [only] => *only,
+        [] if which.is_empty() => anyhow::bail!("no sessions found"),
+        [] => anyhow::bail!("no session id starts with '{which}'"),
+        // Listing them is what makes the error actionable — a prefix is only
+        // ambiguous relative to sessions the user cannot see from here.
+        many => anyhow::bail!(
+            "'{which}' matches {} sessions:\n{}",
+            many.len(),
+            many.iter()
+                .map(|s| format!("  {} ({})", s.session_id, s.provider.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    };
+
+    let data = loader.store().session_data(session);
+    let brief = crate::handoff::build(session, Some(&data));
+    print!("{}", brief.to_markdown());
+    Ok(())
 }
 
 pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {

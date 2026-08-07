@@ -1039,6 +1039,73 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
         compaction.is_some(),
         width,
     ));
+    lines.extend(context_timeline(session, data, width));
+    lines
+}
+
+/// The window across every request the session made, under the bar that shows
+/// what it currently holds.
+///
+/// The bar answers "what is in there"; this answers "how did it get that full",
+/// which is the question that changes what anyone does next. A window that
+/// climbed evenly is a conversation that grew and will keep growing. One that
+/// stepped is a handful of large tool results, and the same call will do it
+/// again. A sawtooth is a session living on compactions, paying to rebuild its
+/// context over and over.
+fn context_timeline(session: &Session, data: &SessionData, width: usize) -> Vec<Line<'static>> {
+    // Two points is a line between two measurements, which says nothing a
+    // reader could not get from the header. Below that there is no shape.
+    if data.context_series.len() < 3 || width < 24 {
+        return Vec::new();
+    }
+    let values: Vec<f64> = data
+        .context_series
+        .iter()
+        .map(|p| p.window as f64)
+        .collect();
+    // Scaled to the window rather than to the tallest point, so the chart's
+    // height means the same thing as the bar above it: how full, not how much
+    // taller than the rest of this session.
+    let max = session
+        .context
+        .map(|c| c.max as f64)
+        .filter(|m| *m > 0.0)
+        .unwrap_or_else(|| values.iter().cloned().fold(1.0, f64::max));
+
+    let compactions = data
+        .context_series
+        .iter()
+        .filter(|p| p.after_compaction)
+        .count();
+    let peak = values.iter().cloned().fold(0.0, f64::max);
+
+    let mut lines = vec![
+        Line::default(),
+        Line::from(vec![
+            label("How it filled  "),
+            dim(format!("{} requests", data.context_series.len())),
+            dim("   peak "),
+            value(crate::util::compact_tokens(peak as u64)),
+            match compactions {
+                0 => dim(String::new()),
+                // Named on the chart because they are the only drops in it: a
+                // fall with no compaction behind it would be a measurement
+                // error, and telling the two apart matters.
+                n => dim(format!(
+                    "   {n} compaction{}",
+                    if n == 1 { "" } else { "s" }
+                )),
+            },
+        ]),
+    ];
+    lines.extend(crate::ui::spark::line_chart(
+        &values,
+        width,
+        5,
+        max,
+        theme::Gradient::Accent,
+        None,
+    ));
     lines
 }
 
@@ -1590,6 +1657,53 @@ fn mcp_from_toml(path: &Path) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use crate::session::{ContextUsage, SubagentStatus};
+
+    fn series(windows: &[u64]) -> SessionData {
+        let mut data = SessionData::default();
+        data.context_series = windows
+            .iter()
+            .enumerate()
+            .map(|(i, w)| crate::session::CtxPoint {
+                ts: format!("2026-08-05T10:{i:02}:00+00:00"),
+                window: *w,
+                after_compaction: false,
+            })
+            .collect();
+        data
+    }
+
+    /// The chart says how the window filled, which needs a shape to show. Two
+    /// points are a straight line between two numbers the header already
+    /// prints, so the section stays off rather than drawing a truism.
+    #[test]
+    fn the_context_chart_needs_more_than_a_pair_of_points() {
+        let session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        assert!(context_timeline(&session, &series(&[10, 20]), 80).is_empty());
+        assert!(!context_timeline(&session, &series(&[10, 20, 30]), 80).is_empty());
+    }
+
+    /// A narrow panel has no room for a chart, and drawing one anyway would push
+    /// the bar and legend — which do fit — off the top.
+    #[test]
+    fn the_context_chart_stays_off_a_narrow_panel() {
+        let session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        assert!(context_timeline(&session, &series(&[10, 20, 30, 40]), 12).is_empty());
+    }
+
+    /// Compactions are the only drops in the chart, so the header counts them:
+    /// a fall with nothing behind it would otherwise read as a measurement bug.
+    #[test]
+    fn the_context_chart_counts_the_compactions_it_drew() {
+        let session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        let mut data = series(&[10, 90, 20, 40]);
+        data.context_series[2].after_compaction = true;
+        let text: String = context_timeline(&session, &data, 80)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("1 compaction"), "got {text:?}");
+        assert!(text.contains("4 requests"), "got {text:?}");
+    }
 
     /// A failed call is marked two ways on purpose: the red wash, and a glyph in
     /// the gap after the timestamp so the row still reads on a terminal that

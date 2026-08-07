@@ -17,6 +17,21 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
 
+/// Lines of the agent's output cctop keeps behind the top of a pane.
+///
+/// Only ever scrolled by a pane with no multiplexer behind it: under tmux the
+/// wheel goes to tmux, whose history is both deeper and cheaper. This one is not
+/// cheap — every row is a full-width array of 32-byte cells, so a pane that has
+/// scrolled this far has ~20MB behind it at a normal width. Enough to find what
+/// just went past, which is what the wheel is reached for, and short of the cost
+/// of keeping a session's whole life in memory when the transcript already has
+/// it.
+const SCROLLBACK: usize = 5_000;
+
+/// Lines one notch of the wheel moves, matching what terminals themselves send
+/// for a notch when an application is not reading the mouse.
+const WHEEL_LINES: usize = 3;
+
 /// The wire format an attached connection speaks: `[kind][len: u32 BE][payload]`.
 ///
 /// Both directions carry two kinds of message, and one of them is raw keystrokes
@@ -175,11 +190,75 @@ impl Attach {
     }
 
     /// Type a key into the agent. Returns false once the connection is gone.
+    ///
+    /// Typing returns to the live screen first, the way every terminal does it:
+    /// answering a prompt you scrolled away from must show you the answer, not
+    /// leave you reading history while the agent moves on beneath it.
     pub fn send_key(&mut self, key: KeyEvent) -> bool {
+        if self.parser.screen().scrollback() > 0 {
+            self.parser.screen_mut().set_scrollback(0);
+        }
         match encode(key) {
             Some(bytes) => self.send(&frame::encode(frame::KEYS, &bytes)),
             None => true,
         }
+    }
+
+    /// Scroll the wheel at `(col, row)`, given pane-relative and zero-based.
+    ///
+    /// Goes to the agent only if the agent asked for mouse reporting — under
+    /// tmux it always has, and scrolling is then tmux's copy-mode, which is the
+    /// history the agent actually has. Nothing else may be sent one: a pty
+    /// filters nothing, so an application that never enabled tracking would read
+    /// the report as the keystrokes its bytes spell, and a wheel over a plain
+    /// shell would type `[<64;3;9M` into it. The screen knows which it is
+    /// because enabling tracking is something the agent did in its own output.
+    ///
+    /// Everyone else scrolls what cctop kept, which is what makes the wheel work
+    /// over an agent that has no multiplexer behind it at all.
+    ///
+    /// The encoding is the agent's too. SGR is what everything modern selects —
+    /// and the only one that survives past column 223 — but the default is still
+    /// what an agent gets if it never asked for better.
+    pub fn wheel(&mut self, up: bool, col: u16, row: u16) -> bool {
+        use vt100::{MouseProtocolEncoding as Enc, MouseProtocolMode as Mode};
+        if self.parser.screen().mouse_protocol_mode() == Mode::None {
+            let at = self.parser.screen().scrollback();
+            let to = match up {
+                true => at + WHEEL_LINES,
+                false => at.saturating_sub(WHEEL_LINES),
+            };
+            // Clamped by the screen to what there is, so scrolling past the top
+            // of a short history stops there rather than emptying the pane.
+            self.parser.screen_mut().set_scrollback(to);
+            return true;
+        }
+        // 64 and 65 are the wheel's two buttons in every xterm encoding: bit 6
+        // marks the event as a wheel rather than a button, and the low bit is
+        // the direction.
+        let button = 64 + u16::from(!up);
+        let bytes = match self.parser.screen().mouse_protocol_encoding() {
+            Enc::Sgr => format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes(),
+            // One printable byte each, biased by 32, so anything past column 223
+            // cannot be said at all. Reporting it at the edge would name the
+            // wrong cell; dropping it costs a scroll the agent could not have
+            // placed correctly anyway.
+            _ => {
+                if col > 222 || row > 222 {
+                    return true;
+                }
+                let cell = |v: u16| u8::try_from(v + 33).unwrap_or(u8::MAX);
+                vec![
+                    0x1b,
+                    b'[',
+                    b'M',
+                    u8::try_from(button + 32).unwrap_or(u8::MAX),
+                    cell(col),
+                    cell(row),
+                ]
+            }
+        };
+        self.send(&frame::encode(frame::KEYS, &bytes))
     }
 
     fn send(&mut self, bytes: &[u8]) -> bool {
@@ -270,9 +349,7 @@ pub fn attach(pid: u32) -> Option<Attach> {
         closed,
         size,
         requested: (0, 0),
-        // No scrollback: this shows what the agent is showing. Its own history
-        // is in the transcript, which the panels already read.
-        parser: vt100::Parser::new(size.1, size.0, 0),
+        parser: vt100::Parser::new(size.1, size.0, SCROLLBACK),
     })
 }
 
@@ -541,6 +618,100 @@ fn encode(key: KeyEvent) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `Attach` writing to memory instead of a socket, and the buffer it
+    /// writes to.
+    fn probe() -> (Attach, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        #[derive(Clone)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let written = sink.0.clone();
+        let attach = Attach {
+            input: Box::new(sink),
+            close: Box::new(|| {}),
+            pending: std::sync::Arc::default(),
+            closed: std::sync::Arc::default(),
+            size: (80, 24),
+            requested: (0, 0),
+            parser: vt100::Parser::new(24, 80, SCROLLBACK),
+        };
+        (attach, written)
+    }
+
+    /// Nothing filters a pty, so an agent that never asked for mouse reporting
+    /// would read a wheel report as the keystrokes its bytes spell.
+    #[test]
+    fn the_wheel_reaches_only_an_agent_that_asked_for_it() {
+        let (mut attach, written) = probe();
+        assert!(attach.wheel(true, 2, 8));
+        assert!(written.lock().unwrap().is_empty());
+
+        // 1000 turns tracking on, 1006 selects SGR — what tmux sends the moment
+        // `mouse` is on, and what any modern application asks for.
+        attach.parser.process(b"\x1b[?1000h\x1b[?1006h");
+        assert!(attach.wheel(true, 2, 8));
+        assert!(attach.wheel(false, 2, 8));
+        // Coordinates are one-based on the wire; 64 is the wheel up, 65 down.
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            [
+                frame::encode(frame::KEYS, b"\x1b[<64;3;9M"),
+                frame::encode(frame::KEYS, b"\x1b[<65;3;9M"),
+            ]
+            .concat()
+        );
+    }
+
+    /// The default encoding spends one printable byte on each coordinate, so a
+    /// position it cannot say is dropped rather than reported as another cell.
+    #[test]
+    fn a_wheel_in_the_default_encoding_says_what_it_can() {
+        let (mut attach, written) = probe();
+        attach.parser.process(b"\x1b[?1000h");
+        assert!(attach.wheel(true, 2, 8));
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            frame::encode(frame::KEYS, b"\x1b[M\x60\x23\x29")
+        );
+
+        written.lock().unwrap().clear();
+        assert!(attach.wheel(true, 300, 8));
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    /// With no multiplexer behind a pane, the history the wheel moves through is
+    /// the one cctop kept — and typing has to put the agent's live screen back,
+    /// or an answer is given to a prompt that is no longer on screen.
+    #[test]
+    fn a_pane_with_no_one_reading_the_mouse_scrolls_what_cctop_kept() {
+        let (mut attach, written) = probe();
+        for i in 0..100 {
+            attach.parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        assert!(attach.wheel(true, 0, 0));
+        assert!(attach.wheel(true, 0, 0));
+        assert_eq!(attach.parser.screen().scrollback(), WHEEL_LINES * 2);
+        // Nothing was sent: the agent never asked to hear about the mouse.
+        assert!(written.lock().unwrap().is_empty());
+
+        assert!(attach.wheel(false, 0, 0));
+        assert_eq!(attach.parser.screen().scrollback(), WHEEL_LINES);
+        attach.send_key(KeyEvent::from(KeyCode::Char('y')));
+        assert_eq!(attach.parser.screen().scrollback(), 0);
+
+        // The bottom is as far down as it goes, however hard the wheel is spun.
+        assert!(attach.wheel(false, 0, 0));
+        assert_eq!(attach.parser.screen().scrollback(), 0);
+    }
 
     #[test]
     fn a_size_payload_is_read_or_refused() {

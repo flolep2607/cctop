@@ -43,9 +43,13 @@ pub const COLUMNS: &[Column] = &[
     Column {
         id: ColumnId::Status,
         label: " ",
-        width: Some(1),
+        // Two wide so a subagent's dot can sit one cell in from its parent's.
+        // The tree glyph that says "child" lives out in the Project column, and
+        // reading the far side of the row to find out what the near side is
+        // describing is the confusion this indent removes.
+        width: Some(2),
         right_align: false,
-        desc: "Status: ● working (green = fresh, greyer = idle), amber ● awaiting input, red ● API error, ○ stopped",
+        desc: "Status: ● working (green = fresh, greyer = idle), amber ● awaiting input, red ● API error, ○ stopped; indented one cell for a subagent",
     },
     Column {
         id: ColumnId::Last,
@@ -277,9 +281,11 @@ pub fn render_subagent_cell(
     now: &DateTime<Utc>,
 ) -> String {
     match id {
+        // Indented into the second cell of the column, so the left edge alone
+        // says child-of-the-row-above without hunting for the tree glyph.
         ColumnId::Status => match sub.status {
-            SubagentStatus::Running => "●".into(),
-            SubagentStatus::Done => "○".into(),
+            SubagentStatus::Running => " ●".into(),
+            SubagentStatus::Done => " ○".into(),
         },
         ColumnId::Last => match &sub.last_active {
             Some(ts) => util::relative_age(ts, now),
