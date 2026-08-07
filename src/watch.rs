@@ -200,8 +200,13 @@ mod tests {
     #[test]
     fn a_create_keeps_asking_until_it_is_discovered() {
         let dir = tempfile::tempdir().unwrap();
-        let watch = watch_dir(dir.path());
-        let transcript = dir.path().join("new-session.jsonl");
+        // Canonicalised because this is the one test that compares a path the
+        // watcher reported against one it built itself. On macOS the temp dir is
+        // `/var/folders/…`, a symlink to `/private/var/folders/…`, and FSEvents
+        // reports the target — so the two spellings would never match.
+        let root = dir.path().canonicalize().unwrap();
+        let watch = watch_dir(&root);
+        let transcript = root.join("new-session.jsonl");
 
         std::fs::write(&transcript, b"{}\n").unwrap();
         let waiting = eventually(|| watch.awaiting_discovery(|_| false));

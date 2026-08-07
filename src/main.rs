@@ -43,6 +43,21 @@ fn main() -> anyhow::Result<()> {
     // transparent stand-in for `claude` and hands over the terminal; `cctop
     // claude` starts cctop with the agent attached inside it, which is the point
     // of launching it through cctop at all.
+    // `cctop hook` is spawned by the agent itself, many times a session. It is
+    // answered before anything else is set up — no config, no pricing, no cache
+    // — because the agent is blocked until it returns.
+    //
+    // Every platform, deliberately. Delivery is a no-op where there are no unix
+    // sockets, but the *exit code* is not: `--install-hooks` writes the agent's
+    // settings file on any platform, and a `cctop hook` that fell through to
+    // clap would exit non-zero, which Claude Code reads as a decision to block
+    // the tool call and feed stderr back to the model. Answering here is what
+    // keeps the guarantee the hook module is built around — see its docs.
+    if std::env::args().nth(1).as_deref() == Some("hook") {
+        let argv: Vec<String> = std::env::args().collect();
+        std::process::exit(hook::emit(&argv[2..]));
+    }
+
     #[cfg(unix)]
     let mut agent: Option<Vec<String>> = None;
     #[cfg(unix)]
@@ -51,12 +66,6 @@ fn main() -> anyhow::Result<()> {
         // `cctop attach` puts a running agent on this terminal directly, with no
         // UI around it. Handled here for the same reason as `run`: it takes a
         // positional, and cctop otherwise has none.
-        // `cctop hook` is spawned by the agent itself, many times a session.
-        // It is answered before anything else is set up — no config, no
-        // pricing, no cache — because the agent is blocked until it returns.
-        if argv.get(1).map(String::as_str) == Some("hook") {
-            std::process::exit(hook::emit(&argv[2..]));
-        }
         if argv.get(1).map(String::as_str) == Some("attach") {
             std::process::exit(attach::run_terminal(&argv[2..])?);
         }

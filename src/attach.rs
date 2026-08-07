@@ -114,6 +114,11 @@ pub mod frame {
 
 /// One thing the shim said, kept in order so a resize is applied to the parser
 /// before the redraw the agent sent in response to it.
+///
+/// [`Attach::pump`] reads these on every platform, but only [`read_event`]
+/// builds one and that is unix-only — there is no shim to hear from otherwise.
+/// The type still has to exist, because `pump` and the `Attach` it belongs to do.
+#[cfg_attr(not(unix), allow(dead_code))]
 enum Event {
     Output(Vec<u8>),
     Size(u16, u16),
@@ -559,6 +564,10 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
 
 /// The next frame that means something to a watcher. Unknown kinds are skipped
 /// so a newer shim can add one without this end having to understand it.
+///
+/// Every caller is unix-only, because every one of them is reading a shim's
+/// socket.
+#[cfg(unix)]
 fn read_event(decoder: &mut frame::Decoder) -> Option<Event> {
     loop {
         let (kind, payload) = decoder.next()?;
