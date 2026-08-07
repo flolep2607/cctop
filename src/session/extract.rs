@@ -9,8 +9,12 @@ use std::sync::LazyLock;
 
 /// Stream a `.jsonl` file, invoking `f` for each parseable object.
 ///
-/// Oversized lines (base64 image payloads) and malformed lines (truncated or
-/// null-padded tails from a crashed writer) are skipped rather than fatal.
+/// Oversized lines (base64 image payloads, whole-file writes) are not parsed
+/// into a `Value` — that is what blows up memory — but an oversized *assistant*
+/// entry still carries the turn's `usage`, so it is re-read into a slim form
+/// rather than dropped; dropping it silently loses those tokens and their cost.
+/// Malformed lines (truncated or null-padded tails from a crashed writer) are
+/// skipped rather than fatal.
 pub fn for_each_jsonl<F: FnMut(&Value)>(path: &Path, mut f: F) -> std::io::Result<()> {
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::with_capacity(256 * 1024, file);
@@ -22,11 +26,16 @@ pub fn for_each_jsonl<F: FnMut(&Value)>(path: &Path, mut f: F) -> std::io::Resul
         if n == 0 {
             break;
         }
-        if buf.len() > MAX_JSONL_LINE_BYTES {
-            continue;
-        }
         let line = buf.trim_ascii();
         if line.is_empty() {
+            continue;
+        }
+        if line.len() > MAX_JSONL_LINE_BYTES {
+            if let Some(slim) = slim_oversized(line) {
+                f(&slim);
+            }
+            // Don't let one giant line keep its buffer for the rest of the file.
+            buf = Vec::with_capacity(8 * 1024);
             continue;
         }
         if let Ok(v) = serde_json::from_slice::<Value>(line) {
@@ -34,6 +43,60 @@ pub fn for_each_jsonl<F: FnMut(&Value)>(path: &Path, mut f: F) -> std::io::Resul
         }
     }
     Ok(())
+}
+
+/// The billing-relevant fields of an entry too large to parse in full.
+///
+/// Everything else — the base64 image, the file body — deserialises into
+/// `IgnoredAny`, which walks the JSON without allocating it.
+#[derive(serde::Deserialize)]
+struct SlimEntry {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    timestamp: Option<String>,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+    #[serde(rename = "isSidechain")]
+    is_sidechain: Option<bool>,
+    message: Option<SlimMessage>,
+}
+
+#[derive(serde::Deserialize)]
+struct SlimMessage {
+    id: Option<String>,
+    model: Option<String>,
+    usage: Option<Value>,
+}
+
+/// Rebuild an oversized line as a small object carrying only its `usage`.
+///
+/// Returns `None` when there is no usage to salvage, which keeps the previous
+/// drop behaviour for the user entries the size cap was written for.
+fn slim_oversized(line: &[u8]) -> Option<Value> {
+    let entry: SlimEntry = serde_json::from_slice(line).ok()?;
+    let message = entry.message?;
+    let usage = message.usage?;
+    let mut slim = serde_json::Map::new();
+    slim.insert("type".into(), Value::String(entry.kind?));
+    if let Some(ts) = entry.timestamp {
+        slim.insert("timestamp".into(), Value::String(ts));
+    }
+    if let Some(id) = entry.request_id {
+        slim.insert("requestId".into(), Value::String(id));
+    }
+    if let Some(side) = entry.is_sidechain {
+        slim.insert("isSidechain".into(), Value::Bool(side));
+    }
+    let mut msg = serde_json::Map::new();
+    if let Some(id) = message.id {
+        msg.insert("id".into(), Value::String(id));
+    }
+    if let Some(model) = message.model {
+        msg.insert("model".into(), Value::String(model));
+    }
+    msg.insert("usage".into(), usage);
+    slim.insert("message".into(), Value::Object(msg));
+    Some(Value::Object(slim))
 }
 
 /// Parse up to `max_lines` objects from the head of a file.
@@ -72,7 +135,7 @@ pub fn read_last_lines(path: &Path, max_lines: usize) -> Vec<Value> {
     };
 
     let mut pos = size;
-    let mut carry = String::new();
+    let mut carry: Vec<u8> = Vec::new();
     let mut out = Vec::new();
 
     while pos > 0 && out.len() < max_lines {
@@ -85,26 +148,29 @@ pub fn read_last_lines(path: &Path, max_lines: usize) -> Vec<Value> {
         if file.read_exact(&mut chunk).is_err() {
             break;
         }
-        let text = format!("{}{}", String::from_utf8_lossy(&chunk), carry);
-        let mut lines: Vec<&str> = text.split('\n').collect();
+        // Join raw bytes, not text: a multi-byte character straddling the chunk
+        // boundary would otherwise become U+FFFD on both sides and the line
+        // would fail to parse. One lossy conversion per assembled line instead.
+        chunk.extend_from_slice(&carry);
+        let mut lines: Vec<&[u8]> = chunk.split(|b| *b == b'\n').collect();
 
         // The first element may be a partial line continuing into the previous
         // chunk; hold it back unless we've reached the start of the file.
         carry = if pos > 0 && !lines.is_empty() {
-            lines.remove(0).to_string()
+            lines.remove(0).to_vec()
         } else {
-            String::new()
+            Vec::new()
         };
 
         for line in lines.iter().rev() {
             if out.len() >= max_lines {
                 break;
             }
-            let line = line.trim();
+            let line = line.trim_ascii();
             if line.is_empty() {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if let Ok(v) = serde_json::from_str::<Value>(&String::from_utf8_lossy(line)) {
                 out.push(v);
             }
         }
@@ -585,6 +651,84 @@ mod tests {
             &json!({"open": [{"ref_id": "turn1search0"}, {"ref_id": "turn1search1"}]}),
         );
         assert_eq!(s, "open: turn1search0 · turn1search1");
+    }
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "cctop-extract-{tag}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ))
+    }
+
+    /// Regression: an oversized assistant entry (a big `Write`, a large
+    /// `apply_patch`) used to be dropped whole, silently losing its tokens and
+    /// their cost from every total.
+    #[test]
+    fn oversized_assistant_line_still_reports_its_usage() {
+        let path = temp_path("oversized");
+        let filler = "x".repeat(MAX_JSONL_LINE_BYTES + 1024);
+        let big = format!(
+            r#"{{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_big","message":{{"id":"m1","model":"claude-opus-5","usage":{{"input_tokens":10,"output_tokens":7}},"content":[{{"type":"tool_use","id":"t1","name":"Write","input":{{"content":"{filler}"}}}}]}}}}"#
+        );
+        let small = r#"{"type":"assistant","timestamp":"2026-08-05T10:00:01.000Z","message":{"usage":{"output_tokens":1}}}"#;
+        std::fs::write(&path, format!("{big}\n{small}\n")).expect("write jsonl");
+
+        let mut outputs = Vec::new();
+        for_each_jsonl(&path, |v| {
+            outputs.push(
+                v.pointer("/message/usage/output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            );
+        })
+        .expect("read jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(outputs, vec![7, 1]);
+    }
+
+    /// A huge *user* entry is still dropped: it carries no usage, only the
+    /// base64 payload the size cap exists for.
+    #[test]
+    fn oversized_user_line_is_still_skipped() {
+        let path = temp_path("oversized-user");
+        let filler = "x".repeat(MAX_JSONL_LINE_BYTES + 1024);
+        std::fs::write(
+            &path,
+            format!(r#"{{"type":"user","message":{{"content":"{filler}"}}}}"#) + "\n",
+        )
+        .expect("write jsonl");
+
+        let mut seen = 0;
+        for_each_jsonl(&path, |_| seen += 1).expect("read jsonl");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(seen, 0);
+    }
+
+    /// Regression: chunks were made lossy before being joined, so a multi-byte
+    /// character landing on the 64 KB boundary was mangled into U+FFFD on both
+    /// sides and its whole line silently failed to parse.
+    #[test]
+    fn tail_reads_a_multibyte_char_across_the_chunk_boundary() {
+        let path = temp_path("boundary");
+        // The tail is read in 64 KB chunks from the end, so the boundary sits
+        // 65536 bytes before EOF. Pad so the 3-byte '★' starts one byte earlier
+        // and therefore spans it.
+        let tail_bytes = r#""}"#.len() + 1; // closing brace plus the newline
+        let pad = 65_537 - "★".len() - tail_bytes;
+        let title = format!("★{}", "a".repeat(pad));
+        let line = format!(r#"{{"type":"custom-title","customTitle":"{title}"}}"#);
+        std::fs::write(&path, format!("{line}\n")).expect("write jsonl");
+
+        let values = read_last_lines(&path, 5);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(values.len(), 1, "the straddling line must still parse");
+        assert_eq!(values[0]["customTitle"].as_str(), Some(title.as_str()));
     }
 
     #[test]
