@@ -474,9 +474,66 @@ mod tests {
         };
         let quiet = session_row(&s, &widths, &row(false), &now);
         let rang = session_row(&s, &widths, &row(true), &now);
-        assert_eq!(quiet.spans[0].content, "○");
-        assert_eq!(rang.spans[0].content, "◉");
+        assert_eq!(quiet.spans[0].content, "○ ");
+        assert_eq!(rang.spans[0].content, "◉ ");
         assert_eq!(rang.spans[0].style.fg, Some(theme::ACCENT));
+    }
+
+    /// Which rows are children has to be readable at the left edge. The tree
+    /// glyph saying so lives out in the Project column, and a subagent's dot
+    /// used to sit in the same cell as its parent's — so the only way to tell
+    /// what a row was meant reading across the whole width and back.
+    #[test]
+    fn a_subagents_dot_is_indented_under_its_parents() {
+        let now = chrono::Utc::now();
+        let widths = column_widths(200);
+        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        s.last_active = now.to_rfc3339();
+        let parent = session_row(
+            &s,
+            &widths,
+            &RowState {
+                selected: false,
+                marked: false,
+                rang: false,
+                deleting: false,
+                query: "",
+                expand: Some('▾'),
+            },
+            &now,
+        );
+
+        let sub = crate::session::Subagent {
+            agent_id: "sub-1".into(),
+            agent_type: "general-purpose".into(),
+            description: "Review performance".into(),
+            model: "claude-opus-5".into(),
+            started_at: None,
+            last_active: None,
+            duration_ms: 0,
+            status: crate::session::SubagentStatus::Done,
+            cost: 0.0,
+            tool_count: 0,
+            tool_use_id: None,
+            context: None,
+            ghost: false,
+        };
+        let child = subagent_row(&sub, &widths, false, true, &now);
+
+        assert_eq!(
+            parent.spans[0].content, "○ ",
+            "a session starts at column 0"
+        );
+        assert_eq!(child.spans[0].content, " ○", "a subagent starts one in");
+        // Indenting must not cost the row its alignment: every other column has
+        // to stay under the same header as the parent's.
+        let width = |line: &Line| -> usize {
+            line.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        };
+        assert_eq!(width(&parent), width(&child));
     }
 
     /// Highlighting marks the match and changes nothing else — a row that

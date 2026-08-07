@@ -462,6 +462,11 @@ struct Extractor {
     /// The segment the last compaction retired, kept because the one that
     /// replaced it may never receive a request to measure.
     ctx_sealed: Option<CtxSegment>,
+    /// Every request's window measurement, for the Context panel's chart.
+    ctx_series: Vec<super::CtxPoint>,
+    /// A compaction has happened and the next measured request is the first of
+    /// the segment that replaced it.
+    ctx_compacted: bool,
     error: Option<String>,
 }
 
@@ -716,7 +721,7 @@ impl Extractor {
     /// CLAUDE.md and the skills index, with nothing of the conversation in front
     /// of it yet. Everything counted before it is discarded rather than added,
     /// since that content is already inside the number.
-    fn note_window(&mut self, message: &Value) {
+    fn note_window(&mut self, message: &Value, ts: &str) {
         let Some(usage) = message.get("usage") else {
             return;
         };
@@ -731,6 +736,17 @@ impl Extractor {
             self.ctx.chars = CtxChars::default();
         }
         self.ctx.total = window;
+
+        // The series spans the whole session rather than the live segment: a
+        // compaction is the most interesting thing that can happen to a context
+        // window, and a chart that restarted at each one would be the only view
+        // in cctop that cannot show one.
+        self.ctx_series.push(super::CtxPoint {
+            ts: ts.to_string(),
+            window,
+            after_compaction: std::mem::take(&mut self.ctx_compacted),
+        });
+        super::decimate(&mut self.ctx_series);
     }
 
     /// A compaction replaced the conversation with a summary, so everything
@@ -748,6 +764,7 @@ impl Extractor {
             self.ctx_sealed = Some(sealed);
         }
         self.ctx.after_compaction = true;
+        self.ctx_compacted = true;
     }
 
     fn visit_assistant(
@@ -767,7 +784,7 @@ impl Extractor {
         // character counters before this entry's blocks land in them.
         let ctx = in_context(item, is_main);
         if ctx {
-            self.note_window(message);
+            self.note_window(message, ts);
         }
 
         // The request key identifies the turn; tokens are attributed to it and
@@ -1133,6 +1150,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         costs_by_hour: ext.costs_by_hour,
         metrics: ext.metrics,
         context_breakdown,
+        context_series: ext.ctx_series,
         subagents,
         rates: None,
         error: None,
@@ -1594,6 +1612,57 @@ mod tests {
         format!(
             r#"{{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"{request}","message":{{"id":"m_{request}","role":"assistant","model":"claude-opus-5","content":[{content}],"usage":{{"input_tokens":{window},"output_tokens":5}}}}}}"#
         )
+    }
+
+    /// The chart spans the session, not the live segment: a compaction is the
+    /// most interesting thing that can happen to a context window, and the
+    /// series is the only view that can show one. The point that opens the new
+    /// segment is the one marked, because that is where the drop lands.
+    #[test]
+    fn the_context_series_spans_compactions_and_marks_them() {
+        let data = extract_lines(
+            "ctx-series",
+            &[
+                assistant("req_1", 50_000, r#"{"type":"text","text":"a"}"#),
+                assistant("req_2", 90_000, r#"{"type":"text","text":"b"}"#),
+                r#"{"type":"user","isCompactSummary":true,"timestamp":"2026-08-05T10:00:02.000Z","message":{"role":"user","content":"a summary of everything above"}}"#.to_string(),
+                assistant("req_3", 20_000, r#"{"type":"text","text":"c"}"#),
+                assistant("req_4", 35_000, r#"{"type":"text","text":"d"}"#),
+            ],
+        );
+
+        let windows: Vec<u64> = data.context_series.iter().map(|p| p.window).collect();
+        assert_eq!(windows, vec![50_000, 90_000, 20_000, 35_000]);
+        let marked: Vec<bool> = data
+            .context_series
+            .iter()
+            .map(|p| p.after_compaction)
+            .collect();
+        assert_eq!(
+            marked,
+            vec![false, false, true, false],
+            "only the first request of the segment after a compaction is marked"
+        );
+    }
+
+    /// A long session must not carry an unbounded series into the cache. The
+    /// endpoints survive decimation, because the first and last windows are the
+    /// two the header quotes.
+    #[test]
+    fn a_long_series_is_decimated_but_keeps_its_ends() {
+        let mut series: Vec<super::super::CtxPoint> = (0..super::super::MAX_CTX_POINTS + 1)
+            .map(|i| super::super::CtxPoint {
+                ts: format!("{i}"),
+                window: i as u64,
+                after_compaction: false,
+            })
+            .collect();
+        let last = series.last().expect("a point").window;
+        super::super::decimate(&mut series);
+
+        assert!(series.len() <= super::super::MAX_CTX_POINTS);
+        assert_eq!(series.first().expect("a point").window, 0);
+        assert_eq!(series.last().expect("a point").window, last);
     }
 
     /// The panel's whole claim is that it separates what was measured from what

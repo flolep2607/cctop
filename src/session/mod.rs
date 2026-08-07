@@ -140,6 +140,40 @@ pub struct ContextBreakdown {
     pub superseded: bool,
 }
 
+/// One request's measurement of the context window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CtxPoint {
+    pub ts: String,
+    pub window: u64,
+    /// The first request of a segment that follows a compaction — where the
+    /// window dropped because the harness reclaimed it, not because the
+    /// conversation shrank.
+    #[serde(default)]
+    pub after_compaction: bool,
+}
+
+/// How many points a series keeps.
+///
+/// A long session issues thousands of requests and the chart is at most a few
+/// hundred columns wide, so the tail beyond this is detail no reader can see.
+/// It is enforced by dropping every other point once the cap is passed, which
+/// keeps the shape and the endpoints while halving the resolution — the same
+/// trade a chart makes when it draws.
+pub const MAX_CTX_POINTS: usize = 2000;
+
+/// Halve `series` in place, keeping the first and last points.
+pub fn decimate(series: &mut Vec<CtxPoint>) {
+    if series.len() <= MAX_CTX_POINTS {
+        return;
+    }
+    let last = series.pop();
+    let mut kept: Vec<CtxPoint> = series.iter().step_by(2).cloned().collect();
+    if let Some(last) = last {
+        kept.push(last);
+    }
+    *series = kept;
+}
+
 impl ContextBreakdown {
     /// Everything the transcript could be read for, `startup` excluded.
     pub fn estimated(&self) -> u64 {
@@ -870,6 +904,14 @@ pub struct SessionData {
     /// providers whose transcripts don't report per-request usage.
     #[serde(default)]
     pub context_breakdown: Option<ContextBreakdown>,
+    /// The window measured at each request, oldest first.
+    ///
+    /// The breakdown says what the window holds *now*; this says how it got
+    /// there, which is the part that explains a session's cost. A window that
+    /// climbed steadily is a conversation that grew; one that jumped is a single
+    /// tool result that will do it again.
+    #[serde(default)]
+    pub context_series: Vec<CtxPoint>,
     pub subagents: Vec<Subagent>,
     /// Codex reports per-million rates directly; surfaced in the Cost panel.
     pub rates: Option<CodexRates>,

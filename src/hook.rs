@@ -116,12 +116,13 @@ pub fn emit(args: &[String]) -> i32 {
 
 /// Read the event however this agent hands it over, and deliver it.
 fn forward(args: &[String]) {
-    // Claude Code writes the event to stdin and cctop names it on the command
-    // line. Codex runs its `notify` program with the JSON as the last argument
-    // and nothing on stdin at all, so the two are read differently and then
+    // Claude Code, Gemini CLI and Cursor all write the event to stdin, and cctop
+    // names it on the command line. Codex runs its `notify` program with the
+    // JSON as the last argument and nothing on stdin at all, and cctop's
+    // OpenCode plugin copies that shape, so those are read differently and then
     // treated the same.
     let (name, payload) = match args.first().map(String::as_str) {
-        Some(CODEX_SELECTOR) => match args.get(1) {
+        Some(word) if is_argv_payload(word) => match args.get(1) {
             Some(json) => (String::new(), json.as_bytes().to_vec()),
             None => return,
         },
@@ -179,34 +180,50 @@ fn deliver(line: &[u8]) {
 #[cfg(not(unix))]
 fn deliver(_line: &[u8]) {}
 
-/// Reduce whatever the agent sent to the three things cctop needs, on one line.
+/// Reduce whatever the agent sent to the few things cctop needs, on one line.
 ///
 /// Newlines inside the agent's JSON are what makes the framing need doing at
-/// all. The field names differ per agent, so both spellings are tried: Claude
-/// Code says `session_id` and `hook_event_name`, Codex says `thread-id` and
-/// `type`.
+/// all. Every harness names the same handful of facts differently, so each is
+/// looked for under all the spellings anyone uses rather than branching on which
+/// agent this is — the payload does not always say, and a harness that renames a
+/// field in a release should degrade to a missing value rather than a wrong one.
+///
+/// | fact | Claude Code, Gemini CLI | Codex | Cursor | OpenCode |
+/// |---|---|---|---|---|
+/// | event | `hook_event_name` | `type` | `hook_event_name` | `type` |
+/// | session | `session_id` | `thread-id` | `session_id`, `conversation_id` | `sessionID` |
+/// | directory | `cwd` | `cwd` | `workspace_roots[0]` | `directory` |
 fn envelope(name: &str, payload: &[u8]) -> Option<Vec<u8>> {
     let body: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let field = |key: &str| body.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+    // The first of these keys the payload actually carries.
+    let first = |keys: &[&str]| keys.iter().map(|k| field(k)).find(|v| !v.is_empty());
     let event = serde_json::json!({
         // The event name is in the payload, but an installer can also pass it as
         // an argument — taking it from the command line means a harness whose
         // payload spells it differently still lands in the right bin.
         "event": match name.is_empty() {
-            true => match field("hook_event_name") {
-                "" => field("type"),
-                claude => claude,
-            },
+            true => first(&["hook_event_name", "type"]).unwrap_or_default(),
             false => name,
         },
-        "session_id": match field("session_id") {
-            "" => field("thread-id"),
-            claude => claude,
-        },
-        "cwd": field("cwd"),
-        // Only `SubagentStop` carries one, and it is the id cctop's own
-        // subagent transcripts are named after.
-        "agent_id": field("agent_id"),
+        "session_id": first(&["session_id", "thread-id", "conversation_id", "sessionID"])
+            .unwrap_or_default(),
+        // Cursor sends no `cwd` at all: the directory it is working in is the
+        // first of its workspace roots, which is an array rather than a string.
+        "cwd": first(&["cwd", "directory"]).unwrap_or_else(|| {
+            body.get("workspace_roots")
+                .and_then(|v| v.as_array())
+                .and_then(|roots| roots.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+        }),
+        // Only a subagent finishing carries one, and it is the id cctop's own
+        // subagent transcripts are named after. Cursor spells it `subagent_id`.
+        "agent_id": first(&["agent_id", "subagent_id"]).unwrap_or_default(),
+        // Which of the many things `Notification` means — see
+        // [`notification_signal`]. Absent on every other event, and on a Claude
+        // Code old enough not to send it.
+        "notification_type": field("notification_type"),
     });
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -282,26 +299,97 @@ pub struct Reported {
     pub cwd: String,
 }
 
+/// What a `Notification` is actually about.
+///
+/// The event is not one thing. Claude Code raises it for a permission prompt,
+/// for a login succeeding, for an MCP server answering an elicitation, and for
+/// the nudge it sends when a finished turn has sat there for a minute — all
+/// down the same hook, told apart only by `notification_type`.
+///
+/// Reading every one of them as a held question is what makes a session that
+/// merely finished go amber and stay amber: `idle_prompt` arrives *after*
+/// `Stop`, so the nudge overwrites the truth with something more alarming than
+/// it and nothing corrects it until the next turn.
+///
+/// The default is still [`Signal::NeedsInput`]. An unrecognised type — a newer
+/// Claude Code's, or none at all from one too old to send the field — is more
+/// likely to be a prompt worth showing than not, and that is the behaviour
+/// every version had before this field was read.
+fn notification_signal(kind: &str) -> Option<Signal> {
+    match kind {
+        // The turn ended a minute ago and nobody is blocked: this is the same
+        // fact `Stop` already reported, said again more loudly.
+        "idle_prompt" => Some(Signal::Idle),
+        // An MCP elicitation was answered, which is the answer arriving rather
+        // than the question — the agent is moving again.
+        "elicitation_response" => Some(Signal::Busy),
+        // None of these say anything about whether the agent is waiting on you:
+        // a login, a computer-use session changing hands, an MCP server
+        // acknowledging, or some *other* agent finishing. Dropped rather than
+        // mapped, so a true state already on the row survives them.
+        "auth_success"
+        | "computer_use_enter"
+        | "computer_use_exit"
+        | "elicitation_complete"
+        | "agent_completed"
+        | "push_notification" => None,
+        // `agent_needs_input`, `worker_permission_prompt`, and whatever comes
+        // next: the case the amber exists for.
+        _ => Some(Signal::NeedsInput),
+    }
+}
+
 /// Map an event name onto what it means. Unknown names are dropped rather than
 /// guessed at, so a newer agent can add events without confusing this one.
-fn signal_of(event: &str) -> Option<Signal> {
+///
+/// Every harness's vocabulary lands in the same match. They do not collide —
+/// Claude Code and Gemini CLI capitalise their events, Cursor lower-cases its,
+/// Codex and OpenCode use hyphens and dots — so one table can hold the lot, and
+/// a fact means the same thing to the UI whichever agent reported it.
+///
+/// `notification` is the `notification_type` of a `Notification`, and empty for
+/// every other event.
+fn signal_of(event: &str, notification: &str) -> Option<Signal> {
     match event {
         // The turn is over. This is the event the whole feature exists for:
         // nothing in a transcript distinguishes it from the agent still working.
-        // Codex's `notify` fires once per turn and says only this.
-        "Stop" | "agent-turn-complete" => Some(Signal::Idle),
-        // Claude Code raises this when it wants the user — a permission prompt,
-        // or an idle nudge.
-        "Notification" => Some(Signal::NeedsInput),
+        // Codex's `notify` fires once per turn and says only this; Gemini CLI
+        // calls the end of its agent loop `AfterAgent`; Cursor and OpenCode say
+        // it in their own spelling.
+        "Stop" | "agent-turn-complete" | "AfterAgent" | "stop" | "session.idle" => {
+            Some(Signal::Idle)
+        }
+        // Several different facts share this event; which one is in the payload.
+        "Notification" => notification_signal(notification),
         // All of these mean work has started, which answers whatever came
         // before. `SubagentStop` included: a subagent finishing tells you the
         // agent that spawned it is still going.
-        "UserPromptSubmit" | "PreToolUse" | "SubagentStop" => Some(Signal::Busy),
+        //
+        // `PostToolUse` is here for the permission prompt specifically. The
+        // sequence is `PreToolUse`, then `Notification` because the tool needs
+        // an answer, then — once you give it — the tool runs and this fires.
+        // Nothing between the answer and this event says the answer happened,
+        // so without it a prompt you have already dealt with keeps its tab
+        // blinking until the *next* tool call or the end of the turn.
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SubagentStop"
+        // Gemini CLI: a prompt submitted, and a tool about to run.
+        | "BeforeAgent" | "BeforeTool"
+        // Cursor: the same three moments, lower-cased. A shell command is the
+        // one tool call it reports, which is enough to answer an amber row.
+        | "beforeSubmitPrompt" | "beforeShellExecution" | "subagentStop"
+        // OpenCode, whose plugin reports a tool starting and nothing finer.
+        | "tool.execute.before" => Some(Signal::Busy),
+        // A held permission prompt, in the harnesses that have an event for it.
+        // Cursor and Gemini both raise `Notification` the way Claude Code does,
+        // and it is matched above.
+        "permission.asked" => Some(Signal::NeedsInput),
         // Compaction is the one kind of work worth naming separately: the
         // context panel is about to lurch, and it is not the agent stalling.
-        "PreCompact" => Some(Signal::Compacting),
-        "SessionStart" => Some(Signal::Started),
-        "SessionEnd" => Some(Signal::Ended),
+        "PreCompact" | "PreCompress" | "preCompact" | "session.compacted" => {
+            Some(Signal::Compacting)
+        }
+        "SessionStart" | "sessionStart" | "session.created" => Some(Signal::Started),
+        "SessionEnd" | "sessionEnd" | "session.deleted" => Some(Signal::Ended),
         _ => None,
     }
 }
@@ -409,13 +497,22 @@ fn parse(line: &str) -> Option<Event> {
         session_id,
         // Claude Code names it `agent_id`, and cctop stores that subagent's
         // transcript as `agent-<agent_id>.jsonl`, so the two line up directly.
-        finished_agent: (value.get("event").and_then(|v| v.as_str()) == Some("SubagentStop"))
-            .then(|| value.get("agent_id").and_then(|v| v.as_str()))
-            .flatten()
-            .filter(|id| !id.is_empty())
-            .map(str::to_string),
+        finished_agent: matches!(
+            value.get("event").and_then(|v| v.as_str()),
+            Some("SubagentStop" | "subagentStop")
+        )
+        .then(|| value.get("agent_id").and_then(|v| v.as_str()))
+        .flatten()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string),
         reported: Reported {
-            signal: signal_of(value.get("event")?.as_str()?)?,
+            signal: signal_of(
+                value.get("event")?.as_str()?,
+                value
+                    .get("notification_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+            )?,
             cwd: value
                 .get("cwd")
                 .and_then(|v| v.as_str())
@@ -433,18 +530,59 @@ fn parse(line: &str) -> Option<Event> {
 ///
 /// Deliberately still a small set: every hook fire costs the agent a process
 /// spawn, so an event cctop would only use to redraw something it can already
-/// see is not worth the fork. `PreToolUse` is the only frequent one; the rest
+/// see is not worth the fork. The `*ToolUse` pair is the frequent one; the rest
 /// fire a handful of times in a session and each answers a question the
 /// transcript cannot.
-const WANTED: [&str; 8] = [
+///
+/// `PostToolUse` earns the second fork per tool call because it is the only
+/// event that follows an answered permission prompt — see [`signal_of`].
+const CLAUDE_EVENTS: &[&str] = &[
     "Stop",
     "Notification",
     "UserPromptSubmit",
     "PreToolUse",
+    "PostToolUse",
     "SessionStart",
     "SessionEnd",
     "PreCompact",
     "SubagentStop",
+];
+
+/// The same list in Gemini CLI's vocabulary.
+///
+/// It has no `Stop`: the end of a turn is the end of its agent loop, which is
+/// `AfterAgent`. `AfterTool` is left out — `BeforeTool` already says the agent
+/// is working, and Gemini has no permission-prompt event for the second fork to
+/// answer.
+const GEMINI_EVENTS: &[&str] = &[
+    "BeforeAgent",
+    "AfterAgent",
+    "BeforeTool",
+    "Notification",
+    "SessionStart",
+    "SessionEnd",
+    "PreCompress",
+];
+
+/// The same list in Cursor's vocabulary.
+///
+/// `beforeShellExecution` stands in for a tool call: it is the one Cursor
+/// reports that a monitor can do anything with, and skipping `beforeReadFile`
+/// and `afterFileEdit` keeps the fan-out down to roughly what the other
+/// harnesses cost.
+///
+/// Cursor also reads Claude Code's `settings.json` for hooks of its own accord,
+/// so with both installed each moment arrives twice. That is a wasted process
+/// spawn and nothing worse — the second event carries the same fact as the
+/// first, and applying it again changes nothing.
+const CURSOR_EVENTS: &[&str] = &[
+    "stop",
+    "beforeSubmitPrompt",
+    "beforeShellExecution",
+    "sessionStart",
+    "sessionEnd",
+    "preCompact",
+    "subagentStop",
 ];
 
 /// The word that separates the binary from the event in a command cctop wrote.
@@ -458,26 +596,216 @@ const MARKER: &str = " hook ";
 /// argv rather than on stdin.
 const CODEX_SELECTOR: &str = "codex";
 
+/// The same, for the plugin cctop installs into OpenCode.
+const OPENCODE_SELECTOR: &str = "opencode";
+
+/// Whether this first argument means "the event is the next argument" rather
+/// than naming an event to read from stdin.
+fn is_argv_payload(word: &str) -> bool {
+    matches!(word, CODEX_SELECTOR | OPENCODE_SELECTOR)
+}
+
+/// An agent cctop can ask to report on itself.
+///
+/// Each one is asked in its own way — three different config files, a `notify`
+/// program, and a plugin — but every one of them ends up spawning
+/// `cctop hook`, and what comes back is the same [`Event`] whichever it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Harness {
+    Claude,
+    Gemini,
+    Cursor,
+    Codex,
+    OpenCode,
+}
+
+/// Every harness an install touches, in the order they are reported.
+pub const HARNESSES: [Harness; 5] = [
+    Harness::Claude,
+    Harness::Gemini,
+    Harness::Cursor,
+    Harness::Codex,
+    Harness::OpenCode,
+];
+
+/// How a harness spells one entry in its `hooks` object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// Claude Code and Gemini CLI: a wrapper holding a list of commands, so a
+    /// `matcher` can select which tools an entry applies to.
+    Nested,
+    /// Cursor: the command entry itself, directly under the event name, in a
+    /// file whose root also carries a `version`.
+    Flat,
+}
+
+/// What an install has to write for one harness in one scope.
+enum Config {
+    /// A JSON settings file with a `hooks` object, one array per event.
+    Json {
+        path: PathBuf,
+        shape: Shape,
+        events: &'static [&'static str],
+    },
+    /// Codex's single `notify` program, in TOML.
+    Notify(PathBuf),
+    /// A plugin file cctop owns outright and can therefore write and delete
+    /// whole, rather than merging into somebody else's document.
+    Plugin(PathBuf),
+}
+
+impl Harness {
+    /// The name to print. Long enough to be unambiguous in a list of five.
+    pub fn label(self) -> &'static str {
+        match self {
+            Harness::Claude => "Claude Code",
+            Harness::Gemini => "Gemini CLI",
+            Harness::Cursor => "Cursor",
+            Harness::Codex => "Codex",
+            Harness::OpenCode => "OpenCode",
+        }
+    }
+
+    /// What an install writes for this harness at this scope, or `None` where
+    /// the harness has no such scope.
+    fn config(self, scope: &Scope) -> Option<Config> {
+        let project = match scope {
+            Scope::User => None,
+            Scope::Project(dir) => Some(dir.as_path()),
+        };
+        Some(match self {
+            Harness::Claude => Config::Json {
+                // Honours the same `$CLAUDE_CONFIG_DIR` override as the rest of
+                // cctop.
+                path: match project {
+                    None => crate::config::CLAUDE_CONFIG_DIR.join("settings.json"),
+                    Some(dir) => dir.join(".claude").join("settings.json"),
+                },
+                shape: Shape::Nested,
+                events: CLAUDE_EVENTS,
+            },
+            Harness::Gemini => Config::Json {
+                path: match project {
+                    None => crate::config::GEMINI_HOME.join("settings.json"),
+                    Some(dir) => dir.join(".gemini").join("settings.json"),
+                },
+                shape: Shape::Nested,
+                events: GEMINI_EVENTS,
+            },
+            Harness::Cursor => Config::Json {
+                path: match project {
+                    None => crate::config::CURSOR_HOME.join("hooks.json"),
+                    Some(dir) => dir.join(".cursor").join("hooks.json"),
+                },
+                shape: Shape::Flat,
+                events: CURSOR_EVENTS,
+            },
+            // Codex is configured machine-wide or not at all.
+            Harness::Codex => match project {
+                Some(_) => return None,
+                None => Config::Notify(crate::config::CODEX_HOME.join("config.toml")),
+            },
+            Harness::OpenCode => Config::Plugin(
+                match project {
+                    None => crate::config::OPENCODE_CONFIG_DIR.clone(),
+                    Some(dir) => dir.join(".opencode"),
+                }
+                .join("plugins")
+                .join(PLUGIN_FILE),
+            ),
+        })
+    }
+
+    /// The file an install for this scope would write, for reporting.
+    pub fn config_file(self, scope: &Scope) -> Option<PathBuf> {
+        Some(match self.config(scope)? {
+            Config::Json { path, .. } | Config::Notify(path) | Config::Plugin(path) => path,
+        })
+    }
+
+    /// Ask this harness to report, leaving everything else in its config alone.
+    fn install(self, scope: &Scope, exe: &str) -> anyhow::Result<String> {
+        let Some(config) = self.config(scope) else {
+            anyhow::bail!("{} has no {} scope", self.label(), scope.label());
+        };
+        match config {
+            Config::Json {
+                path,
+                shape,
+                events,
+            } => {
+                json_install(&path, shape, events, exe)?;
+                Ok(format!(
+                    "{}: added {} hooks to {}",
+                    self.label(),
+                    events.len(),
+                    path.display()
+                ))
+            }
+            Config::Notify(path) => {
+                notify_install(&path, exe)?;
+                Ok(format!("{}: notify points at cctop", self.label()))
+            }
+            Config::Plugin(path) => {
+                plugin_install(&path, exe)?;
+                Ok(format!("{}: wrote plugin {}", self.label(), path.display()))
+            }
+        }
+    }
+
+    /// Take cctop back out, leaving every other entry untouched.
+    fn remove(self, scope: &Scope) -> anyhow::Result<String> {
+        let Some(config) = self.config(scope) else {
+            return Ok(String::new());
+        };
+        match config {
+            Config::Json { path, .. } => {
+                let removed = json_remove(&path)?;
+                Ok(format!(
+                    "{}: removed {removed} hooks from {}",
+                    self.label(),
+                    path.display()
+                ))
+            }
+            Config::Notify(path) => {
+                notify_remove(&path).map(|what| format!("{}: {what}", self.label()))
+            }
+            Config::Plugin(path) => {
+                let removed = plugin_remove(&path)?;
+                Ok(match removed {
+                    true => format!("{}: removed plugin {}", self.label(), path.display()),
+                    false => format!("{}: nothing of cctop's installed", self.label()),
+                })
+            }
+        }
+    }
+
+    /// What is actually in this harness's config right now.
+    fn health(self, scope: &Scope) -> Option<Health> {
+        Some(match self.config(scope)? {
+            Config::Json {
+                path,
+                shape,
+                events,
+            } => json_health(&path, shape, events),
+            Config::Notify(path) => notify_health(&path),
+            Config::Plugin(path) => plugin_health(&path),
+        })
+    }
+}
+
 /// Which settings file an install writes to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    /// `~/.claude/settings.json` — every session on this machine.
+    /// The per-user config of every harness — every session on this machine.
     User,
-    /// `<dir>/.claude/settings.json` — sessions started in one project. Shared
-    /// with whoever else checks that file out, which is why it is never the
-    /// default.
+    /// One project's checked-in config: sessions started in that directory,
+    /// shared with whoever else checks the file out, which is why it is never
+    /// the default.
     Project(PathBuf),
 }
 
 impl Scope {
-    pub fn settings_file(&self) -> PathBuf {
-        match self {
-            // Honours the same `$CLAUDE_CONFIG_DIR` override as the rest of cctop.
-            Scope::User => crate::config::CLAUDE_CONFIG_DIR.join("settings.json"),
-            Scope::Project(dir) => dir.join(".claude").join("settings.json"),
-        }
-    }
-
     pub fn label(&self) -> &'static str {
         match self {
             Scope::User => "user",
@@ -506,16 +834,56 @@ fn own_exe() -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("could not find cctop's own path"))
 }
 
-/// Add cctop's hooks to a Claude Code settings file, leaving everything else
-/// alone.
+/// Ask every harness that has this scope to report, and say what happened to
+/// each.
+///
+/// One harness cannot fail the others. A `notify` slot already holding somebody
+/// else's program, a settings file that is not valid JSON, an agent that is not
+/// installed at all — each of those is one line of the answer, not the end of
+/// the run, because they are independent files and half an install is better
+/// than none.
+pub fn install(scope: &Scope) -> Vec<String> {
+    let exe = match own_exe() {
+        Ok(exe) => exe,
+        Err(e) => return vec![e.to_string()],
+    };
+    HARNESSES
+        .iter()
+        .filter(|h| h.config(scope).is_some())
+        .map(|h| match h.install(scope, &exe) {
+            Ok(what) => what,
+            Err(e) => format!("{}: {e}", h.label()),
+        })
+        .collect()
+}
+
+/// Take cctop back out of every harness, leaving every other entry untouched.
+pub fn remove(scope: &Scope) -> Vec<String> {
+    HARNESSES
+        .iter()
+        .filter(|h| h.config(scope).is_some())
+        .map(|h| match h.remove(scope) {
+            Ok(what) => what,
+            Err(e) => format!("{}: {e}", h.label()),
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Add cctop's hooks to one JSON settings file, leaving everything else alone.
 ///
 /// The file is the user's, and by the time cctop sees it their other tools have
 /// usually put hooks in it — so this merges into the arrays rather than writing
 /// them, and never reorders or reformats what it did not add.
-pub fn install(scope: &Scope) -> anyhow::Result<String> {
-    let path = scope.settings_file();
-    let mut root = read_settings(&path)?;
-    let exe = own_exe()?;
+fn json_install(path: &Path, shape: Shape, events: &[&str], exe: &str) -> anyhow::Result<()> {
+    let mut root = read_settings(path)?;
+    // Cursor versions its hooks file and ignores one without the field. Only
+    // written when absent, so a file that already declares a newer version is
+    // not quietly downgraded.
+    if shape == Shape::Flat {
+        root.entry("version")
+            .or_insert_with(|| serde_json::json!(1));
+    }
 
     let hooks = root
         .entry("hooks")
@@ -523,9 +891,9 @@ pub fn install(scope: &Scope) -> anyhow::Result<String> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("`hooks` in {} is not an object", path.display()))?;
 
-    for event in WANTED {
+    for event in events {
         let list = hooks
-            .entry(event)
+            .entry(*event)
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
             .ok_or_else(|| anyhow::anyhow!("`hooks.{event}` is not an array"))?;
@@ -533,25 +901,26 @@ pub fn install(scope: &Scope) -> anyhow::Result<String> {
         // entry left by an older cctop at a path that has since moved is
         // replaced rather than added to.
         list.retain(|entry| !is_ours(entry));
-        list.push(serde_json::json!({
-            "hooks": [{
-                "type": "command",
-                "command": format!("{exe} hook {event}"),
-            }]
-        }));
+        let command = serde_json::json!({
+            "type": "command",
+            "command": format!("{exe} hook {event}"),
+        });
+        list.push(match shape {
+            Shape::Nested => serde_json::json!({ "hooks": [command] }),
+            Shape::Flat => command,
+        });
     }
-    write_settings(&path, &root)?;
-    Ok(format!(
-        "Added {} hooks to {}",
-        WANTED.len(),
-        path.display()
-    ))
+    write_settings(path, &root)
 }
 
-/// Take cctop's hooks back out, leaving every other entry untouched.
-pub fn remove(scope: &Scope) -> anyhow::Result<String> {
-    let path = scope.settings_file();
-    let mut root = read_settings(&path)?;
+/// Take cctop's entries out of one JSON settings file, and say how many went.
+///
+/// Every event is swept, not just the ones this cctop would install: an entry
+/// written by an older version that has since dropped an event is still cctop's
+/// to clean up, and leaving it behind would keep firing at a monitor that no
+/// longer reports it installed.
+fn json_remove(path: &Path) -> anyhow::Result<usize> {
+    let mut root = read_settings(path)?;
     let mut removed = 0;
     if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         for (_, value) in hooks.iter_mut() {
@@ -564,17 +933,18 @@ pub fn remove(scope: &Scope) -> anyhow::Result<String> {
         // An event whose only entry was ours goes too, rather than leaving an
         // empty array behind in someone else's file.
         hooks.retain(|_, value| !value.as_array().is_some_and(|l| l.is_empty()));
+        // And the `hooks` object itself, once cctop's were all it held.
+        if hooks.is_empty() {
+            root.remove("hooks");
+        }
     }
     if removed > 0 {
-        write_settings(&path, &root)?;
+        write_settings(path, &root)?;
     }
-    Ok(format!(
-        "Removed {removed} cctop hooks from {}",
-        path.display()
-    ))
+    Ok(removed)
 }
 
-/// Whether a settings entry is one cctop wrote.
+/// Whether a settings entry is one cctop wrote, in either shape.
 fn is_ours(entry: &serde_json::Value) -> bool {
     entry_commands(entry).any(is_our_command)
 }
@@ -600,14 +970,21 @@ fn is_our_command(command: &str) -> bool {
             .is_some_and(|name| name.to_string_lossy().contains("cctop"))
 }
 
+/// The command lines one entry names, whichever shape it is written in.
+///
+/// Both are accepted everywhere rather than per harness: the two shapes are
+/// told apart by what the entry holds, and an agent that grows the other one —
+/// Cursor already reads Claude Code's nested files — needs no second reader.
 fn entry_commands(entry: &serde_json::Value) -> impl Iterator<Item = &str> {
-    entry
+    let nested = entry
         .get("hooks")
         .and_then(|h| h.as_array())
         .map(|inner| inner.as_slice())
         .unwrap_or_default()
         .iter()
-        .filter_map(|h| h.get("command").and_then(|c| c.as_str()))
+        .filter_map(|h| h.get("command").and_then(|c| c.as_str()));
+    let flat = entry.get("command").and_then(|c| c.as_str());
+    nested.chain(flat)
 }
 
 /// The cctop an installed command names, taken back out of the command text.
@@ -659,12 +1036,6 @@ fn write_settings(
 // Codex
 // ---------------------------------------------------------------------------
 
-/// Codex's config file, honouring the same `$CODEX_HOME` override as the rest
-/// of cctop.
-fn codex_config_file() -> PathBuf {
-    crate::config::CODEX_HOME.join("config.toml")
-}
-
 /// The `notify` value cctop installs.
 ///
 /// Codex runs this program once a turn and appends the event as one more
@@ -676,14 +1047,12 @@ fn codex_notify(exe: &str) -> Vec<String> {
 
 /// Point Codex's `notify` at cctop.
 ///
-/// Codex allows exactly one `notify` program, so unlike Claude Code's hook
-/// arrays this cannot merge: an existing entry that is not ours is left alone
-/// and reported, because replacing someone's desktop-notification script with a
-/// monitor is not a trade cctop gets to make for them.
-pub fn codex_install() -> anyhow::Result<String> {
-    let path = codex_config_file();
-    let mut doc = read_codex(&path)?;
-    let exe = own_exe()?;
+/// Codex allows exactly one `notify` program, so unlike the hook arrays this
+/// cannot merge: an existing entry that is not ours is left alone and reported,
+/// because replacing someone's desktop-notification script with a monitor is not
+/// a trade cctop gets to make for them.
+fn notify_install(path: &Path, exe: &str) -> anyhow::Result<()> {
+    let mut doc = read_codex(path)?;
 
     if let Some(existing) = codex_notify_argv(&doc)
         && !existing.iter().any(|a| a.contains("cctop"))
@@ -695,35 +1064,27 @@ pub fn codex_install() -> anyhow::Result<String> {
     }
 
     let mut array = toml_edit::Array::new();
-    for arg in codex_notify(&exe) {
+    for arg in codex_notify(exe) {
         array.push(arg);
     }
     doc["notify"] = toml_edit::value(array);
-    write_codex(&path, &doc)?;
-    Ok(format!(
-        "Pointed Codex's notify at cctop in {}",
-        path.display()
-    ))
+    write_codex(path, &doc)
 }
 
 /// Take cctop back out of Codex's `notify`, leaving another tool's alone.
-pub fn codex_remove() -> anyhow::Result<String> {
-    let path = codex_config_file();
-    let mut doc = read_codex(&path)?;
+fn notify_remove(path: &Path) -> anyhow::Result<String> {
+    let mut doc = read_codex(path)?;
     match codex_notify_argv(&doc) {
         Some(argv) if argv.iter().any(|a| a.contains("cctop")) => {
             doc.remove("notify");
-            write_codex(&path, &doc)?;
-            Ok(format!("Removed cctop from notify in {}", path.display()))
+            write_codex(path, &doc)?;
+            Ok(format!("removed from notify in {}", path.display()))
         }
         Some(_) => Ok(format!(
             "notify in {} belongs to something else; left alone",
             path.display()
         )),
-        None => Ok(format!(
-            "Codex was not notifying cctop ({})",
-            path.display()
-        )),
+        None => Ok(format!("was not notifying cctop ({})", path.display())),
     }
 }
 
@@ -762,6 +1123,189 @@ fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> 
 }
 
 // ---------------------------------------------------------------------------
+// OpenCode
+// ---------------------------------------------------------------------------
+
+/// The plugin file cctop owns. Named for cctop so that a file cctop did not
+/// write is never the one it deletes.
+const PLUGIN_FILE: &str = "cctop.ts";
+
+/// The line the plugin records this binary's path on, and how its own state is
+/// read back out.
+const PLUGIN_MARKER: &str = "const CCTOP = ";
+
+/// The plugin cctop writes into OpenCode.
+///
+/// OpenCode has no hook commands to register: extensions are code it loads at
+/// startup, so the only way in is a file, and cctop writes the whole of it. That
+/// makes this the one integration that runs *inside* the agent's process rather
+/// than beside it, which is why every line of the handler is wrapped: a plugin
+/// that throws is a plugin that can spoil the session it is watching, and there
+/// is no exit code to hide behind here.
+///
+/// The event is handed to `cctop hook` as one argument, the same way Codex does
+/// it, and the child is left to run on its own — nothing waits for it, so the
+/// agent's own loop is never blocked on a monitor.
+fn plugin_source(exe: &str) -> String {
+    let exe = serde_json::Value::String(exe.to_string());
+    format!(
+        r#"// Written by cctop, which watches coding agents. Safe to delete: removing
+// this file is all it takes to stop reporting.
+//
+// Reports the moments a transcript cannot show — a turn finishing, a session
+// starting or ending — to whatever cctop is running. Every failure is
+// swallowed on purpose: this runs inside OpenCode, and a monitor must never be
+// the reason a session breaks.
+{PLUGIN_MARKER}{exe}
+
+// Only the events cctop has something to say about. Anything else is ignored
+// here rather than spawning a process to be dropped at the other end.
+const REPORTED = new Set([
+  "session.idle",
+  "session.created",
+  "session.deleted",
+  "session.compacted",
+  "permission.asked",
+  "tool.execute.before",
+])
+
+export const cctop = async ({{ directory, worktree }}) => {{
+  return {{
+    event: async ({{ event }}) => {{
+      try {{
+        const type = event?.type
+        if (!type || !REPORTED.has(type)) return
+        const props = event.properties ?? {{}}
+        const sessionID = props.sessionID ?? props.info?.id ?? props.sessionId
+        if (!sessionID) return
+        const payload = JSON.stringify({{
+          type,
+          sessionID,
+          directory: directory ?? worktree ?? "",
+        }})
+        Bun.spawn([CCTOP, "hook", "{OPENCODE_SELECTOR}", payload], {{
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        }}).unref()
+      }} catch {{
+        // A monitor is never worth an exception in somebody else's agent.
+      }}
+    }},
+  }}
+}}
+"#
+    )
+}
+
+/// Write the plugin, replacing whatever cctop left there before.
+fn plugin_install(path: &Path, exe: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("ts.cctop-tmp");
+    std::fs::write(&tmp, plugin_source(exe))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Delete the plugin, and say whether there was one. A file at that name that
+/// cctop did not write is left alone, however unlikely that is.
+fn plugin_remove(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+        Ok(text) if !text.contains(PLUGIN_MARKER) => Ok(false),
+        Ok(_) => {
+            std::fs::remove_file(path)?;
+            Ok(true)
+        }
+    }
+}
+
+/// The cctop a plugin file names, read back out of the line that records it.
+fn plugin_exe(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.starts_with(PLUGIN_MARKER))?;
+    // Written by `serde_json`, so it is read back the same way rather than by
+    // trimming quotes: a path with a backslash or a quote in it survives.
+    serde_json::from_str::<String>(line[PLUGIN_MARKER.len()..].trim()).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+/// What one JSON settings file has to say about cctop.
+fn json_health(path: &Path, shape: Shape, events: &[&'static str]) -> Health {
+    let root = match read_settings(path) {
+        Err(e) => return Health::Unreadable(e.to_string()),
+        Ok(root) => root,
+    };
+    // Cursor ignores a hooks file with no `version`, so one without it is not
+    // installed however many entries it holds.
+    if shape == Shape::Flat && root.get("version").is_none() {
+        return Health::Absent;
+    }
+    let hooks = root.get("hooks").and_then(|h| h.as_object());
+    let mut missing = Vec::new();
+    let mut recorded: Option<String> = None;
+    for event in events {
+        let entry = hooks
+            .and_then(|h| h.get(*event))
+            .and_then(|v| v.as_array())
+            .and_then(|list| list.iter().find(|e| is_ours(e)));
+        match entry {
+            None => missing.push(*event),
+            Some(entry) => {
+                recorded = recorded.or_else(|| {
+                    entry_commands(entry)
+                        .find_map(recorded_exe)
+                        .map(str::to_string)
+                })
+            }
+        }
+    }
+    verdict(recorded, missing)
+}
+
+/// What Codex's config has to say.
+fn notify_health(path: &Path) -> Health {
+    match read_codex(path) {
+        Err(e) => Health::Unreadable(e.to_string()),
+        Ok(doc) => match codex_notify_argv(&doc).as_deref() {
+            None | Some([]) => Health::Absent,
+            // Somebody else's notify program, which cctop reports and leaves.
+            Some([exe, ..]) if !exe.contains("cctop") => Health::Other(exe.clone()),
+            Some([exe, ..]) => verdict(Some(exe.clone()), Vec::new()),
+        },
+    }
+}
+
+/// What the OpenCode plugin file has to say.
+fn plugin_health(path: &Path) -> Health {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Health::Absent,
+        Err(e) => Health::Unreadable(e.to_string()),
+        Ok(text) => match plugin_exe(&text) {
+            None => Health::Unreadable(format!("{} is not a cctop plugin", path.display())),
+            Some(exe) => verdict(Some(exe), Vec::new()),
+        },
+    }
+}
+
+/// Turn "cctop is recorded here, at this path, missing these events" into the
+/// one verdict every harness is reported with.
+fn verdict(recorded: Option<String>, missing: Vec<&'static str>) -> Health {
+    match recorded {
+        None => Health::Absent,
+        Some(exe) if !Path::new(&exe).exists() => Health::Broken(exe),
+        Some(exe) if Some(exe.as_str()) != own_exe().ok().as_deref() => Health::Other(exe),
+        Some(_) if !missing.is_empty() => Health::Partial(missing),
+        Some(_) => Health::Installed,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
 
@@ -796,9 +1340,10 @@ impl Health {
     }
 }
 
-/// What one settings file has to say.
+/// What one harness's config, in one scope, has to say.
 #[derive(Debug, Clone)]
 pub struct ScopeStatus {
+    pub harness: Harness,
     pub scope: Scope,
     pub path: PathBuf,
     pub health: Health,
@@ -807,83 +1352,44 @@ pub struct ScopeStatus {
 /// The whole integration, in one value the CLI and the UI both render.
 #[derive(Debug, Clone)]
 pub struct Report {
-    pub claude: Vec<ScopeStatus>,
-    /// The `notify` program Codex will run, if any.
-    pub codex: (PathBuf, Health),
+    /// Every harness in every scope that was looked at, in install order.
+    pub entries: Vec<ScopeStatus>,
     /// Whether this cctop is receiving events, and how many others also are.
     pub listening: bool,
     pub peers: usize,
 }
 
-/// Inspect one settings file.
-pub fn scope_status(scope: Scope) -> ScopeStatus {
-    let path = scope.settings_file();
-    let health = match read_settings(&path) {
-        Err(e) => Health::Unreadable(e.to_string()),
-        Ok(root) => {
-            let hooks = root.get("hooks").and_then(|h| h.as_object());
-            let mut missing = Vec::new();
-            let mut recorded: Option<String> = None;
-            for event in WANTED {
-                let entry = hooks
-                    .and_then(|h| h.get(event))
-                    .and_then(|v| v.as_array())
-                    .and_then(|list| list.iter().find(|e| is_ours(e)));
-                match entry {
-                    None => missing.push(event),
-                    Some(entry) => {
-                        recorded = recorded.or_else(|| {
-                            entry_commands(entry)
-                                .find_map(recorded_exe)
-                                .map(str::to_string)
-                        })
-                    }
-                }
-            }
-            match recorded {
-                None => Health::Absent,
-                Some(exe) if !Path::new(&exe).exists() => Health::Broken(exe),
-                Some(exe) if Some(exe.as_str()) != own_exe().ok().as_deref() => Health::Other(exe),
-                Some(_) if !missing.is_empty() => Health::Partial(missing),
-                Some(_) => Health::Installed,
-            }
-        }
-    };
-    ScopeStatus {
+/// Inspect one harness's config in one scope.
+pub fn harness_status(harness: Harness, scope: Scope) -> Option<ScopeStatus> {
+    Some(ScopeStatus {
+        path: harness.config_file(&scope)?,
+        health: harness.health(&scope)?,
+        harness,
         scope,
-        path,
-        health,
-    }
+    })
 }
 
 /// Inspect the whole integration. `cwd` decides which project scope is looked
 /// at; `listener` is this instance's, when it has one.
 pub fn status(cwd: Option<&Path>, listener: Option<&Listener>) -> Report {
-    let mut claude = vec![scope_status(Scope::User)];
+    let mut scopes = vec![Scope::User];
     if let Some(dir) = cwd {
-        claude.push(scope_status(Scope::Project(dir.to_path_buf())));
+        scopes.push(Scope::Project(dir.to_path_buf()));
     }
-
-    let codex_path = codex_config_file();
-    let codex = match read_codex(&codex_path) {
-        Err(e) => Health::Unreadable(e.to_string()),
-        Ok(doc) => match codex_notify_argv(&doc) {
-            None => Health::Absent,
-            Some(argv) => match argv.first() {
-                None => Health::Absent,
-                Some(exe) if !exe.contains("cctop") => Health::Other(argv.join(" ")),
-                Some(exe) if !Path::new(exe).exists() => Health::Broken(exe.clone()),
-                Some(exe) if Some(exe.as_str()) != own_exe().ok().as_deref() => {
-                    Health::Other(exe.clone())
-                }
-                Some(_) => Health::Installed,
-            },
-        },
-    };
+    // Harness first, then scope: the answer to "is Claude Code reporting" is
+    // both of its lines together, and reading them apart is how a project
+    // install gets mistaken for the user one.
+    let entries = HARNESSES
+        .iter()
+        .flat_map(|harness| {
+            scopes
+                .iter()
+                .filter_map(|scope| harness_status(*harness, scope.clone()))
+        })
+        .collect();
 
     Report {
-        claude,
-        codex: (codex_path, codex),
+        entries,
         listening: listener.is_some(),
         peers: listener.map(Listener::peer_count).unwrap_or(0),
     }
@@ -892,24 +1398,48 @@ pub fn status(cwd: Option<&Path>, listener: Option<&Listener>) -> Report {
 impl Report {
     /// The report as lines to print or draw, each tagged with whether it is
     /// something to worry about.
+    ///
+    /// One line per harness, and a second only where a scope has something to
+    /// say. Five agents times two scopes is a wall of "not installed" that
+    /// buries the line that matters, and the panel this is drawn in is exactly
+    /// as tall as the lines it is handed.
     pub fn lines(&self) -> Vec<(String, bool)> {
         let mut out = Vec::new();
-        for status in &self.claude {
-            let (text, bad) = describe(&status.health);
-            out.push((
-                format!(
-                    "Claude Code ({}) {}: {text}",
-                    status.scope.label(),
-                    status.path.display()
-                ),
-                bad,
-            ));
+        for harness in HARNESSES {
+            let mine: Vec<&ScopeStatus> = self
+                .entries
+                .iter()
+                .filter(|entry| entry.harness == harness)
+                .collect();
+            if mine.iter().all(|entry| entry.health == Health::Absent) {
+                if let Some(entry) = mine.first() {
+                    out.push((
+                        format!(
+                            "{}: not installed ({})",
+                            harness.label(),
+                            entry.path.display()
+                        ),
+                        false,
+                    ));
+                }
+                continue;
+            }
+            // Only the scopes with something to say. A user install and no
+            // project one is the ordinary shape, and printing the absence of the
+            // second doubles the panel to say nothing.
+            for entry in mine.iter().filter(|entry| entry.health != Health::Absent) {
+                let (text, bad) = describe(&entry.health);
+                out.push((
+                    format!(
+                        "{} ({}) {}: {text}",
+                        harness.label(),
+                        entry.scope.label(),
+                        entry.path.display()
+                    ),
+                    bad,
+                ));
+            }
         }
-        let (text, bad) = describe(&self.codex.1);
-        out.push((
-            format!("Codex notify {}: {text}", self.codex.0.display()),
-            bad,
-        ));
         out.push(match (self.listening, self.peers) {
             (false, _) => ("Listener: not running".into(), true),
             (true, 0) => ("Listener: receiving".into(), false),
@@ -945,20 +1475,26 @@ fn describe(health: &Health) -> (String, bool) {
 /// cctop that does exist is left alone: that is a second install, not a fault,
 /// and stealing it would be a surprise.
 pub fn repair(cwd: Option<&Path>) -> Vec<String> {
-    let mut fixed = Vec::new();
+    let Ok(exe) = own_exe() else {
+        return Vec::new();
+    };
     let mut scopes = vec![Scope::User];
     if let Some(dir) = cwd {
         scopes.push(Scope::Project(dir.to_path_buf()));
     }
-    for scope in scopes {
-        if matches!(scope_status(scope.clone()).health, Health::Broken(_))
-            && install(&scope).is_ok()
-        {
-            fixed.push(format!("repointed {} hooks at this cctop", scope.label()));
+    let mut fixed = Vec::new();
+    for harness in HARNESSES {
+        for scope in &scopes {
+            if matches!(harness.health(scope), Some(Health::Broken(_)))
+                && harness.install(scope, &exe).is_ok()
+            {
+                fixed.push(format!(
+                    "repointed {} ({}) at this cctop",
+                    harness.label(),
+                    scope.label()
+                ));
+            }
         }
-    }
-    if matches!(status(None, None).codex.1, Health::Broken(_)) && codex_install().is_ok() {
-        fixed.push("repointed Codex's notify at this cctop".into());
     }
     fixed
 }
@@ -1056,19 +1592,162 @@ mod tests {
         );
     }
 
+    /// Gemini CLI and Cursor report the same moments as Claude Code, under
+    /// their own names and in their own fields. Both payloads are the ones the
+    /// agents actually send, and each has to reduce to the same [`Event`].
+    #[test]
+    fn every_harness_reports_a_finished_turn_the_same_way() {
+        // Gemini: identical field names to Claude Code, and the end of its agent
+        // loop rather than a `Stop`.
+        let raw = br#"{"session_id":"a1b2c3d4-0000-4000-8000-00000000ffff","transcript_path":"/t.jsonl","cwd":"/home/flo/cctop","hook_event_name":"AfterAgent","timestamp":"2026-08-07T00:00:00Z","prompt":"hi","prompt_response":"ok","stop_hook_active":false}"#;
+        let event = parse(
+            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+                .unwrap()
+                .trim(),
+        )
+        .expect("parse");
+        assert_eq!(event.session_id, "a1b2c3d4-0000-4000-8000-00000000ffff");
+        assert_eq!(event.reported.cwd, "/home/flo/cctop");
+        assert_eq!(event.reported.signal, Signal::Idle);
+
+        // Cursor: lower-cased events, and no `cwd` at all — the directory is the
+        // first of its workspace roots.
+        let raw = br#"{"conversation_id":"c8f2e1a0-1111-4111-8111-111111111111","session_id":"c8f2e1a0-1111-4111-8111-111111111111","hook_event_name":"stop","cursor_version":"2026.06.04","workspace_roots":["/home/flo/cctop"],"status":"completed"}"#;
+        let event = parse(
+            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+                .unwrap()
+                .trim(),
+        )
+        .expect("parse");
+        assert_eq!(event.session_id, "c8f2e1a0-1111-4111-8111-111111111111");
+        assert_eq!(
+            event.reported.cwd, "/home/flo/cctop",
+            "a Cursor event carries its directory as a workspace root"
+        );
+        assert_eq!(event.reported.signal, Signal::Idle);
+
+        // Cursor with only the conversation id, which is what its older payloads
+        // carry, and a subagent finishing — the id has to survive either way.
+        let raw = br#"{"conversation_id":"c8f2e1a0-1111-4111-8111-111111111111","hook_event_name":"subagentStop","subagent_id":"sub-77","workspace_roots":["/w"]}"#;
+        let event = parse(
+            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+                .unwrap()
+                .trim(),
+        )
+        .expect("parse");
+        assert_eq!(event.session_id, "c8f2e1a0-1111-4111-8111-111111111111");
+        assert_eq!(event.finished_agent.as_deref(), Some("sub-77"));
+        assert_eq!(event.reported.signal, Signal::Busy);
+
+        // OpenCode, whose plugin hands the event over in argv the way Codex does.
+        let raw =
+            br#"{"type":"session.idle","sessionID":"ses_8a7c","directory":"/home/flo/cctop"}"#;
+        let event = parse(
+            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+                .unwrap()
+                .trim(),
+        )
+        .expect("parse");
+        assert_eq!(event.session_id, "ses_8a7c");
+        assert_eq!(event.reported.cwd, "/home/flo/cctop");
+        assert_eq!(event.reported.signal, Signal::Idle);
+    }
+
+    /// Five vocabularies share one table, so the thing that can go wrong is two
+    /// harnesses spelling different facts the same way.
+    #[test]
+    fn no_two_harnesses_disagree_about_a_shared_event_name() {
+        let mut seen: Vec<(&str, Signal)> = Vec::new();
+        for event in CLAUDE_EVENTS
+            .iter()
+            .chain(GEMINI_EVENTS)
+            .chain(CURSOR_EVENTS)
+        {
+            let Some(signal) = signal_of(event, "") else {
+                panic!("{event} is installed but means nothing to cctop");
+            };
+            if let Some((_, other)) = seen.iter().find(|(name, _)| name == event) {
+                assert_eq!(*other, signal, "{event} means two things");
+            }
+            seen.push((event, signal));
+        }
+    }
+
+    /// A permission prompt is the one exchange with no event of its own for the
+    /// *answer*, so the tool running afterwards has to carry that news.
+    #[test]
+    fn an_answered_permission_prompt_stops_asking() {
+        assert_eq!(signal_of("PreToolUse", ""), Some(Signal::Busy));
+        assert_eq!(signal_of("Notification", ""), Some(Signal::NeedsInput));
+        assert_eq!(
+            signal_of("PostToolUse", ""),
+            Some(Signal::Busy),
+            "without this the prompt stays 'asking' until the next tool or the \
+             end of the turn"
+        );
+        assert!(
+            CLAUDE_EVENTS.contains(&"PostToolUse"),
+            "the event has to be installed to arrive at all"
+        );
+    }
+
+    /// `Notification` is several unrelated facts sharing one event, and reading
+    /// them all as a held question is what leaves a finished turn amber.
+    #[test]
+    fn only_a_notification_that_blocks_the_agent_asks_for_you() {
+        let notification = |kind: &str| signal_of("Notification", kind);
+
+        // The 60-second nudge, which arrives *after* `Stop` and would otherwise
+        // overwrite a finished turn with something more alarming than it is.
+        assert_eq!(notification("idle_prompt"), Some(Signal::Idle));
+        // A real block, whether it is this agent or a worker under it.
+        assert_eq!(notification("agent_needs_input"), Some(Signal::NeedsInput));
+        assert_eq!(
+            notification("worker_permission_prompt"),
+            Some(Signal::NeedsInput)
+        );
+        // An elicitation answered is the answer, not the question.
+        assert_eq!(notification("elicitation_response"), Some(Signal::Busy));
+        // These say nothing about whether the agent is waiting, so they must not
+        // be allowed to overwrite what is already known about it.
+        for quiet in [
+            "auth_success",
+            "computer_use_enter",
+            "computer_use_exit",
+            "elicitation_complete",
+            "agent_completed",
+            "push_notification",
+        ] {
+            assert_eq!(notification(quiet), None, "{quiet} claimed a state");
+        }
+        // A type cctop has never seen, and a Claude Code too old to send one at
+        // all, both keep the behaviour every version had before this was read.
+        assert_eq!(notification("something_new"), Some(Signal::NeedsInput));
+        assert_eq!(notification(""), Some(Signal::NeedsInput));
+    }
+
+    /// End to end, from the bytes Claude Code actually writes to the hook.
+    #[test]
+    fn an_idle_nudge_arrives_as_a_finished_turn() {
+        let raw = br#"{"session_id":"s-1","transcript_path":"/t.jsonl","cwd":"/w","hook_event_name":"Notification","message":"Claude is waiting for your input","title":"Claude Code","notification_type":"idle_prompt"}"#;
+        let line = envelope("Notification", raw).expect("envelope");
+        let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+        assert_eq!(event.reported.signal, Signal::Idle);
+    }
+
     /// The lifecycle events are the ones that change which rows exist, and the
     /// table has to be told to go and look rather than wait for its poll.
     #[test]
     fn only_the_lifecycle_events_ask_for_a_rescan() {
-        assert!(signal_of("SessionStart").unwrap().is_lifecycle());
-        assert!(signal_of("SessionEnd").unwrap().is_lifecycle());
-        assert!(!signal_of("PreToolUse").unwrap().is_lifecycle());
-        assert!(!signal_of("Stop").unwrap().is_lifecycle());
+        assert!(signal_of("SessionStart", "").unwrap().is_lifecycle());
+        assert!(signal_of("SessionEnd", "").unwrap().is_lifecycle());
+        assert!(!signal_of("PreToolUse", "").unwrap().is_lifecycle());
+        assert!(!signal_of("Stop", "").unwrap().is_lifecycle());
         // Compaction is work, not a stalled agent, and a finished subagent means
         // the one that spawned it is still going.
-        assert!(signal_of("PreCompact").unwrap().is_working());
-        assert!(signal_of("SubagentStop").unwrap().is_working());
-        assert!(!signal_of("Stop").unwrap().is_working());
+        assert!(signal_of("PreCompact", "").unwrap().is_working());
+        assert!(signal_of("SubagentStop", "").unwrap().is_working());
+        assert!(!signal_of("Stop", "").unwrap().is_working());
     }
 
     /// The settings file belongs to the user and their other tools. Installing
@@ -1078,7 +1757,7 @@ mod tests {
     fn installing_leaves_another_tools_hooks_exactly_as_they_were() {
         let dir = scratch("hooks");
         let scope = Scope::Project(dir.clone());
-        let path = scope.settings_file();
+        let path = Harness::Claude.config_file(&scope).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let theirs = serde_json::json!({
             "model": "opus",
@@ -1088,7 +1767,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_string_pretty(&theirs).unwrap()).unwrap();
 
-        install(&scope).unwrap();
+        install(&scope);
         let after = read_settings(&path).unwrap();
         assert_eq!(after["model"], "opus", "an unrelated setting was disturbed");
         assert_eq!(
@@ -1103,7 +1782,7 @@ mod tests {
         assert_eq!(after["hooks"]["Stop"].as_array().unwrap().len(), 1);
 
         // Twice is once: an installer that doubled up would fire twice a turn.
-        install(&scope).unwrap();
+        install(&scope);
         assert_eq!(
             read_settings(&path).unwrap()["hooks"]["Stop"]
                 .as_array()
@@ -1111,11 +1790,80 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(scope_status(scope.clone()).health, Health::Installed);
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
 
-        remove(&scope).unwrap();
+        remove(&scope);
         assert_eq!(read_settings(&path).unwrap(), *theirs.as_object().unwrap());
-        assert_eq!(scope_status(scope).health, Health::Absent);
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Absent);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each harness is asked in its own dialect, and one install does the lot.
+    ///
+    /// The shapes are not interchangeable: Cursor ignores a hooks file with no
+    /// `version` and does not read Claude Code's nested wrapper in its own file,
+    /// and OpenCode has no command to register at all — it loads a plugin. An
+    /// install that wrote Claude's shape everywhere would look installed in the
+    /// panel and deliver nothing.
+    #[test]
+    fn every_harness_is_asked_in_its_own_dialect() {
+        let dir = scratch("dialects");
+        let scope = Scope::Project(dir.clone());
+        let done = install(&scope);
+        assert_eq!(
+            done.len(),
+            4,
+            "every harness with a project scope should have been written: {done:?}"
+        );
+
+        // Claude Code and Gemini CLI: the nested wrapper, under their own names.
+        for (harness, event) in [(Harness::Claude, "Stop"), (Harness::Gemini, "AfterAgent")] {
+            let path = harness.config_file(&scope).unwrap();
+            let root = read_settings(&path).unwrap();
+            let command = root["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                is_our_command(&command),
+                "{} wrote {command:?} for {event}",
+                harness.label()
+            );
+            assert!(command.ends_with(event), "the event has to be named");
+            assert_eq!(harness.health(&scope), Some(Health::Installed));
+        }
+
+        // Cursor: the command entry directly, under a versioned root.
+        let path = Harness::Cursor.config_file(&scope).unwrap();
+        assert!(path.ends_with(".cursor/hooks.json"));
+        let root = read_settings(&path).unwrap();
+        assert_eq!(root["version"], 1, "Cursor ignores an unversioned file");
+        let command = root["hooks"]["stop"][0]["command"].as_str().unwrap();
+        assert!(is_our_command(command), "Cursor got {command:?}");
+
+        // OpenCode: a plugin file, naming this binary.
+        let path = Harness::OpenCode.config_file(&scope).unwrap();
+        assert!(path.ends_with(".opencode/plugins/cctop.ts"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(plugin_exe(&text).as_deref(), own_exe().ok().as_deref());
+        assert!(
+            text.contains(&format!("\"hook\", \"{OPENCODE_SELECTOR}\"")),
+            "the plugin has to call the hook the way `hook` reads it"
+        );
+
+        // And every one of them comes back out.
+        remove(&scope);
+        for harness in HARNESSES {
+            assert!(
+                matches!(harness.health(&scope), None | Some(Health::Absent)),
+                "{} was left behind",
+                harness.label()
+            );
+        }
+        assert!(
+            !Harness::OpenCode.config_file(&scope).unwrap().exists(),
+            "the plugin file was left on disk"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1126,7 +1874,7 @@ mod tests {
     fn an_install_missing_newer_events_reads_as_partial() {
         let dir = scratch("partial");
         let scope = Scope::Project(dir.clone());
-        let path = scope.settings_file();
+        let path = Harness::Claude.config_file(&scope).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let exe = own_exe().unwrap();
         std::fs::write(
@@ -1138,7 +1886,7 @@ mod tests {
         )
         .unwrap();
 
-        match scope_status(scope.clone()).health {
+        match Harness::Claude.health(&scope).unwrap() {
             Health::Partial(missing) => {
                 assert!(missing.contains(&"SessionEnd"));
                 assert!(!missing.contains(&"Stop"));
@@ -1147,8 +1895,8 @@ mod tests {
         }
 
         // And installing over it fills the gap without doubling `Stop`.
-        install(&scope).unwrap();
-        assert_eq!(scope_status(scope).health, Health::Installed);
+        install(&scope);
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
         assert_eq!(
             read_settings(&path).unwrap()["hooks"]["Stop"]
                 .as_array()
@@ -1166,12 +1914,12 @@ mod tests {
     fn a_hook_pointing_at_a_deleted_binary_is_repaired_but_a_live_one_is_not() {
         let dir = scratch("repair");
         let scope = Scope::Project(dir.clone());
-        let path = scope.settings_file();
+        let path = Harness::Claude.config_file(&scope).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         let gone = dir.join("moved-away-cctop");
         let write_pointing_at = |exe: &Path| {
-            let hooks: serde_json::Map<String, serde_json::Value> = WANTED
+            let hooks: serde_json::Map<String, serde_json::Value> = CLAUDE_EVENTS
                 .iter()
                 .map(|e| {
                     (
@@ -1186,14 +1934,14 @@ mod tests {
 
         write_pointing_at(&gone);
         assert_eq!(
-            scope_status(scope.clone()).health,
+            Harness::Claude.health(&scope).unwrap(),
             Health::Broken(gone.display().to_string())
         );
         assert!(
             !repair(Some(&dir)).is_empty(),
             "a dead path was not repaired"
         );
-        assert_eq!(scope_status(scope.clone()).health, Health::Installed);
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
 
         // A path that exists is another install, whoever made it.
         let other = dir.join("other-cctop");

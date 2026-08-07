@@ -2,7 +2,7 @@
 
 use super::columns::{COLUMNS, ColumnId};
 use super::{
-    AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render, session_root_pid, tabs,
+    AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render, session_root_pid,
 };
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -30,11 +30,16 @@ impl App {
                 self.show_tab(0);
                 return;
             }
-            if let Some(pane) = self.focused_pane()
-                && !pane.view.send_key(key)
-            {
-                self.close_pane();
-                self.set_status("The agent's terminal closed");
+            if let Some(pane) = self.focused_pane() {
+                // The agent this key is going to, taken before the borrow ends:
+                // answering its question is the one thing no hook reports.
+                let agent = pane.agent();
+                let alive = pane.view.send_key(key);
+                self.mark_answered(agent);
+                if !alive {
+                    self.close_pane();
+                    self.set_status("The agent's terminal closed");
+                }
             }
             return;
         }
@@ -52,6 +57,9 @@ impl App {
             Mode::DeleteConfirm => self.on_key_delete(key),
             Mode::KillConfirm => self.on_key_kill(key),
             Mode::ResumeConfirm => self.on_key_resume(key),
+            Mode::TmuxInstall => {
+                self.tmux_install_answer(key.code == KeyCode::Char('y'));
+            }
             Mode::QuitConfirm => self.on_key_quit(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
                 self.on_key_batch(key)
@@ -82,15 +90,25 @@ impl App {
                 None => return false,
             },
             KeyCode::Char('w') => self.close_pane(),
+            // Shifted, because it is the irreversible one: `w` on a tmux-backed
+            // pane only detaches, and the key that ends the agent should not be
+            // the same key with a slip of a finger.
+            KeyCode::Char('W') => self.kill_pane(),
             _ => return false,
         }
         true
     }
 
     fn on_key_launch(&mut self, key: KeyEvent) {
-        let n = tabs::harnesses().len().max(1);
+        let n = self.launch_choices().len().max(1);
         match key.code {
-            KeyCode::Esc => self.mode = Mode::List,
+            // Backing out of the launcher abandons the handoff with it: a brief
+            // left pending would be typed at whatever agent is started next,
+            // which by then is an unrelated one.
+            KeyCode::Esc => {
+                self.mode = Mode::List;
+                self.pending_brief = None;
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.launch_cursor = (self.launch_cursor + n - 1) % n
             }
@@ -451,6 +469,13 @@ impl App {
             // `R`, because `r` refreshes. Capital also matches how the other
             // keys that start something irreversible are spelled.
             KeyCode::Char('R') => self.resume_selected(),
+            // `O` for hand-off, capitalised alongside `R`: both take a session
+            // somewhere else and both start an agent, so neither belongs on a
+            // lowercase key. `H` was already sort-by-harness.
+            KeyCode::Char('O') if self.on_subagent() => {
+                self.set_status("Hand off the session, not one of its subagents")
+            }
+            KeyCode::Char('O') => self.handoff_selected(),
             // Alt+n does this too and works from inside a pane; here on the
             // dashboard, where nothing is competing for the keyboard, a plain
             // letter is what anyone will try first.
@@ -492,16 +517,86 @@ impl App {
     }
 
     pub(super) fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
-        // Inside a tab the only thing the mouse can hit is the tab bar: the
-        // table and its panels are not on screen, so nothing else has a target.
-        // Only a click — mouse capture also reports movement, and switching tabs
-        // on a hover means the pointer resting anywhere near the bar drags you
-        // out of the agent you are typing into.
+        // Anything the mouse actually does changes the screen, and unlike
+        // `on_key` there is nothing downstream to rely on for the frame:
+        // `launch_prompt` opening the launcher and `set_sort` reordering the
+        // table both leave the previous picture up until some unrelated event
+        // repaints it, which reads as a dead click. Movement is left out —
+        // capture reports it continuously and it changes nothing.
+        if matches!(
+            ev.kind,
+            MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            self.needs_redraw = true;
+        }
+
+        // A modal owns the mouse while it is up. Without this the dashboard
+        // underneath still answers, so a click on a launcher row lands on the
+        // panel tab or session row the modal is drawn over.
+        //
+        // Only a modal that recorded its rectangle, though, since that rectangle
+        // is the whole means of telling a click meant for the modal from one
+        // meant for what it covers. The search box records none: it is a strip
+        // over a table that is still being scrolled and clicked while the query
+        // is typed, and swallowing the wheel there strands the filter it exists
+        // to drive.
+        if self.mode != Mode::List && layout.modal_rect.is_some() {
+            if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+                return;
+            }
+            // One click picks; Enter, or a second click on the row already
+            // picked, starts it — so no single stray click starts an agent.
+            if let Some(i) = layout.launch_row_at(ev.column, ev.row) {
+                match i == self.launch_cursor {
+                    true => {
+                        self.mode = Mode::List;
+                        self.launch_selected();
+                    }
+                    false => {
+                        self.launch_cursor = i;
+                        self.needs_redraw = true;
+                    }
+                }
+            } else if layout.modal_rect.is_some() && !layout.in_modal(ev.column, ev.row) {
+                // Clicking off a modal is how everyone dismisses one. A modal
+                // that did not record its rectangle swallows the click instead
+                // of guessing that it was aimed elsewhere.
+                self.mode = Mode::List;
+            }
+            return;
+        }
+
+        // Inside a tab the mouse has two targets: the tab bar, and the agents
+        // themselves. Clicks are the bar's — mouse capture also reports
+        // movement, and switching tabs on a hover means the pointer resting
+        // anywhere near the bar drags you out of the agent you are typing into.
         if self.tab > 0 {
-            if ev.kind == MouseEventKind::Down(MouseButton::Left)
-                && let Some(tab) = layout.workspace_at(ev.column, ev.row)
+            if ev.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
+                    self.show_tab(tab);
+                } else if layout.workspace_new_at(ev.column, ev.row) {
+                    self.launch_prompt(LaunchInto::Tab);
+                }
+                return;
+            }
+            // The wheel is the agent's, wherever it is pointed — cctop keeps no
+            // scrollback of its own, so a pane's history lives in the agent (or
+            // in the tmux around it) and only the agent can scroll it. The pane
+            // under the pointer, not the focused one, because the wheel says
+            // where it is aimed and stealing focus to answer it would move the
+            // keyboard out from under someone mid-sentence.
+            let up = match ev.kind {
+                MouseEventKind::ScrollUp => true,
+                MouseEventKind::ScrollDown => false,
+                _ => return,
+            };
+            if let Some((i, col, row)) = layout.pane_at(ev.column, ev.row)
+                && let Some(pane) = self.active_tab().and_then(|t| t.panes.get_mut(i))
             {
-                self.show_tab(tab);
+                // A failed send means that agent is gone, which the reaper is
+                // already watching for. Unlike a keystroke there is nothing to
+                // report: a scroll that landed on a dead pane asked for nothing.
+                let _ = pane.view.wheel(up, col, row);
             }
             return;
         }
@@ -523,6 +618,8 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
                     self.show_tab(tab);
+                } else if layout.workspace_new_at(ev.column, ev.row) {
+                    self.launch_prompt(LaunchInto::Tab);
                 } else if self.bottom_tab == 3
                     && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
                 {

@@ -274,6 +274,9 @@ mod tests {
             eprintln!("skipping: tmux not installed");
             return;
         }
+        // Every test that drives the real server takes its turn — see
+        // [`tmux::test_lock`](crate::tmux::test_lock).
+        let _turn = crate::tmux::test_lock();
         let out = std::env::temp_dir().join("cctop-mux-test.txt");
         let _ = std::fs::remove_file(&out);
         // `tee` takes the path as an argument, so the reader is findable by
@@ -281,6 +284,12 @@ mod tests {
         // shell between the pane and the reader so the ancestor walk has to
         // climb at least one level.
         let session = "cctop-mux-test";
+        // The name is fixed, so a run killed before its teardown leaves the
+        // session behind and `new-session` then fails as a duplicate — for every
+        // run after it, until someone thinks to look in tmux.
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={session}")])
+            .status();
         let script = format!("tee {} >/dev/null; :", out.display());
         assert!(
             Command::new("tmux")

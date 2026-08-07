@@ -3,9 +3,11 @@ mod attach;
 mod cache;
 mod cli;
 mod config;
+mod handoff;
 mod hook;
 mod inject;
 mod loader;
+mod mcp;
 mod notify;
 mod pricing;
 mod proc;
@@ -13,6 +15,7 @@ mod quota;
 mod session;
 #[cfg(unix)]
 mod shim;
+mod tmux;
 mod ui;
 mod update;
 mod util;
@@ -92,26 +95,14 @@ fn main() -> anyhow::Result<()> {
         let Some(scope) = hook::Scope::parse(scope, &cwd) else {
             anyhow::bail!("unknown scope '{scope}'; use `user` or `project`");
         };
-        eprintln!(
-            "{}",
-            match installing {
-                true => hook::install(&scope)?,
-                false => hook::remove(&scope)?,
-            }
-        );
-        // Codex is configured machine-wide or not at all, so it rides along with
-        // the user scope only. A failure there — someone else's notify program
-        // already in the slot — is reported rather than fatal: it must not undo
-        // the Claude Code half that already succeeded.
-        if scope == hook::Scope::User {
-            match if installing {
-                hook::codex_install()
-            } else {
-                hook::codex_remove()
-            } {
-                Ok(what) => eprintln!("{what}"),
-                Err(e) => eprintln!("Codex: {e}"),
-            }
+        // One line per harness, including the ones that could not be done:
+        // they are separate files, and a `notify` slot that already belongs to
+        // somebody else must not undo the four installs that succeeded.
+        for line in match installing {
+            true => hook::install(&scope),
+            false => hook::remove(&scope),
+        } {
+            eprintln!("{line}");
         }
         eprintln!("Sessions already running keep their old hooks until restarted.");
         return Ok(());
@@ -137,6 +128,20 @@ fn main() -> anyhow::Result<()> {
 
     if args.clear_cache && cache::clear_session_cache()? {
         eprintln!("Cleared cctop session extraction cache.");
+    }
+
+    if args.mcp {
+        // Nothing may be printed to stdout but JSON-RPC: the transport is the
+        // stream, and one stray line of logging desynchronises the client.
+        return mcp::serve();
+    }
+
+    if let Some(which) = &args.handoff {
+        let mut loader = loader::Loader::new();
+        let sessions = loader.load(args.plan);
+        cli::run_handoff(&sessions, which, &loader)?;
+        loader.store().save();
+        return Ok(());
     }
 
     if args.list || args.json {
