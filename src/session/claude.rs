@@ -1174,11 +1174,7 @@ fn build_subagents(files: &[PathBuf], ext: &Extractor) -> Vec<Subagent> {
         // header, which would understate CTX% for the common 200k default.
         let context = stats.filter(|s| s.latest_used > 0).map(|s| ContextUsage {
             used: s.latest_used,
-            max: if s.latest_used > CLAUDE_DEFAULT_CTX {
-                CLAUDE_1M_CTX
-            } else {
-                CLAUDE_DEFAULT_CTX
-            },
+            max: resolve_ctx_max(None, s.latest_used, None),
             compacting: false,
         });
 
@@ -1286,6 +1282,22 @@ fn build_subagents(files: &[PathBuf], ext: &Extractor) -> Vec<Subagent> {
 // Tail scans for live sessions
 // ---------------------------------------------------------------------------
 
+/// Size of the context window, from the most trustworthy source that knows one:
+/// a pinned setting, then usage that has already outgrown the default, then
+/// LiteLLM, then the default itself.
+///
+/// Every caller resolves through here so the sources cannot name two different
+/// sizes for the same window. They would otherwise: whichever branch fires first
+/// becomes the denominator of every percentage in the UI and fixes where the
+/// auto-compaction marker sits, so a session that happens to cross 200k would
+/// stop agreeing with its neighbours on the same model.
+fn resolve_ctx_max(settings_ctx: Option<u64>, used: u64, litellm_ctx: Option<u64>) -> u64 {
+    settings_ctx
+        .or_else(|| (used > CLAUDE_DEFAULT_CTX).then_some(CLAUDE_1M_CTX))
+        .or(litellm_ctx)
+        .unwrap_or(CLAUDE_DEFAULT_CTX)
+}
+
 /// Context-window setting pinned in Claude Code settings, most specific first.
 fn settings_context(session: &Session) -> Option<u64> {
     let config_root = match (session.surface.is_desktop(), &session.mac_meta) {
@@ -1356,26 +1368,16 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
         if used == 0 {
             continue;
         }
-        // Resolution order: a pinned [1m] setting, then inference from observed
-        // usage, then LiteLLM, then the 200k default.
-        let max = settings_ctx
-            .or(if used > CLAUDE_DEFAULT_CTX {
-                Some(CLAUDE_1M_CTX)
-            } else {
-                None
-            })
-            .or(litellm_ctx)
-            .unwrap_or(CLAUDE_DEFAULT_CTX);
         return Some(ContextUsage {
             used,
-            max,
+            max: resolve_ctx_max(settings_ctx, used, litellm_ctx),
             compacting: saw_compact_boundary,
         });
     }
 
     saw_compact_boundary.then(|| ContextUsage {
         used: 0,
-        max: settings_ctx.or(litellm_ctx).unwrap_or(CLAUDE_DEFAULT_CTX),
+        max: resolve_ctx_max(settings_ctx, 0, litellm_ctx),
         compacting: true,
     })
 }
@@ -1620,5 +1622,32 @@ mod tests {
             .expect("failed call");
         assert!(!ok.failed, "a successful result must not be flagged");
         assert!(bad.failed, "is_error must be flagged");
+    }
+
+    /// Every route to the large window has to name the same size. Two sessions on
+    /// one model differ only in how far they have filled it, and that must not
+    /// change the denominator: if crossing the 200k default swapped LiteLLM's
+    /// figure for a different constant, every percentage in the UI and the
+    /// auto-compaction marker would jump the moment a session got busy.
+    #[test]
+    fn crossing_the_default_does_not_change_the_window_litellm_reported() {
+        let litellm = pricing::litellm_max_input_tokens("claude-opus-5").or(Some(CLAUDE_1M_CTX));
+        let below = resolve_ctx_max(None, CLAUDE_DEFAULT_CTX - 1, litellm);
+        let above = resolve_ctx_max(None, CLAUDE_DEFAULT_CTX + 1, litellm);
+        let pinned = resolve_ctx_max(Some(CLAUDE_1M_CTX), 1, litellm);
+        assert_eq!(below, above, "inference must agree with LiteLLM");
+        assert_eq!(above, pinned, "inference must agree with a pinned [1m]");
+    }
+
+    /// The ordering the sources are consulted in is itself behaviour: a pinned
+    /// setting is the only one the user stated outright, and the 200k default is
+    /// what a session gets when nothing knows better.
+    #[test]
+    fn a_pinned_setting_outranks_inference_and_the_default_catches_the_rest() {
+        assert_eq!(
+            resolve_ctx_max(Some(CLAUDE_DEFAULT_CTX), CLAUDE_1M_CTX, Some(CLAUDE_1M_CTX)),
+            CLAUDE_DEFAULT_CTX
+        );
+        assert_eq!(resolve_ctx_max(None, 1, None), CLAUDE_DEFAULT_CTX);
     }
 }
