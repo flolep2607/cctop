@@ -447,7 +447,7 @@ pub fn extract(path: &Path) -> SessionData {
     let mut result_ts: HashMap<String, String> = HashMap::new();
     let mut failed_calls: HashSet<String> = HashSet::new();
 
-    let _ = for_each_jsonl(path, |item| {
+    let read = for_each_jsonl(path, |item| {
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
         let payload = item.get("payload");
         let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
@@ -624,6 +624,18 @@ pub fn extract(path: &Path) -> SessionData {
             _ => {}
         }
     });
+
+    // A read that failed part-way has partial totals; reporting them as the
+    // session's cost writes a fabricated number straight into the cache.
+    if let Err(err) = read {
+        return SessionData {
+            error: Some(format!(
+                "Could not read Codex rollout {}: {err}",
+                path.display()
+            )),
+            ..Default::default()
+        };
+    }
 
     // Time each call from its own entry to its output's.
     for details in metrics.tool_details.values_mut() {

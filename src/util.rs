@@ -243,9 +243,14 @@ pub fn tildify(path: &str) -> String {
 /// still reads clearly as `opus-5`.
 pub fn short_model(model: &str) -> String {
     let m = model.strip_prefix("claude-").unwrap_or(model);
-    // Trim a trailing `-YYYYMMDD` release stamp.
-    if m.len() > 9 {
-        let (head, tail) = m.split_at(m.len() - 9);
+    // Trim a trailing `-YYYYMMDD` release stamp. Model names come straight from
+    // transcripts and custom providers can put anything in them, so the split
+    // has to respect char boundaries: a byte split panics mid-character. A
+    // non-boundary here also means the last 9 bytes hold a multi-byte char,
+    // which can never be `-` plus eight digits.
+    let idx = m.len().wrapping_sub(9);
+    if m.len() > 9 && m.is_char_boundary(idx) {
+        let (head, tail) = m.split_at(idx);
         if tail.starts_with('-') && tail[1..].chars().all(|c| c.is_ascii_digit()) {
             return head.to_string();
         }
@@ -506,6 +511,15 @@ mod tests {
         assert_eq!(short_model("claude-opus-5"), "opus-5");
         assert_eq!(short_model("gpt-5.3-codex"), "gpt-5.3-codex");
         assert_eq!(short_model("gpt-5.5"), "gpt-5.5");
+    }
+
+    /// Regression: a byte split at `len - 9` panicked whenever it landed inside
+    /// a multi-byte character, taking the whole TUI down on every refresh.
+    #[test]
+    fn model_shortening_survives_non_ascii_names() {
+        assert_eq!(short_model("gpt-café-preview"), "gpt-café-preview");
+        assert_eq!(short_model("modèle-20251101"), "modèle");
+        assert_eq!(short_model("日本語モデル"), "日本語モデル");
     }
 
     #[test]
