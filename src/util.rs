@@ -466,6 +466,36 @@ pub fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Tail windows tried in turn by [`scan_tail_escalating`], in bytes.
+///
+/// A single JSONL entry can carry a whole file read or a screenshot, so it is
+/// routinely hundreds of kilobytes; one of those between EOF and the entry a
+/// scan is after pushes it out of any fixed window. Growing 4x at a time keeps
+/// the wasted re-scan of the windows that already came up empty to a third of
+/// the final read, and 4MB is the point past which a transcript that still has
+/// no match almost certainly never will — better to give up than to spend the
+/// refresh tick proving it.
+const TAIL_STEPS: [u64; 4] = [65_536, 262_144, 1_048_576, 4_194_304];
+
+/// Run `scan` over the tail of a file, widening the window until it hits.
+///
+/// Each call gets a byte window that normally starts mid-line, so `scan` must
+/// tolerate a truncated first line; a window that grows completes that line
+/// rather than dropping it.
+pub fn scan_tail_escalating<T>(path: &Path, mut scan: impl FnMut(&str) -> Option<T>) -> Option<T> {
+    let size = std::fs::metadata(path).ok()?.len();
+    for &want in &TAIL_STEPS {
+        let hit = scan(&read_tail(path, want)?);
+        if hit.is_some() {
+            return hit;
+        }
+        if want >= size {
+            break;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
