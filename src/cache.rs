@@ -4,35 +4,64 @@ use crate::config;
 use crate::session::{Session, SessionData};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Bumped whenever `SessionData`'s shape changes. A mismatch discards the whole
-/// cache, which replaces the pile of ad-hoc `_hasSubagentsField`-style probes
-/// the JS version accumulated as its schema drifted.
-// Version 3 invalidated sessions cached before the codex-auto-review -> GPT-5.2
-// pricing alias existed. Version 4 re-extracted Codex tool activity after `exec`
-// wrappers began being unwrapped. Version 5 avoided mistaking `tools.*` text
-// inside a patch for the wrapper's actual nested call. Version 6 also ignores
-// `await tools.*` text inside quoted patch content. Version 7 re-extracts
-// Codex web calls so their query is shown instead of `response_length`.
-// Version 8 captures OpenCode edit detail, deltas, and duration. Version 9
-// records whether each tool call failed.
-const CACHE_VERSION: u32 = 9;
+/// Identity of the code that produced a cache entry, so a mismatch discards the
+/// whole cache. This replaces the pile of ad-hoc `_hasSubagentsField`-style
+/// probes the JS version accumulated as its schema drifted.
+///
+/// It is derived by `build.rs` from the bytes of every source that decides what
+/// an entry means — `src/session/`, this file, `pricing.rs`, `config.rs` —
+/// rather than being a number a human remembers to bump. The manual version was
+/// forgotten exactly when it mattered: a field added to `SessionData` without a
+/// bump deserializes as `None` under `#[serde(default)]`, and a finished
+/// transcript never changes again, so its panel stays blank forever.
+///
+/// The tradeoff is deliberate: *any* edit to a parser invalidates every cached
+/// session, whitespace and comments included. A re-parse costs a fraction of a
+/// second per session and happens once; serving a stale wrong panel costs
+/// correctness and lasts until the user thinks to pass `--clear-cache`.
+const CACHE_VERSION: &str = env!("CCTOP_CACHE_HASH");
 
+/// One cached extraction.
+///
+/// The transcript path is a field rather than something recovered from the key.
+/// The key embeds it — `{path}|{len}|{mtime}|p{epoch}` — but a path may contain
+/// `|` itself, and splitting on the first one truncated it, so those sessions
+/// were dropped on every save and re-parsed forever.
 #[derive(Serialize, Deserialize)]
-struct DiskCache {
-    version: u32,
-    entries: HashMap<String, SessionData>,
+struct Entry {
+    path: PathBuf,
+    /// Unix millis of the write that stored this, used to evict the oldest
+    /// entries when the cache outgrows its bound.
+    #[serde(default)]
+    stored_at: u64,
+    data: SessionData,
 }
 
-impl Default for DiskCache {
-    fn default() -> Self {
-        DiskCache {
-            version: CACHE_VERSION,
-            entries: HashMap::new(),
-        }
-    }
+#[derive(Deserialize)]
+struct DiskCache {
+    version: String,
+    entries: HashMap<String, Entry>,
+}
+
+/// Serializing view, so `save` writes the live map instead of cloning it.
+#[derive(Serialize)]
+struct DiskCacheRef<'a> {
+    version: &'a str,
+    entries: &'a HashMap<String, Entry>,
+}
+
+/// Upper bound on retained entries. Sessions are never explicitly deleted from
+/// the user's disk, so without this the cache only ever grows.
+const MAX_ENTRIES: usize = 2_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Identity of a transcript's *content*: any append changes size or mtime, so a
@@ -69,7 +98,7 @@ pub fn cache_key(path: &Path) -> Option<String> {
 }
 
 pub struct CostCache {
-    entries: Mutex<HashMap<String, SessionData>>,
+    entries: Mutex<HashMap<String, Entry>>,
     dirty: Mutex<bool>,
 }
 
@@ -93,12 +122,16 @@ pub fn clear_session_cache() -> anyhow::Result<bool> {
 
 impl CostCache {
     pub fn load() -> Self {
-        let entries = std::fs::read_to_string(&*config::COST_CACHE_FILE)
+        let mut entries = std::fs::read_to_string(&*config::COST_CACHE_FILE)
             .ok()
             .and_then(|t| serde_json::from_str::<DiskCache>(&t).ok())
             .filter(|c| c.version == CACHE_VERSION)
             .map(|c| c.entries)
             .unwrap_or_default();
+        // Deleted transcripts are the only entries worth a `stat`, and once per
+        // process start is enough: an entry whose file merely *changed* is
+        // superseded by key on the next `put`, at no IO cost at all.
+        entries.retain(|_, e| e.path.exists());
         CostCache {
             entries: Mutex::new(entries),
             dirty: Mutex::new(false),
@@ -106,20 +139,35 @@ impl CostCache {
     }
 
     pub fn get(&self, key: &str) -> Option<SessionData> {
-        self.entries.lock().ok()?.get(key).cloned()
+        self.entries.lock().ok()?.get(key).map(|e| e.data.clone())
     }
 
-    pub fn put(&self, key: String, data: &SessionData) {
-        if let Ok(mut e) = self.entries.lock() {
-            e.insert(key, data.clone());
+    pub fn put(&self, key: String, path: &Path, data: &SessionData) {
+        if let Ok(mut entries) = self.entries.lock() {
+            // The old key for this transcript can never be hit again — the file
+            // has moved past it — so drop it here rather than re-deriving every
+            // key from the filesystem at save time.
+            entries.retain(|k, e| k == &key || e.path != path);
+            entries.insert(
+                key,
+                Entry {
+                    path: path.to_path_buf(),
+                    stored_at: now_ms(),
+                    data: data.clone(),
+                },
+            );
         }
         if let Ok(mut d) = self.dirty.lock() {
             *d = true;
         }
     }
 
-    /// Write the cache back, dropping entries whose transcript has changed or
-    /// been deleted since they were stored.
+    /// Write the cache back.
+    ///
+    /// This runs on a timer while the UI is up, so it touches the filesystem
+    /// once — for the write itself. It used to `stat` and `read_dir` every
+    /// cached transcript to re-derive its key, and to clone the whole entry map
+    /// (hundreds of MB-scale sessions) before serializing.
     pub fn save(&self) {
         if !self.dirty.lock().map(|d| *d).unwrap_or(false) {
             return;
@@ -127,20 +175,47 @@ impl CostCache {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
-        entries.retain(|key, _| {
-            let Some(path) = key.split('|').next() else {
-                return false;
-            };
-            cache_key(Path::new(path)).as_deref() == Some(key)
-        });
+        evict_oldest(&mut entries);
 
         let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
-        if let Ok(text) = serde_json::to_string(&DiskCache {
-            version: CACHE_VERSION,
-            entries: entries.clone(),
-        }) {
-            let _ = std::fs::write(&*config::COST_CACHE_FILE, text);
+        // Write-then-rename: a crash or a full disk mid-write would otherwise
+        // leave truncated JSON, throwing away every cached session.
+        let tmp = config::COST_CACHE_FILE.with_extension("json.tmp");
+        let wrote = std::fs::File::create(&tmp).is_ok_and(|file| {
+            serde_json::to_writer(
+                std::io::BufWriter::new(&file),
+                &DiskCacheRef {
+                    version: CACHE_VERSION,
+                    entries: &entries,
+                },
+            )
+            .is_ok()
+        });
+        if wrote && std::fs::rename(&tmp, &*config::COST_CACHE_FILE).is_ok() {
+            if let Ok(mut d) = self.dirty.lock() {
+                *d = false;
+            }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
         }
+    }
+}
+
+/// Drop the least recently stored entries once the cache exceeds `MAX_ENTRIES`.
+fn evict_oldest(entries: &mut HashMap<String, Entry>) {
+    if entries.len() <= MAX_ENTRIES {
+        return;
+    }
+    // Sorted by key as well as age: a startup burst stores many entries in the
+    // same millisecond, and "everything older than the cutoff" would then throw
+    // away far more than the overflow.
+    let mut order: Vec<(u64, String)> = entries
+        .iter()
+        .map(|(k, e)| (e.stored_at, k.clone()))
+        .collect();
+    order.sort_unstable();
+    for (_, key) in order.into_iter().take(entries.len() - MAX_ENTRIES) {
+        entries.remove(&key);
     }
 }
 
@@ -156,22 +231,55 @@ struct MemEntry {
     pricing_epoch: u64,
     data: SessionData,
     /// How long the parse behind `data` took, and when it finished. Together
-    /// they bound how much of a core one growing transcript may consume.
+    /// with `size` they bound how much of a core one growing transcript may
+    /// consume.
     parsed_in: std::time::Duration,
     parsed_at: std::time::Instant,
+    /// Transcript size when it was stored, a proxy for what re-parsing costs.
+    size: u64,
+}
+
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 /// How many times its own parse cost a transcript must wait before being parsed
 /// again, so each one costs at most `1/N` of a core no matter how large it is.
 const REPARSE_BACKOFF: u32 = 20;
 
+/// Above this, a transcript also gets a size-based floor on its re-parse
+/// interval.
+const LARGE_TRANSCRIPT_BYTES: u64 = 1 << 20;
+
+/// Seconds of floor per megabyte, and the ceiling on that floor.
+const FLOOR_SECS_PER_MB: u64 = 10;
+const MAX_FLOOR_SECS: u64 = 60;
+
+/// Minimum time between re-parses of a transcript of this size.
+///
+/// The proportional backoff alone does not bind in practice: a 3.7 MB
+/// transcript parses in ~50 ms, so `parse × 20` is a one-second window — under
+/// the default two-second refresh, meaning every tick re-parses the whole file.
+/// Parse cost tracks size, so size gives the floor a scale the measurement
+/// cannot: nothing under a megabyte gets one at all (small sessions stay live,
+/// which is where lag would actually be noticed), then ten seconds per megabyte
+/// up to a minute. That 3.7 MB file lands on a 30 s floor — under 0.2% of a
+/// core instead of 2.5% — and a 20 MB one cannot exceed 0.2% either.
+fn reparse_floor(size: u64) -> std::time::Duration {
+    if size < LARGE_TRANSCRIPT_BYTES {
+        return std::time::Duration::ZERO;
+    }
+    let mb = size / LARGE_TRANSCRIPT_BYTES;
+    std::time::Duration::from_secs((mb * FLOOR_SECS_PER_MB).min(MAX_FLOOR_SECS))
+}
+
 /// Whether stale-but-cached data should be served instead of re-parsing.
 ///
 /// A live session appends every few seconds and the cache key is size+mtime, so
 /// every append invalidates the entry and the whole file is parsed again. Cheap
 /// transcripts stay effectively real-time; only the expensive ones back off.
-fn reuse_stale(parsed_in: std::time::Duration, since: std::time::Duration) -> bool {
-    since < parsed_in * REPARSE_BACKOFF
+fn reuse_stale(parsed_in: std::time::Duration, since: std::time::Duration, size: u64) -> bool {
+    since < parsed_in * REPARSE_BACKOFF || since < reparse_floor(size)
 }
 
 #[derive(Default)]
@@ -226,7 +334,7 @@ impl Store {
             // straddle the boundary gets counted twice. Until then, bound the
             // waste: a transcript costing 500ms to parse is re-read every 10s
             // instead of every 2s, while cheap ones stay effectively live.
-            if allow_stale && reuse_stale(entry.parsed_in, entry.parsed_at.elapsed()) {
+            if allow_stale && reuse_stale(entry.parsed_in, entry.parsed_at.elapsed(), entry.size) {
                 return entry.data.clone();
             }
         }
@@ -252,9 +360,11 @@ impl Store {
                         pricing_epoch: epoch,
                         data: data.clone(),
                         // A disk hit says nothing about what parsing this costs,
-                        // so claim nothing and let the next change be parsed.
+                        // so claim nothing and let the next change be parsed —
+                        // subject to the size floor, which needs no measurement.
                         parsed_in: std::time::Duration::ZERO,
                         parsed_at: std::time::Instant::now(),
+                        size: file_size(file),
                     },
                 );
             }
@@ -262,7 +372,7 @@ impl Store {
         }
 
         let started = std::time::Instant::now();
-        let data = match session.provider {
+        let mut data = match session.provider {
             crate::pricing::Provider::Claude => crate::session::claude::extract(file),
             crate::pricing::Provider::Codex => crate::session::codex::extract(file),
             crate::pricing::Provider::Cursor => crate::session::cursor::extract(file),
@@ -276,6 +386,8 @@ impl Store {
             }
         };
         let parsed_in = started.elapsed();
+        // Trim before anything sees it, so the cached copy and this one agree.
+        data.finalize();
         if let Ok(mut mem) = self.mem.lock() {
             mem.insert(
                 mem_key,
@@ -285,6 +397,7 @@ impl Store {
                     data: data.clone(),
                     parsed_in,
                     parsed_at: std::time::Instant::now(),
+                    size: file_size(file),
                 },
             );
         }
@@ -292,7 +405,7 @@ impl Store {
         if let Some(key) = disk_key
             && data.error.is_none()
         {
-            self.disk.put(key, &data);
+            self.disk.put(key, file, &data);
         }
         data
     }
@@ -347,6 +460,11 @@ pub struct UiPrefs {
     /// The shell alias block has been written once. Kept here so removing the
     /// block — by flag or by hand — isn't undone by the next launch.
     pub shell_alias_installed: bool,
+    /// Table columns the user has hidden, by column id. Unlike the sort order
+    /// this is deliberate and effortful to redo, so it survives the run.
+    pub hidden_columns: Vec<String>,
+    /// Chosen theme name, or `None` to follow the built-in default.
+    pub theme: Option<String>,
 }
 
 impl Default for UiPrefs {
@@ -362,6 +480,8 @@ impl Default for UiPrefs {
             cost_floor: 0.0,
             notify: false,
             shell_alias_installed: false,
+            hidden_columns: Vec::new(),
+            theme: None,
         }
     }
 }
@@ -382,6 +502,14 @@ impl UiPrefs {
     }
 }
 
+/// The build script, pulled into the test binary so the cache version can be
+/// re-derived here instead of being asserted against a copy of its logic.
+#[cfg(test)]
+#[allow(dead_code)]
+mod build_script {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,22 +517,187 @@ mod tests {
     #[test]
     fn reparse_backoff_scales_with_parse_cost() {
         use std::time::Duration;
+        const SMALL: u64 = 64 * 1024;
         // A cheap transcript is re-read almost immediately…
         assert!(!reuse_stale(
             Duration::from_millis(5),
-            Duration::from_millis(200)
+            Duration::from_millis(200),
+            SMALL
         ));
         // …an expensive one waits proportionally longer than the refresh interval.
         assert!(reuse_stale(
             Duration::from_millis(500),
-            Duration::from_secs(2)
+            Duration::from_secs(2),
+            SMALL
         ));
         assert!(!reuse_stale(
             Duration::from_millis(500),
-            Duration::from_secs(11)
+            Duration::from_secs(11),
+            SMALL
         ));
         // Something never parsed here (a disk-cache hit) claims no budget.
-        assert!(!reuse_stale(Duration::ZERO, Duration::ZERO));
+        assert!(!reuse_stale(Duration::ZERO, Duration::ZERO, SMALL));
+    }
+
+    /// Regression: the proportional backoff alone left multi-MB live sessions
+    /// re-parsed on every tick, because they parse far faster than a 2s refresh.
+    #[test]
+    fn large_transcripts_get_a_floor_the_refresh_interval_cannot_beat() {
+        use std::time::Duration;
+        let big = 4 * (1 << 20);
+        // A 50ms parse would otherwise permit a re-parse after one second.
+        assert!(reuse_stale(
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            big
+        ));
+        assert!(!reuse_stale(
+            Duration::from_millis(50),
+            Duration::from_secs(41),
+            big
+        ));
+        // Small sessions keep feeling live: no floor at all.
+        assert_eq!(reparse_floor(900 * 1024), Duration::ZERO);
+        // …and the floor is capped, so a huge file is not frozen indefinitely.
+        assert_eq!(
+            reparse_floor(500 * (1 << 20)),
+            Duration::from_secs(MAX_FLOOR_SECS)
+        );
+    }
+
+    #[test]
+    fn cache_version_is_derived_and_stable() {
+        assert!(!CACHE_VERSION.is_empty(), "build.rs must set the hash");
+        assert_eq!(CACHE_VERSION.len(), 16);
+        assert!(CACHE_VERSION.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(CACHE_VERSION, env!("CCTOP_CACHE_HASH"));
+    }
+
+    /// The real source set, as the build script sees it. `cargo test` runs with
+    /// the package root as the working directory, which is what makes the build
+    /// script's relative roots resolve here too.
+    fn hashed_sources() -> Vec<(String, Vec<u8>)> {
+        let (files, _dirs) = build_script::sources();
+        assert!(
+            !files.is_empty(),
+            "expected to run from the package root, found no sources"
+        );
+        build_script::read_all(&files)
+    }
+
+    /// Every provider's extractor decides what ends up in a cache entry, so
+    /// every provider's file has to be in the hashed set. A new one that nobody
+    /// remembered to list is exactly the failure this whole mechanism exists to
+    /// prevent.
+    #[test]
+    fn the_hashed_set_covers_every_parser_and_the_shipped_hash_matches_it() {
+        let sources = hashed_sources();
+        let names: Vec<&str> = sources.iter().map(|(p, _)| p.as_str()).collect();
+        for provider in [
+            "claude", "codex", "cursor", "gemini", "opencode", "pi", "windsurf",
+        ] {
+            let expected = format!("src/session/{provider}.rs");
+            assert!(names.contains(&expected.as_str()), "{expected} not hashed");
+        }
+        assert!(names.contains(&"src/session/mod.rs"));
+        assert!(names.contains(&"src/config.rs"));
+        assert!(names.contains(&"src/pricing.rs"));
+        // …and what the binary carries is the digest of exactly that set, so the
+        // walk cannot silently drift from what was compiled in.
+        assert_eq!(
+            format!("{:016x}", build_script::digest(&sources)),
+            CACHE_VERSION
+        );
+    }
+
+    /// The bug this replaced: `context_breakdown` was added to `SessionData`
+    /// without bumping the hand-written version, so cached entries kept
+    /// deserializing it as `None` and the panel stayed blank forever. Changing
+    /// the shape must change the version, with nobody having to remember.
+    #[test]
+    fn changing_session_data_changes_the_derived_hash() {
+        let base = hashed_sources();
+        let before = build_script::digest(&base);
+        assert_eq!(before, build_script::digest(&base), "digest is a function");
+
+        let mut edited = base.clone();
+        let model = edited
+            .iter_mut()
+            .find(|(p, _)| p == "src/session/mod.rs")
+            .expect("the data model is hashed");
+        model
+            .1
+            .extend_from_slice(b"\n// a new cached field lands here\n");
+        assert_ne!(
+            before,
+            build_script::digest(&edited),
+            "an edit to the data model must invalidate the cache"
+        );
+
+        // Relocating a parser is a change too, even byte for byte.
+        let mut moved = base.clone();
+        moved[0].0 = format!("src/session/renamed_{}", moved[0].0);
+        assert_ne!(before, build_script::digest(&moved));
+    }
+
+    /// Regression: `save` used to recover the transcript path with
+    /// `key.split('|').next()`, which truncates a path that contains `|`. The
+    /// derived key then never matched, the entry was dropped on every save, and
+    /// that session was re-parsed forever.
+    #[test]
+    fn entries_survive_a_pipe_in_the_transcript_path() {
+        let dir = std::env::temp_dir().join(format!("cctop-pipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a|b.jsonl");
+        std::fs::write(&file, "x").unwrap();
+
+        let cache = CostCache {
+            entries: Mutex::new(HashMap::new()),
+            dirty: Mutex::new(false),
+        };
+        let key = cache_key(&file).unwrap();
+        assert!(key.contains("a|b"), "the key embeds the awkward path");
+        cache.put(key.clone(), &file, &SessionData::default());
+
+        let entries = cache.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[&key].path, file);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A new key for the same transcript replaces the old one, which is what
+    /// keeps the cache from growing without re-`stat`ing everything on save.
+    #[test]
+    fn a_changed_transcript_supersedes_its_own_entry() {
+        let path = Path::new("/tmp/whatever.jsonl");
+        let cache = CostCache {
+            entries: Mutex::new(HashMap::new()),
+            dirty: Mutex::new(false),
+        };
+        cache.put("k1".into(), path, &SessionData::default());
+        cache.put("k2".into(), path, &SessionData::default());
+        let entries = cache.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains_key("k2"));
+    }
+
+    #[test]
+    fn eviction_keeps_the_newest_entries() {
+        let mut entries = HashMap::new();
+        for i in 0..(MAX_ENTRIES + 10) {
+            entries.insert(
+                format!("k{i}"),
+                Entry {
+                    path: PathBuf::from(format!("/tmp/{i}.jsonl")),
+                    stored_at: i as u64,
+                    data: SessionData::default(),
+                },
+            );
+        }
+        evict_oldest(&mut entries);
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert!(!entries.contains_key("k9"));
+        assert!(entries.contains_key("k10"));
     }
 
     #[test]
@@ -461,5 +754,24 @@ mod tests {
             serde_json::from_str(r#"{"bottom_tab":3,"sort_col":"cpu","future_field":1}"#).unwrap();
         assert_eq!(back.bottom_tab, 3);
         assert_eq!(back.subagent_sort_col, "last"); // filled from Default
+    }
+
+    /// Prefs written before these fields existed must still load. The
+    /// container-level `#[serde(default)]` is what guarantees it, so pin the
+    /// behaviour rather than the attribute.
+    #[test]
+    fn prefs_gain_hidden_columns_and_theme_without_breaking_old_files() {
+        let old: UiPrefs = serde_json::from_str(r#"{"bottom_tab":1}"#).unwrap();
+        assert!(old.hidden_columns.is_empty());
+        assert_eq!(old.theme, None);
+
+        let prefs = UiPrefs {
+            hidden_columns: vec!["cpu".into(), "mem".into()],
+            theme: Some("mono".into()),
+            ..Default::default()
+        };
+        let back: UiPrefs = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(back.hidden_columns, ["cpu", "mem"]);
+        assert_eq!(back.theme.as_deref(), Some("mono"));
     }
 }
