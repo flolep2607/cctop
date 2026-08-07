@@ -449,6 +449,12 @@ pub struct UiPrefs {
     pub inactivity_filter: Option<String>,
     pub agent_live_filter: bool,
     pub tool_show_diff: bool,
+    /// Session keys whose subagents are shown as child rows.
+    ///
+    /// Unlike the table's sort, this is worth persisting: expanding a session is
+    /// a deliberate act about one session, not a click that lands a pixel away
+    /// from something else.
+    pub expanded: Vec<String>,
     pub subagent_sort_col: String,
     pub subagent_sort_asc: bool,
     /// Only show sessions whose cost reaches this floor (0 disables it).
@@ -475,6 +481,7 @@ impl Default for UiPrefs {
             inactivity_filter: None,
             agent_live_filter: false,
             tool_show_diff: false,
+            expanded: Vec::new(),
             subagent_sort_col: "last".into(),
             subagent_sort_asc: false,
             cost_floor: 0.0,

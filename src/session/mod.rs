@@ -74,8 +74,17 @@ pub struct MacMeta {
 pub struct ContextUsage {
     pub used: u64,
     pub max: u64,
-    #[serde(default)]
-    pub compacting: bool,
+    /// A compaction is the newest thing in the transcript: it replaced the
+    /// window and no request has measured the new one yet, so `used` describes
+    /// the window as it stood *before* that compaction.
+    ///
+    /// Deliberately not called "compacting". The transcript cannot tell a
+    /// compaction that is still running from one the session stopped right
+    /// after, and a session that compacted and ended is not busy — only
+    /// liveness settles that, so [`Session::is_compacting`] is where the two
+    /// facts meet.
+    #[serde(default, alias = "compacting")]
+    pub compacted: bool,
 }
 
 impl ContextUsage {
@@ -98,6 +107,13 @@ impl ContextUsage {
 /// up to the window — whatever is left over is [`unaccounted`], and that gap is
 /// the honest answer to what the transcript cannot see.
 ///
+/// Every field describes one and the same segment — the stretch of conversation
+/// between a start (or a compaction) and the last request that reported its
+/// size. Mixing segments is the one way this type can lie without any single
+/// number being wrong: a `total` from one side of a compaction and parts from
+/// the other differ by the whole conversation, and all of it lands in
+/// [`unaccounted`], which is meant to hold only what cannot be seen.
+///
 /// [`unaccounted`]: ContextBreakdown::unaccounted
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ContextBreakdown {
@@ -114,9 +130,13 @@ pub struct ContextBreakdown {
     pub attachments: u64,
     pub user_text: u64,
     pub assistant_text: u64,
-    /// The live segment begins at a compaction summary rather than at the start
-    /// of the session, so `startup` carries that summary too.
+    /// The segment begins at a compaction summary rather than at the start of
+    /// the session, so `startup` carries that summary too.
     pub after_compaction: bool,
+    /// A compaction has since replaced this segment and no request has measured
+    /// its replacement yet, so these numbers describe the window as it stood
+    /// before that compaction — the last one anything measured.
+    pub superseded: bool,
 }
 
 impl ContextBreakdown {
@@ -230,6 +250,17 @@ impl Session {
 
     pub fn is_running(&self) -> bool {
         self.process.is_some() || self.inferred_running
+    }
+
+    /// A compaction is the newest thing in the transcript *and* something is
+    /// still there to send the request that follows it.
+    ///
+    /// Liveness is checked here rather than baked into [`ContextUsage`] because
+    /// the transcript of a session that compacted and then stopped never
+    /// changes again: a flag stored at read time would keep calling that
+    /// session busy for as long as it is listed.
+    pub fn is_compacting(&self) -> bool {
+        self.context.is_some_and(|c| c.compacted) && self.is_running()
     }
 
     /// Title if renamed, else the abbreviated working directory.
