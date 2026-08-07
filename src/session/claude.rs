@@ -315,6 +315,21 @@ struct Snapshot {
     cw1h: u64,
     model: String,
     ts: String,
+    /// Whether this turn ran in the session's own context rather than a
+    /// sidechain, which decides whether its model can name the session.
+    main_ctx: bool,
+}
+
+/// Order two transcript timestamps as instants.
+///
+/// String comparison is wrong the moment a transcript carries a non-`Z` offset
+/// or a different sub-second precision. Unparseable stamps fall back to the
+/// lexical order so behaviour never gets worse than before.
+fn ts_before(a: &str, b: &str) -> bool {
+    match (util::parse_ts(a), util::parse_ts(b)) {
+        (Some(x), Some(y)) => x < y,
+        _ => a < b,
+    }
 }
 
 /// Per-subagent-file accumulators.
@@ -440,9 +455,13 @@ impl Extractor {
         cw1h: u64,
         ts: &str,
         is_main: bool,
+        main_ctx: bool,
     ) {
         self.last_model = model.to_string();
-        if is_main {
+        // `SessionData::last_model` promises the main transcript *excluding*
+        // sidechains: older transcripts interleave `isSidechain` subagent turns
+        // into the parent file, and their model must not name the session.
+        if main_ctx {
             self.last_main_model = model.to_string();
         }
         *self.models.entry(model.to_string()).or_insert(0) += 1;
@@ -838,7 +857,7 @@ impl Extractor {
         // Track the subagent's own cumulative context from its latest message.
         if !is_main
             && let Some(stats) = self.sub_stats.get_mut(file)
-            && (stats.latest_used_ts.is_empty() || ts >= stats.latest_used_ts.as_str())
+            && (stats.latest_used_ts.is_empty() || !ts_before(ts, &stats.latest_used_ts))
         {
             stats.latest_used = input + cache_read + total_cw;
             stats.latest_used_ts = ts.to_string();
@@ -852,6 +871,7 @@ impl Extractor {
             cw1h,
             model: model.to_string(),
             ts: ts.to_string(),
+            main_ctx: ctx,
         };
 
         // Streaming writes the same requestId repeatedly with growing counts;
@@ -861,7 +881,7 @@ impl Extractor {
                 last_by_key.insert(k.to_string(), snapshot);
             }
             None => self.accumulate(
-                file, model, input, cache_read, output, cw5m, cw1h, ts, is_main,
+                file, model, input, cache_read, output, cw5m, cw1h, ts, is_main, ctx,
             ),
         }
     }
@@ -878,10 +898,10 @@ impl Extractor {
             && let Some(ts) = item.get("timestamp").and_then(Value::as_str)
             && let Some(stats) = self.sub_stats.get_mut(file)
         {
-            if stats.first_ts.as_deref().is_none_or(|f| ts < f) {
+            if stats.first_ts.as_deref().is_none_or(|f| ts_before(ts, f)) {
                 stats.first_ts = Some(ts.to_string());
             }
-            if stats.last_ts.as_deref().is_none_or(|l| ts > l) {
+            if stats.last_ts.as_deref().is_none_or(|l| ts_before(l, ts)) {
                 stats.last_ts = Some(ts.to_string());
             }
         }
@@ -946,12 +966,30 @@ pub fn extract(transcript: &Path) -> SessionData {
     for (idx, file) in files.iter().enumerate() {
         let is_main = idx == 0;
         let mut last_by_key: HashMap<String, Snapshot> = HashMap::new();
-        let _ = for_each_jsonl(file, |item| {
+        if let Err(err) = for_each_jsonl(file, |item| {
             ext.visit(item, file, is_main, &mut last_by_key);
-        });
+        }) {
+            // Never fall through to a fabricated $0: the cache only refuses to
+            // persist a session when it carries an error.
+            return SessionData {
+                error: Some(format!(
+                    "Could not read Claude transcript {}: {err}",
+                    file.display()
+                )),
+                ..Default::default()
+            };
+        }
         // Flush the deduped snapshots for this file. The surviving entry per
         // request carries that turn's final token counts.
-        let snapshots: Vec<(String, Snapshot)> = last_by_key.into_iter().collect();
+        let mut snapshots: Vec<(String, Snapshot)> = last_by_key.into_iter().collect();
+        // A HashMap's order is randomised per process, and the last model
+        // flushed becomes the session's MODEL. Order by instant (request key as
+        // a tiebreak) so multi-model sessions don't flip between runs.
+        snapshots.sort_by(|(ka, a), (kb, b)| {
+            util::parse_ts(&a.ts)
+                .cmp(&util::parse_ts(&b.ts))
+                .then_with(|| ka.cmp(kb))
+        });
         for (key, s) in snapshots {
             ext.req_usage
                 .insert(key, (s.input + s.cache_read + s.cw5m + s.cw1h, s.output));
@@ -965,6 +1003,7 @@ pub fn extract(transcript: &Path) -> SessionData {
                 s.cw1h,
                 &s.ts,
                 is_main,
+                s.main_ctx,
             );
         }
     }
@@ -1327,7 +1366,13 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
     let file = session.data_file.as_ref()?;
     let text = util::read_tail(file, 65_536)?;
 
-    let settings_ctx = settings_context(session);
+    // The session's own model string beats any settings file: the settings may
+    // have changed, or name a different model than this session is running.
+    let settings_ctx = session
+        .model
+        .contains("[1m]")
+        .then_some(CLAUDE_1M_CTX)
+        .or_else(|| settings_context(session));
     let litellm_ctx = pricing::litellm_max_input_tokens(&session.model);
     let mut saw_compact_boundary = false;
 
@@ -1356,16 +1401,13 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
         if used == 0 {
             continue;
         }
-        // Resolution order: a pinned [1m] setting, then inference from observed
-        // usage, then LiteLLM, then the 200k default.
-        let max = settings_ctx
-            .or(if used > CLAUDE_DEFAULT_CTX {
-                Some(CLAUDE_1M_CTX)
-            } else {
-                None
-            })
-            .or(litellm_ctx)
-            .unwrap_or(CLAUDE_DEFAULT_CTX);
+        // Resolution order: a pinned [1m] setting, then LiteLLM, then the 200k
+        // default. Observed usage overrides all of it — a project settings file
+        // naming a 200k model must not report a 1M session as 239% full.
+        let mut max = settings_ctx.or(litellm_ctx).unwrap_or(CLAUDE_DEFAULT_CTX);
+        if used > max {
+            max = CLAUDE_1M_CTX.max(used);
+        }
         return Some(ContextUsage {
             used,
             max,
@@ -1451,16 +1493,21 @@ fn remove_dir_if_present(path: &std::path::Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// Write a transcript to a unique temp path and parse it.
-    fn extract_lines(tag: &str, lines: &[String]) -> SessionData {
-        let path = std::env::temp_dir().join(format!(
-            "cctop-claude-{tag}-{}-{}.jsonl",
+    /// A unique temp path, extension-free so callers can make it a file or dir.
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "cctop-claude-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock after epoch")
                 .as_nanos()
-        ));
+        ))
+    }
+
+    /// Write a transcript to a unique temp path and parse it.
+    fn extract_lines(tag: &str, lines: &[String]) -> SessionData {
+        let path = temp_path(tag).with_extension("jsonl");
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write transcript");
         let data = extract(&path);
         let _ = std::fs::remove_file(&path);
@@ -1575,6 +1622,84 @@ mod tests {
         );
         // Its cost still counts: it was billed to this session either way.
         assert!(data.costs.total > 0.0);
+    }
+
+    /// Regression: snapshots were flushed straight out of a `HashMap`, whose
+    /// order is randomised per process, so a two-model session's MODEL column
+    /// flipped between runs — and the wrong value got cached.
+    #[test]
+    fn last_model_follows_the_timestamps_not_the_hash_order() {
+        // Many turns, so a randomised order would disagree with itself quickly.
+        let mut body = String::new();
+        for i in 0..40 {
+            let model = if i == 39 {
+                "claude-opus-5"
+            } else {
+                "claude-haiku-4-5"
+            };
+            body.push_str(&format!(
+                r#"{{"type":"assistant","timestamp":"2026-08-05T10:{:02}:00.000Z","requestId":"req_{i}","message":{{"id":"m{i}","model":"{model}","usage":{{"input_tokens":10,"output_tokens":2}}}}}}"#,
+                i
+            ));
+            body.push('\n');
+        }
+        let path = temp_path("order").with_extension("jsonl");
+        std::fs::write(&path, &body).expect("write transcript");
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(data.last_model, "claude-opus-5");
+    }
+
+    /// `SessionData::last_model` documents "excluding subagent sidechains", but
+    /// older transcripts interleave `isSidechain` turns into the parent file.
+    #[test]
+    fn sidechain_turns_do_not_claim_the_main_model_column() {
+        let path = temp_path("sidechain").with_extension("jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_1","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                "\n",
+                r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-08-05T10:00:05.000Z","requestId":"req_2","message":{"id":"m2","model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(data.last_model, "claude-opus-5");
+        // The sidechain's tokens still count towards the session's totals.
+        assert_eq!(data.tokens.output, 4);
+    }
+
+    /// Regression: a project settings file naming a 200k model used to win over
+    /// what the session had actually used, yielding a CTX% of ~239%.
+    #[test]
+    fn context_window_is_never_smaller_than_observed_usage() {
+        let dir = temp_path("ctx");
+        std::fs::create_dir_all(dir.join(".claude")).expect("create settings dir");
+        std::fs::write(
+            dir.join(".claude").join("settings.json"),
+            r#"{"model":"opus"}"#,
+        )
+        .expect("write settings");
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":400000,"output_tokens":2}}}"#,
+        )
+        .expect("write transcript");
+
+        let mut session = Session::new(Provider::Claude, "s1".into());
+        session.label_source = dir.to_string_lossy().into_owned();
+        session.data_file = Some(transcript);
+        let ctx = extract_context(&session).expect("context usage");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(ctx.used, 400_000);
+        assert!(ctx.max >= ctx.used, "{} < {}", ctx.max, ctx.used);
     }
 
     /// A failed call must be distinguishable from a successful one. Claude
