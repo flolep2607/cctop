@@ -15,6 +15,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
+/// How long a subagent transcript must sit still before it counts as finished.
+///
+/// Long enough to cover the gap between a subagent's own turns — a slow model
+/// reply or a long tool call writes nothing meanwhile — and short enough that a
+/// finished agent does not linger as "running" for the rest of the session. The
+/// `SubagentStop` hook answers this exactly when it is installed; this is what
+/// the transcript alone can say.
+const SUBAGENT_QUIET_MS: i64 = 30_000;
+
 /// `<command-name>/foo</command-name>` markers left by skill/slash invocations.
 static CMD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<command-name>/?([^<]+)</command-name>").expect("static regex"));
@@ -1221,22 +1230,30 @@ fn build_subagents(files: &[PathBuf], ext: &Extractor) -> Vec<Subagent> {
         };
         let last_active_ms = config::file_mtime_ms(file) as i64;
 
-        // Prefer the parent's tool_result as the completion signal; fall back to
-        // recency only when no tool_use_id links this transcript to the parent.
+        // A transcript being appended to outranks the parent's tool_result,
+        // because that result does not always mean what it appears to: an agent
+        // spawned in the background is acknowledged the moment it *starts*, so
+        // taking the result at face value marked every background subagent
+        // finished about three seconds into a run that had barely begun. Still
+        // writing means still working, whatever the parent has recorded.
+        //
+        // A subagent that has genuinely finished goes quiet and stays quiet, so
+        // the two rules agree everywhere except the window this exists to fix.
+        let newest = last_active_ms.max(last_ms.unwrap_or(0));
+        let quiet = now_ms - newest >= SUBAGENT_QUIET_MS;
         let status = match &tool_use_id {
             Some(id) => {
-                if ext.agent_results.contains(id) {
+                if ext.agent_results.contains(id) && quiet {
                     SubagentStatus::Done
                 } else {
                     SubagentStatus::Running
                 }
             }
             None => {
-                let newest = last_active_ms.max(last_ms.unwrap_or(0));
-                if now_ms - newest < 30_000 {
-                    SubagentStatus::Running
-                } else {
+                if quiet {
                     SubagentStatus::Done
+                } else {
+                    SubagentStatus::Running
                 }
             }
         };

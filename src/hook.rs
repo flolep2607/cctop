@@ -204,6 +204,9 @@ fn envelope(name: &str, payload: &[u8]) -> Option<Vec<u8>> {
             claude => claude,
         },
         "cwd": field("cwd"),
+        // Only `SubagentStop` carries one, and it is the id cctop's own
+        // subagent transcripts are named after.
+        "agent_id": field("agent_id"),
     });
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -258,6 +261,13 @@ pub struct Event {
     pub session_id: String,
     /// What the agent last said about itself, and where it is working.
     pub reported: Reported,
+    /// The subagent this event is about, when it is about one.
+    ///
+    /// `SubagentStop` is the only end-of-subagent signal that exists. A
+    /// background subagent's tool_result arrives at *launch* — it says the agent
+    /// started, not that it finished — so a transcript alone cannot tell a
+    /// working subagent from a finished one.
+    pub finished_agent: Option<String>,
 }
 
 /// The last thing a session reported, kept per session.
@@ -397,6 +407,13 @@ fn parse(line: &str) -> Option<Event> {
     }
     Some(Event {
         session_id,
+        // Claude Code names it `agent_id`, and cctop stores that subagent's
+        // transcript as `agent-<agent_id>.jsonl`, so the two line up directly.
+        finished_agent: (value.get("event").and_then(|v| v.as_str()) == Some("SubagentStop"))
+            .then(|| value.get("agent_id").and_then(|v| v.as_str()))
+            .flatten()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
         reported: Reported {
             signal: signal_of(value.get("event")?.as_str()?)?,
             cwd: value
@@ -955,6 +972,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The only word cctop gets that a *background* subagent has finished. Its
+    /// tool_result arrives when it launches, so without this every background
+    /// subagent reads as done about three seconds into its run — and the id has
+    /// to survive the envelope, which forwards a fixed set of fields.
+    ///
+    /// The payload is the one Claude Code 2.1 actually sends, captured from a
+    /// live `SubagentStop`.
+    #[test]
+    fn a_subagent_stop_names_the_subagent_that_finished() {
+        let raw = br#"{"session_id":"parent-1","cwd":"/x","hook_event_name":"SubagentStop","agent_id":"ab3e95cbb4558bd90","agent_type":"general-purpose","last_assistant_message":"pineapple"}"#;
+        let line = envelope("", raw).expect("envelope");
+        let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+
+        assert_eq!(
+            event.finished_agent.as_deref(),
+            Some("ab3e95cbb4558bd90"),
+            "the id must reach the UI, not stop at the envelope"
+        );
+        // The session named is the parent's: a subagent has no session of its
+        // own, and applying the signal to the id would find no row.
+        assert_eq!(event.session_id, "parent-1");
+    }
+
+    /// Every other event has no subagent to report, and must not claim one —
+    /// an empty id would match nothing and a stray one would retire a subagent
+    /// that is still working.
+    #[test]
+    fn only_a_subagent_stop_reports_a_finished_subagent() {
+        for name in ["Stop", "PreToolUse", "Notification"] {
+            let raw = format!(r#"{{"session_id":"s","hook_event_name":"{name}"}}"#);
+            let line = envelope("", raw.as_bytes()).expect("envelope");
+            let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+            assert!(event.finished_agent.is_none(), "{name} named a subagent");
+        }
     }
 
     /// The envelope must survive the payload, whatever is in it: the fields are
