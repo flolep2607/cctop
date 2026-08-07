@@ -307,6 +307,11 @@ struct JsonSession {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     harness: Option<String>,
+    /// How much the session asks before it acts, when its own hooks said.
+    /// Absent for a session with no cctop hooks installed — nothing in a
+    /// transcript records this, so it cannot be inferred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permission: Option<&'static str>,
     models: Vec<String>,
     plan: &'static str,
     running: bool,
@@ -411,6 +416,7 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
                 harness: (!s.harness.is_empty()).then(|| s.harness.clone()),
+                permission: s.permission.map(crate::hook::Permission::label),
                 models: data.models.clone(),
                 plan: plan.as_str(),
                 running: s.is_running(),

@@ -486,6 +486,16 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
                 theme::colors().dim
             }
         }
+        // The only cell here whose colour is a warning rather than a
+        // measurement. An agent that asks about nothing is the thing worth
+        // catching across a screen of rows, so it gets the hot end of the
+        // scale; the modes that do ask stay quiet, because they are the norm
+        // and colouring the norm is how a warning stops being read.
+        ColumnId::Permission => match s.permission {
+            Some(p) if p.is_unrestricted() => theme::colors().cost_high,
+            Some(_) => theme::colors().dim,
+            None => theme::colors().dimmer,
+        },
         _ => Color::Reset,
     }
 }

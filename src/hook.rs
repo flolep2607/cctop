@@ -228,6 +228,12 @@ fn envelope(name: &str, payload: &[u8]) -> Option<Vec<u8>> {
         // [`notification_signal`]. Absent on every other event, and on a Claude
         // Code old enough not to send it.
         "notification_type": field("notification_type"),
+        // How much this session is asking before it acts. On every Claude Code
+        // event, and the one fact here that is about the agent's *settings*
+        // rather than what it is doing — which is exactly why it is worth
+        // carrying: nothing in a transcript says it, so a session running with
+        // permissions turned off is otherwise indistinguishable from any other.
+        "permission_mode": first(&["permission_mode", "permissionMode"]).unwrap_or_default(),
     });
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -301,6 +307,59 @@ pub struct Reported {
     pub signal: Signal,
     /// Empty when the agent did not say.
     pub cwd: String,
+    /// How much the session asks before it acts, when it has said.
+    pub permission: Option<Permission>,
+}
+
+/// How much a session asks before it acts.
+///
+/// Only a live agent's own hooks can answer this — it is a setting, not an
+/// event, and no transcript records it. That is what makes it worth a column:
+/// an agent running with its permission prompts turned off looks exactly like
+/// every other agent right up until it does something you would have refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permission {
+    /// Asks before anything it is not already allowed to do.
+    Ask,
+    /// Files are written without asking; everything else still asks.
+    AcceptEdits,
+    /// Reading and planning only — it cannot act at all yet.
+    Plan,
+    /// Asks about nothing. `--dangerously-skip-permissions`.
+    Bypass,
+}
+
+impl Permission {
+    /// Parse the mode a harness reported, or `None` for one cctop has not seen.
+    ///
+    /// An unknown mode is deliberately not folded into [`Permission::Ask`]: a
+    /// future mode is at least as likely to be a *looser* one, and quietly
+    /// drawing it as the safe end is the wrong way to be wrong about this.
+    pub fn parse(word: &str) -> Option<Permission> {
+        match word {
+            "default" | "ask" => Some(Permission::Ask),
+            "acceptEdits" | "auto" => Some(Permission::AcceptEdits),
+            "plan" => Some(Permission::Plan),
+            "bypassPermissions" | "dontAsk" => Some(Permission::Bypass),
+            _ => None,
+        }
+    }
+
+    /// A word for the column, short enough for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Permission::Ask => "ask",
+            Permission::AcceptEdits => "edits",
+            Permission::Plan => "plan",
+            Permission::Bypass => "BYPASS",
+        }
+    }
+
+    /// Whether this mode lets the agent act without asking at all — the case
+    /// the column exists to make visible.
+    pub fn is_unrestricted(self) -> bool {
+        matches!(self, Permission::Bypass)
+    }
 }
 
 /// What a `Notification` is actually about.
@@ -522,6 +581,10 @@ fn parse(line: &str) -> Option<Event> {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            permission: value
+                .get("permission_mode")
+                .and_then(|v| v.as_str())
+                .and_then(Permission::parse),
         },
     })
 }
@@ -1737,6 +1800,42 @@ mod tests {
         let line = envelope("Notification", raw).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.reported.signal, Signal::Idle);
+    }
+
+    /// The permission mode rides in on every Claude Code event, and it is the
+    /// one fact here that no transcript records.
+    #[test]
+    fn a_session_reports_how_much_it_asks_before_it_acts() {
+        let raw = br#"{"session_id":"s-1","cwd":"/w","hook_event_name":"PreToolUse","permission_mode":"bypassPermissions","tool_name":"Bash"}"#;
+        let line = envelope("PreToolUse", raw).expect("envelope");
+        let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+        assert_eq!(event.reported.permission, Some(Permission::Bypass));
+        assert!(Permission::Bypass.is_unrestricted());
+
+        // Every spelling seen in the wild, across the payload and transcripts.
+        for (word, mode) in [
+            ("default", Permission::Ask),
+            ("ask", Permission::Ask),
+            ("acceptEdits", Permission::AcceptEdits),
+            ("auto", Permission::AcceptEdits),
+            ("plan", Permission::Plan),
+            ("bypassPermissions", Permission::Bypass),
+        ] {
+            assert_eq!(Permission::parse(word), Some(mode), "{word}");
+        }
+        // The modes that do ask must never read as unrestricted — this is the
+        // whole reason the column is worth drawing.
+        for quiet in [Permission::Ask, Permission::AcceptEdits, Permission::Plan] {
+            assert!(!quiet.is_unrestricted(), "{quiet:?}");
+        }
+
+        // An unknown mode stays unknown rather than being folded into the safe
+        // end: a future mode is at least as likely to be a looser one.
+        assert_eq!(Permission::parse("somethingNew"), None);
+        let raw = br#"{"session_id":"s-2","cwd":"/w","hook_event_name":"Stop"}"#;
+        let line = envelope("Stop", raw).expect("envelope");
+        let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+        assert_eq!(event.reported.permission, None, "silence is not a mode");
     }
 
     /// The lifecycle events are the ones that change which rows exist, and the

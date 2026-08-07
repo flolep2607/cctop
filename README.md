@@ -11,6 +11,12 @@ being guessed. **BRANCH** is the branch checked out in the session's working
 directory, read from the repository's `HEAD` — `@<commit>` when it is detached,
 and `─` when the directory is not in a repository at all.
 
+**PERM** is how much a session asks before it acts: `ask`, `edits` (writes files
+unasked), `plan` (cannot act at all), or a red `BYPASS` for one started with
+`--dangerously-skip-permissions`. Read from the transcript, and kept current by
+the session's own hooks when it has them. `─` means the harness does not record
+it — today only Claude Code does.
+
 A Rust rewrite of an earlier Node implementation.
 
 ## Install

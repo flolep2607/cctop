@@ -25,6 +25,7 @@ pub enum ColumnId {
     TokenRate,
     Model,
     Harness,
+    Permission,
     Branch,
     Project,
 }
@@ -166,6 +167,17 @@ pub const COLUMNS: &[Column] = &[
         desc: "Where the agent is hosted, such as Cursor or a terminal CLI",
     },
     Column {
+        id: ColumnId::Permission,
+        label: "PERM",
+        width: Some(6),
+        // Above the measurements but below what names a row: it is a safety
+        // fact, and the whole point is that it stays visible when the window
+        // narrows and the numbers start dropping off.
+        priority: 72,
+        right_align: false,
+        desc: "How much the session asks before it acts, as its own hooks reported it:\nask, edits (writes files unasked), plan (cannot act), BYPASS (asks nothing).\n─ when the session has no cctop hooks installed and so cannot say.",
+    },
+    Column {
         id: ColumnId::Branch,
         label: "BRANCH",
         width: Some(12),
@@ -202,6 +214,7 @@ pub fn key(id: ColumnId) -> &'static str {
         ColumnId::TokenRate => "tok_rate",
         ColumnId::Model => "model",
         ColumnId::Harness => "harness",
+        ColumnId::Permission => "perm",
         ColumnId::Branch => "branch",
         ColumnId::Project => "project",
     }
@@ -359,6 +372,13 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
                 s.harness.clone()
             }
         }
+        // A session with no hooks cannot report this, and "─" is the honest
+        // answer: not "it asks about everything", which would be a guess about
+        // the one column whose whole job is not to guess.
+        ColumnId::Permission => match s.permission {
+            Some(p) => p.label().into(),
+            None => "─".into(),
+        },
         ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
     }
@@ -436,6 +456,9 @@ pub fn render_subagent_cell(
         | ColumnId::TokenTotal
         | ColumnId::TokenRate
         | ColumnId::Harness
+        // A subagent runs under whatever its parent was started with, so
+        // repeating it down the children would be the same fact four times.
+        | ColumnId::Permission
         | ColumnId::Branch => String::new(),
     }
 }
@@ -460,6 +483,21 @@ static BRANCHES: LazyLock<Mutex<HashMap<String, Reading>>> =
 
 /// Branch checked out in a session's working directory, or `None` when it is
 /// not in a repository. Cached, so the filter can ask per row per keystroke.
+/// Sort order for the permission column: looser is greater, so a descending
+/// sort puts the sessions asking least at the top. An unhooked session sorts
+/// below every known mode rather than among them — it is an absence, not a
+/// setting.
+fn permission_rank(s: &crate::session::Session) -> u8 {
+    use crate::hook::Permission;
+    match s.permission {
+        None => 0,
+        Some(Permission::Plan) => 1,
+        Some(Permission::Ask) => 2,
+        Some(Permission::AcceptEdits) => 3,
+        Some(Permission::Bypass) => 4,
+    }
+}
+
 pub fn branch_of(s: &crate::session::Session) -> Option<String> {
     branch(&s.label_source)
 }
@@ -578,6 +616,8 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::TokenRate => num(a.tokens_per_min, b.tokens_per_min),
         ColumnId::Model => a.model.cmp(&b.model),
         ColumnId::Harness => a.harness.cmp(&b.harness),
+        // Loosest first when descending, which is the order worth looking at.
+        ColumnId::Permission => permission_rank(a).cmp(&permission_rank(b)),
         // Sessions outside a repository sort together, below every branch.
         ColumnId::Branch => branch(&a.label_source).cmp(&branch(&b.label_source)),
         ColumnId::Project => a
