@@ -940,12 +940,40 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
 // Context breakdown
 // ---------------------------------------------------------------------------
 
+/// One category of what the window holds.
+struct Slice {
+    name: &'static str,
+    tokens: u64,
+    color: ratatui::style::Color,
+    /// What the bar and the legend swatch are drawn with. Solid for everything
+    /// the window holds; the free remainder is shaded so that "nothing is here
+    /// yet" does not read as one more category.
+    fill: char,
+}
+
+impl Slice {
+    fn held(name: &'static str, tokens: u64, color: ratatui::style::Color) -> Self {
+        Slice {
+            name,
+            tokens,
+            color,
+            fill: '█',
+        }
+    }
+}
+
 /// What the context window is filled with, largest share first.
 ///
 /// The panel's job is to be believed, so it never pretends the parts add up.
 /// `Startup` is measured and the other categories are estimated from transcript
-/// characters, and whatever the two together fail to reach gets its own bar
+/// characters, and whatever the two together fail to reach gets its own share
 /// instead of being spread over the categories that happen to be measurable.
+///
+/// The shares are drawn as one stacked bar rather than as a bar apiece: the
+/// question the panel answers is what proportion of a *single* window each
+/// category holds, and separate bars make that a comparison between rows instead
+/// of something the eye reads off at once. It also leaves room for the window's
+/// unused remainder, which is the part a bar-per-row cannot show at all.
 pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> Vec<Line<'static>> {
     let Some(data) = data else {
         return note("Loading…");
@@ -954,94 +982,257 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
         return note("This transcript reports no per-request usage — nothing to break down.");
     };
 
-    let mut rows: Vec<(&str, u64, ratatui::style::Color)> = vec![
+    use ratatui::style::Color::Indexed;
+    let mut slices = vec![
         // Named for what it holds rather than "system prompt", because after a
         // compaction the summary is folded into the same number.
-        ("Startup", b.startup, theme::PANEL_TITLE),
-        (
-            "Tool output",
-            b.tool_output,
-            ratatui::style::Color::Indexed(75),
-        ),
-        (
-            "Tool input",
-            b.tool_input,
-            ratatui::style::Color::Indexed(109),
-        ),
-        (
-            "Attachments",
-            b.attachments,
-            ratatui::style::Color::Indexed(180),
-        ),
-        ("Your messages", b.user_text, theme::COST_LOW),
-        (
-            "Assistant text",
-            b.assistant_text,
-            ratatui::style::Color::Indexed(139),
-        ),
+        Slice::held("Startup", b.startup, theme::PANEL_TITLE),
+        Slice::held("Tool output", b.tool_output, Indexed(75)),
+        Slice::held("Tool input", b.tool_input, Indexed(109)),
+        Slice::held("Attachments", b.attachments, Indexed(180)),
+        Slice::held("Your messages", b.user_text, theme::COST_LOW),
+        Slice::held("Assistant text", b.assistant_text, Indexed(139)),
     ];
+    slices.retain(|s| s.tokens > 0);
+    slices.sort_by_key(|s| std::cmp::Reverse(s.tokens));
+    // Pinned last wherever it lands by size: it is the leftover, and it belongs
+    // against the free remainder rather than in the middle of the measured
+    // categories.
     let unaccounted = b.unaccounted();
     if unaccounted > 0 {
-        rows.push(("Unaccounted", unaccounted as u64, theme::DIM));
+        slices.push(Slice::held("Unaccounted", unaccounted as u64, theme::DIM));
     }
-    rows.retain(|(_, tokens, _)| *tokens > 0);
-    rows.sort_by_key(|(_, tokens, _)| std::cmp::Reverse(*tokens));
+    // What is still free, so the bar is the whole window rather than only the
+    // part already spent — which is what makes the used portion's length mean
+    // something at a glance.
+    let free = session
+        .context
+        .map(|ctx| ctx.max.saturating_sub(b.total))
+        .unwrap_or(0);
+    if free > 0 {
+        slices.push(Slice {
+            name: "Free",
+            tokens: free,
+            color: theme::DIMMER,
+            fill: '░',
+        });
+    }
 
-    // When the estimate overshoots there is no gap to draw, and scaling the bars
-    // to the window would push them past the panel edge. Measure them against
-    // whichever is larger and let the footer explain the discrepancy.
-    let scale = b.total.max(b.startup + b.estimated()).max(1);
+    let compaction = compaction_cell(session, &slices, width);
+    let mut lines = vec![context_header(session, &b)];
+    lines.push(Line::default());
+    lines.push(stacked_bar(&slices, compaction, width));
+    lines.push(Line::default());
+    lines.extend(legend(&slices, width));
+    lines.push(Line::default());
+    lines.extend(context_footnotes(
+        &b,
+        unaccounted,
+        compaction.is_some(),
+        width,
+    ));
+    lines
+}
 
-    let bar_w = width.saturating_sub(28).clamp(10, 48);
-    let mut lines = vec![Line::from(vec![
+/// Which bar cell the auto-compact threshold falls on, when it is still ahead.
+///
+/// Marking it turns the free remainder into two readable parts: the room that is
+/// genuinely usable, and the tail past the threshold that the harness will
+/// reclaim before it is ever reached. `None` once the threshold is behind — the
+/// header already says so in red, and a marker there would erase a category.
+fn compaction_cell(session: &Session, slices: &[Slice], width: usize) -> Option<usize> {
+    let ctx = session.context?;
+    let scale = slices.iter().map(|s| s.tokens).sum::<u64>();
+    if scale == 0 || ctx.compacting {
+        return None;
+    }
+    let compact_at = ctx.max as f64 * *crate::config::COMPACT_THRESHOLD;
+    let cell = (compact_at / scale as f64 * width as f64).round() as usize;
+    // Only inside the free tail: elsewhere it would overwrite something held.
+    let held: u64 = slices
+        .iter()
+        .filter(|s| s.name != "Free")
+        .map(|s| s.tokens)
+        .sum();
+    let free_starts = (held as f64 / scale as f64 * width as f64).round() as usize;
+    (cell > free_starts && cell < width).then_some(cell)
+}
+
+/// Window size, how full it is, and how much is left before auto-compaction.
+///
+/// Headroom in tokens rather than only a percentage: "how much can I still say"
+/// is the decision this panel is consulted for, and a share of a window whose
+/// size varies by model does not answer it. The gauge rides on the same line
+/// because fullness is the one thing here worth seeing without reading.
+fn context_header(session: &Session, b: &crate::session::ContextBreakdown) -> Line<'static> {
+    let mut spans = vec![
         label("Window"),
-        Span::raw("    "),
+        Span::raw("  "),
         value(util::compact_tokens(b.total)),
-        Span::raw(" "),
-        dim(match session.context {
-            Some(ctx) => format!("of {}", util::compact_tokens(ctx.max)),
-            None => "in the live conversation".to_string(),
-        }),
-    ])];
-    lines.push(Line::default());
+    ];
+    let Some(ctx) = session.context else {
+        spans.push(Span::raw(" "));
+        spans.push(dim("in the live conversation"));
+        return Line::from(spans);
+    };
 
-    for (name, tokens, color) in rows {
-        let ratio = tokens as f64 / scale as f64;
-        lines.push(Line::from(vec![
-            Span::styled(format!("{name:<14} "), theme::value()),
-            bar(ratio, bar_w, color),
-            Span::styled(
-                format!(" {:>7}", util::compact_tokens(tokens)),
-                Style::default().fg(color),
-            ),
-            dim(format!(" {:>3}%", (ratio * 100.0).round() as i64)),
-        ]));
+    spans.push(dim(format!(" of {}", util::compact_tokens(ctx.max))));
+    if ctx.compacting {
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(
+            "compacting…",
+            Style::default()
+                .fg(theme::COST_HIGH)
+                .add_modifier(Modifier::BOLD),
+        ));
+        return Line::from(spans);
     }
 
-    // Which numbers were measured and which were guessed is the point of the
-    // panel, so the caveats belong next to the bars rather than in the README.
-    lines.push(Line::default());
-    let footnotes = [
-        if b.after_compaction {
-            "Startup is measured: this segment's first request — system prompt, tool schemas, CLAUDE.md, the skills index, and the compaction summary. The transcript never records its parts, so it cannot be split further."
-        } else {
-            "Startup is measured: the first request — system prompt, tool schemas, CLAUDE.md, the skills index. The transcript never records its parts, so it cannot be split further."
-        },
-        "Every other bar is estimated from how many characters the transcript holds, so read them as proportions rather than as counts.",
-        if unaccounted >= 0 {
-            "Unaccounted is what neither reaches: thinking, which is stored with its text stripped; the reminders the harness injects each turn; and estimation error."
-        } else {
-            "The estimate overshoots the window, which means the harness has dropped context that the transcript still holds."
-        },
-    ];
-    for note in footnotes {
-        lines.extend(
-            wrap(note, width.max(20))
-                .into_iter()
-                .map(|l| Line::from(dim(l))),
-        );
+    let pct = ctx.percent_to_compact();
+    let color = theme::context_color(pct);
+    let compact_at = (ctx.max as f64 * *crate::config::COMPACT_THRESHOLD).round() as u64;
+    // No gauge here: the bar below already shows how full the window is, and a
+    // second meter measuring a *different* denominator — share of the threshold
+    // rather than of the window — is two answers to one question.
+    spans.push(Span::raw("   "));
+    spans.push(Span::styled(
+        format!("{}%", pct.round() as i64),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(dim(" to compaction"));
+    spans.push(Span::raw("   "));
+    spans.push(value(util::compact_tokens(
+        compact_at.saturating_sub(b.total),
+    )));
+    spans.push(dim(" left"));
+    Line::from(spans)
+}
+
+/// Every category in one bar, in the legend's order, spanning the panel.
+fn stacked_bar(slices: &[Slice], compaction: Option<usize>, width: usize) -> Line<'static> {
+    let cells = width.max(1);
+    let weights: Vec<u64> = slices.iter().map(|s| s.tokens).collect();
+
+    // Laid out cell by cell so the threshold marker can replace one of them: a
+    // marker appended as its own span would push the bar a cell past the panel.
+    let mut cell_styles: Vec<(char, ratatui::style::Color)> = slices
+        .iter()
+        .zip(apportion(&weights, cells))
+        .flat_map(|(slice, w)| std::iter::repeat_n((slice.fill, slice.color), w))
+        .collect();
+    if let Some(at) = compaction
+        && let Some(cell) = cell_styles.get_mut(at)
+    {
+        *cell = ('┊', theme::DIM);
+    }
+
+    // Runs of one style become one span; a span per cell would allocate a String
+    // per column of the panel, on every frame.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (glyph, color) in cell_styles {
+        match spans.last_mut() {
+            Some(last) if last.style.fg == Some(color) => last.content.to_mut().push(glyph),
+            _ => spans.push(Span::styled(glyph.to_string(), Style::default().fg(color))),
+        }
+    }
+    Line::from(spans)
+}
+
+/// Split `cells` across `weights` in proportion, summing to exactly `cells`.
+///
+/// Largest remainder rather than a rounded share apiece: independent rounding
+/// leaves the bar a cell or two short of the panel width, and in a stacked bar
+/// that error lands on the boundary between two colours, which is exactly where
+/// the eye is already looking.
+fn apportion(weights: &[u64], cells: usize) -> Vec<usize> {
+    let scale: u64 = weights.iter().sum::<u64>().max(1);
+    let exact: Vec<f64> = weights
+        .iter()
+        .map(|w| *w as f64 / scale as f64 * cells as f64)
+        .collect();
+    let mut out: Vec<usize> = exact.iter().map(|e| e.floor() as usize).collect();
+
+    let mut spare = cells.saturating_sub(out.iter().sum::<usize>());
+    let mut order: Vec<usize> = (0..weights.len()).collect();
+    order.sort_by(|a, b| {
+        let frac = |i: usize| exact[i] - exact[i].floor();
+        frac(*b).total_cmp(&frac(*a))
+    });
+    for i in order {
+        if spare == 0 {
+            break;
+        }
+        out[i] += 1;
+        spare -= 1;
+    }
+    out
+}
+
+/// Swatch, name, tokens and share per category, two to a line where it fits.
+///
+/// Shares are of the whole window, free space included, so a legend entry and
+/// its segment in the bar above are always the same length of the same thing.
+fn legend(slices: &[Slice], width: usize) -> Vec<Line<'static>> {
+    let scale = slices.iter().map(|s| s.tokens).sum::<u64>().max(1);
+    // Two columns halve the panel's height for free, but need the room; below
+    // that the entries stack rather than truncate.
+    let columns = if width >= 64 { 2 } else { 1 };
+
+    let mut lines = Vec::new();
+    for row in slices.chunks(columns) {
+        let mut spans = Vec::new();
+        for (i, slice) in row.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("   "));
+            }
+            let share = slice.tokens as f64 / scale as f64 * 100.0;
+            spans.push(Span::styled(
+                format!("{} ", slice.fill),
+                Style::default().fg(slice.color),
+            ));
+            spans.push(value(format!("{:<14}", slice.name)));
+            spans.push(Span::styled(
+                format!("{:>7}", util::compact_tokens(slice.tokens)),
+                Style::default().fg(slice.color),
+            ));
+            spans.push(dim(format!(" {:>3}%", share.round() as i64)));
+        }
+        lines.push(Line::from(spans));
     }
     lines
+}
+
+/// Which numbers were measured and which were guessed.
+///
+/// The distinction is the point of the panel, so it stays on screen — but as two
+/// dim lines under the bar rather than as the three paragraphs it takes to say
+/// the same thing in prose.
+fn context_footnotes(
+    b: &crate::session::ContextBreakdown,
+    unaccounted: i64,
+    marked: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let marker = if marked {
+        " ┊ on the bar is where auto-compaction triggers."
+    } else {
+        ""
+    };
+    let startup = if b.after_compaction {
+        "Measured: Window, and Startup — this segment's first request (system prompt, tool schemas, CLAUDE.md, skills index, compaction summary), which the transcript cannot split further."
+    } else {
+        "Measured: Window, and Startup — the first request (system prompt, tool schemas, CLAUDE.md, skills index), which the transcript cannot split further."
+    };
+    let rest = if unaccounted >= 0 {
+        "Estimated from transcript characters: everything else — read as proportions. Unaccounted is thinking (stored stripped), the harness's per-turn reminders, and estimation error."
+    } else {
+        "Estimated from transcript characters: everything else — read as proportions. Here they overshoot the window, which means the harness has dropped context the transcript still holds."
+    };
+    [startup.to_string(), format!("{rest}{marker}")]
+        .iter()
+        .flat_map(|note| wrap(note, width.max(20)))
+        .map(|l| Line::from(dim(l)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1593,24 +1784,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        let lines = context(&s, Some(&data), 100);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
-            .collect();
+        let lines = rendered(&s, &data, 100);
+        let text = lines.join("\n");
+        let entries = legend_entries(&lines);
 
-        assert!(text.contains("Unaccounted"), "{text}");
-        // 100k window, 55k attributed: the gap is 45%, and it is the biggest
-        // single share, so it must sort to the top.
-        let first_bar = lines[2]
-            .spans
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect::<String>();
-        assert!(first_bar.starts_with("Unaccounted"), "{first_bar}");
-        assert!(first_bar.contains("45%"), "{first_bar}");
+        // 100k window, 55k attributed: the gap is 45%, the biggest single share.
+        // It still reads last, because it is the leftover and belongs at the tail
+        // of the bar rather than in the middle of the measured categories.
+        let gap = entries.last().expect("the legend must have entries");
+        assert!(gap.starts_with("Unaccounted"), "{entries:?}");
+        assert!(gap.contains("45%"), "{gap}");
+        // Shares are of what the window holds, so they account for all of it.
+        let shares: i64 = entries.iter().filter_map(|e| share_of(e)).sum();
+        assert!((99..=101).contains(&shares), "shares summed to {shares}");
         assert!(
-            text.contains("estimated"),
+            text.contains("Estimated"),
             "the estimate must say so: {text}"
         );
     }
@@ -1630,15 +1818,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        let lines = context(&s, Some(&data), 100);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
-            .collect();
+        let text = rendered(&s, &data, 100).join("\n");
         assert!(!text.contains("Unaccounted"), "there is no gap to report");
-        assert!(text.contains("overshoots"), "{text}");
-        // Bars are measured against the larger of the two, so none can exceed
-        // the panel width.
+        assert!(text.contains("overshoot"), "{text}");
+        // Shares are measured against the larger of the two, so the bar cannot
+        // run past the panel.
         assert!(text.contains("75%"), "60k of 80k: {text}");
     }
 
@@ -1652,5 +1836,114 @@ mod tests {
             .map(|sp| sp.content.to_string())
             .collect();
         assert!(text.contains("cloud VM"));
+    }
+
+    /// A stacked bar has to land exactly on the panel width whatever the shares
+    /// round to, or its right edge wanders against everything drawn beside it.
+    #[test]
+    fn apportioning_a_bar_always_spends_every_cell() {
+        for weights in [
+            vec![1u64, 1, 1],        // thirds, which never divide evenly
+            vec![999_999, 1],        // a share too small for one cell
+            vec![7, 11, 13, 17, 19], // primes, so no share is exact
+            vec![0, 0, 5],           // categories that contributed nothing
+        ] {
+            for cells in [10usize, 37, 96] {
+                let parts = apportion(&weights, cells);
+                assert_eq!(
+                    parts.iter().sum::<usize>(),
+                    cells,
+                    "{weights:?} over {cells} cells"
+                );
+            }
+        }
+    }
+
+    fn breakdown() -> crate::session::ContextBreakdown {
+        crate::session::ContextBreakdown {
+            total: 118_200,
+            startup: 45_200,
+            tool_output: 32_100,
+            tool_input: 18_000,
+            attachments: 2_100,
+            user_text: 8_100,
+            assistant_text: 6_900,
+            after_compaction: false,
+        }
+    }
+
+    fn rendered(session: &Session, data: &SessionData, width: usize) -> Vec<String> {
+        context(session, Some(data), width)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect()
+    }
+
+    /// The legend's entries in reading order, however many share a line.
+    ///
+    /// A legend line is a swatch followed by a space, which is what tells it
+    /// apart from the solid bar above it.
+    fn legend_entries(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with("█ ") || l.starts_with("░ "))
+            .flat_map(|l| l.split(['█', '░']))
+            .map(|e| e.trim().to_string())
+            .filter(|e| e.ends_with('%'))
+            .collect()
+    }
+
+    /// The trailing `NN%` of a legend entry.
+    fn share_of(entry: &str) -> Option<i64> {
+        entry.trim_end_matches('%').rsplit(' ').next()?.parse().ok()
+    }
+
+    /// The header carries the two numbers a running session is consulted for —
+    /// how full the window is and how much room is left — and the bar underneath
+    /// spans the panel exactly.
+    #[test]
+    fn the_context_panel_leads_with_headroom_and_a_full_width_bar() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        s.context = Some(ContextUsage {
+            used: 118_200,
+            max: 200_000,
+            compacting: false,
+        });
+        let data = SessionData {
+            context_breakdown: Some(breakdown()),
+            ..Default::default()
+        };
+
+        let lines = rendered(&s, &data, 100);
+        assert!(lines[0].contains("118.2K of 200.0K"), "{}", lines[0]);
+        assert!(lines[0].contains("to compaction"), "{}", lines[0]);
+        assert!(lines[0].contains("left"), "{}", lines[0]);
+        assert_eq!(
+            lines[2].chars().count(),
+            100,
+            "the stacked bar must fill the panel: {}",
+            lines[2]
+        );
+        // 118.2K of a 200K window: held cells and free cells in that proportion.
+        assert_eq!(lines[2].chars().filter(|c| *c == '█').count(), 59);
+        assert!(
+            lines[2].ends_with('░'),
+            "free space must trail the bar: {}",
+            lines[2]
+        );
+        // The marker lands on the auto-compaction threshold, wherever the
+        // harness (or its env override) puts it.
+        let expected = (*crate::config::COMPACT_THRESHOLD * 100.0).round() as usize;
+        assert_eq!(
+            lines[2].find('┊').map(|i| lines[2][..i].chars().count()),
+            Some(expected),
+            "{}",
+            lines[2]
+        );
+
+        let entries = legend_entries(&lines);
+        let free = entries.last().expect("the legend must have entries");
+        assert!(free.starts_with("Free"), "{entries:?}");
+        assert!(free.contains("81.8K"), "{free}");
     }
 }
