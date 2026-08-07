@@ -35,8 +35,17 @@ pub struct Column {
     /// `None` for the flexible column that absorbs leftover width.
     pub width: Option<u16>,
     pub right_align: bool,
+    /// What survives a narrow terminal. Higher stays; the lowest goes first.
+    ///
+    /// The ranking is "what identifies a row" over "what measures it": a row
+    /// with no project and no status is unreadable, while a row without TOK/m
+    /// is merely less informative. See [`visible_columns`].
+    pub priority: u8,
     pub desc: &'static str,
 }
+
+/// Smallest usable width for the flexible column, matching `table::column_widths`.
+const MIN_FLEX: u16 = 8;
 
 /// Columns shown in the table, in display order. Also the sortable set.
 pub const COLUMNS: &[Column] = &[
@@ -44,6 +53,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Status,
         label: " ",
         width: Some(1),
+        priority: 95,
         right_align: false,
         desc: "Status: ● working (green = fresh, greyer = idle), amber ● awaiting input, red ● API error, ○ stopped",
     },
@@ -51,6 +61,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Last,
         label: "LAST",
         width: Some(5),
+        priority: 90,
         right_align: true,
         desc: "Time since last activity",
     },
@@ -58,6 +69,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Duration,
         label: "DUR",
         width: Some(6),
+        priority: 55,
         right_align: true,
         desc: "Session duration (first to last activity)",
     },
@@ -65,6 +77,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Cost,
         label: "$",
         width: Some(9),
+        priority: 85,
         right_align: true,
         desc: "Estimated cost from per-token API pricing (LiteLLM).\nFlat-rate plans (Max, Pro, Team) bill differently,\nso this may not match your invoice.",
     },
@@ -72,6 +85,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::CostHour,
         label: "$/1H",
         width: Some(7),
+        priority: 40,
         right_align: true,
         desc: "Estimated cost in the current local clock hour",
     },
@@ -79,6 +93,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::CostToday,
         label: "$/24H",
         width: Some(7),
+        priority: 35,
         right_align: true,
         desc: "Estimated cost since midnight (local time)",
     },
@@ -86,6 +101,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Context,
         label: "CTX%",
         width: Some(6),
+        priority: 60,
         right_align: true,
         desc: "Context window used, as a share of the auto-compact threshold",
     },
@@ -93,6 +109,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Cpu,
         label: "CPU%",
         width: Some(5),
+        priority: 50,
         right_align: true,
         desc: "CPU usage across the session's process tree",
     },
@@ -100,6 +117,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Memory,
         label: "MEM",
         width: Some(6),
+        priority: 45,
         right_align: true,
         desc: "Resident memory across the session's process tree",
     },
@@ -107,6 +125,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Tools,
         label: "TOOLS",
         width: Some(6),
+        priority: 30,
         right_align: true,
         desc: "Total tool invocations in the session",
     },
@@ -114,6 +133,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::TokenTotal,
         label: "TOKENS",
         width: Some(8),
+        priority: 25,
         right_align: true,
         desc: "Total input and output tokens used by the session",
     },
@@ -121,6 +141,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::TokenRate,
         label: "TOK/m",
         width: Some(7),
+        priority: 20,
         right_align: true,
         desc: "Token rate per minute (exponential moving average)",
     },
@@ -128,6 +149,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Model,
         label: "MODEL",
         width: Some(14),
+        priority: 70,
         right_align: false,
         desc: "Model used by the session",
     },
@@ -135,6 +157,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Harness,
         label: "HARNESS",
         width: Some(10),
+        priority: 65,
         right_align: false,
         desc: "Where the agent is hosted, such as Cursor or a terminal CLI",
     },
@@ -142,6 +165,7 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Branch,
         label: "BRANCH",
         width: Some(12),
+        priority: 68,
         right_align: false,
         desc: "Git branch checked out in the session's working directory,\nor @<commit> when HEAD is detached",
     },
@@ -149,10 +173,86 @@ pub const COLUMNS: &[Column] = &[
         id: ColumnId::Project,
         label: "PROJECT",
         width: None,
+        priority: 100,
         right_align: false,
         desc: "Session title if renamed, otherwise the working directory",
     },
 ];
+
+/// Stable configuration name for a column, used by `$CCTOP_COLUMNS_HIDE` and
+/// by the persisted preferences. Kept separate from `label`, which is what the
+/// header shows and is free to change with the layout.
+pub fn key(id: ColumnId) -> &'static str {
+    match id {
+        ColumnId::Status => "status",
+        ColumnId::Last => "active",
+        ColumnId::Duration => "duration",
+        ColumnId::Cost => "cost",
+        ColumnId::CostHour => "cost_hour",
+        ColumnId::CostToday => "cost_today",
+        ColumnId::Context => "ctx",
+        ColumnId::Cpu => "cpu",
+        ColumnId::Memory => "mem",
+        ColumnId::Tools => "tools",
+        ColumnId::TokenTotal => "tokens",
+        ColumnId::TokenRate => "tok_rate",
+        ColumnId::Model => "model",
+        ColumnId::Harness => "harness",
+        ColumnId::Branch => "branch",
+        ColumnId::Project => "project",
+    }
+}
+
+/// Columns the user has hidden by hand: a comma-separated list of the keys
+/// above, e.g. `tok_rate,mem`. Unknown names are ignored rather than refused.
+pub fn parse_hidden(list: &str) -> Vec<ColumnId> {
+    list.split(',')
+        .filter_map(|name| {
+            let name = name.trim();
+            COLUMNS.iter().find(|c| key(c.id).eq_ignore_ascii_case(name))
+        })
+        // The flexible column is the row's identity and has no fixed width to
+        // reclaim, so hiding it would only break the layout.
+        .filter(|c| c.width.is_some())
+        .map(|c| c.id)
+        .collect()
+}
+
+/// The columns to draw in `total` cells of width, widest-first casualties last.
+///
+/// Every fixed column costs its width plus a gutter whether or not it fits, so
+/// past a certain narrowness the ones on the right are simply cut off by the
+/// terminal — which is how MODEL, HARNESS, BRANCH and PROJECT used to vanish
+/// together and leave rows no one could tell apart. Dropping by priority
+/// instead means the columns that name a row are the last to go.
+pub fn visible_columns(total: u16, hidden: &[ColumnId]) -> Vec<&'static Column> {
+    let mut cols: Vec<&'static Column> = COLUMNS
+        .iter()
+        .filter(|c| !hidden.contains(&c.id))
+        .collect();
+
+    // Drop the least important column until the rest fit, keeping display order.
+    while cols.len() > 1 && required_width(&cols) > total {
+        let victim = cols
+            .iter()
+            .enumerate()
+            // Later columns lose ties, so the drop order stays predictable.
+            .min_by_key(|(i, c)| (c.priority, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        match victim {
+            Some(i) => cols.remove(i),
+            None => break,
+        };
+    }
+    cols
+}
+
+/// Cells needed to show `cols` without clipping: fixed widths, single-space
+/// gutters, and a usable minimum for the flexible column.
+fn required_width(cols: &[&'static Column]) -> u16 {
+    let fixed: u16 = cols.iter().map(|c| c.width.unwrap_or(MIN_FLEX)).sum();
+    fixed + cols.len().saturating_sub(1) as u16
+}
 
 /// Seconds since a session last did anything.
 fn age_secs(s: &Session, now: &DateTime<Utc>) -> Option<i64> {
@@ -418,6 +518,42 @@ mod tests {
         }
         // Exactly one flexible column, or layout breaks.
         assert_eq!(COLUMNS.iter().filter(|c| c.width.is_none()).count(), 1);
+    }
+
+    /// A wide terminal loses nothing, and a narrow one keeps the columns that
+    /// say *which session this is* rather than how it is doing.
+    #[test]
+    fn columns_drop_by_priority_as_width_shrinks() {
+        assert_eq!(visible_columns(200, &[]).len(), COLUMNS.len());
+
+        let ids = |w| -> Vec<ColumnId> { visible_columns(w, &[]).iter().map(|c| c.id).collect() };
+        let narrow = ids(90);
+        assert!(narrow.len() < COLUMNS.len(), "90 cells must drop something");
+        for keep in [ColumnId::Status, ColumnId::Last, ColumnId::Project] {
+            assert!(narrow.contains(&keep), "{keep:?} must survive 90 cells");
+        }
+        assert!(!narrow.contains(&ColumnId::TokenRate), "TOK/m goes first");
+
+        // Dropping is monotonic: nothing reappears as the terminal narrows.
+        let wider = ids(120);
+        assert!(narrow.iter().all(|id| wider.contains(id)));
+
+        // Even absurdly narrow, a row still says which session it is, and the
+        // one-cell status dot rides along for as long as it fits.
+        assert_eq!(ids(12), vec![ColumnId::Status, ColumnId::Project]);
+        assert_eq!(ids(8), vec![ColumnId::Project]);
+    }
+
+    #[test]
+    fn explicit_hidden_columns_win_over_automatic_dropping() {
+        let hidden = parse_hidden("cpu, mem,nonsense");
+        assert_eq!(hidden, vec![ColumnId::Cpu, ColumnId::Memory]);
+        // Hidden at any width, including one where everything else fits.
+        let ids: Vec<ColumnId> = visible_columns(500, &hidden).iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), COLUMNS.len() - 2);
+        assert!(!ids.contains(&ColumnId::Cpu));
+        // The flexible column can't be hidden: it has no width to give back.
+        assert!(parse_hidden("project").is_empty());
     }
 
     #[test]

@@ -153,26 +153,81 @@ fn edit(f: impl Fn(&str) -> String) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Install the aliases the first time cctop runs interactively, then never again
-/// — so removing the block, by flag or by hand, stays removed.
-pub fn install_once(prefs: &mut crate::cache::UiPrefs) {
+/// Whether a shell startup file already carries the managed block, so a user
+/// who installed it deliberately isn't asked about it again after a cache wipe.
+fn already_installed() -> bool {
+    rc_files()
+        .iter()
+        .any(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains(BEGIN)))
+        || fish_file().is_some_and(|p| p.is_file())
+}
+
+/// Ask, once, before touching the user's shell configuration.
+///
+/// Editing someone's `.zshrc` is not something to do quietly: the old
+/// behaviour wrote the block on first launch and announced it with a line the
+/// alternate screen covered milliseconds later, which in practice meant a
+/// silent edit. Declining is a complete answer — everything works except the
+/// keys that need cctop to own the agent's pty (`s`, `a`), and those come back
+/// by starting agents as `cctop claude` or running `cctop --install-alias`.
+///
+/// Callers must only reach this on an interactive TTY.
+pub fn ask_on_first_run(prefs: &mut crate::cache::UiPrefs) {
+    // The flag means "the first-run question has been settled", either by
+    // installing or by declining, so removing the block stays removed.
     if prefs.shell_alias_installed {
         return;
     }
-    prefs.shell_alias_installed = true;
-    prefs.save();
-    let changed = install();
-    if changed.is_empty() {
+    // Nowhere to write, nothing to ask about.
+    if rc_files().is_empty() && fish_file().is_none() {
         return;
     }
-    let files: Vec<_> = changed.iter().map(|p| p.display().to_string()).collect();
-    // Printed before the UI takes the alternate screen, so it is still there
-    // after quitting rather than flashing past.
+    if already_installed() {
+        prefs.shell_alias_installed = true;
+        prefs.save();
+        return;
+    }
+
+    let files: Vec<String> = rc_files()
+        .iter()
+        .chain(fish_file().iter())
+        .map(|p| p.display().to_string())
+        .collect();
     eprintln!(
-        "cctop: aliased {AGENTS} to `cctop <agent>` in {} so it can type into \
-         those sessions. Undo with `cctop --remove-alias`.",
+        "cctop can alias {AGENTS} to `cctop <agent>` in {} so it can type into \
+         and attach to those sessions (the `s` and `a` keys).",
         files.join(" and ")
     );
+    eprint!("Install the alias? [y] install / [n] not now: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        // No answer available: leave the question open rather than guessing.
+        return;
+    }
+    let yes = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+
+    prefs.shell_alias_installed = true;
+    prefs.save();
+
+    if !yes {
+        eprintln!(
+            "Not installed. cctop works as before; run `cctop --install-alias`, \
+             or start agents as `cctop <agent>`, to enable those keys."
+        );
+        return;
+    }
+    match install().as_slice() {
+        [] => eprintln!("No shell startup file needed changing."),
+        changed => {
+            let changed: Vec<_> = changed.iter().map(|p| p.display().to_string()).collect();
+            eprintln!(
+                "Updated {}. Undo with `cctop --remove-alias`.",
+                changed.join(" and ")
+            );
+        }
+    }
 }
 
 #[cfg(test)]
