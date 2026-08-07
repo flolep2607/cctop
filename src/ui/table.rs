@@ -37,14 +37,16 @@ fn pad(text: &str, width: u16, right: bool) -> String {
 }
 
 pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
-    let title = if app.live_only {
-        format!(
+    // Once anything is filtered, the count that matters is how much of the
+    // table is being hidden — "Sessions (54)" over six rows reads as a bug.
+    let title = match (app.live_only, app.visible.len() != app.sessions.len()) {
+        (true, _) => format!(
             "Sessions ({}/{}) — live",
             app.visible.len(),
             app.sessions.len()
-        )
-    } else {
-        format!("Sessions ({})", app.sessions.len())
+        ),
+        (false, true) => format!("Sessions ({}/{})", app.visible.len(), app.sessions.len()),
+        (false, false) => format!("Sessions ({})", app.sessions.len()),
     };
     let block = panel_block(&title);
     let inner = block.inner(area);
@@ -124,6 +126,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
         .min(app.visible.len().saturating_sub(height.max(1)));
 
     let now = chrono::Utc::now();
+    let query = app.search.to_ascii_lowercase();
     let lines: Vec<Line> = app
         .visible
         .iter()
@@ -136,30 +139,78 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
             let key = s.key();
             let marked = app.marked.contains(&key);
             let deleting = app.deleting.contains(&key);
-            session_row(
-                s,
-                &widths,
+            let row = RowState {
                 selected,
                 marked,
                 deleting,
-                app.notify.rang_recently(&key),
-                &now,
-            )
+                rang: app.notify.rang_recently(&key),
+                query: &query,
+            };
+            session_row(s, &widths, &row, &now)
         })
         .collect();
 
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
+/// Split a cell around the active query, so the matching run can be picked out.
+///
+/// A filtered table shows the rows that matched but not *why* — with a query
+/// over five columns, the reason is often a cell nobody was looking at. This
+/// makes the cause visible without a column of its own.
+///
+/// `query` is lowercase; matching folds case on the cell's side. Anything that
+/// is not a match keeps `base` exactly, padding included, so highlighting never
+/// changes a row's width or colour.
+fn highlight(text: String, query: &str, base: Style) -> Vec<Span<'static>> {
+    if query.is_empty() {
+        return vec![Span::styled(text, base)];
+    }
+    let lower = text.to_ascii_lowercase();
+    let Some(at) = lower.find(query) else {
+        return vec![Span::styled(text, base)];
+    };
+    // ASCII-lowercasing preserves byte length, so offsets carry across — but
+    // only if the query itself is ASCII. A non-ASCII query can fold to a
+    // different length, and slicing `text` at the wrong offset would panic.
+    if !query.is_ascii() || !text.is_char_boundary(at) || !text.is_char_boundary(at + query.len()) {
+        return vec![Span::styled(text, base)];
+    }
+    let hit = base
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    vec![
+        Span::styled(text[..at].to_string(), base),
+        Span::styled(text[at..at + query.len()].to_string(), hit),
+        Span::styled(text[at + query.len()..].to_string(), base),
+    ]
+}
+
+/// What the table knows about a row beyond the session on it.
+struct RowState<'a> {
+    selected: bool,
+    marked: bool,
+    /// This session rang the bell a moment ago.
+    rang: bool,
+    /// Its deletion has been accepted but not yet confirmed.
+    deleting: bool,
+    /// The active filter, lowercased, for marking the cells that matched.
+    query: &'a str,
+}
+
 fn session_row(
     s: &crate::session::Session,
     widths: &[u16],
-    selected: bool,
-    marked: bool,
-    deleting: bool,
-    rang: bool,
+    row: &RowState,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Line<'static> {
+    let &RowState {
+        selected,
+        marked,
+        rang,
+        deleting,
+        query,
+    } = row;
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
     let base = if selected {
         Style::default()
@@ -208,7 +259,20 @@ fn session_row(
                 cell_color(c.id, s, age_secs)
             })
         };
-        spans.push(Span::styled(pad(&text, *w, c.right_align), style));
+        // The status dot is a glyph, not text, and the numeric columns match a
+        // query only by coincidence — highlighting "42" inside a cost because
+        // the query was "42" is noise. The columns worth marking are the ones
+        // the filter is actually aimed at.
+        let searchable = matches!(
+            c.id,
+            ColumnId::Project | ColumnId::Model | ColumnId::Harness | ColumnId::Branch
+        );
+        let padded = pad(&text, *w, c.right_align);
+        if searchable && !deleting {
+            spans.extend(highlight(padded, query, style));
+        } else {
+            spans.push(Span::styled(padded, style));
+        }
         spans.push(Span::styled(" ", base));
     }
     Line::from(spans)
@@ -315,11 +379,56 @@ mod tests {
         let now = chrono::Utc::now();
         let widths = column_widths(200);
 
-        let quiet = session_row(&s, &widths, false, false, false, false, &now);
-        let rang = session_row(&s, &widths, false, false, false, true, &now);
+        let row = |rang| RowState {
+            selected: false,
+            marked: false,
+            rang,
+            deleting: false,
+            query: "",
+        };
+        let quiet = session_row(&s, &widths, &row(false), &now);
+        let rang = session_row(&s, &widths, &row(true), &now);
         assert_eq!(quiet.spans[0].content, "○");
         assert_eq!(rang.spans[0].content, "◉");
         assert_eq!(rang.spans[0].style.fg, Some(theme::ACCENT));
+    }
+
+    /// Highlighting marks the match and changes nothing else — a row that
+    /// shifted by a character under the cursor would be worse than no
+    /// highlight at all.
+    #[test]
+    fn highlighting_marks_the_match_without_moving_the_cell() {
+        let base = Style::default();
+        let cell = pad("Billing API", 20, false);
+
+        let spans = highlight(cell.clone(), "api", base);
+        let rebuilt: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rebuilt, cell, "the cell must survive intact");
+        assert_eq!(spans[1].content, "API", "case folds on the cell's side");
+        assert_eq!(spans[1].style.fg, Some(theme::ACCENT));
+
+        // No match, no query, and a query that is not in the cell all leave one
+        // plain span behind.
+        for query in ["", "kingfisher"] {
+            let spans = highlight(cell.clone(), query, base);
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].style.fg, None);
+        }
+    }
+
+    /// Regression guard: byte offsets from an ASCII-lowercased copy only line
+    /// up while the query is ASCII, and slicing on a bad boundary panics.
+    #[test]
+    fn highlighting_a_multibyte_cell_does_not_slice_a_character() {
+        let base = Style::default();
+        let spans = highlight("café ▸ api".to_string(), "api", base);
+        let rebuilt: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rebuilt, "café ▸ api");
+        assert_eq!(spans[1].content, "api");
+
+        // A non-ASCII query is left unmarked rather than risked.
+        let spans = highlight("café".to_string(), "café", base);
+        assert_eq!(spans.len(), 1);
     }
 
     #[test]

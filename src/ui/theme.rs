@@ -24,6 +24,14 @@ pub const OPENCODE: Color = Color::Indexed(117);
 pub const PI: Color = Color::Indexed(150);
 pub const GEMINI: Color = Color::Indexed(74);
 pub const WINDSURF: Color = Color::Indexed(80);
+// Open-weight vendors seen through custom providers. Chosen to stay clear of
+// each other and of the harness hues above.
+pub const GLM: Color = Color::Indexed(108);
+pub const KIMI: Color = Color::Indexed(216);
+pub const DEEPSEEK: Color = Color::Indexed(105);
+pub const QWEN: Color = Color::Indexed(180);
+pub const GROK: Color = Color::Indexed(247);
+
 pub const DESKTOP_CODE: Color = Color::Indexed(141);
 pub const DESKTOP_COWORK: Color = Color::Indexed(183);
 
@@ -66,12 +74,32 @@ pub fn cost_color(value: f64) -> Color {
 }
 
 /// Hue by vendor so mixed lists stay scannable.
+///
+/// Matched on the leaf of the name: a model reached through a custom provider
+/// carries its whole route (`canopywave/zai/glm-5.1`), and the vendor that
+/// prefix names is the gateway, not whose model it is.
 pub fn model_color(model: &str) -> Color {
-    let m = model.to_ascii_lowercase();
+    let m = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
     if m.starts_with("claude") {
         CLAUDE
     } else if m.starts_with("gpt") || m.starts_with('o') && m.len() > 1 {
         OPENAI
+    } else if m.starts_with("gemini") {
+        GEMINI
+    } else if m.starts_with("glm") {
+        GLM
+    } else if m.starts_with("kimi") {
+        KIMI
+    } else if m.starts_with("deepseek") {
+        DEEPSEEK
+    } else if m.starts_with("qwen") {
+        QWEN
+    } else if m.starts_with("grok") {
+        GROK
     } else {
         DIM
     }

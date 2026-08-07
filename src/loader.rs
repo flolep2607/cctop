@@ -74,6 +74,19 @@ impl Loader {
         self.store.get_or_init(Store::new)
     }
 
+    /// Run `job` on the background pool, or inline when there isn't one.
+    ///
+    /// Anything that fans out across every session on disk belongs here rather
+    /// than on rayon's default pool: the reason [`gentle_threads`] exists is
+    /// that a monitor should not seize the machine to do work nobody is
+    /// blocking on, and a transcript scan is exactly that kind of work.
+    pub fn gently<R: Send>(&self, job: impl FnOnce() -> R + Send) -> R {
+        match self.gentle.as_ref() {
+            Some(pool) => pool.install(job),
+            None => job(),
+        }
+    }
+
     /// Discover, extract, and annotate every session.
     pub fn load(&mut self, plan: Plan) -> Vec<Session> {
         // The CLI's caller is always waiting on the result.
@@ -226,11 +239,8 @@ impl Loader {
             let fresh = match s.provider {
                 Provider::Claude => session::claude::extract_context(s),
                 Provider::Codex => session::codex::extract_context(s),
-                Provider::Cursor
-                | Provider::Gemini
-                | Provider::OpenCode
-                | Provider::Pi
-                | Provider::Windsurf => None,
+                Provider::OpenCode => session::opencode::extract_context(s),
+                Provider::Cursor | Provider::Gemini | Provider::Pi | Provider::Windsurf => None,
             };
             if let Some(ctx) = fresh {
                 self.context_cache.insert(key.clone(), ctx);

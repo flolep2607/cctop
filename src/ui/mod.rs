@@ -52,6 +52,16 @@ const FULL_WALK_INTERVAL: Duration = Duration::from_secs(60);
 /// file may sit there for a while before the model first answers.
 const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 
+/// How long typing has to pause before the query is scanned for.
+///
+/// A scan reads every transcript on disk, so it waits for a word rather than
+/// chasing each character of one. Short enough that finishing a word and
+/// looking up finds the results already there.
+const SCAN_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Shortest query worth reading every transcript for.
+const MIN_SCAN_CHARS: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     List,
@@ -65,6 +75,9 @@ pub enum Mode {
     DeleteBlocked,
     /// Confirming termination of the selected live session.
     KillConfirm,
+    /// Confirming that a session already running elsewhere should be resumed
+    /// anyway, which puts a second agent on the same transcript.
+    ResumeConfirm,
     /// Confirming a quit that would take the hosted agent down with it.
     QuitConfirm,
     /// Explaining why a live session cannot be terminated locally.
@@ -81,6 +94,9 @@ pub enum Mode {
     SendKeys,
     /// Picking which agent a new tab or split should run.
     Launch,
+    /// The agent-integration panel: what is installed where, and whether the
+    /// agents are actually reporting in.
+    Hooks,
 }
 
 /// Where the agent picked in `Mode::Launch` ends up.
@@ -177,6 +193,11 @@ enum Request {
         pid: u32,
         text: String,
     },
+    /// Look for `query` inside every listed session's transcript.
+    Scan {
+        query: String,
+        targets: Vec<crate::session::search::Target>,
+    },
     Shutdown,
 }
 
@@ -208,6 +229,88 @@ enum Response {
     KeysSent {
         result: Result<(), String>,
     },
+    /// A finished transcript scan: session key -> the text around its match.
+    /// The query comes back with it, because the user has usually typed more by
+    /// the time a scan over thousands of transcripts lands.
+    Scanned {
+        query: String,
+        hits: HashMap<String, String>,
+    },
+}
+
+/// Everything about a session the `/` filter can match without reading a
+/// transcript, lowercased.
+///
+/// The columns on screen, plus the two things a row shows only part of: the
+/// full working directory, because the table abbreviates it to fit and
+/// `~/src/work/api` is what someone types; and the branch, which is a column
+/// but is read from disk rather than carried on the row.
+fn search_haystack(s: &Session) -> String {
+    format!(
+        "{} {} {} {} {} {} {}",
+        s.display_label(),
+        s.model,
+        s.harness,
+        s.provider.as_str(),
+        s.session_id,
+        s.label_source,
+        columns::branch_of(s).unwrap_or_default(),
+    )
+    .to_ascii_lowercase()
+}
+
+/// Remembered scan results, keyed by session and query. `None` is a remembered
+/// *miss*, which is the answer worth caching most: a miss costs a full read of
+/// the transcript, a hit usually stops early.
+type ScanCache = HashMap<(String, String), Option<String>>;
+
+/// Entries kept before the scan cache is dropped wholesale.
+///
+/// Reached only by someone who has run many distinct queries over many
+/// sessions; forgetting everything then costs one re-scan rather than the
+/// bookkeeping an eviction policy would need for a cache this cheap to refill.
+const MAX_SCAN_CACHE: usize = 20_000;
+
+/// Search every target's transcript for `needle`, in parallel.
+///
+/// Running sessions are never cached: their transcripts grow, so today's "not
+/// found" is not tomorrow's, and the one case where a stale answer is most
+/// visible is the session the user is watching right now.
+fn scan(
+    cache: &mut ScanCache,
+    targets: &[crate::session::search::Target],
+    needle: &str,
+) -> HashMap<String, String> {
+    use rayon::prelude::*;
+    let found: Vec<(&crate::session::search::Target, Option<String>)> = targets
+        .par_iter()
+        .map(|target| {
+            let memo = (!target.running)
+                .then(|| cache.get(&(target.key.clone(), needle.to_string())))
+                .flatten();
+            match memo {
+                Some(remembered) => (target, remembered.clone()),
+                None => (
+                    target,
+                    crate::session::search::find(target, needle).map(|hit| hit.snippet),
+                ),
+            }
+        })
+        .collect();
+
+    if cache.len() + found.len() > MAX_SCAN_CACHE {
+        cache.clear();
+    }
+    let mut hits = HashMap::new();
+    for (target, snippet) in found {
+        if !target.running {
+            cache.insert((target.key.clone(), needle.to_string()), snippet.clone());
+        }
+        if let Some(snippet) = snippet {
+            hits.insert(target.key.clone(), snippet);
+        }
+    }
+    hits
 }
 
 /// Owns the `Loader` and does all filesystem and parsing work off the UI thread,
@@ -223,6 +326,9 @@ fn spawn_worker(
         // The last full walk's rows, kept so a light refresh has something to
         // update in place.
         let mut live_rows: Vec<Session> = Vec::new();
+        // What earlier transcript scans found, so refining a query re-reads only
+        // what it has to. See `scan`.
+        let mut scans: ScanCache = HashMap::new();
         while let Ok(req) = rx.recv() {
             match req {
                 Request::Refresh => {
@@ -334,6 +440,13 @@ fn spawn_worker(
                         break;
                     }
                 }
+                Request::Scan { query, targets } => {
+                    let needle = query.to_ascii_lowercase();
+                    let hits = loader.gently(|| scan(&mut scans, &targets, &needle));
+                    if tx.send(Response::Scanned { query, hits }).is_err() {
+                        break;
+                    }
+                }
                 Request::Shutdown => break,
             }
         }
@@ -360,6 +473,28 @@ pub struct App {
     pub sortby_cursor: usize,
 
     pub search: String,
+    /// Search the transcripts as well as the columns.
+    ///
+    /// Off by default, and deliberately: the metadata filter answers instantly
+    /// from memory, while this one reads every transcript on disk. Turning it on
+    /// is how you say the reading is worth it.
+    pub search_content: bool,
+    /// The query [`App::scan_hits`] belongs to.
+    ///
+    /// Kept because a scan over thousands of transcripts outlives the keystroke
+    /// that started it: hits for "flyw" must not be applied to "flywheel".
+    pub scan_query: String,
+    /// Session key -> the transcript text around its match.
+    pub scan_hits: HashMap<String, String>,
+    /// A scan is out with the worker.
+    pub scanning: bool,
+    /// When the query last changed, so a burst of typing costs one scan.
+    scan_typed_at: Option<Instant>,
+    /// Queries run before, newest first, walked with ↑/↓ in the filter modal.
+    pub search_history: Vec<String>,
+    /// Where ↑/↓ has walked to in `search_history`, and the query that was
+    /// being typed before the walk started, so ↓ can put it back.
+    history_cursor: Option<(usize, String)>,
     pub age_filter: Option<AgeFilter>,
     pub age_cursor: usize,
     pub live_only: bool,
@@ -445,7 +580,17 @@ pub struct App {
     /// Only sessions whose agent has cctop's hooks installed appear here, so an
     /// absent entry is the ordinary case and means "fall back to the transcript"
     /// rather than "nothing is happening".
-    pub hooked: HashMap<String, crate::hook::Signal>,
+    pub hooked: HashMap<String, crate::hook::Reported>,
+    /// The integration's state, as of the last time the panel was opened.
+    ///
+    /// Rebuilt on opening and after every action rather than every frame: it
+    /// reads three files off disk and scans a directory, which is nothing to do
+    /// once and wasteful to do sixty times a second behind a closed panel.
+    pub hooks: Option<crate::hook::Report>,
+    /// The socket the agents push their events to. `None` only where there is
+    /// none to be had — a non-unix build — in which case every estimate carries
+    /// on exactly as it did before hooks existed.
+    pub listener: Option<crate::hook::Listener>,
     /// The command highlighted in the launcher.
     pub launch_cursor: usize,
     /// Where the launcher's pick will go.
@@ -500,6 +645,13 @@ impl App {
             sort_asc: true,
             sortby_cursor: 0,
             search: String::new(),
+            search_content: false,
+            scan_query: String::new(),
+            scan_hits: HashMap::new(),
+            scanning: false,
+            scan_typed_at: None,
+            search_history: prefs.search_history.clone(),
+            history_cursor: None,
             age_filter,
             age_cursor,
             live_only: prefs.live_only,
@@ -549,6 +701,8 @@ impl App {
             tabs: Vec::new(),
             tab: 0,
             hooked: HashMap::new(),
+            hooks: None,
+            listener: None,
             launch_cursor: 0,
             launch_into: LaunchInto::Tab,
             launch_cwd: None,
@@ -580,6 +734,7 @@ impl App {
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;
         self.prefs.notify = self.notify.enabled;
+        self.prefs.search_history = self.search_history.clone();
         self.prefs.save();
     }
 
@@ -618,19 +773,8 @@ impl App {
                         return false;
                     }
                 }
-                if !query.is_empty() {
-                    let haystack = format!(
-                        "{} {} {} {} {}",
-                        s.display_label(),
-                        s.model,
-                        s.harness,
-                        s.provider.as_str(),
-                        s.session_id
-                    )
-                    .to_ascii_lowercase();
-                    if !haystack.contains(&query) {
-                        return false;
-                    }
+                if !self.matches_query(s, &query) {
+                    return false;
                 }
                 if self.cost_floor > 0.0 {
                     // Sessions with unknown cost are kept: the floor can't say
@@ -843,20 +987,11 @@ impl App {
             return;
         };
         let text = match self.bottom_tab {
-            // From the Info tab, the resume command is the most useful thing.
-            0 => match s.provider {
-                Provider::Claude => format!("claude --resume {}", s.session_id),
-                Provider::Codex => format!("codex resume {}", s.session_id),
-                Provider::Cursor => s
-                    .data_file
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| s.session_id.clone()),
-                Provider::OpenCode => format!("opencode --session {}", s.session_id),
-                Provider::Pi => format!("pi --session {}", s.session_id),
-                // Neither resumes from the shell, so the transcript's path is
-                // the useful thing to put on the clipboard.
-                Provider::Gemini | Provider::Windsurf => s
+            // From the Info tab, the resume command is the most useful thing —
+            // and for the providers that have none, the transcript's path is.
+            0 => match s.resume_argv() {
+                Some(argv) => argv.join(" "),
+                None => s
                     .data_file
                     .as_ref()
                     .map(|p| p.display().to_string())
@@ -874,20 +1009,151 @@ impl App {
 
     /// Whether the session matches the active text search.
     fn matches_search(&self, s: &Session) -> bool {
-        let query = self.search.to_ascii_lowercase();
+        self.matches_query(s, &self.search.to_ascii_lowercase())
+    }
+
+    /// Whether a session matches `query`, which must already be lowercase.
+    ///
+    /// Content search widens the filter rather than replacing it: a query that
+    /// names a project still finds that project's sessions, and the transcripts
+    /// add whatever else mentions it. Hits only count while they belong to the
+    /// query being typed — until the scan for a longer query lands, its rows are
+    /// the metadata matches alone, which is a filter narrowing as you type
+    /// rather than showing results for a query you have moved on from.
+    fn matches_query(&self, s: &Session, query: &str) -> bool {
         if query.is_empty() {
             return true;
         }
-        let haystack = format!(
-            "{} {} {} {} {}",
-            s.display_label(),
-            s.model,
-            s.harness,
-            s.provider.as_str(),
-            s.session_id
-        )
-        .to_ascii_lowercase();
-        haystack.contains(&query)
+        if search_haystack(s).contains(query) {
+            return true;
+        }
+        self.search_content && self.scan_query == query && self.scan_hits.contains_key(&s.key())
+    }
+
+    /// The transcript text around the selected session's content match.
+    pub fn selected_snippet(&self) -> Option<&str> {
+        let s = self.selected_session()?;
+        (self.search_content && self.scan_query == self.search.to_ascii_lowercase())
+            .then(|| self.scan_hits.get(&s.key()))
+            .flatten()
+            .map(String::as_str)
+    }
+
+    /// Note that the query changed, so the scan can be rescheduled.
+    ///
+    /// Every edit lands here, including the ones that only shorten the query:
+    /// hits for a longer query are not hits for a shorter one, and leaving them
+    /// applied would leave rows on screen that no longer match anything.
+    pub(super) fn search_edited(&mut self) {
+        self.history_cursor = None;
+        self.scan_typed_at = Some(Instant::now());
+        self.refilter();
+    }
+
+    /// Turn transcript searching on or off.
+    pub(super) fn toggle_content_search(&mut self) {
+        self.search_content = !self.search_content;
+        if !self.search_content {
+            // Results for a search nobody is running any more; keeping them
+            // would make the next toggle show stale rows for an instant.
+            self.scan_hits.clear();
+            self.scan_query.clear();
+        }
+        self.scan_typed_at = Some(Instant::now());
+        self.refilter();
+    }
+
+    /// Send the current query off to be scanned, once the typing has settled.
+    ///
+    /// Called every loop iteration rather than on each keystroke: a scan reads
+    /// every transcript on disk, and firing one per character would spend the
+    /// whole budget on prefixes of the word being typed.
+    pub(super) fn tick_scan(&mut self) {
+        if !self.search_content || self.scanning {
+            return;
+        }
+        let query = self.search.to_ascii_lowercase();
+        if query == self.scan_query {
+            self.scan_typed_at = None;
+            return;
+        }
+        // A one- or two-character query matches nearly every transcript, so it
+        // is the most expensive scan to run and the least useful to read.
+        // Deleting back to that length drops the results with it, rather than
+        // leaving a count on screen for a query no longer being asked.
+        if query.chars().count() < MIN_SCAN_CHARS {
+            if !self.scan_query.is_empty() {
+                self.scan_query.clear();
+                self.scan_hits.clear();
+                self.refilter();
+                self.needs_redraw = true;
+            }
+            return;
+        }
+        match self.scan_typed_at {
+            Some(at) if at.elapsed() < SCAN_DEBOUNCE => return,
+            _ => {}
+        }
+        self.scan_typed_at = None;
+        let targets: Vec<crate::session::search::Target> = self
+            .sessions
+            .iter()
+            .map(crate::session::search::Target::of)
+            .collect();
+        if self.tx.send(Request::Scan { query, targets }).is_ok() {
+            self.scanning = true;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Fold in a finished scan.
+    fn scanned(&mut self, query: String, hits: HashMap<String, String>) {
+        self.scanning = false;
+        self.scan_query = query;
+        self.scan_hits = hits;
+        self.refilter();
+        self.needs_redraw = true;
+    }
+
+    /// Record the query that was just run, so ↑ can bring it back.
+    pub(super) fn remember_query(&mut self) {
+        let query = self.search.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        // Re-running a query moves it to the front rather than adding a second
+        // copy, which is what makes a short history worth walking.
+        self.search_history.retain(|q| q != &query);
+        self.search_history.insert(0, query);
+        self.search_history
+            .truncate(crate::cache::MAX_SEARCH_HISTORY);
+        self.save_prefs();
+    }
+
+    /// Walk the query history: `1` towards older entries, `-1` back towards
+    /// what was being typed when the walk started.
+    pub(super) fn history_step(&mut self, delta: isize) {
+        if self.search_history.is_empty() {
+            return;
+        }
+        let (at, typed) = match self.history_cursor.take() {
+            Some((at, typed)) => (at as isize + delta, typed),
+            // Nothing walked yet: ↓ has nowhere older to come back from.
+            None if delta < 0 => return,
+            None => (0, self.search.clone()),
+        };
+        // Stepping back past the newest entry restores the partial query, which
+        // is the one thing the history itself cannot hold.
+        if at < 0 {
+            self.search = typed;
+        } else {
+            let at = (at as usize).min(self.search_history.len() - 1);
+            self.search = self.search_history[at].clone();
+            self.history_cursor = Some((at, typed));
+        }
+        self.scan_typed_at = Some(Instant::now());
+        self.refilter();
+        self.needs_redraw = true;
     }
 
     /// Jump to the next/previous session matching the active search, wrapping
@@ -1117,21 +1383,100 @@ impl App {
         tab.attention(index == self.tab, &|pid| self.pane_signal(pid))
     }
 
-    /// Fold in whatever the agents' hooks have reported.
+    /// Fold in whatever the agents have reported.
     ///
     /// These outrank anything read off disk or off a screen: an agent saying
     /// "my turn is over" is the fact those are both estimating.
-    fn apply_hooks(&mut self, events: Vec<crate::hook::Event>) -> bool {
+    ///
+    /// Returns whether anything arrived, and whether the set of sessions itself
+    /// changed — one that has just started or just ended is a row to go and
+    /// find or forget now, rather than at the next poll.
+    fn apply_hooks(&mut self, events: Vec<crate::hook::Event>) -> (bool, bool) {
         let changed = !events.is_empty();
+        let mut lifecycle = false;
         for event in events {
-            self.hooked.insert(event.session_id, event.signal);
+            lifecycle |= event.reported.signal.is_lifecycle();
+            match event.reported.signal {
+                // Nothing more will be said about it, and leaving the last
+                // signal behind would have the row claim a state forever.
+                crate::hook::Signal::Ended => {
+                    self.hooked.remove(&event.session_id);
+                }
+                _ => {
+                    self.hooked.insert(event.session_id, event.reported);
+                }
+            }
         }
-        changed
+        (changed, lifecycle)
+    }
+
+    /// Open the integration panel, reading the current state off disk.
+    pub fn open_hooks(&mut self) {
+        self.hooks = Some(self.hook_status());
+        self.mode = Mode::Hooks;
+        self.needs_redraw = true;
+    }
+
+    /// The integration's state, scoped to whichever project the cursor is on.
+    fn hook_status(&self) -> crate::hook::Report {
+        crate::hook::status(self.hook_project().as_deref(), self.listener.as_ref())
+    }
+
+    /// The project a `project`-scoped install would write into: the directory
+    /// of the selected session, when it has one on this machine.
+    pub fn hook_project(&self) -> Option<std::path::PathBuf> {
+        self.selected_session()
+            .map(|s| std::path::PathBuf::from(&s.label_source))
+            .filter(|dir| dir.is_dir())
+    }
+
+    /// Install or remove from the panel, and show what happened.
+    pub fn set_hooks(&mut self, scope: crate::hook::Scope, install: bool) {
+        let result = match install {
+            true => crate::hook::install(&scope),
+            false => crate::hook::remove(&scope),
+        };
+        // Codex is configured machine-wide or not at all, so it follows the user
+        // scope only. Its outcome is folded into the panel below either way, so
+        // a failure here needs no message of its own.
+        if scope == crate::hook::Scope::User {
+            let _ = match install {
+                true => crate::hook::codex_install(),
+                false => crate::hook::codex_remove(),
+            };
+        }
+        match result {
+            Ok(what) => self.set_status(&what),
+            Err(e) => self.set_status(e.to_string()),
+        }
+        self.hooks = Some(self.hook_status());
+    }
+
+    /// What the agents have actually said, newest state per session, as
+    /// `(project, state)` pairs for the panel.
+    ///
+    /// The project rather than the session id: an id names nothing to a reader,
+    /// and this list is the answer to "is the thing I just installed working",
+    /// which needs a name you recognise.
+    pub fn reporting(&self) -> Vec<(String, &'static str)> {
+        let mut rows: Vec<(String, &'static str)> = self
+            .hooked
+            .values()
+            .map(|r| {
+                let name = std::path::Path::new(&r.cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "—".into());
+                (name, r.signal.label())
+            })
+            .collect();
+        rows.sort();
+        rows
     }
 
     /// What a session's own hooks last said about it, if it has any.
     fn hooked_signal(&self, session_id: &str) -> Option<crate::hook::Signal> {
-        self.hooked.get(session_id).copied()
+        self.hooked.get(session_id).map(|r| r.signal)
     }
 
     /// What has been reported about the agent running as `pid`, if anything.
@@ -1206,6 +1551,69 @@ impl App {
                 .filter(|dir| dir.is_dir()),
         };
         self.mode = Mode::Launch;
+    }
+
+    /// Reopen the selected session in a tab of its own.
+    ///
+    /// This is the one way into a session cctop did not start. `a` shows an
+    /// agent's live terminal, but only for the agents cctop hosts — there is no
+    /// pty to borrow otherwise. Resuming instead starts a *new* agent and hands
+    /// it the transcript, which is what the harnesses themselves offer and works
+    /// whether the session ended an hour ago or is running in another window.
+    pub(super) fn resume_selected(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let Some(argv) = session.resume_argv() else {
+            self.set_status(format!(
+                "{} sessions cannot be resumed from a shell",
+                session.provider.as_str()
+            ));
+            return;
+        };
+        if !crate::shim::is_command(&argv[0]) {
+            self.set_status(format!("{} is not installed on this machine", argv[0]));
+            return;
+        }
+        // Two agents appending to one transcript is not something any of the
+        // harnesses coordinate, so the running case asks first.
+        if session.is_running() {
+            self.mode = Mode::ResumeConfirm;
+            return;
+        }
+        self.resume_now();
+    }
+
+    /// Resume the selected session, having decided that it should be.
+    pub(super) fn resume_now(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let Some(argv) = session.resume_argv() else {
+            return;
+        };
+        // The transcript is full of paths relative to where the agent ran, so a
+        // resumed session belongs in the same directory.
+        let cwd = session.work_dir();
+        let name = format!("{} · {}", session.display_label(), argv[0]);
+        self.open_tab(&argv, cwd, &name);
+    }
+
+    /// Start `argv` in a new tab, reporting what happened either way.
+    fn open_tab(&mut self, argv: &[String], cwd: Option<std::path::PathBuf>, what: &str) {
+        let pane = match tabs::Pane::launch(argv, cwd.as_deref()) {
+            Ok(pane) => pane,
+            Err(error) => {
+                self.set_status(format!("Could not start {what}: {error}"));
+                return;
+            }
+        };
+        self.tabs.push(tabs::Tab::new(pane));
+        self.tab = self.tabs.len();
+        let where_ = cwd
+            .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
+            .unwrap_or_default();
+        self.set_status(format!("Resumed {what}{where_}"));
     }
 
     /// Start the launcher's pick.
@@ -1408,16 +1816,34 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // Established before the loop so the first tick already has it; `None` just
     // means discovery falls back to the periodic walk.
     let watch = crate::watch::Watch::start();
-    // `None` when another cctop already holds the address, or when no hooks are
-    // installed at all — either way the estimates carry on as before.
-    let hooks = crate::hook::Listener::start();
+    app.listener = crate::hook::Listener::start();
+    // A hook naming a cctop that has since been moved or deleted fires nothing
+    // at all, so it is repointed here rather than left to look installed while
+    // reporting nothing. Anything narrower than that is left for the panel.
+    for fixed in crate::hook::repair(app.hook_project().as_deref()) {
+        app.set_status(&fixed);
+    }
+    // What repair deliberately would not touch: an install registering fewer
+    // events than this cctop wants, or a settings file that will not parse.
+    // Both look installed and quietly deliver less than they should, so they
+    // are worth one line on the way in — an install that is simply absent is
+    // not, since that is a choice and nagging about it is what makes people
+    // stop reading the status line.
+    if app
+        .hook_status()
+        .claude
+        .iter()
+        .any(|s| s.health.is_problem())
+    {
+        app.set_status("Agent hooks need attention — press h");
+    }
+
     let result = event_loop(
         &mut app,
         &mut terminal,
         &res_rx,
         &req_tx,
         watch.as_ref(),
-        hooks.as_ref(),
         hosted.as_mut(),
     );
 
@@ -1494,7 +1920,6 @@ fn event_loop(
     res_rx: &Receiver<Response>,
     req_tx: &Sender<Request>,
     watch: Option<&crate::watch::Watch>,
-    hooks: Option<&crate::hook::Listener>,
     mut hosted: Option<&mut crate::shim::Hosted>,
 ) -> anyhow::Result<i32> {
     let mut last_refresh = Instant::now();
@@ -1617,6 +2042,7 @@ fn event_loop(
                     Ok(()) => app.set_status("Sent to the session's terminal"),
                     Err(error) => app.set_status(error),
                 },
+                Ok(Response::Scanned { query, hits }) => app.scanned(query, hits),
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -1631,6 +2057,7 @@ fn event_loop(
         }
 
         app.sync_panel_data();
+        app.tick_scan();
 
         // Every tab, not just the visible one: an agent whose output nobody
         // reads eventually blocks on writing it.
@@ -1646,12 +2073,20 @@ fn event_loop(
             app.needs_redraw = true;
         }
 
-        // Hooks arrive whenever an agent hits one, which is not on any tick of
-        // ours, so they are drained here alongside everything else.
-        if let Some(hooks) = hooks
-            && app.apply_hooks(hooks.drain())
-        {
-            app.needs_redraw = true;
+        // Hook events arrive whenever an agent hits one, which is not on any
+        // tick of ours, so they are drained here alongside everything else.
+        if let Some(events) = app.listener.as_ref().map(crate::hook::Listener::drain) {
+            let (changed, lifecycle) = app.apply_hooks(events);
+            app.needs_redraw |= changed;
+            // A session that has just begun or ended is a row to find or forget
+            // now. Waiting for the next poll would leave an agent the user just
+            // started missing from the table for as long as the interval, which
+            // is precisely the moment they are looking for it.
+            if lifecycle && !refresh_in_flight {
+                let _ = req_tx.send(Request::Refresh);
+                refresh_in_flight = true;
+                last_refresh = Instant::now();
+            }
         }
 
         // A blinking tab is the one thing on screen that changes with no event
@@ -1774,6 +2209,51 @@ mod tests {
         assert_eq!(app.sort_col, ColumnId::Last);
     }
 
+    /// A reported state is kept until the session says it is over, and the
+    /// events that change *which sessions exist* ask for a rescan while the
+    /// ones that only change a state do not.
+    #[test]
+    fn a_reported_state_is_kept_until_the_session_ends() {
+        let event = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
+            session_id: id.into(),
+            reported: crate::hook::Reported {
+                signal,
+                cwd: "/w/proj".into(),
+            },
+        };
+        let mut app = test_app();
+
+        // Nothing arriving is not "nothing is happening": an absent entry means
+        // fall back to the transcript, so it must stay absent.
+        assert_eq!(app.apply_hooks(Vec::new()), (false, false));
+        assert!(app.hooked_signal("a").is_none());
+
+        // A start is a row to go and find now.
+        assert_eq!(
+            app.apply_hooks(vec![event("a", crate::hook::Signal::Started)]),
+            (true, true)
+        );
+        // Ordinary state changes are not worth a rescan of the disk.
+        assert_eq!(
+            app.apply_hooks(vec![
+                event("a", crate::hook::Signal::Busy),
+                event("a", crate::hook::Signal::Idle),
+            ]),
+            (true, false)
+        );
+        assert_eq!(app.hooked_signal("a"), Some(crate::hook::Signal::Idle));
+        assert_eq!(app.reporting(), vec![("proj".to_string(), "idle")]);
+
+        // And an ended session is forgotten rather than left claiming its last
+        // state forever — which is also a rescan, since the row is going.
+        assert_eq!(
+            app.apply_hooks(vec![event("a", crate::hook::Signal::Ended)]),
+            (true, true)
+        );
+        assert!(app.hooked_signal("a").is_none());
+        assert!(app.reporting().is_empty());
+    }
+
     fn session(id: &str, running: bool, label: &str) -> Session {
         let mut s = Session::new(Provider::Claude, id.into());
         s.label_source = label.into();
@@ -1884,6 +2364,158 @@ mod tests {
         app.refilter();
         assert_eq!(app.visible.len(), 1);
         assert_eq!(app.sessions[app.visible[0]].session_id, "bbb");
+    }
+
+    /// The table abbreviates the working directory to fit its column, so the
+    /// filter has to match the full path — otherwise the directory someone
+    /// types is one the row is not admitting to.
+    #[test]
+    fn search_matches_the_full_working_directory() {
+        let mut app = test_app();
+        let mut deep = session("aaa", false, "/home/x/work/api/services/billing");
+        // What the table actually shows for that row.
+        deep.abbrev_label = "…/billing".into();
+        app.sessions = vec![deep, session("bbb", false, "/home/x/other")];
+
+        app.search = "work/api".into();
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.sessions[app.visible[0]].session_id, "aaa");
+    }
+
+    /// Content hits widen the filter, and only for the query they were found
+    /// for: a scan that lands after the user has typed another character must
+    /// not put its rows back on screen.
+    #[test]
+    fn transcript_hits_widen_the_filter_for_their_own_query_only() {
+        let mut app = test_app();
+        app.sessions = vec![
+            session("aaa", false, "/home/x/alpha"),
+            session("bbb", false, "/home/x/beta"),
+        ];
+        let hit = |key: &str| HashMap::from([(key.to_string(), "…flywheel…".to_string())]);
+
+        // No content search: a word only the transcript knows finds nothing.
+        app.search = "flywheel".into();
+        app.refilter();
+        assert!(app.visible.is_empty());
+
+        // With one, the session whose transcript matched joins the metadata
+        // matches rather than replacing them.
+        app.search_content = true;
+        app.scanned("flywheel".into(), hit("claude:bbb"));
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.sessions[app.visible[0]].session_id, "bbb");
+
+        app.search = "alpha".into();
+        app.scanned("alpha".into(), hit("claude:bbb"));
+        assert_eq!(
+            app.visible.len(),
+            2,
+            "metadata and content matches, not one"
+        );
+
+        // Hits belonging to a query that has since been extended are ignored.
+        app.search = "alphabet".into();
+        app.refilter();
+        assert!(app.visible.is_empty());
+        assert!(app.selected_snippet().is_none());
+    }
+
+    /// Turning content search off has to take its results with it, or the rows
+    /// it found stay on screen with nothing matching them.
+    #[test]
+    fn leaving_content_search_drops_its_rows() {
+        let mut app = test_app();
+        app.sessions = vec![session("aaa", false, "/home/x/alpha")];
+        app.search = "flywheel".into();
+        app.search_content = true;
+        app.scanned(
+            "flywheel".into(),
+            HashMap::from([("claude:aaa".into(), "…flywheel…".into())]),
+        );
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.selected_snippet(), Some("…flywheel…"));
+
+        app.toggle_content_search();
+        assert!(app.visible.is_empty());
+        assert!(app.selected_snippet().is_none());
+    }
+
+    /// A scan is worth its cost only once there is a word to look for, and only
+    /// for a query that isn't already answered.
+    #[test]
+    fn a_scan_waits_for_a_word_and_for_the_typing_to_settle() {
+        let mut app = test_app();
+        app.sessions = vec![session("aaa", false, "/home/x/alpha")];
+        app.search_content = true;
+
+        // Too short to be worth reading every transcript for.
+        app.search = "fl".into();
+        app.search_edited();
+        app.scan_typed_at = None;
+        app.tick_scan();
+        assert!(!app.scanning);
+
+        // Long enough, but the user is still typing.
+        app.search = "flywheel".into();
+        app.search_edited();
+        app.tick_scan();
+        assert!(!app.scanning, "fired before the debounce elapsed");
+
+        // Settled.
+        app.scan_typed_at = Some(Instant::now() - SCAN_DEBOUNCE);
+        app.tick_scan();
+        assert!(app.scanning);
+
+        // And the answer to a query already scanned for is not scanned again.
+        app.scanned("flywheel".into(), HashMap::new());
+        app.tick_scan();
+        assert!(!app.scanning);
+    }
+
+    /// ↑ walks back through past queries and ↓ returns, ending on whatever was
+    /// half-typed when the walk began.
+    #[test]
+    fn the_query_history_walks_both_ways() {
+        let mut app = test_app();
+        app.search_history = vec!["newest".into(), "older".into()];
+
+        app.search = "half-typ".into();
+        app.history_step(1);
+        assert_eq!(app.search, "newest");
+        app.history_step(1);
+        assert_eq!(app.search, "older");
+        // The end of the history is a floor, not a wrap.
+        app.history_step(1);
+        assert_eq!(app.search, "older");
+
+        app.history_step(-1);
+        assert_eq!(app.search, "newest");
+        app.history_step(-1);
+        assert_eq!(app.search, "half-typ");
+        // Nothing older to come back from any more.
+        app.history_step(-1);
+        assert_eq!(app.search, "half-typ");
+    }
+
+    /// Re-running a query moves it to the front rather than filling the history
+    /// with copies of the search someone runs most.
+    #[test]
+    fn a_repeated_query_is_remembered_once() {
+        let mut app = test_app();
+        app.search = "alpha".into();
+        app.remember_query();
+        app.search = "beta".into();
+        app.remember_query();
+        app.search = "alpha".into();
+        app.remember_query();
+        assert_eq!(app.search_history, vec!["alpha", "beta"]);
+
+        // An abandoned modal leaves nothing behind.
+        app.search = "   ".into();
+        app.remember_query();
+        assert_eq!(app.search_history, vec!["alpha", "beta"]);
     }
 
     #[test]

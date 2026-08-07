@@ -236,13 +236,22 @@ pub fn tildify(path: &str) -> String {
     path.to_string()
 }
 
-/// Drop version-date suffixes and the `claude-` vendor prefix.
+/// Drop routing prefixes, version-date suffixes, and the `claude-` vendor prefix.
+///
+/// Custom providers name models by the whole route they are reached through
+/// (`canopywave/zai/glm-5.1`), which is all prefix and no information once it
+/// no longer fits the column — the leaf is the part that identifies the model.
 ///
 /// `gpt-` is deliberately kept: dropping it leaves bare version numbers like
 /// `5.5`, which say nothing about which model they are, whereas `claude-opus-5`
 /// still reads clearly as `opus-5`.
 pub fn short_model(model: &str) -> String {
-    let m = model.strip_prefix("claude-").unwrap_or(model);
+    let m = model
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(model);
+    let m = m.strip_prefix("claude-").unwrap_or(m);
     // Trim a trailing `-YYYYMMDD` release stamp. Model names come straight from
     // transcripts and custom providers can put anything in them, so the split
     // has to respect char boundaries: a byte split panics mid-character. A
@@ -511,6 +520,22 @@ mod tests {
         assert_eq!(short_model("claude-opus-5"), "opus-5");
         assert_eq!(short_model("gpt-5.3-codex"), "gpt-5.3-codex");
         assert_eq!(short_model("gpt-5.5"), "gpt-5.5");
+    }
+
+    /// Custom providers name a model by the whole route to it. The prefixes are
+    /// the gateway's, not the model's, and they push the identifying part out of
+    /// the column: `canopywave/z` says nothing, `glm-5.1` says everything.
+    #[test]
+    fn model_shortening_drops_provider_routes() {
+        assert_eq!(short_model("canopywave/zai/glm-5.1"), "glm-5.1");
+        assert_eq!(short_model("moonshotai/kimi-k2.6"), "kimi-k2.6");
+        assert_eq!(
+            short_model("anthropic/claude-opus-4-5-20251101"),
+            "opus-4-5"
+        );
+        assert_eq!(short_model("openai/gpt-5.2"), "gpt-5.2");
+        // A trailing slash leaves no leaf; the original still beats an empty cell.
+        assert_eq!(short_model("weird/"), "weird/");
     }
 
     /// Regression: a byte split at `len - 9` panicked whenever it landed inside

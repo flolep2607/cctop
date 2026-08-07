@@ -252,7 +252,7 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
                 s.harness.clone()
             }
         }
-        ColumnId::Branch => branch(&s.label_source).unwrap_or_else(|| "─".into()),
+        ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
     }
 }
@@ -274,6 +274,12 @@ type Reading = (Option<String>, Instant);
 /// Working directory -> its last reading.
 static BRANCHES: LazyLock<Mutex<HashMap<String, Reading>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Branch checked out in a session's working directory, or `None` when it is
+/// not in a repository. Cached, so the filter can ask per row per keystroke.
+pub fn branch_of(s: &crate::session::Session) -> Option<String> {
+    branch(&s.label_source)
+}
 
 /// Branch of a working directory, cached.
 ///

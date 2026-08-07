@@ -183,10 +183,12 @@ impl Tab {
             .filter(|(i, _)| !(focused && *i == self.focus))
             .filter_map(|(_, pane)| match known(pane.pid) {
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
-                Some(crate::hook::Signal::Idle) => Some(Attention::Idle),
-                // Reported as working: the screen is irrelevant, and this is the
-                // case the heuristic gets wrong for an agent that thinks quietly.
-                Some(crate::hook::Signal::Busy) => None,
+                // Reported as working — compacting and just-started included:
+                // the screen is irrelevant, and this is the case the heuristic
+                // gets wrong for an agent that thinks quietly.
+                Some(signal) if signal.is_working() => None,
+                // Its turn is over, or the session is.
+                Some(_) => Some(Attention::Idle),
                 None => pane.idle().then_some(Attention::Idle),
             })
             // A held question outranks a finished turn: one of them is blocking

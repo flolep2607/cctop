@@ -74,12 +74,45 @@ fn main() -> anyhow::Result<()> {
         return update::run(false);
     }
 
-    if args.install_hooks || args.remove_hooks {
-        let what = match args.install_hooks {
-            true => hook::install()?,
-            false => hook::remove()?,
+    if args.hooks_status {
+        let cwd = std::env::current_dir().ok();
+        for (line, problem) in hook::status(cwd.as_deref(), None).lines() {
+            eprintln!("{} {line}", if problem { "!" } else { "·" });
+        }
+        return Ok(());
+    }
+
+    if let Some(scope) = args
+        .install_hooks
+        .as_deref()
+        .or(args.remove_hooks.as_deref())
+    {
+        let installing = args.install_hooks.is_some();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let Some(scope) = hook::Scope::parse(scope, &cwd) else {
+            anyhow::bail!("unknown scope '{scope}'; use `user` or `project`");
         };
-        eprintln!("{what}");
+        eprintln!(
+            "{}",
+            match installing {
+                true => hook::install(&scope)?,
+                false => hook::remove(&scope)?,
+            }
+        );
+        // Codex is configured machine-wide or not at all, so it rides along with
+        // the user scope only. A failure there — someone else's notify program
+        // already in the slot — is reported rather than fatal: it must not undo
+        // the Claude Code half that already succeeded.
+        if scope == hook::Scope::User {
+            match if installing {
+                hook::codex_install()
+            } else {
+                hook::codex_remove()
+            } {
+                Ok(what) => eprintln!("{what}"),
+                Err(e) => eprintln!("Codex: {e}"),
+            }
+        }
         eprintln!("Sessions already running keep their old hooks until restarted.");
         return Ok(());
     }
