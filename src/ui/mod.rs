@@ -347,6 +347,10 @@ fn spawn_worker(
 
 pub struct App {
     pub sessions: Vec<Session>,
+    /// Whether a first load has landed. Discovery is asynchronous, so an empty
+    /// `sessions` means "still looking" until this flips — and "you have none"
+    /// is a very different thing to tell someone.
+    pub loaded: bool,
     /// Indices into `sessions`, after filtering and sorting.
     pub visible: Vec<usize>,
     pub stats: Stats,
@@ -384,6 +388,15 @@ pub struct App {
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
     /// page by half a screen.
     pub list_height: u16,
+
+    /// Columns the user has hidden outright (`$CCTOP_COLUMNS_HIDE`). These win
+    /// over the automatic width-based dropping in [`columns::visible_columns`].
+    pub hidden_columns: Vec<ColumnId>,
+
+    /// Scroll offset of the help overlay, which is taller than most terminals.
+    pub help_scroll: u16,
+    /// Last computed bottom of the help overlay, recorded during draw.
+    pub help_max_scroll: u16,
 
     pub bottom_tab: usize,
     pub panel_data: Option<SessionData>,
@@ -488,6 +501,7 @@ impl App {
 
         App {
             sessions: Vec::new(),
+            loaded: false,
             visible: Vec::new(),
             stats: Stats::default(),
             selected: 0,
@@ -512,6 +526,9 @@ impl App {
             cost_input: String::new(),
             send_input: String::new(),
             list_height: 0,
+            hidden_columns: hidden_columns(&prefs),
+            help_scroll: 0,
+            help_max_scroll: 0,
             bottom_tab: prefs.bottom_tab.min(panels::TABS.len() - 1),
             panel_data: None,
             panel_key: String::new(),
@@ -618,19 +635,8 @@ impl App {
                         return false;
                     }
                 }
-                if !query.is_empty() {
-                    let haystack = format!(
-                        "{} {} {} {} {}",
-                        s.display_label(),
-                        s.model,
-                        s.harness,
-                        s.provider.as_str(),
-                        s.session_id
-                    )
-                    .to_ascii_lowercase();
-                    if !haystack.contains(&query) {
-                        return false;
-                    }
+                if !matches_query(s, &query) {
+                    return false;
                 }
                 if self.cost_floor > 0.0 {
                     // Sessions with unknown cost are kept: the floor can't say
@@ -873,21 +879,59 @@ impl App {
     }
 
     /// Whether the session matches the active text search.
+    ///
+    /// `refilter` calls [`matches_query`] directly with a query it lowercases
+    /// once; this is the same predicate for callers that only have one session
+    /// in hand, so the live filter and the `n`/`N` jump cannot drift apart.
     fn matches_search(&self, s: &Session) -> bool {
-        let query = self.search.to_ascii_lowercase();
-        if query.is_empty() {
-            return true;
+        matches_query(s, &self.search.to_ascii_lowercase())
+    }
+
+    /// Open the terminate confirmation for the selected session, explaining
+    /// itself when there is nothing this cctop can signal.
+    fn confirm_terminate(&mut self) {
+        match self.selected_session() {
+            Some(s) if session_root_pid(s).is_some() => self.mode = Mode::KillConfirm,
+            Some(s) if s.is_running() => self.mode = Mode::KillBlocked,
+            Some(_) => self.set_status("Selected session is not running"),
+            None => {}
         }
-        let haystack = format!(
-            "{} {} {} {} {}",
-            s.display_label(),
-            s.model,
-            s.harness,
-            s.provider.as_str(),
-            s.session_id
-        )
-        .to_ascii_lowercase();
-        haystack.contains(&query)
+    }
+
+    /// Peel off one filter layer, narrowest first, and say which one went.
+    ///
+    /// One press per layer rather than all at once: filters are combined
+    /// deliberately, and clearing four of them on a stray Esc would lose work
+    /// that took four deliberate keystrokes to set up. Every layer that paints
+    /// a badge in the footer is reachable from here, so nothing can stay on
+    /// with no way to turn it off.
+    fn clear_one_filter(&mut self) {
+        let cleared = if !self.search.is_empty() {
+            self.search.clear();
+            "Search cleared"
+        } else if self.cost_floor > 0.0 {
+            self.cost_floor = 0.0;
+            "Cost floor cleared"
+        } else if self.live_only {
+            self.live_only = false;
+            "Showing stopped sessions too"
+        } else if self.age_filter.is_some() {
+            self.age_filter = None;
+            "Age filter cleared"
+        } else if self.tool_tab != 0 || self.tool_live_only {
+            // The Tool Activity sidebar filters a panel rather than the table,
+            // so it comes last: it is the layer the user is least likely to
+            // have forgotten about.
+            self.tool_tab = 0;
+            self.tool_live_only = false;
+            self.tool_follow = true;
+            "Tool Activity filter cleared"
+        } else {
+            return;
+        };
+        self.refilter();
+        self.save_prefs();
+        self.set_status(cleared);
     }
 
     /// Jump to the next/previous session matching the active search, wrapping
@@ -1335,6 +1379,54 @@ impl App {
     }
 }
 
+/// Columns the user has hidden outright, which win over the automatic
+/// width-based dropping in [`columns::visible_columns`].
+///
+/// `$CCTOP_COLUMNS_HIDE` is the only source today and is meant to stay an
+/// override once a persisted one exists: `UiPrefs` is the natural home for the
+/// stored list, but it lives in `cache.rs`, which this module does not own, and
+/// carries no such field yet. When it grows one, read it here and let a
+/// non-empty env var take precedence.
+fn hidden_columns(_prefs: &UiPrefs) -> Vec<ColumnId> {
+    columns::parse_hidden(&std::env::var("CCTOP_COLUMNS_HIDE").unwrap_or_default())
+}
+
+/// The one definition of "this session matches the search box".
+///
+/// `query` must already be ASCII-lowercased — it is one string per refresh,
+/// while the fields tested here are thousands, and folding those was the whole
+/// per-refresh allocation. Fields are tested one at a time rather than joined
+/// into a haystack, which also means a query never matches across the seam
+/// between two unrelated fields.
+fn matches_query(s: &Session, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    [
+        s.display_label(),
+        &s.model,
+        &s.harness,
+        s.provider.as_str(),
+        &s.session_id,
+    ]
+    .iter()
+    .any(|field| contains_ascii_ci(field, query))
+}
+
+/// `haystack.to_ascii_lowercase().contains(needle)` without the allocation.
+///
+/// Comparing bytes is safe on UTF-8 here: ASCII case folding never touches a
+/// continuation byte, so a match can only start at a character boundary.
+fn contains_ascii_ci(haystack: &str, lowercase_needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), lowercase_needle.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    h.len() >= n.len()
+        && h.windows(n.len())
+            .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
+}
+
 /// PID of the currently live agent root, excluding briefly retained exits.
 fn session_root_pid(session: &Session) -> Option<u32> {
     session
@@ -1357,6 +1449,10 @@ fn session_root_pid(session: &Session) -> Option<u32> {
 /// shows attached and outlives by nothing: when the agent exits, so does cctop,
 /// so `cctop claude` gets you back to your shell the way `claude` would.
 pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i32> {
+    // Before anything draws, and once: the palette is read by every widget and
+    // must not change under them mid-run.
+    theme::init_from_env();
+
     let (req_tx, req_rx) = channel::<Request>();
     let (res_tx, res_rx) = channel::<Response>();
     let worker = spawn_worker(args.plan, req_rx, res_tx.clone());
@@ -1514,6 +1610,7 @@ fn event_loop(
             match res_rx.try_recv() {
                 Ok(Response::Discovered(sessions)) => {
                     app.sessions = sessions;
+                    app.loaded = true;
                     app.stats = crate::loader::compute_stats(&app.sessions);
                     app.refilter();
                     rows_changed = true;
@@ -1536,6 +1633,7 @@ fn event_loop(
                 Ok(Response::Sessions(payload)) => {
                     let (sessions, stats) = *payload;
                     app.sessions = sessions;
+                    app.loaded = true;
                     app.stats = stats;
                     app.push_history();
                     app.refilter();
@@ -1557,6 +1655,7 @@ fn event_loop(
                         }
                     }
                     app.stats = stats;
+                    app.loaded = true;
                     app.push_history();
                     app.refilter();
                     refresh_in_flight = false;
@@ -1755,6 +1854,7 @@ fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn test_app() -> App {
         let (tx, rx) = channel();
@@ -2090,5 +2190,128 @@ mod tests {
         assert_eq!(app.refresh_secs, 0.5);
         app.adjust_refresh(100.0);
         assert_eq!(app.refresh_secs, 60.0);
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The whole point of the rebinding: a vim reflex moves the cursor and
+    /// cannot reach a live agent.
+    #[test]
+    fn k_moves_up_and_never_terminates() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "/x"), session("b", true, "/y")];
+        app.refilter();
+        app.selected = 1;
+
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.selected, 0, "k must move up like every modal here");
+        assert_eq!(app.mode, Mode::List, "k must not open a kill dialog");
+
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected, 1);
+
+        // Terminate still exists, behind a modifier. The fixture's process has
+        // no root PID, so it stops at the explanation rather than the confirm —
+        // either way, Ctrl+K is what reaches the terminate path at all.
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(app.mode, Mode::KillBlocked);
+    }
+
+    /// Every filter that paints a badge must be reachable from Esc, one press
+    /// at a time.
+    #[test]
+    fn esc_clears_one_filter_layer_per_press() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "/x")];
+        app.search = "x".into();
+        app.cost_floor = 1.0;
+        app.live_only = true;
+        app.age_filter = Some(AgeFilter::Day);
+        app.tool_tab = 2;
+        app.refilter();
+
+        for expected in 1..=5 {
+            app.on_key(key(KeyCode::Esc));
+            let left = [
+                !app.search.is_empty(),
+                app.cost_floor > 0.0,
+                app.live_only,
+                app.age_filter.is_some(),
+                app.tool_tab != 0,
+            ]
+            .iter()
+            .filter(|on| **on)
+            .count();
+            assert_eq!(left, 5 - expected, "press {expected} cleared the wrong count");
+        }
+        // A sixth press is harmless.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::List);
+    }
+
+    /// Panel keys are bounded by the tab list, not by a literal that drifts.
+    #[test]
+    fn number_keys_cover_every_panel_and_nothing_more() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "/x")];
+        app.refilter();
+        for (i, _) in panels::TABS.iter().enumerate() {
+            let digit = char::from_digit(i as u32 + 1, 10).unwrap();
+            app.on_key(key(KeyCode::Char(digit)));
+            assert_eq!(app.bottom_tab, i, "key {digit} must select panel {i}");
+        }
+        // One past the end changes nothing rather than selecting a phantom tab.
+        let past = char::from_digit(panels::TABS.len() as u32 + 1, 10).unwrap();
+        let before = app.bottom_tab;
+        app.on_key(key(KeyCode::Char(past)));
+        assert_eq!(app.bottom_tab, before);
+    }
+
+    /// The live filter and the n/N jump must agree, because they are now the
+    /// same predicate.
+    #[test]
+    fn refilter_and_matches_search_agree() {
+        let mut app = test_app();
+        app.sessions = vec![
+            session("aaa", false, "/home/x/Alpha"),
+            session("bbb", false, "/home/x/beta"),
+        ];
+        for query in ["alpha", "ALPHA", "x/", "", "nomatch"] {
+            app.search = query.into();
+            app.refilter();
+            let by_predicate: Vec<usize> = (0..app.sessions.len())
+                .filter(|&i| app.matches_search(&app.sessions[i]))
+                .collect();
+            assert_eq!(app.visible.len(), by_predicate.len(), "query {query:?}");
+        }
+    }
+
+    #[test]
+    fn case_insensitive_contains_matches_std() {
+        for (h, n) in [
+            ("Alpha/Beta", "beta"),
+            ("Alpha", "alpha"),
+            ("Alpha", ""),
+            ("a", "aa"),
+            ("héllo-World", "world"),
+            ("nope", "zz"),
+        ] {
+            assert_eq!(
+                contains_ascii_ci(h, n),
+                h.to_ascii_lowercase().contains(n),
+                "{h:?} / {n:?}"
+            );
+        }
+    }
+
+    /// An empty table before the first load means "still looking", and the
+    /// table draws a different thing for each.
+    #[test]
+    fn sessions_are_not_reported_empty_before_the_first_load() {
+        let app = test_app();
+        assert!(!app.loaded);
+        assert!(app.sessions.is_empty());
     }
 }

@@ -5,7 +5,7 @@ use super::theme;
 use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, session_root_pid, tabs};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
@@ -31,24 +31,73 @@ fn modal(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>, 
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER_HI))
+        .border_style(Style::default().fg(theme::colors().border_hi))
         .title(Span::styled(format!(" {title} "), theme::title()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
+/// A modal whose content may be taller than the screen.
+///
+/// Returns the largest useful scroll offset so the key handler knows where the
+/// bottom is; the caller stores it on the app. Without this the tail of a long
+/// overlay is simply cut off by `centered`, with nothing on screen to say that
+/// there is more — which is exactly how the Tabs section of the help went
+/// missing on anything shorter than about 57 rows.
+fn scrollable_modal(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    width: u16,
+    scroll: u16,
+) -> u16 {
+    let total = lines.len() as u16;
+    let rect = centered(area, width, total + 2);
+    frame.render_widget(Clear, rect);
+
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .title(Span::styled(format!(" {title} "), theme::title()));
+
+    let inner_height = block.inner(rect).height;
+    let max_scroll = total.saturating_sub(inner_height);
+    let scroll = scroll.min(max_scroll);
+    if max_scroll > 0 {
+        // On the border, so it costs no content line and can't scroll away.
+        block = block.title_bottom(Span::styled(
+            format!(
+                " {}–{} of {total}   ↑↓ scroll ",
+                scroll + 1,
+                (scroll + inner_height).min(total)
+            ),
+            theme::dim(),
+        ));
+    }
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        inner,
+    );
+    max_scroll
+}
+
+pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
     let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
     let item = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("  {k:<16}"), Style::default().fg(theme::ACCENT)),
+            Span::styled(format!("  {k:<16}"), Style::default().fg(theme::colors().accent)),
             Span::raw(d.to_string()),
         ])
     };
     let lines = vec![
         section("Navigation"),
-        item("↑  ↓/j", "Move between sessions"),
+        item("↑/k  ↓/j", "Move between sessions"),
         item("PgUp / PgDn", "Page through the list"),
         item("Ctrl+U / Ctrl+D", "Half a page up / down"),
         item("g / G", "Jump to first / last"),
@@ -59,7 +108,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         section("Panels"),
         item("←  →", "Move between bottom panels"),
         item("Tab / Shift+Tab", "Same, either direction"),
-        item("1 – 7", "Jump to a panel directly"),
+        item("1 – 9", "Jump to a panel directly"),
         item("Shift+↑ / ↓", "Scroll inside the active panel"),
         item("f", "Follow mode: keep the selection centered"),
         item("L", "Toggle the Tool Activity live filter"),
@@ -74,7 +123,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("P / M / T", "Sort by status / memory / cost"),
         item("H / X / S", "Sort by harness / context / tools"),
         item("+ / - / =", "Speed up / slow down / reset refresh"),
-        item("Esc", "Clear the active filter"),
+        item("Esc", "Clear one filter layer per press"),
         Line::default(),
         section("Batch actions"),
         item("Space", "Mark / unmark the selected session"),
@@ -86,7 +135,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("w", "Bell + desktop alert when a session needs you"),
         item("y", "Copy resume command or transcript path"),
         item("d", "Delete the selected session (not running)"),
-        item("k", "Terminate the selected live session"),
+        item("Ctrl+K", "Terminate the selected live session"),
         item("s", "Type a line into the session's terminal"),
         item("a", "Open the session's terminal in a tab"),
         item("A", "Open the agent this cctop launched"),
@@ -102,6 +151,15 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("Alt+w", "Close the focused pane"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
+        section("Environment"),
+        item("CCTOP_THEME", "light / dark / auto (default: auto)"),
+        item("NO_COLOR", "Drop colour; shape and weight carry the state"),
+        item("CCTOP_COLUMNS_HIDE", "Column keys to hide, e.g. tok_rate,mem"),
+        Line::from(Span::styled(
+            "  Columns also drop by priority on their own as the window narrows.",
+            theme::dim(),
+        )),
+        Line::default(),
         Line::from(Span::styled(
             "  Costs are estimates from published per-token rates. Flat-rate plans",
             theme::dim(),
@@ -111,9 +169,12 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
             theme::dim(),
         )),
         Line::default(),
-        Line::from(Span::styled("  Press any key to return", theme::dim())),
+        Line::from(Span::styled(
+            "  ↑ / ↓ scroll   any other key returns",
+            theme::dim(),
+        )),
     ];
-    modal(frame, area, "Help", lines, 76);
+    app.help_max_scroll = scrollable_modal(frame, area, "Help", lines, 76, app.help_scroll);
 }
 
 pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
@@ -123,10 +184,10 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 app.search.clone(),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(theme::colors().value)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("█", Style::default().fg(theme::ACCENT)),
+            Span::styled("█", Style::default().fg(theme::colors().accent)),
         ]),
         Line::from(Span::styled(
             format!(
@@ -153,12 +214,9 @@ pub(super) fn draw_sortby(frame: &mut Frame, area: Rect, app: &App) {
             };
             let text = format!(" {}{}", c.label.trim(), arrow);
             let style = if i == app.sortby_cursor {
-                Style::default()
-                    .bg(theme::SELECTED_BG)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
+                theme::selected()
             } else if active {
-                Style::default().fg(theme::ACCENT)
+                Style::default().fg(theme::colors().accent)
             } else {
                 Style::default()
             };
@@ -187,10 +245,7 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
             let marker = if active { "●" } else { "○" };
             let text = opt.map(|o| o.label()).unwrap_or("No filter");
             let style = if i == app.age_cursor {
-                Style::default()
-                    .bg(theme::SELECTED_BG)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
+                theme::selected()
             } else {
                 Style::default()
             };
@@ -198,9 +253,9 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(
                     format!(" {marker} "),
                     Style::default().fg(if active {
-                        theme::COST_LOW
+                        theme::colors().cost_low
                     } else {
-                        theme::DIMMER
+                        theme::colors().dimmer
                     }),
                 ),
                 Span::styled(format!("{text:<22}"), style),
@@ -222,10 +277,7 @@ pub(super) fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, argv)| {
             let style = if i == app.launch_cursor {
-                Style::default()
-                    .bg(theme::SELECTED_BG)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
+                theme::selected()
             } else {
                 Style::default()
             };
@@ -245,7 +297,7 @@ pub(super) fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
             ),
             None => " in this directory".to_string(),
         },
-        Style::default().fg(theme::LABEL),
+        Style::default().fg(theme::colors().label),
     )));
     lines.push(Line::from(Span::styled(
         " ↑/↓  Enter start  Esc cancel",
@@ -272,7 +324,7 @@ pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {
         Line::default(),
         Line::from(Span::styled(
             "  This permanently removes the transcript from disk.",
-            Style::default().fg(theme::COST_MID),
+            Style::default().fg(theme::colors().cost_mid),
         )),
         Line::default(),
         Line::from(Span::styled(
@@ -314,7 +366,7 @@ pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App) {
         Line::default(),
         Line::from(Span::styled(
             "  Send a termination signal to this agent process?",
-            Style::default().fg(theme::COST_MID),
+            Style::default().fg(theme::colors().cost_mid),
         )),
         Line::from(Span::raw("  Unsaved work in the agent may be interrupted.")),
         Line::default(),
@@ -336,11 +388,11 @@ pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App) {
         Line::default(),
         Line::from(Span::styled(
             "  This agent is running on a terminal cctop owns,",
-            Style::default().fg(theme::COST_MID),
+            Style::default().fg(theme::colors().cost_mid),
         )),
         Line::from(Span::styled(
             "  and quitting ends it.",
-            Style::default().fg(theme::COST_MID),
+            Style::default().fg(theme::colors().cost_mid),
         )),
         Line::from(Span::raw("  Exit the agent itself to leave it cleanly.")),
         Line::default(),
@@ -403,7 +455,7 @@ pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App) {
             BatchKind::Delete => "  This permanently removes their transcripts from disk.",
             BatchKind::Kill => "  Unsaved work in the agents may be interrupted.",
         },
-        Style::default().fg(theme::COST_MID),
+        Style::default().fg(theme::colors().cost_mid),
     )));
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
@@ -474,10 +526,10 @@ pub(super) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 input,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(theme::colors().value)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("█", Style::default().fg(theme::ACCENT)),
+            Span::styled("█", Style::default().fg(theme::colors().accent)),
         ]),
         Line::default(),
         Line::from(Span::styled(
@@ -511,10 +563,10 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 app.send_input.clone(),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(theme::colors().value)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("█", Style::default().fg(theme::ACCENT)),
+            Span::styled("█", Style::default().fg(theme::colors().accent)),
         ]),
         Line::default(),
         Line::from(Span::styled(" Enter send   Esc cancel", theme::dim())),

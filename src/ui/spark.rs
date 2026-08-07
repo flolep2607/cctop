@@ -4,7 +4,7 @@
 //! resolution of block glyphs. Sparklines use only the left dot column so each
 //! character maps to exactly one sample; the larger charts use both.
 
-use super::theme::Gradient;
+use super::theme::{self, Gradient};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -35,7 +35,7 @@ pub fn sparkline(
     let baseline = braille(LEFT_COL_BITS[0]);
     let base_style = Style::default().fg(gradient.baseline());
     let now_style = Style::default()
-        .fg(ratatui::style::Color::White)
+        .fg(theme::colors().value)
         .add_modifier(ratatui::style::Modifier::BOLD);
 
     if width == 0 {
@@ -150,9 +150,9 @@ pub fn line_chart(
         prev_y = Some(y);
     }
 
-    let axis_style = Style::default().fg(ratatui::style::Color::Indexed(238));
-    let label_style = Style::default().fg(ratatui::style::Color::Indexed(239));
-    let empty_style = Style::default().fg(ratatui::style::Color::Indexed(236));
+    let axis_style = Style::default().fg(theme::gray(238));
+    let label_style = Style::default().fg(theme::gray(239));
+    let empty_style = Style::default().fg(theme::gray(236));
 
     let mut out = Vec::with_capacity(rows + 1);
     for (r, row) in grid.iter().enumerate() {

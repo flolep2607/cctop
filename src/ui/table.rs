@@ -1,7 +1,7 @@
 //! The session table: column sizing, row rendering, and per-cell colouring.
 
 use super::App;
-use super::columns::{self, COLUMNS, ColumnId};
+use super::columns::{self, ColumnId};
 use super::render::{Layout, panel_block};
 use super::theme;
 use crate::pricing::Provider;
@@ -18,11 +18,76 @@ use ratatui::widgets::Paragraph;
 // ---------------------------------------------------------------------------
 
 /// Resolve each column's width, giving the flexible column whatever is left.
-fn column_widths(total: u16) -> Vec<u16> {
-    let fixed: u16 = COLUMNS.iter().filter_map(|c| c.width).sum::<u16>()
-        + (COLUMNS.len().saturating_sub(1)) as u16; // single-space gutters
+fn column_widths(cols: &[&'static columns::Column], total: u16) -> Vec<u16> {
+    let fixed: u16 = cols.iter().filter_map(|c| c.width).sum::<u16>()
+        + (cols.len().saturating_sub(1)) as u16; // single-space gutters
     let flex = total.saturating_sub(fixed).max(8);
-    COLUMNS.iter().map(|c| c.width.unwrap_or(flex)).collect()
+    cols.iter().map(|c| c.width.unwrap_or(flex)).collect()
+}
+
+/// Providers cctop knows how to read, and where it looks for each. Shown when
+/// the list is genuinely empty, since "found nothing" is only useful next to
+/// "here is what I looked for".
+fn provider_search_paths() -> Vec<(&'static str, String)> {
+    use crate::config;
+    vec![
+        (
+            "Claude Code",
+            config::CLAUDE_PROJECTS_ROOT.display().to_string(),
+        ),
+        ("Codex", config::CODEX_SESSIONS_ROOT.display().to_string()),
+        ("Cursor", config::CURSOR_PROJECTS_ROOT.display().to_string()),
+        ("Gemini CLI", config::GEMINI_CHATS_ROOT.display().to_string()),
+        ("OpenCode", config::OPENCODE_DATA_DIR.display().to_string()),
+        ("Pi", config::PI_SESSIONS_ROOT.display().to_string()),
+        ("Windsurf", config::WINDSURF_USER_DIR.display().to_string()),
+    ]
+}
+
+#[cfg(test)]
+/// Every provider must name itself here, or an empty screen quietly implies
+/// cctop cannot see a tool it can in fact read.
+fn provider_is_listed(p: crate::pricing::Provider) -> bool {
+    let listed = provider_search_paths();
+    listed
+        .iter()
+        .any(|(name, _)| name.to_ascii_lowercase().starts_with(p.as_str()))
+}
+
+/// What to say when there is nothing to draw.
+fn empty_lines(app: &App) -> Vec<Line<'static>> {
+    if !app.loaded {
+        return vec![Line::from(Span::styled(
+            "Scanning for sessions…",
+            theme::dim(),
+        ))];
+    }
+    if app.live_only {
+        return vec![Line::from(Span::styled(
+            "No running sessions. ` shows stopped ones too.",
+            theme::dim(),
+        ))];
+    }
+    if !app.search.is_empty() || app.age_filter.is_some() || app.cost_floor > 0.0 {
+        return vec![Line::from(Span::styled(
+            "No sessions match the current filters. Esc clears them, one at a time.",
+            theme::dim(),
+        ))];
+    }
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "No agent sessions found. cctop looked in:",
+            theme::dim(),
+        )),
+        Line::default(),
+    ];
+    for (name, path) in provider_search_paths() {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {name:<12}"), theme::dim()),
+            Span::styled(path, theme::dim()),
+        ]));
+    }
+    lines
 }
 
 fn pad(text: &str, width: u16, right: bool) -> String {
@@ -53,13 +118,14 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     if inner.height == 0 {
         return;
     }
-    let widths = column_widths(inner.width);
+    let cols = columns::visible_columns(inner.width, &app.hidden_columns);
+    let widths = column_widths(&cols, inner.width);
 
     // Header, recording click spans as we go.
     let mut header_spans = Vec::new();
     let mut col_pos = inner.x;
     layout.column_spans.clear();
-    for (c, w) in COLUMNS.iter().zip(&widths) {
+    for (c, w) in cols.iter().zip(&widths) {
         let arrow = if c.id == app.sort_col {
             if app.sort_asc { "▲" } else { "▼" }
         } else {
@@ -73,12 +139,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     }
     layout.header_row = inner.y;
     frame.render_widget(
-        Paragraph::new(Line::from(header_spans)).style(
-            Style::default()
-                .fg(Color::White)
-                .bg(theme::HEADER_BG)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(Line::from(header_spans)).style(theme::header()),
         Rect { height: 1, ..inner },
     );
 
@@ -91,17 +152,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     layout.rows_end = list_area.y + list_area.height;
 
     if app.visible.is_empty() {
-        let msg = if app.live_only {
-            "No running sessions."
-        } else if !app.search.is_empty() || app.age_filter.is_some() {
-            "No sessions match the current filters. Esc clears them."
-        } else {
-            "No Claude, Codex, Cursor, OpenCode, or Pi sessions found."
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, theme::dim()))),
-            list_area,
-        );
+        frame.render_widget(Paragraph::new(empty_lines(app)), list_area);
         return;
     }
 
@@ -136,44 +187,54 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
             let key = s.key();
             let marked = app.marked.contains(&key);
             let deleting = app.deleting.contains(&key);
-            session_row(
-                s,
-                &widths,
+            let state = RowState {
                 selected,
                 marked,
                 deleting,
-                app.notify.rang_recently(&key),
-                &now,
-            )
+                rang: app.notify.rang_recently(&key),
+            };
+            session_row(s, &cols, &widths, state, &now)
         })
         .collect();
 
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
-fn session_row(
-    s: &crate::session::Session,
-    widths: &[u16],
+/// What a row is doing beyond its data: whether it is under the cursor, marked
+/// for a batch action, on its way out, or has just rung. Grouped because they
+/// travel together and are all read by the same loop.
+#[derive(Debug, Clone, Copy, Default)]
+struct RowState {
     selected: bool,
     marked: bool,
     deleting: bool,
     rang: bool,
+}
+
+fn session_row(
+    s: &crate::session::Session,
+    cols: &[&'static columns::Column],
+    widths: &[u16],
+    state: RowState,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Line<'static> {
+    let RowState {
+        selected,
+        marked,
+        deleting,
+        rang,
+    } = state;
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
     let base = if selected {
-        Style::default()
-            .bg(theme::SELECTED_BG)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
+        theme::selected()
     } else if marked {
-        Style::default().bg(theme::MARKED_BG)
+        theme::marked()
     } else {
         Style::default()
     };
 
-    let mut spans = Vec::with_capacity(COLUMNS.len() * 2);
-    for (c, w) in COLUMNS.iter().zip(widths) {
+    let mut spans = Vec::with_capacity(cols.len() * 2);
+    for (c, w) in cols.iter().zip(widths) {
         // The session that just rang takes over its own status dot for a
         // moment. Without it a bell out of a dozen panes is a sound with no
         // row attached — and its ordinary dot would be the same hollow grey as
@@ -191,19 +252,16 @@ fn session_row(
         // colored, otherwise you can't tell a running session from a stopped
         // one on the selected line.
         let style = if bell {
-            base.fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            base.fg(theme::colors().accent).add_modifier(Modifier::BOLD)
         } else if selected {
             if c.id == ColumnId::Status {
-                Style::default()
-                    .bg(theme::SELECTED_BG)
-                    .fg(cell_color(c.id, s, age_secs))
-                    .add_modifier(Modifier::BOLD)
+                theme::selected().fg(cell_color(c.id, s, age_secs))
             } else {
                 base
             }
         } else {
             base.fg(if deleting && c.id == ColumnId::Status {
-                theme::COST_MID
+                theme::colors().cost_mid
             } else {
                 cell_color(c.id, s, age_secs)
             })
@@ -217,66 +275,66 @@ fn session_row(
 fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) -> Color {
     match id {
         ColumnId::Status => match s.activity_state {
-            crate::session::ActivityState::WaitingForInput => theme::COST_MID,
-            crate::session::ActivityState::ApiError => theme::COST_HIGH,
+            crate::session::ActivityState::WaitingForInput => theme::colors().cost_mid,
+            crate::session::ActivityState::ApiError => theme::colors().cost_high,
             crate::session::ActivityState::Working if s.is_running() => {
                 theme::running_dot_color(age_secs)
             }
-            crate::session::ActivityState::Working => theme::DIM,
+            crate::session::ActivityState::Working => theme::colors().dim,
         },
         ColumnId::Last => theme::age_color(age_secs, s.is_running()),
         ColumnId::Model => theme::model_color(&s.model),
         ColumnId::Project => match s.surface {
-            Surface::DesktopCowork => theme::DESKTOP_COWORK,
-            Surface::DesktopCode => theme::DESKTOP_CODE,
-            Surface::Editor => theme::CURSOR,
-            Surface::Cli if s.provider == Provider::Cursor => theme::CURSOR,
+            Surface::DesktopCowork => theme::colors().desktop_cowork,
+            Surface::DesktopCode => theme::colors().desktop_code,
+            Surface::Editor => theme::colors().cursor,
+            Surface::Cli if s.provider == Provider::Cursor => theme::colors().cursor,
             Surface::Cli => Color::Reset,
         },
         ColumnId::Cost => {
             if s.cost_is_free {
-                theme::DIMMER
+                theme::colors().dimmer
             } else {
-                s.total_cost.map(theme::cost_color).unwrap_or(theme::DIM)
+                s.total_cost.map(theme::cost_color).unwrap_or(theme::colors().dim)
             }
         }
         ColumnId::CostHour => {
             if s.cost_is_free {
-                theme::DIMMER
+                theme::colors().dimmer
             } else if s.cost_hour > 0.0 {
                 theme::cost_color(s.cost_hour)
             } else {
-                theme::DIMMER
+                theme::colors().dimmer
             }
         }
         ColumnId::CostToday => {
             if s.cost_is_free {
-                theme::DIMMER
+                theme::colors().dimmer
             } else if s.cost_today > 0.0 {
                 theme::cost_color(s.cost_today)
             } else {
-                theme::DIMMER
+                theme::colors().dimmer
             }
         }
         ColumnId::Context => match &s.context {
-            Some(c) if c.compacting => theme::COST_HIGH,
+            Some(c) if c.compacting => theme::colors().cost_high,
             Some(c) => theme::context_color(c.percent_to_compact()),
-            None => theme::DIMMER,
+            None => theme::colors().dimmer,
         },
         ColumnId::Cpu => s
             .process
             .as_ref()
             .map(|p| theme::cpu_color(p.cpu))
-            .unwrap_or(theme::DIMMER),
+            .unwrap_or(theme::colors().dimmer),
         ColumnId::TokenRate => {
             if s.tokens_per_min > 5000.0 {
-                theme::COST_HIGH
+                theme::colors().cost_high
             } else if s.tokens_per_min > 1000.0 {
-                theme::COST_MID
+                theme::colors().cost_mid
             } else if s.tokens_per_min > 0.0 {
-                theme::COST_LOW
+                theme::colors().cost_low
             } else {
-                theme::DIM
+                theme::colors().dim
             }
         }
         _ => Color::Reset,
@@ -286,11 +344,17 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::columns::COLUMNS;
+
+    fn all_columns() -> Vec<&'static columns::Column> {
+        COLUMNS.iter().collect()
+    }
 
     #[test]
     fn column_widths_fill_the_available_space() {
-        let widths = column_widths(200);
-        let total: u16 = widths.iter().sum::<u16>() + (COLUMNS.len() - 1) as u16;
+        let cols = all_columns();
+        let widths = column_widths(&cols, 200);
+        let total: u16 = widths.iter().sum::<u16>() + (cols.len() - 1) as u16;
         assert_eq!(total, 200);
     }
 
@@ -298,7 +362,8 @@ mod tests {
     fn column_widths_stay_positive_when_cramped() {
         // A narrow terminal must not produce a zero or wrapped-around width.
         for w in [10u16, 40, 80] {
-            let widths = column_widths(w);
+            let cols = columns::visible_columns(w, &[]);
+            let widths = column_widths(&cols, w);
             assert!(
                 widths.iter().all(|&x| x > 0),
                 "width {w} produced {widths:?}"
@@ -313,13 +378,53 @@ mod tests {
         let mut s = crate::session::Session::new(Provider::Claude, "a".into());
         s.last_active = chrono::Utc::now().to_rfc3339();
         let now = chrono::Utc::now();
-        let widths = column_widths(200);
+        let cols = all_columns();
+        let widths = column_widths(&cols, 200);
 
-        let quiet = session_row(&s, &widths, false, false, false, false, &now);
-        let rang = session_row(&s, &widths, false, false, false, true, &now);
+        let quiet = session_row(&s, &cols, &widths, RowState::default(), &now);
+        let rang = session_row(
+            &s,
+            &cols,
+            &widths,
+            RowState {
+                rang: true,
+                ..RowState::default()
+            },
+            &now,
+        );
         assert_eq!(quiet.spans[0].content, "○");
         assert_eq!(rang.spans[0].content, "◉");
-        assert_eq!(rang.spans[0].style.fg, Some(theme::ACCENT));
+        assert_eq!(rang.spans[0].style.fg, Some(theme::colors().accent));
+    }
+
+    /// The surviving columns must actually fit, or the drop was pointless.
+    #[test]
+    fn narrow_layouts_fit_inside_the_terminal() {
+        for w in [40u16, 60, 80, 100, 132, 200] {
+            let cols = columns::visible_columns(w, &[]);
+            let widths = column_widths(&cols, w);
+            let used: u16 = widths.iter().sum::<u16>() + (cols.len() - 1) as u16;
+            assert!(used <= w, "width {w} used {used} cells");
+        }
+    }
+
+    /// The empty screen names every provider cctop can read. A new one added
+    /// to `Provider` without a line here would look unsupported.
+    #[test]
+    fn the_empty_state_accounts_for_every_provider() {
+        for p in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::Cursor,
+            Provider::Gemini,
+            Provider::OpenCode,
+            Provider::Pi,
+            Provider::Windsurf,
+        ] {
+            assert!(provider_is_listed(p), "{p:?} is missing from the empty state");
+        }
+        // And each names a real directory rather than an empty string.
+        assert!(provider_search_paths().iter().all(|(_, path)| !path.is_empty()));
     }
 
     #[test]
