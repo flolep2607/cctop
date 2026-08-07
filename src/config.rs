@@ -146,8 +146,27 @@ pub const MAX_JSONL_LINE_BYTES: usize = 512 * 1024;
 /// Cap on retained per-tool invocation details, keeping the newest.
 pub const MAX_TOOL_DETAILS: usize = 200;
 
+/// Cap on retained invocation details across *all* tools in one session.
+///
+/// `MAX_TOOL_DETAILS` is per tool name, so a session touching fifteen tools can
+/// hold three thousand details at roughly a kilobyte each — measured at 95-99%
+/// of a cache entry. The Tools panel shows a recent slice, never thousands of
+/// rows, so the extra history costs disk and deserialization time and buys
+/// nothing.
+pub const MAX_SESSION_TOOL_DETAILS: usize = 400;
+
+/// Cap on a retained detail's full text (characters, not bytes).
+///
+/// `full` exists so the clipboard gets the untruncated command or prompt; a
+/// whole file's contents pasted into a tool call is not that.
+pub const MAX_TOOL_DETAIL_CHARS: usize = 800;
+
 /// Cap on diff lines kept per edit, so a large refactor doesn't bloat the cache.
 pub const MAX_DIFF_LINES: usize = 60;
+
+/// Cap on a single retained diff line, which minified or generated files can
+/// otherwise make arbitrarily long.
+pub const MAX_DIFF_LINE_CHARS: usize = 300;
 
 pub const CLAUDE_DEFAULT_CTX: u64 = 200_000;
 pub const CLAUDE_1M_CTX: u64 = 1_048_576;

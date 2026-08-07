@@ -9,6 +9,8 @@ license = "MIT"
 repository = "https://github.com/flolep2607/cctop"
 homepage = "https://github.com/flolep2607/cctop"
 readme = "README.md"
+# Derives the session cache's version from the parser sources; see build.rs.
+build = "build.rs"
 keywords = ["tui", "monitoring", "claude", "codex", "htop"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.github", "/target"]
