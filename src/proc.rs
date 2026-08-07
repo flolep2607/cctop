@@ -91,6 +91,20 @@ fn is_app_bundle(args: &str) -> bool {
     (args.contains(".app/") || args.contains(".app\\")) && !args.contains("/claude-code/")
 }
 
+fn tokens_of(p: &sysinfo::Process) -> Vec<String> {
+    p.cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The executable's comparable command name, if the kernel let us read it.
+fn exe_stem(p: &sysinfo::Process) -> Option<String> {
+    p.exe()
+        .map(|e| command_stem(&e.to_string_lossy()))
+        .filter(|n| !n.is_empty())
+}
+
 fn basename(s: &str) -> &str {
     s.rsplit(['/', '\\']).next().unwrap_or(s)
 }
@@ -175,18 +189,32 @@ fn is_node_hosted_agent(tokens: &[String], agent: &str) -> bool {
 /// `argv[0]` still says `claude`, so trust it first and only fall back to
 /// matching the install path for launchers that exec by absolute path.
 fn is_claude_binary(name: &str, tokens: &[String]) -> bool {
-    if name == "claude" {
-        return true;
-    }
-    tokens
-        .first()
-        .is_some_and(|argv0| command_stem(argv0) == "claude")
-        || tokens.first().is_some_and(|p| {
-            p.contains("/.claude/remote/ccd-cli/")
-                || p.contains("\\.claude\\remote\\ccd-cli\\")
-                || p.contains("/claude/versions/")
-                || p.contains("\\claude\\versions\\")
-        })
+    name == "claude" || tokens.first().is_some_and(|argv0| is_claude_argv0(argv0))
+}
+
+fn is_claude_argv0(argv0: &str) -> bool {
+    command_stem(argv0) == "claude"
+        || argv0.contains("/.claude/remote/ccd-cli/")
+        || argv0.contains("\\.claude\\remote\\ccd-cli\\")
+        || argv0.contains("/claude/versions/")
+        || argv0.contains("\\claude\\versions\\")
+}
+
+/// Cheap rejection test, run over every process on the machine before any
+/// command line is copied out of `sysinfo`.
+///
+/// It must stay a strict superset of the per-provider tests below: a process it
+/// rejects is never looked at again. Everything it needs is the executable stem
+/// and `argv[0]`, both of which are already in hand.
+fn could_be_agent(name: &str, argv0: Option<&str>) -> bool {
+    matches!(
+        name,
+        // `node` hosts the JS-packaged builds of codex, opencode and pi.
+        "claude" | "node" | "opencode" | "opencode-cli" | "pi"
+        // Codex's sandbox launchers, which can be the agent root themselves.
+        | "bwrap" | "codex-linux-sandbox"
+    ) || is_codex_binary(name)
+        || argv0.is_some_and(is_claude_argv0)
 }
 
 /// Locate a `resume` argument and return its value plus the index it came from.
@@ -267,75 +295,90 @@ impl Collector {
 
     /// Aggregate CPU/memory per session, keyed by `provider:session_id`.
     pub fn collect(&mut self, sessions: &[Session]) -> HashMap<String, ProcInfo> {
+        // A process's command line and executable never change for its lifetime
+        // (an exec makes it a different process, which `sysinfo` notices by its
+        // start time and re-reads in full), so re-reading `/proc/<pid>/cmdline`
+        // and re-`readlink`ing `/proc/<pid>/exe` on every tick is pure waste.
+        // A cwd genuinely can change, so that one stays unconditional.
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
             ProcessRefreshKind::nothing()
-                .with_cmd(UpdateKind::Always)
+                .with_cmd(UpdateKind::OnlyIfNotSet)
                 .with_cwd(UpdateKind::Always)
-                .with_exe(UpdateKind::Always)
+                .with_exe(UpdateKind::OnlyIfNotSet)
                 .with_memory()
                 .with_cpu()
                 .without_tasks(),
         );
         self.orphans.clear();
+        let sys = &self.sys;
 
-        // Snapshot into plain data so we're not holding borrows on `self.sys`.
-        struct Snap {
+        // Every process contributes its place in the tree and its resource
+        // usage, and nothing else: copying out command lines for all of them is
+        // what used to make this scale with the size of the machine rather than
+        // with the number of agents. The few processes that turn out to matter
+        // read theirs back out of `sys` further down.
+        struct Proc {
             ppid: u32,
-            args: String,
-            tokens: Vec<String>,
-            name: String,
-            cwd: String,
             cpu: f32,
             memory: u64,
             /// Seconds since the epoch, used to pair concurrent processes in one
             /// directory with the sessions they most plausibly started.
             start_time: u64,
         }
-        let snapshot: HashMap<u32, Snap> = self
-            .sys
-            .processes()
-            .iter()
+        /// A process that survived the cheap name filter, with the command line
+        /// the provider tests need.
+        struct Candidate {
+            pid: u32,
+            name: String,
+            tokens: Vec<String>,
+            args: String,
+        }
+
+        let mut procs: HashMap<u32, Proc> = HashMap::with_capacity(sys.processes().len());
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for (pid, p) in sys.processes() {
             // Threads share their process's command line, so every one of them
             // matches the same session. Left in, they compete to be picked as
             // the root — nondeterministically, since map order isn't stable —
             // and whichever thread wins reports its own CPU and no children.
-            .filter(|(_, p)| p.thread_kind().is_none())
-            .map(|(pid, p)| {
-                let tokens: Vec<String> = p
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .collect();
-                let args = tokens.join(" ");
-                let name = p
-                    .exe()
-                    .map(|e| command_stem(&e.to_string_lossy()))
-                    .filter(|n| !n.is_empty())
-                    .or_else(|| tokens.first().map(|t| command_stem(t)))
-                    .unwrap_or_else(|| command_stem(&p.name().to_string_lossy()));
-                (
-                    pid.as_u32(),
-                    Snap {
-                        ppid: p.parent().map(Pid::as_u32).unwrap_or(0),
-                        args,
-                        tokens,
-                        name,
-                        cwd: p
-                            .cwd()
-                            .map(|c| c.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        cpu: p.cpu_usage(),
-                        memory: p.memory(),
-                        start_time: p.start_time(),
-                    },
-                )
-            })
-            .collect();
+            if p.thread_kind().is_some() {
+                continue;
+            }
+            let pid = pid.as_u32();
+            procs.insert(
+                pid,
+                Proc {
+                    ppid: p.parent().map(Pid::as_u32).unwrap_or(0),
+                    cpu: p.cpu_usage(),
+                    memory: p.memory(),
+                    start_time: p.start_time(),
+                },
+            );
+
+            let argv0 = p.cmd().first().map(|a| a.to_string_lossy());
+            let name = exe_stem(p).unwrap_or_else(|| match &argv0 {
+                Some(a) => command_stem(a),
+                None => command_stem(&p.name().to_string_lossy()),
+            });
+            if !could_be_agent(&name, argv0.as_deref()) {
+                continue;
+            }
+            let tokens = tokens_of(p);
+            candidates.push(Candidate {
+                pid,
+                name,
+                args: tokens.join(" "),
+                tokens,
+            });
+        }
+        // Map order is not stable, so fix it before anything claims a session:
+        // `claim_root` and the title match below both prefer the lowest PID.
+        candidates.sort_by_key(|c| c.pid);
 
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for (pid, s) in &snapshot {
+        for (pid, s) in &procs {
             children.entry(s.ppid).or_default().push(*pid);
         }
 
@@ -349,7 +392,7 @@ impl Collector {
             if !current_ancestors.insert(pid) {
                 break;
             }
-            current = snapshot
+            current = procs
                 .get(&pid)
                 .and_then(|s| (s.ppid != 0).then_some(s.ppid));
         }
@@ -379,7 +422,8 @@ impl Collector {
             });
         }
 
-        for (&pid, snap) in &snapshot {
+        for snap in &candidates {
+            let pid = snap.pid;
             if exclude_agent_process(&snap.name, &snap.tokens, &snap.args) {
                 continue;
             }
@@ -448,27 +492,34 @@ impl Collector {
             let mut current = Some(pid);
             let mut seen = HashSet::new();
             let cwd = loop {
-                let Some(current_pid) = current else { break "" };
-                if !seen.insert(current_pid) {
-                    break "";
-                }
-                let Some(s) = snapshot.get(&current_pid) else {
-                    break "";
+                let Some(current_pid) = current else {
+                    break String::new();
                 };
-                if !s.cwd.is_empty() {
-                    break s.cwd.as_str();
+                if !seen.insert(current_pid) {
+                    break String::new();
                 }
-                if let Some(value) = flag_value(&s.tokens, "--command-cwd")
-                    .or_else(|| flag_value(&s.tokens, "--sandbox-policy-cwd"))
+                let (Some(s), Some(p)) = (
+                    procs.get(&current_pid),
+                    sys.process(Pid::from_u32(current_pid)),
+                ) else {
+                    break String::new();
+                };
+                if let Some(cwd) = p
+                    .cwd()
+                    .map(|c| c.to_string_lossy())
+                    .filter(|c| !c.is_empty())
                 {
-                    break value;
+                    break cwd.into_owned();
+                }
+                let tokens = tokens_of(p);
+                if let Some(value) = flag_value(&tokens, "--command-cwd")
+                    .or_else(|| flag_value(&tokens, "--sandbox-policy-cwd"))
+                {
+                    break value.to_string();
                 }
                 current = (s.ppid != 0).then_some(s.ppid);
             };
-            by_cwd
-                .entry((provider, cwd.to_string()))
-                .or_default()
-                .push(pid);
+            by_cwd.entry((provider, cwd)).or_default().push(pid);
         }
 
         // Map order is not stable, so fix it before attributing anything.
@@ -479,7 +530,7 @@ impl Collector {
         for ((provider, cwd), mut pids) in groups {
             // Oldest process first, so it pairs with the session that started
             // first and each keeps its own CPU and memory.
-            pids.sort_by_key(|pid| (snapshot.get(pid).map_or(0, |s| s.start_time), *pid));
+            pids.sort_by_key(|pid| (procs.get(pid).map_or(0, |s| s.start_time), *pid));
 
             let mut claimed = 0;
             if !cwd.is_empty()
@@ -510,35 +561,38 @@ impl Collector {
         }
 
         // --- Aggregate each root's process subtree ---
+        // Only here does a command line get copied for a non-agent process, and
+        // only for the handful that are descendants of an agent root.
         let mut result = HashMap::new();
         for (key, root_pid) in roots {
             let pids = descendants(root_pid, &children);
-            let mut info = ProcInfo {
-                command: snapshot
-                    .get(&root_pid)
-                    .map(|s| s.args.clone())
-                    .unwrap_or_default(),
-                ..Default::default()
-            };
+            let mut info = ProcInfo::default();
             for pid in &pids {
-                let Some(snap) = snapshot.get(pid) else {
+                let (Some(snap), Some(p)) = (procs.get(pid), sys.process(Pid::from_u32(*pid)))
+                else {
                     continue;
                 };
+                let args = tokens_of(p).join(" ");
+                if *pid == root_pid {
+                    info.command = args.clone();
+                }
                 info.cpu += snap.cpu;
                 info.memory += snap.memory;
                 info.process_list.push(ProcEntry {
                     pid: *pid,
                     cpu: snap.cpu,
                     memory: snap.memory,
-                    args: snap.args.clone(),
+                    args,
                     is_root: *pid == root_pid,
                     ghost: false,
                 });
             }
             info.pids = pids.len();
             info.cpu = (info.cpu * 10.0).round() / 10.0;
-            self.apply_linger(&key, &mut info);
             result.insert(key, info);
+        }
+        for (key, info) in &mut result {
+            self.apply_linger(key, info);
         }
 
         // Drop linger state for sessions that are no longer running at all.
@@ -914,6 +968,44 @@ mod tests {
         let mut got = descendants(1, &children);
         got.sort();
         assert_eq!(got, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// `could_be_agent` decides, for every process on the machine, whether its
+    /// command line is worth copying at all. If it ever rejects something the
+    /// provider tests would have accepted, that agent silently disappears from
+    /// cctop — so pin every shape the tests below rely on.
+    #[test]
+    fn the_cheap_filter_admits_every_agent_shape() {
+        let admits = |name: &str, argv: &str| {
+            let tokens = toks(argv);
+            could_be_agent(name, tokens.first().map(String::as_str))
+        };
+        // Claude, including the version-named native and remote installs whose
+        // executable stem says nothing about Claude.
+        assert!(admits("claude", "claude"));
+        assert!(admits("2.1.222", "claude --resume"));
+        assert!(admits(
+            "2.1.222",
+            "/home/f/.local/share/claude/versions/2.1.222"
+        ));
+        assert!(admits("2.1.221", "/home/f/.claude/remote/ccd-cli/2.1.221"));
+        // Codex, its release-archive names and its sandbox launchers.
+        assert!(admits("codex", "codex resume abc"));
+        assert!(admits("codex-x86_64-unknown-linux-musl", ""));
+        assert!(admits(
+            "codex-linux-sandbox",
+            "codex-linux-sandbox app-server"
+        ));
+        assert!(admits("bwrap", "bwrap -- /opt/codex app-server"));
+        // opencode and pi, native and node-hosted.
+        assert!(admits("opencode", "opencode"));
+        assert!(admits("opencode-cli", "opencode-cli"));
+        assert!(admits("pi", "pi"));
+        assert!(admits("node", "node /usr/lib/opencode.js"));
+        // Everything else on the machine stops here.
+        assert!(!admits("firefox", "/usr/bin/firefox"));
+        assert!(!admits("cargo", "cargo build"));
+        assert!(!admits("2.1.222", "/opt/other/2.1.222"));
     }
 
     #[test]
