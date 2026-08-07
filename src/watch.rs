@@ -8,20 +8,43 @@
 //! not exist before, because that means walking every provider's directory tree.
 //! So the walk becomes a safety net and this becomes the trigger.
 //!
+//! One walk per create would still be too few. A transcript is created before it
+//! carries enough to build a session from — Claude writes the file at startup and
+//! the model name only arrives with the first assistant message — so the walk the
+//! create triggers finds nothing, and the appends that follow are the very events
+//! this module ignores. Creates are therefore remembered until they turn into a
+//! session, and the caller re-walks while any are outstanding.
+//!
 //! Watch failures are not errors: a provider directory may not exist, and on
 //! Linux a recursive watch consumes one inotify watch per directory, which a
 //! large enough tree can exhaust. Either way the periodic walk still runs, so the
 //! only cost is that a new session takes until the next one to appear.
 
 use notify::{EventKind, RecursiveMode, Watcher};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long a created file stays worth re-walking for.
+///
+/// A transcript exists before it says anything a session can be built from —
+/// Claude writes the file at startup and the first assistant message, which is
+/// where the model name comes from, lands whenever the model answers. Until then
+/// a walk finds nothing, so the create alone cannot be the last word.
+const PENDING_FOR: Duration = Duration::from_secs(120);
+
+/// Cap on remembered creates, so a provider rewriting a directory in bulk cannot
+/// grow this without bound.
+const MAX_PENDING: usize = 256;
 
 pub struct Watch {
     /// Dropping this stops the watch, so it is held for its lifetime alone.
     _watcher: notify::RecommendedWatcher,
     structural: Arc<AtomicBool>,
+    /// Files seen created, with when — dropped once they turn into a session.
+    pending: Arc<Mutex<HashMap<PathBuf, Instant>>>,
 }
 
 impl Watch {
@@ -31,13 +54,16 @@ impl Watch {
     /// its periodic walk.
     pub fn start() -> Option<Self> {
         let structural = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
         let flag = Arc::clone(&structural);
+        let noted = Arc::clone(&pending);
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             // Appends are deliberately ignored; see the module note.
             if let Ok(event) = res
                 && matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
             {
                 flag.store(true, Ordering::Relaxed);
+                note(&noted, &event);
             }
         })
         .ok()?;
@@ -53,6 +79,7 @@ impl Watch {
         (watching > 0).then_some(Watch {
             _watcher: watcher,
             structural,
+            pending,
         })
     }
 
@@ -61,6 +88,42 @@ impl Watch {
     /// Reading clears the flag: each structural change earns exactly one walk.
     pub fn took_structural_change(&self) -> bool {
         self.structural.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether some created file has still to turn into a session.
+    ///
+    /// One walk per create is not enough, because a transcript is created empty
+    /// and only becomes summarizable once the model has spoken. So creates are
+    /// remembered and this stays true until the caller reports the path
+    /// discovered, the file goes away, or [`PENDING_FOR`] passes — after which
+    /// the file is presumed to be something that will never be a session.
+    pub fn awaiting_discovery(&self, discovered: impl Fn(&Path) -> bool) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        pending.retain(|path, at| at.elapsed() < PENDING_FOR && path.exists() && !discovered(path));
+        !pending.is_empty()
+    }
+}
+
+/// Remember created files and forget removed ones.
+fn note(pending: &Mutex<HashMap<PathBuf, Instant>>, event: &notify::Event) {
+    let Ok(mut pending) = pending.lock() else {
+        return;
+    };
+    for path in &event.paths {
+        match event.kind {
+            // Directories are containers; what gets summarized is the file that
+            // lands inside one, which arrives as its own create.
+            EventKind::Create(_) if path.is_file() => {
+                if pending.len() < MAX_PENDING {
+                    pending.insert(path.clone(), Instant::now());
+                }
+            }
+            _ => {
+                pending.remove(path);
+            }
+        }
     }
 }
 
@@ -83,37 +146,99 @@ fn roots() -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    /// A create under a watched tree has to reach the flag, and reading it has to
-    /// disarm it — otherwise every tick would trigger a full walk forever.
-    #[test]
-    fn a_created_file_arms_the_flag_once() {
-        let dir = tempfile::tempdir().unwrap();
+    /// A watch over `dir` alone, built the way [`Watch::start`] builds one.
+    fn watch_dir(dir: &Path) -> Watch {
         let structural = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
         let flag = Arc::clone(&structural);
+        let noted = Arc::clone(&pending);
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res
                 && matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
             {
                 flag.store(true, Ordering::Relaxed);
+                note(&noted, &event);
             }
         })
         .unwrap();
-        watcher.watch(dir.path(), RecursiveMode::Recursive).unwrap();
-        let watch = Watch {
+        watcher.watch(dir, RecursiveMode::Recursive).unwrap();
+        Watch {
             _watcher: watcher,
             structural,
-        };
+            pending,
+        }
+    }
+
+    /// Poll until `f` holds, giving the watcher thread time to deliver.
+    fn eventually(f: impl Fn() -> bool) -> bool {
+        (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            f()
+        })
+    }
+
+    /// A create under a watched tree has to reach the flag, and reading it has to
+    /// disarm it — otherwise every tick would trigger a full walk forever.
+    #[test]
+    fn a_created_file_arms_the_flag_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let watch = watch_dir(dir.path());
 
         std::fs::write(dir.path().join("new-session.jsonl"), b"{}\n").unwrap();
-        let armed = (0..50).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            watch.took_structural_change()
-        });
+        let armed = eventually(|| watch.took_structural_change());
 
         assert!(armed, "a created file did not reach the flag");
         assert!(
             !watch.took_structural_change(),
             "reading the flag must disarm it"
+        );
+    }
+
+    /// The walk a create earns runs while the transcript is still empty, so the
+    /// create has to keep asking for walks until the file is a session — and stop
+    /// the moment it is, or every tick would walk forever.
+    #[test]
+    fn a_create_keeps_asking_until_it_is_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let watch = watch_dir(dir.path());
+        let transcript = dir.path().join("new-session.jsonl");
+
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let waiting = eventually(|| watch.awaiting_discovery(|_| false));
+
+        assert!(waiting, "a created file was not remembered");
+        assert!(
+            watch.awaiting_discovery(|_| false),
+            "an undiscovered create must survive being read"
+        );
+        assert!(
+            !watch.awaiting_discovery(|path| path == transcript),
+            "a discovered create must stop asking for walks"
+        );
+        assert!(
+            !watch.awaiting_discovery(|_| false),
+            "a discovered create must be forgotten, not re-armed"
+        );
+    }
+
+    /// A file that vanishes before it ever became a session must not hold the
+    /// walk cadence open for the whole pending window.
+    #[test]
+    fn a_removed_create_stops_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let watch = watch_dir(dir.path());
+        let transcript = dir.path().join("doomed.jsonl");
+
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        assert!(
+            eventually(|| watch.awaiting_discovery(|_| false)),
+            "a created file was not remembered"
+        );
+
+        std::fs::remove_file(&transcript).unwrap();
+        assert!(
+            !watch.awaiting_discovery(|_| false),
+            "a file that no longer exists must not keep asking for walks"
         );
     }
 }

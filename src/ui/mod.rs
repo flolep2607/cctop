@@ -45,6 +45,13 @@ const QUOTA_TICK: Duration = Duration::from_secs(10);
 /// new sessions are normally found. `r` still forces one immediately.
 const FULL_WALK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Gap between walks while a created file has yet to become a session.
+///
+/// Short, because this is the window in which a session the user just started is
+/// missing from the table; bounded, because the walk is the expensive one and a
+/// file may sit there for a while before the model first answers.
+const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     List,
@@ -1715,7 +1722,21 @@ fn event_loop(
             // the walk — the only thing that can notice a *new* session — runs on
             // its own slower cadence.
             let watched_change = watch.is_some_and(crate::watch::Watch::took_structural_change);
-            let full_due = watched_change || last_full_walk.elapsed() >= FULL_WALK_INTERVAL;
+            // A transcript is created before it is summarizable — the model name
+            // only arrives with the first assistant message — so the walk the
+            // create earned can find nothing. Keep walking, at a cadence between
+            // the fast tick and the safety net, until the file becomes a session.
+            let awaiting = !watched_change
+                && last_full_walk.elapsed() >= PENDING_WALK_INTERVAL
+                && watch.is_some_and(|w| {
+                    w.awaiting_discovery(|path| {
+                        app.sessions
+                            .iter()
+                            .any(|s| s.data_file.as_deref() == Some(path))
+                    })
+                });
+            let full_due =
+                watched_change || awaiting || last_full_walk.elapsed() >= FULL_WALK_INTERVAL;
             if full_due {
                 last_full_walk = Instant::now();
             }
