@@ -661,6 +661,11 @@ mod tests {
     /// `key.split('|').next()`, which truncates a path that contains `|`. The
     /// derived key then never matched, the entry was dropped on every save, and
     /// that session was re-parsed forever.
+    ///
+    /// Unix-only because the awkward path cannot exist elsewhere: `|` is not a
+    /// legal character in a Windows filename, so there the bug is unreachable
+    /// and the test is just a failing `create_dir_all`.
+    #[cfg(unix)]
     #[test]
     fn entries_survive_a_pipe_in_the_transcript_path() {
         let dir = std::env::temp_dir().join(format!("cctop-pipe-{}", std::process::id()));

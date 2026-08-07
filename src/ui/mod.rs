@@ -2072,7 +2072,13 @@ impl App {
         if self.tmux_declined || self.tmux_installing.is_some() {
             return Some(tabs::Own::Cctop);
         }
-        let install = crate::tmux::installer()?;
+        // No package manager to offer means there is nothing to ask about, so
+        // this is the plain fallback rather than a refusal: `?` here would
+        // return `None`, which the caller reads as "the launch is waiting on an
+        // answer" — and no answer would ever come, so the tab never opened.
+        let Some(install) = crate::tmux::installer() else {
+            return Some(tabs::Own::Cctop);
+        };
         self.tmux_install = Some(install);
         self.tmux_deferred = Some(deferred);
         self.mode = Mode::TmuxInstall;
