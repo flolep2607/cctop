@@ -25,6 +25,18 @@ pub struct CodexPricing {
     pub output: f64,
 }
 
+/// Rates for a model with no built-in table, taken straight from LiteLLM.
+///
+/// Used by harnesses that let the user point at an arbitrary provider, where the
+/// model can be anything and the harness may not price it itself.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GenericPricing {
+    pub input: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    pub output: f64,
+}
+
 /// USD per million tokens.
 const fn claude(input: f64, cw5m: f64, cw1h: f64, cr: f64, output: f64) -> ClaudePricing {
     ClaudePricing {
@@ -102,6 +114,11 @@ pub struct LitellmEntry {
     pub output_cost_per_token: f64,
     #[serde(default)]
     pub cache_read_input_token_cost: f64,
+    /// Absent and zero mean different things: a listing that omits the field
+    /// says nothing about cache writes, while an explicit 0 means the provider
+    /// writes to cache for free. Only the latter may price a write at nothing.
+    #[serde(default)]
+    pub cache_creation_input_token_cost: Option<f64>,
     #[serde(default)]
     pub max_input_tokens: Option<u64>,
 }
@@ -150,6 +167,28 @@ fn install(raw: HashMap<String, serde_json::Value>, epoch: u64) {
         *guard = Some(parse_entries(&raw));
     }
     PRICING_EPOCH.store(epoch, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Install a fixed table so tests that exercise the LiteLLM fallback do not
+/// depend on whatever the machine happens to have cached.
+///
+/// The table is process-wide and the test harness is threaded, so this hands
+/// back a guard that has to live for the rest of the test: without it, two tests
+/// in different modules install over each other and each reads the other's
+/// rates.
+#[cfg(test)]
+#[must_use = "hold the guard until the test is done reading the table"]
+pub fn install_test_table(
+    rows: &[(&str, serde_json::Value)],
+) -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let raw = rows
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), v.clone()))
+        .collect();
+    install(raw, 1);
+    guard
 }
 
 /// Load pricing from the disk cache if it is fresh. Returns `true` on success.
@@ -265,6 +304,25 @@ fn litellm_entry(model: &str) -> Option<LitellmEntry> {
 /// Context window reported by LiteLLM, if known.
 pub fn litellm_max_input_tokens(model: &str) -> Option<u64> {
     litellm_entry(model).and_then(|e| e.max_input_tokens)
+}
+
+/// Rates for any model LiteLLM lists, whatever route it is reached by.
+///
+/// `None` means the model is genuinely unknown, which the caller needs to tell
+/// apart from a free one: a harness that reports no cost of its own has nothing
+/// to fall back on, and inventing $0.00 would read as "this was free".
+pub fn resolve_generic(model: &str) -> Option<GenericPricing> {
+    let e = litellm_entry(model)?;
+    let input = e.input_cost_per_token * 1e6;
+    Some(GenericPricing {
+        input,
+        cache_read: e.cache_read_input_token_cost * 1e6,
+        // A listing that omits the write rate says nothing about it; base input
+        // is the closest defensible guess, and understating it to zero would
+        // silently drop a real charge.
+        cache_write: e.cache_creation_input_token_cost.map_or(input, |c| c * 1e6),
+        output: e.output_cost_per_token * 1e6,
+    })
 }
 
 pub fn resolve_claude(model: &str) -> ClaudePricing {

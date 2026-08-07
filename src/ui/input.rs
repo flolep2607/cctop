@@ -51,6 +51,7 @@ impl App {
             Mode::AgeFilter => self.on_key_age(key),
             Mode::DeleteConfirm => self.on_key_delete(key),
             Mode::KillConfirm => self.on_key_kill(key),
+            Mode::ResumeConfirm => self.on_key_resume(key),
             Mode::QuitConfirm => self.on_key_quit(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
                 self.on_key_batch(key)
@@ -58,6 +59,7 @@ impl App {
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
             Mode::Launch => self.on_key_launch(key),
+            Mode::Hooks => self.on_key_hooks(key),
             Mode::Help | Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
         }
@@ -101,18 +103,60 @@ impl App {
         }
     }
 
+    /// The integration panel. Every action rewrites somebody's settings file,
+    /// so each is a distinct letter — there is no cursor to land on the wrong
+    /// row and no Enter that does whatever was last highlighted.
+    fn on_key_hooks(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.mode = Mode::List;
+                self.hooks = None;
+            }
+            KeyCode::Char('i') => self.set_hooks(crate::hook::Scope::User, true),
+            KeyCode::Char('x') => self.set_hooks(crate::hook::Scope::User, false),
+            KeyCode::Char('p') | KeyCode::Char('P') => match self.hook_project() {
+                Some(dir) => self.set_hooks(
+                    crate::hook::Scope::Project(dir),
+                    key.code == KeyCode::Char('p'),
+                ),
+                None => self.set_status("The selected session has no project directory here"),
+            },
+            _ => {}
+        }
+    }
+
     fn on_key_search(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => self.mode = Mode::List,
+            // Enter is "I meant that one"; Esc is backing out. Only the former
+            // is worth remembering, or the history fills with abandoned
+            // prefixes typed on the way to somewhere else.
+            KeyCode::Enter => {
+                self.remember_query();
+                self.mode = Mode::List;
+            }
+            KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Backspace => {
                 self.search.pop();
-                self.refilter();
+                self.search_edited();
             }
+            // Tab rather than a letter: every printable character belongs to the
+            // query being typed.
+            KeyCode::Tab => self.toggle_content_search(),
+            KeyCode::Up => self.history_step(1),
+            KeyCode::Down => self.history_step(-1),
             KeyCode::Char(c) => {
                 self.search.push(c);
-                self.refilter();
+                self.search_edited();
             }
             _ => {}
+        }
+    }
+
+    /// The resume confirmation, shown only when the session is already running.
+    fn on_key_resume(&mut self, key: KeyEvent) {
+        self.mode = Mode::List;
+        if key.code == KeyCode::Char('y') {
+            self.resume_now();
         }
     }
 
@@ -342,6 +386,8 @@ impl App {
                 self.save_prefs();
             }
 
+            // `h` rather than `H`, which already sorts by harness.
+            KeyCode::Char('h') | KeyCode::F(8) => self.open_hooks(),
             KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
             KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
             KeyCode::Char('>') | KeyCode::Char('<') | KeyCode::F(6) => {
@@ -388,6 +434,9 @@ impl App {
             },
             KeyCode::Char('a') => self.attach_selected(),
             KeyCode::Char('A') => self.attach_hosted(),
+            // `R`, because `r` refreshes. Capital also matches how the other
+            // keys that start something irreversible are spelled.
+            KeyCode::Char('R') => self.resume_selected(),
             // Alt+n does this too and works from inside a pane; here on the
             // dashboard, where nothing is competing for the keyboard, a plain
             // letter is what anyone will try first.
@@ -417,7 +466,7 @@ impl App {
                 // Clear the narrowest active filter first.
                 if !self.search.is_empty() {
                     self.search.clear();
-                    self.refilter();
+                    self.search_edited();
                 } else if self.age_filter.is_some() {
                     self.age_filter = None;
                     self.refilter();

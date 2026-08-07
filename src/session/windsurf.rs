@@ -48,7 +48,7 @@ fn readonly(path: &Path) -> rusqlite::Result<Connection> {
 /// The stored type is taken as it comes: VS Code writes some `ItemTable` entries
 /// as BLOB and others as TEXT, and asking rusqlite for either concrete type
 /// fails outright on the other.
-fn chat_data(db: &Connection) -> Option<Value> {
+pub(super) fn chat_data(db: &Connection) -> Option<Value> {
     let mut stmt = db
         .prepare("SELECT value FROM ItemTable WHERE key = ?1")
         .ok()?;
@@ -68,13 +68,13 @@ fn chat_data(db: &Connection) -> Option<Value> {
     })
 }
 
-fn tabs(data: &Value) -> &[Value] {
+pub(super) fn tabs(data: &Value) -> &[Value] {
     data.get("tabs")
         .and_then(Value::as_array)
         .map_or(&[], |t| t)
 }
 
-fn tab_id(tab: &Value) -> Option<String> {
+pub(super) fn tab_id(tab: &Value) -> Option<String> {
     tab.get("tabId")
         .and_then(|id| {
             id.as_str()

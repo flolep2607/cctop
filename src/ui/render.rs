@@ -171,6 +171,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::DeleteConfirm => modals::draw_delete_confirm(frame, area, app),
         Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app),
         Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
+        Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app),
         Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
         Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
         Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),
@@ -179,6 +180,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
         Mode::Launch => modals::draw_launch(frame, area, app),
+        Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::List => {}
     }
     layout
@@ -886,8 +888,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     if !app.search.is_empty() {
+        // The filter stays on the footer once the modal closes, so it has to
+        // say whether transcripts are in scope — the two searches can return
+        // very different tables for the same word.
+        let scope = match (app.search_content, app.scanning) {
+            (false, _) => String::new(),
+            (true, true) => " +transcripts…".to_string(),
+            (true, false) => format!(" +transcripts({})", app.scan_hits.len()),
+        };
         spans.push(Span::styled(
-            format!(" Filter: {} ", app.search),
+            format!(" Filter: {}{scope} ", app.search),
             Style::default().fg(Color::Cyan),
         ));
     }

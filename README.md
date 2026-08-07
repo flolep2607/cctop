@@ -128,7 +128,7 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
 | `f` | Follow mode: keep the selection centered |
-| `/` or `F3` | Filter sessions by text |
+| `/` or `F3` | Filter sessions by text (see below) |
 | `F6`, `>`, `<` | Sort-by panel |
 | `F7` | Filter by age (1d / 1w / 1mo) |
 | `#` | Cost floor: only sessions costing ≥ `$X` |
@@ -142,10 +142,12 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `Space` | Mark / unmark the selected session |
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation) |
 | `U` | Clear all marks |
+| `h` or `F8` | Agent integration: what reports to cctop, and install it |
 | `y` | Copy resume command or transcript path |
 | `d` | Delete the selected session (not running) |
 | `k` | Terminate the selected live session (with confirmation) |
 | `s` | Type a line into the selected session's terminal (see below) |
+| `R` | Resume the selected session in a tab of its own (see below) |
 | `a` | Open that session's terminal in a tab and drive it |
 | `t` | New tab: run an agent or a shell (see below) |
 | `Esc` | Clear the active filter |
@@ -166,6 +168,46 @@ Tabs and splits, from anywhere including inside a running agent:
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+### Finding a session
+
+`/` filters the table as you type, on everything a row is: its label or title,
+the full working directory (not just the abbreviation the column has room for),
+the git branch, the model, the harness, the provider and the session id. The
+cell that matched is underlined, so it is clear *why* a row survived the filter.
+`n` and `N` step through matches, `Esc` clears, and `↑`/`↓` inside the prompt
+bring back a search you ran before — the last twenty are remembered across runs.
+
+`Tab` widens the search to the transcripts themselves, which is how you find the
+session where something was actually discussed rather than one whose name
+happens to mention it. Transcript matches are added to the metadata matches
+rather than replacing them, and the line each one was found on is shown under
+the prompt.
+
+This reads every transcript on disk, so it is opt-in, it waits for a pause in
+typing and for a query of at least three characters, and it runs on cctop's
+background thread pool — the table stays live throughout, and the footer says
+`+transcripts…` while a scan is out. Results are remembered per query, so
+refining a search re-reads only what it must. Two limits are worth knowing:
+transcripts store their text as JSON, so a phrase containing a quote or a
+newline is escaped on disk and will not match; and a single session is scanned
+up to 64 MiB.
+
+### Resuming a session
+
+`R` reopens the selected session in a tab of its own, running the harness's own
+resume command — `claude --resume <id>`, `codex resume <id>`,
+`opencode --session <id>`, `pi --session <id>` — in the directory the session
+was working in. This is the way into a session cctop did not start: `a` can only
+show the terminal of an agent cctop is already hosting, while resuming starts a
+fresh agent from the transcript and so works for any session in the table,
+however it was launched and however long ago it ended.
+
+Cursor, Gemini and Windsurf keep their conversations inside an editor and have
+no such command, so `R` says so rather than guessing at a flag; `y` copies their
+transcript path instead. Resuming a session that is *still running* asks first —
+two agents appending to one transcript is not something the harnesses
+coordinate.
 
 ### Typing into a session
 
@@ -248,26 +290,48 @@ repaints constantly (a spinner's elapsed counter alone ticks every second), so
 two seconds of a still screen means the agent is waiting on you. That needs no
 per-harness parsing and works for anything you open in a tab, shells included.
 
-#### Letting Claude Code tell cctop directly
+#### Letting the agents tell cctop directly
 
-Both of those are cctop guessing. Claude Code can just say it:
+Both of those are cctop guessing. The agents can just say it:
 
 ```bash
-cctop --install-hooks     # merge cctop's hooks into ~/.claude/settings.json
-cctop --remove-hooks      # take them back out
+cctop --install-hooks           # for this user: Claude Code and Codex
+cctop --install-hooks project   # only for the project in this directory
+cctop --remove-hooks            # take it back out; same scopes
+cctop --hooks-status            # what is installed, and whether it works
 ```
 
-That registers four hooks — `Stop`, `Notification`, `UserPromptSubmit`,
-`PreToolUse` — each running `cctop hook <event>`, which forwards the event to a
-running cctop over a unix socket. A reported turn beats a still screen: the
-green appears the instant the turn ends rather than two seconds later, and the
-amber no longer waits for a transcript to be written. Sessions already running
-keep their old hooks until they restart.
+Press `h` (or `F8`) in the UI for the same thing with the install and remove
+keys on it, so none of this needs you to leave cctop or restart it.
 
-The installer merges into your settings rather than writing them, matches its
-own entries by command text so it is idempotent and removable, writes through a
-temporary file so an interrupted write cannot leave you with no settings, and
-refuses outright if the file is not valid JSON rather than replacing it.
+For **Claude Code** that registers eight hooks — `Stop`, `Notification`,
+`UserPromptSubmit`, `PreToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`
+and `SubagentStop` — each running `cctop hook <event>`. For **Codex** it points
+`notify` in `~/.codex/config.toml` at `cctop hook codex`, which is how Codex
+reports a finished turn. Either way the event goes to every running cctop over
+a unix socket.
+
+A reported turn beats a still screen: the green appears the instant the turn
+ends rather than two seconds later, and the amber no longer waits for a
+transcript to be written. `SessionStart` and `SessionEnd` do the same for the
+table itself — a session you just started appears at once instead of at the next
+poll, and one that has exited stops claiming a state it is no longer in.
+Sessions already running keep their old hooks until they restart.
+
+The installer merges into your settings rather than writing them, recognises its
+own entries by their shape so it is idempotent and removable however the binary
+is named, writes through a temporary file so an interrupted write cannot leave
+you with no settings, and refuses outright if the file is not valid JSON — or,
+for Codex, not valid TOML — rather than replacing it. Codex's config is edited
+in place, so the comments and layout around it survive. Codex allows only one
+`notify` program, so an entry that is not cctop's is reported and left alone.
+
+`--hooks-status` and the `h` panel exist because none of this is visible
+otherwise: an install that points at a cctop you have since moved or deleted
+looks exactly like an agent with nothing to say. cctop repoints that one for you
+on startup — there is no behaviour to preserve in a command that runs nothing —
+but leaves an install pointing at a *different* cctop that does exist alone,
+since that is a second install and not a fault.
 
 **`cctop hook` cannot break your session.** An agent reads a hook's exit code as
 a decision — exit 2 blocks the tool call — so this one exits 0 unconditionally,

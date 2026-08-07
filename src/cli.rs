@@ -51,6 +51,15 @@ the UI, or run `cctop attach [pid]` to put one on the terminal directly —\n  \
 with no pid it lists what is running. F12 detaches and leaves it running. The\n  \
 agent is resized to the smallest window watching it, and gets its size back\n  \
 when that one detaches.\n\n\
+RESUMING\n  \
+`R` in the UI reopens any session in a tab of its own, by running its own\n  \
+harness's resume command in the directory it was working in. Unlike `a` this\n  \
+needs nothing of cctop at the time the session ran, so it reaches the sessions\n  \
+started from anywhere — including ones that ended long ago.\n\n\
+SEARCHING\n  \
+`/` filters on what the table shows plus the full working directory and the\n  \
+branch; `Tab` in that prompt extends the search into the transcripts, which\n  \
+reads them off disk and so is opt-in.\n\n\
 NOTES\n  \
 Session data is read from each agent's standard local session store.\n  \
 UI preferences (active tab, sort order, filters) persist across runs.",
@@ -89,13 +98,20 @@ pub struct Args {
     #[arg(long)]
     pub remove_alias: bool,
 
-    /// Ask Claude Code to report turn and prompt events to cctop, and exit
-    #[arg(long)]
-    pub install_hooks: bool,
+    /// Ask the agents to report session events to cctop, and exit. Takes
+    /// `user` (the default) or `project` for the current directory's settings
+    #[arg(long, num_args = 0..=1, default_missing_value = "user", value_name = "SCOPE")]
+    pub install_hooks: Option<String>,
 
-    /// Stop Claude Code reporting events to cctop, and exit
+    /// Stop the agents reporting events to cctop, and exit. Same scopes as
+    /// --install-hooks
+    #[arg(long, num_args = 0..=1, default_missing_value = "user", value_name = "SCOPE")]
+    pub remove_hooks: Option<String>,
+
+    /// Report what is installed where, whether it still points at this binary,
+    /// and whether events are being received, then exit
     #[arg(long)]
-    pub remove_hooks: bool,
+    pub hooks_status: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {

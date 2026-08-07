@@ -7,6 +7,7 @@ pub mod extract;
 pub mod gemini;
 pub mod opencode;
 pub mod pi;
+pub mod search;
 pub mod windsurf;
 
 use crate::pricing::Provider;
@@ -232,6 +233,35 @@ impl Session {
         self.process.is_some() || self.inferred_running
     }
 
+    /// The command that reopens this session in a terminal, if its provider
+    /// has one.
+    ///
+    /// `None` is a real answer, not a gap to be filled in later: Cursor, Gemini
+    /// and Windsurf keep their conversations inside an editor or a UI of their
+    /// own, and there is no CLI invocation that picks one back up. Callers show
+    /// the transcript's path for those instead of guessing at a flag.
+    pub fn resume_argv(&self) -> Option<Vec<String>> {
+        let argv = match self.provider {
+            Provider::Claude => vec!["claude", "--resume", &self.session_id],
+            Provider::Codex => vec!["codex", "resume", &self.session_id],
+            Provider::OpenCode => vec!["opencode", "--session", &self.session_id],
+            Provider::Pi => vec!["pi", "--session", &self.session_id],
+            Provider::Cursor | Provider::Gemini | Provider::Windsurf => return None,
+        };
+        Some(argv.into_iter().map(str::to_string).collect())
+    }
+
+    /// The working directory a resumed session should start in.
+    ///
+    /// The agent is being put back where it was, and half of what a transcript
+    /// refers to is relative to that directory. A path that no longer exists —
+    /// a deleted checkout, a session from another machine — yields `None`, so
+    /// the agent starts wherever cctop was launched rather than failing to
+    /// start at all.
+    pub fn work_dir(&self) -> Option<PathBuf> {
+        Some(PathBuf::from(&self.label_source)).filter(|dir| dir.is_dir())
+    }
+
     /// Title if renamed, else the abbreviated working directory.
     pub fn display_label(&self) -> &str {
         self.title
@@ -409,6 +439,45 @@ fn is_input_request_tool(name: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Each harness spells resuming differently, and the three that cannot be
+    /// resumed from a shell must say so rather than producing a command that
+    /// looks plausible and does nothing.
+    #[test]
+    fn each_provider_resumes_the_way_its_harness_does() {
+        let argv = |provider| Session::new(provider, "sid".into()).resume_argv();
+        assert_eq!(
+            argv(Provider::Claude),
+            Some(vec!["claude".into(), "--resume".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::Codex),
+            Some(vec!["codex".into(), "resume".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::OpenCode),
+            Some(vec!["opencode".into(), "--session".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::Pi),
+            Some(vec!["pi".into(), "--session".into(), "sid".into()])
+        );
+        for provider in [Provider::Cursor, Provider::Gemini, Provider::Windsurf] {
+            assert_eq!(argv(provider), None, "{provider:?} has no resume command");
+        }
+    }
+
+    /// A resumed agent belongs in the directory the session ran in — but a path
+    /// that has since gone must not stop it from starting at all.
+    #[test]
+    fn a_resumed_session_only_claims_a_directory_that_exists() {
+        let mut s = Session::new(Provider::Claude, "sid".into());
+        s.label_source = "/nonexistent/gone".into();
+        assert_eq!(s.work_dir(), None);
+
+        s.label_source = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(s.work_dir(), Some(std::env::temp_dir()));
+    }
 
     #[test]
     fn classifies_completed_assistant_responses_as_waiting() {
@@ -600,6 +669,50 @@ pub struct Costs {
     pub cached_input: f64,
     #[serde(default)]
     pub total: f64,
+}
+
+/// LiteLLM rates for harnesses that record a cost of their own but may not
+/// always know one.
+///
+/// A harness that supports arbitrary providers — a local proxy, a gateway, any
+/// OpenAI-compatible endpoint — has no rates for them and writes `0` into the
+/// same field it uses for a real charge. Taken at face value that reads as "this
+/// was free", so the tokens are priced here instead. Rates are memoised because
+/// a LiteLLM lookup scans the whole table while a session has one model and
+/// hundreds of messages.
+#[derive(Default)]
+pub struct FallbackRates(HashMap<String, Option<crate::pricing::GenericPricing>>);
+
+impl FallbackRates {
+    /// What `tokens` cost at LiteLLM's rates for `model`, or `None` when LiteLLM
+    /// lists no such model — which the caller has to keep distinct from free.
+    pub fn costs(&mut self, model: &str, tokens: &Tokens) -> Option<Costs> {
+        let p = (*self
+            .0
+            .entry(model.to_string())
+            .or_insert_with(|| crate::pricing::resolve_generic(model)))?;
+        let per_m = |count: u64, rate: f64| count as f64 * rate / 1e6;
+        let costs = Costs {
+            input: per_m(tokens.input, p.input),
+            // Reasoning is reported alongside output, not on top of it, so it is
+            // deliberately not billed again.
+            output: per_m(tokens.output, p.output),
+            cache_read: per_m(tokens.cache_read, p.cache_read),
+            cache_write_5m: per_m(tokens.cache_write_5m, p.cache_write),
+            cache_write_1h: per_m(tokens.cache_write_1h, p.cache_write),
+            cached_input: per_m(tokens.cached_input, p.cache_read),
+            total: 0.0,
+        };
+        Some(Costs {
+            total: costs.input
+                + costs.output
+                + costs.cache_read
+                + costs.cache_write_5m
+                + costs.cache_write_1h
+                + costs.cached_input,
+            ..costs
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

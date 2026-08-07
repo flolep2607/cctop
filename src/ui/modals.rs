@@ -66,7 +66,9 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("v", "Toggle inline diffs for edits"),
         Line::default(),
         section("Filter and sort"),
-        item("/ or F3", "Filter sessions by text"),
+        item("/ or F3", "Filter by label, project, branch, model, id"),
+        item("  Tab", "Search inside the transcripts as well"),
+        item("  ↑ / ↓", "Bring back an earlier search"),
         item("F6  >  <", "Open the sort-by panel"),
         item("F7", "Filter by age (1d / 1w / 1mo)"),
         item("#", "Cost floor: only sessions costing ≥ $X"),
@@ -88,8 +90,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         item("d", "Delete the selected session (not running)"),
         item("k", "Terminate the selected live session"),
         item("s", "Type a line into the session's terminal"),
+        item("R", "Resume the session in a tab of its own"),
         item("a", "Open the session's terminal in a tab"),
         item("A", "Open the agent this cctop launched"),
+        item("h or F8", "Agent integration: what reports to cctop"),
         item("r or F5", "Refresh now"),
         item("q or F10", "Quit"),
         Line::default(),
@@ -117,7 +121,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
 }
 
 pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = vec![
+    const WIDTH: u16 = 62;
+    let text_w = WIDTH as usize - 4;
+
+    let mut lines = vec![
         Line::from(vec![
             Span::raw(" > "),
             Span::styled(
@@ -130,14 +137,105 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
         ]),
         Line::from(Span::styled(
             format!(
-                " {} match{}   Enter/Esc to close",
+                " {} of {} session{}",
                 app.visible.len(),
-                if app.visible.len() == 1 { "" } else { "es" }
+                app.sessions.len(),
+                if app.sessions.len() == 1 { "" } else { "s" }
             ),
             theme::dim(),
         )),
     ];
-    modal(frame, area, "Filter sessions", lines, 54);
+
+    // What is actually being searched, and whether the answer on screen is
+    // final. A scan is the one filter here that takes long enough to see, so
+    // saying nothing would read as "no transcript matches" while it runs.
+    let (marker, style, text) = match (app.search_content, app.scanning) {
+        (false, _) => (
+            "○",
+            theme::dim(),
+            "Columns only — Tab also searches transcripts".to_string(),
+        ),
+        (true, true) => (
+            "◌",
+            Style::default().fg(theme::ACCENT),
+            "Searching transcripts…".to_string(),
+        ),
+        (true, false) => (
+            "●",
+            Style::default().fg(theme::COST_LOW),
+            match app.scan_hits.len() {
+                0 if app.search.chars().count() < 3 => {
+                    "Transcripts: type three characters".to_string()
+                }
+                0 => "Transcripts: no matches".to_string(),
+                n => format!("Transcripts: {n} matched"),
+            },
+        ),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!(" {marker} "), style),
+        Span::styled(crate::util::truncate(&text, text_w), style),
+    ]));
+
+    // The matching line from the selected session's transcript. Without it a
+    // content hit is a row that matches for reasons nothing on screen explains.
+    if let Some(snippet) = app.selected_snippet() {
+        lines.push(Line::from(Span::styled(
+            // Less the three-space indent: the paragraph wraps, and a snippet
+            // spilling onto a second line resizes the modal as you type.
+            format!("   {}", crate::util::truncate(snippet, text_w - 3)),
+            theme::value(),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        if app.search_history.is_empty() {
+            " Enter apply   Esc cancel"
+        } else {
+            " Enter apply   ↑/↓ past searches   Esc cancel"
+        },
+        theme::dim(),
+    )));
+    modal(frame, area, "Filter sessions", lines, WIDTH);
+}
+
+/// Resuming a session that is already running somewhere else.
+pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+    let command = session
+        .resume_argv()
+        .map(|argv| argv.join(" "))
+        .unwrap_or_default();
+    // `modal` sizes the box by line count and the paragraph wraps, so a line
+    // long enough to wrap pushes the last one out of the border. Every line
+    // here is kept inside the 60 columns the box has room for.
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(
+                " {} is still running.",
+                crate::util::truncate(session.display_label(), 40)
+            ),
+            Style::default().fg(theme::COST_MID),
+        )),
+        Line::default(),
+        Line::from(Span::raw(
+            " Resuming starts a second agent on the same transcript,",
+        )),
+        Line::from(Span::raw(" which neither of them will know about.")),
+        Line::default(),
+        Line::from(Span::styled(
+            format!("   {}", crate::util::truncate(&command, 56)),
+            theme::value(),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            " y to resume anyway · any other key to cancel",
+            theme::dim(),
+        )),
+    ];
+    modal(frame, area, "Resume a running session?", lines, 62);
 }
 
 pub(super) fn draw_sortby(frame: &mut Frame, area: Rect, app: &App) {
@@ -257,6 +355,84 @@ pub(super) fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
         LaunchInto::Split { stacked: true } => "Split down",
     };
     modal(frame, area, title, lines, 38);
+}
+
+/// What the agents have been asked to report, and whether they are doing it.
+///
+/// The panel exists because every part of this is invisible otherwise: a hook
+/// that is not installed, or is installed at a path that has moved, looks
+/// exactly like an agent that has nothing to say.
+pub(super) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(report) = &app.hooks else { return };
+    const WIDTH: u16 = 78;
+    // Two for the border, one for the marker and the space after it.
+    let text_w = WIDTH as usize - 5;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (text, problem) in report.lines() {
+        let (marker, style) = match problem {
+            true => ("! ", Style::default().fg(theme::COST_MID)),
+            false => ("· ", theme::value()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker}"), style),
+            Span::styled(crate::util::truncate(&text, text_w), style),
+        ]));
+    }
+
+    // What has actually arrived, which is the only proof any of the above is
+    // working. An install can be perfect and still deliver nothing, because
+    // sessions started before it keep the hooks they were started with.
+    lines.push(Line::default());
+    let reporting = app.reporting();
+    if reporting.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " Nothing has reported in yet",
+            theme::dim(),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(" Reporting", theme::label())));
+        for (project, state) in reporting.iter().take(6) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("   {:<24}", crate::util::truncate(project, 24)),
+                    theme::value(),
+                ),
+                Span::styled(*state, theme::dim()),
+            ]));
+        }
+        if reporting.len() > 6 {
+            lines.push(Line::from(Span::styled(
+                format!("   … and {} more", reporting.len() - 6),
+                theme::dim(),
+            )));
+        }
+    }
+
+    lines.push(Line::default());
+    // The project keys name the directory they would write into: a settings
+    // file committed to somebody's repository is not a thing to install by
+    // accident.
+    lines.push(Line::from(Span::styled(
+        match app.hook_project() {
+            Some(dir) => format!(
+                " p / P  install / remove in {}",
+                crate::util::truncate(&dir.display().to_string(), text_w.saturating_sub(30))
+            ),
+            None => " p / P  install / remove for the selected project".into(),
+        },
+        theme::dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        " i / x  install / remove for this user (Claude Code and Codex)",
+        theme::dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        " Esc    close   ·   sessions already running keep their old hooks",
+        theme::dim(),
+    )));
+
+    modal(frame, area, "Agent integration", lines, WIDTH);
 }
 
 pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {

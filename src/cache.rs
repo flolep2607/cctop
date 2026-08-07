@@ -465,7 +465,16 @@ pub struct UiPrefs {
     pub hidden_columns: Vec<String>,
     /// Chosen theme name, or `None` to follow the built-in default.
     pub theme: Option<String>,
+    /// Recent `/` queries, newest first, so a search worth running twice does
+    /// not have to be typed twice. Capped at [`MAX_SEARCH_HISTORY`].
+    pub search_history: Vec<String>,
 }
+
+/// How many past queries are remembered.
+///
+/// Long enough to hold a session's worth of searching, short enough that ↑ is
+/// still a faster way back to a query than retyping it.
+pub const MAX_SEARCH_HISTORY: usize = 20;
 
 impl Default for UiPrefs {
     fn default() -> Self {
@@ -482,6 +491,7 @@ impl Default for UiPrefs {
             shell_alias_installed: false,
             hidden_columns: Vec::new(),
             theme: None,
+            search_history: Vec::new(),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Pi coding-agent session discovery and JSONL extraction.
 
 use super::extract::{self, for_each_jsonl};
-use super::{Costs, ModelBreakdown, Session, SessionData, Tokens};
+use super::{Costs, FallbackRates, ModelBreakdown, Session, SessionData, Tokens};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
@@ -100,11 +100,16 @@ fn cost_number(cost: &Value, key: &str) -> f64 {
     cost.get(key).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
-/// Parse Pi's documented session JSONL format. Usage costs are recorded by Pi,
-/// so they are preserved exactly instead of being re-estimated from a model ID.
+/// Parse Pi's documented session JSONL format.
+///
+/// Usage costs are recorded by Pi and preserved exactly rather than re-estimated
+/// from a model ID. The exception is a turn Pi priced at nothing while reporting
+/// tokens, which is what a provider it has no rates for produces: those are
+/// priced from LiteLLM, since reporting them as free hides real spend.
 pub fn extract(path: &Path) -> SessionData {
     let mut data = SessionData::default();
     let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
+    let mut rates = FallbackRates::default();
 
     let result = for_each_jsonl(path, |item| {
         if item.get("type").and_then(Value::as_str) == Some("session_info") {
@@ -141,13 +146,19 @@ pub fn extract(path: &Path) -> SessionData {
             total: usage_number(usage, "totalTokens"),
             ..Default::default()
         };
-        let costs = Costs {
+        let reported = Costs {
             input: cost_number(cost, "input"),
             output: cost_number(cost, "output"),
             cache_read: cost_number(cost, "cacheRead"),
             cache_write_5m: cost_number(cost, "cacheWrite"),
             total: cost_number(cost, "total"),
             ..Default::default()
+        };
+        let billable = tokens.input + tokens.output + tokens.cache_read + tokens.cache_write_5m;
+        let costs = if reported.total > 0.0 || billable == 0 {
+            reported
+        } else {
+            rates.costs(&model, &tokens).unwrap_or(reported)
         };
 
         data.tokens.input += tokens.input;
@@ -293,6 +304,52 @@ mod tests {
         assert!((data.costs.total - 0.33).abs() < 1e-9);
         assert_eq!(data.metrics.tool_count, 1);
         assert_eq!(data.metrics.tools.get("read"), Some(&1));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Pi prices what it has rates for and writes zeros for the rest, so a turn
+    /// with tokens and no cost is a provider Pi doesn't know — not a free one.
+    #[test]
+    fn a_turn_pi_could_not_price_is_costed_from_litellm() {
+        let _rates = crate::pricing::install_test_table(&[(
+            "zai/glm-5.1",
+            serde_json::json!({
+                "input_cost_per_token": 1.4e-6,
+                "output_cost_per_token": 4.4e-6,
+                "cache_read_input_token_cost": 2.6e-7,
+                "cache_creation_input_token_cost": 0.0,
+            }),
+        )]);
+        let path = std::env::temp_dir().join(format!(
+            "cctop-pi-fallback-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"pi-2\",\"timestamp\":\"2026-08-05T00:00:00Z\",\"cwd\":\"/work\"}\n",
+                "{\"type\":\"message\",\"timestamp\":\"2026-08-05T00:01:00Z\",\"message\":{\"role\":\"assistant\",\"model\":\"myproxy/zai/glm-5.1\",\"timestamp\":1785888060000,\"usage\":{\"input\":1000000,\"output\":1000000,\"cacheRead\":1000000,\"cacheWrite\":1000000,\"totalTokens\":4000000,\"cost\":{\"total\":0}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let data = extract(&path);
+        // 1.40 input + 4.40 output + 0.26 cache read + 0.00 cache write per Mtok.
+        assert!(
+            (data.costs.total - 6.06).abs() < 1e-9,
+            "priced at {}",
+            data.costs.total
+        );
+        // The breakdown has to add up to the total, not just the total be right.
+        assert!((data.costs.input - 1.4).abs() < 1e-9);
+        assert!((data.costs.output - 4.4).abs() < 1e-9);
+        assert!((data.costs.cache_read - 0.26).abs() < 1e-9);
+        assert_eq!(data.costs.cache_write_5m, 0.0);
 
         std::fs::remove_file(path).unwrap();
     }

@@ -1,7 +1,9 @@
 //! OpenCode session discovery and extraction from its current SQLite store.
 
 use super::extract;
-use super::{ActivityState, Costs, ModelBreakdown, Session, SessionData, Tokens};
+use super::{
+    ActivityState, ContextUsage, Costs, FallbackRates, ModelBreakdown, Session, SessionData, Tokens,
+};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
@@ -213,7 +215,7 @@ fn u64_at(value: &Value, path: &[&str]) -> u64 {
     current.as_u64().unwrap_or(0)
 }
 
-fn assistant_usage(value: &Value) -> (String, String, Tokens, Costs) {
+fn assistant_usage(value: &Value, rates: &mut FallbackRates) -> (String, String, Tokens, Costs) {
     let model = value
         .get("modelID")
         .and_then(Value::as_str)
@@ -239,8 +241,17 @@ fn assistant_usage(value: &Value) -> (String, String, Tokens, Costs) {
         total: input + output + cache_read + cache_write,
         ..Default::default()
     };
+    // OpenCode writes `cost: 0` for providers it has no rates for, which is
+    // indistinguishable in the record from a genuinely free model. A cost it did
+    // compute is authoritative; a zero falls back to pricing the tokens.
+    let reported = value.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+    let total = if reported > 0.0 || tokens.total == 0 {
+        reported
+    } else {
+        rates.costs(&model, &tokens).map_or(0.0, |c| c.total)
+    };
     let costs = Costs {
-        total: value.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
+        total,
         ..Default::default()
     };
     (model, ts, tokens, costs)
@@ -256,9 +267,12 @@ fn add_usage(target: &mut SessionData, tokens: &Tokens, costs: &Costs) {
     target.costs.total += costs.total;
 }
 
-/// Extract accounting and tools for one OpenCode session. The database stores
-/// the provider-reported cost on every assistant message, so no pricing lookup
-/// or model-name guess is needed.
+/// Extract accounting and tools for one OpenCode session.
+///
+/// The database records a cost on every assistant message, and that figure wins
+/// wherever OpenCode knows the provider's rates. It reports zero for providers
+/// it has no pricing for, so a zero falls back to pricing the tokens against
+/// LiteLLM rather than being taken at face value.
 pub fn extract(path: &Path, session_id: &str) -> SessionData {
     let Ok(db) = readonly(path) else {
         return SessionData {
@@ -272,6 +286,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
     let mut data = SessionData::default();
     let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
     let mut saw_usage = false;
+    let mut rates = FallbackRates::default();
 
     let aggregate = db
         .query_row(
@@ -314,7 +329,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             if message.get("role").and_then(Value::as_str) != Some("assistant") {
                 continue;
             }
-            let (model, ts, tokens, costs) = assistant_usage(&message);
+            let (model, ts, tokens, costs) = assistant_usage(&message, &mut rates);
             saw_usage = true;
             data.last_model = model.clone();
             add_usage(&mut data, &tokens, &costs);
@@ -355,7 +370,13 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             total: input + output + cache_read + cache_write,
             ..Default::default()
         };
-        data.costs.total = cost;
+        data.costs.total = if cost > 0.0 || data.tokens.total == 0 {
+            cost
+        } else {
+            rates
+                .costs(&data.last_model, &data.tokens)
+                .map_or(0.0, |c| c.total)
+        };
     }
 
     if let Ok(mut stmt) =
@@ -438,6 +459,53 @@ pub fn delete(session: &Session) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Context usage from the newest assistant message that carries token counts.
+///
+/// OpenCode records no window size of its own, so the ceiling comes from
+/// LiteLLM's listing for the model. Without one there is no denominator, and a
+/// guessed window would misreport CTX% for every model that does not match it.
+pub fn extract_context(session: &Session) -> Option<ContextUsage> {
+    let db = readonly(session.data_file.as_ref()?).ok()?;
+    // A turn that was aborted or failed before the provider answered is still
+    // recorded, with every count at zero. Those sit at the end of many sessions,
+    // so walk back past them rather than reading the newest row and giving up.
+    let mut stmt = db
+        .prepare(
+            "SELECT data FROM message WHERE session_id = ?1 \
+             AND json_extract(data, '$.role') = 'assistant' \
+             ORDER BY time_created DESC, id DESC LIMIT 40",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map(params![session.session_id], |row| row.get::<_, String>(0))
+        .ok()?;
+
+    for raw in rows.flatten() {
+        let Ok(message) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        // What the next turn has to resend: everything the model was given,
+        // cached or not. Output is excluded — the next input count includes it.
+        let used = u64_at(&message, &["tokens", "input"])
+            + u64_at(&message, &["tokens", "cache", "read"])
+            + u64_at(&message, &["tokens", "cache", "write"]);
+        if used == 0 {
+            continue;
+        }
+        let model = message
+            .get("modelID")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(&session.model);
+        return Some(ContextUsage {
+            used,
+            max: crate::pricing::litellm_max_input_tokens(model)?,
+            compacting: false,
+        });
+    }
+    None
+}
+
 pub fn extract_last_tool(session: &Session) -> String {
     let Some(path) = &session.data_file else {
         return String::new();
@@ -461,6 +529,17 @@ pub fn extract_last_tool(session: &Session) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_db(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "cctop-opencode-{tag}-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
 
     #[test]
     fn extracts_sqlite_accounting_and_tool_activity() {
@@ -553,6 +632,129 @@ mod tests {
         assert_eq!(bash.len(), 2);
         assert!(!bash[0].failed, "a completed call must not be flagged");
         assert!(bash[1].failed, "status=error must be flagged");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A custom provider (any OpenAI-compatible endpoint OpenCode has no rates
+    /// for) reports `cost: 0` on every message. Reporting those sessions as free
+    /// hid real spend, so the tokens are priced against LiteLLM instead — and the
+    /// route prefix in the model name must not stop that lookup from landing.
+    #[test]
+    fn a_custom_provider_reporting_no_cost_is_priced_from_litellm() {
+        let _rates = crate::pricing::install_test_table(&[(
+            "zai/glm-5.1",
+            serde_json::json!({
+                "input_cost_per_token": 1.4e-6,
+                "output_cost_per_token": 4.4e-6,
+                "cache_read_input_token_cost": 2.6e-7,
+                "cache_creation_input_token_cost": 0.0,
+                "max_input_tokens": 200_000u64,
+            }),
+        )]);
+        let path = temp_db("priced");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT, cost REAL NOT NULL,
+                tokens_input INTEGER NOT NULL, tokens_output INTEGER NOT NULL,
+                tokens_reasoning INTEGER NOT NULL, tokens_cache_read INTEGER NOT NULL,
+                tokens_cache_write INTEGER NOT NULL
+             );
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "ses_1",
+                "proxied",
+                r#"{"id":"canopywave/zai/glm-5.1","providerID":"myproxy"}"#,
+                0.0,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_1",
+                "ses_1",
+                1_785_888_060_000i64,
+                r#"{"role":"assistant","time":{"created":1785888060000},"modelID":"canopywave/zai/glm-5.1","providerID":"myproxy","cost":0,"tokens":{"input":1000000,"output":1000000,"reasoning":500000,"cache":{"read":1000000,"write":1000000}}}"#
+            ],
+        )
+        .unwrap();
+        drop(db);
+
+        let data = extract(&path, "ses_1");
+        // 1.40 input + 4.40 output + 0.26 cache read + 0.00 cache write per Mtok.
+        // Reasoning is part of output, not billed on top of it.
+        assert!(
+            (data.costs.total - 6.06).abs() < 1e-9,
+            "priced at {}",
+            data.costs.total
+        );
+
+        let mut session = Session::new(Provider::OpenCode, "ses_1".to_string());
+        session.data_file = Some(path.clone());
+        let ctx = extract_context(&session).expect("context from the LiteLLM window");
+        assert_eq!(ctx.used, 3_000_000);
+        assert_eq!(ctx.max, 200_000);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A cost OpenCode did compute is authoritative — pricing over the top of it
+    /// would replace a provider's real invoice with a list price.
+    #[test]
+    fn a_reported_cost_is_never_second_guessed() {
+        let _rates = crate::pricing::install_test_table(&[(
+            "zai/glm-5.1",
+            serde_json::json!({"input_cost_per_token": 1.4e-6, "output_cost_per_token": 4.4e-6}),
+        )]);
+        let mut rates = FallbackRates::default();
+        let message = serde_json::json!({
+            "role": "assistant",
+            "modelID": "canopywave/zai/glm-5.1",
+            "cost": 0.5,
+            "tokens": {"input": 1_000_000, "output": 0, "cache": {"read": 0, "write": 0}},
+        });
+        let (_, _, _, costs) = assistant_usage(&message, &mut rates);
+        assert!((costs.total - 0.5).abs() < 1e-9);
+    }
+
+    /// A model LiteLLM does not list has no window, and a guessed one would make
+    /// every CTX% wrong in a way the user cannot see.
+    #[test]
+    fn an_unlisted_model_reports_no_context_rather_than_a_guess() {
+        let _rates = crate::pricing::install_test_table(&[]);
+        let path = temp_db("noctx");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_1",
+                "ses_1",
+                1i64,
+                r#"{"role":"assistant","modelID":"local/some-finetune","tokens":{"input":500,"output":10,"cache":{"read":0,"write":0}}}"#
+            ],
+        )
+        .unwrap();
+        drop(db);
+
+        let mut session = Session::new(Provider::OpenCode, "ses_1".to_string());
+        session.data_file = Some(path.clone());
+        assert!(extract_context(&session).is_none());
 
         std::fs::remove_file(path).unwrap();
     }
