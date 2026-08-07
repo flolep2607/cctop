@@ -472,6 +472,82 @@ mod tests {
         );
         let _ = std::fs::remove_file(path);
     }
+
+    fn detail(ts: &str, full: &str) -> ToolDetail {
+        ToolDetail {
+            d: "x".into(),
+            ts: ts.into(),
+            full: Some(full.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn finalize_caps_details_per_session_keeping_the_newest() {
+        let mut data = SessionData::default();
+        // Two tools, each within the per-tool cap, together over the session cap.
+        for tool in ["Read", "Bash"] {
+            let list = data.metrics.tool_details.entry(tool.into()).or_default();
+            for i in 0..crate::config::MAX_TOOL_DETAILS {
+                list.push(detail(&format!("2026-01-01T00:{i:04}"), "arg"));
+            }
+        }
+        data.metrics
+            .tool_details
+            .entry("Edit".into())
+            .or_default()
+            .push(detail("2027-01-01T00:00", "arg"));
+
+        data.finalize();
+        let total: usize = data.metrics.tool_details.values().map(Vec::len).sum();
+        assert_eq!(total, crate::config::MAX_SESSION_TOOL_DETAILS);
+        // The single newest call survives even though its tool is the smallest.
+        assert_eq!(data.metrics.tool_details["Edit"].len(), 1);
+        // …and what remains of a trimmed tool is its tail, not its head.
+        let read = &data.metrics.tool_details["Read"];
+        assert_eq!(
+            read.last().expect("kept details").ts,
+            format!("2026-01-01T00:{:04}", crate::config::MAX_TOOL_DETAILS - 1)
+        );
+    }
+
+    #[test]
+    fn finalize_bounds_the_large_string_fields() {
+        let mut data = SessionData::default();
+        let mut d = detail("2026-01-01T00:00", &"é".repeat(5_000));
+        d.delta = Some(Delta {
+            added: 1,
+            removed: 0,
+            hunks: vec!["+".repeat(5_000)],
+        });
+        data.metrics.tool_details.insert("Bash".into(), vec![d]);
+
+        data.finalize();
+        let d = &data.metrics.tool_details["Bash"][0];
+        assert_eq!(
+            d.full.as_ref().expect("full kept").chars().count(),
+            crate::config::MAX_TOOL_DETAIL_CHARS + 1 // the ellipsis
+        );
+        assert_eq!(
+            d.delta.as_ref().expect("delta kept").hunks[0]
+                .chars()
+                .count(),
+            crate::config::MAX_DIFF_LINE_CHARS + 1
+        );
+    }
+
+    #[test]
+    fn finalize_leaves_a_small_session_untouched() {
+        let mut data = SessionData::default();
+        data.metrics
+            .tool_details
+            .insert("Bash".into(), vec![detail("2026-01-01T00:00", "ls")]);
+        data.finalize();
+        assert_eq!(
+            data.metrics.tool_details["Bash"][0].full.as_deref(),
+            Some("ls")
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +733,81 @@ pub struct SessionData {
     pub error: Option<String>,
 }
 
+/// Keep the newest `MAX_SESSION_TOOL_DETAILS` details across all tools, and
+/// bound the string fields each one carries.
+///
+/// The per-tool cap alone lets a busy session hold thousands of details; the
+/// panel only ever shows a recent slice of them. Details are ranked by
+/// timestamp so "the newest" means newest in the session, not newest per tool —
+/// a tool used once at the very end should survive while an early flood of
+/// reads does not.
+fn trim_tool_details(details: &mut HashMap<String, Vec<ToolDetail>>) {
+    for list in details.values_mut() {
+        for d in list.iter_mut() {
+            truncate_chars(&mut d.d, crate::config::MAX_TOOL_DETAIL_CHARS);
+            if let Some(full) = d.full.as_mut() {
+                truncate_chars(full, crate::config::MAX_TOOL_DETAIL_CHARS);
+            }
+            if let Some(delta) = d.delta.as_mut() {
+                for line in delta.hunks.iter_mut() {
+                    truncate_chars(line, crate::config::MAX_DIFF_LINE_CHARS);
+                }
+            }
+        }
+    }
+
+    let total: usize = details.values().map(Vec::len).sum();
+    if total <= crate::config::MAX_SESSION_TOOL_DETAILS {
+        return;
+    }
+
+    // Rank newest-first. Within one tool the vectors are already chronological,
+    // so the index breaks ties for details sharing (or missing) a timestamp.
+    let mut ranked: Vec<(&str, usize)> = details
+        .iter()
+        .flat_map(|(name, list)| (0..list.len()).map(move |i| (name.as_str(), i)))
+        .collect();
+    ranked.sort_by(|a, b| {
+        details[b.0][b.1]
+            .ts
+            .cmp(&details[a.0][a.1].ts)
+            .then(b.1.cmp(&a.1))
+    });
+    ranked.truncate(crate::config::MAX_SESSION_TOOL_DETAILS);
+
+    let mut keep: HashMap<&str, Vec<bool>> = details
+        .iter()
+        .map(|(name, list)| (name.as_str(), vec![false; list.len()]))
+        .collect();
+    for (name, i) in ranked {
+        keep.get_mut(name).expect("name came from details")[i] = true;
+    }
+    let keep: HashMap<String, Vec<bool>> =
+        keep.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+
+    for (name, list) in details.iter_mut() {
+        let flags = &keep[name];
+        let mut i = 0;
+        list.retain(|_| {
+            i += 1;
+            flags[i - 1]
+        });
+    }
+    // A tool whose every detail was dropped would otherwise leave an empty
+    // entry that the panel renders as a tool with no calls.
+    details.retain(|_, list| !list.is_empty());
+}
+
+/// Truncate to at most `max` characters, never mid-character.
+fn truncate_chars(s: &mut String, max: usize) {
+    if s.chars().count() <= max {
+        return;
+    }
+    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+    s.truncate(end);
+    s.push('…');
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CodexRates {
     pub input: f64,
@@ -674,6 +825,17 @@ impl SessionData {
     pub fn cost_this_hour(&self) -> f64 {
         let key = crate::util::local_hour_key(&chrono::Utc::now());
         Self::bucket_total(&self.costs_by_hour, &key)
+    }
+
+    /// Bring freshly extracted data down to what is worth keeping.
+    ///
+    /// This runs on every extraction, before the result is either displayed or
+    /// cached, so a cached session and a re-parsed one show exactly the same
+    /// thing. Trimming only on the way to disk would be cheaper and wrong: the
+    /// Tools panel would quietly change contents the first time a session was
+    /// served from cache.
+    pub fn finalize(&mut self) {
+        trim_tool_details(&mut self.metrics.tool_details);
     }
 
     /// Spend since local midnight.
