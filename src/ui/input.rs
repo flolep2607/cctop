@@ -68,7 +68,8 @@ impl App {
             Mode::SendKeys => self.on_key_send(key),
             Mode::Launch => self.on_key_launch(key),
             Mode::Hooks => self.on_key_hooks(key),
-            Mode::Help | Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
+            Mode::Help => self.on_key_help(key),
+            Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
         }
     }
@@ -175,6 +176,27 @@ impl App {
         self.mode = Mode::List;
         if key.code == KeyCode::Char('y') {
             self.resume_now();
+        }
+    }
+
+    /// The help text is longer than most terminals are tall, so the navigation
+    /// keys scroll it and everything else still dismisses it.
+    fn on_key_help(&mut self, key: KeyEvent) {
+        let step = |app: &mut App, delta: i32| {
+            app.help_scroll =
+                (app.help_scroll as i32 + delta).clamp(0, app.help_max_scroll as i32) as u16;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => step(self, -1),
+            KeyCode::Down | KeyCode::Char('j') => step(self, 1),
+            KeyCode::PageUp => step(self, -(PAGE as i32)),
+            KeyCode::PageDown | KeyCode::Char(' ') => step(self, PAGE as i32),
+            KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => self.help_scroll = self.help_max_scroll,
+            _ => {
+                self.mode = Mode::List;
+                self.help_scroll = 0;
+            }
         }
     }
 
@@ -327,7 +349,12 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::F(10) => self.request_quit(),
-            KeyCode::Up => self.move_selection(-1),
+            // Terminate is deliberately behind a modifier: `k` is vim's "up",
+            // and every modal in this file already binds it that way, so a
+            // plain `k` aimed at the cursor must never reach a live agent.
+            // Plain `K` is taken by the batch kill, hence Ctrl.
+            KeyCode::Char('k') if ctrl => self.confirm_terminate(),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-PAGE),
             KeyCode::PageDown => self.move_selection(PAGE),
@@ -393,9 +420,11 @@ impl App {
 
             KeyCode::Tab => self.cycle_tab(1),
             KeyCode::BackTab => self.cycle_tab(-1),
-            KeyCode::Char(c @ '1'..='7') => {
+            // Bounded by the tab list rather than a literal range, so a panel
+            // added to `panels::TABS` gets its number key for free.
+            KeyCode::Char(c @ '1'..='9') => {
                 let tab = c as usize - '1' as usize;
-                if self.tab_available(tab) {
+                if tab < super::panels::TABS.len() && self.tab_available(tab) {
                     self.bottom_tab = tab;
                     self.save_prefs();
                 }
@@ -437,15 +466,6 @@ impl App {
                 }
                 Some(s) if s.is_running() => self.mode = Mode::DeleteBlocked,
                 Some(_) => self.mode = Mode::DeleteConfirm,
-                None => {}
-            },
-            KeyCode::Char('k') if self.on_subagent() => {
-                self.set_status("A subagent cannot be stopped on its own")
-            }
-            KeyCode::Char('k') => match self.selected_session() {
-                Some(s) if session_root_pid(s).is_some() => self.mode = Mode::KillConfirm,
-                Some(s) if s.is_running() => self.mode = Mode::KillBlocked,
-                Some(_) => self.set_status("Selected session is not running"),
                 None => {}
             },
             // Prefilled with the answer a stalled session usually wants, so
@@ -501,17 +521,7 @@ impl App {
             // Arrows move between bottom panels; Shift+arrows scroll within one.
             KeyCode::Left => self.cycle_tab(-1),
             KeyCode::Right => self.cycle_tab(1),
-            KeyCode::Esc => {
-                // Clear the narrowest active filter first.
-                if !self.search.is_empty() {
-                    self.search.clear();
-                    self.search_edited();
-                } else if self.age_filter.is_some() {
-                    self.age_filter = None;
-                    self.refilter();
-                    self.save_prefs();
-                }
-            }
+            KeyCode::Esc => self.clear_one_filter(),
             _ => {}
         }
     }

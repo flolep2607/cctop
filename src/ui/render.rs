@@ -141,7 +141,7 @@ impl Layout {
 pub(super) fn panel_block(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
+        .border_style(Style::default().fg(theme::colors().border))
         .title(Span::styled(format!(" {title} "), theme::title()))
 }
 
@@ -206,7 +206,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     draw_footer(frame, chunks[4], app);
 
     match app.mode {
-        Mode::Help => modals::draw_help(frame, area),
+        Mode::Help => modals::draw_help(frame, area, app),
         Mode::Search => modals::draw_search(frame, area, app),
         Mode::SortBy => modals::draw_sortby(frame, area, app),
         Mode::AgeFilter => modals::draw_age_filter(frame, area, app),
@@ -247,22 +247,16 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             // some emulators is worse than none, because you stop trusting it.
             Some(what) => {
                 let colour = match what {
-                    tabs::Attention::NeedsInput => theme::COST_MID,
-                    tabs::Attention::Idle => theme::COST_LOW,
+                    tabs::Attention::NeedsInput => theme::colors().cost_mid,
+                    tabs::Attention::Idle => theme::colors().cost_low,
                 };
                 match on {
-                    true => Style::default()
-                        .bg(colour)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
+                    true => theme::attention_lit(colour),
                     false => Style::default().fg(colour).add_modifier(Modifier::BOLD),
                 }
             }
-            None if i == app.tab => Style::default()
-                .bg(theme::SELECTED_BG)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-            None => Style::default().fg(theme::DIM),
+            None if i == app.tab => theme::selected(),
+            None => Style::default().fg(theme::colors().dim),
         };
         spans.push(Span::styled(text, style));
         layout.workspace_spans.push((pos, pos + width, i));
@@ -282,7 +276,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         spans.push(Span::styled(
             new_tab,
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::colors().accent)
                 .add_modifier(Modifier::BOLD),
         ));
         layout.workspace_new = Some((pos, pos + width));
@@ -314,7 +308,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         let mut block = panel_block(&pane.label);
         if i == focus {
             block = block
-                .border_style(Style::default().fg(theme::BORDER_HI))
+                .border_style(Style::default().fg(theme::colors().border_hi))
                 .title_bottom(Span::styled(" F12 back · Alt+w close ", theme::title()));
         }
         // Scrolled back, this pane is showing history rather than the agent, and
@@ -376,7 +370,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 format!("{:>value_w$} ", util::adaptive_usd(amount)),
                 Style::default()
-                    .fg(Color::Indexed(221))
+                    .fg(theme::colors().cost_mid)
                     .add_modifier(Modifier::BOLD),
             ),
         ];
@@ -416,7 +410,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 format!("{:>value_w$}", util::adaptive_usd(app.stats.spend_total)),
                 Style::default()
-                    .fg(Color::Indexed(221))
+                    .fg(theme::colors().cost_mid)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -466,7 +460,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw("  "),
             Span::styled(
                 format!("{} active", app.stats.running),
-                Style::default().fg(theme::COST_LOW),
+                Style::default().fg(theme::colors().cost_low),
             ),
         ]),
     ];
@@ -486,7 +480,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER));
+        .border_style(Style::default().fg(theme::colors().border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -520,7 +514,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         };
         spans.push(Span::styled(
             format!("↳ {}", crate::util::truncate(&what, 48)),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::colors().accent),
         ));
     }
     frame.render_widget(
@@ -648,7 +642,7 @@ fn draw_tool_sidebar(
                     format!("{:<name_w$}", util::truncate(&display, name_w)),
                     if selected {
                         Style::default()
-                            .fg(Color::White)
+                            .fg(theme::colors().value)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         theme::dim()
@@ -670,7 +664,12 @@ fn draw_tool_sidebar(
     frame.render_widget(
         Paragraph::new(
             (0..inner.height)
-                .map(|_| Line::from(Span::styled("│", Style::default().fg(theme::DIMMER))))
+                .map(|_| {
+                    Line::from(Span::styled(
+                        "│",
+                        Style::default().fg(theme::colors().dimmer),
+                    ))
+                })
                 .collect::<Vec<_>>(),
         ),
         Rect {
@@ -812,20 +811,20 @@ fn quota_color(window: &crate::quota::Window, now: i64) -> Color {
         // rate should be unmistakable. For a 7d window the sustainable rate is
         // 100 / (7 * 24), or roughly 0.6 percentage points per hour.
         if pace_ratio >= 1.5 {
-            return theme::COST_HIGH;
+            return theme::colors().cost_high;
         }
         if pace_ratio >= 1.1 {
-            return theme::COST_MID;
+            return theme::colors().cost_mid;
         }
-        return theme::COST_LOW;
+        return theme::colors().cost_low;
     }
 
     if window.pct >= 90 {
-        theme::COST_HIGH
+        theme::colors().cost_high
     } else if window.pct >= 70 {
-        theme::COST_MID
+        theme::colors().cost_mid
     } else {
-        theme::COST_LOW
+        theme::colors().cost_low
     }
 }
 
@@ -863,14 +862,14 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 };
                 spans.push(Span::styled(
                     "sign-in expired — ",
-                    Style::default().fg(theme::COST_MID),
+                    Style::default().fg(theme::colors().cost_mid),
                 ));
                 spans.push(Span::styled(cmd.to_string(), theme::value()));
             }
             crate::quota::ProviderStatus::RateLimited { retry_at } => {
                 spans.push(Span::styled(
                     "rate limited",
-                    Style::default().fg(theme::COST_MID),
+                    Style::default().fg(theme::colors().cost_mid),
                 ));
                 if let Some(at) = retry_at {
                     let remaining = at - chrono::Utc::now().timestamp();
@@ -907,7 +906,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                     ));
                     spans.push(Span::styled(
                         "\u{2500}".repeat(8 - filled),
-                        Style::default().fg(Color::Indexed(244)),
+                        Style::default().fg(theme::gray(244)),
                     ));
                     if let Some(reset) = w.resets_at {
                         let remaining = reset - now;
@@ -923,7 +922,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 if q.limit_reached {
                     spans.push(Span::styled(
                         "\u{26a0} limit",
-                        Style::default().fg(theme::COST_HIGH),
+                        Style::default().fg(theme::colors().cost_high),
                     ));
                 }
             }
@@ -941,18 +940,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 msg.clone(),
-                Style::default().fg(theme::COST_LOW),
+                Style::default().fg(theme::colors().cost_low),
             ))),
             area,
         );
         return;
     }
 
-    let key_style = Style::default()
-        .fg(Color::Black)
-        .bg(theme::ACCENT)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(theme::DIM);
+    let key_style = theme::key_cap();
+    let label_style = Style::default().fg(theme::colors().dim);
 
     let mut spans = Vec::new();
     for (key, name) in [
@@ -965,7 +961,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ("D", "Batch"),
         ("y", "Copy"),
         ("d", "Delete"),
-        ("k", "Kill"),
+        ("^K", "Kill"),
         ("+/-", "Speed"),
         ("F10", "Quit"),
     ] {
@@ -975,7 +971,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(age) = app.age_filter {
         spans.push(Span::styled(
             format!(" Age<{} ", age.short()),
-            Style::default().fg(theme::PANEL_TITLE),
+            Style::default().fg(theme::colors().panel_title),
         ));
     }
     if !app.search.is_empty() {
@@ -989,31 +985,31 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         };
         spans.push(Span::styled(
             format!(" Filter: {}{scope} ", app.search),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme::colors().filter_badge),
         ));
     }
     if app.cost_floor > 0.0 {
         spans.push(Span::styled(
             format!(" ≥${:.2} ", app.cost_floor),
-            Style::default().fg(theme::COST_HIGH),
+            Style::default().fg(theme::colors().cost_high),
         ));
     }
     if !app.marked.is_empty() {
         spans.push(Span::styled(
             format!(" [{} marked] ", app.marked.len()),
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::colors().accent)
                 .add_modifier(Modifier::BOLD),
         ));
     }
     spans.push(Span::styled(
         format!(" {}s ", app.refresh_secs),
-        Style::default().fg(theme::DIMMER),
+        Style::default().fg(theme::colors().dimmer),
     ));
     if app.follow {
         spans.push(Span::styled(
             " FOLLOW ",
-            Style::default().fg(theme::COST_MID),
+            Style::default().fg(theme::colors().cost_mid),
         ));
     }
     // Who rang, kept there until you are looking at them. A bell you heard from
@@ -1025,7 +1021,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" {bell} "),
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::colors().accent)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -1034,7 +1030,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" v{version} available — cctop --update "),
             Style::default()
-                .fg(theme::COST_MID)
+                .fg(theme::colors().cost_mid)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -1158,14 +1154,14 @@ mod tests {
             // the even 100/(7*24) percentage-points-per-hour pace.
             resets_at: Some(reset + duration.as_secs() as i64 / 2),
         };
-        assert_eq!(quota_color(&window, reset), theme::COST_HIGH);
+        assert_eq!(quota_color(&window, reset), theme::colors().cost_high);
 
         let sustainable = crate::quota::Window {
             pct: 50,
             resets_at: Some(reset + duration.as_secs() as i64 / 2),
             ..window
         };
-        assert_eq!(quota_color(&sustainable, reset), theme::COST_LOW);
+        assert_eq!(quota_color(&sustainable, reset), theme::colors().cost_low);
     }
 
     /// A test agent that draws `text` once and then sits there, so anything on
