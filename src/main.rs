@@ -186,7 +186,19 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("the interactive UI needs a TTY; use --list or --json instead");
     }
 
-    alias::install_once(&mut cache::UiPrefs::load());
+    // Both streams are known to be a TTY by here, and every non-interactive
+    // mode (--list, --json, --update, the alias flags, `run`, `attach`, `hook`)
+    // has already returned — so this is the only path that may prompt. CI is
+    // excluded even when it hands us a TTY: nobody is there to answer. So is
+    // `cctop <agent>`, where someone is waiting on an agent to start and
+    // already has, for this run, exactly what the alias would have given them.
+    #[cfg(unix)]
+    let launching_agent = agent.is_some();
+    #[cfg(not(unix))]
+    let launching_agent = false;
+    if !launching_agent && std::env::var_os("CI").is_none() {
+        alias::ask_on_first_run(&mut cache::UiPrefs::load());
+    }
 
     // Load whatever pricing is already cached so the first frame isn't zeroed
     // while the network fetch is still in flight.

@@ -54,7 +54,7 @@ fn displayed_cost(amount: f64, free: bool) -> String {
 
 fn cost_style(amount: f64, free: bool) -> Style {
     Style::default().fg(if free {
-        theme::DIMMER
+        theme::colors().dimmer
     } else {
         theme::cost_color(amount)
     })
@@ -93,7 +93,7 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
         return vec![
             Line::from(Span::styled(
                 "Could not read this session:".to_string(),
-                Style::default().fg(theme::COST_HIGH),
+                Style::default().fg(theme::colors().cost_high),
             )),
             Line::from(dim(err.clone())),
         ];
@@ -101,17 +101,17 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
 
     let mut lines = Vec::new();
     let provider_color = match session.surface {
-        Surface::DesktopCowork => theme::DESKTOP_COWORK,
-        Surface::DesktopCode => theme::DESKTOP_CODE,
-        Surface::Editor => theme::CURSOR,
+        Surface::DesktopCowork => theme::colors().desktop_cowork,
+        Surface::DesktopCode => theme::colors().desktop_code,
+        Surface::Editor => theme::colors().cursor,
         Surface::Cli => match session.provider {
-            Provider::Claude => theme::CLAUDE,
-            Provider::Codex => theme::OPENAI,
-            Provider::Cursor => theme::CURSOR,
-            Provider::Gemini => theme::GEMINI,
-            Provider::OpenCode => theme::OPENCODE,
-            Provider::Pi => theme::PI,
-            Provider::Windsurf => theme::WINDSURF,
+            Provider::Claude => theme::colors().claude,
+            Provider::Codex => theme::colors().openai,
+            Provider::Cursor => theme::colors().cursor,
+            Provider::Gemini => theme::colors().gemini,
+            Provider::OpenCode => theme::colors().opencode,
+            Provider::Pi => theme::colors().pi,
+            Provider::Windsurf => theme::colors().windsurf,
         },
     };
     let model = if data.last_model.is_empty() {
@@ -222,12 +222,12 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
             Span::raw(" "),
             Span::styled(
                 format!("+{}", util::with_commas(m.lines_added)),
-                Style::default().fg(theme::COST_LOW),
+                Style::default().fg(theme::colors().cost_low),
             ),
             Span::raw("  "),
             Span::styled(
                 format!("-{}", util::with_commas(m.lines_removed)),
-                Style::default().fg(theme::COST_HIGH),
+                Style::default().fg(theme::colors().cost_high),
             ),
         ]));
     }
@@ -241,7 +241,7 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
                 Span::styled(
                     "compacting…".to_string(),
                     Style::default()
-                        .fg(theme::COST_HIGH)
+                        .fg(theme::colors().cost_high)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]));
@@ -333,21 +333,18 @@ pub fn processes(session: &Session, width: usize) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(Span::styled(
         format!("{:>7}  {:>6}  {:>8}  {}", "PID", "CPU%", "MEM", "COMMAND"),
-        Style::default()
-            .fg(ratatui::style::Color::White)
-            .bg(theme::HEADER_BG)
-            .add_modifier(Modifier::BOLD),
+        theme::header(),
     )));
 
     for p in procs {
         // A recently-exited child is shown greyed rather than vanishing, so a
         // burst of short-lived tool subprocesses doesn't make the list flicker.
         let base = if p.ghost {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::colors().dim)
         } else if p.is_root {
             theme::value()
         } else {
-            Style::default().fg(ratatui::style::Color::Indexed(250))
+            Style::default().fg(theme::gray(250))
         };
         let cpu_style = if p.ghost {
             base
@@ -495,7 +492,7 @@ pub fn tool_activity(
         let mut spans = vec![
             dim(ts),
             if d.failed {
-                Span::styled("✗", Style::default().fg(theme::COST_HIGH))
+                Span::styled("✗", Style::default().fg(theme::colors().cost_high))
             } else {
                 Span::raw(" ")
             },
@@ -513,9 +510,9 @@ pub fn tool_activity(
             }
         };
         let origin_style = if d.origin.is_some() {
-            Style::default().fg(theme::DESKTOP_CODE)
+            Style::default().fg(theme::colors().desktop_code)
         } else {
-            Style::default().fg(theme::DIMMER)
+            Style::default().fg(theme::colors().dimmer)
         };
         used += 8;
         spans.push(Span::styled(format!("{origin_tag:<7} "), origin_style));
@@ -525,7 +522,7 @@ pub fn tool_activity(
             used += pretty.chars().count() + 1;
             spans.push(Span::styled(
                 format!("{pretty} "),
-                Style::default().fg(tool_color(&tool)),
+                Style::default().fg(theme::tool_color(&tool)),
             ));
         }
 
@@ -535,11 +532,11 @@ pub fn tool_activity(
         if let Some(delta) = &d.delta {
             trailing.push(Span::styled(
                 format!(" +{}", delta.added),
-                Style::default().fg(theme::COST_LOW),
+                Style::default().fg(theme::colors().cost_low),
             ));
             trailing.push(Span::styled(
                 format!(" -{}", delta.removed),
-                Style::default().fg(theme::COST_HIGH),
+                Style::default().fg(theme::colors().cost_high),
             ));
         }
         if let Some(ms) = d.dur_ms {
@@ -558,7 +555,7 @@ pub fn tool_activity(
                     util::compact_tokens(d.tokens_in),
                     util::compact_tokens(d.tokens_out)
                 ),
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::colors().dim),
             ));
         }
         let trailing_w: usize = trailing.iter().map(|sp| sp.content.chars().count()).sum();
@@ -571,7 +568,7 @@ pub fn tool_activity(
         )));
         spans.extend(trailing);
         let row_style = if d.failed {
-            Style::default().bg(theme::FAILED_BG)
+            theme::failed()
         } else {
             Style::default()
         };
@@ -585,10 +582,7 @@ pub fn tool_activity(
                 out.push(
                     Line::from(vec![
                         Span::raw("        "),
-                        Span::styled(
-                            line,
-                            Style::default().fg(ratatui::style::Color::Indexed(252)),
-                        ),
+                        Span::styled(line, Style::default().fg(theme::gray(252))),
                     ])
                     .style(row_style),
                 );
@@ -599,9 +593,9 @@ pub fn tool_activity(
         if show_diff && let Some(delta) = &d.delta {
             for hunk in &delta.hunks {
                 let style = match hunk.chars().next() {
-                    Some('+') => Style::default().fg(theme::COST_LOW),
-                    Some('-') => Style::default().fg(theme::COST_HIGH),
-                    _ => Style::default().fg(theme::DIMMER),
+                    Some('+') => Style::default().fg(theme::colors().cost_low),
+                    Some('-') => Style::default().fg(theme::colors().cost_high),
+                    _ => Style::default().fg(theme::colors().dimmer),
                 };
                 out.push(Line::from(vec![
                     Span::raw("        "),
@@ -623,15 +617,6 @@ fn fmt_millis(ms: i64) -> String {
     } else {
         util::compact_duration(ms)
     }
-}
-
-/// Stable per-tool colour so the same tool keeps its hue between refreshes.
-fn tool_color(name: &str) -> ratatui::style::Color {
-    const PALETTE: [u8; 10] = [75, 114, 173, 180, 139, 109, 146, 215, 152, 167];
-    let hash = name
-        .bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    ratatui::style::Color::Indexed(PALETTE[(hash as usize) % PALETTE.len()])
 }
 
 // ---------------------------------------------------------------------------
@@ -728,10 +713,7 @@ pub fn subagents(
             "{:<6}   {:<12} {:<12} {:<desc_w$} {:>8} {:>6} {:>5} {:>7}",
             "LAST", "TYPE", "MODEL", "DESC", "COST", "TOOLS", "CTX", "TIME"
         ),
-        Style::default()
-            .fg(ratatui::style::Color::White)
-            .bg(theme::HEADER_BG)
-            .add_modifier(Modifier::BOLD),
+        theme::header(),
     ))];
 
     let now = chrono::Utc::now();
@@ -740,18 +722,18 @@ pub fn subagents(
         // A ghost's transcript was purged, so its per-agent metrics are gone;
         // showing zeros would read as "did nothing" rather than "unknown".
         let (icon, icon_color) = if sa.ghost {
-            ("◌", theme::DIM)
+            ("◌", theme::colors().dim)
         } else if running {
-            ("●", theme::COST_LOW)
+            ("●", theme::colors().cost_low)
         } else {
-            ("○", theme::DIM)
+            ("○", theme::colors().dim)
         };
         let row_style = if sa.ghost {
-            Style::default().fg(theme::DIM)
+            Style::default().fg(theme::colors().dim)
         } else if running {
             theme::value()
         } else {
-            Style::default().fg(ratatui::style::Color::Indexed(250))
+            Style::default().fg(theme::gray(250))
         };
 
         let last = sa
@@ -990,16 +972,16 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
         return note("This transcript reports no per-request usage — nothing to break down.");
     };
 
-    use ratatui::style::Color::Indexed;
+    let palette = theme::colors();
     let mut slices = vec![
         // Named for what it holds rather than "system prompt", because after a
         // compaction the summary is folded into the same number.
-        Slice::held("Startup", b.startup, theme::PANEL_TITLE),
-        Slice::held("Tool output", b.tool_output, Indexed(75)),
-        Slice::held("Tool input", b.tool_input, Indexed(109)),
-        Slice::held("Attachments", b.attachments, Indexed(180)),
-        Slice::held("Your messages", b.user_text, theme::COST_LOW),
-        Slice::held("Assistant text", b.assistant_text, Indexed(139)),
+        Slice::held("Startup", b.startup, palette.panel_title),
+        Slice::held("Tool output", b.tool_output, palette.accent),
+        Slice::held("Tool input", b.tool_input, palette.chart_hues[0]),
+        Slice::held("Attachments", b.attachments, palette.name_hue),
+        Slice::held("Your messages", b.user_text, palette.cost_low),
+        Slice::held("Assistant text", b.assistant_text, palette.chart_hues[1]),
     ];
     slices.retain(|s| s.tokens > 0);
     slices.sort_by_key(|s| std::cmp::Reverse(s.tokens));
@@ -1008,7 +990,11 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
     // categories.
     let unaccounted = b.unaccounted();
     if unaccounted > 0 {
-        slices.push(Slice::held("Unaccounted", unaccounted as u64, theme::DIM));
+        slices.push(Slice::held(
+            "Unaccounted",
+            unaccounted as u64,
+            theme::colors().dim,
+        ));
     }
     // What is still free, so the bar is the whole window rather than only the
     // part already spent — which is what makes the used portion's length mean
@@ -1021,7 +1007,7 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
         slices.push(Slice {
             name: "Free",
             tokens: free,
-            color: theme::DIMMER,
+            color: theme::colors().dimmer,
             fill: '░',
         });
     }
@@ -1169,7 +1155,7 @@ fn context_header(session: &Session, b: &crate::session::ContextBreakdown) -> Li
             Span::styled(
                 "compacting…",
                 Style::default()
-                    .fg(theme::COST_HIGH)
+                    .fg(theme::colors().cost_high)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
@@ -1213,7 +1199,7 @@ fn stacked_bar(slices: &[Slice], compaction: Option<usize>, width: usize) -> Lin
     if let Some(at) = compaction
         && let Some(cell) = cell_styles.get_mut(at)
     {
-        *cell = ('┊', theme::DIM);
+        *cell = ('┊', theme::colors().dim);
     }
 
     // Runs of one style become one span; a span per cell would allocate a String
@@ -1343,7 +1329,7 @@ fn file_section(path: &Path, display: &str, max_lines: usize) -> Option<Vec<Line
     let mut out = vec![Line::from(Span::styled(
         display.to_string(),
         Style::default()
-            .fg(theme::BORDER_HI)
+            .fg(theme::colors().border_hi)
             .add_modifier(Modifier::BOLD),
     ))];
     let src: Vec<&str> = content.lines().collect();
@@ -1361,7 +1347,10 @@ fn file_section(path: &Path, display: &str, max_lines: usize) -> Option<Vec<Line
 }
 
 fn missing(text: String) -> Line<'static> {
-    Line::from(Span::styled(text, Style::default().fg(theme::DIMMER)))
+    Line::from(Span::styled(
+        text,
+        Style::default().fg(theme::colors().dimmer),
+    ))
 }
 
 /// Instructions, memory, skills, and MCP servers backing this session.
@@ -1583,7 +1572,10 @@ fn skill_list(dir: &Path) -> Vec<Line<'static>> {
                 }
             }
         }
-        let mut spans = vec![Span::styled(name, Style::default().fg(theme::COST_LOW))];
+        let mut spans = vec![Span::styled(
+            name,
+            Style::default().fg(theme::colors().cost_low),
+        )];
         if !desc.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(dim(util::truncate(&desc, 80)));
@@ -1612,10 +1604,7 @@ fn mcp_from_json(path: &Path, scope: &str) -> Vec<Line<'static>> {
         .filter(|(_, cfg)| cfg.is_object())
         .map(|(name, cfg)| {
             let mut spans = vec![
-                Span::styled(
-                    name.clone(),
-                    Style::default().fg(ratatui::style::Color::Indexed(180)),
-                ),
+                Span::styled(name.clone(), Style::default().fg(theme::colors().name_hue)),
                 Span::raw("  "),
                 dim(format!("({scope})")),
             ];
@@ -1641,7 +1630,7 @@ fn mcp_from_toml(path: &Path) -> Vec<Line<'static>> {
                 .map(|name| {
                     Line::from(Span::styled(
                         name.to_string(),
-                        Style::default().fg(ratatui::style::Color::Indexed(180)),
+                        Style::default().fg(theme::colors().name_hue),
                     ))
                 })
         })
@@ -1739,7 +1728,7 @@ mod tests {
         assert!(!ok.spans.iter().any(|s| s.content.contains('✗')));
 
         let bad = row_of("exit 1");
-        assert_eq!(bad.style.bg, Some(theme::FAILED_BG));
+        assert_eq!(bad.style.bg, Some(theme::colors().failed_bg));
         assert!(
             bad.spans.iter().any(|s| s.content.contains('✗')),
             "the failure must not be conveyed by colour alone"
