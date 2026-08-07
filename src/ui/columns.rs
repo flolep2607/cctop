@@ -203,7 +203,10 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         }
         ColumnId::Context => match &s.context {
             None => "─".into(),
-            Some(c) if c.compacting => "COMPCT".into(),
+            // Only while something is there to finish it. A session that
+            // compacted and stopped keeps its last measured percentage, which is
+            // what the context panel breaks down for the same session.
+            Some(_) if s.is_compacting() => "COMPCT".into(),
             Some(c) => {
                 let pct = c.percent_to_compact().round() as i64;
                 if pct > 100 {
@@ -362,9 +365,11 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::CostHour => num(a.cost_hour, b.cost_hour),
         ColumnId::CostToday => num(a.cost_today, b.cost_today),
         ColumnId::Context => {
-            // A compacting session is the most urgent thing on screen.
+            // A compacting session is the most urgent thing on screen — but only
+            // while it is running, or every session that ever ended on a
+            // compaction would sit above the live ones forever.
             let rank = |s: &Session| match &s.context {
-                Some(c) if c.compacting => f64::INFINITY,
+                _ if s.is_compacting() => f64::INFINITY,
                 Some(c) => c.percent_to_compact(),
                 None => -1.0,
             };
@@ -446,16 +451,17 @@ mod tests {
     fn compacting_sessions_sort_highest_on_context() {
         let now = Utc::now();
         let mut a = session("a");
+        a.inferred_running = true;
         a.context = Some(crate::session::ContextUsage {
             used: 10,
             max: 200_000,
-            compacting: true,
+            compacted: true,
         });
         let mut b = session("b");
         b.context = Some(crate::session::ContextUsage {
             used: 199_000,
             max: 200_000,
-            compacting: false,
+            compacted: false,
         });
         assert_eq!(compare(ColumnId::Context, &a, &b, &now), Ordering::Greater);
     }
@@ -551,17 +557,46 @@ mod tests {
     fn context_cell_flags_compaction_and_overflow() {
         let now = Utc::now();
         let mut s = session("a");
+        s.inferred_running = true;
         s.context = Some(crate::session::ContextUsage {
             used: 0,
             max: 200_000,
-            compacting: true,
+            compacted: true,
         });
         assert_eq!(render_cell(ColumnId::Context, &s, &now), "COMPCT");
         s.context = Some(crate::session::ContextUsage {
             used: 400_000,
             max: 200_000,
-            compacting: false,
+            compacted: false,
         });
         assert_eq!(render_cell(ColumnId::Context, &s, &now), ">100%");
+    }
+
+    /// A transcript that ends on a compaction never changes again, so a session
+    /// that compacted and then stopped would claim to be compacting for as long
+    /// as cctop listed it — and being pinned to the top of CTX% by that claim,
+    /// it would push every live session off the screen.
+    #[test]
+    fn a_stopped_session_that_compacted_no_longer_claims_to_be_compacting() {
+        let now = Utc::now();
+        let mut stopped = session("a");
+        stopped.context = Some(crate::session::ContextUsage {
+            used: 100_000,
+            max: 200_000,
+            compacted: true,
+        });
+        assert_eq!(render_cell(ColumnId::Context, &stopped, &now), "60%");
+
+        let mut live = session("b");
+        live.inferred_running = true;
+        live.context = Some(crate::session::ContextUsage {
+            used: 199_000,
+            max: 200_000,
+            compacted: false,
+        });
+        assert_eq!(
+            compare(ColumnId::Context, &stopped, &live, &now),
+            Ordering::Less
+        );
     }
 }

@@ -234,7 +234,7 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
 
     if let Some(ctx) = &session.context {
         lines.push(Line::default());
-        if ctx.compacting {
+        if session.is_compacting() {
             lines.push(Line::from(vec![
                 label("Compaction"),
                 Span::raw(" "),
@@ -244,6 +244,14 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
                         .fg(theme::COST_HIGH)
                         .add_modifier(Modifier::BOLD),
                 ),
+            ]));
+        } else if ctx.compacted {
+            // The percentage below would be of a window this session compacted
+            // away, and nothing has measured what replaced it.
+            lines.push(Line::from(vec![
+                label("Compaction"),
+                Span::raw(" "),
+                dim("compacted; no request since"),
             ]));
         } else {
             let compact_at = (ctx.max as f64 * *crate::config::COMPACT_THRESHOLD).round() as u64;
@@ -1018,7 +1026,7 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
         });
     }
 
-    let compaction = compaction_cell(session, &slices, width);
+    let compaction = compaction_cell(session, &slices, b.superseded, width);
     let mut lines = vec![context_header(session, &b)];
     lines.push(Line::default());
     lines.push(stacked_bar(&slices, compaction, width));
@@ -1040,10 +1048,18 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
 /// genuinely usable, and the tail past the threshold that the harness will
 /// reclaim before it is ever reached. `None` once the threshold is behind — the
 /// header already says so in red, and a marker there would erase a category.
-fn compaction_cell(session: &Session, slices: &[Slice], width: usize) -> Option<usize> {
+fn compaction_cell(
+    session: &Session,
+    slices: &[Slice],
+    superseded: bool,
+    width: usize,
+) -> Option<usize> {
     let ctx = session.context?;
     let scale = slices.iter().map(|s| s.tokens).sum::<u64>();
-    if scale == 0 || ctx.compacting {
+    // Nothing to point at once the compaction has happened: the bar is a window
+    // that has already been reclaimed, and a threshold ahead of it is a claim
+    // about a window nobody has measured.
+    if scale == 0 || superseded {
         return None;
     }
     let compact_at = ctx.max as f64 * *crate::config::COMPACT_THRESHOLD;
@@ -1077,14 +1093,21 @@ fn context_header(session: &Session, b: &crate::session::ContextBreakdown) -> Li
     };
 
     spans.push(dim(format!(" of {}", util::compact_tokens(ctx.max))));
-    if ctx.compacting {
+    // Headroom is the one thing that cannot be stated across a compaction: the
+    // window below is the one that was compacted away, so how much is "left" in
+    // the one replacing it is not known until its first request lands.
+    if b.superseded {
         spans.push(Span::raw("   "));
-        spans.push(Span::styled(
-            "compacting…",
-            Style::default()
-                .fg(theme::COST_HIGH)
-                .add_modifier(Modifier::BOLD),
-        ));
+        spans.push(if session.is_compacting() {
+            Span::styled(
+                "compacting…",
+                Style::default()
+                    .fg(theme::COST_HIGH)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            dim("as it stood before the last compaction")
+        });
         return Line::from(spans);
     }
 
@@ -1228,7 +1251,15 @@ fn context_footnotes(
     } else {
         "Estimated from transcript characters: everything else — read as proportions. Here they overshoot the window, which means the harness has dropped context the transcript still holds."
     };
-    [startup.to_string(), format!("{rest}{marker}")]
+    // Said outright rather than left to the header: every number in the panel
+    // describes a window that no longer exists, and that is not something to
+    // infer from a missing threshold marker.
+    let superseded = if b.superseded {
+        " A compaction has since replaced this window; nothing has measured what took its place."
+    } else {
+        ""
+    };
+    [startup.to_string(), format!("{rest}{marker}{superseded}")]
         .iter()
         .flat_map(|note| wrap(note, width.max(20)))
         .map(|l| Line::from(dim(l)))
@@ -1616,7 +1647,7 @@ mod tests {
             context: Some(ContextUsage {
                 used: 1000,
                 max: 200_000,
-                compacting: false,
+                compacted: false,
             }),
             ghost,
         }
@@ -1826,6 +1857,40 @@ mod tests {
         assert!(text.contains("75%"), "60k of 80k: {text}");
     }
 
+    /// Once a compaction has replaced the window, headroom in it is not a thing
+    /// anyone has measured. Quoting a figure anyway — in the header or as the
+    /// threshold marker on the bar — would invite the reader to plan the next
+    /// turn around a window that no longer exists.
+    #[test]
+    fn a_superseded_window_is_shown_as_past_rather_than_as_headroom() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        s.context = Some(ContextUsage {
+            used: 100_000,
+            max: 200_000,
+            compacted: true,
+        });
+        let data = SessionData {
+            context_breakdown: Some(crate::session::ContextBreakdown {
+                total: 100_000,
+                startup: 20_000,
+                tool_output: 30_000,
+                superseded: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = rendered(&s, &data, 100).join("\n");
+        assert!(text.contains("before the last compaction"), "{text}");
+        assert!(!text.contains("left"), "no headroom claim: {text}");
+        assert!(!text.contains('┊'), "no threshold marker: {text}");
+
+        // Still running, so the same transcript reads as a compaction in flight —
+        // which is what the CTX% column says for it too.
+        s.inferred_running = true;
+        let text = rendered(&s, &data, 100).join("\n");
+        assert!(text.contains("compacting…"), "{text}");
+    }
+
     #[test]
     fn processes_panel_explains_cowork_absence() {
         let mut s = Session::new(Provider::Claude, "x".into());
@@ -1869,6 +1934,7 @@ mod tests {
             user_text: 8_100,
             assistant_text: 6_900,
             after_compaction: false,
+            superseded: false,
         }
     }
 
@@ -1907,7 +1973,7 @@ mod tests {
         s.context = Some(ContextUsage {
             used: 118_200,
             max: 200_000,
-            compacting: false,
+            compacted: false,
         });
         let data = SessionData {
             context_breakdown: Some(breakdown()),
