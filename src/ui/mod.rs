@@ -1764,7 +1764,30 @@ impl App {
             }
         }
         self.apply_finished_agents();
+        self.apply_permissions();
         (changed, lifecycle)
+    }
+
+    /// Stamp each session with the permission mode its own hooks reported.
+    ///
+    /// Also run after a walk, because the rows are rebuilt wholesale and a
+    /// freshly discovered one has to pick up what was reported before it
+    /// existed. `hooked` outlives the rows for exactly this reason.
+    fn apply_permissions(&mut self) {
+        if self.hooked.is_empty() {
+            return;
+        }
+        for session in &mut self.sessions {
+            if let Some(reported) = self.hooked.get(&session.session_id) {
+                // Only ever set from a report. A session whose newest event did
+                // not carry the field keeps the last mode that did, because the
+                // setting has not changed just because one event was quiet
+                // about it.
+                if reported.permission.is_some() {
+                    session.permission = reported.permission;
+                }
+            }
+        }
     }
 
     /// Mark the subagents whose own hook has reported them finished.
@@ -2956,8 +2979,10 @@ fn event_loop(
         if annotated_rows_changed || rows_changed {
             // Extraction rebuilds each subagent from its transcript, which
             // cannot know what a hook already reported, so the hook's answer is
-            // reapplied to every batch of rows that replaces them.
+            // reapplied to every batch of rows that replaces them. The same
+            // goes for the permission mode, which no transcript records at all.
             app.apply_finished_agents();
+            app.apply_permissions();
         }
         if annotated_rows_changed {
             // A burst can contain hundreds of rows. Recompute and sort once
@@ -3434,6 +3459,50 @@ mod tests {
         assert_eq!(app.sort_col, ColumnId::Last);
     }
 
+    /// The mode is reported by a live agent but drawn on a row rebuilt by every
+    /// walk, so the two have to survive arriving in either order.
+    #[test]
+    fn the_permission_mode_survives_the_rows_being_rebuilt() {
+        let reported = |mode: Option<crate::hook::Permission>| crate::hook::Event {
+            session_id: "a".into(),
+            reported: crate::hook::Reported {
+                signal: crate::hook::Signal::Busy,
+                cwd: "/w/proj".into(),
+                permission: mode,
+            },
+            finished_agent: None,
+        };
+        let mut app = test_app();
+
+        // Reported before the row exists, which is the ordinary order: a
+        // `SessionStart` beats the walk that discovers its transcript.
+        app.apply_hooks(vec![reported(Some(crate::hook::Permission::Bypass))]);
+        app.sessions = vec![session("a", true, "proj")];
+        assert_eq!(app.sessions[0].permission, None, "not stamped yet");
+
+        app.apply_permissions();
+        assert_eq!(
+            app.sessions[0].permission,
+            Some(crate::hook::Permission::Bypass),
+            "a row discovered after the report still picks it up"
+        );
+
+        // An event that says nothing about the mode must not erase it: the
+        // setting has not changed just because one event was quiet.
+        app.apply_hooks(vec![reported(None)]);
+        assert_eq!(
+            app.sessions[0].permission,
+            Some(crate::hook::Permission::Bypass)
+        );
+
+        // A real change is followed.
+        app.apply_hooks(vec![reported(Some(crate::hook::Permission::Plan))]);
+        assert_eq!(
+            app.sessions[0].permission,
+            Some(crate::hook::Permission::Plan)
+        );
+    }
+
     /// A reported state is kept until the session says it is over, and the
     /// events that change *which sessions exist* ask for a rescan while the
     /// ones that only change a state do not.
@@ -3444,6 +3513,7 @@ mod tests {
             reported: crate::hook::Reported {
                 signal,
                 cwd: "/w/proj".into(),
+                permission: None,
             },
             // This test is about the session's own state; subagent events are
             // covered where subagents are.
@@ -3495,6 +3565,7 @@ mod tests {
             reported: crate::hook::Reported {
                 signal: crate::hook::Signal::Idle,
                 cwd: "/w/proj".into(),
+                permission: None,
             },
             finished_agent: None,
         }]);
@@ -3543,6 +3614,7 @@ mod tests {
             reported: crate::hook::Reported {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
+                permission: None,
             },
             finished_agent: None,
         }]);
@@ -3561,6 +3633,7 @@ mod tests {
             reported: crate::hook::Reported {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
+                permission: None,
             },
             finished_agent: None,
         }]);

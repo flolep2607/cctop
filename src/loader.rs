@@ -225,7 +225,13 @@ impl Loader {
             s.context = self.context_cache.get(&key).copied();
             return;
         }
-        s.activity_state = session::extract_activity_state(s);
+        let (state, permission) = session::live_state(s);
+        s.activity_state = state;
+        // The transcript is the baseline, and every Claude Code session has one
+        // whether or not cctop's hooks are installed. A live agent's own report
+        // is fresher and outranks it, which `App::apply_permissions` applies on
+        // top of this.
+        s.permission = permission;
         if s.is_running() {
             s.last_tool = match s.provider {
                 Provider::Claude => session::claude::extract_last_tool(s),

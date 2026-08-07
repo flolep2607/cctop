@@ -235,6 +235,18 @@ pub struct Session {
     pub inferred_running: bool,
     /// A transcript-derived state that refines the liveness dot.
     pub activity_state: ActivityState,
+    /// How much this session asks before it acts, when its own hooks have said.
+    ///
+    /// Read from the transcript, which Claude Code stamps with the mode on
+    /// every `user` record, and overwritten by the session's own hooks when it
+    /// has them — those are fresher, since they arrive as the turn happens
+    /// rather than after it is written down.
+    ///
+    /// `None` when neither could say: a harness that does not record it, or a
+    /// transcript whose tail holds no user record. That is deliberately not the
+    /// same as "it asks about everything", which would be a guess about the one
+    /// column whose whole job is not to guess.
+    pub permission: Option<crate::hook::Permission>,
 
     // --- Rate tracking ---
     pub tokens_per_min: f64,
@@ -273,6 +285,7 @@ impl Session {
             process: None,
             inferred_running: false,
             activity_state: ActivityState::Working,
+            permission: None,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
         }
@@ -346,37 +359,74 @@ impl Session {
     }
 }
 
-/// Infer a meaningful state from the newest session event.
-pub fn extract_activity_state(session: &Session) -> ActivityState {
+/// What the newest events say about a session: what it is doing, and how much
+/// it asks before it acts.
+///
+/// Both come off the same tail, so they are read together — a second pass over
+/// the last 64KB of every transcript, on every refresh, to answer one more
+/// question would be the kind of per-tick waste `proc` was just relieved of.
+///
+/// The permission mode is only carried by Claude Code, on each `user` record,
+/// and the newest one wins: it is a setting the user can change mid-session.
+pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Permission>) {
     let Some(file) = session.data_file.as_ref() else {
-        return ActivityState::Working;
+        return (ActivityState::Working, None);
     };
     if session.provider == crate::pricing::Provider::OpenCode {
-        return opencode::extract_activity_state(file, &session.session_id);
+        return (
+            opencode::extract_activity_state(file, &session.session_id),
+            None,
+        );
     }
     let Some(text) = crate::util::read_tail(file, 65_536) else {
-        return ActivityState::Working;
+        return (ActivityState::Working, None);
     };
 
+    // Found on the way to the state, which is why the walk is not cut short the
+    // moment the state is known: the newest record that names a mode may be
+    // older than the newest record that names a state.
+    let mut permission = None;
+    let mut state = None;
     for line in text.lines().rev() {
         let Ok(item) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        if is_api_error_event(&item) {
-            return ActivityState::ApiError;
+        if permission.is_none() {
+            permission = item
+                .get("permissionMode")
+                .and_then(|v| v.as_str())
+                .and_then(crate::hook::Permission::parse);
         }
-        if is_waiting_for_input_event(session.provider, &item) {
-            return ActivityState::WaitingForInput;
-        }
-        if is_passive_event(&item) {
+        if state.is_some() {
+            if permission.is_some() {
+                break;
+            }
             continue;
         }
-        // The newest meaningful event was ordinary progress (a tool call,
-        // result, or stream event), so do not let an older completed answer
-        // make the row look like it is awaiting input.
-        return ActivityState::Working;
+        state = activity_of(session.provider, &item);
     }
-    ActivityState::Working
+    (state.unwrap_or(ActivityState::Working), permission)
+}
+
+/// What one record says about the session's state, or `None` if it says nothing
+/// and the walk should carry on past it.
+fn activity_of(
+    provider: crate::pricing::Provider,
+    item: &serde_json::Value,
+) -> Option<ActivityState> {
+    if is_api_error_event(item) {
+        return Some(ActivityState::ApiError);
+    }
+    if is_waiting_for_input_event(provider, item) {
+        return Some(ActivityState::WaitingForInput);
+    }
+    if is_passive_event(item) {
+        return None;
+    }
+    // The newest meaningful event was ordinary progress (a tool call, result,
+    // or stream event), so do not let an older completed answer make the row
+    // look like it is awaiting input.
+    Some(ActivityState::Working)
 }
 
 /// Token counters and turn metadata are often appended after the event that
@@ -580,6 +630,52 @@ mod tests {
         assert!(is_passive_event(&item));
     }
 
+    /// The permission mode is on Claude Code's `user` records, so it can be read
+    /// without hooks — and it is the *newest* one, because the user can change
+    /// it mid-session.
+    #[test]
+    fn the_permission_mode_comes_off_the_transcript_tail() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-permission-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","permissionMode":"default"}"#,
+                "\n",
+                r#"{"type":"user","permissionMode":"bypassPermissions"}"#,
+                "\n",
+                // Newer, but says nothing about the mode: the answer above stands.
+                r#"{"type":"assistant","message":{"content":[]}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+        let mut session = Session::new(Provider::Claude, "test".into());
+        session.data_file = Some(path.clone());
+        assert_eq!(
+            live_state(&session).1,
+            Some(crate::hook::Permission::Bypass),
+            "the newest record that names a mode wins"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // A harness that never records it says nothing, rather than guessing at
+        // the safe end.
+        std::fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n",
+        )
+        .expect("write transcript");
+        assert_eq!(live_state(&session).1, None);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn tail_state_uses_the_last_meaningful_codex_event() {
         let path = std::env::temp_dir().join(format!(
@@ -600,10 +696,7 @@ mod tests {
         .expect("write transcript");
         let mut session = Session::new(Provider::Codex, "test".into());
         session.data_file = Some(path.clone());
-        assert_eq!(
-            extract_activity_state(&session),
-            ActivityState::WaitingForInput
-        );
+        assert_eq!(live_state(&session).0, ActivityState::WaitingForInput);
         let _ = std::fs::remove_file(path);
     }
 
