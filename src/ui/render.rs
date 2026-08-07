@@ -430,6 +430,20 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         layout.tab_spans.push((pos, pos + w, i));
         pos += w + 2;
     }
+    // These panels describe the subagent, not the session it ran under, and the
+    // two are a keystroke apart in the table. Naming it on the border is what
+    // stops a subagent's small numbers from being read as its parent's.
+    if let Some(sub) = app.selected_subagent() {
+        let what = if sub.description.is_empty() {
+            sub.agent_type.clone()
+        } else {
+            format!("{}: {}", sub.agent_type, sub.description)
+        };
+        spans.push(Span::styled(
+            format!("↳ {}", crate::util::truncate(&what, 48)),
+            Style::default().fg(theme::ACCENT),
+        ));
+    }
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
         Rect {
