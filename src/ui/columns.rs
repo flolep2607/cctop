@@ -1,6 +1,6 @@
 //! Session-table column definitions: rendering, sorting, and tooltips.
 
-use crate::session::{ActivityState, Session};
+use crate::session::{ActivityState, Session, Subagent, SubagentStatus};
 use crate::util;
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
@@ -203,7 +203,10 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         }
         ColumnId::Context => match &s.context {
             None => "─".into(),
-            Some(c) if c.compacting => "COMPCT".into(),
+            // Only while something is there to finish it. A session that
+            // compacted and stopped keeps its last measured percentage, which is
+            // what the context panel breaks down for the same session.
+            Some(_) if s.is_compacting() => "COMPCT".into(),
             Some(c) => {
                 let pct = c.percent_to_compact().round() as i64;
                 if pct > 100 {
@@ -254,6 +257,80 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         }
         ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
+    }
+}
+
+/// One cell of a subagent's row, under the same columns as its parent.
+///
+/// A subagent is not a session and most columns have no answer for it: it runs
+/// inside the parent's process, so it has no CPU or memory of its own, and its
+/// branch and project are the parent's. Those read as `─` rather than repeating
+/// the parent's figure down every child row, which would look like the cost of
+/// the session had multiplied.
+///
+/// `last` is the tree glyph plus the agent's type and description, because the
+/// Project column is where the eye already looks for what a row *is*.
+pub fn render_subagent_cell(
+    id: ColumnId,
+    sub: &Subagent,
+    last: bool,
+    now: &DateTime<Utc>,
+) -> String {
+    match id {
+        ColumnId::Status => match sub.status {
+            SubagentStatus::Running => "●".into(),
+            SubagentStatus::Done => "○".into(),
+        },
+        ColumnId::Last => match &sub.last_active {
+            Some(ts) => util::relative_age(ts, now),
+            None => "─".into(),
+        },
+        ColumnId::Duration => {
+            if sub.duration_ms > 0 {
+                util::compact_duration(sub.duration_ms)
+            } else {
+                "─".into()
+            }
+        }
+        ColumnId::Cost => {
+            if sub.cost > 0.0 {
+                util::compact_usd(sub.cost)
+            } else {
+                "─".into()
+            }
+        }
+        ColumnId::Context => match &sub.context {
+            Some(c) => format!("{}%", c.percent_to_compact().round() as i64),
+            None => "─".into(),
+        },
+        ColumnId::Tools => {
+            if sub.tool_count > 0 {
+                sub.tool_count.to_string()
+            } else {
+                "─".into()
+            }
+        }
+        ColumnId::Model => util::short_model(&sub.model),
+        ColumnId::Project => {
+            let branch = if last { "└─" } else { "├─" };
+            let what = if sub.description.is_empty() {
+                sub.agent_type.clone()
+            } else {
+                format!("{}: {}", sub.agent_type, sub.description)
+            };
+            format!("{branch} {what}")
+        }
+        // Belongs to the parent, or is not measured per subagent. Left blank
+        // rather than dashed: a dozen `─` down a child row is noise the eye has
+        // to step over to reach the columns that do say something.
+        ColumnId::CostHour
+        | ColumnId::CostToday
+        | ColumnId::Cpu
+        | ColumnId::Memory
+        | ColumnId::TokenTotal
+        | ColumnId::TokenRate
+        | ColumnId::Harness
+        | ColumnId::Branch => String::new(),
     }
 }
 
@@ -368,9 +445,11 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::CostHour => num(a.cost_hour, b.cost_hour),
         ColumnId::CostToday => num(a.cost_today, b.cost_today),
         ColumnId::Context => {
-            // A compacting session is the most urgent thing on screen.
+            // A compacting session is the most urgent thing on screen — but only
+            // while it is running, or every session that ever ended on a
+            // compaction would sit above the live ones forever.
             let rank = |s: &Session| match &s.context {
-                Some(c) if c.compacting => f64::INFINITY,
+                _ if s.is_compacting() => f64::INFINITY,
                 Some(c) => c.percent_to_compact(),
                 None => -1.0,
             };
@@ -452,16 +531,17 @@ mod tests {
     fn compacting_sessions_sort_highest_on_context() {
         let now = Utc::now();
         let mut a = session("a");
+        a.inferred_running = true;
         a.context = Some(crate::session::ContextUsage {
             used: 10,
             max: 200_000,
-            compacting: true,
+            compacted: true,
         });
         let mut b = session("b");
         b.context = Some(crate::session::ContextUsage {
             used: 199_000,
             max: 200_000,
-            compacting: false,
+            compacted: false,
         });
         assert_eq!(compare(ColumnId::Context, &a, &b, &now), Ordering::Greater);
     }
@@ -557,17 +637,46 @@ mod tests {
     fn context_cell_flags_compaction_and_overflow() {
         let now = Utc::now();
         let mut s = session("a");
+        s.inferred_running = true;
         s.context = Some(crate::session::ContextUsage {
             used: 0,
             max: 200_000,
-            compacting: true,
+            compacted: true,
         });
         assert_eq!(render_cell(ColumnId::Context, &s, &now), "COMPCT");
         s.context = Some(crate::session::ContextUsage {
             used: 400_000,
             max: 200_000,
-            compacting: false,
+            compacted: false,
         });
         assert_eq!(render_cell(ColumnId::Context, &s, &now), ">100%");
+    }
+
+    /// A transcript that ends on a compaction never changes again, so a session
+    /// that compacted and then stopped would claim to be compacting for as long
+    /// as cctop listed it — and being pinned to the top of CTX% by that claim,
+    /// it would push every live session off the screen.
+    #[test]
+    fn a_stopped_session_that_compacted_no_longer_claims_to_be_compacting() {
+        let now = Utc::now();
+        let mut stopped = session("a");
+        stopped.context = Some(crate::session::ContextUsage {
+            used: 100_000,
+            max: 200_000,
+            compacted: true,
+        });
+        assert_eq!(render_cell(ColumnId::Context, &stopped, &now), "60%");
+
+        let mut live = session("b");
+        live.inferred_running = true;
+        live.context = Some(crate::session::ContextUsage {
+            used: 199_000,
+            max: 200_000,
+            compacted: false,
+        });
+        assert_eq!(
+            compare(ColumnId::Context, &stopped, &live, &now),
+            Ordering::Less
+        );
     }
 }

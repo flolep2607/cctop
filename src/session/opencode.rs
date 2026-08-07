@@ -500,7 +500,7 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
         return Some(ContextUsage {
             used,
             max: crate::pricing::litellm_max_input_tokens(model)?,
-            compacting: false,
+            compacted: false,
         });
     }
     None
