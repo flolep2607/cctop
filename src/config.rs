@@ -150,7 +150,11 @@ pub const MAX_TOOL_DETAILS: usize = 200;
 pub const MAX_DIFF_LINES: usize = 60;
 
 pub const CLAUDE_DEFAULT_CTX: u64 = 200_000;
-pub const CLAUDE_1M_CTX: u64 = 1_048_576;
+/// A decimal million, not a mebi-token. Anthropic advertises the large window as
+/// 1M tokens and LiteLLM's `max_input_tokens` says 1000000 for the models that
+/// have it; `1 << 20` would put cctop 4.9% above the only figure anyone else
+/// publishes, and 4.9% away from what LiteLLM tells us for the same model.
+pub const CLAUDE_1M_CTX: u64 = 1_000_000;
 pub const CODEX_DEFAULT_CTX: u64 = 258_400;
 
 /// `true` if `s` is exactly a lowercase hyphenated UUID.
