@@ -15,7 +15,15 @@ use std::path::{Path, PathBuf};
 const RELEASES_URL: &str = "https://api.github.com/repos/flolep2607/cctop/releases/latest";
 /// GitHub rejects API requests without one.
 const USER_AGENT: &str = concat!("cctop/", env!("CARGO_PKG_VERSION"));
-const CHECK_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+/// How long a release check stays good for.
+///
+/// An hour, which is far cheaper than it sounds: the check is one unauthenticated
+/// call to GitHub's releases API, the cache file lives in `CACHE_DIR` and is
+/// shared by every cctop on the machine, and unauthenticated GitHub allows 60
+/// requests an hour per IP — so this spends about 2% of that budget. Hourly is
+/// the difference between hearing about a release the day after it lands and
+/// hearing about it while it is still the thing that was just fixed.
+const CHECK_MAX_AGE_SECS: u64 = 60 * 60;
 
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -110,7 +118,7 @@ fn fetch_latest() -> Result<Release> {
     serde_json::from_str(&text).context("could not parse the release response")
 }
 
-/// Newest published version, refreshed at most once a day.
+/// Newest published version, refreshed at most once an hour.
 ///
 /// Returns the cached answer without touching the network when it is fresh, so
 /// this is cheap to call on every start. Failures are silent: a monitor that
@@ -268,28 +276,203 @@ fn staging_dir() -> Result<tempfile::TempDir> {
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow!("the running executable has no parent directory"))?;
-    stage_in(dir)
+    match raw_stage_in(dir) {
+        Ok(staged) => Ok(staged),
+        // The one failure the user can do something about without going back to
+        // the shell, so it is worth handling rather than only reporting.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(elevate(dir)),
+        Err(error) => Err(anyhow::Error::new(error)
+            .context(format!("could not stage an update in {}", dir.display()))),
+    }
 }
 
-fn stage_in(dir: &Path) -> Result<tempfile::TempDir> {
+/// The attempt itself, with the io error kept intact: whether this failed
+/// because of permissions is the question the whole path above turns on, and an
+/// error already wrapped in prose can no longer answer it.
+fn raw_stage_in(dir: &Path) -> std::io::Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(".cctop-update-")
         .tempdir_in(dir)
-        .map_err(|error| {
-            // The documented install puts cctop in /usr/local/bin with sudo, so a
-            // user-owned process being unable to replace it is the ordinary case,
-            // not an exotic one. Saying so beats reporting a bare EACCES.
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
-                anyhow!(
-                    "{} is not writable by this user, so the new binary cannot replace the old one: {ELEVATE}. \
-                     If a package manager installed cctop, update it with that instead.",
-                    dir.display()
-                )
-            } else {
-                anyhow::Error::new(error)
-                    .context(format!("could not stage an update in {}", dir.display()))
-            }
-        })
+}
+
+/// What to say when the install directory cannot be written and cctop has no
+/// way to change that from here.
+///
+/// The documented install puts cctop in /usr/local/bin with sudo, so a
+/// user-owned process being unable to replace it is the ordinary case, not an
+/// exotic one. Saying so beats reporting a bare EACCES.
+fn unwritable(dir: &Path) -> anyhow::Error {
+    anyhow!(
+        "{} is not writable by this user, so the new binary cannot replace the old one: {ELEVATE}. \
+         If a package manager installed cctop, update it with that instead.",
+        dir.display()
+    )
+}
+
+/// What to say when even root cannot write there.
+///
+/// Root and still refused is not a permission problem anyone can grant their way
+/// out of, so this must not mention sudo: pointing at it would only send the user
+/// round the same loop a second time.
+fn read_only(dir: &Path) -> anyhow::Error {
+    anyhow!(
+        "{} is not writable even as root, so the new binary cannot replace the old one — \
+         the filesystem is mounted read-only, or the binary is immutable. \
+         If a package manager installed cctop, update it with that instead.",
+        dir.display()
+    )
+}
+
+/// What cctop can offer a user whose install directory it cannot write to.
+///
+/// Kept as a decision separate from acting on it, because the interesting part
+/// is the table of cases and none of it is testable once it has re-executed the
+/// process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recourse {
+    /// Ask on the terminal, and re-run under sudo if the user agrees.
+    Ask,
+    /// Nothing to offer: report the failure and the manual fix.
+    Explain,
+    /// Already privileged, so the permission error is about the filesystem
+    /// rather than about who is asking.
+    Privileged,
+}
+
+/// Which of those applies, from facts the caller has already gathered.
+///
+/// `elevated` is the recursion guard, and it is deliberately wider than "am I
+/// root": the child cctop re-runs under sudo must never be able to prompt and
+/// elevate again, and a `sudo -u someone-else` that is not root would otherwise
+/// slip past the root check and start the loop.
+///
+/// `interactive` covers CI, pipelines and hooks. Elevating unattended is not a
+/// thing cctop may do — an unanswerable prompt on a detached stderr is a hang at
+/// best, and a silent privilege escalation at worst — so those keep exactly the
+/// behaviour they had before any of this existed.
+fn recourse(root: bool, elevated: bool, sudo: bool, interactive: bool) -> Recourse {
+    match (root, elevated, sudo && interactive) {
+        (true, _, _) => Recourse::Privileged,
+        (false, false, true) => Recourse::Ask,
+        _ => Recourse::Explain,
+    }
+}
+
+/// Whether cctop is already running as root.
+#[cfg(unix)]
+fn is_root() -> bool {
+    // Safe: geteuid reads a process property and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
+}
+
+/// Whether this process was itself started through sudo.
+///
+/// sudo puts `SUDO_USER` in the environment it hands the command, and unlike the
+/// euid it survives a target user who is not root. Together with [`is_root`] it
+/// is what stops the elevated child from offering to elevate again.
+fn already_elevated() -> bool {
+    std::env::var_os("SUDO_USER").is_some()
+}
+
+/// The command that re-runs this exact binary as root.
+///
+/// The resolved path from `current_exe`, never argv[0]: sudo resets `PATH` to
+/// its own `secure_path`, so a bare `cctop` would be looked up somewhere else or
+/// nowhere at all — and the binary to replace is the one at *this* path, which is
+/// the same one `self_replace` will go for on the other side. `--` so a path that
+/// begins with a dash can never be read as an option of sudo's.
+fn sudo_argv(exe: &Path) -> Vec<String> {
+    vec![
+        "sudo".to_string(),
+        "--".to_string(),
+        exe.to_string_lossy().into_owned(),
+        "--update".to_string(),
+    ]
+}
+
+/// Handle an install directory this process cannot write into, elevating if the
+/// user asks for it.
+///
+/// Returns the error to fail with. On the one path where it does not fail it
+/// does not return at all: cctop hands the terminal to sudo, waits for the
+/// privileged run to finish, and exits with whatever that run made of it — there
+/// is nothing sensible left for this process to do afterwards, since the update
+/// it was asked for has either already happened or already been reported.
+fn elevate(dir: &Path) -> anyhow::Error {
+    match recourse(
+        is_root(),
+        already_elevated(),
+        crate::shim::is_command("sudo"),
+        interactive(),
+    ) {
+        Recourse::Privileged => return read_only(dir),
+        Recourse::Explain => return unwritable(dir),
+        Recourse::Ask => {}
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(_) => return unwritable(dir),
+    };
+    if !confirm(dir, &exe) {
+        return anyhow!(
+            "Not updated: {} is not writable by this user. \
+             If a package manager installed cctop, update it with that instead.",
+            dir.display()
+        );
+    }
+
+    let argv = sudo_argv(&exe);
+    // Inherited stdio, which is the whole reason this is a child process and not
+    // an exec of something quieter: sudo asks for a password on the terminal, and
+    // a captured stderr is a prompt the user never sees.
+    match std::process::Command::new(&argv[0]).args(&argv[1..]).status() {
+        // The privileged run has already printed everything there is to say,
+        // including its own failures, so this adds nothing and only forwards how
+        // it went.
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(error) => anyhow!("could not run sudo ({error}): {ELEVATE}."),
+    }
+}
+
+/// Whether there is a user at the other end to answer a question.
+///
+/// stdin because the answer has to come from somewhere, and stderr because that
+/// is where the question goes — stdout is left alone so `--update` stays usable
+/// in a pipeline, which is also a place this must never prompt.
+fn interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Ask before running anything as root.
+///
+/// Explicit consent, defaulting to no: this re-runs a binary with full
+/// privileges, and a user who typed `--update` asked to be updated, not to hand
+/// root to whatever cctop decides to do next. Anything but a plain yes is a no,
+/// including a closed stdin.
+fn confirm(dir: &Path, exe: &Path) -> bool {
+    use std::io::Write;
+
+    let mut err = std::io::stderr();
+    let _ = write!(
+        err,
+        "{} is not writable by this user.\nRe-run as root to replace {}? [y/N] ",
+        dir.display(),
+        exe.display()
+    );
+    let _ = err.flush();
+
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 #[cfg(test)]
@@ -298,6 +481,12 @@ mod tests {
 
     /// The failure every user of the documented install hits, and the one place
     /// the message has to name `sudo` rather than report a bare EACCES.
+    ///
+    /// Two halves, because the live path between them re-executes the process:
+    /// an install directory the user cannot write to really does fail with
+    /// `PermissionDenied` — which is what routes it to [`elevate`] — and the
+    /// message [`elevate`] falls back to when it has nothing to offer names both
+    /// the directory and the command that would work.
     #[cfg(unix)]
     #[test]
     fn an_unwritable_install_directory_names_the_fix() {
@@ -305,18 +494,65 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-        let error = match stage_in(dir.path()) {
-            Err(error) => format!("{error:#}"),
+        let kind = match raw_stage_in(dir.path()) {
+            Err(error) => error.kind(),
             // Running as root, where the mode bits don't apply.
             Ok(_) => return,
         };
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(kind, std::io::ErrorKind::PermissionDenied);
 
+        let error = format!("{:#}", unwritable(dir.path()));
         assert!(error.contains("sudo cctop --update"), "got: {error}");
+        assert!(error.contains("package manager"), "got: {error}");
         assert!(
             error.contains(&dir.path().display().to_string()),
             "got: {error}"
         );
+    }
+
+    /// Elevating is something the user asks for, never something that happens
+    /// to them. Every case here is a case where cctop must *not* run sudo.
+    #[test]
+    fn sudo_is_only_ever_offered_to_someone_who_can_answer() {
+        // The offer, and the only combination that produces it.
+        assert_eq!(recourse(false, false, true, true), Recourse::Ask);
+
+        // No sudo to run, and no terminal to ask on: CI, a pipeline, a hook.
+        // Both keep the message the user has always got.
+        assert_eq!(recourse(false, false, false, true), Recourse::Explain);
+        assert_eq!(recourse(false, false, true, false), Recourse::Explain);
+        assert_eq!(recourse(false, false, false, false), Recourse::Explain);
+
+        // The recursion guard: the child cctop started under sudo finds the same
+        // unwritable directory, and must not offer to elevate a second time —
+        // whether or not sudo made it root.
+        assert_eq!(recourse(false, true, true, true), Recourse::Explain);
+        assert_eq!(recourse(true, true, true, true), Recourse::Privileged);
+
+        // Root already, so the refusal is the filesystem's and not a question of
+        // who is asking.
+        assert_eq!(recourse(true, false, true, true), Recourse::Privileged);
+    }
+
+    /// What gets run as root has to be this binary at this path, since that is
+    /// the file being replaced — and sudo's `secure_path` means a bare `cctop`
+    /// is not a way to name it.
+    #[test]
+    fn the_elevated_command_names_the_running_binary_by_path() {
+        let argv = sudo_argv(Path::new("/usr/local/bin/cctop"));
+        assert_eq!(argv, ["sudo", "--", "/usr/local/bin/cctop", "--update"]);
+    }
+
+    /// Root has no fix to suggest, so it must not send the user back to sudo —
+    /// and it still has to name the one thing that might explain it.
+    #[test]
+    fn a_root_failure_does_not_point_at_sudo() {
+        let error = format!("{:#}", read_only(Path::new("/usr/local/bin")));
+        assert!(!error.contains("sudo"), "got: {error}");
+        assert!(error.contains("/usr/local/bin"), "got: {error}");
+        assert!(error.contains("read-only"), "got: {error}");
+        assert!(error.contains("package manager"), "got: {error}");
     }
 
     #[test]
