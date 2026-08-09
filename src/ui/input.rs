@@ -8,6 +8,44 @@ use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 
+/// The pasted text as a single line, within `room` more bytes — the budget being
+/// in bytes because the caps it enforces are the ones `on_key_send` and
+/// `on_key_cost` already apply to a `String`'s length.
+///
+/// Every input on the dashboard is one line drawn in one strip, and none of them
+/// has a notion of a cursor on a second row — a newline dropped straight in would
+/// be a character the box can neither show nor let you delete past. Each run of
+/// line breaks and tabs becomes the one space it stands for, so pasting a wrapped
+/// sentence into the search box searches for the sentence rather than for a
+/// string no session's text contains. Every other control character is dropped:
+/// none of them is anything a query or a message meant to contain, and an escape
+/// among them would repaint the strip it landed in.
+fn flatten(text: &str, room: usize) -> String {
+    let mut out = String::new();
+    let mut last_was_break = false;
+    for c in text.chars() {
+        if out.len() + c.len_utf8() > room {
+            break;
+        }
+        match c {
+            // A CRLF is one break, not two spaces, and neither is a line that
+            // was indented after it.
+            '\n' | '\r' | '\t' => {
+                if !last_was_break {
+                    out.push(' ');
+                }
+                last_was_break = true;
+            }
+            c if c.is_control() => {}
+            c => {
+                out.push(c);
+                last_was_break = false;
+            }
+        }
+    }
+    out
+}
+
 impl App {
     pub(super) fn on_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
@@ -71,6 +109,60 @@ impl App {
             Mode::Help => self.on_key_help(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
+        }
+    }
+
+    /// A paste, which the terminal hands over whole rather than as the keys it
+    /// spells.
+    ///
+    /// Inside a pane it belongs to the agent and goes down the pty in one write;
+    /// see [`Attach::send_paste`](crate::attach::Attach::send_paste) for what
+    /// happens to it on the way. Everywhere else the only thing on screen that
+    /// can hold text is whichever one-line input is open, so a paste is typing
+    /// into that and nothing at all when none is open. It is deliberately not a
+    /// shortcut for anything: pasting into the dashboard is somebody aiming at a
+    /// box, and answering it with an action would be a command nobody typed.
+    pub(super) fn on_paste(&mut self, text: &str) {
+        self.needs_redraw = true;
+
+        if self.tab > 0 && self.mode == Mode::List {
+            if let Some(pane) = self.focused_pane() {
+                // The same bookkeeping a keystroke does: text put in front of an
+                // agent is an answer to whatever it asked, and no hook reports
+                // that.
+                let agent = pane.agent();
+                let alive = pane.view.send_paste(text);
+                self.mark_answered(agent);
+                if !alive {
+                    self.close_pane();
+                    self.set_status("The agent's terminal closed");
+                }
+            }
+            return;
+        }
+
+        match self.mode {
+            Mode::Search => {
+                self.search.push_str(&flatten(text, usize::MAX));
+                self.search_edited();
+            }
+            Mode::SendKeys => {
+                let room = 500usize.saturating_sub(self.send_input.len());
+                self.send_input.push_str(&flatten(text, room));
+            }
+            // The cost floor is a number, so a paste is filtered the way typing
+            // one is rather than flattened: anything that is not a digit or a
+            // point could not have been typed here either.
+            Mode::CostFilter => {
+                let room = 12usize.saturating_sub(self.cost_input.len());
+                let digits: String = text
+                    .chars()
+                    .filter(|c| c.is_ascii_digit() || *c == '.')
+                    .take(room)
+                    .collect();
+                self.cost_input.push_str(&digits);
+            }
+            _ => {}
         }
     }
 

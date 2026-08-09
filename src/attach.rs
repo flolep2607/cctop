@@ -209,6 +209,47 @@ impl Attach {
         }
     }
 
+    /// Paste `text` into the agent in one go. Returns false once the connection
+    /// is gone.
+    ///
+    /// A paste arrives from crossterm as one string, and it has to leave here as
+    /// one write too: sending it a keystroke at a time makes it crawl in, and
+    /// every newline in it lands as the Enter that submits whatever has been
+    /// typed so far — which is how pasting a five-line message into Claude Code
+    /// used to ask it five questions.
+    ///
+    /// Whether the brackets go around it is the agent's decision, read the same
+    /// way [`wheel`](Self::wheel) reads mouse tracking: from what the agent asked
+    /// for in its own output. Nothing filters a pty, so an application that never
+    /// enabled bracketed paste would read `\x1b[200~` as the literal text it
+    /// spells and the paste would arrive with junk on both ends. Claude Code and
+    /// every other agent's editor turn it on; a bare shell behind a pane does
+    /// not, and that shell gets the plain text a terminal without the mode would
+    /// have sent it.
+    ///
+    /// Two things are rewritten on the way through, both of which a real terminal
+    /// also does. Newlines become carriage returns, because that is what Enter is
+    /// on a pty. And an end marker occurring inside the pasted text is dropped:
+    /// left in, it would close the bracket early and hand the remainder to the
+    /// agent as keystrokes, which is the one way a paste can still submit itself.
+    pub fn send_paste(&mut self, text: &str) -> bool {
+        if self.parser.screen().scrollback() > 0 {
+            self.parser.screen_mut().set_scrollback(0);
+        }
+        let body = text
+            .replace("\x1b[201~", "")
+            .replace("\r\n", "\r")
+            .replace('\n', "\r");
+        if body.is_empty() {
+            return true;
+        }
+        let bytes = match self.parser.screen().bracketed_paste() {
+            true => format!("\x1b[200~{body}\x1b[201~").into_bytes(),
+            false => body.into_bytes(),
+        };
+        self.send(&frame::encode(frame::KEYS, &bytes))
+    }
+
     /// Scroll the wheel at `(col, row)`, given pane-relative and zero-based.
     ///
     /// Goes to the agent only if the agent asked for mouse reporting — under
@@ -719,6 +760,66 @@ mod tests {
 
         // The bottom is as far down as it goes, however hard the wheel is spun.
         assert!(attach.wheel(false, 0, 0));
+        assert_eq!(attach.parser.screen().scrollback(), 0);
+    }
+
+    /// A paste has to leave as one write with one line ending per line, or the
+    /// agent reads every newline in it as the Enter that submits the message.
+    #[test]
+    fn a_paste_reaches_an_agent_that_asked_for_brackets_as_one_paste() {
+        let (mut attach, written) = probe();
+        // 2004 is bracketed paste, which every agent's editor turns on.
+        attach.parser.process(b"\x1b[?2004h");
+        assert!(attach.send_paste("one\ntwo\r\nthree"));
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            frame::encode(frame::KEYS, b"\x1b[200~one\rtwo\rthree\x1b[201~")
+        );
+    }
+
+    /// Nothing filters a pty, so a shell that never enabled the mode would read
+    /// the markers as the text they spell and the paste would arrive with junk
+    /// on both ends. It gets what a terminal without the mode would have sent.
+    #[test]
+    fn a_paste_to_an_agent_that_did_not_ask_carries_no_markers() {
+        let (mut attach, written) = probe();
+        assert!(attach.send_paste("ls -l\n"));
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            frame::encode(frame::KEYS, b"ls -l\r")
+        );
+
+        // Nothing to say means nothing on the wire.
+        written.lock().unwrap().clear();
+        assert!(attach.send_paste(""));
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    /// An end marker inside the pasted text would close the bracket early and
+    /// hand the remainder to the agent as keystrokes — the one way a bracketed
+    /// paste can still submit itself.
+    #[test]
+    fn a_paste_cannot_close_its_own_bracket() {
+        let (mut attach, written) = probe();
+        attach.parser.process(b"\x1b[?2004h");
+        assert!(attach.send_paste("hello\x1b[201~\nrm -rf /\n"));
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            frame::encode(frame::KEYS, b"\x1b[200~hello\rrm -rf /\r\x1b[201~")
+        );
+    }
+
+    /// Pasting an answer to a prompt you scrolled away from must show you the
+    /// answer, the same as typing one does.
+    #[test]
+    fn pasting_returns_to_the_live_screen() {
+        let (mut attach, _written) = probe();
+        for i in 0..100 {
+            attach.parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        assert!(attach.wheel(true, 0, 0));
+        assert_eq!(attach.parser.screen().scrollback(), WHEEL_LINES);
+        assert!(attach.send_paste("continue"));
         assert_eq!(attach.parser.screen().scrollback(), 0);
     }
 
