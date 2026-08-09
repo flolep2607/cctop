@@ -18,7 +18,10 @@ use crate::quota::Quota;
 use crate::session::{Session, SessionData};
 use columns::ColumnId;
 use ratatui::crossterm::cursor::Show;
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use ratatui::crossterm::execute;
 use spark::History;
 use std::collections::{HashMap, HashSet};
@@ -2710,6 +2713,11 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
         previous_hook(info);
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    // Bracketed paste, so a paste arrives as one `Event::Paste` instead of as
+    // one `Event::Key` per character. Without it there is no way to tell a paste
+    // from typing, and the newlines in a pasted message reach the agent as the
+    // Enter that submits it — a five-line paste asking five questions.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
 
     // Established before the loop so the first tick already has it; `None` just
     // means discovery falls back to the periodic walk.
@@ -2797,6 +2805,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 /// alternate screen; it does not restore cursor visibility. Keep this separate
 /// so regular exits, input errors, and panics all use the same cleanup path.
 fn restore_terminal() {
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     let _ = execute!(std::io::stdout(), Show);
     ratatui::restore();
@@ -3072,6 +3081,7 @@ fn event_loop(
         if event::poll(wait)? {
             match event::read()? {
                 Event::Key(key) => app.on_key(key),
+                Event::Paste(text) => app.on_paste(&text),
                 Event::Mouse(m) => app.on_mouse(m, &layout),
                 Event::Resize(_, _) => app.needs_redraw = true,
                 _ => {}
@@ -3142,6 +3152,54 @@ mod tests {
         // Keep the receiver alive so sends in tests don't fail.
         std::mem::forget(rx);
         App::with_prefs(Plan::Retail, tx, UiPrefs::default())
+    }
+
+    /// A paste on the dashboard is typing into whichever one-line box is open,
+    /// and the line breaks in it must not go in: none of these inputs can show a
+    /// second row or let you delete back onto one.
+    #[test]
+    fn a_paste_types_into_the_open_input_as_one_line() {
+        let mut app = test_app();
+
+        app.mode = Mode::Search;
+        app.on_paste("fix the\nlogin bug\r\n");
+        assert_eq!(app.search, "fix the login bug ");
+
+        app.mode = Mode::SendKeys;
+        app.send_input = "continue".into();
+        app.on_paste(" and\ttidy\x07 up");
+        assert_eq!(app.send_input, "continue and tidy up");
+
+        // The cost floor is a number, so a paste is filtered the way typing one
+        // is rather than flattened.
+        app.mode = Mode::CostFilter;
+        app.on_paste("$12.50 or so");
+        assert_eq!(app.cost_input, "12.50");
+    }
+
+    /// The caps the typed path enforces are the paste's too, and a paste with
+    /// nowhere to land does nothing rather than something surprising.
+    #[test]
+    fn a_paste_respects_the_caps_and_does_nothing_with_no_input_open() {
+        let mut app = test_app();
+
+        app.mode = Mode::SendKeys;
+        app.send_input = "x".repeat(495);
+        app.on_paste(&"y".repeat(50));
+        assert_eq!(app.send_input.len(), 500);
+
+        app.mode = Mode::CostFilter;
+        app.on_paste("123456789012345");
+        assert_eq!(app.cost_input, "123456789012");
+
+        // A modal is on screen, so there is no box to type into — and a paste
+        // must never stand in for the key one of these is waiting for.
+        app.mode = Mode::DeleteConfirm;
+        app.on_paste("y");
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        app.mode = Mode::List;
+        app.on_paste("q");
+        assert!(!app.should_quit);
     }
 
     /// Regression: a click on the launcher used to be answered twice — once by
