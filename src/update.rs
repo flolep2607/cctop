@@ -490,7 +490,10 @@ fn elevate(dir: &Path) -> anyhow::Error {
     // Inherited stdio, which is the whole reason this is a child process and not
     // an exec of something quieter: sudo asks for a password on the terminal, and
     // a captured stderr is a prompt the user never sees.
-    match std::process::Command::new(&argv[0]).args(&argv[1..]).status() {
+    match std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+    {
         // The privileged run has already printed everything there is to say,
         // including its own failures, so this adds nothing and only forwards how
         // it went.
@@ -594,7 +597,10 @@ mod tests {
     #[test]
     fn the_cargo_message_names_the_command_that_replaces_it() {
         let error = cargo_managed().to_string();
-        assert!(error.contains("cargo install cctop --force"), "got: {error}");
+        assert!(
+            error.contains("cargo install cctop --force"),
+            "got: {error}"
+        );
         assert!(error.contains(current_version()), "got: {error}");
     }
 
