@@ -215,6 +215,12 @@ fn unpack(archive: &[u8], target: &str, into: &Path) -> Result<PathBuf> {
 /// against a compromised release.
 pub fn run(force: bool) -> Result<()> {
     let current = current_version();
+    // Before the network and before `force`, because this is not a check that a
+    // newer release or a determined user can settle: the objection is to cctop
+    // replacing the file at all, and it holds whatever the versions say.
+    if managed_by_cargo() {
+        return Err(cargo_managed());
+    }
     let target =
         asset_target().ok_or_else(|| anyhow!("no release is published for this platform"))?;
 
@@ -320,6 +326,59 @@ fn read_only(dir: &Path) -> anyhow::Error {
          the filesystem is mounted read-only, or the binary is immutable. \
          If a package manager installed cctop, update it with that instead.",
         dir.display()
+    )
+}
+
+/// Where cargo puts the binaries it installs.
+///
+/// `CARGO_HOME` when it is set, because a user who moved it did so precisely so
+/// that this is not `~/.cargo`, and the default otherwise.
+fn cargo_bin() -> Option<PathBuf> {
+    let home = match std::env::var_os("CARGO_HOME") {
+        Some(dir) => PathBuf::from(dir),
+        None => dirs::home_dir()?.join(".cargo"),
+    };
+    Some(home.join("bin"))
+}
+
+/// Whether `exe` is a file cargo installed into `bin`.
+///
+/// Both sides are resolved before they are compared. `~/.cargo/bin` is on `PATH`
+/// through a symlink often enough — a home directory that is one, a toolchain
+/// managed somewhere else and linked back — that comparing the paths as written
+/// would answer "no" for an install that cargo plainly owns. Resolution failing
+/// is itself an answer: a path that cannot be resolved is not one cargo is
+/// managing, and guessing "yes" would refuse an update nobody could then perform.
+fn under(exe: &Path, bin: &Path) -> bool {
+    let (Ok(exe), Ok(bin)) = (exe.canonicalize(), bin.canonicalize()) else {
+        return false;
+    };
+    exe.parent() == Some(bin.as_path())
+}
+
+/// Whether cargo, rather than a download, owns the running executable.
+fn managed_by_cargo() -> bool {
+    let (Ok(exe), Some(bin)) = (std::env::current_exe(), cargo_bin()) else {
+        return false;
+    };
+    under(&exe, &bin)
+}
+
+/// What to say to a user whose cctop came from `cargo install`.
+///
+/// This is the case the permission check cannot catch, and the reason it needs
+/// catching separately: `~/.cargo/bin` *is* writable, so nothing would refuse and
+/// the replacement would simply happen. What breaks is not the binary but the
+/// bookkeeping — cargo keeps its own record of what it installed, and a file
+/// swapped underneath it leaves that record describing a version that is no
+/// longer there.
+fn cargo_managed() -> anyhow::Error {
+    anyhow!(
+        "cctop was installed by cargo, so replacing the binary here would put it out of step \
+         with what cargo has recorded: `cargo install --list` would go on reporting {}, and the \
+         next `cargo install-update` would undo the update. Run `cargo install cctop --force` \
+         instead.",
+        current_version()
     )
 }
 
@@ -478,6 +537,66 @@ fn confirm(dir: &Path, exe: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cargo install is the case the permission check cannot see, because the
+    /// directory it would test is writable. Only the executable's location
+    /// separates it from a downloaded binary.
+    #[test]
+    fn cargo_owns_only_what_sits_directly_in_its_bin() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let exe = bin.join("cctop");
+        std::fs::write(&exe, b"").unwrap();
+        assert!(under(&exe, &bin));
+
+        // A directory below it is not cargo's: nothing cargo installs lands
+        // there, so a binary there is somebody else's to replace.
+        let nested = bin.join("vendor");
+        std::fs::create_dir(&nested).unwrap();
+        let deep = nested.join("cctop");
+        std::fs::write(&deep, b"").unwrap();
+        assert!(!under(&deep, &bin));
+
+        // The ordinary install, which must stay updatable.
+        let elsewhere = home.path().join("cctop");
+        std::fs::write(&elsewhere, b"").unwrap();
+        assert!(!under(&elsewhere, &bin));
+    }
+
+    /// Regression: `~/.cargo/bin` reaches `PATH` through a symlink often enough
+    /// that comparing the paths as written would call a cargo install a download
+    /// and overwrite it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cargo_bin_is_still_cargo() {
+        let home = tempfile::tempdir().unwrap();
+        let real = home.path().join("real-bin");
+        std::fs::create_dir(&real).unwrap();
+        let exe = real.join("cctop");
+        std::fs::write(&exe, b"").unwrap();
+
+        let linked = home.path().join("bin");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        assert!(under(&exe, &linked), "the link and its target disagreed");
+    }
+
+    /// A path that cannot be resolved is not one cargo is managing. Answering
+    /// "yes" here would refuse an update that nothing could then perform.
+    #[test]
+    fn an_unresolvable_path_is_not_a_cargo_install() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        assert!(!under(&bin.join("cctop"), &bin));
+    }
+
+    /// The message has to name the command that does work, not only refuse.
+    #[test]
+    fn the_cargo_message_names_the_command_that_replaces_it() {
+        let error = cargo_managed().to_string();
+        assert!(error.contains("cargo install cctop --force"), "got: {error}");
+        assert!(error.contains(current_version()), "got: {error}");
+    }
 
     /// The failure every user of the documented install hits, and the one place
     /// the message has to name `sudo` rather than report a bare EACCES.
