@@ -71,7 +71,7 @@ above puts it in `/usr/local/bin` with `sudo`, so updating it needs `sudo` too:
 sudo cctop --update
 ```
 
-cctop checks for a new release once a day in the background and, when one
+cctop checks for a new release once an hour in the background and, when one
 exists, says so in the footer. It never updates itself: the check only reports,
 and replacing the binary always takes an explicit `--update`. If you installed
 with `cargo install` or a package manager, update it the same way you installed
