@@ -32,6 +32,11 @@ const SCROLLBACK: usize = 5_000;
 /// for a notch when an application is not reading the mouse.
 const WHEEL_LINES: usize = 3;
 
+/// A paste may be much larger than an ordinary key frame. Keep each write
+/// comfortably below the wire format's one-megabyte safety limit, without
+/// degrading it into the one-frame-per-character path used for keystrokes.
+const PASTE_CHUNK: usize = 64 * 1024;
+
 /// The wire format an attached connection speaks: `[kind][len: u32 BE][payload]`.
 ///
 /// Both directions carry two kinds of message, and one of them is raw keystrokes
@@ -232,6 +237,12 @@ impl Attach {
     /// on a pty. And an end marker occurring inside the pasted text is dropped:
     /// left in, it would close the bracket early and hand the remainder to the
     /// agent as keystrokes, which is the one way a paste can still submit itself.
+    ///
+    /// It leaves in `PASTE_CHUNK`-sized writes rather than one, because a
+    /// clipboard has no size limit and the wire format does: a single frame past
+    /// `MAX_FRAME` is how the decoder decides the stream is no longer frame
+    /// aligned, and it never recovers from that. A paste smaller than a chunk —
+    /// which is all of them, in practice — is still exactly one write.
     pub fn send_paste(&mut self, text: &str) -> bool {
         if self.parser.screen().scrollback() > 0 {
             self.parser.screen_mut().set_scrollback(0);
@@ -247,7 +258,12 @@ impl Attach {
             true => format!("\x1b[200~{body}\x1b[201~").into_bytes(),
             false => body.into_bytes(),
         };
-        self.send(&frame::encode(frame::KEYS, &bytes))
+        for chunk in bytes.chunks(PASTE_CHUNK) {
+            if !self.send(&frame::encode(frame::KEYS, chunk)) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Scroll the wheel at `(col, row)`, given pane-relative and zero-based.
@@ -719,6 +735,26 @@ mod tests {
             ]
             .concat()
         );
+    }
+
+    #[test]
+    fn a_paste_too_big_for_one_frame_is_split_rather_than_desynchronising() {
+        let (mut attach, written) = probe();
+        attach.parser.process(b"\x1b[?2004h");
+        let text = "x".repeat(PASTE_CHUNK + 1);
+
+        assert!(attach.send_paste(&text));
+        let bytes = written.lock().unwrap();
+        let mut decoder = frame::Decoder::default();
+        decoder.push(&bytes);
+        let frames: Vec<_> = std::iter::from_fn(|| decoder.next()).collect();
+
+        // More than one frame, none of them near the cap that would make the
+        // decoder give up on the stream, and the agent still reads one paste.
+        assert!(frames.len() > 1, "sent as {} frame(s)", frames.len());
+        assert!(frames.iter().all(|(kind, _)| *kind == frame::KEYS));
+        let rejoined: Vec<u8> = frames.iter().flat_map(|(_, body)| body.clone()).collect();
+        assert_eq!(rejoined, format!("\x1b[200~{text}\x1b[201~").into_bytes());
     }
 
     /// The default encoding spends one printable byte on each coordinate, so a

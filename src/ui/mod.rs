@@ -669,8 +669,12 @@ pub struct App {
     pub launch_offer: Vec<tabs::Choice>,
     /// Where the launcher's pick will go.
     pub launch_into: LaunchInto,
-    /// Directory a launched agent starts in — the selected session's project,
-    /// captured when the launcher opens because the selection can move under it.
+    /// Directory cctop was started in. Fresh tabs start here, rather than in
+    /// whichever historical session happens to be selected in the dashboard.
+    pub launch_root: Option<std::path::PathBuf>,
+    /// Directory a launched agent starts in, captured when the launcher opens.
+    /// Splits retain their tab's directory; a handoff deliberately overrides
+    /// this with the source session's project.
     pub launch_cwd: Option<std::path::PathBuf>,
     /// The install the tmux offer is currently showing, so the modal draws the
     /// command that will actually run rather than working it out again.
@@ -822,6 +826,7 @@ impl App {
             launch_cursor: 0,
             launch_offer: Vec::new(),
             launch_into: LaunchInto::Tab,
+            launch_root: std::env::current_dir().ok(),
             launch_cwd: None,
             tmux_install: None,
             tmux_deferred: None,
@@ -1950,9 +1955,9 @@ impl App {
         }
     }
 
-    /// Whether any tab is currently asking to be looked at.
+    /// Whether any hidden tab is explicitly waiting for input and should blink.
     pub fn any_attention(&self) -> bool {
-        (1..=self.tabs.len()).any(|i| self.tab_attention(i).is_some())
+        (1..=self.tabs.len()).any(|i| self.tab_attention(i) == Some(tabs::Attention::NeedsInput))
     }
 
     /// Which half of the blink cycle we are in.
@@ -1988,14 +1993,12 @@ impl App {
         self.launch_offer = offer;
         self.launch_into = into;
         self.launch_cursor = 0;
-        // A split lands next to an agent already working somewhere; a new tab
-        // takes its cue from whatever row the cursor is on.
+        // A split lands next to an agent already working somewhere; a fresh tab
+        // starts where cctop itself was invoked. The selected dashboard row is
+        // for inspecting or resuming that session, not an implicit cwd switch.
         self.launch_cwd = match into {
             LaunchInto::Split { .. } => self.launch_cwd.clone(),
-            LaunchInto::Tab => self
-                .selected_session()
-                .map(|s| std::path::PathBuf::from(&s.label_source))
-                .filter(|dir| dir.is_dir()),
+            LaunchInto::Tab => self.launch_root.clone(),
         };
         self.mode = Mode::Launch;
     }
@@ -2573,6 +2576,27 @@ impl App {
         }
     }
 
+    /// Restore the tmux-backed agents cctop left alive on a previous exit.
+    ///
+    /// The tmux session is the durable workspace state: it preserves the agent,
+    /// its scrollback, and working directory. Recreating a client for each one
+    /// makes reopening cctop resume the tabs the user had open, while leaving a
+    /// failed or concurrently ended session out of the workspace.
+    pub(super) fn restore_running_tabs(&mut self) {
+        for agent in crate::tmux::running() {
+            let choice = tabs::Choice::Waiting(agent.clone());
+            let label = choice.label();
+            if let Ok(pane) =
+                tabs::Pane::launch(&[label], None, tabs::Own::TmuxExisting(agent.name))
+            {
+                self.tabs.push(tabs::Tab::new(pane));
+            }
+        }
+        if !self.tabs.is_empty() {
+            self.tab = 1;
+        }
+    }
+
     /// Show the agent running as `pid`, reusing the pane already on it rather
     /// than opening a second window onto one terminal.
     ///
@@ -2691,6 +2715,11 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     let mut app = App::new(args.plan, req_tx.clone());
     app.refresh_secs = args.delay;
     let _ = req_tx.send(Request::Refresh);
+
+    // Tabs backed by tmux outlive cctop. Reattach them before the first frame
+    // so reopening the dashboard restores the workspace rather than making the
+    // user find and reopen every surviving agent through the launcher.
+    app.restore_running_tabs();
 
     // Attach before the first frame: the agent cctop was asked to launch is the
     // reason it is running, so it should be on screen and not behind a keypress.
@@ -3308,7 +3337,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::Launch | Mode::List));
     }
 
-    /// Regression: `Alt+W` is documented as the irreversible one, but on a pane
+    /// Regression: `Alt+Shift+W` is documented as the irreversible one, but on a pane
     /// opened with `a` — a window onto an agent cctop never started — there was
     /// nothing to kill, so it closed the window and reported nothing amiss. The
     /// agent it claimed to have stopped went on running.
@@ -4373,6 +4402,16 @@ mod tests {
         // either way, Ctrl+K is what reaches the terminate path at all.
         app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert_eq!(app.mode, Mode::KillBlocked);
+    }
+
+    #[test]
+    fn f10_quits_from_an_agent_tab_instead_of_reaching_the_agent() {
+        let mut app = test_app();
+        app.tab = 1;
+
+        app.on_key(key(KeyCode::F(10)));
+
+        assert!(app.should_quit);
     }
 
     /// Every filter that paints a badge must be reachable from Esc, one press

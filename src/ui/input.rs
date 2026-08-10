@@ -57,13 +57,18 @@ impl App {
         // every other key belongs to the agent. Alt is the modifier left over:
         // Ctrl- is the agent's (Ctrl-C interrupts it), and the function keys are
         // too few to also carry the splits.
-        if key.modifiers.contains(KeyModifiers::ALT) && self.on_key_workspace(key.code) {
+        if key.modifiers.contains(KeyModifiers::ALT) && self.on_key_workspace(key) {
             return;
         }
 
-        // Inside a pane the keyboard belongs to the agent. Only F12 is cctop's,
-        // and it is a function key because those are the ones never forwarded.
+        // Inside a pane the keyboard belongs to the agent. F10 and F12 remain
+        // cctop's because the dashboard promises them as quit and back, and
+        // function keys otherwise go straight through to the focused agent.
         if self.tab > 0 && self.mode == Mode::List {
+            if key.code == KeyCode::F(10) {
+                self.request_quit();
+                return;
+            }
             if key.code == KeyCode::F(12) {
                 self.show_tab(0);
                 return;
@@ -169,8 +174,8 @@ impl App {
     /// The multiplexer keys, live everywhere including inside a pane. Returns
     /// false for an Alt- combination that means nothing here, so it still
     /// reaches the agent.
-    fn on_key_workspace(&mut self, code: KeyCode) -> bool {
-        match code {
+    fn on_key_workspace(&mut self, key: KeyEvent) -> bool {
+        match key.code {
             KeyCode::Left => self.cycle_workspace(-1),
             KeyCode::Right => self.cycle_workspace(1),
             // The dashboard is tab 1, matching where it sits in the tab bar.
@@ -186,7 +191,7 @@ impl App {
             // Shifted, because it is the irreversible one: `w` on a tmux-backed
             // pane only detaches, and the key that ends the agent should not be
             // the same key with a slip of a finger.
-            KeyCode::Char('W') => self.kill_pane(),
+            KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::SHIFT) => self.kill_pane(),
             _ => return false,
         }
         true

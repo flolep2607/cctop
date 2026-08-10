@@ -231,7 +231,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
-    let titles = std::iter::once("Dashboard".to_string()).chain(app.tabs.iter().map(|t| t.title()));
+    let titles = std::iter::once("Dashboard".to_string()).chain(
+        app.tabs
+            .iter()
+            .map(|tab| workspace_tab_title(tab, &app.quota)),
+    );
     let on = app.blink_on();
     let mut spans = Vec::new();
     let mut pos = area.x;
@@ -245,16 +249,17 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             // Blinking by hand rather than with `Modifier::SLOW_BLINK`, which
             // many terminals quietly drop — an attention cue that only works on
             // some emulators is worse than none, because you stop trusting it.
-            Some(what) => {
-                let colour = match what {
-                    tabs::Attention::NeedsInput => theme::colors().cost_mid,
-                    tabs::Attention::Idle => theme::colors().cost_low,
-                };
-                match on {
-                    true => theme::attention_lit(colour),
-                    false => Style::default().fg(colour).add_modifier(Modifier::BOLD),
-                }
-            }
+            Some(tabs::Attention::NeedsInput) => match on {
+                true => theme::attention_lit(theme::colors().cost_mid),
+                false => Style::default()
+                    .fg(theme::colors().cost_mid)
+                    .add_modifier(Modifier::BOLD),
+            },
+            // A quiet agent is useful context, not an alarm. Keep its green
+            // label visible without repeatedly pulling attention from work.
+            Some(tabs::Attention::Idle) => Style::default()
+                .fg(theme::colors().cost_low)
+                .add_modifier(Modifier::BOLD),
             None if i == app.tab => theme::selected(),
             None => Style::default().fg(theme::colors().dim),
         };
@@ -282,6 +287,50 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         layout.workspace_new = Some((pos, pos + width));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The quota that belongs to a tab's agent, kept in the tab label so it stays
+/// visible while the agent owns the pane. Shells and unknown launch commands do
+/// not imply a provider and therefore keep their ordinary labels.
+fn workspace_tab_title(tab: &tabs::Tab, quota: &crate::quota::Quota) -> String {
+    let title = tab.title();
+    let usage = quota_suffix(&title, quota, chrono::Utc::now().timestamp());
+    if usage.is_empty() {
+        title
+    } else {
+        format!("{title} · {usage}")
+    }
+}
+
+/// Compact provider quota for a tab label. The suffix is deliberately derived
+/// from the command label rather than a session: fresh tabs do not have a
+/// transcript, let alone a known provider session, when their title is drawn.
+fn quota_suffix(title: &str, quota: &crate::quota::Quota, now: i64) -> String {
+    let command = title
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let status = if command.starts_with("claude") {
+        &quota.claude
+    } else if command.starts_with("codex") {
+        &quota.codex
+    } else {
+        return String::new();
+    };
+    let crate::quota::ProviderStatus::Ok(quota) = status else {
+        return String::new();
+    };
+    let windows = quota.windows.iter().map(|window| {
+        let reset = window
+            .resets_at
+            .map(|at| at - now)
+            .filter(|remaining| *remaining > 0)
+            .map(|remaining| format!(" {}h{:02}m", remaining / 3600, (remaining % 3600) / 60))
+            .unwrap_or_default();
+        format!("{} {}%{}", window.label, window.pct, reset)
+    });
+    windows.collect::<Vec<_>>().join(" · ")
 }
 
 /// Every terminal in the active tab, sharing the space evenly.
@@ -355,12 +404,15 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Spend has three time-series rows, while the agent figures are naturally
+    // compact. Giving the charts the extra room makes a trend readable instead
+    // of a decorative strip, especially on laptop-width terminals.
     let cols =
-        RLayout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+        RLayout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(inner);
     let (left, right) = (cols[0], cols[1]);
 
     let realtime = app.stats.spend_per_min;
-    let label_w = 15usize;
+    let label_w = 11usize;
     let value_w = 12usize;
     let chart_w = left.width.saturating_sub((label_w + value_w + 2) as u16) as usize;
 
@@ -384,20 +436,15 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     let rt_idx = app.global_spend.values().len().checked_sub(1);
 
     let left_lines = vec![
+        row("Live rate", realtime, app.global_spend.values(), rt_idx),
         row(
-            "Live Spend/min",
-            realtime,
-            app.global_spend.values(),
-            rt_idx,
-        ),
-        row(
-            "Today Spend",
+            "Today",
             app.stats.spend_today,
             &app.stats.daily_hourly,
             hour_idx,
         ),
         row(
-            "Month-to-date",
+            "This month",
             app.stats.spend_calendar_month,
             &app.stats.monthly_daily,
             day_idx,
@@ -406,7 +453,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         // a sparkline: the others chart a window that scrolls, and a running total
         // only ever climbs, so a chart of it says nothing the number doesn't.
         Line::from(vec![
-            Span::styled(format!("{:<label_w$}", "Total Spend"), theme::label()),
+            Span::styled(format!("{:<label_w$}", "All time"), theme::label()),
             Span::styled(
                 format!("{:>value_w$}", util::adaptive_usd(app.stats.spend_total)),
                 Style::default()
@@ -418,14 +465,14 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(left_lines), left);
 
     let mem_mb = app.stats.total_memory as f64 / (1024.0 * 1024.0);
-    let r_label_w = 12usize;
+    let r_label_w = 10usize;
     let r_value_w = 9usize;
     let r_chart_w = right
         .width
         .saturating_sub((r_label_w + r_value_w + 2) as u16) as usize;
 
     let mut cpu_spans = vec![
-        Span::styled(format!("{:<r_label_w$}", "Agents CPU"), theme::label()),
+        Span::styled(format!("{:<r_label_w$}", "Agent CPU"), theme::label()),
         Span::styled(
             format!("{:>r_value_w$} ", format!("{:.1}%", app.stats.total_cpu)),
             theme::value(),
@@ -445,7 +492,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     let right_lines = vec![
         Line::from(cpu_spans),
         Line::from(vec![
-            Span::styled(format!("{:<r_label_w$}", "Agents Mem"), theme::label()),
+            Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
             Span::styled(
                 format!("{:>r_value_w$}", format!("{mem_mb:.0} MB")),
                 theme::value(),
@@ -950,6 +997,29 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let key_style = theme::key_cap();
     let label_style = Style::default().fg(theme::colors().dim);
 
+    // A terminal tab has no dashboard selection, filters, or panels to act on.
+    // Its footer is the compact map of the keys cctop keeps while the rest of
+    // the keyboard belongs to the focused agent.
+    if app.tab > 0 {
+        let mut spans = Vec::new();
+        for (key, name) in [
+            ("F12", "Dashboard"),
+            ("F10", "Quit"),
+            ("F1", "Help"),
+            ("Alt+←→", "Tabs"),
+            ("Alt+n", "New"),
+            ("Alt+v/s", "Split"),
+            ("Alt+o", "Focus"),
+            ("Alt+w", "Close"),
+            ("Alt+Shift+W", "Stop"),
+        ] {
+            spans.push(Span::styled(key, key_style));
+            spans.push(Span::styled(format!(" {name} "), label_style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+
     let mut spans = Vec::new();
     for (key, name) in [
         ("F1", "Help"),
@@ -1081,6 +1151,27 @@ pub fn copy_to_clipboard(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_tab_quota_shows_usage_and_reset() {
+        let quota = crate::quota::Quota {
+            codex: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                plan: None,
+                windows: vec![crate::quota::Window {
+                    label: "5h",
+                    pct: 37,
+                    duration: None,
+                    resets_at: Some(10_000),
+                }],
+                limit_reached: false,
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(quota_suffix("codex", &quota, 4_500), "5h 37% 1h31m");
+        assert_eq!(quota_suffix("codex-2", &quota, 4_500), "5h 37% 1h31m");
+        assert!(quota_suffix("zsh", &quota, 4_500).is_empty());
+    }
 
     #[test]
     fn hit_testing_maps_regions() {
@@ -1312,6 +1403,16 @@ mod tests {
             screen[rows as usize - 2].contains("F12 back"),
             "the focused pane's hint is missing: {:?}",
             screen[rows as usize - 2]
+        );
+        assert!(
+            screen[rows as usize - 1].contains("Dashboard"),
+            "the agent footer is not showing workspace controls: {:?}",
+            screen[rows as usize - 1]
+        );
+        assert!(
+            !screen[rows as usize - 1].contains("Filter"),
+            "the dashboard footer leaked into an agent tab: {:?}",
+            screen[rows as usize - 1]
         );
     }
 
