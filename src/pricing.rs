@@ -139,10 +139,66 @@ static LITELLM: LazyLock<RwLock<Option<HashMap<String, LitellmEntry>>>> =
 /// the rates behind those costs change — not only when a transcript grows.
 /// Without this, sessions priced before the table was fetched keep reporting
 /// $0.00 forever, because their transcripts never change again.
+///
+/// It is a digest of the rates themselves rather than the moment they were
+/// fetched, because the two differ in how often they change. LiteLLM's table is
+/// re-fetched whenever the disk copy passes a day old, and is almost always
+/// byte-identical to the copy already in hand; stamping it with the fetch time
+/// invalidated every cached session daily and re-parsed the entire corpus to
+/// arrive at exactly the figures it had just discarded — measured here at 2.3×
+/// the run time, once a day, forever. A digest changes only when a rate does.
+///
+/// Zero is reserved for "no table loaded at all", which is what a first run has
+/// before the fetch lands, so a table that happens to digest to zero is nudged.
 static PRICING_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn pricing_epoch() -> u64 {
     PRICING_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// FNV-1a over the rates, spelled out rather than taken from `DefaultHasher`.
+///
+/// The digest is embedded in on-disk cache keys, so it has to mean the same
+/// thing in the next process as in this one. `DefaultHasher` is stable in
+/// practice but explicitly not promised to be across std releases, and a
+/// silent change there would quietly invalidate every user's cache on a
+/// toolchain bump.
+fn digest_rates(entries: &HashMap<String, LitellmEntry>) -> u64 {
+    fn mix(hash: &mut u64, bytes: &[u8]) {
+        for byte in bytes {
+            *hash ^= *byte as u64;
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    // Sorted, because a HashMap's iteration order is not the table's identity:
+    // the same rates in a different order must digest the same.
+    let mut keys: Vec<&String> = entries.keys().collect();
+    keys.sort_unstable();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for key in keys {
+        let entry = &entries[key];
+        mix(&mut hash, key.as_bytes());
+        // Only what feeds a cost or a context percentage. A new upstream field
+        // cctop does not price should not invalidate anybody's cache.
+        for rate in [
+            entry.input_cost_per_token,
+            entry.output_cost_per_token,
+            entry.cache_read_input_token_cost,
+            // `None` and `Some(0.0)` mean different things to the pricer, so
+            // they must digest differently too.
+            entry.cache_creation_input_token_cost.unwrap_or(f64::NAN),
+        ] {
+            mix(&mut hash, &rate.to_bits().to_le_bytes());
+        }
+        mix(
+            &mut hash,
+            &entry.max_input_tokens.unwrap_or(u64::MAX).to_le_bytes(),
+        );
+    }
+    // Zero means "nothing loaded"; a real table must never claim that.
+    hash.max(1)
 }
 
 fn unix_secs() -> u64 {
@@ -162,9 +218,12 @@ fn parse_entries(raw: &HashMap<String, serde_json::Value>) -> HashMap<String, Li
         .collect()
 }
 
-fn install(raw: HashMap<String, serde_json::Value>, epoch: u64) {
+/// Make `raw` the live rate table and stamp it with its own digest.
+fn install(raw: HashMap<String, serde_json::Value>) {
+    let entries = parse_entries(&raw);
+    let epoch = digest_rates(&entries);
     if let Ok(mut guard) = LITELLM.write() {
-        *guard = Some(parse_entries(&raw));
+        *guard = Some(entries);
     }
     PRICING_EPOCH.store(epoch, std::sync::atomic::Ordering::Relaxed);
 }
@@ -187,7 +246,7 @@ pub fn install_test_table(
         .iter()
         .map(|(k, v)| ((*k).to_string(), v.clone()))
         .collect();
-    install(raw, 1);
+    install(raw);
     guard
 }
 
@@ -200,8 +259,7 @@ pub fn load_cached_pricing() -> bool {
         return false;
     };
     let fresh = unix_secs().saturating_sub(cache.fetched_at) < config::PRICING_CACHE_MAX_AGE_SECS;
-    let epoch = cache.fetched_at;
-    install(cache.data, epoch);
+    install(cache.data);
     fresh
 }
 
@@ -234,7 +292,7 @@ pub fn refresh_pricing_blocking() {
     }) {
         let _ = std::fs::write(&*config::PRICING_CACHE_FILE, text);
     }
-    install(data, now);
+    install(data);
 }
 
 /// Whether `key` is LiteLLM's name for `model` under some route prefix.
@@ -429,6 +487,72 @@ impl Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table(rows: &[(&str, f64)]) -> HashMap<String, LitellmEntry> {
+        rows.iter()
+            .map(|(name, input)| {
+                (
+                    (*name).to_string(),
+                    LitellmEntry {
+                        input_cost_per_token: *input,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The regression this replaced: the epoch was the fetch timestamp, so the
+    /// daily re-fetch of an unchanged table invalidated every cached session and
+    /// re-parsed the whole corpus to recompute figures identical to the ones it
+    /// had just thrown away.
+    #[test]
+    fn refetching_the_same_rates_keeps_the_epoch() {
+        let rates = [("gpt-x", 1.0), ("claude-y", 2.0)];
+        assert_eq!(digest_rates(&table(&rates)), digest_rates(&table(&rates)));
+    }
+
+    #[test]
+    fn a_changed_rate_changes_the_epoch() {
+        let before = digest_rates(&table(&[("gpt-x", 1.0)]));
+        assert_ne!(before, digest_rates(&table(&[("gpt-x", 1.5)])));
+        // …as does gaining or losing a model.
+        assert_ne!(before, digest_rates(&table(&[("gpt-x", 1.0), ("z", 1.0)])));
+        // …and renaming one, so rates cannot migrate between models unnoticed.
+        assert_ne!(before, digest_rates(&table(&[("gpt-y", 1.0)])));
+    }
+
+    /// `HashMap` iteration order is not the table's identity. Without sorting,
+    /// the epoch would differ run to run for the very same rates and invalidate
+    /// the cache on every launch — the opposite of the bug being fixed.
+    #[test]
+    fn the_epoch_does_not_depend_on_map_order() {
+        let forward = digest_rates(&table(&[("a", 1.0), ("b", 2.0), ("c", 3.0)]));
+        let reversed = digest_rates(&table(&[("c", 3.0), ("b", 2.0), ("a", 1.0)]));
+        assert_eq!(forward, reversed);
+    }
+
+    /// An absent cache-write rate says "unknown" while an explicit zero says
+    /// "free", and the pricer treats them differently, so the digest must too.
+    #[test]
+    fn an_absent_cache_write_rate_differs_from_a_free_one() {
+        let mut unknown = table(&[("m", 1.0)]);
+        let mut free = unknown.clone();
+        unknown
+            .get_mut("m")
+            .unwrap()
+            .cache_creation_input_token_cost = None;
+        free.get_mut("m").unwrap().cache_creation_input_token_cost = Some(0.0);
+        assert_ne!(digest_rates(&unknown), digest_rates(&free));
+    }
+
+    /// Zero is the "no table loaded yet" sentinel a first run sits at, so no
+    /// real table may claim it — including the empty one a failed parse yields.
+    #[test]
+    fn a_loaded_table_never_reports_the_empty_epoch() {
+        assert_ne!(digest_rates(&HashMap::new()), 0);
+        assert_ne!(digest_rates(&table(&[("m", 1.0)])), 0);
+    }
 
     #[test]
     fn builtin_table_hits_before_litellm() {
