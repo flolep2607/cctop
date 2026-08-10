@@ -163,12 +163,36 @@ const MAX_DEPTH: usize = 32;
 /// from, or the agent itself when it *is* the pane command — so the two meet by
 /// walking up from the agent.
 fn pane_for(pid: u32) -> Option<String> {
-    let panes = list_panes()?;
+    pane_in(&list_panes()?, pid)
+}
+
+/// The walk itself, over a pane list the caller supplies.
+///
+/// Split out because the hijack below cannot be reproduced against the real
+/// server without typing into whichever pane the test runner happens to sit in
+/// — which is the bug, not a way to test it.
+fn pane_in(panes: &[(u32, String)], pid: u32) -> Option<String> {
     let mut sys = System::new();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
 
+    // Climbing past cctop itself leaves the agent's terminal and enters cctop's
+    // own, so the pane it then finds belongs to the user's shell rather than to
+    // the session being typed into. That is not a near miss: it sends the line
+    // to whatever the user is doing right now. It bit for real — a pty child
+    // spawned by the test suite has cctop as its parent, so `send_line` walked
+    // out of the pty, up through cargo, and typed "continue" into the terminal
+    // the developer was working in.
+    //
+    // A session cctop launched itself is reached by `shim_send` through its
+    // socket, and one launched into tmux belongs to the tmux server rather than
+    // to cctop, so neither legitimate case needs this walk to climb that far.
+    let own = std::process::id();
+
     let mut current = pid;
     for _ in 0..MAX_DEPTH {
+        if current == own {
+            return None;
+        }
         if let Some((_, pane)) = panes.iter().find(|(pane_pid, _)| *pane_pid == current) {
             return Some(pane.clone());
         }
@@ -262,6 +286,60 @@ mod tests {
         assert!(
             start.elapsed() >= SETTLE,
             "the two writes went out back to back, which is the race this avoids"
+        );
+    }
+
+    /// A child of cctop's own process must never resolve to a pane, because the
+    /// only pane above it is the one cctop is running in — the user's terminal.
+    ///
+    /// The regression: `send_line` on a pty child spawned by the suite walked
+    /// out of the pty, up through cargo and the shell, and typed "continue" into
+    /// whatever the developer had on screen. Driven through a synthetic pane
+    /// list, since reproducing it against the real server means doing it again.
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_stops_before_it_reaches_cctops_own_terminal() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a child to walk up from");
+        let kid = child.id();
+
+        // Claim cctop's own parent is a pane, exactly as the real server would
+        // report the shell that cargo was launched from.
+        let ancestor = {
+            let mut sys = System::new();
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                false,
+                ProcessRefreshKind::nothing(),
+            );
+            sys.process(Pid::from_u32(std::process::id()))
+                .and_then(|p| p.parent())
+                .map(|p| p.as_u32())
+        };
+        let ancestor = ancestor.expect("cctop's own parent is what the walk must not reach");
+
+        // Both probes run while the child is alive: once it is reaped the walk
+        // stops at the missing process and returns `None` for a reason that has
+        // nothing to do with the guard, which is how the first cut of this test
+        // passed against the unfixed code.
+        let hijacked = pane_in(&[(ancestor, "%99".to_string())], kid);
+        // Positive control: a pane that really is the target still resolves, so
+        // the guard is not simply refusing everything.
+        let found = pane_in(&[(kid, "%7".to_string())], kid);
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            found.as_deref(),
+            Some("%7"),
+            "a real pane must still resolve"
+        );
+        assert_eq!(
+            hijacked, None,
+            "the walk climbed through cctop into the user's own pane"
         );
     }
 
