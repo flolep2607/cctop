@@ -9,6 +9,36 @@ use ratatui::crossterm::event::{
 };
 
 impl App {
+    /// Deliver a terminal paste as a unit.
+    ///
+    /// Bracketed paste turns a potentially huge clipboard into one event. A
+    /// pane must receive that event as a bulk write; routing it through
+    /// `on_key` would make a large prompt feel like it was being typed by hand.
+    pub(super) fn on_paste(&mut self, text: String) {
+        self.needs_redraw = true;
+
+        if self.tab > 0 && self.mode == Mode::List {
+            if let Some(pane) = self.focused_pane() {
+                let agent = pane.agent();
+                let alive = pane.view.send_paste(&text);
+                self.mark_answered(agent);
+                if !alive {
+                    self.close_pane();
+                    self.set_status("The agent's terminal closed");
+                }
+            }
+            return;
+        }
+
+        // Searches are single-line expressions. Preserve word boundaries from
+        // a copied line without letting an accidental newline submit or change
+        // the current modal.
+        if self.mode == Mode::Search {
+            self.search.push_str(&text.replace(['\r', '\n'], " "));
+            self.search_edited();
+        }
+    }
+
     pub(super) fn on_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -19,13 +49,18 @@ impl App {
         // every other key belongs to the agent. Alt is the modifier left over:
         // Ctrl- is the agent's (Ctrl-C interrupts it), and the function keys are
         // too few to also carry the splits.
-        if key.modifiers.contains(KeyModifiers::ALT) && self.on_key_workspace(key.code) {
+        if key.modifiers.contains(KeyModifiers::ALT) && self.on_key_workspace(key) {
             return;
         }
 
-        // Inside a pane the keyboard belongs to the agent. Only F12 is cctop's,
-        // and it is a function key because those are the ones never forwarded.
+        // Inside a pane the keyboard belongs to the agent. F10 and F12 remain
+        // cctop's because the dashboard promises them as quit and back, and
+        // function keys otherwise go straight through to the focused agent.
         if self.tab > 0 && self.mode == Mode::List {
+            if key.code == KeyCode::F(10) {
+                self.request_quit();
+                return;
+            }
             if key.code == KeyCode::F(12) {
                 self.show_tab(0);
                 return;
@@ -77,8 +112,8 @@ impl App {
     /// The multiplexer keys, live everywhere including inside a pane. Returns
     /// false for an Alt- combination that means nothing here, so it still
     /// reaches the agent.
-    fn on_key_workspace(&mut self, code: KeyCode) -> bool {
-        match code {
+    fn on_key_workspace(&mut self, key: KeyEvent) -> bool {
+        match key.code {
             KeyCode::Left => self.cycle_workspace(-1),
             KeyCode::Right => self.cycle_workspace(1),
             // The dashboard is tab 1, matching where it sits in the tab bar.
@@ -94,7 +129,7 @@ impl App {
             // Shifted, because it is the irreversible one: `w` on a tmux-backed
             // pane only detaches, and the key that ends the agent should not be
             // the same key with a slip of a finger.
-            KeyCode::Char('W') => self.kill_pane(),
+            KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::SHIFT) => self.kill_pane(),
             _ => return false,
         }
         true

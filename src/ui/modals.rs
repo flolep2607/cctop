@@ -170,7 +170,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+1 – 9", "Jump to a tab (1 is the dashboard)"),
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane; a tmux-backed agent keeps running"),
-        item("Alt+W", "Stop the focused pane's agent for good"),
+        item("Alt+Shift+W", "Stop the focused pane's agent for good"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
         section("Environment"),

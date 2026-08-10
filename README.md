@@ -170,7 +170,7 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
 | `Alt+o` | Move focus to the next pane |
 | `Alt+w` | Close the focused pane; a tmux-backed agent keeps running |
-| `Alt+W` | Stop the focused pane's agent for good |
+| `Alt+Shift+W` | Stop the focused pane's agent for good |
 | `F12` | Back to the dashboard, leaving everything running |
 
 Mouse works too: click session rows, column headers, and panel tabs; scroll
@@ -224,12 +224,12 @@ and what cctop hosts is only the tmux client. Quitting cctop, or closing the pan
 with `Alt+w`, detaches — the agent notices neither and carries on. On the way out
 cctop says how many it left behind.
 
-To get back to them, open the launcher with `t`: agents still running appear
-above the commands that start a new one, under **Still running**, and picking one
-reattaches to it with its scrollback intact. `R` on a session's row does the same
-thing by another route — a resumed session's tmux session is named after it, so
+Opening cctop again restores those tmux-backed tabs automatically, with their
+scrollback intact. The launcher (`t`) still lists any running agents that are
+not already open, so you can attach to them on demand. `R` on a session's row
+does the same thing by another route — a resumed session's tmux session is named after it, so
 pressing `R` twice reattaches rather than starting a rival agent on one
-transcript. `Alt+W` is the one key that ends an agent outright.
+transcript. `Alt+Shift+W` is the one key that ends an agent outright.
 
 Each of those agents is listed by what the dashboard calls it, the directory it
 is working in, and what it last reported through its hooks — `asking`, `working`,
@@ -306,8 +306,10 @@ The session table is tab 1. `t` opens another: pick an agent — whichever of
 `claude`, `codex`, `opencode`, and `pi` you have installed — or your shell, and
 it starts on a pty cctop owns and draws in the window. `Alt+v` and `Alt+s` split
 the tab you are in, side by side or stacked, so `claude` and a shell for
-`git diff` are one keystroke apart. A tab opened from a session's row starts in
-that session's project directory.
+`git diff` are one keystroke apart. Fresh tabs start in the directory where you
+started `cctop`; use `R` to reopen a session in that session's project directory.
+Agent tabs also show their subscription-window usage and time until reset when
+that provider reports it.
 
 Each pane is resized to the rectangle it is given rather than cropped to it, so
 a split is two agents each drawing a real screen — not two crops of one. The
@@ -321,8 +323,8 @@ drawing. That needs cctop to hold the pty, so it works for sessions started with
 start from a shell. On attaching, the shim replays its recent output so the
 screen is rebuilt immediately rather than at the agent's next repaint.
 
-A tab you are not looking at blinks when it wants you: **green** when its agent
-has stopped drawing — its turn is over and the prompt is yours — and **amber**
+A tab you are not looking at is marked **green** when its agent has stopped
+drawing — its turn is over and the prompt is yours — and blinks **amber** only
 when it has explicitly asked a question and is blocked on the answer. Amber wins
 when a tab has both. The tab you are on never blinks, since its focused pane is
 already in front of you.
