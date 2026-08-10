@@ -32,6 +32,11 @@ const SCROLLBACK: usize = 5_000;
 /// for a notch when an application is not reading the mouse.
 const WHEEL_LINES: usize = 3;
 
+/// A paste may be much larger than an ordinary key frame. Keep each write
+/// comfortably below the wire format's one-megabyte safety limit, without
+/// degrading it into the one-frame-per-character path used for keystrokes.
+const PASTE_CHUNK: usize = 64 * 1024;
+
 /// The wire format an attached connection speaks: `[kind][len: u32 BE][payload]`.
 ///
 /// Both directions carry two kinds of message, and one of them is raw keystrokes
@@ -207,6 +212,30 @@ impl Attach {
             Some(bytes) => self.send(&frame::encode(frame::KEYS, &bytes)),
             None => true,
         }
+    }
+
+    /// Paste text into the agent as a few large writes rather than a key event
+    /// per character.
+    ///
+    /// The outer terminal gives cctop one [`crossterm::event::Event::Paste`]
+    /// only after it has consumed the bracket markers. Put them back when the
+    /// agent asked for bracketed paste, otherwise a multiline paste would be
+    /// mistaken for a series of submits by the agent's prompt.
+    pub fn send_paste(&mut self, text: &str) -> bool {
+        if self.parser.screen().scrollback() > 0 {
+            self.parser.screen_mut().set_scrollback(0);
+        }
+
+        let bracketed = self.parser.screen().bracketed_paste();
+        if bracketed && !self.send(&frame::encode(frame::KEYS, b"\x1b[200~")) {
+            return false;
+        }
+        for chunk in text.as_bytes().chunks(PASTE_CHUNK) {
+            if !self.send(&frame::encode(frame::KEYS, chunk)) {
+                return false;
+            }
+        }
+        !bracketed || self.send(&frame::encode(frame::KEYS, b"\x1b[201~"))
     }
 
     /// Scroll the wheel at `(col, row)`, given pane-relative and zero-based.
@@ -677,6 +706,29 @@ mod tests {
                 frame::encode(frame::KEYS, b"\x1b[<65;3;9M"),
             ]
             .concat()
+        );
+    }
+
+    #[test]
+    fn a_bracketed_paste_is_forwarded_in_large_frames() {
+        let (mut attach, written) = probe();
+        attach.parser.process(b"\x1b[?2004h");
+        let text = "x".repeat(PASTE_CHUNK + 1);
+
+        assert!(attach.send_paste(&text));
+        let bytes = written.lock().unwrap();
+        let mut decoder = frame::Decoder::default();
+        decoder.push(&bytes);
+        let frames: Vec<_> = std::iter::from_fn(|| decoder.next()).collect();
+
+        assert_eq!(
+            frames,
+            vec![
+                (frame::KEYS, b"\x1b[200~".to_vec()),
+                (frame::KEYS, vec![b'x'; PASTE_CHUNK]),
+                (frame::KEYS, vec![b'x']),
+                (frame::KEYS, b"\x1b[201~".to_vec()),
+            ]
         );
     }
 
