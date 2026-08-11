@@ -214,6 +214,14 @@ pub struct Session {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub tool_count: u64,
+    /// Tool calls the transcript reported as failed. Zero for a provider that
+    /// records no outcome — see [`Session::error_rate`], which is the only
+    /// thing that should read this.
+    pub tool_errors: u64,
+    /// Compactions this session has been through, when the harness records
+    /// them. Claude Code only, so `0` elsewhere means "not said" rather than
+    /// "never happened".
+    pub compactions: u32,
     /// `None` when the active plan bundles this provider's usage.
     pub total_cost: Option<f64>,
     /// False when the provider's transcript contains no billable usage data.
@@ -310,6 +318,8 @@ impl Session {
             input_tokens: 0,
             output_tokens: 0,
             tool_count: 0,
+            tool_errors: 0,
+            compactions: 0,
             total_cost: Some(0.0),
             cost_available: true,
             cost_is_free: false,
@@ -335,6 +345,19 @@ impl Session {
     /// Stable identity used as a map key across refreshes.
     pub fn key(&self) -> String {
         format!("{}:{}", self.provider.as_str(), self.session_id)
+    }
+
+    /// Share of this session's tool calls that failed, or `None` when the
+    /// harness does not record outcomes and a rate would be an invention.
+    ///
+    /// A session with no calls yet also reports `None`: nought out of nought is
+    /// not a clean run, and drawing it as `0%` puts a reassuring figure on a
+    /// session that has done nothing.
+    pub fn error_rate(&self) -> Option<f64> {
+        if !self.provider.records_tool_outcomes() || self.tool_count == 0 {
+            return None;
+        }
+        Some(self.tool_errors as f64 / self.tool_count as f64)
     }
 
     pub fn is_running(&self) -> bool {
@@ -717,6 +740,30 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// The rate has three answers, and two of them are `None` for reasons that
+    /// must not be confused: a harness that cannot report outcomes, and a
+    /// session that has not made a call yet. Neither is a clean run, and
+    /// drawing either as `0%` would put a reassuring figure on a row that has
+    /// earned nothing of the sort.
+    #[test]
+    fn an_error_rate_is_only_reported_where_one_can_be_measured() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        assert_eq!(s.error_rate(), None, "no calls yet is not a clean run");
+
+        s.tool_count = 40;
+        s.tool_errors = 10;
+        assert_eq!(s.error_rate(), Some(0.25));
+
+        s.tool_errors = 0;
+        assert_eq!(s.error_rate(), Some(0.0), "a clean run is a real answer");
+
+        // Pi counts its calls but records no outcome, so the same figures mean
+        // nothing there.
+        let mut quiet = Session::new(Provider::Pi, "x".into());
+        quiet.tool_count = 40;
+        assert_eq!(quiet.error_rate(), None);
+    }
+
     #[test]
     fn tail_state_uses_the_last_meaningful_codex_event() {
         let path = std::env::temp_dir().join(format!(
@@ -973,6 +1020,15 @@ pub struct ToolDetail {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Metrics {
     pub tool_count: u64,
+    /// Calls the transcript reported as failed, over the same population as
+    /// `tool_count` — main session and subagents together, so the two divide.
+    ///
+    /// Always zero for a provider whose transcript records no per-call outcome.
+    /// [`crate::pricing::Provider::records_tool_outcomes`] is what tells those
+    /// apart from a session that simply had no failures; without it a harness
+    /// that cannot say would read as a harness with nothing to report.
+    #[serde(default)]
+    pub tool_errors: u64,
     pub tools: HashMap<String, u64>,
     pub tool_details: HashMap<String, Vec<ToolDetail>>,
     pub mcp_tool_count: u64,
@@ -1046,6 +1102,16 @@ pub struct SessionData {
     /// tool result that will do it again.
     #[serde(default)]
     pub context_series: Vec<CtxPoint>,
+    /// Compactions the session has been through.
+    ///
+    /// Counted as they are seen rather than read back off `context_series`,
+    /// which is decimated past [`MAX_CTX_POINTS`] and can lose a marker, and
+    /// which records nothing at all for a compaction no request followed.
+    ///
+    /// Claude Code only, for the same reason as the breakdown above: it is the
+    /// only transcript that says a compaction happened.
+    #[serde(default)]
+    pub compactions: u32,
     pub subagents: Vec<Subagent>,
     /// Codex reports per-million rates directly; surfaced in the Cost panel.
     pub rates: Option<CodexRates>,

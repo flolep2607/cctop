@@ -267,13 +267,15 @@ pub fn extract(path: &Path) -> SessionData {
             );
             *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
             data.metrics.tool_count += 1;
+            let failed = call.get("status").and_then(Value::as_str) == Some("error");
+            data.metrics.tool_errors += u64::from(failed);
             if let Some(detail) = data
                 .metrics
                 .tool_details
                 .get_mut(name)
                 .and_then(|details| details.last_mut())
             {
-                detail.failed = call.get("status").and_then(Value::as_str) == Some("error");
+                detail.failed = failed;
             }
         }
     });

@@ -284,6 +284,26 @@ pub fn info(
     }
 
     let m = &data.metrics;
+    // Only when there is something to say. The `ERR%` column carries the rate;
+    // this carries the two numbers behind it, because "8%" of what is the first
+    // thing anyone asks of a rate.
+    if m.tool_errors > 0 {
+        let rate = session.error_rate().unwrap_or(0.0);
+        lines.push(Line::from(vec![
+            label(&format!("{:<9}", "Failed")),
+            Span::raw(" "),
+            Span::styled(
+                format!("{} of {} calls", m.tool_errors, m.tool_count),
+                Style::default().fg(match rate {
+                    r if r >= 0.25 => theme::colors().cost_high,
+                    r if r >= 0.10 => theme::colors().cost_mid,
+                    _ => theme::colors().dim,
+                }),
+            ),
+            Span::raw("  "),
+            dim(format!("{}%", (rate * 100.0).round() as i64)),
+        ]));
+    }
     if m.lines_added > 0 || m.lines_removed > 0 {
         lines.push(Line::from(vec![
             label(&format!("{:<9}", "Lines")),
@@ -1126,11 +1146,10 @@ fn context_timeline(session: &Session, data: &SessionData, width: usize) -> Vec<
         .filter(|m| *m > 0.0)
         .unwrap_or_else(|| values.iter().cloned().fold(1.0, f64::max));
 
-    let compactions = data
-        .context_series
-        .iter()
-        .filter(|p| p.after_compaction)
-        .count();
+    // The counted total, not the markers in the series: that is decimated once
+    // it passes its cap, and a chart that lost a marker would under-report the
+    // one thing it is being read for.
+    let compactions = data.compactions as usize;
     let peak = values.iter().cloned().fold(0.0, f64::max);
 
     let mut lines = vec![
@@ -1160,7 +1179,45 @@ fn context_timeline(session: &Session, data: &SessionData, width: usize) -> Vec<
         theme::Gradient::Accent,
         None,
     ));
+    lines.extend(thrash_note(session, compactions));
     lines
+}
+
+/// What a session living on compactions is paying for, spelled out.
+///
+/// The sawtooth is visible in the chart above, but only to someone who already
+/// knows what it means. A cadence is not: three compactions over two days is a
+/// long conversation, three in twenty minutes is a session that will spend the
+/// rest of the day rebuilding a window it keeps refilling, and the chart draws
+/// those identically.
+fn thrash_note(session: &Session, compactions: usize) -> Vec<Line<'static>> {
+    /// Below this there is no cadence yet, only a long conversation.
+    const MIN_COMPACTIONS: usize = 3;
+
+    if compactions < MIN_COMPACTIONS {
+        return Vec::new();
+    }
+    let (Some(start), Some(end)) = (
+        util::parse_ts(&session.started_at),
+        util::parse_ts(&session.last_active),
+    ) else {
+        return Vec::new();
+    };
+    let span_ms = (end.timestamp_millis() - start.timestamp_millis()).max(0);
+    let every = span_ms / compactions as i64;
+    if every <= 0 {
+        return Vec::new();
+    }
+    vec![Line::from(vec![
+        Span::styled(
+            format!(
+                "↺ one compaction every {}",
+                crate::util::compact_duration(every)
+            ),
+            Style::default().fg(theme::colors().cost_mid),
+        ),
+        dim(" — each one re-sends the conversation as a summary the model has to read again"),
+    ])]
 }
 
 /// Which bar cell the auto-compact threshold falls on, when it is still ahead.
@@ -1750,17 +1807,54 @@ mod tests {
 
     /// Compactions are the only drops in the chart, so the header counts them:
     /// a fall with nothing behind it would otherwise read as a measurement bug.
+    ///
+    /// The count is the session's own, not the markers left in the series: that
+    /// series is decimated once it outgrows its cap, and a chart that lost a
+    /// marker would under-report the one number it is being read for.
     #[test]
     fn the_context_chart_counts_the_compactions_it_drew() {
         let session = Session::new(crate::pricing::Provider::Claude, "x".into());
         let mut data = series(&[10, 90, 20, 40]);
         data.context_series[2].after_compaction = true;
+        data.compactions = 1;
         let text: String = context_timeline(&session, &data, 80)
             .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
             .collect();
         assert!(text.contains("1 compaction"), "got {text:?}");
         assert!(text.contains("4 requests"), "got {text:?}");
+
+        // A marker the decimation dropped must not cost the header a count.
+        data.compactions = 3;
+        data.context_series[2].after_compaction = false;
+        let text: String = context_timeline(&session, &data, 80)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("3 compactions"), "got {text:?}");
+    }
+
+    /// Three compactions over two days is a long conversation; three in twenty
+    /// minutes is a session that will spend the day rebuilding a window it
+    /// keeps refilling. The chart draws those identically, so the cadence is
+    /// spelled out under it — and only once there is a cadence to spell.
+    #[test]
+    fn a_thrashing_session_is_told_how_often_it_is_rebuilding() {
+        let mut session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        session.started_at = "2026-08-11T10:00:00Z".into();
+        session.last_active = "2026-08-11T11:00:00Z".into();
+
+        assert!(thrash_note(&session, 2).is_empty(), "two is not a cadence");
+        let text: String = thrash_note(&session, 4)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("every 15m"), "got {text:?}");
+
+        // A session with no clock behind it says nothing rather than dividing
+        // by a span it does not have.
+        session.last_active = session.started_at.clone();
+        assert!(thrash_note(&session, 4).is_empty());
     }
 
     /// A failed call is marked two ways on purpose: the red wash, and a glyph in

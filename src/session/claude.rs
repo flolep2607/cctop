@@ -467,6 +467,8 @@ struct Extractor {
     /// A compaction has happened and the next measured request is the first of
     /// the segment that replaced it.
     ctx_compacted: bool,
+    /// How many compactions the transcript has been through, in total.
+    compactions: u32,
     error: Option<String>,
 }
 
@@ -765,6 +767,7 @@ impl Extractor {
         }
         self.ctx.after_compaction = true;
         self.ctx_compacted = true;
+        self.compactions += 1;
     }
 
     fn visit_assistant(
@@ -1151,6 +1154,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         metrics: ext.metrics,
         context_breakdown,
         context_series: ext.ctx_series,
+        compactions: ext.compactions,
         subagents,
         rates: None,
         error: None,
@@ -1163,6 +1167,10 @@ pub fn extract(transcript: &Path) -> SessionData {
 /// in a later entry than the call, and a turn's final token counts are only known
 /// once its streaming partials have been deduped.
 fn attach_call_details(ext: &mut Extractor) {
+    // Counted from the set of failed ids rather than from the details below,
+    // which are capped: a session busy enough to overflow that cap is exactly
+    // the one whose error rate is worth reading.
+    ext.metrics.tool_errors = ext.tool_failed.len() as u64;
     for details in ext.metrics.tool_details.values_mut() {
         for d in details.iter_mut() {
             let Some(id) = d.id.clone() else { continue };
@@ -1975,6 +1983,10 @@ mod tests {
             .expect("failed call");
         assert!(!ok.failed, "a successful result must not be flagged");
         assert!(bad.failed, "is_error must be flagged");
+        // And the total behind the ERR% column, which is counted from the set
+        // of failed ids rather than from the capped details above.
+        assert_eq!(data.metrics.tool_errors, 1);
+        assert_eq!(data.metrics.tool_count, 2);
     }
 
     /// Every route to the large window has to name the same size. Two sessions on

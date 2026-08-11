@@ -418,6 +418,8 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             );
             *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
             data.metrics.tool_count += 1;
+            let failed = state.get("status").and_then(Value::as_str) == Some("error");
+            data.metrics.tool_errors += u64::from(failed);
             if let Some(detail) = data
                 .metrics
                 .tool_details
@@ -426,7 +428,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             {
                 detail.delta = delta;
                 detail.dur_ms = duration_ms;
-                detail.failed = state.get("status").and_then(Value::as_str) == Some("error");
+                detail.failed = failed;
             }
         }
     }
@@ -632,6 +634,7 @@ mod tests {
         assert_eq!(bash.len(), 2);
         assert!(!bash[0].failed, "a completed call must not be flagged");
         assert!(bash[1].failed, "status=error must be flagged");
+        assert_eq!(data.metrics.tool_errors, 1);
 
         std::fs::remove_file(path).unwrap();
     }

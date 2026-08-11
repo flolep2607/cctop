@@ -21,6 +21,7 @@ pub enum ColumnId {
     Cpu,
     Memory,
     Tools,
+    Errors,
     TokenTotal,
     TokenRate,
     Model,
@@ -136,6 +137,16 @@ pub const COLUMNS: &[Column] = &[
         desc: "Total tool invocations in the session",
     },
     Column {
+        id: ColumnId::Errors,
+        label: "ERR%",
+        width: Some(5),
+        // Above TOOLS, which it qualifies: a session's call count says how busy
+        // it has been, and this says how much of that was work.
+        priority: 32,
+        right_align: true,
+        desc: "Share of this session's tool calls the transcript reported as failed.\nA session stuck retrying is the one spending money without moving.\n─ where the harness records no per-call outcome (Cursor, Pi, Windsurf),\nand for a session that has made no calls yet.",
+    },
+    Column {
         id: ColumnId::TokenTotal,
         label: "TOKENS",
         width: Some(8),
@@ -222,6 +233,7 @@ pub fn key(id: ColumnId) -> &'static str {
         ColumnId::Cpu => "cpu",
         ColumnId::Memory => "mem",
         ColumnId::Tools => "tools",
+        ColumnId::Errors => "errors",
         ColumnId::TokenTotal => "tokens",
         ColumnId::TokenRate => "tok_rate",
         ColumnId::Model => "model",
@@ -362,6 +374,12 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
                 String::new()
             }
         }
+        // Zero is drawn as a dash rather than as `0%`: a clean session is the
+        // norm, and a column of noughts is a column nobody reads.
+        ColumnId::Errors => match s.error_rate() {
+            None | Some(0.0) => "─".into(),
+            Some(rate) => format!("{}%", (rate * 100.0).round() as i64),
+        },
         ColumnId::TokenTotal => {
             let total = s.input_tokens + s.output_tokens;
             if total > 0 {
@@ -473,6 +491,8 @@ pub fn render_subagent_cell(
         | ColumnId::CostToday
         | ColumnId::Cpu
         | ColumnId::Memory
+        // Counted against the parent, whose figure already includes them.
+        | ColumnId::Errors
         | ColumnId::TokenTotal
         | ColumnId::TokenRate
         | ColumnId::Harness
@@ -643,6 +663,12 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
             .unwrap_or(0)
             .cmp(&b.process.as_ref().map(|p| p.memory).unwrap_or(0)),
         ColumnId::Tools => a.tool_count.cmp(&b.tool_count),
+        // A harness that cannot report outcomes sorts below every one that can,
+        // rather than among the clean sessions it is not known to be one of.
+        ColumnId::Errors => num(
+            a.error_rate().unwrap_or(-1.0),
+            b.error_rate().unwrap_or(-1.0),
+        ),
         ColumnId::TokenTotal => {
             (a.input_tokens + a.output_tokens).cmp(&(b.input_tokens + b.output_tokens))
         }

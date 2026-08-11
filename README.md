@@ -453,6 +453,31 @@ finished its turn and is sitting at its prompt. In the transcript that looks
 the same as an agent still thinking, and a timer would fire in the middle of
 every long reasoning turn.
 
+### Sessions that are not making progress
+
+A session can be busy and expensive without getting anywhere, and the columns
+that measure how hard it is working all read *higher* when that happens. Two
+that read the other way:
+
+**`ERR%`** is the share of a session's tool calls the transcript reported as
+failed. A few is ordinary — a grep that found nothing, a build that caught a
+mistake. A quarter of them is an agent retrying something that will not work,
+paying full price for each attempt. Sort by it with `F6` to put those at the
+top; the Info panel gives the two numbers behind the rate, and Tool Activity
+marks the individual calls with `✗`.
+
+It reads `─` where the harness records no per-call outcome — Cursor, Pi and
+Windsurf — rather than `0%`, which would claim a clean run cctop cannot see.
+Claude, Codex, Gemini and OpenCode all report one.
+
+**Compaction cadence** is under the Context panel's chart. The sawtooth in that
+chart is already the shape of a session living on compactions, but three of them
+over two days is a long conversation while three in twenty minutes is a session
+that will spend the rest of the day rebuilding a window it keeps refilling — and
+the chart draws those identically. From three compactions on, the panel says how
+often: `↺ one compaction every 15m`. Claude Code only, since no other transcript
+records that a compaction happened.
+
 ### When two agents are in one repository
 
 Two agents editing one checkout is not a merge conflict. Git would at least

@@ -471,6 +471,20 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Whether this provider's transcript says, per call, that it failed.
+    ///
+    /// Kept as a fact about the provider rather than a flag on the extraction:
+    /// a transcript with no failures in it and a transcript that cannot express
+    /// one look identical, and the difference decides whether an error rate is
+    /// `0%` or `─`. Pi records tool calls but no outcome; Cursor and Windsurf
+    /// record neither.
+    pub fn records_tool_outcomes(&self) -> bool {
+        match self {
+            Provider::Claude | Provider::Codex | Provider::Gemini | Provider::OpenCode => true,
+            Provider::Cursor | Provider::Pi | Provider::Windsurf => false,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Provider::Claude => "claude",

@@ -496,6 +496,15 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
             Some(_) => theme::colors().dim,
             None => theme::colors().dimmer,
         },
+        // A few failed calls is ordinary — a grep that found nothing, a build
+        // that caught a mistake. A quarter of them is a session that has stopped
+        // making progress and is still being billed for the attempt.
+        ColumnId::Errors => match s.error_rate() {
+            Some(r) if r >= 0.25 => theme::colors().cost_high,
+            Some(r) if r >= 0.10 => theme::colors().cost_mid,
+            Some(r) if r > 0.0 => theme::colors().dim,
+            _ => theme::colors().dimmer,
+        },
         // The other warning colour, and the only one about a second session:
         // hot once two agents have written the same file, amber while they are
         // merely in the same repository and have not met yet.

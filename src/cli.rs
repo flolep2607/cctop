@@ -280,6 +280,14 @@ struct JsonTokens {
 #[derive(Serialize)]
 struct JsonActivity {
     tool_count: u64,
+    /// Calls the transcript reported as failed. Absent — rather than zero —
+    /// where the harness records no per-call outcome, since the two mean very
+    /// different things to anything totalling them up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_errors: Option<u64>,
+    /// Compactions the session has been through. Claude Code only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compactions: Option<u32>,
     tools: std::collections::HashMap<String, u64>,
     skill_count: u64,
     skills: std::collections::HashMap<String, u64>,
@@ -469,6 +477,8 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 },
                 activity: JsonActivity {
                     tool_count: m.tool_count,
+                    tool_errors: s.provider.records_tool_outcomes().then_some(m.tool_errors),
+                    compactions: (s.provider == Provider::Claude).then_some(data.compactions),
                     tools: m.tools.clone(),
                     skill_count: m.skill_count,
                     skills: m.skills.clone(),

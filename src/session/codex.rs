@@ -637,6 +637,9 @@ pub fn extract(path: &Path) -> SessionData {
         };
     }
 
+    // From the set rather than the details, which are capped; see the same
+    // reasoning in `claude::attach_call_details`.
+    metrics.tool_errors = failed_calls.len() as u64;
     // Time each call from its own entry to its output's.
     for details in metrics.tool_details.values_mut() {
         for d in details.iter_mut() {
