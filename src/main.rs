@@ -2,6 +2,7 @@ mod alias;
 mod attach;
 mod cache;
 mod cli;
+mod collide;
 mod config;
 mod handoff;
 mod hook;

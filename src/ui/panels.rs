@@ -85,7 +85,74 @@ fn wall_duration_ms(session: &Session, now: DateTime<Utc>) -> Option<i64> {
 // Info
 // ---------------------------------------------------------------------------
 
-pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Line<'static>> {
+/// A session's overlap with the other live agents, with the peers already
+/// resolved to the names the table shows them under.
+///
+/// Resolving happens in the caller because only it holds the session list;
+/// handing the panel raw keys would make it look every peer up itself and
+/// print `claude:8f3a…` when it failed.
+pub struct Clash {
+    pub level: crate::collide::Overlap,
+    pub peers: Vec<String>,
+    pub files: Vec<String>,
+}
+
+/// The Info panel's account of who else is on this session's ground.
+///
+/// The `!` column can only say that something is wrong; this is where it says
+/// what and with whom, which is what turns the warning into an action. Files
+/// are listed in full rather than counted — "you and cctop-2 have both written
+/// src/ui/mod.rs" is the whole message, and a number would send the reader
+/// hunting for it.
+fn clash_lines(clash: Option<&Clash>) -> Vec<Line<'static>> {
+    /// Beyond this the list stops being read and starts being scrolled past.
+    const MAX_FILES: usize = 6;
+
+    let Some(clash) = clash else {
+        return Vec::new();
+    };
+    let peers = clash.peers.join(", ");
+    let mut lines = match clash.level {
+        crate::collide::Overlap::File => vec![Line::from(vec![
+            label(&format!("{:<9}", "Conflict")),
+            Span::raw(" "),
+            Span::styled(
+                format!("⚠ also written by {peers}"),
+                Style::default()
+                    .fg(theme::colors().cost_high)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])],
+        crate::collide::Overlap::Directory => vec![Line::from(vec![
+            label(&format!("{:<9}", "Sharing")),
+            Span::raw(" "),
+            Span::styled(
+                format!("· this repository with {peers}"),
+                Style::default().fg(theme::colors().cost_mid),
+            ),
+        ])],
+    };
+    for path in clash.files.iter().take(MAX_FILES) {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(11)),
+            dim(util::path_tail(path, 3)),
+        ]));
+    }
+    if clash.files.len() > MAX_FILES {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(11)),
+            dim(format!("+{} more", clash.files.len() - MAX_FILES)),
+        ]));
+    }
+    lines
+}
+
+pub fn info(
+    session: &Session,
+    data: Option<&SessionData>,
+    plan: Plan,
+    clash: Option<&Clash>,
+) -> Vec<Line<'static>> {
     let Some(data) = data else {
         return note("Loading…");
     };
@@ -166,6 +233,7 @@ pub fn info(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     };
     lines.push(field("Cmd", cmd));
     lines.push(field("Plan", plan.as_str()));
+    lines.extend(clash_lines(clash));
     if let Some(effort) = &data.reasoning_effort {
         lines.push(field("Effort", effort.clone()));
     }
@@ -1831,7 +1899,7 @@ mod tests {
             error: Some("boom".into()),
             ..Default::default()
         };
-        let lines = info(&s, Some(&data), Plan::Retail);
+        let lines = info(&s, Some(&data), Plan::Retail, None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))

@@ -636,6 +636,12 @@ pub struct App {
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
 
+    /// Which live sessions are working the same ground, recomputed whenever
+    /// rows move. The level also rides on each row so the table can sort by it;
+    /// this holds the part only the footer and the Info panel need — who, and
+    /// which files.
+    pub collisions: crate::collide::Map,
+
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
     /// Which tab is on screen: `0` is the dashboard, `1..=tabs.len()` index
@@ -812,6 +818,7 @@ impl App {
             global_spend: History::default(),
             quota: Quota::default(),
             notify: crate::notify::Notifier::new(prefs.notify),
+            collisions: crate::collide::Map::new(),
             update_available: None,
             status: None,
             started_at: chrono::Utc::now().to_rfc3339(),
@@ -850,6 +857,55 @@ impl App {
         self.visible
             .get(self.selected)
             .and_then(|row| self.sessions.get(row.session()))
+    }
+
+    /// The footer's warning that two live agents have written the same file.
+    ///
+    /// Only the file-level overlaps. A shared repository is worth the cell in
+    /// the `!` column and no more — agents share repositories all day and
+    /// nothing has gone wrong yet, whereas two of them writing one file means
+    /// one has already lost an edit or is about to.
+    ///
+    /// Unlike the bell's line this does not clear when you select the row: the
+    /// bell reports a moment that has passed, and this reports a state that is
+    /// still true whether or not you are looking at it.
+    pub fn conflict_footer(&self) -> Option<String> {
+        use std::collections::BTreeSet;
+        let mut agents = 0;
+        let mut files: BTreeSet<&str> = BTreeSet::new();
+        for c in self.collisions.values() {
+            if c.level != crate::collide::Overlap::File {
+                continue;
+            }
+            agents += 1;
+            files.extend(c.files.iter().map(String::as_str));
+        }
+        let first = files.iter().next()?;
+        let more = match files.len() {
+            1 => String::new(),
+            n => format!(" +{} more", n - 1),
+        };
+        Some(format!(
+            "Conflict: ⚠ {}{more} — {agents} agents have written it",
+            crate::util::path_tail(first, 2)
+        ))
+    }
+
+    /// What one session collides with, with its peers named the way the table
+    /// names them.
+    pub fn clash_of(&self, session: &Session) -> Option<panels::Clash> {
+        let c = self.collisions.get(&session.key())?;
+        let peers = c
+            .peers
+            .iter()
+            .filter_map(|key| self.sessions.iter().find(|s| &s.key() == key))
+            .map(|s| s.display_label().to_string())
+            .collect();
+        Some(panels::Clash {
+            level: c.level,
+            peers,
+            files: c.files.clone(),
+        })
     }
 
     /// The highlighted row, whatever kind it is.
@@ -3007,6 +3063,10 @@ fn event_loop(
             // goes for the permission mode, which no transcript records at all.
             app.apply_finished_agents();
             app.apply_permissions();
+            // After the hooks, because a row's liveness is what decides whether
+            // it can still race anyone, and cheap enough to redo wholesale:
+            // it compares paths already in memory and reads no transcript.
+            app.collisions = crate::collide::apply(&mut app.sessions);
         }
         if annotated_rows_changed {
             // A burst can contain hundreds of rows. Recompute and sort once
@@ -3726,6 +3786,49 @@ mod tests {
             s.process = Some(crate::proc::ProcInfo::default());
         }
         s
+    }
+
+    /// Two live agents in one checkout, both having written the same file —
+    /// the arrangement the whole warning exists for.
+    #[test]
+    fn a_contested_file_reaches_the_footer_and_the_info_panel() {
+        let repo = std::env::temp_dir().join(format!("cctop-ui-clash-{}", std::process::id()));
+        std::fs::create_dir_all(repo.join(".git")).expect("checkout");
+        let dir = repo.to_string_lossy().into_owned();
+        let contested = crate::collide::normalise("src/ui/mod.rs", &dir);
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, &dir), session("b", true, &dir)];
+        for s in app.sessions.iter_mut() {
+            s.recent_writes = vec![contested.clone()];
+        }
+        app.collisions = crate::collide::apply(&mut app.sessions);
+
+        // On the rows, so the column can colour and sort by it…
+        for s in &app.sessions {
+            assert_eq!(s.conflict, Some(crate::collide::Overlap::File));
+        }
+        // …and in the footer, which names the file rather than a count.
+        let footer = app.conflict_footer().expect("a warning");
+        assert!(footer.contains("ui/mod.rs"), "{footer}");
+        assert!(footer.contains("2 agents"), "{footer}");
+
+        // The panel names the peer, which is the part that says what to do.
+        let clash = app.clash_of(&app.sessions[0]).expect("a clash");
+        assert_eq!(clash.peers, vec![app.sessions[1].display_label()]);
+        assert_eq!(clash.files, vec![contested]);
+
+        // A repository shared without a shared file is the quieter finding, and
+        // deliberately does not reach the footer.
+        app.sessions[1].recent_writes = vec![crate::collide::normalise("other.rs", &dir)];
+        app.collisions = crate::collide::apply(&mut app.sessions);
+        assert_eq!(
+            app.sessions[0].conflict,
+            Some(crate::collide::Overlap::Directory)
+        );
+        assert!(app.conflict_footer().is_none());
+
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     fn with_subagents(id: &str, names: &[&str]) -> Session {

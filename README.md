@@ -453,6 +453,44 @@ finished its turn and is sitting at its prompt. In the transcript that looks
 the same as an agent still thinking, and a timer would fire in the middle of
 every long reasoning turn.
 
+### When two agents are in one repository
+
+Two agents editing one checkout is not a merge conflict. Git would at least
+announce that. It is one of them writing a file the other is still holding in
+context, and the loser finds out when the work is already gone. cctop is the
+only thing on the machine that can see both of them, so it is the only thing
+that can say so while it still helps.
+
+The `!` column is that warning:
+
+| | |
+|---|---|
+| `⚠` | another running agent has written a file this session also wrote |
+| `·` | another running agent is in the same repository, and has not touched your files |
+| (blank) | nobody else is here |
+
+Sort by it with `F6`, and the Info panel names the peer and lists the files. The
+footer carries the `⚠` case only — agents share repositories all day and nothing
+has gone wrong yet, whereas two of them writing one file means an edit has
+already been lost or is about to be.
+
+The unit of comparison is the **repository root**, not the working directory. A
+linked worktree carries its own `.git`, so two agents in two worktrees of one
+repository are editing two sets of files on disk and are not reported; two
+agents started from different subdirectories of one checkout are. Comparing
+directories gets both of those backwards, and the second is the arrangement
+`git worktree` exists to provide.
+
+Three limits worth knowing. Only running sessions are compared — a session that
+has stopped may well have left uncommitted work behind, but nothing it does from
+here can race anyone. Only the last 32 files each session wrote are watched, so
+a path it finished with an hour and forty edits ago is not treated as contested.
+And a Codex `apply_patch` covering several files summarises as
+`first.rs (+3 more)` in the transcript, so only the first of them is recovered.
+
+Agents can ask this themselves through `check_conflicts` — see
+[Letting agents see each other](#letting-agents-see-each-other).
+
 ## Where data comes from
 
 | Source | Path |
@@ -651,12 +689,17 @@ server:
 {"mcpServers": {"cctop": {"command": "cctop", "args": ["--mcp"]}}}
 ```
 
-Three tools, all read-only:
+Four tools, all read-only:
 
 - **`list_sessions`** — every session, any harness: model, directory, branch,
   tokens, estimated cost, context occupancy, and whether it is still running.
   Filterable by `running_only` and by `directory`, which is how an agent asks
   who else is in this repo.
+- **`check_conflicts`** — the `!` column, asked rather than read: give it a
+  directory and the files you are about to change, and it answers with the
+  running agents in the same repository and which of those files they have
+  already written. The one question an agent cannot answer for itself and pays
+  for getting wrong, since a lost edit arrives with no error attached.
 - **`get_session_context`** — the same brief `O` writes, for one session.
 - **`search_sessions`** — the full text of every transcript on the machine,
   with a snippet of each match. Where something was already discussed or

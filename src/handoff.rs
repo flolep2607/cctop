@@ -18,7 +18,7 @@
 //! its plan in prose leaves it empty rather than guessing at which assistant
 //! paragraph was the plan.
 
-use crate::session::{Session, SessionData, ToolDetail};
+use crate::session::{EDIT_TOOLS, Session, SessionData, ToolDetail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -68,19 +68,6 @@ pub struct Brief {
     /// Window occupancy at the last measured request, when the harness reports it.
     pub context: Option<(u64, u64)>,
 }
-
-/// Tool names that mean "this file was modified", across harnesses.
-const EDIT_TOOLS: &[&str] = &[
-    "Edit",
-    "edit",
-    "Write",
-    "write",
-    "MultiEdit",
-    "NotebookEdit",
-    "str_replace_editor",
-    "ApplyPatch",
-    "apply_patch",
-];
 
 const READ_TOOLS: &[&str] = &["Read", "read", "view"];
 const SHELL_TOOLS: &[&str] = &["Bash", "bash", "shell", "run_terminal_cmd"];

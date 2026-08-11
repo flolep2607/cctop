@@ -673,7 +673,10 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         };
         let data = app.panel_data.as_ref();
         match app.bottom_tab {
-            0 => (panels::info(session, data, app.plan), app.info_scroll),
+            0 => (
+                panels::info(session, data, app.plan, app.clash_of(session).as_ref()),
+                app.info_scroll,
+            ),
             2 => (panels::processes(session, width), app.proc_scroll),
             3 => {
                 let live = app.tool_live_only.then_some(app.started_at.as_str());
@@ -1160,6 +1163,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             format!(" {bell} "),
             Style::default()
                 .fg(theme::colors().accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    // Two agents writing one file is the only thing here that is a fault rather
+    // than a state, so it sits with the bell rather than among the badges.
+    if let Some(clash) = app.conflict_footer() {
+        spans.push(Span::styled(
+            format!(" {clash} "),
+            Style::default()
+                .fg(theme::colors().cost_high)
                 .add_modifier(Modifier::BOLD),
         ));
     }

@@ -379,6 +379,36 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     s.costs_by_hour = data.costs_by_hour.clone();
     s.subagents_cost = data.subagents.iter().map(|sa| sa.cost).sum();
     s.subagents = data.subagents.clone();
+    s.recent_writes = recent_writes(m, &s.label_source);
+}
+
+/// Paths the session has written lately, newest first and deduplicated.
+///
+/// The path is the detail string a write tool records, which for every tool in
+/// [`session::EDIT_TOOLS`] is the file it targeted.
+///
+/// ponytail: a Codex `apply_patch` touching several files summarises as
+/// `first.rs (+3 more)`, so only the first is recovered here. The remaining
+/// files go unwatched rather than being guessed at from a truncated string.
+fn recent_writes(m: &session::Metrics, cwd: &str) -> Vec<String> {
+    let mut all: Vec<&session::ToolDetail> = session::EDIT_TOOLS
+        .iter()
+        .filter_map(|name| m.tool_details.get(*name))
+        .flatten()
+        .collect();
+    all.sort_by(|a, b| b.ts.cmp(&a.ts));
+
+    let mut seen = std::collections::HashSet::new();
+    all.into_iter()
+        .map(|d| match d.d.split_once(" (+") {
+            Some((first, _)) => first.trim(),
+            None => d.d.trim(),
+        })
+        .filter(|p| !p.is_empty())
+        .map(|p| crate::collide::normalise(p, cwd))
+        .filter(|p| seen.insert(p.clone()))
+        .take(session::MAX_RECENT_WRITES)
+        .collect()
 }
 
 fn harness_from_process(session: &Session, command: &str) -> &'static str {

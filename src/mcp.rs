@@ -145,6 +145,34 @@ fn tool_schemas() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "check_conflicts",
+            "description": "Ask whether another agent is already working where you are about \
+                            to. Give it your working directory and, if you know them, the files \
+                            you intend to change; it answers with the running sessions in the \
+                            same repository and which of your files they have already written. \
+                            Two agents writing one file is not a merge conflict — nothing warns \
+                            you and one edit is simply lost — so check before a batch of edits, \
+                            and take a worktree if someone is there.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "directory": {
+                        "type": "string",
+                        "description": "Your working directory. The repository containing it is \
+                                        what gets compared, so a subdirectory is fine.",
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Paths you are about to change, absolute or relative to \
+                                        `directory`. Optional: without them the answer is just \
+                                        who else is in the repository.",
+                    },
+                },
+                "required": ["directory"],
+            },
+        }),
+        json!({
             "name": "search_sessions",
             "description": "Search the full text of every session transcript on this machine \
                             for a string, and return the sessions that mention it with a \
@@ -183,6 +211,7 @@ fn call_tool(params: Option<&Value>) -> Result<Value, String> {
     let text = match name {
         "list_sessions" => list_sessions(&sessions, &args)?,
         "get_session_context" => get_session_context(&sessions, &loader, &args)?,
+        "check_conflicts" => check_conflicts(&sessions, &args)?,
         "search_sessions" => search_sessions(&sessions, &args)?,
         other => return Err(format!("unknown tool '{other}'")),
     };
@@ -253,6 +282,75 @@ fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
         "truncated": total > rows.len(),
         "cost_note": "Costs are estimates from published per-token rates. Flat-rate plans \
                       bill differently.",
+    });
+    Ok(serde_json::to_string_pretty(&payload).unwrap_or_default())
+}
+
+/// Who else is running in this repository, and which of the caller's files they
+/// have already written.
+///
+/// The caller is very likely one of the sessions in the list — an agent asking
+/// about its own repository is a session cctop can see. It is left in rather
+/// than guessed out: cctop cannot tell which row is the caller (an MCP server
+/// is a child process, not a session), and a wrong guess would drop the one
+/// peer that mattered. `own_row_note` says so instead.
+fn check_conflicts(sessions: &[Session], args: &Value) -> Result<String, String> {
+    let directory = args
+        .get("directory")
+        .and_then(Value::as_str)
+        .ok_or("check_conflicts needs a directory")?;
+    let files: Vec<String> = args
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let peers = crate::collide::peers_of(sessions, directory, &files);
+    let contested: Vec<&str> = peers
+        .iter()
+        .filter(|(_, shared)| !shared.is_empty())
+        .flat_map(|(_, shared)| shared.iter().map(String::as_str))
+        .collect();
+
+    let rows: Vec<Value> = peers
+        .iter()
+        .map(|(s, shared)| {
+            json!({
+                "session_id": s.session_id,
+                "harness": s.harness,
+                "directory": s.label_source,
+                "last_active": s.last_active,
+                "your_files_it_has_written": shared,
+                "recently_written": s.recent_writes,
+            })
+        })
+        .collect();
+
+    let payload = json!({
+        "directory": directory,
+        "agents_here": rows,
+        "contested_files": contested,
+        "clear": contested.is_empty(),
+        "own_row_note": "One of these is probably you — an agent calling this has a session of \
+                         its own. Match on session_id or working directory.",
+        "advice": match contested.is_empty() {
+            true if rows.len() > 1 =>
+                "Another agent is in this repository but has not written your files. Nothing is \
+                 lost yet; check again if you start editing widely.",
+            true => "Nobody else is running here.",
+            false =>
+                "Another running agent has already written these files. Whichever of you saves \
+                 last wins and the other edit is gone, with no warning from git. Take a worktree, \
+                 or agree who finishes first.",
+        },
+        "limits": "Only running sessions are compared, only the files each has written recently, \
+                   and a linked git worktree counts as a separate repository — which is the point \
+                   of one.",
     });
     Ok(serde_json::to_string_pretty(&payload).unwrap_or_default())
 }

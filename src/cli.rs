@@ -324,8 +324,23 @@ struct JsonSession {
     subagents: Vec<crate::session::Subagent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<crate::session::ContextUsage>,
+    /// Other running agents on this session's ground. Absent when there are
+    /// none, which is the ordinary case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflict: Option<JsonConflict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct JsonConflict {
+    /// `file` when a peer has written a file this session also wrote,
+    /// `directory` when they merely share a repository.
+    level: &'static str,
+    /// Session ids of the peers, not keys: an id is what every other field
+    /// here is addressed by.
+    peers: Vec<String>,
+    files: Vec<String>,
 }
 
 /// Print one session's context brief to stdout.
@@ -376,9 +391,29 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
     Ok(())
 }
 
+/// Resolve a collision's peer keys back to the session ids the rest of the
+/// document is addressed by. A key a caller cannot look up is worse than no
+/// entry, so an unresolvable one is dropped rather than printed raw.
+fn json_conflict(sessions: &[Session], c: &crate::collide::Collision) -> JsonConflict {
+    JsonConflict {
+        level: match c.level {
+            crate::collide::Overlap::File => "file",
+            crate::collide::Overlap::Directory => "directory",
+        },
+        peers: c
+            .peers
+            .iter()
+            .filter_map(|key| sessions.iter().find(|s| &s.key() == key))
+            .map(|s| s.session_id.clone())
+            .collect(),
+        files: c.files.clone(),
+    }
+}
+
 pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
     let claude_account = crate::quota::claude_account();
     let codex_account = crate::quota::codex_account();
+    let collisions = crate::collide::detect(sessions);
 
     let out: Vec<JsonSession> = sessions
         .iter()
@@ -449,6 +484,7 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 rates: data.rates,
                 subagents: data.subagents.clone(),
                 context: s.context,
+                conflict: collisions.get(&s.key()).map(|c| json_conflict(sessions, c)),
                 error: data.error.clone(),
             }
         })

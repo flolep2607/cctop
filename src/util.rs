@@ -208,6 +208,20 @@ pub fn nice_max(val: f64) -> f64 {
     10.0 * mag
 }
 
+/// The last `parts` components of a path, prefixed with `…/` when that dropped
+/// something.
+///
+/// A footer naming a contested file needs enough of the path to identify it and
+/// none of the prefix, which is the same for everything in the repository. Both
+/// separators are honoured because a path can reach cctop from either platform.
+pub fn path_tail(path: &str, parts: usize) -> String {
+    let components: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    if components.len() <= parts {
+        return path.to_string();
+    }
+    format!("…/{}", components[components.len() - parts..].join("/"))
+}
+
 /// Truncate to `width` display cells, appending `…` when it doesn't fit.
 pub fn truncate(s: &str, width: usize) -> String {
     if s.chars().count() <= width {

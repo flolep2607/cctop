@@ -26,6 +26,7 @@ pub enum ColumnId {
     Model,
     Harness,
     Permission,
+    Conflict,
     Branch,
     Project,
 }
@@ -178,6 +179,17 @@ pub const COLUMNS: &[Column] = &[
         desc: "How much the session asks before it acts, as its own hooks reported it:\nask, edits (writes files unasked), plan (cannot act), BYPASS (asks nothing).\n─ when the session has no cctop hooks installed and so cannot say.",
     },
     Column {
+        id: ColumnId::Conflict,
+        label: "!",
+        width: Some(1),
+        // Above PERM, and for a stronger version of the same reason: a
+        // permission mode is a standing setting, while this is a fault
+        // happening now. One cell is a cheap thing to keep on a narrow screen.
+        priority: 74,
+        right_align: false,
+        desc: "Another running agent is working the same ground:\n⚠ it has written a file this session also wrote,\n· it is in the same repository.\nWorktrees count as separate repositories, which is the point of them.",
+    },
+    Column {
         id: ColumnId::Branch,
         label: "BRANCH",
         width: Some(12),
@@ -215,6 +227,7 @@ pub fn key(id: ColumnId) -> &'static str {
         ColumnId::Model => "model",
         ColumnId::Harness => "harness",
         ColumnId::Permission => "perm",
+        ColumnId::Conflict => "conflict",
         ColumnId::Branch => "branch",
         ColumnId::Project => "project",
     }
@@ -379,6 +392,13 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
             Some(p) => p.label().into(),
             None => "─".into(),
         },
+        // Blank rather than a dash for the ordinary case. This column is a
+        // warning light, and a light that is on in every row is off.
+        ColumnId::Conflict => match s.conflict {
+            Some(crate::collide::Overlap::File) => "⚠".into(),
+            Some(crate::collide::Overlap::Directory) => "·".into(),
+            None => String::new(),
+        },
         ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
     }
@@ -459,6 +479,9 @@ pub fn render_subagent_cell(
         // A subagent runs under whatever its parent was started with, so
         // repeating it down the children would be the same fact four times.
         | ColumnId::Permission
+        // A subagent edits through its parent's process, in the parent's
+        // directory: the collision is the parent's and is already on its row.
+        | ColumnId::Conflict
         | ColumnId::Branch => String::new(),
     }
 }
@@ -495,6 +518,16 @@ fn permission_rank(s: &crate::session::Session) -> u8 {
         Some(Permission::Ask) => 2,
         Some(Permission::AcceptEdits) => 3,
         Some(Permission::Bypass) => 4,
+    }
+}
+
+/// Sort order for the conflict column: a shared file outranks a shared
+/// repository, which outranks a session nobody is racing.
+fn conflict_rank(s: &crate::session::Session) -> u8 {
+    match s.conflict {
+        None => 0,
+        Some(crate::collide::Overlap::Directory) => 1,
+        Some(crate::collide::Overlap::File) => 2,
     }
 }
 
@@ -618,6 +651,8 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::Harness => a.harness.cmp(&b.harness),
         // Loosest first when descending, which is the order worth looking at.
         ColumnId::Permission => permission_rank(a).cmp(&permission_rank(b)),
+        // Worst first when descending, which is the only order worth asking for.
+        ColumnId::Conflict => conflict_rank(a).cmp(&conflict_rank(b)),
         // Sessions outside a repository sort together, below every branch.
         ColumnId::Branch => branch(&a.label_source).cmp(&branch(&b.label_source)),
         ColumnId::Project => a

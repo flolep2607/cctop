@@ -496,6 +496,14 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
             Some(_) => theme::colors().dim,
             None => theme::colors().dimmer,
         },
+        // The other warning colour, and the only one about a second session:
+        // hot once two agents have written the same file, amber while they are
+        // merely in the same repository and have not met yet.
+        ColumnId::Conflict => match s.conflict {
+            Some(crate::collide::Overlap::File) => theme::colors().cost_high,
+            Some(crate::collide::Overlap::Directory) => theme::colors().cost_mid,
+            None => Color::Reset,
+        },
         _ => Color::Reset,
     }
 }

@@ -248,10 +248,49 @@ pub struct Session {
     /// column whose whole job is not to guess.
     pub permission: Option<crate::hook::Permission>,
 
+    /// Absolute paths this session has written recently, newest first.
+    ///
+    /// Kept on the row rather than looked up per frame because the only
+    /// question asked of it — does anyone else hold this file — is asked about
+    /// every live session at once, and [`SessionData`] is loaded for one.
+    /// Bounded by [`MAX_RECENT_WRITES`]; spelled by [`crate::collide::normalise`]
+    /// so two harnesses' spellings of one path compare equal.
+    pub recent_writes: Vec<String>,
+
+    /// How close another live session is to this one's work, as
+    /// [`crate::collide`] last measured it. `None` is the ordinary case: no
+    /// other running agent shares this repository.
+    pub conflict: Option<crate::collide::Overlap>,
+
     // --- Rate tracking ---
     pub tokens_per_min: f64,
     pub cost_per_min: f64,
 }
+
+/// Tool names that mean "this file was modified", across harnesses.
+///
+/// Shared because two features now turn on it — the handoff brief's file list
+/// and collision detection — and a name known to one but not the other would
+/// show a session editing a file that cctop swore nobody was editing.
+pub const EDIT_TOOLS: &[&str] = &[
+    "Edit",
+    "edit",
+    "Write",
+    "write",
+    "MultiEdit",
+    "NotebookEdit",
+    "str_replace_editor",
+    "ApplyPatch",
+    "apply_patch",
+];
+
+/// How many written paths a row carries.
+///
+/// Enough to cover what a session has open at once, and far short of every file
+/// it has ever touched: a path it wrote an hour and forty edits ago is one it
+/// has almost certainly finished with, and treating it as contested would make
+/// the warning cry wolf on any long session.
+pub const MAX_RECENT_WRITES: usize = 32;
 
 impl Session {
     pub fn new(provider: Provider, session_id: String) -> Self {
@@ -286,6 +325,8 @@ impl Session {
             inferred_running: false,
             activity_state: ActivityState::Working,
             permission: None,
+            recent_writes: Vec::new(),
+            conflict: None,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
         }
