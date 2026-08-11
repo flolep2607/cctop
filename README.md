@@ -225,7 +225,10 @@ with `Alt+w`, detaches — the agent notices neither and carries on. On the way 
 cctop says how many it left behind.
 
 Opening cctop again restores those tmux-backed tabs automatically, with their
-scrollback intact. The launcher (`t`) still lists any running agents that are
+scrollback intact — except the ones you closed. `Alt+w` is a decision that
+outlasts the run: the agent keeps running and the launcher still offers it, but
+it does not come back as a tab until you open it again.
+The launcher (`t`) still lists any running agents that are
 not already open, so you can attach to them on demand. `R` on a session's row
 does the same thing by another route — a resumed session's tmux session is named after it, so
 pressing `R` twice reattaches rather than starting a rival agent on one

@@ -2396,6 +2396,11 @@ impl App {
             true => " — it will outlive cctop",
             false => "",
         };
+        // Opening it again says it is wanted, so an earlier Alt+w on this
+        // session stops keeping it out of the restore.
+        if let Some(name) = pane.tmux.clone() {
+            self.undismiss_tmux(&name);
+        }
         match self.launch_into {
             LaunchInto::Split { stacked } => {
                 let Some(tab) = self.active_tab() else { return };
@@ -2442,15 +2447,39 @@ impl App {
         };
         let closed = (tab.focus < tab.panes.len()).then(|| {
             let pane = tab.panes.remove(tab.focus);
-            (pane.label.clone(), pane.outlives_cctop())
+            (pane.label.clone(), pane.tmux.clone())
         });
         tab.focus = tab.focus.min(tab.panes.len().saturating_sub(1));
         self.drop_empty_tabs();
-        if let Some((label, detached)) = closed {
-            self.set_status(match detached {
-                true => format!("Detached from {label} — it is still running"),
+        if let Some((label, tmux)) = closed {
+            // Closing is a decision about this pane, and it has to outlast the
+            // run: the agent stays alive in tmux, so the next launch would find
+            // it running and open the tab straight back up.
+            if let Some(name) = tmux.clone() {
+                self.dismiss_tmux(name);
+            }
+            self.set_status(match tmux.is_some() {
+                true => format!("Detached from {label} — still running, but not reopened at start"),
                 false => format!("Closed {label}"),
             });
+        }
+    }
+
+    /// Remember that this tmux session's tab was closed, and forget the
+    /// dismissals whose sessions have since ended so the list cannot grow
+    /// without bound.
+    fn dismiss_tmux(&mut self, name: String) {
+        let alive: Vec<String> = crate::tmux::running().into_iter().map(|a| a.name).collect();
+        self.prefs.dismiss_tmux(name, &alive);
+        self.save_prefs();
+    }
+
+    /// Undo a dismissal, because opening the session again says plainly that it
+    /// is wanted back.
+    fn undismiss_tmux(&mut self, name: &str) {
+        if self.prefs.dismissed_tmux.iter().any(|n| n == name) {
+            self.prefs.dismissed_tmux.retain(|n| n != name);
+            self.save_prefs();
         }
     }
 
@@ -2583,7 +2612,20 @@ impl App {
     /// makes reopening cctop resume the tabs the user had open, while leaving a
     /// failed or concurrently ended session out of the workspace.
     pub(super) fn restore_running_tabs(&mut self) {
-        for agent in crate::tmux::running() {
+        let running = crate::tmux::running();
+        // A session the user closed the pane on stays closed, however many times
+        // cctop restarts; one that has ended in the meantime drops off the list
+        // rather than sitting there forever.
+        let names: Vec<String> = running.iter().map(|a| a.name.clone()).collect();
+        if self.prefs.prune_dismissed(&names) {
+            self.prefs.save();
+        }
+        let dismissed = self.prefs.dismissed_tmux.clone();
+
+        for agent in running {
+            if dismissed.contains(&agent.name) {
+                continue;
+            }
             let choice = tabs::Choice::Waiting(agent.clone());
             let label = choice.label();
             if let Ok(pane) =

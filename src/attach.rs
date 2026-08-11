@@ -652,7 +652,11 @@ fn encode(key: KeyEvent) -> Option<Vec<u8>> {
         // Ctrl-A..Ctrl-Z are the letter with the top three bits cleared, which
         // is also how Ctrl-C reaches the agent as a signal.
         KeyCode::Char(c) if ctrl && c.is_ascii_alphabetic() => {
-            vec![c.to_ascii_lowercase() as u8 & 0x1f]
+            let control = c.to_ascii_lowercase() as u8 & 0x1f;
+            match alt {
+                true => vec![0x1b, control],
+                false => vec![control],
+            }
         }
         KeyCode::Char(c) => {
             let mut b = c.to_string().into_bytes();
@@ -664,21 +668,54 @@ fn encode(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        // Ctrl-Backspace is the other delete-word, and terminals send it as
+        // 0x17 — the same byte Ctrl-W would, which is what readline and every
+        // agent's editor listen for.
+        KeyCode::Backspace if ctrl => vec![0x17],
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Esc => vec![0x1b],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        // Arrows and the editing keys carry their modifiers in the sequence.
+        // Sending the bare form threw them away, so Ctrl-Left arrived as a plain
+        // Left and moved one character where the user asked for a word.
+        KeyCode::Up => csi_letter(b'A', key.modifiers),
+        KeyCode::Down => csi_letter(b'B', key.modifiers),
+        KeyCode::Right => csi_letter(b'C', key.modifiers),
+        KeyCode::Left => csi_letter(b'D', key.modifiers),
+        KeyCode::Home => csi_letter(b'H', key.modifiers),
+        KeyCode::End => csi_letter(b'F', key.modifiers),
+        KeyCode::Insert => csi_tilde(2, key.modifiers),
+        KeyCode::Delete => csi_tilde(3, key.modifiers),
+        KeyCode::PageUp => csi_tilde(5, key.modifiers),
+        KeyCode::PageDown => csi_tilde(6, key.modifiers),
         _ => return None,
     };
     Some(bytes)
+}
+
+/// xterm's modifier parameter: 1 plus a bit per held modifier. 1 means none,
+/// and a sequence carrying it is written without the parameter at all — which
+/// is the form every terminal has always sent and some readers only accept.
+fn modifier_param(mods: KeyModifiers) -> Option<u8> {
+    let bits = (mods.contains(KeyModifiers::SHIFT) as u8)
+        | ((mods.contains(KeyModifiers::ALT) as u8) << 1)
+        | ((mods.contains(KeyModifiers::CONTROL) as u8) << 2);
+    (bits != 0).then_some(bits + 1)
+}
+
+/// A cursor-key sequence: `\x1b[D`, or `\x1b[1;5D` when modifiers are held.
+fn csi_letter(final_byte: u8, mods: KeyModifiers) -> Vec<u8> {
+    match modifier_param(mods) {
+        Some(param) => format!("\x1b[1;{param}{}", final_byte as char).into_bytes(),
+        None => vec![0x1b, b'[', final_byte],
+    }
+}
+
+/// A numbered editing key: `\x1b[3~`, or `\x1b[3;5~` with modifiers.
+fn csi_tilde(number: u8, mods: KeyModifiers) -> Vec<u8> {
+    match modifier_param(mods) {
+        Some(param) => format!("\x1b[{number};{param}~").into_bytes(),
+        None => format!("\x1b[{number}~").into_bytes(),
+    }
 }
 
 #[cfg(test)]
@@ -935,5 +972,55 @@ mod tests {
         assert_eq!(encode(key(KeyCode::Backspace)), Some(vec![0x7f]));
         assert_eq!(encode(key(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
         assert_eq!(encode(key(KeyCode::F(5))), None);
+    }
+
+    /// Word-wise movement is Ctrl held on an arrow, and it only works if the
+    /// modifier survives the trip: the bare sequence is a plain arrow, which
+    /// moves one character and looks like the key was ignored.
+    #[test]
+    fn modified_arrows_keep_their_modifier() {
+        let with = |code, mods| encode(KeyEvent::new(code, mods));
+
+        assert_eq!(
+            with(KeyCode::Right, KeyModifiers::CONTROL),
+            Some(b"\x1b[1;5C".to_vec())
+        );
+        assert_eq!(
+            with(KeyCode::Left, KeyModifiers::CONTROL),
+            Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            with(KeyCode::Home, KeyModifiers::SHIFT),
+            Some(b"\x1b[1;2H".to_vec())
+        );
+        assert_eq!(
+            with(
+                KeyCode::Up,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT
+            ),
+            Some(b"\x1b[1;8A".to_vec())
+        );
+        assert_eq!(
+            with(KeyCode::Delete, KeyModifiers::CONTROL),
+            Some(b"\x1b[3;5~".to_vec())
+        );
+        // Unmodified keys keep the plain form every terminal has always sent.
+        assert_eq!(
+            with(KeyCode::Delete, KeyModifiers::NONE),
+            Some(b"\x1b[3~".to_vec())
+        );
+        // Ctrl-Backspace is delete-word, which readline reads as Ctrl-W.
+        assert_eq!(
+            with(KeyCode::Backspace, KeyModifiers::CONTROL),
+            Some(vec![0x17])
+        );
+        // Alt with a control character is the escape prefix, as in Alt-Ctrl-A.
+        assert_eq!(
+            with(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ),
+            Some(vec![0x1b, 1])
+        );
     }
 }

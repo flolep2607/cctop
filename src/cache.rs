@@ -474,6 +474,14 @@ pub struct UiPrefs {
     /// Recent `/` queries, newest first, so a search worth running twice does
     /// not have to be typed twice. Capped at [`MAX_SEARCH_HISTORY`].
     pub search_history: Vec<String>,
+    /// tmux sessions the user closed the pane on, which must therefore not come
+    /// back as tabs on the next launch.
+    ///
+    /// Closing a tmux-backed pane detaches rather than kills — that is the point
+    /// of tmux here — so without a record of the choice, the restore that
+    /// reopens every running session would undo it every time. The agent keeps
+    /// running and is still reachable with `a`; only the tab stays shut.
+    pub dismissed_tmux: Vec<String>,
 }
 
 /// How many past queries are remembered.
@@ -499,11 +507,31 @@ impl Default for UiPrefs {
             hidden_columns: Vec::new(),
             theme: None,
             search_history: Vec::new(),
+            dismissed_tmux: Vec::new(),
         }
     }
 }
 
 impl UiPrefs {
+    /// Record that `name`'s tab was closed, dropping any dismissal whose session
+    /// is no longer in `alive` — a name that ended can never be restored, and a
+    /// tmux session name is reused when an agent is started in the same session
+    /// again, so a stale entry would silently suppress a tab the user did want.
+    pub fn dismiss_tmux(&mut self, name: String, alive: &[String]) {
+        self.dismissed_tmux.retain(|n| alive.contains(n));
+        if !self.dismissed_tmux.contains(&name) {
+            self.dismissed_tmux.push(name);
+        }
+    }
+
+    /// Drop dismissals for sessions that are gone. True when something changed
+    /// and the file is therefore worth rewriting.
+    pub fn prune_dismissed(&mut self, alive: &[String]) -> bool {
+        let before = self.dismissed_tmux.len();
+        self.dismissed_tmux.retain(|n| alive.contains(n));
+        self.dismissed_tmux.len() != before
+    }
+
     pub fn load() -> Self {
         std::fs::read_to_string(&*config::UI_PREFS_FILE)
             .ok()
@@ -795,5 +823,27 @@ mod tests {
         let back: UiPrefs = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
         assert_eq!(back.hidden_columns, ["cpu", "mem"]);
         assert_eq!(back.theme.as_deref(), Some("mono"));
+    }
+
+    /// Closing a tmux-backed pane detaches rather than kills, so the restore on
+    /// the next launch would reopen the tab unless the choice is remembered —
+    /// and forgotten again once that session ends.
+    #[test]
+    fn a_dismissed_tmux_session_stays_dismissed_until_it_ends() {
+        let mut prefs = UiPrefs::default();
+        let alive = ["cctop-one".to_string(), "cctop-two".to_string()];
+
+        prefs.dismiss_tmux("cctop-one".into(), &alive);
+        prefs.dismiss_tmux("cctop-one".into(), &alive);
+        assert_eq!(prefs.dismissed_tmux, ["cctop-one"]);
+
+        prefs.dismiss_tmux("cctop-two".into(), &alive);
+        assert_eq!(prefs.dismissed_tmux, ["cctop-one", "cctop-two"]);
+
+        // One session ends: its dismissal goes with it, so a later session of
+        // the same name is not suppressed by a decision about a dead one.
+        assert!(prefs.prune_dismissed(&["cctop-two".to_string()]));
+        assert_eq!(prefs.dismissed_tmux, ["cctop-two"]);
+        assert!(!prefs.prune_dismissed(&["cctop-two".to_string()]));
     }
 }
