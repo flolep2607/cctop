@@ -231,13 +231,36 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
-    let titles =
-        std::iter::once("Dashboard".to_string()).chain(app.tabs.iter().map(|tab| tab.title()));
+    let titles: Vec<String> = std::iter::once("Dashboard".to_string())
+        .chain(app.tabs.iter().map(|tab| tab.title()))
+        .enumerate()
+        .map(|(i, title)| format!("{}:{}", i + 1, title))
+        .collect();
     let on = app.blink_on();
     let mut spans = Vec::new();
     let mut pos = area.x;
-    for (i, title) in titles.enumerate() {
-        let text = format!(" {}:{} ", i + 1, title);
+    // The new-tab button is the one thing the bar exists for, so its room is
+    // reserved before the labels get any: nothing else here is reachable by
+    // mouse if it falls off the end.
+    let new_tab = match app.tab {
+        // Which key to name depends on where the keyboard is: inside a pane it
+        // belongs to the agent, so only the Alt- form gets through.
+        0 => " + Tab (t) ",
+        _ => " + Tab (Alt+n) ",
+    };
+    let label_room = area.width.saturating_sub(new_tab.chars().count() as u16) as usize;
+
+    // Only crowded bars pay for the crowding: while every label fits it is
+    // drawn whole, and past that each tab gets an equal share. A clipped label
+    // you can still count and click beats a bar that runs off the screen.
+    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum();
+    let cap = match natural <= label_room {
+        true => usize::MAX,
+        false => (label_room / titles.len()).saturating_sub(2).max(3),
+    };
+
+    for (i, title) in titles.iter().enumerate() {
+        let text = format!(" {} ", elide(title, cap));
         let width = text.chars().count() as u16;
         // A tab wanting something outranks the plain selected/unselected look:
         // the whole point of the colour is to be seen while you are reading a
@@ -267,12 +290,6 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
 
     // The button that says the feature exists. It carries its key as well as
     // its click target, because the keyboard is how anyone will use it twice.
-    // Which key to name depends on where the keyboard is: inside a pane it
-    // belongs to the agent, so only the Alt- form gets through.
-    let new_tab = match app.tab {
-        0 => " + Tab (t) ",
-        _ => " + Tab (Alt+n) ",
-    };
     let width = new_tab.chars().count() as u16;
     if pos + width <= area.x + area.width {
         spans.push(Span::styled(
@@ -284,29 +301,21 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         layout.workspace_new = Some((pos, pos + width));
     }
 
-    // Quota belongs to the provider, not to the tab, so it is drawn once at the
-    // right edge instead of repeated in every label — three claude tabs used to
-    // print the same two windows three times and the titles disappeared into
-    // the noise. It is on the bar at all because the Limits panel is a
-    // dashboard panel: inside a workspace the bar is the only place left.
-    let right = area.x + area.width;
-    let free = right.saturating_sub(pos);
-    if let Some(text) = bar_quota(app, chrono::Utc::now().timestamp(), free) {
-        let width = text.chars().count() as u16;
-        spans.push(Span::styled(
-            " ".repeat(free.saturating_sub(width) as usize),
-            Style::default(),
-        ));
-        spans.push(Span::styled(text, theme::dim()));
-    }
-
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// How much of the quota fits. The bar competes with the tab labels for one
-/// row, so rather than truncate mid-number it drops whole pieces: the reset
-/// countdowns first, then the window labels, keeping the percentages — the part
-/// that answers "can I keep working" — down to the narrowest terminal.
+/// `text`, clipped to `max` columns with an ellipsis when it does not fit.
+fn elide(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
+/// How much of the quota fits. Rather than truncate mid-number, the pane border
+/// drops whole pieces: the reset countdowns first, then the window labels,
+/// keeping the percentages — the part that answers "can I keep working" — down
+/// to the narrowest split.
 #[derive(Clone, Copy)]
 enum QuotaDetail {
     Full,
@@ -314,53 +323,41 @@ enum QuotaDetail {
     PctOnly,
 }
 
-/// The quota line for the tab bar: one entry per provider that actually has a
-/// tab open, at the widest detail that fits in `budget`. Returns `None` when
-/// nothing fits, or when no open tab implies a provider.
-fn bar_quota(app: &App, now: i64, budget: u16) -> Option<String> {
-    // Derived from the command labels rather than sessions: a fresh tab has no
-    // transcript, let alone a known provider session, when the bar is drawn.
-    let mut providers: Vec<&str> = Vec::new();
-    for tab in app.tabs.iter() {
-        let title = tab.title();
-        let command = title
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        for name in ["claude", "codex"] {
-            if command.starts_with(name) && !providers.contains(&name) {
-                providers.push(name);
-            }
-        }
-    }
+/// The quota to put on a pane's border, at the widest detail fitting `budget`.
+///
+/// Quota belongs to the provider, not the pane, but a pane is where you are
+/// looking when it matters and its border already names the command. Repeating
+/// it in every tab label — the previous home — made a wall of identical
+/// percentages that buried the titles; on the border, each pane shows the
+/// figures for its own agent and nothing shows them twice on one line.
+///
+/// The provider comes from the pane's command label rather than a session: a
+/// fresh pane has no transcript, let alone a known provider session, when its
+/// border is drawn.
+fn pane_quota(label: &str, quota: &crate::quota::Quota, now: i64, budget: u16) -> Option<String> {
+    let command = label
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let status = if command.starts_with("claude") {
+        &quota.claude
+    } else if command.starts_with("codex") {
+        &quota.codex
+    } else {
+        return None;
+    };
 
-    for detail in [
+    [
         QuotaDetail::Full,
         QuotaDetail::NoResets,
         QuotaDetail::PctOnly,
-    ] {
-        let parts: Vec<String> = providers
-            .iter()
-            .filter_map(|name| {
-                let status = match *name {
-                    "codex" => &app.quota.codex,
-                    _ => &app.quota.claude,
-                };
-                let usage = quota_suffix(status, now, detail);
-                (!usage.is_empty()).then(|| format!("{name} {usage}"))
-            })
-            .collect();
-        if parts.is_empty() {
-            return None;
-        }
-        // Two leading spaces keep it off the new-tab button.
-        let text = format!("  {}", parts.join("   "));
-        if text.chars().count() as u16 <= budget {
-            return Some(text);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .map(|detail| quota_suffix(status, now, detail))
+    .take_while(|text| !text.is_empty())
+    .find(|text| text.chars().count() as u16 + 2 <= budget)
+    .map(|text| format!(" {text} "))
 }
 
 /// One provider's windows, compacted to `detail`.
@@ -394,6 +391,8 @@ fn quota_suffix(status: &crate::quota::ProviderStatus, now: i64, detail: QuotaDe
 /// the rectangle it was given, so a split is two agents each drawing a real
 /// screen rather than two crops of one.
 fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
+    // Read out before the tab is borrowed mutably; the panes' borders want it.
+    let quota = app.quota.clone();
     let Some(tab) = app.active_tab() else {
         return;
     };
@@ -408,8 +407,22 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
     .split(area);
 
     let focus = tab.focus;
+    let now = chrono::Utc::now().timestamp();
     for (i, pane) in tab.panes.iter_mut().enumerate() {
         let mut block = panel_block(&pane.label);
+        // The border is long and empty, and the label has already told you which
+        // agent this is; the quota is the other thing you want while it runs.
+        // Right-aligned so it does not move when the label changes, and only if
+        // it fits beside the label rather than pushing it off.
+        let taken = pane.label.chars().count() as u16 + 6;
+        if let Some(text) = pane_quota(
+            &pane.label,
+            &quota,
+            now,
+            slots[i].width.saturating_sub(taken).saturating_sub(2),
+        ) {
+            block = block.title_top(Line::from(Span::styled(text, theme::dim())).right_aligned());
+        }
         if i == focus {
             block = block
                 .border_style(Style::default().fg(theme::colors().border_hi))
@@ -1217,7 +1230,50 @@ mod tests {
     }
 
     #[test]
-    fn bar_quota_drops_detail_as_the_bar_narrows() {
+    fn pane_quota_narrows_to_fit_and_only_for_a_provider() {
+        let quota = crate::quota::Quota {
+            claude: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                plan: None,
+                windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
+                limit_reached: false,
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pane_quota("claude-6", &quota, 4_500, 40).as_deref(),
+            Some(" 5h 37% 1h31m · 7d 21% 137h38m ")
+        );
+        assert_eq!(
+            pane_quota("claude-6", &quota, 4_500, 20).as_deref(),
+            Some(" 5h 37% · 7d 21% ")
+        );
+        assert_eq!(
+            pane_quota("claude-6", &quota, 4_500, 10).as_deref(),
+            Some(" 37%/21% ")
+        );
+        // Too narrow for even the percentages, and a shell has no provider.
+        assert!(pane_quota("claude-6", &quota, 4_500, 5).is_none());
+        assert!(pane_quota("zsh", &quota, 4_500, 40).is_none());
+    }
+
+    #[test]
+    fn a_crowded_tab_bar_elides_instead_of_overflowing() {
+        let titles: Vec<String> = (1..=6).map(|i| format!("{i}:claude-{i}")).collect();
+        let label_room = 40usize;
+        let cap = (label_room / titles.len()).saturating_sub(2).max(3);
+        let drawn: usize = titles
+            .iter()
+            .map(|t| elide(t, cap).chars().count() + 2)
+            .sum();
+
+        assert!(drawn <= label_room, "{drawn} columns in {label_room}");
+        assert_eq!(elide("1:claude-1", cap), "1:c…");
+        assert_eq!(elide("1:cc", cap), "1:cc");
+    }
+
+    #[test]
+    fn quota_suffix_drops_detail_step_by_step() {
         let status = crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
             plan: None,
             windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
