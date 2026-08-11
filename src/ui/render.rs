@@ -231,11 +231,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
-    let titles = std::iter::once("Dashboard".to_string()).chain(
-        app.tabs
-            .iter()
-            .map(|tab| workspace_tab_title(tab, &app.quota)),
-    );
+    let titles =
+        std::iter::once("Dashboard".to_string()).chain(app.tabs.iter().map(|tab| tab.title()));
     let on = app.blink_on();
     let mut spans = Vec::new();
     let mut pos = area.x;
@@ -286,51 +283,109 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         ));
         layout.workspace_new = Some((pos, pos + width));
     }
+
+    // Quota belongs to the provider, not to the tab, so it is drawn once at the
+    // right edge instead of repeated in every label — three claude tabs used to
+    // print the same two windows three times and the titles disappeared into
+    // the noise. It is on the bar at all because the Limits panel is a
+    // dashboard panel: inside a workspace the bar is the only place left.
+    let right = area.x + area.width;
+    let free = right.saturating_sub(pos);
+    if let Some(text) = bar_quota(app, chrono::Utc::now().timestamp(), free) {
+        let width = text.chars().count() as u16;
+        spans.push(Span::styled(
+            " ".repeat(free.saturating_sub(width) as usize),
+            Style::default(),
+        ));
+        spans.push(Span::styled(text, theme::dim()));
+    }
+
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// The quota that belongs to a tab's agent, kept in the tab label so it stays
-/// visible while the agent owns the pane. Shells and unknown launch commands do
-/// not imply a provider and therefore keep their ordinary labels.
-fn workspace_tab_title(tab: &tabs::Tab, quota: &crate::quota::Quota) -> String {
-    let title = tab.title();
-    let usage = quota_suffix(&title, quota, chrono::Utc::now().timestamp());
-    if usage.is_empty() {
-        title
-    } else {
-        format!("{title} · {usage}")
-    }
+/// How much of the quota fits. The bar competes with the tab labels for one
+/// row, so rather than truncate mid-number it drops whole pieces: the reset
+/// countdowns first, then the window labels, keeping the percentages — the part
+/// that answers "can I keep working" — down to the narrowest terminal.
+#[derive(Clone, Copy)]
+enum QuotaDetail {
+    Full,
+    NoResets,
+    PctOnly,
 }
 
-/// Compact provider quota for a tab label. The suffix is deliberately derived
-/// from the command label rather than a session: fresh tabs do not have a
-/// transcript, let alone a known provider session, when their title is drawn.
-fn quota_suffix(title: &str, quota: &crate::quota::Quota, now: i64) -> String {
-    let command = title
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let status = if command.starts_with("claude") {
-        &quota.claude
-    } else if command.starts_with("codex") {
-        &quota.codex
-    } else {
-        return String::new();
-    };
+/// The quota line for the tab bar: one entry per provider that actually has a
+/// tab open, at the widest detail that fits in `budget`. Returns `None` when
+/// nothing fits, or when no open tab implies a provider.
+fn bar_quota(app: &App, now: i64, budget: u16) -> Option<String> {
+    // Derived from the command labels rather than sessions: a fresh tab has no
+    // transcript, let alone a known provider session, when the bar is drawn.
+    let mut providers: Vec<&str> = Vec::new();
+    for tab in app.tabs.iter() {
+        let title = tab.title();
+        let command = title
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for name in ["claude", "codex"] {
+            if command.starts_with(name) && !providers.contains(&name) {
+                providers.push(name);
+            }
+        }
+    }
+
+    for detail in [
+        QuotaDetail::Full,
+        QuotaDetail::NoResets,
+        QuotaDetail::PctOnly,
+    ] {
+        let parts: Vec<String> = providers
+            .iter()
+            .filter_map(|name| {
+                let status = match *name {
+                    "codex" => &app.quota.codex,
+                    _ => &app.quota.claude,
+                };
+                let usage = quota_suffix(status, now, detail);
+                (!usage.is_empty()).then(|| format!("{name} {usage}"))
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        // Two leading spaces keep it off the new-tab button.
+        let text = format!("  {}", parts.join("   "));
+        if text.chars().count() as u16 <= budget {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// One provider's windows, compacted to `detail`.
+fn quota_suffix(status: &crate::quota::ProviderStatus, now: i64, detail: QuotaDetail) -> String {
     let crate::quota::ProviderStatus::Ok(quota) = status else {
         return String::new();
     };
-    let windows = quota.windows.iter().map(|window| {
-        let reset = window
-            .resets_at
-            .map(|at| at - now)
-            .filter(|remaining| *remaining > 0)
-            .map(|remaining| format!(" {}h{:02}m", remaining / 3600, (remaining % 3600) / 60))
-            .unwrap_or_default();
-        format!("{} {}%{}", window.label, window.pct, reset)
+    let windows = quota.windows.iter().map(|window| match detail {
+        QuotaDetail::PctOnly => format!("{}%", window.pct),
+        QuotaDetail::NoResets => format!("{} {}%", window.label, window.pct),
+        QuotaDetail::Full => {
+            let reset = window
+                .resets_at
+                .map(|at| at - now)
+                .filter(|remaining| *remaining > 0)
+                .map(|remaining| format!(" {}h{:02}m", remaining / 3600, (remaining % 3600) / 60))
+                .unwrap_or_default();
+            format!("{} {}%{}", window.label, window.pct, reset)
+        }
     });
-    windows.collect::<Vec<_>>().join(" · ")
+    let sep = match detail {
+        QuotaDetail::PctOnly => "/",
+        _ => " · ",
+    };
+    windows.collect::<Vec<_>>().join(sep)
 }
 
 /// Every terminal in the active tab, sharing the space evenly.
@@ -1152,25 +1207,43 @@ pub fn copy_to_clipboard(text: &str) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn agent_tab_quota_shows_usage_and_reset() {
-        let quota = crate::quota::Quota {
-            codex: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
-                plan: None,
-                windows: vec![crate::quota::Window {
-                    label: "5h",
-                    pct: 37,
-                    duration: None,
-                    resets_at: Some(10_000),
-                }],
-                limit_reached: false,
-            }),
-            ..Default::default()
-        };
+    fn window(label: &'static str, pct: u32, resets_at: i64) -> crate::quota::Window {
+        crate::quota::Window {
+            label,
+            pct,
+            duration: None,
+            resets_at: Some(resets_at),
+        }
+    }
 
-        assert_eq!(quota_suffix("codex", &quota, 4_500), "5h 37% 1h31m");
-        assert_eq!(quota_suffix("codex-2", &quota, 4_500), "5h 37% 1h31m");
-        assert!(quota_suffix("zsh", &quota, 4_500).is_empty());
+    #[test]
+    fn bar_quota_drops_detail_as_the_bar_narrows() {
+        let status = crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+            plan: None,
+            windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
+            limit_reached: false,
+        });
+
+        assert_eq!(
+            quota_suffix(&status, 4_500, QuotaDetail::Full),
+            "5h 37% 1h31m · 7d 21% 137h38m"
+        );
+        assert_eq!(
+            quota_suffix(&status, 4_500, QuotaDetail::NoResets),
+            "5h 37% · 7d 21%"
+        );
+        assert_eq!(
+            quota_suffix(&status, 4_500, QuotaDetail::PctOnly),
+            "37%/21%"
+        );
+        assert!(
+            quota_suffix(
+                &crate::quota::ProviderStatus::Pending,
+                4_500,
+                QuotaDetail::Full
+            )
+            .is_empty()
+        );
     }
 
     #[test]
