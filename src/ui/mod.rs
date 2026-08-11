@@ -2396,11 +2396,6 @@ impl App {
             true => " — it will outlive cctop",
             false => "",
         };
-        // Opening it again says it is wanted, so an earlier Alt+w on this
-        // session stops keeping it out of the restore.
-        if let Some(name) = pane.tmux.clone() {
-            self.undismiss_tmux(&name);
-        }
         match self.launch_into {
             LaunchInto::Split { stacked } => {
                 let Some(tab) = self.active_tab() else { return };
@@ -2435,84 +2430,46 @@ impl App {
         });
     }
 
-    /// Close the focused pane.
+    /// Close the focused pane, ending the agent behind it.
     ///
-    /// What that costs depends on who owns the agent: a tmux-backed pane is
-    /// detached from and the agent carries on, while a pane holding cctop's own
-    /// pty takes the agent with it. The status line says which happened, because
-    /// the two look identical on screen and only one is undoable.
+    /// Closing used to detach from a tmux-backed agent and leave it running,
+    /// which meant the tab came back at the next launch and the only way to be
+    /// rid of it was a second key. Closing a window is meant to be the end of
+    /// it, so this kills the tmux session outright — the same thing Alt+Shift+W
+    /// does, which is now a synonym rather than the only way to stop an agent.
+    ///
+    /// The exception is a pane opened with `a`, which is a window onto somebody
+    /// else's agent. There is nothing here to kill and stopping it was never
+    /// cctop's to do, so that one is only closed.
     pub fn close_pane(&mut self) {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let closed = (tab.focus < tab.panes.len()).then(|| {
-            let pane = tab.panes.remove(tab.focus);
-            (pane.label.clone(), pane.tmux.clone())
-        });
+        if tab.focus >= tab.panes.len() {
+            return;
+        }
+        // Out of the tab first: for a cctop-owned pty, dropping the pane is the
+        // kill, and it must happen either way rather than only when tmux agrees.
+        let pane = tab.panes.remove(tab.focus);
         tab.focus = tab.focus.min(tab.panes.len().saturating_sub(1));
+        let label = pane.label.clone();
+        let stopped = pane.owns_agent().then(|| pane.kill_agent());
+        drop(pane);
         self.drop_empty_tabs();
-        if let Some((label, tmux)) = closed {
-            // Closing is a decision about this pane, and it has to outlast the
-            // run: the agent stays alive in tmux, so the next launch would find
-            // it running and open the tab straight back up.
-            if let Some(name) = tmux.clone() {
-                self.dismiss_tmux(name);
-            }
-            self.set_status(match tmux.is_some() {
-                true => format!("Detached from {label} — still running, but not reopened at start"),
-                false => format!("Closed {label}"),
-            });
-        }
+
+        self.set_status(match stopped {
+            Some(Err(error)) => format!("Closed {label}, but could not stop it: {error}"),
+            Some(Ok(())) => format!("Stopped {label}"),
+            None => format!("Closed the view of {label} — it is not cctop's to stop"),
+        });
     }
 
-    /// Remember that this tmux session's tab was closed, and forget the
-    /// dismissals whose sessions have since ended so the list cannot grow
-    /// without bound.
-    fn dismiss_tmux(&mut self, name: String) {
-        let alive: Vec<String> = crate::tmux::running().into_iter().map(|a| a.name).collect();
-        self.prefs.dismiss_tmux(name, &alive);
-        self.save_prefs();
-    }
-
-    /// Undo a dismissal, because opening the session again says plainly that it
-    /// is wanted back.
-    fn undismiss_tmux(&mut self, name: &str) {
-        if self.prefs.dismissed_tmux.iter().any(|n| n == name) {
-            self.prefs.dismissed_tmux.retain(|n| n != name);
-            self.save_prefs();
-        }
-    }
-
-    /// End the focused pane's agent outright, rather than detaching from it.
+    /// End the focused pane's agent outright. A synonym for [`close_pane`],
+    /// kept because it is documented and in muscle memory.
     ///
-    /// Only meaningful for a tmux-backed pane: everywhere else closing already
-    /// is the kill, so this is that same act by a name that says so.
+    /// [`close_pane`]: Self::close_pane
     pub fn kill_pane(&mut self) {
-        let Some(pane) = self.focused_pane() else {
-            return;
-        };
-        // A pane opened with `a` is a window onto somebody else's agent: there
-        // is nothing here to kill, and closing the window would look from the
-        // outside exactly like having stopped it. Saying so beats a key that is
-        // documented as irreversible and quietly does nothing.
-        if !pane.owns_agent() {
-            let label = pane.label.clone();
-            self.set_status(format!(
-                "{label} is not cctop's to stop — Alt+w closes this view of it"
-            ));
-            return;
-        }
-        let (label, owned) = (pane.label.clone(), pane.outlives_cctop());
-        if let Err(error) = pane.kill_agent() {
-            self.set_status(format!("Could not stop {label}: {error}"));
-            return;
-        }
-        // The pane goes either way: for a cctop-owned agent dropping it is the
-        // kill, and for a tmux one the client exits with the session anyway.
         self.close_pane();
-        if owned {
-            self.set_status(format!("Stopped {label}"));
-        }
     }
 
     /// Forget the tabs whose agents have all exited, keeping the view on
@@ -2612,20 +2569,7 @@ impl App {
     /// makes reopening cctop resume the tabs the user had open, while leaving a
     /// failed or concurrently ended session out of the workspace.
     pub(super) fn restore_running_tabs(&mut self) {
-        let running = crate::tmux::running();
-        // A session the user closed the pane on stays closed, however many times
-        // cctop restarts; one that has ended in the meantime drops off the list
-        // rather than sitting there forever.
-        let names: Vec<String> = running.iter().map(|a| a.name.clone()).collect();
-        if self.prefs.prune_dismissed(&names) {
-            self.prefs.save();
-        }
-        let dismissed = self.prefs.dismissed_tmux.clone();
-
-        for agent in running {
-            if dismissed.contains(&agent.name) {
-                continue;
-            }
+        for agent in crate::tmux::running() {
             let choice = tabs::Choice::Waiting(agent.clone());
             let label = choice.label();
             if let Ok(pane) =
@@ -3379,13 +3323,13 @@ mod tests {
         assert!(matches!(app.mode, Mode::Launch | Mode::List));
     }
 
-    /// Regression: `Alt+Shift+W` is documented as the irreversible one, but on a pane
-    /// opened with `a` — a window onto an agent cctop never started — there was
-    /// nothing to kill, so it closed the window and reported nothing amiss. The
-    /// agent it claimed to have stopped went on running.
+    /// Closing is a kill now, but only of an agent that is cctop's to kill. On a
+    /// pane opened with `a` — a window onto an agent cctop never started — there
+    /// is nothing to stop, so the window closes and the status says the agent
+    /// was left alone rather than claiming a kill that never happened.
     #[cfg(target_os = "linux")]
     #[test]
-    fn stopping_an_agent_cctop_does_not_own_declines_instead_of_pretending() {
+    fn closing_a_borrowed_pane_says_the_agent_was_left_running() {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let pane = tabs::Pane::view_of(pid, "agent".into()).expect("attach");
         assert!(
@@ -3398,14 +3342,14 @@ mod tests {
         app.tab = 1;
         app.kill_pane();
 
-        // The pane is still there, and the reason is on screen.
-        assert_eq!(
-            app.tabs.len(),
-            1,
-            "the view was closed as if it were a kill"
-        );
+        // The window is gone, the agent is not, and the status says which.
+        assert!(app.tabs.is_empty(), "the view outlived its close");
         let (status, _) = app.status.clone().expect("nothing was said");
         assert!(status.contains("not cctop's to stop"), "{status}");
+        assert!(
+            child.try_wait().ok().flatten().is_none(),
+            "closing a borrowed view stopped somebody else's agent"
+        );
 
         let _ = child.kill();
         let _ = child.wait();

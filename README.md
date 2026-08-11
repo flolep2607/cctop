@@ -169,8 +169,8 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+←` / `Alt+→` | Previous / next tab |
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
 | `Alt+o` | Move focus to the next pane |
-| `Alt+w` | Close the focused pane; a tmux-backed agent keeps running |
-| `Alt+Shift+W` | Stop the focused pane's agent for good |
+| `Alt+w` | Close the focused pane and stop its agent |
+| `Alt+Shift+W` | The same thing, by a name that says so |
 | `F12` | Back to the dashboard, leaving everything running |
 
 Mouse works too: click session rows, column headers, and panel tabs; scroll
@@ -220,19 +220,18 @@ coordinate.
 ### Tabs outlive cctop
 
 When tmux is installed, every tab's agent runs inside a tmux session of its own
-and what cctop hosts is only the tmux client. Quitting cctop, or closing the pane
-with `Alt+w`, detaches — the agent notices neither and carries on. On the way out
-cctop says how many it left behind.
+and what cctop hosts is only the tmux client. Quitting cctop detaches — the
+agent does not notice and carries on. On the way out cctop says how many it left
+behind.
 
 Opening cctop again restores those tmux-backed tabs automatically, with their
-scrollback intact — except the ones you closed. `Alt+w` is a decision that
-outlasts the run: the agent keeps running and the launcher still offers it, but
-it does not come back as a tab until you open it again.
-The launcher (`t`) still lists any running agents that are
+scrollback intact. Closing a pane is the other thing entirely: `Alt+w` ends the
+agent, because a window you closed should stay closed rather than come back at
+the next launch. The launcher (`t`) still lists any running agents that are
 not already open, so you can attach to them on demand. `R` on a session's row
 does the same thing by another route — a resumed session's tmux session is named after it, so
 pressing `R` twice reattaches rather than starting a rival agent on one
-transcript. `Alt+Shift+W` is the one key that ends an agent outright.
+transcript.
 
 Each of those agents is listed by what the dashboard calls it, the directory it
 is working in, and what it last reported through its hooks — `asking`, `working`,
@@ -417,8 +416,9 @@ them is a silent, prompt success. Dropping an event is always cheaper than
 stalling an agent.
 
 Panes cctop started are cctop's to end: closing one (`Alt+w`, or the agent
-exiting on its own) takes the agent with it, and quitting cctop takes them all.
-A pane opened onto someone else's session with `a` only stops watching.
+exiting on its own) takes the agent with it, tmux session included. Quitting
+cctop is the opposite and leaves them running. A pane opened onto someone
+else's session with `a` only stops watching.
 
 Everything not in the table above goes to the focused agent, `Ctrl-C` included:
 inside a pane, that interrupts the agent rather than quitting cctop. `F12` and
