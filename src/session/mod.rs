@@ -270,9 +270,30 @@ pub struct Session {
     /// other running agent shares this repository.
     pub conflict: Option<crate::collide::Overlap>,
 
+    /// Set when this row came from another machine over ssh, rather than from
+    /// this one's disk.
+    ///
+    /// The single test for "cctop cannot act on this": every path that signals
+    /// a process, deletes a transcript, opens a pty or reads a git directory is
+    /// about *this* filesystem, and would quietly do the wrong thing to a
+    /// same-named path if it ran for a remote row.
+    pub remote: Option<Remote>,
+
     // --- Rate tracking ---
     pub tokens_per_min: f64,
     pub cost_per_min: f64,
+}
+
+/// Where a row came from, when it did not come from this machine.
+#[derive(Debug, Clone)]
+pub struct Remote {
+    /// The ssh target exactly as the user spelled it, which is what the HOST
+    /// column shows and what any message about the row names.
+    pub host: String,
+    /// Branch as that machine read it. Carried rather than looked up, because
+    /// the working directory is a path on *that* filesystem and reading it here
+    /// would report whatever happens to live at the same path locally.
+    pub branch: Option<String>,
 }
 
 /// Tool names that mean "this file was modified", across harnesses.
@@ -337,6 +358,7 @@ impl Session {
             permission: None,
             recent_writes: Vec::new(),
             conflict: None,
+            remote: None,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
         }

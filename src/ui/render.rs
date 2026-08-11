@@ -653,6 +653,39 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         return;
     }
 
+    // A remote row carries what the table shows and nothing behind it: the
+    // transcript that every other panel is a reading of is a file on the other
+    // machine, and cctop never fetches it. Info is the exception, being built
+    // from the row itself.
+    //
+    // Said outright rather than left to draw as zeroes. A Cost panel reporting
+    // $0.00 next to a `$` column reporting $12 is not an empty panel, it is a
+    // wrong one, and nothing on screen would say which to believe.
+    if app.bottom_tab != 0
+        && let Some(host) = app
+            .selected_session()
+            .and_then(|s| s.remote.as_ref())
+            .map(|r| r.host.clone())
+    {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("This session is on {host}."),
+                    theme::dim(),
+                )),
+                Line::default(),
+                Line::from(Span::styled(
+                    "cctop reads that machine's summary over ssh; the transcript this panel \
+                     would break down stays there. Info has everything that crossed.",
+                    theme::dim(),
+                )),
+            ])
+            .wrap(ratatui::widgets::Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
     // The Performance tab draws charts rather than text lines.
     if app.bottom_tab == 1 {
         if let Some(session) = app.selected_session() {
@@ -1164,6 +1197,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default()
                 .fg(theme::colors().accent)
                 .add_modifier(Modifier::BOLD),
+        ));
+    }
+    // A machine that has dropped out has to say so. Its rows are still on
+    // screen, holding their last reading, and the totals still look complete.
+    if let Some(down) = app.remote_footer() {
+        spans.push(Span::styled(
+            format!(" ⚠ {down} "),
+            Style::default().fg(theme::colors().cost_mid),
         ));
     }
     // Two agents writing one file is the only thing here that is a fault rather

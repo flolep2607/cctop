@@ -348,7 +348,11 @@ fn session_row(
         // the filter is actually aimed at.
         let searchable = matches!(
             c.id,
-            ColumnId::Project | ColumnId::Model | ColumnId::Harness | ColumnId::Branch
+            ColumnId::Project
+                | ColumnId::Model
+                | ColumnId::Harness
+                | ColumnId::Host
+                | ColumnId::Branch
         );
         let padded = pad(&text, *w, c.right_align);
         if searchable && !deleting {
@@ -504,6 +508,12 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
             Some(r) if r >= 0.10 => theme::colors().cost_mid,
             Some(r) if r > 0.0 => theme::colors().dim,
             _ => theme::colors().dimmer,
+        },
+        // A remote row is dimmer throughout its identifying cells, so a table
+        // spanning machines still reads as "here, plus elsewhere" at a glance.
+        ColumnId::Host => match s.remote {
+            Some(_) => theme::colors().accent,
+            None => theme::colors().dimmer,
         },
         // The other warning colour, and the only one about a second session:
         // hot once two agents have written the same file, amber while they are

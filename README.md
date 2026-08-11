@@ -115,6 +115,7 @@ cctop --clear-cache   # re-extract all session activity; keeps preferences/prici
 cctop --update        # replace this binary with the newest release
 cctop run claude      # start an agent on a pty cctop can type into (see Keys)
 cctop claude --help   # the same, without the `run`; flags go to the agent
+cctop --host devbox   # also show another machine's sessions, read over ssh
 cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias adds them)
 ```
 
@@ -515,6 +516,56 @@ And a Codex `apply_patch` covering several files summarises as
 
 Agents can ask this themselves through `check_conflicts` — see
 [Letting agents see each other](#letting-agents-see-each-other).
+
+### More than one machine
+
+Everything above is about one computer, which is the wrong shape if the agents
+are not all on it — a laptop in front of you and a devbox doing the heavy work,
+each with its own idea of what today cost.
+
+```bash
+cctop --host devbox --host flo@builder
+CCTOP_HOSTS=devbox,flo@builder cctop     # the same, from the environment
+```
+
+Their sessions join the table with a **HOST** column saying where each one is,
+and their spend joins every total and every window in the Overview. The column
+appears only when a host is configured; on one machine it would be the word
+`local` repeated down the screen.
+
+The mechanism is the dullest one available: a thread per host runs
+`ssh <host> cctop --json` every 15 seconds and reads what comes back. No daemon,
+no port, no protocol of cctop's own, nothing to install on the far side beyond
+the cctop that is already there — ssh has the authentication and the transport,
+and `--json` is the wire format whether or not anyone sends it over a wire. A
+host must therefore have cctop installed and your key must reach it without a
+passphrase prompt (`BatchMode=yes`, so a host that would ask is an error rather
+than a hang).
+
+**If it says `command not found`,** that is the usual first result and it is not
+a lie: `ssh host cctop` runs a *non-interactive* shell, which on most setups
+skips the rc file that put `~/.local/bin` or a version manager's shim on `PATH`.
+Name the binary instead:
+
+```bash
+cctop --host devbox:/usr/local/bin/cctop
+```
+
+Remote rows are **read-only**. `d`, `k`, `s`, `a`, `R` and `O` all refuse them by
+name, because every one of them reaches into *this* machine — a signal to a
+process, a transcript on disk, a pty — and the same path on this filesystem is a
+different file. For the same reason the branch shown is the one that machine
+read, not whatever happens to sit at that path here, and the `!` conflict column
+carries the verdict that machine reached: each one detects its own overlaps,
+being the only one that can see its own disk.
+
+Only the Info panel is filled in for a remote session. Cost, Context, Tool
+Activity and the rest are readings of a transcript that stays where it is, and
+they say so rather than drawing zeroes.
+
+A host that stops answering keeps its last rows and says so in the footer
+(`⚠ devbox: Permission denied`). Blanking them would be the stronger claim —
+those agents have not stopped, cctop has merely lost sight of them.
 
 ## Where data comes from
 

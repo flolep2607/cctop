@@ -153,8 +153,14 @@ pub fn info(
     plan: Plan,
     clash: Option<&Clash>,
 ) -> Vec<Line<'static>> {
-    let Some(data) = data else {
-        return note("Loading…");
+    // A remote row has no extraction behind it and never will — its transcript
+    // is on the other machine. Everything below that reads `data` is optional,
+    // so it is drawn from an empty one rather than being stuck on "Loading…".
+    let empty = SessionData::default();
+    let data = match (data, session.remote.is_some()) {
+        (Some(data), _) => data,
+        (None, true) => &empty,
+        (None, false) => return note("Loading…"),
     };
     if let Some(err) = &data.error {
         return vec![
@@ -208,6 +214,23 @@ pub fn info(
     ]));
 
     lines.push(field("ID", session.session_id.clone()));
+    // Above everything else about the row, because it changes what the rest of
+    // this panel means: the directory is a path over there, the resume command
+    // has to be run over there, and none of the keys act on it from here.
+    if let Some(r) = &session.remote {
+        lines.push(Line::from(vec![
+            label(&format!("{:<9}", "Host")),
+            Span::raw(" "),
+            Span::styled(
+                r.host.clone(),
+                Style::default()
+                    .fg(theme::colors().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            dim("read over ssh; cctop acts only on this machine"),
+        ]));
+    }
     if !session.harness.is_empty() {
         lines.push(field("Harness", session.harness.clone()));
     }

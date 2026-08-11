@@ -258,6 +258,11 @@ enum Response {
     KeysSent {
         result: Result<(), String>,
     },
+    /// One remote machine's snapshot, or why it could not be read.
+    Remote {
+        host: String,
+        snapshot: crate::fleet::Snapshot,
+    },
     /// A finished transcript scan: session key -> the text around its match.
     /// The query comes back with it, because the user has usually typed more by
     /// the time a scan over thousands of transcripts lands.
@@ -636,6 +641,19 @@ pub struct App {
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
 
+    /// The last snapshot from each machine named with `--host`, keyed by the
+    /// target as the user spelled it.
+    ///
+    /// Held apart from `sessions` rather than merged once, because `sessions`
+    /// is replaced wholesale by every walk and would drop them; `merge_remotes`
+    /// puts the current snapshots back after each replacement.
+    pub remotes: HashMap<String, Vec<Session>>,
+    /// Machines that failed their last poll, and why.
+    ///
+    /// Shown rather than logged. A host that has quietly dropped out is worse
+    /// than one that was never added: the totals still look complete.
+    pub remote_errors: HashMap<String, String>,
+
     /// Which live sessions are working the same ground, recomputed whenever
     /// rows move. The level also rides on each row so the table can sort by it;
     /// this holds the part only the footer and the Info panel need — who, and
@@ -819,6 +837,8 @@ impl App {
             quota: Quota::default(),
             notify: crate::notify::Notifier::new(prefs.notify),
             collisions: crate::collide::Map::new(),
+            remotes: HashMap::new(),
+            remote_errors: HashMap::new(),
             update_available: None,
             status: None,
             started_at: chrono::Utc::now().to_rfc3339(),
@@ -889,6 +909,67 @@ impl App {
             "Conflict: ⚠ {}{more} — {agents} agents have written it",
             crate::util::path_tail(first, 2)
         ))
+    }
+
+    /// Put the current remote snapshots back into the table.
+    ///
+    /// Every wholesale replacement of `sessions` — a full walk, a discovery —
+    /// drops the remote rows, because the loader only ever knows about this
+    /// machine. Rather than teaching the loader about ssh, the rows are
+    /// re-appended here and the totals recomputed over both.
+    ///
+    /// A no-op with no hosts configured, so the ordinary single-machine run
+    /// pays nothing for this.
+    pub fn merge_remotes(&mut self) {
+        if self.remotes.is_empty() {
+            return;
+        }
+        self.sessions.retain(|s| s.remote.is_none());
+        for rows in self.remotes.values() {
+            self.sessions.extend(rows.iter().cloned());
+        }
+        self.stats = crate::loader::compute_stats(&self.sessions);
+        self.refilter();
+    }
+
+    /// Take the worker's totals, unless remote rows mean they are not the whole
+    /// picture. The worker only ever sees this machine.
+    fn adopt_stats(&mut self, stats: Stats) {
+        self.stats = match self.remotes.is_empty() {
+            true => stats,
+            false => crate::loader::compute_stats(&self.sessions),
+        };
+    }
+
+    /// Whether an action that reaches into this machine can apply to a row.
+    ///
+    /// Returns the refusal to show, or `None` when the row is local. Every
+    /// caller is a path that signals a process, deletes a file, or opens a pty,
+    /// and each would otherwise do it to whatever sits at the same path here.
+    pub fn remote_refusal(session: &Session) -> Option<String> {
+        let r = session.remote.as_ref()?;
+        Some(format!(
+            "{} is on {} — cctop reads other machines but only acts on this one",
+            session.display_label(),
+            r.host
+        ))
+    }
+
+    /// The footer's note that a machine is not answering.
+    pub fn remote_footer(&self) -> Option<String> {
+        let mut hosts: Vec<&str> = self.remote_errors.keys().map(String::as_str).collect();
+        hosts.sort();
+        let first = hosts.first()?;
+        // One host names its reason, which is nearly always the whole fix
+        // ("Permission denied", "command not found"). Several would not fit, so
+        // they are counted and the panel is where the rest live.
+        Some(match hosts.len() {
+            1 => format!("{first}: {}", self.remote_errors[*first]),
+            n => format!(
+                "{n} hosts unreachable ({first}: {})",
+                self.remote_errors[*first]
+            ),
+        })
     }
 
     /// What one session collides with, with its peers named the way the table
@@ -1179,6 +1260,16 @@ impl App {
             self.panel_key.clear();
             return;
         };
+        // Nothing to extract for a row read over ssh: the transcript is a file
+        // on the other machine and cctop never fetches it. Asking would hand the
+        // worker a session with no `data_file` and get an empty result back that
+        // the panels would draw as zeroes.
+        if session.remote.is_some() {
+            self.panel_data = None;
+            self.panel_key = session.key();
+            self.panel_stamp = session.last_active.clone();
+            return;
+        }
         let key = session.key();
         let stamp = session.last_active.clone();
         let switched = key != self.panel_key;
@@ -1514,6 +1605,11 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Whether the cursor is on a row read from another machine.
+    pub fn selected_is_remote(&self) -> bool {
+        self.selected_session().is_some_and(|s| s.remote.is_some())
+    }
+
     /// Open the terminate confirmation for the selected session, explaining
     /// itself when there is nothing this cctop can signal.
     fn confirm_terminate(&mut self) {
@@ -1523,6 +1619,10 @@ impl App {
         // which is not what the cursor is pointing at.
         if self.on_subagent() {
             self.set_status("A subagent cannot be stopped on its own");
+            return;
+        }
+        if let Some(why) = self.selected_session().and_then(App::remote_refusal) {
+            self.set_status(why);
             return;
         }
         match self.selected_session() {
@@ -1664,6 +1764,11 @@ impl App {
         let mut failed = 0;
         for s in &marked {
             let key = s.key();
+            // Marking spans machines because the table does; acting does not.
+            if s.remote.is_some() {
+                failed += 1;
+                continue;
+            }
             match kind {
                 BatchKind::Delete => {
                     if self.tx.send(Request::Delete(Box::new(s.clone()))).is_ok() {
@@ -2745,6 +2850,10 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
         });
     }
     spawn_quota_poller(res_tx.clone());
+    let hosts = crate::fleet::Host::collect(&args.hosts);
+    for host in &hosts {
+        spawn_host_poller(host.clone(), res_tx.clone());
+    }
 
     // One cached check per day, off the UI thread. Only ever reports: replacing
     // the binary stays behind an explicit `--update`.
@@ -2756,6 +2865,12 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 
     let mut app = App::new(args.plan, req_tx.clone());
     app.refresh_secs = args.delay;
+    // With nothing to put in it, HOST is a column of one repeated word. Hidden
+    // through the same mechanism the user has, so `$CCTOP_COLUMNS_HIDE` and this
+    // cannot disagree about what is on screen.
+    if hosts.is_empty() {
+        app.hidden_columns.push(ColumnId::Host);
+    }
     let _ = req_tx.send(Request::Refresh);
 
     // Tabs backed by tmux outlive cctop. Reattach them before the first frame
@@ -2885,6 +3000,30 @@ fn restore_terminal() {
     let _ = execute!(std::io::stdout(), Show);
 }
 
+/// Read one machine on a timer until cctop exits.
+///
+/// A thread rather than a slot in the worker's queue: an ssh round trip can
+/// take seconds or hang until its timeout, and the worker is what answers the
+/// keyboard's refresh. One wedged host must cost only itself.
+fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
+    std::thread::spawn(move || {
+        loop {
+            let snapshot = host.poll();
+            if tx
+                .send(Response::Remote {
+                    host: host.target.clone(),
+                    snapshot,
+                })
+                .is_err()
+            {
+                // The UI has gone; so should this.
+                return;
+            }
+            std::thread::sleep(crate::fleet::POLL);
+        }
+    });
+}
+
 fn spawn_quota_poller(tx: Sender<Response>) {
     std::thread::spawn(move || {
         let mut quota = Quota::default();
@@ -2949,6 +3088,7 @@ fn event_loop(
                     app.loaded = true;
                     app.stats = crate::loader::compute_stats(&app.sessions);
                     app.refilter();
+                    app.merge_remotes();
                     rows_changed = true;
                 }
                 Ok(Response::Annotated(session)) => {
@@ -2956,8 +3096,14 @@ fn event_loop(
                     // formats a String per candidate, so a scan over thousands of
                     // rows allocated thousands of times — per arriving row, on the
                     // thread that also has to answer the keyboard.
+                    // `remote.is_none()` is part of the identity, not a
+                    // nicety: the worker only ever reports local rows, and a
+                    // remote session that happened to share an id would be
+                    // overwritten by one from this machine.
                     let found = app.sessions.iter_mut().find(|s| {
-                        s.provider == session.provider && s.session_id == session.session_id
+                        s.remote.is_none()
+                            && s.provider == session.provider
+                            && s.session_id == session.session_id
                     });
                     if let Some(existing) = found {
                         *existing = *session;
@@ -2971,6 +3117,7 @@ fn event_loop(
                     app.sessions = sessions;
                     app.loaded = true;
                     app.stats = stats;
+                    app.merge_remotes();
                     app.push_history();
                     app.refilter();
                     refresh_in_flight = false;
@@ -2980,17 +3127,18 @@ fn event_loop(
                 Ok(Response::LiveRows(payload)) => {
                     let (rows, stats) = *payload;
                     for row in rows {
-                        let found = app
-                            .sessions
-                            .iter_mut()
-                            .find(|s| s.provider == row.provider && s.session_id == row.session_id);
+                        let found = app.sessions.iter_mut().find(|s| {
+                            s.remote.is_none()
+                                && s.provider == row.provider
+                                && s.session_id == row.session_id
+                        });
                         match found {
                             Some(existing) => *existing = row,
                             // A session that started since the last full walk.
                             None => app.sessions.push(row),
                         }
                     }
-                    app.stats = stats;
+                    app.adopt_stats(stats);
                     app.loaded = true;
                     app.push_history();
                     app.refilter();
@@ -3052,6 +3200,23 @@ fn event_loop(
                     Ok(()) => app.set_status("Sent to the session's terminal"),
                     Err(error) => app.set_status(error),
                 },
+                Ok(Response::Remote { host, snapshot }) => {
+                    match snapshot {
+                        crate::fleet::Snapshot::Rows(rows) => {
+                            app.remote_errors.remove(&host);
+                            app.remotes.insert(host, rows);
+                        }
+                        // The last good snapshot is kept rather than blanked: a
+                        // dropped ssh connection has not stopped those agents,
+                        // and an empty machine is a stronger claim than a stale
+                        // one. The footer says the reading is old.
+                        crate::fleet::Snapshot::Failed(why) => {
+                            app.remote_errors.insert(host, why);
+                        }
+                    }
+                    app.merge_remotes();
+                    rows_changed = true;
+                }
                 Ok(Response::Scanned { query, hits }) => app.scanned(query, hits),
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
@@ -3829,6 +3994,78 @@ mod tests {
         assert!(app.conflict_footer().is_none());
 
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A remote row survives the walk that replaces the table, counts towards
+    /// the totals, and refuses every key that would reach into this machine.
+    #[test]
+    fn remote_rows_outlive_a_walk_and_stay_read_only() {
+        let mut app = test_app();
+        app.sessions = vec![session("local", true, "/here")];
+
+        let mut away = session("away", true, "/srv/work");
+        away.remote = Some(crate::session::Remote {
+            host: "box".into(),
+            branch: Some("main".into()),
+        });
+        away.total_cost = Some(3.0);
+        app.remotes.insert("box".into(), vec![away]);
+        app.merge_remotes();
+        assert_eq!(app.sessions.len(), 2);
+        assert!(
+            (app.stats.spend_claude - 3.0).abs() < 1e-9,
+            "totals span hosts"
+        );
+
+        // A full walk replaces the table with this machine's rows only. The
+        // remote ones have to come back, or a host would blink out every
+        // refresh.
+        app.sessions = vec![session("local", true, "/here")];
+        app.merge_remotes();
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(
+            app.sessions.iter().filter(|s| s.remote.is_some()).count(),
+            1
+        );
+
+        // And nothing here may act on it.
+        let remote = app
+            .sessions
+            .iter()
+            .find(|s| s.remote.is_some())
+            .expect("the remote row");
+        let why = App::remote_refusal(remote).expect("a refusal");
+        assert!(why.contains("box"), "the refusal has to name the machine");
+        assert!(App::remote_refusal(&app.sessions[0]).is_none());
+
+        // The branch comes from the far side rather than from this filesystem,
+        // where the same path may well exist and mean something else.
+        assert_eq!(
+            crate::ui::columns::branch_of(remote).as_deref(),
+            Some("main")
+        );
+
+        // A host that stops answering keeps its rows and says so.
+        app.remote_errors
+            .insert("box".into(), "Permission denied".into());
+        let footer = app.remote_footer().expect("a warning");
+        assert!(footer.contains("box"), "{footer}");
+        assert!(footer.contains("Permission denied"), "{footer}");
+    }
+
+    /// With no host configured the column is one repeated word down every row,
+    /// so it is hidden — through the user's own mechanism, so the two cannot
+    /// disagree about what is on screen.
+    #[test]
+    fn the_host_column_stays_off_a_single_machine() {
+        let ids = |hidden: &[ColumnId]| -> Vec<ColumnId> {
+            columns::visible_columns(300, hidden)
+                .iter()
+                .map(|c| c.id)
+                .collect()
+        };
+        assert!(ids(&[]).contains(&ColumnId::Host));
+        assert!(!ids(&[ColumnId::Host]).contains(&ColumnId::Host));
     }
 
     fn with_subagents(id: &str, names: &[&str]) -> Session {

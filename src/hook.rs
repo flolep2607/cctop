@@ -335,12 +335,15 @@ impl Permission {
     /// An unknown mode is deliberately not folded into [`Permission::Ask`]: a
     /// future mode is at least as likely to be a *looser* one, and quietly
     /// drawing it as the safe end is the wrong way to be wrong about this.
+    /// The spellings cctop's own [`label`](Permission::label) uses are accepted
+    /// too, so a mode that has been through `--json` and back — which is how a
+    /// remote machine's rows arrive — reads as the mode it left as.
     pub fn parse(word: &str) -> Option<Permission> {
         match word {
             "default" | "ask" => Some(Permission::Ask),
-            "acceptEdits" | "auto" => Some(Permission::AcceptEdits),
+            "acceptEdits" | "auto" | "edits" => Some(Permission::AcceptEdits),
             "plan" => Some(Permission::Plan),
-            "bypassPermissions" | "dontAsk" => Some(Permission::Bypass),
+            "bypassPermissions" | "dontAsk" | "BYPASS" => Some(Permission::Bypass),
             _ => None,
         }
     }

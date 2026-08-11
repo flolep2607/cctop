@@ -28,6 +28,7 @@ pub enum ColumnId {
     Harness,
     Permission,
     Conflict,
+    Host,
     Branch,
     Project,
 }
@@ -201,6 +202,17 @@ pub const COLUMNS: &[Column] = &[
         desc: "Another running agent is working the same ground:\n⚠ it has written a file this session also wrote,\n· it is in the same repository.\nWorktrees count as separate repositories, which is the point of them.",
     },
     Column {
+        id: ColumnId::Host,
+        label: "HOST",
+        width: Some(10),
+        // Just under BRANCH. Which machine a row is on is part of naming it —
+        // two checkouts of one repository on two boxes are otherwise the same
+        // row twice — but the branch identifies it more sharply.
+        priority: 67,
+        right_align: false,
+        desc: "Machine the session is on, for rows read from another over ssh (--host).\nlocal for this one. Hidden unless a --host is configured.",
+    },
+    Column {
         id: ColumnId::Branch,
         label: "BRANCH",
         width: Some(12),
@@ -240,6 +252,7 @@ pub fn key(id: ColumnId) -> &'static str {
         ColumnId::Harness => "harness",
         ColumnId::Permission => "perm",
         ColumnId::Conflict => "conflict",
+        ColumnId::Host => "host",
         ColumnId::Branch => "branch",
         ColumnId::Project => "project",
     }
@@ -417,6 +430,10 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
             Some(crate::collide::Overlap::Directory) => "·".into(),
             None => String::new(),
         },
+        ColumnId::Host => match &s.remote {
+            Some(r) => r.host.clone(),
+            None => "local".into(),
+        },
         ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
     }
@@ -493,6 +510,8 @@ pub fn render_subagent_cell(
         | ColumnId::Memory
         // Counted against the parent, whose figure already includes them.
         | ColumnId::Errors
+        // A subagent is on whichever machine its parent is.
+        | ColumnId::Host
         | ColumnId::TokenTotal
         | ColumnId::TokenRate
         | ColumnId::Harness
@@ -551,8 +570,22 @@ fn conflict_rank(s: &crate::session::Session) -> u8 {
     }
 }
 
+/// Sort key for the host column, putting this machine before every other.
+fn host_key(s: &crate::session::Session) -> (bool, &str) {
+    match &s.remote {
+        Some(r) => (true, r.host.as_str()),
+        None => (false, ""),
+    }
+}
+
 pub fn branch_of(s: &crate::session::Session) -> Option<String> {
-    branch(&s.label_source)
+    // A remote row's working directory is a path on another machine. Reading it
+    // here would report the branch of whatever happens to sit at the same path
+    // locally, which is worse than reporting nothing.
+    match &s.remote {
+        Some(r) => r.branch.clone(),
+        None => branch(&s.label_source),
+    }
 }
 
 /// Branch of a working directory, cached.
@@ -679,8 +712,10 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::Permission => permission_rank(a).cmp(&permission_rank(b)),
         // Worst first when descending, which is the only order worth asking for.
         ColumnId::Conflict => conflict_rank(a).cmp(&conflict_rank(b)),
+        // Local rows sort together, and first: they are the ones you can act on.
+        ColumnId::Host => host_key(a).cmp(&host_key(b)),
         // Sessions outside a repository sort together, below every branch.
-        ColumnId::Branch => branch(&a.label_source).cmp(&branch(&b.label_source)),
+        ColumnId::Branch => branch_of(a).cmp(&branch_of(b)),
         ColumnId::Project => a
             .display_label()
             .to_ascii_lowercase()

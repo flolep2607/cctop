@@ -55,7 +55,7 @@ pub type Map = HashMap<String, Collision>;
 /// footer need — who, and which files.
 pub fn apply(sessions: &mut [Session]) -> Map {
     let map = detect(sessions);
-    for s in sessions.iter_mut() {
+    for s in sessions.iter_mut().filter(|s| s.remote.is_none()) {
         s.conflict = map.get(&s.key()).map(|c| c.level);
     }
     map
@@ -67,7 +67,14 @@ pub fn apply(sessions: &mut [Session]) -> Map {
 /// it can be recomputed every refresh without touching a transcript.
 pub fn detect(sessions: &[Session]) -> Map {
     let mut by_repo: HashMap<PathBuf, Vec<&Session>> = HashMap::new();
-    for s in sessions.iter().filter(|s| s.is_running()) {
+    // Remote rows are excluded on both counts: their paths are on another
+    // filesystem, so `ground` would stat whatever happens to sit at the same
+    // path here, and each machine already detects and reports its own overlaps
+    // through `--json`. [`apply`] leaves their carried verdict alone.
+    for s in sessions
+        .iter()
+        .filter(|s| s.is_running() && s.remote.is_none())
+    {
         if s.label_source.is_empty() {
             continue;
         }
@@ -133,7 +140,7 @@ pub fn peers_of<'a>(
     let wanted: HashSet<String> = files.iter().map(|f| normalise(f, dir)).collect();
     sessions
         .iter()
-        .filter(|s| s.is_running() && !s.label_source.is_empty())
+        .filter(|s| s.is_running() && s.remote.is_none() && !s.label_source.is_empty())
         .filter(|s| ground(&s.label_source) == here)
         .map(|s| {
             let shared = s

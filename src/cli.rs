@@ -124,6 +124,13 @@ pub struct Args {
     /// what the other agents on this machine are doing. Read-only
     #[arg(long)]
     pub mcp: bool,
+
+    /// Also show the sessions on another machine, read over ssh. Repeatable.
+    /// Takes `[user@]host`, or `[user@]host:/path/to/cctop` where cctop is not
+    /// on the PATH a non-interactive ssh gets. $CCTOP_HOSTS adds more, comma
+    /// separated. Remote rows are read-only: cctop acts only on this machine
+    #[arg(long = "host", value_name = "HOST")]
+    pub hosts: Vec<String>,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {
@@ -265,8 +272,49 @@ struct JsonCost {
     /// `null` when the plan bundles this provider's usage.
     total: Option<String>,
     included: bool,
+    /// Recorded usage that priced at nothing, as with a free model. Distinct
+    /// from `available: false`, which is a provider that records no usage.
+    free: bool,
+    this_hour: f64,
+    today: f64,
+    /// Smoothed live spend rate, USD per minute.
+    per_min: f64,
+    /// `YYYY-MM-DD` -> USD, trimmed to [`JSON_DAYS`] days.
+    ///
+    /// Present so a reader can compute the same spend windows the overview
+    /// shows rather than only a lifetime total. Trimmed because a session
+    /// running for months would otherwise carry a bucket per day of it, and no
+    /// window here looks back further.
+    by_day: std::collections::BTreeMap<String, f64>,
+    /// `YYYY-MM-DDTHH` -> USD, trimmed to [`JSON_HOURS`] hours.
+    by_hour: std::collections::BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     breakdown: Option<crate::session::Costs>,
+}
+
+/// How far back the per-day and per-hour buckets in `--json` reach.
+///
+/// One more than the longest window anything downstream computes — the
+/// overview's calendar month and its 30-day rolling total for days, today's
+/// 24 hourly buckets for hours.
+const JSON_DAYS: usize = 31;
+const JSON_HOURS: usize = 48;
+
+/// Flatten a `key -> model -> USD` bucket map, keeping the newest `keep` keys.
+///
+/// Keys sort lexicographically in time order in both spellings cctop uses
+/// (`YYYY-MM-DD` and `YYYY-MM-DDTHH`), so "newest" is the tail of a sort.
+fn trimmed_buckets(
+    buckets: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+    keep: usize,
+) -> std::collections::BTreeMap<String, f64> {
+    let mut keys: Vec<&String> = buckets.keys().collect();
+    keys.sort();
+    keys.iter()
+        .rev()
+        .take(keep)
+        .map(|k| ((*k).clone(), buckets[*k].values().sum()))
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -305,6 +353,9 @@ struct JsonActivity {
 struct JsonSession {
     provider: &'static str,
     surface: &'static str,
+    /// What the status dot says: `working`, `waiting` for the user, or `error`
+    /// on an API failure. Independent of `running`, which is about a process.
+    state: &'static str,
     session_id: String,
     started_at: String,
     last_active: String,
@@ -315,6 +366,11 @@ struct JsonSession {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     harness: Option<String>,
+    /// Branch checked out in the working directory, read on the machine the
+    /// session is on — which is why it is carried rather than looked up by
+    /// whoever reads this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
     /// How much the session asks before it acts, when its own hooks said.
     /// Absent for a session with no cctop hooks installed — nothing in a
     /// transcript records this, so it cannot be inferred.
@@ -323,8 +379,14 @@ struct JsonSession {
     models: Vec<String>,
     plan: &'static str,
     running: bool,
+    /// CPU and resident memory across the session's process tree. Absent where
+    /// no per-session process exists to measure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process: Option<JsonProcess>,
     cost: JsonCost,
     tokens: JsonTokens,
+    /// Token rate per minute, smoothed the same way the `TOK/m` column is.
+    tokens_per_min: f64,
     activity: JsonActivity,
     #[serde(skip_serializing_if = "Option::is_none")]
     rates: Option<crate::session::CodexRates>,
@@ -338,6 +400,15 @@ struct JsonSession {
     conflict: Option<JsonConflict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct JsonProcess {
+    cpu: f32,
+    memory: u64,
+    command: String,
+    /// Processes in the tree, which is what the `pids` figure in the UI counts.
+    pids: usize,
 }
 
 #[derive(Serialize)]
@@ -445,6 +516,11 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
 
             JsonSession {
                 provider: s.provider.as_str(),
+                state: match s.activity_state {
+                    crate::session::ActivityState::Working => "working",
+                    crate::session::ActivityState::WaitingForInput => "waiting",
+                    crate::session::ActivityState::ApiError => "error",
+                },
                 surface: match s.surface {
                     crate::session::Surface::Cli => "cli",
                     crate::session::Surface::Editor => "editor",
@@ -459,14 +535,27 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
                 harness: (!s.harness.is_empty()).then(|| s.harness.clone()),
+                branch: crate::ui::columns::branch_of(s),
                 permission: s.permission.map(crate::hook::Permission::label),
                 models: data.models.clone(),
                 plan: plan.as_str(),
                 running: s.is_running(),
+                process: s.process.as_ref().map(|p| JsonProcess {
+                    cpu: p.cpu,
+                    memory: p.memory,
+                    command: p.command.clone(),
+                    pids: p.pids,
+                }),
                 cost: JsonCost {
                     available: s.cost_available,
                     total: (s.cost_available && !included).then(|| util::money(data.costs.total)),
                     included,
+                    free: s.cost_is_free,
+                    this_hour: s.cost_hour,
+                    today: s.cost_today,
+                    per_min: s.cost_per_min,
+                    by_day: trimmed_buckets(&s.costs_by_day, JSON_DAYS),
+                    by_hour: trimmed_buckets(&s.costs_by_hour, JSON_HOURS),
                     breakdown: (s.cost_available && !included).then(|| data.costs.clone()),
                 },
                 tokens: JsonTokens {
@@ -475,6 +564,7 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                     total: s.input_tokens + s.output_tokens,
                     detail: data.tokens.clone(),
                 },
+                tokens_per_min: s.tokens_per_min,
                 activity: JsonActivity {
                     tool_count: m.tool_count,
                     tool_errors: s.provider.records_tool_outcomes().then_some(m.tool_errors),

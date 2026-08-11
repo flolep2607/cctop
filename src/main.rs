@@ -4,6 +4,7 @@ mod cache;
 mod cli;
 mod collide;
 mod config;
+mod fleet;
 mod handoff;
 mod hook;
 mod inject;
