@@ -4,6 +4,7 @@ mod cache;
 mod cli;
 mod collide;
 mod config;
+mod doctor;
 mod fleet;
 mod handoff;
 mod hook;
@@ -58,6 +59,20 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("hook") {
         let argv: Vec<String> = std::env::args().collect();
         std::process::exit(hook::emit(&argv[2..]));
+    }
+
+    // `cctop doctor` is intercepted here for the same reason `run` and `attach`
+    // are: cctop takes no positionals, so clap would answer a bare word with a
+    // usage error. Before the `is_command` check below, so a stray `doctor`
+    // binary on PATH cannot shadow it.
+    //
+    // Every platform. The checks that are unix-only say so individually; the
+    // question "why can cctop not see my sessions" is not unix-only at all.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("doctor") {
+            std::process::exit(doctor::run(&argv[2..]));
+        }
     }
 
     #[cfg(unix)]

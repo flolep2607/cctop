@@ -116,6 +116,7 @@ cctop --update        # replace this binary with the newest release
 cctop run claude      # start an agent on a pty cctop can type into (see Keys)
 cctop claude --help   # the same, without the `run`; flags go to the agent
 cctop --host devbox   # also show another machine's sessions, read over ssh
+cctop doctor          # check this installation and say what is wrong with it
 cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias adds them)
 ```
 
@@ -516,6 +517,45 @@ And a Codex `apply_patch` covering several files summarises as
 
 Agents can ask this themselves through `check_conflicts` — see
 [Letting agents see each other](#letting-agents-see-each-other).
+
+### When it isn't showing what you expected
+
+```bash
+cctop doctor
+```
+
+Most of what can go wrong is invisible from outside the process: a
+`CLAUDE_CONFIG_DIR` left over from an experiment sending discovery somewhere
+empty, a pricing table that never downloaded so every session reads `$0.00`,
+hooks installed against a binary that has since moved. `doctor` prints all of
+it — one line per check, with the fix attached to anything that is not fine.
+
+```
+Session sources
+  ✓ Claude Code            26 session(s)
+  ! Cursor                 directory exists but holds no sessions (/home/flo/.cursor/projects)
+      → if that is wrong, check the environment overrides above
+
+Pricing
+  ! LiteLLM table          cached but 49h 35m old
+      → the next interactive run refreshes it; costs use the stale rates until then
+```
+
+It covers the version and binary path, any `CLAUDE_CONFIG_DIR`-style overrides
+in the environment, every harness's session directory and how many it found,
+pricing, the cache and whether it is writable, the hooks report, and which of
+the three backends behind `s` this machine actually has.
+
+`cctop doctor --host devbox` adds a section that makes the ssh round trip for
+real, which is the only honest test of it — and reports ssh's own words back
+with the fix that matches them, since a key that needs a passphrase and a
+hostname that will not resolve need very different answers.
+
+It exits `0` when nothing is broken, `1` for a real fault — an unwritable
+cache, no pricing at all, a `--host` that could not be read — and `2` for a bad
+argument. A warning is something you chose not to set up, so it does not fail
+the exit code and `cctop doctor` is usable in a script to mean "is this
+installation sound".
 
 ### More than one machine
 

@@ -16,7 +16,8 @@ use serde::Serialize;
     // print a usage line claiming options are all there is.
     override_usage = "cctop [OPTIONS]\n       \
                       cctop <agent> [args…]\n       \
-                      cctop attach [pid]",
+                      cctop attach [pid]\n       \
+                      cctop doctor",
     // Shown by `-h` as well as `--help`: the long description is the only place
     // that mentioned launching agents, and nobody reads `--help` to find out a
     // command exists.
@@ -25,7 +26,10 @@ cctop <agent> [args…]  Start claude, codex, opencode or pi on a pty cctop owns
 so the UI can watch it and type into it. Same as\n                         \
 `cctop run <agent>`; everything after the name goes to it.\n  \
 cctop attach [pid]     Put a running agent on this terminal. With no pid, lists\n                         \
-them. F12 detaches and leaves it running.\n\n\
+them. F12 detaches and leaves it running.\n  \
+cctop doctor           Check this installation and say what is wrong with it:\n                         \
+where sessions are read from, pricing, hooks, and what\n                         \
+`s` can reach. --host also tests an ssh target.\n\n\
 Use --help for the full description.",
     // Otherwise clap repeats the block above under the long description, which
     // covers the same ground at length.
@@ -60,6 +64,11 @@ SEARCHING\n  \
 `/` filters on what the table shows plus the full working directory and the\n  \
 branch; `Tab` in that prompt extends the search into the transcripts, which\n  \
 reads them off disk and so is opt-in.\n\n\
+DIAGNOSING\n  \
+`cctop doctor` reports where sessions are read from and how many it found,\n  \
+whether pricing loaded, which agent hooks are installed, and what `s` can\n  \
+reach. It exits non-zero only for a real fault, so it is usable in a script.\n  \
+`cctop doctor --host <host>` additionally makes the ssh round trip.\n\n\
 NOTES\n  \
 Session data is read from each agent's standard local session store.\n  \
 UI preferences (active tab, sort order, filters) persist across runs.",
