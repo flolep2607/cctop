@@ -2,3 +2,6 @@
 
 # Scratch worktrees the agent harness creates.
 .claude/worktrees/
+
+# Byte-code from the screenshot tool
+__pycache__/

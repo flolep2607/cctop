@@ -4,7 +4,10 @@
 Codex, Cursor, Gemini CLI, OpenCode, Pi and Windsurf session on your machine —
 what each is doing, what it has spent, and which one is waiting on you.
 
-![cctop showing seven agent sessions with their cost, context usage, tool counts and error rates](docs/assets/dashboard.png)
+![cctop: walking the session table, opening the context breakdown, then filtering](docs/assets/demo.gif)
+
+<sub>A real recording — [play it in a terminal](docs/assets/demo.cast) with
+`asciinema play docs/assets/demo.cast`.</sub>
 
 It reads what the agents leave on disk, so it sees sessions it did not start,
 including ones that ended weeks ago. Nothing to configure, nothing to run

@@ -110,22 +110,37 @@ hand for a normal version bump.
 
 ## Refreshing the screenshots
 
-`docs/assets/*.png` are real captures, not mock-ups. Regenerate them after any
+`docs/assets/` holds real captures, not mock-ups. Regenerate them after any
 change to the table's columns or the panels:
 
 ```bash
 cargo build --release
-python3 docs/assets/shot.py docs/assets/dashboard.png --size 146x30
-python3 docs/assets/shot.py docs/assets/context.png --keys 'Tab*7' --size 146x36
+R="--redact YourCompany=Example Inc"
+python3 docs/assets/shot.py docs/assets/dashboard.png --size 146x30 $R
+python3 docs/assets/shot.py docs/assets/context.png --keys 'Tab*7' --size 146x36 $R
+python3 docs/assets/shot.py docs/assets/demo.gif --record docs/assets/demo.cast \
+        --size 128x30 --scale 1 $R
 ```
 
 The script drives a real cctop through tmux and rasterises the captured screen
-itself. Two traps it now guards against, both of which produced a wrong picture
-before they were: a tmux session named `cctop-*` gets adopted by cctop as one of
-its own tabs, so it attaches to the terminal it is running in; and preferring
-`target/release` over `target/debug` silently captures whichever is *older*, in
-one case shipping a screenshot missing two columns added that afternoon.
+itself, so the images carry whatever is on the machine that made them.
 
-The images carry whatever is on the machine that made them — session titles,
-working directories and real spend figures. Check what is in frame before
-committing one.
+**It scrubs email addresses unconditionally**, because cctop reads the signed-in
+account out of each harness's config and prints it in the Info panel — an
+address the person taking the screenshot never chose to publish and would not
+think to look for. `--redact` adds literals (an employer, a client's project
+name). Scrubbing happens on the parsed grid, so a replacement of a different
+length cannot shift a column: it is padded or truncated to the same width.
+
+Nothing else is scrubbed. Session titles, working directories and real spend
+figures all appear as they are — look at what is in frame before committing.
+
+Three traps the script guards, each of which produced a wrong picture first:
+
+- a tmux session named `cctop-*` is adopted by cctop as one of its own tabs, so
+  it attaches to the terminal it is running in;
+- preferring `target/release` over `target/debug` captures whichever is *older*,
+  which once shipped a screenshot missing two columns added that afternoon;
+- an SVG would be smaller and sharper, but cctop draws sparklines with eight-dot
+  braille (U+2840+) and DejaVu Sans Mono covers only the six-dot block, so those
+  cells become tofu on any reader whose font agrees. Rasterising pins them.

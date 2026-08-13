@@ -10,6 +10,8 @@ means, click one to sort by it, or press `F6` for the sort list.
 Hide columns you never read with `$CCTOP_COLUMNS_HIDE`, a comma-separated list
 of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 
+![The session table with the Overview above it and the Info panel below](assets/dashboard.png)
+
 ## The columns
 
 | Column | Key | What it says |
