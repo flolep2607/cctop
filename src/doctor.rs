@@ -510,8 +510,24 @@ fn typing() -> Section {
         },
     ];
 
-    #[cfg(target_os = "linux")]
-    checks.push(match is_root() {
+    checks.extend(tiocsti_check());
+
+    Section {
+        title: "Typing into sessions",
+        checks,
+    }
+}
+
+/// The `TIOCSTI` backend's availability, where the kernel has one at all.
+///
+/// Split into two functions returning an `Option` rather than a `#[cfg]`'d
+/// `push`, so the vector above is mutated on every platform. A `push` that only
+/// compiles on Linux leaves `let mut checks` unused elsewhere, which `-D
+/// warnings` rejects — the same trap as a `cfg`'d-out caller making its callee
+/// dead code, and it only shows up on the macOS and Windows runners.
+#[cfg(target_os = "linux")]
+fn tiocsti_check() -> Option<Check> {
+    Some(match is_root() {
         true => ok(
             "TIOCSTI",
             "running as root; sessions in plain terminals can be typed into",
@@ -521,12 +537,14 @@ fn typing() -> Section {
             "unavailable (not root) — the last-resort backend only, \
              and not needed if the aliases above are installed",
         ),
-    });
+    })
+}
 
-    Section {
-        title: "Typing into sessions",
-        checks,
-    }
+/// No `TIOCSTI` outside Linux, so there is nothing to report rather than a
+/// line saying a backend this platform never had is missing.
+#[cfg(not(target_os = "linux"))]
+fn tiocsti_check() -> Option<Check> {
+    None
 }
 
 /// Actually read every configured host.
