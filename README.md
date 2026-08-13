@@ -4,17 +4,7 @@
 Codex, Cursor, Gemini CLI, OpenCode, Pi and Windsurf session on your machine —
 what each is doing, what it has spent, and which one is waiting on you.
 
-```
- Sessions (4/71)                                            $12.64 today · 2 running
-
-    LAST   DUR        $  CTX%  CPU%   MEM  TOOLS  ERR%  MODEL       PERM    !  PROJECT
- ●    3s  1h12m   $4.82   68%  22.4  1.2G    178    2%  opus-5      edits   ⚠  ~/cctop
- ●   14s    46m   $2.10   31%   8.1  840M     94    ─   gpt-5-codex ask     ⚠  ~/cctop
- ●    2m  2h03m   $9.41   88%   0.0  1.5G    402   14%  opus-5      BYPASS  ·  ~/api
- ○    4h    22m   $0.31    ─     ─     ─      31    0%  sonnet-5    ─       ─  ~/scripts
-
- Conflict: ⚠ …/ui/mod.rs — 2 agents have written it
-```
+![cctop showing seven agent sessions with their cost, context usage, tool counts and error rates](docs/assets/dashboard.png)
 
 It reads what the agents leave on disk, so it sees sessions it did not start,
 including ones that ended weeks ago. Nothing to configure, nothing to run

@@ -107,3 +107,25 @@ release, builds the platform archives, and publishes the crate. **The version
 bump is the release** — there is no separate confirmation step, and
 `cargo publish` to crates.io cannot be undone. Do not create a release tag by
 hand for a normal version bump.
+
+## Refreshing the screenshots
+
+`docs/assets/*.png` are real captures, not mock-ups. Regenerate them after any
+change to the table's columns or the panels:
+
+```bash
+cargo build --release
+python3 docs/assets/shot.py docs/assets/dashboard.png --size 146x30
+python3 docs/assets/shot.py docs/assets/context.png --keys 'Tab*7' --size 146x36
+```
+
+The script drives a real cctop through tmux and rasterises the captured screen
+itself. Two traps it now guards against, both of which produced a wrong picture
+before they were: a tmux session named `cctop-*` gets adopted by cctop as one of
+its own tabs, so it attaches to the terminal it is running in; and preferring
+`target/release` over `target/debug` silently captures whichever is *older*, in
+one case shipping a screenshot missing two columns added that afternoon.
+
+The images carry whatever is on the machine that made them — session titles,
+working directories and real spend figures. Check what is in frame before
+committing one.

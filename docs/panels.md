@@ -44,6 +44,8 @@ line counts, `update_plan` shows progress and the step in flight, and
 
 ## Context breakdown
 
+![The Context panel: a stacked bar of the window with a legend naming each category](assets/context.png)
+
 `CTX%` says the window is 68% full. The **Context** panel says what is in it —
 Claude sessions only, since no other provider's transcript reports per-request
 usage.
