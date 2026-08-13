@@ -1,10 +1,9 @@
 [package]
 name = "cctop"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, Windsurf)"
-authors = ["Florian Leprat <florian.leprat@xtracta.com>"]
 license = "MIT"
 repository = "https://github.com/flolep2607/cctop"
 homepage = "https://github.com/flolep2607/cctop"
