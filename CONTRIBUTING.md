@@ -143,4 +143,10 @@ Three traps the script guards, each of which produced a wrong picture first:
   which once shipped a screenshot missing two columns added that afternoon;
 - an SVG would be smaller and sharper, but cctop draws sparklines with eight-dot
   braille (U+2840+) and DejaVu Sans Mono covers only the six-dot block, so those
-  cells become tofu on any reader whose font agrees. Rasterising pins them.
+  cells become tofu on any reader whose font agrees. Rasterising pins them;
+- DejaVu Sans Mono is a wide face, and at its natural line height the cell is
+  1.93:1 against the ~2.2 terminals use — every row looks vertically squashed.
+  The cell is therefore 1.35× the font size, and the ten box and block glyphs
+  (`─━│┊╭╮╯╰█░`) are drawn as geometry rather than text, because a font's box
+  characters only span its *own* natural line height and would otherwise leave
+  the panel borders visibly gapped.

@@ -169,13 +169,82 @@ def capture(size, keys, settle):
                        stderr=subprocess.DEVNULL, check=False)
 
 
+# The only glyphs cctop draws that have to meet their neighbours exactly.
+#
+# A font's box-drawing glyphs are cut to span its *natural* line height and no
+# further, so any cell taller than that leaves the verticals gapped — and the
+# natural cell here is 1.93:1, noticeably squatter than the ~2.2 terminals use.
+# Drawing these ten as geometry instead decouples the two: the cell can be any
+# shape and the borders still join.
+BOXES = set("─━│┊╭╮╯╰█░")
+
+
+def draw_box(draw, ch, x0, y0, cw, lh, colour, bg):
+    """Draw one box or block character to fill its cell. True if handled."""
+    if ch not in BOXES:
+        return False
+    x1, y1 = x0 + cw, y0 + lh
+    cx, cy = x0 + cw / 2, y0 + lh / 2
+    light = max(1.0, round(lh / 20))
+    heavy = max(2.0, round(lh / 11))
+
+    def hbar(a, b, t):
+        draw.rectangle([a, cy - t / 2, b, cy + t / 2], fill=colour)
+
+    def vbar(a, b, t):
+        draw.rectangle([cx - t / 2, a, cx + t / 2, b], fill=colour)
+
+    if ch == "█":
+        draw.rectangle([x0, y0, x1, y1], fill=colour)
+    elif ch == "░":
+        # A 25% shade, as a blend rather than a stipple: at these cell sizes a
+        # dither pattern aliases into stripes when the image is scaled down.
+        base = tuple(int(bg[i:i + 2], 16) for i in (1, 3, 5))
+        want = tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+        draw.rectangle([x0, y0, x1, y1],
+                       fill=tuple(round(b + (w - b) * 0.25) for b, w in zip(base, want)))
+    elif ch == "─":
+        hbar(x0, x1, light)
+    elif ch == "━":
+        hbar(x0, x1, heavy)
+    elif ch == "│":
+        vbar(y0, y1, light)
+    elif ch == "┊":
+        # Four dashes with three gaps, so a run of them reads as a dotted rule.
+        step = lh / 7
+        for k in (0, 2, 4, 6):
+            vbar(y0 + k * step, y0 + (k + 1) * step, light)
+    else:
+        # The four rounded corners: two arms meeting at the cell centre, joined
+        # by a quarter arc so the panel keeps its rounded look.
+        r = min(cw, lh) * 0.45
+        right, down = ch in "╭╰", ch in "╭╮"
+        hbar(cx + r if right else x0, x1 if right else cx - r, light)
+        vbar(cy + r if down else y0, y1 if down else cy - r, light)
+        ox = cx + r if right else cx - r
+        oy = cy + r if down else cy - r
+        start = {(True, True): 180, (False, True): 270,
+                 (False, False): 0, (True, False): 90}[(right, down)]
+        draw.arc([ox - r, oy - r, ox + r, oy + r], start, start + 90,
+                 fill=colour, width=int(light))
+    return True
+
+
 def render(rows, scale, pt):
     fs = pt * scale
     reg = ImageFont.truetype(DEJAVU + "DejaVuSansMono.ttf", fs)
     bold_f = ImageFont.truetype(DEJAVU + "DejaVuSansMono-Bold.ttf", fs)
     fallback = ImageFont.truetype(DEJAVU + "DejaVuSans.ttf", fs)
     notdef = reg.getmask("￾").getbbox()
-    cw, lh, pad = reg.getlength("M"), int(fs * 1.22), 14 * scale
+    # DejaVu Sans Mono is a wide face — 0.602 em advance against ~0.55 for the
+    # fonts terminals usually ship — and its natural line height puts the cell
+    # at 1.93:1. Terminals sit nearer 2.2 (Menlo, SF Mono, Cascadia all do), and
+    # at 1.93 every row looks vertically squashed. 1.35 restores 2.21.
+    cw, lh, pad = reg.getlength("M"), int(fs * 1.35), 14 * scale
+    # The extra leading is split above and below rather than all falling under
+    # the glyph, which would sit each line high in its own cell.
+    ascent, descent = reg.getmetrics()
+    lead = max(0, (lh - (ascent + descent)) // 2)
 
     def absent(ch):
         return reg.getmask(ch).getbbox() == notdef
@@ -195,12 +264,20 @@ def render(rows, scale, pt):
             if not text.strip():
                 continue
             colour, font = fg or FG_DEFAULT, bold_f if bold else reg
+            if any(c in BOXES for c in text):
+                for k, ch in enumerate(text):
+                    x0, y0 = pad + (col + k) * cw, pad + y * lh
+                    if not draw_box(draw, ch, x0, y0, cw, lh, colour, _bg or BG_DEFAULT):
+                        draw.text((x0, y0 + lead), ch,
+                                  font=fallback if absent(ch) else font, fill=colour)
+                continue
             if any(absent(c) for c in text):
                 for k, ch in enumerate(text):
-                    draw.text((pad + (col + k) * cw, pad + y * lh), ch,
+                    draw.text((pad + (col + k) * cw, pad + y * lh + lead), ch,
                               font=fallback if absent(ch) else font, fill=colour)
             else:
-                draw.text((pad + col * cw, pad + y * lh), text, font=font, fill=colour)
+                draw.text((pad + col * cw, pad + y * lh + lead), text,
+                          font=font, fill=colour)
     return img
 
 
