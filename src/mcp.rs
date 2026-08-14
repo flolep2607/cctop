@@ -258,6 +258,9 @@ fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
                 "provider": s.provider.as_str(),
                 "model": s.model,
                 "title": s.title,
+                // Absent for the caller's own sessions, which is all of them
+                // unless cctop is reading every user's homes.
+                "user": s.owner,
                 "directory": s.label_source,
                 "branch": crate::ui::columns::branch_of(s),
                 "branch_note": "the branch checked out now, not necessarily the one it worked on",

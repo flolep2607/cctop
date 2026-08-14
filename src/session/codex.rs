@@ -393,11 +393,17 @@ fn collect_static(path: &Path) -> StaticParts {
 
 /// All Codex rollout sessions, newest file first.
 pub fn list_sessions() -> Vec<Session> {
-    if !config::dir_exists(&config::CODEX_SESSIONS_ROOT) {
+    let mut files: Vec<_> = config::codex_sessions_roots()
+        .iter()
+        .filter(|root| config::dir_exists(root))
+        .flat_map(|root| config::rglob(root, ".jsonl"))
+        .collect();
+    if files.is_empty() {
         return Vec::new();
     }
-    let mut files = config::rglob(&config::CODEX_SESSIONS_ROOT, ".jsonl");
-    files.sort();
+    // By filename, not full path: the rollout name carries the timestamp, and
+    // sorting by path would order by whose home the file sits in first.
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then_with(|| a.cmp(b)));
     files.reverse();
 
     files

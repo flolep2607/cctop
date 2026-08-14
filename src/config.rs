@@ -1,5 +1,6 @@
 //! Filesystem locations and process-wide constants.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -10,7 +11,7 @@ pub static HOME: LazyLock<PathBuf> =
 pub static CLAUDE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| HOME.join(".claude"))
+        .unwrap_or_else(|| claude_config_dir_in(&HOME))
 });
 
 pub static CLAUDE_PROJECTS_ROOT: LazyLock<PathBuf> =
@@ -182,6 +183,250 @@ pub const MAX_DIFF_LINES: usize = 60;
 /// otherwise make arbitrarily long.
 pub const MAX_DIFF_LINE_CHARS: usize = 300;
 
+// --- Other users' homes -----------------------------------------------------
+//
+// Everything below exists for one case: cctop running as root, which is a
+// request to see the whole machine rather than root's own (usually empty)
+// home. An unprivileged user cannot read another's transcripts, so there is
+// nothing to offer them here and the ordinary path stays exactly as it was —
+// one home, the statics above, no extra directory reads.
+
+/// Another user's home directory, and whose it is.
+#[derive(Debug, Clone)]
+pub struct OtherHome {
+    pub home: PathBuf,
+    /// Login name, used for the USER column and nothing else.
+    pub user: String,
+}
+
+/// `$CCTOP_ALL_USERS`: `0`/`false`/`no` forces the single-home behaviour even
+/// for root, anything else forces the sweep on. Unset means "on when root".
+///
+/// The off switch is for a root shell that only wants its own rows; the on
+/// switch is for a non-root user who genuinely can read the homes (a shared
+/// group, an NFS export).
+fn all_users_wanted() -> bool {
+    match std::env::var("CCTOP_ALL_USERS") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no"
+        ),
+        Err(_) => running_as_root(),
+    }
+}
+
+/// Homes named outright in `$CCTOP_HOMES`, `:`-separated as a `PATH` is.
+///
+/// For the machines whose homes are not under `/home` and not in the local
+/// `passwd` file — an NFS export mounted at `/export/people`, a container's
+/// bind mount — where discovery has nothing to go on and the operator does.
+/// Naming any implies the sweep, since asking for a home is asking to read it.
+fn named_homes() -> Vec<(PathBuf, String)> {
+    let Some(list) = std::env::var_os("CCTOP_HOMES") else {
+        return Vec::new();
+    };
+    std::env::split_paths(&list)
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|path| {
+            // The directory is named after its user in every layout this is
+            // for; there is nothing else to read a login name off.
+            let user = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (path, user)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    // SAFETY: geteuid reads process state and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn running_as_root() -> bool {
+    false
+}
+
+/// Every home besides this user's that cctop reads sessions out of.
+///
+/// Empty in the ordinary case, which is what keeps the single-user cost at
+/// zero: each provider's root list is then just its own root, unchanged.
+pub static OTHER_HOMES: LazyLock<Vec<OtherHome>> = LazyLock::new(|| {
+    let named = named_homes();
+    if named.is_empty() && !all_users_wanted() {
+        return Vec::new();
+    }
+    let mut seen: HashSet<PathBuf> = HashSet::from([HOME.clone()]);
+    let mut out = Vec::new();
+
+    for (home, user) in named {
+        push_home(&mut out, &mut seen, home, user);
+    }
+    if !all_users_wanted() {
+        return out;
+    }
+
+    // `/etc/passwd` first, since it is the only source that pairs a home with
+    // the login name that owns it.
+    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+        for (home, user) in passwd_homes(&passwd) {
+            push_home(&mut out, &mut seen, home, user);
+        }
+    }
+
+    // ponytail: users served by LDAP, SSSD or another directory are not in
+    // `/etc/passwd`, and enumerating them properly means getpwent(3) and a
+    // libc call per entry. Listing the home parents catches them in the shape
+    // that actually occurs — one directory per user, named after them.
+    for parent in ["/home", "/Users"].map(PathBuf::from) {
+        for name in list_dir(&parent) {
+            push_home(&mut out, &mut seen, parent.join(&name), name);
+        }
+    }
+    out
+});
+
+/// Lowest uid a login account gets, below which an entry is a service account.
+///
+/// The convention the distributions set in `/etc/login.defs`; macOS starts its
+/// human accounts at 500. Reading `login.defs` to learn the local value would be
+/// more correct and would change nothing: no `daemon` or `www-data` has ever
+/// run a coding agent, and a site that lowered `UID_MIN` still keeps its
+/// service accounts below the default.
+const UID_MIN: u32 = if cfg!(target_os = "macos") { 500 } else { 1000 };
+
+/// `(home, user)` for every `passwd` line belonging to a person.
+///
+/// Field 0 is the name, 2 the uid and 5 the home; a line with fewer fields is
+/// a comment or a truncated write and is skipped rather than half-read. Only
+/// root and the login accounts are kept — a system account's home exists, is
+/// readable as root, and holds nothing, so sweeping the couple of dozen of
+/// them is pure noise in the doctor report and pure stat calls at startup.
+fn passwd_homes(text: &str) -> Vec<(PathBuf, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            let [user, _, uid, _, _, home, ..] = fields[..] else {
+                return None;
+            };
+            let uid: u32 = uid.parse().ok()?;
+            let person = uid == 0 || uid >= UID_MIN;
+            (person && !user.is_empty() && !home.is_empty())
+                .then(|| (PathBuf::from(home), user.to_string()))
+        })
+        .collect()
+}
+
+/// Record `home` as `user`'s if it is a real directory nobody claimed yet.
+fn push_home(out: &mut Vec<OtherHome>, seen: &mut HashSet<PathBuf>, home: PathBuf, user: String) {
+    // `/` is what the system accounts carry; taking it would put every path on
+    // the machine under one "user" and make the sweep recurse the filesystem.
+    if home.parent().is_none() || !seen.insert(home.clone()) || !home.is_dir() {
+        return;
+    }
+    out.push(OtherHome { home, user });
+}
+
+/// `primary` plus the same location under every other scanned home.
+///
+/// `primary` is passed in rather than derived because only this user's home
+/// honours the `$CLAUDE_CONFIG_DIR`-style overrides: those name one directory,
+/// not a pattern that could be applied to somebody else's home.
+pub fn roots_across_homes(primary: &Path, derive: impl Fn(&Path) -> PathBuf) -> Vec<PathBuf> {
+    let mut roots = vec![primary.to_path_buf()];
+    roots.extend(OTHER_HOMES.iter().map(|o| derive(&o.home)));
+    roots
+}
+
+pub fn claude_config_dir_in(home: &Path) -> PathBuf {
+    home.join(".claude")
+}
+
+/// Per-provider session roots, this user's first.
+pub fn claude_projects_roots() -> Vec<PathBuf> {
+    roots_across_homes(&CLAUDE_PROJECTS_ROOT, |h| {
+        claude_config_dir_in(h).join("projects")
+    })
+}
+
+pub fn codex_sessions_roots() -> Vec<PathBuf> {
+    roots_across_homes(&CODEX_SESSIONS_ROOT, |h| h.join(".codex").join("sessions"))
+}
+
+pub fn cursor_projects_roots() -> Vec<PathBuf> {
+    roots_across_homes(&CURSOR_PROJECTS_ROOT, |h| {
+        h.join(".cursor").join("projects")
+    })
+}
+
+pub fn pi_sessions_roots() -> Vec<PathBuf> {
+    roots_across_homes(&PI_SESSIONS_ROOT, |h| {
+        h.join(".pi").join("agent").join("sessions")
+    })
+}
+
+pub fn gemini_chats_roots() -> Vec<PathBuf> {
+    roots_across_homes(&GEMINI_CHATS_ROOT, |h| h.join(".gemini").join("tmp"))
+}
+
+/// The platform data directory *for another home*, which `dirs::data_dir` can
+/// only answer for the calling user.
+fn data_dir_in(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
+        home.join(".local").join("share")
+    }
+}
+
+fn config_dir_in(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
+        home.join(".config")
+    }
+}
+
+pub fn opencode_data_roots() -> Vec<PathBuf> {
+    roots_across_homes(&OPENCODE_DATA_DIR, |h| data_dir_in(h).join("opencode"))
+}
+
+pub fn windsurf_workspace_roots() -> Vec<PathBuf> {
+    roots_across_homes(&WINDSURF_WORKSPACE_STORAGE, |h| {
+        config_dir_in(h)
+            .join("Windsurf")
+            .join("User")
+            .join("workspaceStorage")
+    })
+}
+
+/// Mac-only roots, empty off macOS exactly as their statics are `None` there.
+pub fn claude_mac_roots(primary: &Option<PathBuf>, leaf: &str) -> Vec<PathBuf> {
+    let Some(primary) = primary.as_ref() else {
+        return Vec::new();
+    };
+    roots_across_homes(primary, |h| {
+        h.join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join(leaf)
+    })
+}
+
+/// Which user's home `path` lives under, when it is not this user's.
+///
+/// `None` means "mine", which is why the USER column is blank rather than
+/// repeating the operator's own name on every row.
+pub fn owner_of(path: &Path) -> Option<&'static str> {
+    OTHER_HOMES
+        .iter()
+        .find(|o| path.starts_with(&o.home))
+        .map(|o| o.user.as_str())
+}
+
 pub const CLAUDE_DEFAULT_CTX: u64 = 200_000;
 /// A decimal million, not a mebi-token. Anthropic advertises the large window as
 /// 1M tokens and LiteLLM's `max_input_tokens` says 1000000 for the models that
@@ -280,6 +525,44 @@ mod tests {
         assert!(!is_full_uuid("7026D578-8CBA-4880-B464-9700F1B77B71")); // uppercase
         assert!(!is_full_uuid("7026d578-8cba-4880-b464-9700f1b77b7")); // short
         assert!(!is_full_uuid("7026d5788cba4880b4649700f1b77b71")); // no hyphens
+    }
+
+    #[test]
+    fn passwd_parsing_takes_the_home_field() {
+        let homes = passwd_homes(
+            "root:x:0:0:root:/root:/bin/bash\n\
+             ana:x:1000:1000:Ana,,,:/home/ana:/bin/zsh\n\
+             www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n\
+             # comment\n\
+             truncated:x:1001",
+        );
+        assert_eq!(
+            homes,
+            vec![
+                (PathBuf::from("/root"), "root".to_string()),
+                (PathBuf::from("/home/ana"), "ana".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn homes_are_deduped_and_must_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("ana");
+        std::fs::create_dir(&real).unwrap();
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        push_home(&mut out, &mut seen, real.clone(), "ana".into());
+        // The same home under a second login name, a missing one, and `/` —
+        // which every system account carries and which would put the whole
+        // filesystem under one user.
+        push_home(&mut out, &mut seen, real, "ana-again".into());
+        push_home(&mut out, &mut seen, dir.path().join("gone"), "gone".into());
+        push_home(&mut out, &mut seen, PathBuf::from("/"), "sync".into());
+
+        let users: Vec<&str> = out.iter().map(|o| o.user.as_str()).collect();
+        assert_eq!(users, ["ana"]);
     }
 
     #[test]

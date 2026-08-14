@@ -63,9 +63,13 @@ fn started_from_stem(stem: &str) -> Option<String> {
 /// walking `tool-outputs/`, which holds a file per tool call and dwarfs the
 /// transcripts it sits beside.
 fn chat_files() -> Vec<PathBuf> {
-    config::list_dir(&config::GEMINI_CHATS_ROOT)
+    config::gemini_chats_roots()
         .into_iter()
-        .map(|project| config::GEMINI_CHATS_ROOT.join(project).join("chats"))
+        .flat_map(|root| {
+            config::list_dir(&root)
+                .into_iter()
+                .map(move |project| root.join(project).join("chats"))
+        })
         .filter(|dir| config::dir_exists(dir))
         .flat_map(|dir| {
             config::list_dir(&dir)
@@ -114,9 +118,6 @@ fn summarize(path: PathBuf) -> Option<Session> {
 }
 
 pub fn list_sessions() -> Vec<Session> {
-    if !config::dir_exists(&config::GEMINI_CHATS_ROOT) {
-        return Vec::new();
-    }
     let mut sessions: Vec<_> = chat_files().into_par_iter().filter_map(summarize).collect();
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     sessions

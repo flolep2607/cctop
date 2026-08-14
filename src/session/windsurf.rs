@@ -130,9 +130,13 @@ fn percent_decode(s: &str) -> String {
 }
 
 fn databases() -> Vec<PathBuf> {
-    config::list_dir(&config::WINDSURF_WORKSPACE_STORAGE)
+    config::windsurf_workspace_roots()
         .into_iter()
-        .map(|entry| config::WINDSURF_WORKSPACE_STORAGE.join(entry))
+        .flat_map(|root| {
+            config::list_dir(&root)
+                .into_iter()
+                .map(move |entry| root.join(entry))
+        })
         .filter(|dir| dir.is_dir())
         .map(|dir| dir.join("state.vscdb"))
         .filter(|db| db.is_file())
@@ -147,9 +151,6 @@ fn databases() -> Vec<PathBuf> {
 /// wrong about nothing else: every tab in a workspace shares the timestamp
 /// because the file is all the evidence there is.
 pub fn list_sessions() -> Vec<Session> {
-    if !config::dir_exists(&config::WINDSURF_WORKSPACE_STORAGE) {
-        return Vec::new();
-    }
     let mut sessions = Vec::new();
     for path in databases() {
         let Ok(db) = readonly(&path) else { continue };

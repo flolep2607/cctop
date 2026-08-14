@@ -274,6 +274,8 @@ fn environment() -> Section {
         "PI_CODING_AGENT_DIR",
         "PI_CODING_AGENT_SESSION_DIR",
         "WINDSURF_USER_DIR",
+        "CCTOP_ALL_USERS",
+        "CCTOP_HOMES",
         "CCTOP_HOSTS",
         "CCTOP_COLUMNS_HIDE",
     ];
@@ -335,7 +337,9 @@ fn sources() -> Section {
         .iter()
         .map(|(provider, name, root)| {
             let found = sessions.iter().filter(|s| s.provider == *provider).count();
-            match (config::dir_exists(root), found) {
+            // Sessions can come from another user's home while this one has no
+            // such directory at all, which is the ordinary case for root.
+            match (config::dir_exists(root) || found > 0, found) {
                 (false, _) => ok(*name, format!("not installed ({})", root.display())),
                 (true, 0) => warn(
                     *name,
@@ -349,6 +353,19 @@ fn sources() -> Section {
             }
         })
         .collect();
+
+    let others = &*config::OTHER_HOMES;
+    if !others.is_empty() {
+        let names: Vec<&str> = others.iter().map(|o| o.user.as_str()).collect();
+        checks.push(ok(
+            "all users",
+            format!(
+                "also reading {} other home(s): {}",
+                names.len(),
+                names.join(", ")
+            ),
+        ));
+    }
 
     if sessions.is_empty() {
         checks.push(warn(

@@ -23,18 +23,18 @@ fn created_ms(path: &Path) -> u64 {
         .unwrap_or_else(|| config::file_mtime_ms(path))
 }
 
-fn project_slug(path: &Path) -> String {
+fn project_slug(path: &Path, roots: &[PathBuf]) -> String {
     path.ancestors()
         .find(|p| {
             p.parent()
-                .is_some_and(|parent| parent == *config::CURSOR_PROJECTS_ROOT)
+                .is_some_and(|parent| roots.iter().any(|root| parent == root))
         })
         .and_then(Path::file_name)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
-fn summarize(path: PathBuf) -> Option<Session> {
+fn summarize(path: PathBuf, roots: &[PathBuf]) -> Option<Session> {
     let session_id = path.file_stem()?.to_string_lossy().into_owned();
     if !config::is_full_uuid(&session_id) {
         return None;
@@ -52,7 +52,7 @@ fn summarize(path: PathBuf) -> Option<Session> {
     session.harness = "Cursor".into();
     session.started_at = util::ms_to_rfc3339(created_ms(&path) as i64);
     session.last_active = util::ms_to_rfc3339(config::file_mtime_ms(&path) as i64);
-    session.label_source = project_slug(&path);
+    session.label_source = project_slug(&path, roots);
     session.data_file = Some(path);
     session.cost_available = false;
     session.total_cost = None;
@@ -60,12 +60,15 @@ fn summarize(path: PathBuf) -> Option<Session> {
 }
 
 pub fn list_sessions() -> Vec<Session> {
-    if !config::dir_exists(&config::CURSOR_PROJECTS_ROOT) {
-        return Vec::new();
-    }
-    let mut sessions: Vec<_> = config::rglob(&config::CURSOR_PROJECTS_ROOT, ".jsonl")
+    let roots = config::cursor_projects_roots();
+    let files: Vec<_> = roots
+        .iter()
+        .filter(|root| config::dir_exists(root))
+        .flat_map(|root| config::rglob(root, ".jsonl"))
+        .collect();
+    let mut sessions: Vec<_> = files
         .into_par_iter()
-        .filter_map(summarize)
+        .filter_map(|path| summarize(path, &roots))
         .collect();
     sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
 

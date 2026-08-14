@@ -29,6 +29,7 @@ pub enum ColumnId {
     Permission,
     Conflict,
     Host,
+    User,
     Branch,
     Project,
 }
@@ -213,6 +214,17 @@ pub const COLUMNS: &[Column] = &[
         desc: "Machine the session is on, for rows read from another over ssh (--host).\nlocal for this one. Hidden unless a --host is configured.",
     },
     Column {
+        id: ColumnId::User,
+        label: "USER",
+        width: Some(9),
+        // Alongside HOST, and for the same reason: with other users' sessions
+        // on screen, whose a row is part of naming it — two people in the same
+        // repository are otherwise the same row twice.
+        priority: 67,
+        right_align: false,
+        desc: "User whose home the session was read from, when cctop is watching\nevery user (running as root, or $CCTOP_ALL_USERS). Blank for your own.\nHidden when only your own sessions are in view.",
+    },
+    Column {
         id: ColumnId::Branch,
         label: "BRANCH",
         width: Some(12),
@@ -253,6 +265,7 @@ pub fn key(id: ColumnId) -> &'static str {
         ColumnId::Permission => "perm",
         ColumnId::Conflict => "conflict",
         ColumnId::Host => "host",
+        ColumnId::User => "user",
         ColumnId::Branch => "branch",
         ColumnId::Project => "project",
     }
@@ -434,6 +447,10 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
             Some(r) => r.host.clone(),
             None => "local".into(),
         },
+        // Blank for your own rows: repeating the operator's own name down the
+        // table says nothing, and the point of the column is the ones that
+        // are not theirs.
+        ColumnId::User => s.owner.clone().unwrap_or_default(),
         ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
     }
@@ -512,6 +529,8 @@ pub fn render_subagent_cell(
         | ColumnId::Errors
         // A subagent is on whichever machine its parent is.
         | ColumnId::Host
+        // ...and belongs to whoever owns its parent.
+        | ColumnId::User
         | ColumnId::TokenTotal
         | ColumnId::TokenRate
         | ColumnId::Harness
@@ -714,6 +733,9 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::Conflict => conflict_rank(a).cmp(&conflict_rank(b)),
         // Local rows sort together, and first: they are the ones you can act on.
         ColumnId::Host => host_key(a).cmp(&host_key(b)),
+        // Your own rows sort together, and first, for the same reason: they are
+        // the ones you can act on without stepping into someone else's session.
+        ColumnId::User => a.owner.cmp(&b.owner),
         // Sessions outside a repository sort together, below every branch.
         ColumnId::Branch => branch_of(a).cmp(&branch_of(b)),
         ColumnId::Project => a

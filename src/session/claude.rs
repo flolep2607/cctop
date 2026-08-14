@@ -147,9 +147,12 @@ fn summarize(transcript: &Path) -> Option<Session> {
 pub fn list_sessions() -> Vec<Session> {
     let mut transcripts = Vec::new();
 
-    if config::dir_exists(&config::CLAUDE_PROJECTS_ROOT) {
-        for project in config::list_dir(&config::CLAUDE_PROJECTS_ROOT) {
-            let project_dir = config::CLAUDE_PROJECTS_ROOT.join(&project);
+    for root in config::claude_projects_roots() {
+        if !config::dir_exists(&root) {
+            continue;
+        }
+        for project in config::list_dir(&root) {
+            let project_dir = root.join(&project);
             if !project_dir.is_dir() {
                 continue;
             }
@@ -201,14 +204,23 @@ fn find_desktop_jsonl(session_dir: &Path, cli_session_id: &str) -> Option<PathBu
 /// Sessions from Claude for Mac (both Code and Cowork surfaces).
 pub fn list_mac_sessions() -> Vec<Session> {
     let mut sessions = Vec::new();
-    let roots: [(&Option<PathBuf>, Option<Surface>); 2] = [
-        (&config::CLAUDE_MAC_COWORK_ROOT, None),
-        (&config::CLAUDE_MAC_CODE_ROOT, Some(Surface::DesktopCode)),
+    let surfaces: [(&Option<PathBuf>, &str, Option<Surface>); 2] = [
+        (
+            &config::CLAUDE_MAC_COWORK_ROOT,
+            "local-agent-mode-sessions",
+            None,
+        ),
+        (
+            &config::CLAUDE_MAC_CODE_ROOT,
+            "claude-code-sessions",
+            Some(Surface::DesktopCode),
+        ),
     ];
-    for (root, forced) in roots {
-        let Some(root) = root.as_ref() else { continue };
-        if config::dir_exists(root) {
-            scan_mac_root(root, forced, &mut sessions);
+    for (primary, leaf, forced) in surfaces {
+        for root in config::claude_mac_roots(primary, leaf) {
+            if config::dir_exists(&root) {
+                scan_mac_root(&root, forced, &mut sessions);
+            }
         }
     }
     sessions

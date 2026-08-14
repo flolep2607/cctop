@@ -69,6 +69,11 @@ DIAGNOSING\n  \
 whether pricing loaded, which agent hooks are installed, and what `s` can\n  \
 reach. It exits non-zero only for a real fault, so it is usable in a script.\n  \
 `cctop doctor --host <host>` additionally makes the ssh round trip.\n\n\
+EVERY USER\n  \
+Run as root and cctop reads every user's sessions rather than root's own,\n  \
+naming whose each row is in the USER column. CCTOP_ALL_USERS=0 turns that\n  \
+off, =1 turns it on without root, and CCTOP_HOMES names homes that are\n  \
+neither in /etc/passwd nor under /home.\n\n\
 NOTES\n  \
 Session data is read from each agent's standard local session store.\n  \
 UI preferences (active tab, sort order, filters) persist across runs.",
@@ -230,6 +235,12 @@ fn print_group(
     );
     for (i, (s, label)) in sessions.iter().zip(labels).enumerate() {
         let display = s.title.clone().unwrap_or(label);
+        // No column of its own here: --list has a fixed layout, and naming the
+        // owner in front of the label costs nothing when there is no owner.
+        let display = match &s.owner {
+            Some(user) => format!("{user}: {display}"),
+            None => display,
+        };
         println!("{}", format_row(start_index + i + 1, s, &display, width));
     }
 }
@@ -370,6 +381,10 @@ struct JsonSession {
     last_active: String,
     project: Option<String>,
     title: Option<String>,
+    /// Login name of the user the session belongs to, when cctop is reading
+    /// every user's homes and this one is not the reader's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<JsonAccount>,
     model: Option<String>,
@@ -509,9 +524,14 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
             let data = loader.store().session_data(s);
             let m = &data.metrics;
             let included = s.cost_available && plan.includes(s.provider);
+            // The credentials read here are this user's. Another user's
+            // session is signed in as whoever they are, and stamping the
+            // reader's own email on their row would be a wrong answer where
+            // no answer is the true one.
             let account = match s.provider {
-                Provider::Claude => claude_account.as_ref(),
-                Provider::Codex => codex_account.as_ref(),
+                Provider::Claude if s.owner.is_none() => claude_account.as_ref(),
+                Provider::Codex if s.owner.is_none() => codex_account.as_ref(),
+                Provider::Claude | Provider::Codex => None,
                 Provider::Cursor
                 | Provider::Gemini
                 | Provider::OpenCode
@@ -541,6 +561,7 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 last_active: s.last_active.clone(),
                 project: (!s.label_source.is_empty()).then(|| s.label_source.clone()),
                 title: s.title.clone(),
+                user: s.owner.clone(),
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
                 harness: (!s.harness.is_empty()).then(|| s.harness.clone()),

@@ -1460,13 +1460,16 @@ impl App {
         // per refresh, and lowercasing them all was the whole per-refresh
         // allocation; it also stops a query matching across the seam between
         // two unrelated fields.
-        let fields: [&str; 6] = [
+        let fields: [&str; 7] = [
             s.display_label(),
             &s.model,
             &s.harness,
             s.provider.as_str(),
             &s.session_id,
             &s.label_source,
+            // Empty for this user's own rows, which no query can match, so
+            // searching a name finds that person's sessions and nothing else.
+            s.owner.as_deref().unwrap_or_default(),
         ];
         if fields.iter().any(|f| contains_ascii_ci(f, query)) {
             return true;
@@ -2870,6 +2873,11 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // cannot disagree about what is on screen.
     if hosts.is_empty() {
         app.hidden_columns.push(ColumnId::Host);
+    }
+    // Likewise USER: with only this user's homes in view, every row's owner is
+    // the person reading the screen.
+    if crate::config::OTHER_HOMES.is_empty() {
+        app.hidden_columns.push(ColumnId::User);
     }
     let _ = req_tx.send(Request::Refresh);
 

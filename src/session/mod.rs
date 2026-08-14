@@ -279,6 +279,15 @@ pub struct Session {
     /// same-named path if it ran for a remote row.
     pub remote: Option<Remote>,
 
+    /// Login name of the user whose home this session was read out of, when
+    /// that is not the user running cctop.
+    ///
+    /// Only ever set when cctop is sweeping other homes — running as root, or
+    /// told to by `$CCTOP_ALL_USERS` — so `None` on an ordinary run means
+    /// "mine" rather than "unknown". Stamped from the transcript's path in
+    /// [`list_all`], which is the one place every provider's rows meet.
+    pub owner: Option<String>,
+
     // --- Rate tracking ---
     pub tokens_per_min: f64,
     pub cost_per_min: f64,
@@ -359,6 +368,7 @@ impl Session {
             recent_writes: Vec::new(),
             conflict: None,
             remote: None,
+            owner: None,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
         }
@@ -1283,6 +1293,16 @@ pub fn list_all() -> Vec<Session> {
     codex.extend(gemini);
     codex.extend(windsurf);
     let mut sessions = codex;
+    // Whose row this is, decided once here rather than in seven discovery
+    // functions: the transcript's path already says it, and every provider
+    // reaches this point.
+    if !crate::config::OTHER_HOMES.is_empty() {
+        for s in &mut sessions {
+            if let Some(file) = &s.data_file {
+                s.owner = crate::config::owner_of(file).map(str::to_string);
+            }
+        }
+    }
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     sessions
 }

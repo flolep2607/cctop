@@ -34,6 +34,7 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `PERM` | `perm` | How much it asks before acting — see below |
 | `!` | `conflict` | Another agent is on the same ground — see below |
 | `HOST` | `host` | Which machine, when [reading more than one](integrations.md#more-than-one-machine). Hidden otherwise |
+| `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Blank for your own, hidden otherwise |
 | `BRANCH` | `branch` | Branch checked out in the working directory, `@<commit>` when detached, `─` when not a repository |
 | `PROJECT` | `project` | The session's title if it has one, otherwise its working directory |
 

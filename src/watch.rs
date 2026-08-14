@@ -129,15 +129,21 @@ fn note(pending: &Mutex<HashMap<PathBuf, Instant>>, event: &notify::Event) {
 
 /// Every provider's session root that is present on this machine.
 fn roots() -> Vec<PathBuf> {
-    let mut roots = vec![
-        crate::config::CLAUDE_PROJECTS_ROOT.clone(),
-        crate::config::CODEX_SESSIONS_ROOT.clone(),
-        crate::config::CURSOR_PROJECTS_ROOT.clone(),
-        crate::config::PI_SESSIONS_ROOT.clone(),
-        crate::config::OPENCODE_DATA_DIR.clone(),
-    ];
-    roots.extend(crate::config::CLAUDE_MAC_COWORK_ROOT.clone());
-    roots.extend(crate::config::CLAUDE_MAC_CODE_ROOT.clone());
+    // Every home being scanned, so a session another user starts shows up as
+    // promptly as one of this user's does.
+    let mut roots = crate::config::claude_projects_roots();
+    roots.extend(crate::config::codex_sessions_roots());
+    roots.extend(crate::config::cursor_projects_roots());
+    roots.extend(crate::config::pi_sessions_roots());
+    roots.extend(crate::config::opencode_data_roots());
+    roots.extend(crate::config::claude_mac_roots(
+        &crate::config::CLAUDE_MAC_COWORK_ROOT,
+        "local-agent-mode-sessions",
+    ));
+    roots.extend(crate::config::claude_mac_roots(
+        &crate::config::CLAUDE_MAC_CODE_ROOT,
+        "claude-code-sessions",
+    ));
     roots.retain(|r| r.is_dir());
     roots
 }

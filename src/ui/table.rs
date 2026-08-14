@@ -352,6 +352,7 @@ fn session_row(
                 | ColumnId::Model
                 | ColumnId::Harness
                 | ColumnId::Host
+                | ColumnId::User
                 | ColumnId::Branch
         );
         let padded = pad(&text, *w, c.right_align);

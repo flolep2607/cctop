@@ -267,7 +267,14 @@ pub fn info(
         ));
     }
 
+    // Whose session this is, when it is not the reader's — and the reason the
+    // account below is then left off: those credentials are this user's, and
+    // another user's session is signed in as somebody else.
+    if let Some(owner) = &session.owner {
+        lines.push(field("User", owner.clone()));
+    }
     let account = match session.provider {
+        _ if session.owner.is_some() => None,
         Provider::Claude => crate::quota::claude_account(),
         Provider::Codex => crate::quota::codex_account(),
         Provider::Cursor

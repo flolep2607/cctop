@@ -26,7 +26,11 @@ fn message_ts(item: &Value, message: &Value) -> String {
 /// Discover every persisted Pi session, including custom session roots.
 pub fn list_sessions() -> Vec<Session> {
     let mut sessions = Vec::new();
-    for path in config::rglob(&config::PI_SESSIONS_ROOT, ".jsonl") {
+    let paths: Vec<_> = config::pi_sessions_roots()
+        .iter()
+        .flat_map(|root| config::rglob(root, ".jsonl"))
+        .collect();
+    for path in paths {
         let mut session_id = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())

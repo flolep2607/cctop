@@ -166,3 +166,32 @@ they say so rather than drawing zeroes.
 A host that stops answering keeps its last rows and says so in the footer
 (`⚠ devbox: Permission denied`). Blanking them would be the stronger claim —
 those agents have not stopped, cctop has merely lost sight of them.
+
+## Every user on the machine
+
+Run cctop as root and it reads every user's sessions, not root's own — which on
+most machines is an empty table, since nobody runs an agent as root. This is
+what `htop` does with processes, for the same reason: the point of running a
+monitor privileged is to see the machine rather than your corner of it.
+
+```bash
+sudo cctop                       # every user's sessions
+sudo CCTOP_ALL_USERS=0 cctop     # root's own only, the way any other user sees it
+CCTOP_ALL_USERS=1 cctop          # sweep without root, where the homes are readable anyway
+CCTOP_HOMES=/export/people/ana:/export/people/bo cctop   # homes discovery cannot find
+```
+
+Homes come from `/etc/passwd` — root and the login accounts, service accounts
+skipped — plus whatever sits under `/home` (or `/Users`), which catches users
+served by LDAP or SSSD rather than the local file. `$CCTOP_HOMES` names any the
+machine keeps somewhere else entirely, `:`-separated as a `PATH` is.
+
+Rows gain a **USER** column naming whose session each one is, blank for your own
+and hidden entirely when only your own homes are in view. The name is also
+searchable, so `/ana` filters the table to that person's sessions.
+
+What cctop *does* stays privileged in the ordinary way: as root, `k` really will
+kill someone else's agent and `d` really will delete their transcript. The one
+thing it declines to guess is identity — the Account line and the `account`
+field in `--json` are read from your own credentials, so they are left off
+another user's row rather than stamped with your email.

@@ -153,10 +153,14 @@ fn is_api_failure(message: &Value) -> bool {
 
 /// Stable releases use `opencode.db`; nonstandard channels suffix the filename.
 fn database_paths() -> Vec<PathBuf> {
-    config::list_dir(&config::OPENCODE_DATA_DIR)
+    config::opencode_data_roots()
         .into_iter()
-        .filter(|name| name.starts_with("opencode") && name.ends_with(".db"))
-        .map(|name| config::OPENCODE_DATA_DIR.join(name))
+        .flat_map(|root| {
+            config::list_dir(&root)
+                .into_iter()
+                .filter(|name| name.starts_with("opencode") && name.ends_with(".db"))
+                .map(move |name| root.join(name))
+        })
         .collect()
 }
 
