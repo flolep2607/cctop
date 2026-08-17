@@ -330,6 +330,42 @@ pub const EDIT_TOOLS: &[&str] = &[
 /// the warning cry wolf on any long session.
 pub const MAX_RECENT_WRITES: usize = 32;
 
+/// The paths a session wrote lately, newest first, as the transcript spelled
+/// them. The detail string an [`EDIT_TOOLS`] call records is the file it
+/// targeted.
+///
+/// Run once per extraction so the tool history itself need never be persisted.
+/// Resolving these against the session's cwd stays in [`crate::loader`], which
+/// is the layer that knows the cwd.
+///
+/// ponytail: a Codex `apply_patch` touching several files summarises as
+/// `first.rs (+3 more)`, so only the first is recovered here. The remaining
+/// files go unwatched rather than being guessed at from a truncated string.
+///
+/// ponytail: deduplicated as written rather than as resolved, so two spellings
+/// of one file both take a slot. Costs at most a slot or two of a 32-entry list
+/// against keeping every write on disk to re-derive the list each run.
+fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<String> {
+    let mut all: Vec<&ToolDetail> = EDIT_TOOLS
+        .iter()
+        .filter_map(|name| details.get(*name))
+        .flatten()
+        .collect();
+    all.sort_by(|a, b| b.ts.cmp(&a.ts));
+
+    let mut seen = std::collections::HashSet::new();
+    all.into_iter()
+        .map(|d| match d.d.split_once(" (+") {
+            Some((first, _)) => first.trim(),
+            None => d.d.trim(),
+        })
+        .filter(|p| !p.is_empty())
+        .filter(|p| seen.insert(p.to_string()))
+        .take(MAX_RECENT_WRITES)
+        .map(str::to_string)
+        .collect()
+}
+
 impl Session {
     pub fn new(provider: Provider, session_id: String) -> Self {
         Session {
@@ -1062,6 +1098,20 @@ pub struct Metrics {
     #[serde(default)]
     pub tool_errors: u64,
     pub tools: HashMap<String, u64>,
+    /// Every recorded call, with its arguments — deliberately never persisted.
+    ///
+    /// This is by far the largest thing an extraction produces: measured at
+    /// ~31 KB per session, 83% of a cache holding 2000 of them. Nothing on the
+    /// table needs it. The row wants the handful of paths in
+    /// [`SessionData::recent_writes`], which is distilled from this in
+    /// `finalize` and stored instead; the Tools panel wants all of it, but only
+    /// for the one session that is open, and that path re-parses anyway (see
+    /// [`crate::cache::Store::session_data_fresh`]).
+    ///
+    /// Persisting it cost a 124 MB cache file that had to be read in full
+    /// before the first frame, which was slower than re-parsing the transcripts
+    /// it was meant to save.
+    #[serde(skip)]
     pub tool_details: HashMap<String, Vec<ToolDetail>>,
     pub mcp_tool_count: u64,
     pub mcp_tools: Vec<String>,
@@ -1132,7 +1182,11 @@ pub struct SessionData {
     /// there, which is the part that explains a session's cost. A window that
     /// climbed steadily is a conversation that grew; one that jumped is a single
     /// tool result that will do it again.
-    #[serde(default)]
+    ///
+    /// Not persisted, for the same reason as `metrics.tool_details`: one point
+    /// per request made this 15% of the cache, and only the open session's
+    /// sparkline reads it.
+    #[serde(skip)]
     pub context_series: Vec<CtxPoint>,
     /// Compactions the session has been through.
     ///
@@ -1144,6 +1198,21 @@ pub struct SessionData {
     /// only transcript that says a compaction happened.
     #[serde(default)]
     pub compactions: u32,
+    /// Paths the session wrote lately, newest first, as the transcript spelled
+    /// them — [`crate::loader`] resolves them against the session's cwd.
+    ///
+    /// Distilled in `finalize` from `metrics.tool_details`, which is not
+    /// persisted. The row only ever wanted these few paths; keeping the whole
+    /// tool history on disk to re-derive them each run is what made the cache
+    /// too big to load. Bounded by [`MAX_RECENT_WRITES`].
+    #[serde(default)]
+    pub recent_writes: Vec<String>,
+    /// Whether this carries the fields `finalize` fills but the cache drops.
+    ///
+    /// False for anything deserialized, which is what tells the panel path that
+    /// a cache hit is not enough and the transcript has to be read again.
+    #[serde(skip)]
+    pub complete: bool,
     pub subagents: Vec<Subagent>,
     /// Codex reports per-million rates directly; surfaced in the Cost panel.
     pub rates: Option<CodexRates>,
@@ -1254,6 +1323,8 @@ impl SessionData {
     /// served from cache.
     pub fn finalize(&mut self) {
         trim_tool_details(&mut self.metrics.tool_details);
+        self.recent_writes = distil_recent_writes(&self.metrics.tool_details);
+        self.complete = true;
     }
 
     /// Spend since local midnight.

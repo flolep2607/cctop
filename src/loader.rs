@@ -381,35 +381,21 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     s.costs_by_hour = data.costs_by_hour.clone();
     s.subagents_cost = data.subagents.iter().map(|sa| sa.cost).sum();
     s.subagents = data.subagents.clone();
-    s.recent_writes = recent_writes(m, &s.label_source);
+    s.recent_writes = recent_writes(&data.recent_writes, &s.label_source);
 }
 
-/// Paths the session has written lately, newest first and deduplicated.
+/// Resolve the session's recent writes against the directory it runs in.
 ///
-/// The path is the detail string a write tool records, which for every tool in
-/// [`session::EDIT_TOOLS`] is the file it targeted.
-///
-/// ponytail: a Codex `apply_patch` touching several files summarises as
-/// `first.rs (+3 more)`, so only the first is recovered here. The remaining
-/// files go unwatched rather than being guessed at from a truncated string.
-fn recent_writes(m: &session::Metrics, cwd: &str) -> Vec<String> {
-    let mut all: Vec<&session::ToolDetail> = session::EDIT_TOOLS
-        .iter()
-        .filter_map(|name| m.tool_details.get(*name))
-        .flatten()
-        .collect();
-    all.sort_by(|a, b| b.ts.cmp(&a.ts));
-
+/// The paths themselves are distilled during extraction — see
+/// [`session::SessionData::recent_writes`] — because the tool history they come
+/// from is not persisted. Only this step needs the cwd, and only this step is
+/// cheap enough to redo on every walk.
+fn recent_writes(paths: &[String], cwd: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    all.into_iter()
-        .map(|d| match d.d.split_once(" (+") {
-            Some((first, _)) => first.trim(),
-            None => d.d.trim(),
-        })
-        .filter(|p| !p.is_empty())
+    paths
+        .iter()
         .map(|p| crate::collide::normalise(p, cwd))
         .filter(|p| seen.insert(p.clone()))
-        .take(session::MAX_RECENT_WRITES)
         .collect()
 }
 
@@ -688,6 +674,30 @@ mod tests {
 
         let st = compute_stats(&[a, b]);
         assert!((st.spend_per_min - 1.0).abs() < 1e-9);
+    }
+
+    /// The paths reach a row from the extraction now that the tool history they
+    /// were derived from is no longer cached — so a cached session and a
+    /// re-parsed one must still light the same collision warning. Resolving them
+    /// against the cwd stays here, which is why a relative path has to arrive
+    /// spelled absolutely.
+    #[test]
+    fn a_row_takes_its_recent_writes_from_the_extraction() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        s.label_source = "/repo".into();
+        let data = SessionData {
+            recent_writes: vec![
+                "src/main.rs".into(),
+                "/repo/src/lib.rs".into(),
+                // Two spellings of one file collapse once resolved.
+                "./src/main.rs".into(),
+            ],
+            ..Default::default()
+        };
+
+        annotate(&mut s, &data, Plan::Retail);
+
+        assert_eq!(s.recent_writes, ["/repo/src/main.rs", "/repo/src/lib.rs"]);
     }
 
     #[test]

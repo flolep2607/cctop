@@ -55,7 +55,13 @@ struct DiskCacheRef<'a> {
 
 /// Upper bound on retained entries. Sessions are never explicitly deleted from
 /// the user's disk, so without this the cache only ever grows.
-const MAX_ENTRIES: usize = 2_000;
+///
+/// Raised from 2000 once entries stopped carrying the tool history, which took
+/// them from ~67 KB to under 2 KB. The old figure was set when 2000 entries
+/// meant a 124 MB file, and a machine with 2000 sessions — a shared server is
+/// the ordinary case — sat exactly on it, re-parsing whatever spilled over on
+/// every single run.
+const MAX_ENTRIES: usize = 20_000;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -301,12 +307,17 @@ impl Store {
         self.data(session, true)
     }
 
-    /// Extracted data for the session the user has open, never served stale.
+    /// Extracted data for the session the user has open, never served stale and
+    /// never served incomplete.
     ///
     /// The row-level refresh backs off on expensive transcripts because it pays
     /// that cost once per session, thousands of times over. The open panels are
     /// one session — the one place where a few seconds of lag is actually visible,
     /// and the one place where a full parse per change is affordable.
+    ///
+    /// It is also the only path that sees the fields the cache drops — the tool
+    /// history and the context series — so a cached copy of those, which is
+    /// always empty, has to be refused rather than displayed as an empty panel.
     pub fn session_data_fresh(&self, session: &Session) -> SessionData {
         self.data(session, false)
     }
@@ -324,7 +335,9 @@ impl Store {
             && let Some(entry) = mem.get(&mem_key)
             && entry.pricing_epoch == epoch
         {
-            if entry.mtime == mtime {
+            // A copy that came off disk carries no tool history and no context
+            // series, so it answers a row but not a panel.
+            if entry.mtime == mtime && (allow_stale || entry.data.complete) {
                 return entry.data.clone();
             }
             // ponytail: re-parse backoff, not incremental parsing. A transcript is
@@ -349,7 +362,11 @@ impl Store {
         ))
         .then(|| cache_key(file))
         .flatten();
-        if let Some(key) = &disk_key
+        // Rows only: what the disk holds is missing exactly the fields the panel
+        // is opened to read, so serving it there would draw an empty panel over
+        // a session that has plenty to show.
+        if allow_stale
+            && let Some(key) = &disk_key
             && let Some(data) = self.disk.get(key)
         {
             if let Ok(mut mem) = self.mem.lock() {
@@ -751,6 +768,69 @@ mod tests {
             "key {key} must embed the pricing epoch"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session's tool history is the bulk of what an extraction produces —
+    /// measured at 83% of a cache holding 2000 sessions, with the context series
+    /// another 15%. Neither is on a row, and persisting them made the cache file
+    /// slower to read than the transcripts it stood in for. What the row does
+    /// need is distilled first, so it has to survive the round trip.
+    #[test]
+    fn the_cache_drops_the_tool_history_but_keeps_what_a_row_needs() {
+        let mut data = SessionData::default();
+        data.metrics.tool_details.insert(
+            "Edit".into(),
+            vec![crate::session::ToolDetail {
+                d: "src/main.rs".into(),
+                ts: "2026-01-01T00:00".into(),
+                ..Default::default()
+            }],
+        );
+        data.context_series.push(crate::session::CtxPoint {
+            ts: "2026-01-01T00:00".into(),
+            window: 1234,
+            after_compaction: false,
+        });
+        data.costs.total = 4.25;
+        data.finalize();
+        assert_eq!(data.recent_writes, ["src/main.rs"]);
+        assert!(data.complete, "a fresh extraction is complete");
+
+        let back: SessionData =
+            serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+
+        assert!(
+            back.metrics.tool_details.is_empty(),
+            "history was persisted"
+        );
+        assert!(back.context_series.is_empty(), "series was persisted");
+        assert_eq!(back.recent_writes, ["src/main.rs"]);
+        assert_eq!(back.costs.total, 4.25);
+        // …and it must own up to being partial, or the panel would draw the
+        // empty history above as though the session had never used a tool.
+        assert!(
+            !back.complete,
+            "a restored entry must not claim completeness"
+        );
+    }
+
+    /// The panel is the one view that reads the fields the cache drops, so a
+    /// cache hit is not enough for it even when the transcript has not changed.
+    #[test]
+    fn a_restored_entry_satisfies_a_row_but_not_a_panel() {
+        let fresh = {
+            let mut d = SessionData::default();
+            d.finalize();
+            d
+        };
+        let restored: SessionData =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+
+        // This is the condition `Store::data` applies to a memory hit.
+        let serves = |data: &SessionData, allow_stale: bool| allow_stale || data.complete;
+        assert!(serves(&restored, true), "a row may be served from cache");
+        assert!(!serves(&restored, false), "a panel may not");
+        assert!(serves(&fresh, false), "a real parse serves anything");
     }
 
     #[test]

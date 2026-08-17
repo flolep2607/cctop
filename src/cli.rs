@@ -488,7 +488,9 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
         ),
     };
 
-    let data = loader.store().session_data(session);
+    // The brief is built out of the tool history, which the cache does not
+    // carry, so this is one of the two callers that needs a real parse.
+    let data = loader.store().session_data_fresh(session);
     let brief = crate::handoff::build(session, Some(&data));
     print!("{}", brief.to_markdown());
     Ok(())

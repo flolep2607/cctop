@@ -1170,6 +1170,9 @@ pub fn extract(transcript: &Path) -> SessionData {
         subagents,
         rates: None,
         error: None,
+        // `recent_writes` and `complete` are what `finalize` is for; every
+        // extraction goes through it before anything reads the result.
+        ..Default::default()
     }
 }
 
