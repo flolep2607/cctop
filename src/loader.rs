@@ -697,7 +697,16 @@ mod tests {
 
         annotate(&mut s, &data, Plan::Retail);
 
-        assert_eq!(s.recent_writes, ["/repo/src/main.rs", "/repo/src/lib.rs"]);
+        // Spelled with the host's separator, because that is what `normalise`
+        // resolves to and what the collision check compares.
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            s.recent_writes,
+            [
+                format!("{sep}repo{sep}src{sep}main.rs"),
+                format!("{sep}repo{sep}src{sep}lib.rs"),
+            ]
+        );
     }
 
     #[test]
