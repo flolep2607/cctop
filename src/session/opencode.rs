@@ -9,6 +9,7 @@ use crate::pricing::Provider;
 use crate::util;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -62,13 +63,53 @@ fn readonly(path: &Path) -> rusqlite::Result<Connection> {
     )
 }
 
+thread_local! {
+    /// Read-only connections, kept open and reused.
+    ///
+    /// Every session in a database is asked about separately — its activity
+    /// dot, its context window, its last tool, its costs — and each of those
+    /// used to open a connection of its own. On a machine with 1478 OpenCode
+    /// sessions that came to several thousand opens of a 555 MB database per
+    /// walk, and the cost was not the reading: 240,000 voluntary context
+    /// switches and nine seconds of kernel time, spent almost entirely on
+    /// setting up and tearing down file locks.
+    ///
+    /// Thread-local rather than shared, which is what makes it safe *and*
+    /// fast. `SQLITE_OPEN_NO_MUTEX` means a connection may not be used from two
+    /// threads at once, so one shared connection would have to be behind a
+    /// mutex — and extraction fans out across every core, so that mutex would
+    /// serialise the one path that most needs not to be. A connection per
+    /// thread has neither problem: the serial tail pass opens one, and a cold
+    /// extraction opens one per worker instead of one per session.
+    ///
+    /// ponytail: held for the life of the thread, never revalidated. SQLite
+    /// writes in place and a read-only connection picks up another process's
+    /// commits, so this stays correct while OpenCode is running; a database
+    /// swapped out wholesale underneath it would be read from the old file
+    /// until cctop restarts.
+    static CONNECTIONS: RefCell<HashMap<PathBuf, Connection>> = RefCell::new(HashMap::new());
+}
+
+/// Run `query` against `path`'s database, opening it only the first time this
+/// thread asks. `None` if it cannot be opened.
+fn with_db<T>(path: &Path, query: impl FnOnce(&Connection) -> T) -> Option<T> {
+    CONNECTIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(path) {
+            cache.insert(path.to_path_buf(), readonly(path).ok()?);
+        }
+        cache.get(path).map(query)
+    })
+}
+
 /// State of the newest OpenCode message. OpenCode keeps events in SQLite rather
 /// than a transcript file, but its assistant messages record both completion
 /// and provider errors.
 pub fn extract_activity_state(path: &Path, session_id: &str) -> ActivityState {
-    let Ok(db) = readonly(path) else {
-        return ActivityState::Working;
-    };
+    with_db(path, |db| activity_state(db, session_id)).unwrap_or(ActivityState::Working)
+}
+
+fn activity_state(db: &Connection, session_id: &str) -> ActivityState {
     let message = db
         .query_row(
             "SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT 1",
@@ -89,7 +130,7 @@ pub fn extract_activity_state(path: &Path, session_id: &str) -> ActivityState {
     }
     if is_api_failure(&message) {
         ActivityState::ApiError
-    } else if has_input_request(&db, &message_id) {
+    } else if has_input_request(db, &message_id) {
         ActivityState::WaitingForInput
     } else {
         ActivityState::Working
@@ -471,7 +512,10 @@ pub fn delete(session: &Session) -> rusqlite::Result<()> {
 /// LiteLLM's listing for the model. Without one there is no denominator, and a
 /// guessed window would misreport CTX% for every model that does not match it.
 pub fn extract_context(session: &Session) -> Option<ContextUsage> {
-    let db = readonly(session.data_file.as_ref()?).ok()?;
+    with_db(session.data_file.as_ref()?, |db| context_of(db, session)).flatten()
+}
+
+fn context_of(db: &Connection, session: &Session) -> Option<ContextUsage> {
     // A turn that was aborted or failed before the provider answered is still
     // recorded, with every count at zero. Those sit at the end of many sessions,
     // so walk back past them rather than reading the newest row and giving up.
@@ -516,14 +560,15 @@ pub fn extract_last_tool(session: &Session) -> String {
     let Some(path) = &session.data_file else {
         return String::new();
     };
-    let Ok(db) = readonly(path) else {
-        return String::new();
-    };
+    with_db(path, |db| last_tool(db, &session.session_id)).unwrap_or_default()
+}
+
+fn last_tool(db: &Connection, session_id: &str) -> String {
     db.query_row(
         "SELECT json_extract(data, '$.tool') FROM part \
          WHERE session_id = ?1 AND json_extract(data, '$.type') = 'tool' \
          ORDER BY time_created DESC, id DESC LIMIT 1",
-        params![session.session_id],
+        params![session_id],
         |row| row.get(0),
     )
     .optional()
