@@ -34,6 +34,24 @@ mod watch;
 use clap::Parser;
 use std::io::IsTerminal;
 
+/// mimalloc, rather than whichever allocator the platform came with.
+///
+/// Nearly everything cctop does at load is allocate: parsing JSON transcripts,
+/// on every core at once. That makes the allocator the hot path rather than a
+/// detail of it, and the Linux binaries we ship are static musl builds whose
+/// allocator does not hold up under exactly that — many threads, small
+/// allocations, all at the same time.
+///
+/// Measured on a machine with 2020 sessions, the same commit built against
+/// glibc instead of musl: discovery took 0.17s where musl took 7.22s, and the
+/// whole run 2.8s against 13.5s. Neither number is about parsing.
+///
+/// Replacing the allocator keeps what musl was chosen for — one static binary
+/// that runs on any Linux — instead of trading it away for a glibc build with a
+/// floor on how old a distribution may be.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> anyhow::Result<()> {
     // `cctop run <agent> …` is handled before clap so the agent's own flags are
     // never mistaken for cctop's — `cctop claude --help` must reach claude.
