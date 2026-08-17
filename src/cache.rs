@@ -141,18 +141,28 @@ impl CostCache {
                 None => "absent".into(),
             },
         );
-        let parsed = text.and_then(|t| serde_json::from_str::<DiskCache>(&t).ok());
-        // A cache the running binary cannot read is the single most confusing
+        // A cache the running binary cannot use is the single most confusing
         // thing to debug from the outside: everything re-parses, every run, and
-        // nothing says why.
-        if let Some(c) = &parsed
-            && c.version != CACHE_VERSION
-        {
-            crate::trace::fact(
-                "cache version",
-                format!("stale — file {} vs binary {CACHE_VERSION}", c.version),
-            );
-        }
+        // nothing says why. The three ways it happens look identical from a
+        // stopwatch and want different fixes, so they are reported apart —
+        // unreadable means the file is damaged and should be deleted, stale
+        // means the binary changed and the next run will be fine.
+        let parsed = match text.as_deref().map(serde_json::from_str::<DiskCache>) {
+            None => None,
+            Some(Ok(c)) => {
+                if c.version != CACHE_VERSION {
+                    crate::trace::fact(
+                        "cache state",
+                        format!("stale — file {} vs binary {CACHE_VERSION}", c.version),
+                    );
+                }
+                Some(c)
+            }
+            Some(Err(error)) => {
+                crate::trace::fact("cache state", format!("unreadable — {error}"));
+                None
+            }
+        };
         let mut entries = parsed
             .filter(|c| c.version == CACHE_VERSION)
             .map(|c| c.entries)
@@ -213,27 +223,51 @@ impl CostCache {
         evict_oldest(&mut entries);
 
         let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
-        // Write-then-rename: a crash or a full disk mid-write would otherwise
-        // leave truncated JSON, throwing away every cached session.
-        let tmp = config::COST_CACHE_FILE.with_extension("json.tmp");
-        let wrote = std::fs::File::create(&tmp).is_ok_and(|file| {
-            serde_json::to_writer(
-                std::io::BufWriter::new(&file),
-                &DiskCacheRef {
-                    version: CACHE_VERSION,
-                    entries: &entries,
-                },
-            )
-            .is_ok()
-        });
-        if wrote && std::fs::rename(&tmp, &*config::COST_CACHE_FILE).is_ok() {
-            if let Ok(mut d) = self.dirty.lock() {
-                *d = false;
-            }
-        } else {
-            let _ = std::fs::remove_file(&tmp);
+        if write_atomically(&config::COST_CACHE_FILE, &entries).is_ok()
+            && let Ok(mut d) = self.dirty.lock()
+        {
+            *d = false;
         }
     }
+}
+
+/// Serialize `entries` to `path`, leaving the old file untouched unless the new
+/// one was written whole.
+///
+/// Write-then-rename, because a crash or a full disk mid-write would otherwise
+/// leave truncated JSON in place of every cached session.
+///
+/// The buffer is flushed by hand rather than left to `BufWriter`'s drop, which
+/// flushes and then discards whatever the flush said. `to_writer` returns `Ok`
+/// once the bytes are *buffered*, so without this a write failing on its last
+/// block — a full disk, a quota, a disconnected network home — still reported
+/// success and renamed a truncated file over a good cache. Nothing could read
+/// it afterwards, and a cache that parses as nothing is indistinguishable from
+/// an empty one, so every session re-parsed on every run from then on.
+fn write_atomically(path: &Path, entries: &HashMap<String, Entry>) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("json.tmp");
+    let written = (|| -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        serde_json::to_writer(
+            &mut out,
+            &DiskCacheRef {
+                version: CACHE_VERSION,
+                entries,
+            },
+        )?;
+        out.flush()
+    })();
+    if written.is_ok()
+        && let Err(error) = std::fs::rename(&tmp, path)
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Drop the least recently stored entries once the cache exceeds `MAX_ENTRIES`.
@@ -421,6 +455,18 @@ impl Store {
         }
 
         let _span = crate::trace::span("extract.parse");
+        // Split by provider too. The aggregate says extraction is slow; it
+        // cannot say whether that is one harness's transcripts or all of them,
+        // and the two have nothing in common to fix.
+        let _by_provider = crate::trace::span(match session.provider {
+            crate::pricing::Provider::Claude => "extract.claude",
+            crate::pricing::Provider::Codex => "extract.codex",
+            crate::pricing::Provider::Cursor => "extract.cursor",
+            crate::pricing::Provider::Gemini => "extract.gemini",
+            crate::pricing::Provider::OpenCode => "extract.opencode",
+            crate::pricing::Provider::Pi => "extract.pi",
+            crate::pricing::Provider::Windsurf => "extract.windsurf",
+        });
         crate::trace::add("transcripts parsed", 1);
         // Only where the file backs this session alone. OpenCode keeps every
         // session in one database and Windsurf every conversation in one blob,
@@ -876,6 +922,56 @@ mod tests {
         assert!(serves(&restored, true), "a row may be served from cache");
         assert!(!serves(&restored, false), "a panel may not");
         assert!(serves(&fresh, false), "a real parse serves anything");
+    }
+
+    /// The bug this replaced: `to_writer` reports success once the bytes reach
+    /// the buffer, and `BufWriter`'s drop flushed the rest while discarding any
+    /// error — so a write that failed on its last block still renamed truncated
+    /// JSON over a good cache. What came back parsed as nothing, which reads
+    /// exactly like an empty cache, so every session re-parsed on every run and
+    /// nothing ever said why.
+    #[test]
+    fn a_saved_cache_reads_back_whole() {
+        let dir = std::env::temp_dir().join(format!("cctop-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("a.jsonl");
+        std::fs::write(&transcript, "x").unwrap();
+        let file = dir.join("cost-cache.json");
+
+        // Big enough to span many buffers, which is where a lost flush shows.
+        let mut entries = HashMap::new();
+        for i in 0..500 {
+            let mut data = SessionData::default();
+            data.costs.total = i as f64;
+            data.title = Some("x".repeat(500));
+            entries.insert(
+                format!("k{i}"),
+                Entry {
+                    path: transcript.clone(),
+                    stored_at: i,
+                    data,
+                },
+            );
+        }
+        write_atomically(&file, &entries).expect("the write must report its own failure");
+
+        let back: DiskCache = serde_json::from_str(&std::fs::read_to_string(&file).unwrap())
+            .expect("a saved cache must parse");
+        assert_eq!(back.version, CACHE_VERSION);
+        assert_eq!(back.entries.len(), 500);
+        assert_eq!(back.entries["k499"].data.costs.total, 499.0);
+        // The scratch file must not be left behind next to the real one.
+        assert!(!file.with_extension("json.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A destination that cannot be written has to be reported, not swallowed:
+    /// silently keeping the old cache forever is how a machine ends up
+    /// re-parsing everything on every run with nothing to show for it.
+    #[test]
+    fn an_unwritable_destination_is_an_error() {
+        let path = Path::new("/nonexistent-directory-cctop/cost-cache.json");
+        assert!(write_atomically(path, &HashMap::new()).is_err());
     }
 
     #[test]
