@@ -107,18 +107,25 @@ impl Loader {
         D: FnOnce(&[Session]),
         A: Fn(&Session) + Sync,
     {
+        let _span = crate::trace::span("walk");
         let mut sessions = session::list_all();
 
         // Process state and labels are cheap enough to include in the first
         // visible rows; transcript tails and full extraction can follow.
-        self.attach_processes(&mut sessions);
+        {
+            let _span = crate::trace::span("walk.processes");
+            self.attach_processes(&mut sessions);
+        }
         let labels: Vec<String> = sessions.iter().map(|s| s.label_source.clone()).collect();
         for (s, label) in sessions.iter_mut().zip(util::abbreviate_paths(&labels)) {
             s.abbrev_label = label;
         }
         on_discovered(&sessions);
 
-        self.attach_tail_state(&mut sessions);
+        {
+            let _span = crate::trace::span("walk.tails");
+            self.attach_tail_state(&mut sessions);
+        }
         let store = self.store();
 
         // Extraction dominates wall time on large transcripts, and each session
@@ -132,9 +139,12 @@ impl Loader {
             annotate(s, &store.session_data(s), plan);
             on_annotated(s);
         };
-        match self.gentle.as_ref().filter(|_| !eager) {
-            Some(pool) => pool.install(|| sessions.par_iter_mut().for_each(step)),
-            None => sessions.par_iter_mut().for_each(step),
+        {
+            let _span = crate::trace::span("walk.extract");
+            match self.gentle.as_ref().filter(|_| !eager) {
+                Some(pool) => pool.install(|| sessions.par_iter_mut().for_each(step)),
+                None => sessions.par_iter_mut().for_each(step),
+            }
         }
 
         self.update_rates(&mut sessions);
@@ -268,6 +278,7 @@ impl Loader {
     /// Returns the rows that changed, so the caller can ship those instead of
     /// copying the whole table back to the UI.
     pub fn refresh_live(&mut self, plan: Plan, sessions: &mut Vec<Session>) -> Vec<Session> {
+        let _span = crate::trace::span("refresh-live");
         // A row that has just stopped changed too, and its cleared process has to
         // reach the table, so remember who was live before the process sweep.
         let was_live: std::collections::HashSet<String> = sessions

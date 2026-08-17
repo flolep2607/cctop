@@ -25,6 +25,7 @@ mod shim;
 #[path = "shim_stub.rs"]
 mod shim;
 mod tmux;
+mod trace;
 mod ui;
 mod update;
 mod util;
@@ -105,6 +106,12 @@ fn main() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     let args = cli::Args::parse();
 
+    // Before anything else measurable happens, and in particular before the
+    // caches are touched: a trace that starts after the slow part is no trace.
+    if args.trace.is_some() {
+        trace::enable();
+    }
+
     if args.update {
         return update::run(false);
     }
@@ -173,6 +180,7 @@ fn main() -> anyhow::Result<()> {
         let sessions = loader.load(args.plan);
         cli::run_handoff(&sessions, which, &loader)?;
         loader.store().save();
+        finish_trace(&args);
         return Ok(());
     }
 
@@ -189,6 +197,7 @@ fn main() -> anyhow::Result<()> {
             cli::run_list(&sessions, args.plan);
         }
         loader.store().save();
+        finish_trace(&args);
         return Ok(());
     }
 
@@ -228,5 +237,31 @@ fn main() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     let hosted = None;
 
-    std::process::exit(ui::run(&args, hosted)?)
+    let code = ui::run(&args, hosted)?;
+    // After the UI is down, so the message is not painted over by the alternate
+    // screen being restored.
+    finish_trace(&args);
+    std::process::exit(code)
+}
+
+/// Write the trace, if one was asked for, and say where it went.
+///
+/// The path is printed rather than merely returned because the whole point is
+/// to hand the file to somebody: a report written somewhere the user has to go
+/// looking for is one they will not send.
+fn finish_trace(args: &cli::Args) {
+    let Some(requested) = args.trace.as_deref() else {
+        return;
+    };
+    let path = match requested {
+        "" => trace::default_path(),
+        given => std::path::PathBuf::from(given),
+    };
+    match trace::write_to(&path) {
+        Ok(()) => eprintln!("cctop: trace written to {}", path.display()),
+        Err(error) => eprintln!(
+            "cctop: could not write trace to {}: {error}",
+            path.display()
+        ),
+    }
 }

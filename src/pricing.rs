@@ -252,13 +252,25 @@ pub fn install_test_table(
 
 /// Load pricing from the disk cache if it is fresh. Returns `true` on success.
 pub fn load_cached_pricing() -> bool {
+    let _span = crate::trace::span("pricing.load");
     let Ok(text) = std::fs::read_to_string(&*config::PRICING_CACHE_FILE) else {
+        crate::trace::fact("pricing table", "not cached — costs start at zero");
         return false;
     };
     let Ok(cache) = serde_json::from_str::<PricingCache>(&text) else {
         return false;
     };
-    let fresh = unix_secs().saturating_sub(cache.fetched_at) < config::PRICING_CACHE_MAX_AGE_SECS;
+    let age = unix_secs().saturating_sub(cache.fetched_at);
+    let fresh = age < config::PRICING_CACHE_MAX_AGE_SECS;
+    crate::trace::fact(
+        "pricing table",
+        format!(
+            "{} models, {}h old{}",
+            cache.data.len(),
+            age / 3600,
+            if fresh { "" } else { " — will re-fetch" }
+        ),
+    );
     install(cache.data);
     fresh
 }
@@ -271,6 +283,9 @@ pub fn refresh_pricing_blocking() {
     if load_cached_pricing() {
         return; // cache is fresh, nothing to do
     }
+    // Timed separately from the parse: a table that downloads slowly and one
+    // that parses slowly are a firewall and a slow machine respectively.
+    let _span = crate::trace::span("pricing.fetch");
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(10)))
         .build()

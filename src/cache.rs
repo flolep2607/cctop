@@ -128,16 +128,44 @@ pub fn clear_session_cache() -> anyhow::Result<bool> {
 
 impl CostCache {
     pub fn load() -> Self {
-        let mut entries = std::fs::read_to_string(&*config::COST_CACHE_FILE)
-            .ok()
-            .and_then(|t| serde_json::from_str::<DiskCache>(&t).ok())
+        let _span = crate::trace::span("cache.load");
+        let text = std::fs::read_to_string(&*config::COST_CACHE_FILE).ok();
+        crate::trace::fact(
+            "cache file",
+            match &text {
+                Some(t) => format!(
+                    "{} ({} bytes)",
+                    crate::trace::redact(&config::COST_CACHE_FILE),
+                    t.len()
+                ),
+                None => "absent".into(),
+            },
+        );
+        let parsed = text.and_then(|t| serde_json::from_str::<DiskCache>(&t).ok());
+        // A cache the running binary cannot read is the single most confusing
+        // thing to debug from the outside: everything re-parses, every run, and
+        // nothing says why.
+        if let Some(c) = &parsed
+            && c.version != CACHE_VERSION
+        {
+            crate::trace::fact(
+                "cache version",
+                format!("stale — file {} vs binary {CACHE_VERSION}", c.version),
+            );
+        }
+        let mut entries = parsed
             .filter(|c| c.version == CACHE_VERSION)
             .map(|c| c.entries)
             .unwrap_or_default();
+        let stored = entries.len();
         // Deleted transcripts are the only entries worth a `stat`, and once per
         // process start is enough: an entry whose file merely *changed* is
         // superseded by key on the next `put`, at no IO cost at all.
         entries.retain(|_, e| e.path.exists());
+        crate::trace::fact(
+            "cache entries",
+            format!("{} usable, {} gone", entries.len(), stored - entries.len()),
+        );
         CostCache {
             entries: Mutex::new(entries),
             dirty: Mutex::new(false),
@@ -178,6 +206,7 @@ impl CostCache {
         if !self.dirty.lock().map(|d| *d).unwrap_or(false) {
             return;
         }
+        let _span = crate::trace::span("cache.save");
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
@@ -338,6 +367,7 @@ impl Store {
             // A copy that came off disk carries no tool history and no context
             // series, so it answers a row but not a panel.
             if entry.mtime == mtime && (allow_stale || entry.data.complete) {
+                crate::trace::add("served from memory", 1);
                 return entry.data.clone();
             }
             // ponytail: re-parse backoff, not incremental parsing. A transcript is
@@ -348,6 +378,7 @@ impl Store {
             // waste: a transcript costing 500ms to parse is re-read every 10s
             // instead of every 2s, while cheap ones stay effectively live.
             if allow_stale && reuse_stale(entry.parsed_in, entry.parsed_at.elapsed(), entry.size) {
+                crate::trace::add("served stale to bound cpu", 1);
                 return entry.data.clone();
             }
         }
@@ -385,9 +416,23 @@ impl Store {
                     },
                 );
             }
+            crate::trace::add("served from cache file", 1);
             return data;
         }
 
+        let _span = crate::trace::span("extract.parse");
+        crate::trace::add("transcripts parsed", 1);
+        // Only where the file backs this session alone. OpenCode keeps every
+        // session in one database and Windsurf every conversation in one blob,
+        // both read by indexed lookup rather than end to end — so charging each
+        // session the whole file would report a 70 MB database ten times over
+        // and drown the figure this is here to give.
+        if !matches!(
+            session.provider,
+            crate::pricing::Provider::OpenCode | crate::pricing::Provider::Windsurf
+        ) {
+            crate::trace::add("parsed_bytes", file_size(file));
+        }
         let started = std::time::Instant::now();
         let mut data = match session.provider {
             crate::pricing::Provider::Claude => crate::session::claude::extract(file),

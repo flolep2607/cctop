@@ -29,7 +29,9 @@ cctop attach [pid]     Put a running agent on this terminal. With no pid, lists\
 them. F12 detaches and leaves it running.\n  \
 cctop doctor           Check this installation and say what is wrong with it:\n                         \
 where sessions are read from, pricing, hooks, and what\n                         \
-`s` can reach. --host also tests an ssh target.\n\n\
+`s` can reach. --host also tests an ssh target.\n  \
+cctop --trace          Time each stage of a run and write the totals to a file\n                         \
+on exit, to attach to a bug report about slowness.\n\n\
 Use --help for the full description.",
     // Otherwise clap repeats the block above under the long description, which
     // covers the same ground at length.
@@ -68,7 +70,12 @@ DIAGNOSING\n  \
 `cctop doctor` reports where sessions are read from and how many it found,\n  \
 whether pricing loaded, which agent hooks are installed, and what `s` can\n  \
 reach. It exits non-zero only for a real fault, so it is usable in a script.\n  \
-`cctop doctor --host <host>` additionally makes the ssh round trip.\n\n\
+`cctop doctor --host <host>` additionally makes the ssh round trip.\n  \
+--trace answers the other question, which is why a run is slow. It times each\n  \
+stage — discovery, transcript parsing, the cache, the pricing fetch — and\n  \
+writes the totals to a file when cctop exits, for attaching to a bug report.\n  \
+It carries counts and durations only: no session titles, project paths or\n  \
+file names, and cctop's own paths are spelled with `~`.\n\n\
 EVERY USER\n  \
 Run as root and cctop reads every user's sessions rather than root's own,\n  \
 naming whose each row is in the USER column. CCTOP_ALL_USERS=0 turns that\n  \
@@ -145,6 +152,13 @@ pub struct Args {
     /// separated. Remote rows are read-only: cctop acts only on this machine
     #[arg(long = "host", value_name = "HOST")]
     pub hosts: Vec<String>,
+
+    /// Time each stage of the run and write the totals to a file on exit, for
+    /// sending to a bug report. Takes a path; with no argument, writes beside
+    /// the cache and prints where. Carries counts and durations only — no
+    /// session titles, project paths or file names
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "FILE")]
+    pub trace: Option<String>,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {

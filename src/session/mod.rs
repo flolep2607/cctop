@@ -1344,6 +1344,7 @@ impl SessionData {
 
 /// All sessions from every known provider and surface, newest first.
 pub fn list_all() -> Vec<Session> {
+    let _span = crate::trace::span("discover");
     let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, windsurf)))) = rayon::join(
         || rayon::join(codex::list_sessions, claude::list_sessions),
         || {
@@ -1375,6 +1376,16 @@ pub fn list_all() -> Vec<Session> {
         }
     }
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    // Reported once per walk rather than accumulated, so the figure reads as
+    // "this many sessions exist" rather than that times the number of walks.
+    crate::trace::fact("sessions found", sessions.len().to_string());
+    crate::trace::fact(
+        "homes scanned",
+        format!(
+            "{} (self plus others)",
+            1 + crate::config::OTHER_HOMES.len()
+        ),
+    );
     sessions
 }
 
