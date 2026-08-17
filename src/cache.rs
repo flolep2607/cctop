@@ -33,6 +33,14 @@ const CACHE_VERSION: &str = env!("CCTOP_CACHE_HASH");
 #[derive(Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
+    /// Which session inside `path` this describes.
+    ///
+    /// The path alone used to identify an entry, which is true only where a
+    /// file holds one session. OpenCode keeps every session in one database, so
+    /// storing one evicted all its siblings as superseded and the cache held
+    /// exactly one OpenCode session however many there were.
+    #[serde(default)]
+    session: String,
     /// Unix millis of the write that stored this, used to evict the oldest
     /// entries when the cache outgrows its bound.
     #[serde(default)]
@@ -70,6 +78,40 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Disk key for a session, or `None` where one cannot be formed.
+///
+/// Most providers give a session its own transcript, so the file's identity is
+/// the session's. OpenCode keeps every session in one database, where the file
+/// says nothing about any single one: its size and mtime move when *any*
+/// session is written, and a path-only key would make all of them collide on
+/// one entry. That is why they went uncached — and why it cost so much. A trace
+/// from a 2019-session machine put 1478 of them in OpenCode, 84% of all the
+/// time spent extracting, repeated in full on every run because none of it
+/// could be kept.
+///
+/// So the key is the session's own: its id, and the `time_updated` that
+/// discovery already read out of the `session` row and put in `last_active`.
+/// That is exactly the stamp that moves when this session gains a message, so
+/// it invalidates for the session that changed and no other — better than an
+/// mtime, which cannot tell them apart.
+///
+/// Windsurf keeps its conversations in one settings blob much as OpenCode does,
+/// but nothing in that blob dates them per conversation, so there is no honest
+/// key to build and it stays uncached.
+fn disk_key(session: &Session, file: &Path) -> Option<String> {
+    match session.provider {
+        crate::pricing::Provider::Windsurf => None,
+        crate::pricing::Provider::OpenCode => Some(format!(
+            "{}|{}|{}|p{}",
+            file.display(),
+            session.session_id,
+            session.last_active,
+            crate::pricing::pricing_epoch()
+        )),
+        _ => cache_key(file),
+    }
+}
+
 /// Identity of a transcript's *content*: any append changes size or mtime, so a
 /// stale entry can never be mistaken for a fresh one.
 ///
@@ -77,6 +119,7 @@ fn now_ms() -> u64 {
 /// parent's own mtime doesn't move while a subagent streams into its own file,
 /// and neither does the `subagents/` directory mtime, which only changes when
 /// files are added or removed.
+///
 /// The key also carries the pricing generation, because cached entries hold
 /// computed costs rather than raw tokens: a refreshed rate table has to
 /// invalidate them just as an appended transcript does.
@@ -186,16 +229,21 @@ impl CostCache {
         self.entries.lock().ok()?.get(key).map(|e| e.data.clone())
     }
 
-    pub fn put(&self, key: String, path: &Path, data: &SessionData) {
+    pub fn put(&self, key: String, path: &Path, session: &str, data: &SessionData) {
         if let Ok(mut entries) = self.entries.lock() {
-            // The old key for this transcript can never be hit again — the file
-            // has moved past it — so drop it here rather than re-deriving every
-            // key from the filesystem at save time.
-            entries.retain(|k, e| k == &key || e.path != path);
+            // The old key for this session can never be hit again — its
+            // transcript has moved past it — so drop it here rather than
+            // re-deriving every key from the filesystem at save time.
+            //
+            // Matched on the session as well as the file. On path alone, every
+            // session sharing a database counted as superseding every other,
+            // so each one stored evicted the rest.
+            entries.retain(|k, e| k == &key || e.path != path || e.session != session);
             entries.insert(
                 key,
                 Entry {
                     path: path.to_path_buf(),
+                    session: session.to_string(),
                     stored_at: now_ms(),
                     data: data.clone(),
                 },
@@ -417,16 +465,7 @@ impl Store {
             }
         }
 
-        // OpenCode stores every session in one database, and Windsurf every
-        // conversation in a workspace in one settings blob. A path-only disk key
-        // would make all sessions alias the first extracted row, so keep those
-        // entries in the session-keyed memory cache only.
-        let disk_key = (!matches!(
-            session.provider,
-            crate::pricing::Provider::OpenCode | crate::pricing::Provider::Windsurf
-        ))
-        .then(|| cache_key(file))
-        .flatten();
+        let disk_key = disk_key(session, file);
         // Rows only: what the disk holds is missing exactly the fields the panel
         // is opened to read, so serving it there would draw an empty panel over
         // a session that has plenty to show.
@@ -513,7 +552,7 @@ impl Store {
         if let Some(key) = disk_key
             && data.error.is_none()
         {
-            self.disk.put(key, file, &data);
+            self.disk.put(key, file, &session.session_id, &data);
         }
         data
     }
@@ -523,8 +562,11 @@ impl Store {
         if let Ok(mut mem) = self.mem.lock() {
             mem.remove(&session.key());
         }
+        // Derived the same way it was stored, or a shared-database session
+        // would leave its entry behind — and now that those are cached, that
+        // entry would outlive the session it describes.
         if let Some(file) = session.data_file.as_ref()
-            && let Some(key) = cache_key(file)
+            && let Some(key) = disk_key(session, file)
         {
             if let Ok(mut e) = self.disk.entries.lock() {
                 e.remove(&key);
@@ -787,7 +829,7 @@ mod tests {
         };
         let key = cache_key(&file).unwrap();
         assert!(key.contains("a|b"), "the key embeds the awkward path");
-        cache.put(key.clone(), &file, &SessionData::default());
+        cache.put(key.clone(), &file, "sess", &SessionData::default());
 
         let entries = cache.entries.lock().unwrap();
         assert_eq!(entries.len(), 1);
@@ -804,8 +846,8 @@ mod tests {
             entries: Mutex::new(HashMap::new()),
             dirty: Mutex::new(false),
         };
-        cache.put("k1".into(), path, &SessionData::default());
-        cache.put("k2".into(), path, &SessionData::default());
+        cache.put("k1".into(), path, "sess", &SessionData::default());
+        cache.put("k2".into(), path, "sess", &SessionData::default());
         let entries = cache.entries.lock().unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries.contains_key("k2"));
@@ -819,6 +861,7 @@ mod tests {
                 format!("k{i}"),
                 Entry {
                     path: PathBuf::from(format!("/tmp/{i}.jsonl")),
+                    session: format!("s{i}"),
                     stored_at: i as u64,
                     data: SessionData::default(),
                 },
@@ -948,6 +991,7 @@ mod tests {
                 format!("k{i}"),
                 Entry {
                     path: transcript.clone(),
+                    session: format!("s{i}"),
                     stored_at: i,
                     data,
                 },
@@ -972,6 +1016,34 @@ mod tests {
     fn an_unwritable_destination_is_an_error() {
         let path = Path::new("/nonexistent-directory-cctop/cost-cache.json");
         assert!(write_atomically(path, &HashMap::new()).is_err());
+    }
+
+    /// Every OpenCode session names the same database file, so the key has to
+    /// come from the session. Sharing one would have served all 1478 of them
+    /// whatever the first one extracted.
+    #[test]
+    fn shared_database_sessions_get_a_key_each() {
+        let db = Path::new("/tmp/opencode.db");
+        let key_of = |id: &str, updated: &str| {
+            let mut s = Session::new(crate::pricing::Provider::OpenCode, id.into());
+            s.last_active = updated.into();
+            disk_key(&s, db).expect("a shared-database session must still be keyable")
+        };
+
+        assert_ne!(key_of("a", "2026-01-01"), key_of("b", "2026-01-01"));
+        // …and a session that gained a message must not be served its old copy.
+        assert_ne!(key_of("a", "2026-01-01"), key_of("a", "2026-01-02"));
+        // …while one that did not change keeps its entry, which is the point.
+        assert_eq!(key_of("a", "2026-01-01"), key_of("a", "2026-01-01"));
+    }
+
+    /// Windsurf shares a blob the way OpenCode shares a database, but nothing
+    /// in it dates a single conversation — so there is no honest key, and
+    /// inventing one would serve a stale panel rather than a slow correct one.
+    #[test]
+    fn windsurf_stays_uncached_for_want_of_a_stamp() {
+        let s = Session::new(crate::pricing::Provider::Windsurf, "x".into());
+        assert!(disk_key(&s, Path::new("/tmp/state.vscdb")).is_none());
     }
 
     #[test]
