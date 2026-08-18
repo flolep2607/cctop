@@ -621,6 +621,13 @@ pub struct UiPrefs {
     pub hidden_columns: Vec<String>,
     /// Chosen theme name, or `None` to follow the built-in default.
     pub theme: Option<String>,
+    /// Claude profile a new tab launches under, by name.
+    ///
+    /// Remembered because a profile is an account, and somebody working out of
+    /// their work login is working out of it all afternoon — having every new
+    /// tab revert to the personal one would be a mistake made silently, in the
+    /// place where it costs the most to notice late.
+    pub claude_profile: Option<String>,
     /// Recent `/` queries, newest first, so a search worth running twice does
     /// not have to be typed twice. Capped at [`MAX_SEARCH_HISTORY`].
     pub search_history: Vec<String>,
@@ -648,6 +655,7 @@ impl Default for UiPrefs {
             shell_alias_installed: false,
             hidden_columns: Vec::new(),
             theme: None,
+            claude_profile: None,
             search_history: Vec::new(),
         }
     }

@@ -438,6 +438,24 @@ pub fn choices(open: &[String]) -> Vec<Choice> {
 /// typed, minus any path, which matches what [`shim::host`](crate::shim::host)
 /// calls it once it is running.
 pub fn label_of(argv: &[String]) -> String {
+    // `env VAR=value claude` is a `claude` tab. The prefix is how the agent was
+    // started, which is plumbing, and naming a tab after its plumbing is the
+    // same mistake as calling one `tmux new-session -A -s cctop-claude`.
+    let mut argv = argv;
+    if argv.first().map(String::as_str) == Some("env") {
+        let mut rest = &argv[1..];
+        while rest
+            .first()
+            .is_some_and(|a| a.contains('=') && !a.starts_with('-'))
+        {
+            rest = &rest[1..];
+        }
+        // Only when a command is left. `env` alone is a command in its own
+        // right, and a tab with no name at all is worse than one named oddly.
+        if !rest.is_empty() {
+            argv = rest;
+        }
+    }
     argv.iter()
         .map(|arg| arg.rsplit('/').next().unwrap_or(arg))
         .collect::<Vec<_>>()
@@ -446,6 +464,29 @@ pub fn label_of(argv: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tab launched under a profile is still a `claude` tab. The `env` prefix
+    /// is how it was started, and naming a tab after its plumbing is the same
+    /// mistake as calling one `tmux new-session -A -s cctop-claude`.
+    #[test]
+    fn a_profile_prefix_does_not_become_the_tab_name() {
+        let argv: Vec<String> = ["env", "CLAUDE_CONFIG_DIR=/home/x/.claude-work", "claude"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(label_of(&argv), "claude");
+
+        // Several, and a flag the agent owns, which must survive.
+        let argv: Vec<String> = ["env", "A=1", "B=2", "claude", "--resume"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(label_of(&argv), "claude --resume");
+
+        // A command that merely happens to be called `env` keeps its name.
+        assert_eq!(label_of(&["env".to_string()]), "env");
+        assert_eq!(label_of(&["claude".to_string()]), "claude");
+    }
     use super::*;
 
     /// The launcher must never offer something that isn't there — picking it

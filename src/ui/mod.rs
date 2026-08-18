@@ -575,6 +575,9 @@ pub struct App {
     pub refresh_secs: f64,
     /// Only show sessions whose total cost reaches this floor.
     pub cost_floor: f64,
+    /// Which Claude profile the launcher will start an agent under, as an index
+    /// into [`crate::config::CLAUDE_PROFILES`].
+    pub launch_profile: usize,
     /// Raw digits being typed into the cost-floor modal.
     pub cost_input: String,
     /// Line being typed into the selected session's terminal.
@@ -802,6 +805,18 @@ impl App {
             follow: false,
             refresh_secs: 2.0,
             cost_floor: prefs.cost_floor,
+            // The one used last, or the default when that profile has since
+            // gone: a name that no longer resolves must not silently launch
+            // under somebody else's account.
+            launch_profile: prefs
+                .claude_profile
+                .as_deref()
+                .and_then(|name| {
+                    crate::config::CLAUDE_PROFILES
+                        .iter()
+                        .position(|p| p.name == name)
+                })
+                .unwrap_or(0),
             cost_input: String::new(),
             send_input: String::new(),
             list_height: 0,
@@ -1078,6 +1093,7 @@ impl App {
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;
+        self.prefs.claude_profile = self.launch_profile().map(|p| p.name.clone());
         self.prefs.notify = self.notify.enabled;
         self.prefs.search_history = self.search_history.clone();
         self.prefs.save();
@@ -2471,6 +2487,55 @@ impl App {
         &self.launch_offer
     }
 
+    /// The profile a launch would use, or `None` when there is only the one and
+    /// so nothing to choose between.
+    pub fn launch_profile(&self) -> Option<&'static crate::config::ClaudeProfile> {
+        let profiles = &*crate::config::CLAUDE_PROFILES;
+        (profiles.len() > 1).then(|| profiles.get(self.launch_profile))?
+    }
+
+    /// Move to the next profile. Wraps, because with two — which is the case
+    /// this exists for — a key that toggles is the whole interaction.
+    pub(super) fn cycle_launch_profile(&mut self) {
+        let n = crate::config::CLAUDE_PROFILES.len();
+        if n > 1 {
+            self.launch_profile = (self.launch_profile + 1) % n;
+            self.save_prefs();
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Whether `argv` starts Claude Code, and so whether a profile means
+    /// anything to it. `$CLAUDE_CONFIG_DIR` is Claude's; setting it in front of
+    /// codex would be a promise the env var cannot keep.
+    pub(super) fn takes_claude_profile(argv: &[String]) -> bool {
+        argv.first()
+            .map(|c| c.rsplit(['/', '\\']).next().unwrap_or(c))
+            .is_some_and(|c| c == "claude" || c == "claude.exe")
+    }
+
+    /// Put the chosen profile in front of the command that will read it.
+    ///
+    /// `env VAR=value cmd` rather than plumbing an environment through every
+    /// spawn path: the same argv is handed to tmux, to a pty cctop owns, and to
+    /// `tmux new-session`, and `env` is understood identically by all three.
+    /// [`tabs::label_of`] drops the prefix again so the tab is named after the
+    /// agent rather than after how it was started.
+    fn with_profile(&self, argv: Vec<String>) -> Vec<String> {
+        let Some(profile) = self
+            .launch_profile()
+            .filter(|_| Self::takes_claude_profile(&argv))
+        else {
+            return argv;
+        };
+        let mut out = vec![
+            "env".to_string(),
+            format!("CLAUDE_CONFIG_DIR={}", profile.dir.display()),
+        ];
+        out.extend(argv);
+        out
+    }
+
     /// What a still-running agent in the launcher is doing, if it has said.
     ///
     /// This is the whole reason the offer carries a pid. A list of tmux session
@@ -2521,7 +2586,7 @@ impl App {
                 // it is answered, and the launcher's snapshot is still here to
                 // run it from.
                 let Some(own) = own else { return };
-                (argv.clone(), own)
+                (self.with_profile(argv.clone()), own)
             }
         };
         // The offer is a snapshot, and an agent can finish in the time the modal

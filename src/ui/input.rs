@@ -211,6 +211,9 @@ impl App {
                 self.launch_cursor = (self.launch_cursor + n - 1) % n
             }
             KeyCode::Down | KeyCode::Char('j') => self.launch_cursor = (self.launch_cursor + 1) % n,
+            // Only where there is more than one account to be in, so the key is
+            // absent rather than inert on the machines that have never had two.
+            KeyCode::Char('p') => self.cycle_launch_profile(),
             KeyCode::Enter => {
                 self.mode = Mode::List;
                 self.launch_selected();

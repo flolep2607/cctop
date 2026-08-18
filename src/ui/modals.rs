@@ -615,6 +615,20 @@ pub(super) fn draw_launch(
         },
         Style::default().fg(theme::colors().label),
     )));
+    // Only for an agent the profile reaches, and only where there is more than
+    // one to be in: on a machine with a single account this says nothing, and a
+    // line offering a key that changes nothing is worse than no line.
+    let profile = match picked {
+        Some(tabs::Choice::Start(argv)) if App::takes_claude_profile(argv) => app.launch_profile(),
+        _ => None,
+    };
+    if let Some(profile) = profile {
+        lines.push(Line::from(vec![
+            Span::styled(" as ", Style::default().fg(theme::colors().label)),
+            Span::styled(profile.name.clone(), theme::value()),
+            Span::styled("  (p to change)", theme::dim()),
+        ]));
+    }
     let keys = match picked_waiting {
         true => " ↑/↓  Enter reattach  Esc cancel",
         false => " ↑/↓  Enter start  Esc cancel",

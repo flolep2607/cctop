@@ -17,6 +17,79 @@ pub static CLAUDE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 pub static CLAUDE_PROJECTS_ROOT: LazyLock<PathBuf> =
     LazyLock::new(|| CLAUDE_CONFIG_DIR.join("projects"));
 
+/// One Claude configuration directory: its own credentials, settings, and
+/// transcripts.
+///
+/// `$CLAUDE_CONFIG_DIR` lets one machine hold several accounts side by side —
+/// a personal login and a work one — and each keeps its own `projects/`. cctop
+/// read only the one the env var named, so the sessions of every other profile
+/// were invisible: on the machine this was written for, three of them, one of
+/// which was running at the time and showed as a row with a process and no
+/// model, no cost and no tokens, because its transcript was somewhere cctop
+/// was not looking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeProfile {
+    /// What to call it on screen: `default` for `~/.claude`, else the suffix —
+    /// `~/.claude-work` is `work`.
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+/// The name a profile directory goes by.
+fn profile_name(dir: &Path) -> String {
+    let raw = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match raw.strip_prefix(".claude") {
+        // `~/.claude` itself, the one every install starts with.
+        Some("") => "default".to_string(),
+        Some(rest) => rest.trim_start_matches(['-', '_', '.']).to_string(),
+        // Somewhere else entirely, named by `$CLAUDE_CONFIG_DIR`.
+        None => raw,
+    }
+}
+
+/// Every Claude profile in `home`, newest naming first, `~/.claude` leading.
+///
+/// A profile is a directory holding `.credentials.json`: that file is what
+/// makes a directory an account rather than a folder that happens to be called
+/// `.claude-something`. Only the home's immediate children are considered —
+/// a profile can contain a nested `.claude` of its own, and treating that as a
+/// second account would list one login twice.
+pub fn claude_profiles_in(home: &Path) -> Vec<ClaudeProfile> {
+    let mut out: Vec<ClaudeProfile> = list_dir(home)
+        .into_iter()
+        .filter(|name| name.starts_with(".claude"))
+        .map(|name| home.join(name))
+        .filter(|dir| dir.join(".credentials.json").is_file())
+        .map(|dir| ClaudeProfile {
+            name: profile_name(&dir),
+            dir,
+        })
+        .collect();
+    // The default first, so the picker opens on the one most people mean, then
+    // by name so the order does not depend on how the directory was read.
+    out.sort_by(|a, b| (a.name != "default", &a.name).cmp(&(b.name != "default", &b.name)));
+    out
+}
+
+/// Every profile of this user's, `$CLAUDE_CONFIG_DIR` included even when it
+/// points somewhere that discovery would never have looked.
+pub static CLAUDE_PROFILES: LazyLock<Vec<ClaudeProfile>> = LazyLock::new(|| {
+    let mut out = claude_profiles_in(&HOME);
+    if !out.iter().any(|p| p.dir == *CLAUDE_CONFIG_DIR) {
+        out.insert(
+            0,
+            ClaudeProfile {
+                name: profile_name(&CLAUDE_CONFIG_DIR),
+                dir: CLAUDE_CONFIG_DIR.clone(),
+            },
+        );
+    }
+    out
+});
+
 /// `$CODEX_HOME`, falling back to `~/.codex`.
 pub static CODEX_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::var_os("CODEX_HOME")
@@ -346,10 +419,27 @@ pub fn claude_config_dir_in(home: &Path) -> PathBuf {
 }
 
 /// Per-provider session roots, this user's first.
+/// Every `projects/` directory Claude Code writes to, across every profile and
+/// every home in view.
+///
+/// One entry per profile rather than one per home: a machine with a personal
+/// and a work login has two, and reading only the one `$CLAUDE_CONFIG_DIR`
+/// happens to name is how a running session ends up with a row and no figures.
 pub fn claude_projects_roots() -> Vec<PathBuf> {
-    roots_across_homes(&CLAUDE_PROJECTS_ROOT, |h| {
-        claude_config_dir_in(h).join("projects")
-    })
+    let mut roots: Vec<PathBuf> = CLAUDE_PROFILES
+        .iter()
+        .map(|p| p.dir.join("projects"))
+        .collect();
+    for other in OTHER_HOMES.iter() {
+        match claude_profiles_in(&other.home).as_slice() {
+            // A home cctop cannot read the inside of still has the one
+            // conventional location worth trying.
+            [] => roots.push(claude_config_dir_in(&other.home).join("projects")),
+            found => roots.extend(found.iter().map(|p| p.dir.join("projects"))),
+        }
+    }
+    roots.dedup();
+    roots
 }
 
 pub fn codex_sessions_roots() -> Vec<PathBuf> {
@@ -517,6 +607,68 @@ pub fn file_mtime_ms(p: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A profile is a directory with credentials in it. The nested `.claude` a
+    /// profile can end up containing is the same login, not a second one, so
+    /// only the home's own children count.
+    #[test]
+    fn profiles_are_the_directories_holding_credentials() {
+        let dir = std::env::temp_dir().join(format!("cctop-prof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let make = |path: &Path, creds: bool| {
+            std::fs::create_dir_all(path).unwrap();
+            if creds {
+                std::fs::write(path.join(".credentials.json"), "{}").unwrap();
+            }
+        };
+        make(&dir.join(".claude"), true);
+        make(&dir.join(".claude-work"), true);
+        // Signed out, or never signed in: a folder, not an account.
+        make(&dir.join(".claude-empty"), false);
+        // A profile's own nested config, which is the same login again.
+        make(&dir.join(".claude-work").join(".claude"), true);
+        // Not a profile at all.
+        make(&dir.join(".config"), true);
+
+        let found = claude_profiles_in(&dir);
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+
+        assert_eq!(names, ["default", "work"], "{found:?}");
+        assert_eq!(found[0].dir, dir.join(".claude"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `~/.claude` is what every install starts with, so it is the one a picker
+    /// should open on however the directory happened to be read.
+    #[test]
+    fn the_default_profile_leads_and_the_rest_are_ordered() {
+        let dir = std::env::temp_dir().join(format!("cctop-prof2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for name in [".claude-zeta", ".claude-alpha", ".claude"] {
+            let path = dir.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(".credentials.json"), "{}").unwrap();
+        }
+        let names: Vec<String> = claude_profiles_in(&dir)
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["default", "alpha", "zeta"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A home with no readable profiles still gets the conventional location
+    /// tried, or another user's sessions would vanish the moment cctop could
+    /// not list their home.
+    #[test]
+    fn an_unreadable_home_still_offers_the_usual_place() {
+        let missing = Path::new("/nonexistent-home-cctop");
+        assert!(claude_profiles_in(missing).is_empty());
+        assert_eq!(
+            claude_config_dir_in(missing).join("projects"),
+            missing.join(".claude").join("projects")
+        );
+    }
     use super::*;
 
     #[test]
