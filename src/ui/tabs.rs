@@ -64,6 +64,16 @@ pub struct Pane {
     /// `None` on every pane when tmux is not installed, and resuming one
     /// transcript into two agents is precisely what that question guards.
     pub resumed: Option<String>,
+    /// The Claude profile this pane's agent was started under, when it is not
+    /// the default one.
+    ///
+    /// Kept on the pane because that is the only thing that still knows: the
+    /// profile reaches the agent as an environment variable, which is invisible
+    /// from the outside, and the border needs it to show the right account's
+    /// limits rather than whichever account cctop itself would have used.
+    ///
+    /// Filled in by the caller that chose it, like `resumed` below.
+    pub profile: Option<String>,
     /// The pid cctop hosts. A second request to view the same agent finds this
     /// pane rather than opening a duplicate onto one terminal.
     pub pid: u32,
@@ -198,6 +208,7 @@ impl Pane {
             // Filled in by the caller that knows: launching is not resuming, and
             // most launches are not any session in particular.
             resumed: None,
+            profile: None,
             agent: None,
             asked_at: None,
             hosted: Some(hosted),
@@ -211,6 +222,8 @@ impl Pane {
             hosted: None,
             tmux: None,
             resumed: None,
+            // Nothing was launched here, so there is no choice to record.
+            profile: None,
             pid,
             // Nothing stands between this pane and the agent: the pid asked for
             // is the agent's, which is what makes this the answer already.

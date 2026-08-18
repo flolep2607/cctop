@@ -2601,13 +2601,18 @@ impl App {
         }
 
         let argv = &argv;
-        let pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
+        let mut pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
             Err(error) => {
                 self.set_status(format!("Could not start {}: {error}", tabs::label_of(argv)));
                 return;
             }
         };
+        // The profile is only knowable here: it reached the agent as an
+        // environment variable, which nothing downstream can read back.
+        if matches!(choice, tabs::Choice::Start(_)) {
+            pane.profile = self.launch_profile().map(|p| p.name.clone());
+        }
         let label = pane.label.clone();
         // A brief goes to an agent that is starting fresh. Reattaching lands in
         // a conversation already under way, where typing a "read this and
@@ -3109,10 +3114,26 @@ fn spawn_quota_poller(tx: Sender<Response>) {
             // Each provider is paced by its own last outcome: a throttled one
             // backs off without stalling the other.
             if now >= claude_due {
-                let status = crate::quota::fetch_claude();
-                claude_due =
-                    now + Duration::from_secs(status.retry_delay_secs(QUOTA_INTERVAL_SECS));
-                quota.claude = status;
+                // Each profile is its own account with its own limits, so each
+                // is asked separately. They share one due time: the interval
+                // exists to be polite to the provider, and a machine with two
+                // logins is not entitled to twice the requests.
+                quota.claude = crate::config::CLAUDE_PROFILES
+                    .iter()
+                    .map(|profile| crate::quota::ClaudeQuota {
+                        profile: profile.name.clone(),
+                        status: crate::quota::fetch_claude(profile),
+                    })
+                    .collect();
+                // Paced by whichever account is most throttled, so backing off
+                // for one does not keep asking on behalf of another.
+                let delay = quota
+                    .claude
+                    .iter()
+                    .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
+                    .max()
+                    .unwrap_or(QUOTA_INTERVAL_SECS);
+                claude_due = now + Duration::from_secs(delay);
                 changed = true;
             }
             if now >= codex_due {

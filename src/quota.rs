@@ -3,6 +3,7 @@
 use crate::config;
 use crate::util;
 use serde_json::Value;
+use std::path::Path;
 use std::time::Duration;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -47,11 +48,60 @@ pub enum ProviderStatus {
     Unavailable(String),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Quota {
     pub fetched: bool,
-    pub claude: ProviderStatus,
+    /// One entry per Claude profile, in the order
+    /// [`config::CLAUDE_PROFILES`] lists them.
+    ///
+    /// A profile is an account with its own subscription and its own limits, so
+    /// one figure cannot stand for all of them. It used to: the poller read
+    /// whichever credentials `$CLAUDE_CONFIG_DIR` named and put that on every
+    /// pane, so a tab running as somebody's work login showed their personal
+    /// account's usage — wrong in the direction that matters, since the number
+    /// is consulted to decide whether there is room to keep working.
+    pub claude: Vec<ClaudeQuota>,
     pub codex: ProviderStatus,
+}
+
+/// One Claude account's limits, and which profile they belong to.
+#[derive(Debug, Clone)]
+pub struct ClaudeQuota {
+    pub profile: String,
+    pub status: ProviderStatus,
+}
+
+impl Default for Quota {
+    fn default() -> Self {
+        Quota {
+            fetched: false,
+            // Every profile starts pending, so the panel can say it is checking
+            // rather than claiming an account has no limits before it has looked.
+            claude: config::CLAUDE_PROFILES
+                .iter()
+                .map(|p| ClaudeQuota {
+                    profile: p.name.clone(),
+                    status: ProviderStatus::Pending,
+                })
+                .collect(),
+            codex: ProviderStatus::Pending,
+        }
+    }
+}
+
+impl Quota {
+    /// The limits for `profile`, or the default profile's when a pane does not
+    /// name one — which is every pane started before there was a choice to make.
+    pub fn claude_for(&self, profile: Option<&str>) -> Option<&ProviderStatus> {
+        match profile {
+            Some(name) => self
+                .claude
+                .iter()
+                .find(|q| q.profile == name)
+                .map(|q| &q.status),
+            None => self.claude.first().map(|q| &q.status),
+        }
+    }
 }
 
 /// How the outcome of a fetch should pace the next one.
@@ -124,11 +174,18 @@ fn extract_claude_token(raw: &str) -> Option<String> {
     }
 }
 
-fn read_claude_credential() -> Credential {
+fn read_claude_credential_in(dir: &Path, is_default: bool) -> Credential {
     // macOS keychain. Current builds use "Claude Code-credentials"; older ones
     // used "Claude Code".
+    // Only for the profile Claude Code itself would use. The keychain holds one
+    // entry per machine, not one per config directory, so consulting it for a
+    // second profile would hand back the first profile's token — the exact
+    // confusion this function was parameterised to end.
     #[cfg(target_os = "macos")]
-    for service in ["Claude Code-credentials", "Claude Code"] {
+    for service in ["Claude Code-credentials", "Claude Code"]
+        .into_iter()
+        .filter(|_| is_default)
+    {
         let out = std::process::Command::new("security")
             .args(["find-generic-password", "-s", service, "-w"])
             .output();
@@ -144,10 +201,14 @@ fn read_claude_credential() -> Credential {
         }
     }
 
-    let candidates = [
-        config::CLAUDE_CONFIG_DIR.join(".credentials.json"),
-        config::HOME.join(".claude.json"),
-    ];
+    // `~/.claude.json` is the account file Claude Code writes beside its config
+    // directory, and there is only one of it — so it answers for the default
+    // profile alone. A named profile has to prove itself from its own
+    // credentials or count as signed out.
+    let mut candidates = vec![dir.join(".credentials.json")];
+    if is_default {
+        candidates.push(config::HOME.join(".claude.json"));
+    }
     for path in candidates {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -320,8 +381,11 @@ fn as_epoch_secs(v: Option<&Value>) -> Option<i64> {
     }
 }
 
-pub fn fetch_claude() -> ProviderStatus {
-    let token = match read_claude_credential() {
+pub fn fetch_claude(profile: &config::ClaudeProfile) -> ProviderStatus {
+    let is_default = config::CLAUDE_PROFILES
+        .first()
+        .is_some_and(|first| first.dir == profile.dir);
+    let token = match read_claude_credential_in(&profile.dir, is_default) {
         Credential::ApiKey => return ProviderStatus::ApiBilling,
         Credential::None => return ProviderStatus::NotSignedIn,
         Credential::OAuth(t) => t,
@@ -433,6 +497,44 @@ pub fn fetch_codex() -> ProviderStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// The bug this closes: one figure stood for every account, so a pane
+    /// running as somebody's work login showed their personal usage. The number
+    /// is read to decide whether there is room to keep working, so being wrong
+    /// about which account it describes is worse than showing nothing.
+    #[test]
+    fn each_profile_reports_its_own_limits() {
+        let of = |profile: &str, pct: u32| ClaudeQuota {
+            profile: profile.to_string(),
+            status: ProviderStatus::Ok(ProviderQuota {
+                plan: None,
+                windows: vec![Window {
+                    label: "5h",
+                    pct,
+                    duration: None,
+                    resets_at: None,
+                }],
+                limit_reached: false,
+            }),
+        };
+        let quota = Quota {
+            fetched: true,
+            claude: vec![of("default", 10), of("work", 90)],
+            codex: ProviderStatus::Pending,
+        };
+        let pct = |status: Option<&ProviderStatus>| match status {
+            Some(ProviderStatus::Ok(q)) => q.windows.first().map(|w| w.pct),
+            _ => None,
+        };
+
+        assert_eq!(pct(quota.claude_for(Some("work"))), Some(90));
+        assert_eq!(pct(quota.claude_for(Some("default"))), Some(10));
+        // A pane started before there was a choice to make gets the default.
+        assert_eq!(pct(quota.claude_for(None)), Some(10));
+        // A profile that has since gone reports nothing rather than somebody
+        // else's remaining budget.
+        assert!(quota.claude_for(Some("deleted")).is_none());
+    }
     use super::*;
 
     /// Regression: the status arms below are only reachable because the agent is

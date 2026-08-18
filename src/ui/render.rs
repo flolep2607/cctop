@@ -334,14 +334,22 @@ enum QuotaDetail {
 /// The provider comes from the pane's command label rather than a session: a
 /// fresh pane has no transcript, let alone a known provider session, when its
 /// border is drawn.
-fn pane_quota(label: &str, quota: &crate::quota::Quota, now: i64, budget: u16) -> Option<String> {
+fn pane_quota(
+    label: &str,
+    profile: Option<&str>,
+    quota: &crate::quota::Quota,
+    now: i64,
+    budget: u16,
+) -> Option<String> {
     let command = label
         .split_whitespace()
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
+    // A pane running as one account must not be shown another's remaining
+    // budget: the figure is read to decide whether there is room to keep going.
     let status = if command.starts_with("claude") {
-        &quota.claude
+        quota.claude_for(profile)?
     } else if command.starts_with("codex") {
         &quota.codex
     } else {
@@ -417,6 +425,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         let taken = pane.label.chars().count() as u16 + 6;
         if let Some(text) = pane_quota(
             &pane.label,
+            pane.profile.as_deref(),
             &quota,
             now,
             slots[i].width.saturating_sub(taken).saturating_sub(2),
@@ -984,13 +993,40 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let cols =
-        RLayout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
-
-    for (i, (name, status)) in [("Claude", &app.quota.claude), ("Codex", &app.quota.codex)]
+    // One column per account rather than a fixed two: a machine with a personal
+    // and a work login has three things to report, and the panel exists to say
+    // how much room is left in each.
+    let mut accounts: Vec<(String, &crate::quota::ProviderStatus)> = app
+        .quota
+        .claude
         .iter()
         .enumerate()
-    {
+        .map(|(i, q)| {
+            // The first is the one Claude Code itself would use, and naming it
+            // costs width the figures need — so only the others are qualified.
+            // On the overwhelming majority of machines there are no others.
+            let name = match i {
+                0 => "Claude".to_string(),
+                _ => format!("Claude ({})", q.profile),
+            };
+            (name, &q.status)
+        })
+        .collect();
+    accounts.push(("Codex".to_string(), &app.quota.codex));
+
+    let share = 100 / accounts.len().max(1) as u16;
+    let cols = RLayout::horizontal(
+        accounts
+            .iter()
+            .map(|_| Constraint::Percentage(share))
+            .collect::<Vec<_>>(),
+    )
+    // A gap, or a column that fills its width runs straight into the next one
+    // and the two read as one sentence.
+    .spacing(2)
+    .split(inner);
+
+    for (i, (name, status)) in accounts.iter().enumerate() {
         let mut spans = vec![Span::styled(format!("{name} "), theme::label())];
         // Each failure mode gets its own message: an expired sign-in needs the
         // user to act, a rate-limit clears on its own, and "not signed in" is
@@ -1006,7 +1042,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled("API billing, no limits", theme::dim()));
             }
             crate::quota::ProviderStatus::Expired => {
-                let cmd = if *name == "Codex" {
+                let cmd = if name == "Codex" {
                     "codex login"
                 } else {
                     "claude login"
@@ -1286,29 +1322,32 @@ mod tests {
     #[test]
     fn pane_quota_narrows_to_fit_and_only_for_a_provider() {
         let quota = crate::quota::Quota {
-            claude: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
-                plan: None,
-                windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
-                limit_reached: false,
-            }),
+            claude: vec![crate::quota::ClaudeQuota {
+                profile: "default".into(),
+                status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                    plan: None,
+                    windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
+                    limit_reached: false,
+                }),
+            }],
             ..Default::default()
         };
 
         assert_eq!(
-            pane_quota("claude-6", &quota, 4_500, 40).as_deref(),
+            pane_quota("claude-6", None, &quota, 4_500, 40).as_deref(),
             Some(" 5h 37% 1h31m · 7d 21% 137h38m ")
         );
         assert_eq!(
-            pane_quota("claude-6", &quota, 4_500, 20).as_deref(),
+            pane_quota("claude-6", None, &quota, 4_500, 20).as_deref(),
             Some(" 5h 37% · 7d 21% ")
         );
         assert_eq!(
-            pane_quota("claude-6", &quota, 4_500, 10).as_deref(),
+            pane_quota("claude-6", None, &quota, 4_500, 10).as_deref(),
             Some(" 37%/21% ")
         );
         // Too narrow for even the percentages, and a shell has no provider.
-        assert!(pane_quota("claude-6", &quota, 4_500, 5).is_none());
-        assert!(pane_quota("zsh", &quota, 4_500, 40).is_none());
+        assert!(pane_quota("claude-6", None, &quota, 4_500, 5).is_none());
+        assert!(pane_quota("zsh", None, &quota, 4_500, 40).is_none());
     }
 
     #[test]
