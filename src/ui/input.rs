@@ -692,11 +692,53 @@ impl App {
         // movement, and switching tabs on a hover means the pointer resting
         // anywhere near the bar drags you out of the agent you are typing into.
         if self.tab > 0 {
-            if ev.kind == MouseEventKind::Down(MouseButton::Left) {
-                if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
-                    self.show_tab(tab);
-                } else if layout.workspace_new_at(ev.column, ev.row) {
-                    self.launch_prompt(LaunchInto::Tab);
+            // cctop's own chrome first. The workspace bar is drawn above the
+            // panes and is the one thing in a tab that is not the agent's.
+            if ev.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some(tab) = layout.workspace_at(ev.column, ev.row)
+            {
+                self.show_tab(tab);
+                return;
+            }
+            if ev.kind == MouseEventKind::Down(MouseButton::Left)
+                && layout.workspace_new_at(ev.column, ev.row)
+            {
+                self.launch_prompt(LaunchInto::Tab);
+                return;
+            }
+
+            // Inside a pane the mouse is the agent's. Claude Code, opencode and
+            // pi all ask for mouse reporting and act on it — placing the cursor
+            // in the composer, picking a file, choosing from the agents list —
+            // and cctop holds the terminal's capture, so without forwarding the
+            // click simply went nowhere.
+            let button = |b| match b {
+                MouseButton::Left => Some(crate::attach::MouseButton::Left),
+                MouseButton::Middle => Some(crate::attach::MouseButton::Middle),
+                MouseButton::Right => Some(crate::attach::MouseButton::Right),
+            };
+            let action = match ev.kind {
+                MouseEventKind::Down(b) => button(b).map(|b| (crate::attach::MouseKind::Press, b)),
+                MouseEventKind::Up(b) => button(b).map(|b| (crate::attach::MouseKind::Release, b)),
+                MouseEventKind::Drag(b) => button(b).map(|b| (crate::attach::MouseKind::Drag, b)),
+                _ => None,
+            };
+            if let Some((kind, b)) = action {
+                if let Some((i, col, row)) = layout.pane_at(ev.column, ev.row) {
+                    // A press also moves the keyboard there, which is what
+                    // clicking a pane means everywhere else. Only a press: a
+                    // release ending a drag that wandered out of the pane it
+                    // started in must not hand focus to whatever it landed on.
+                    if kind == crate::attach::MouseKind::Press
+                        && let Some(tab) = self.active_tab()
+                    {
+                        tab.focus = i;
+                    }
+                    if let Some(pane) = self.active_tab().and_then(|t| t.panes.get_mut(i)) {
+                        // A failed send means that agent has gone, which the
+                        // reaper already watches for.
+                        let _ = pane.view.mouse(kind, b, col, row);
+                    }
                 }
                 return;
             }

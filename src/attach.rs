@@ -282,6 +282,37 @@ impl Attach {
     /// The encoding is the agent's too. SGR is what everything modern selects —
     /// and the only one that survives past column 223 — but the default is still
     /// what an agent gets if it never asked for better.
+    /// Report a button press, release or drag to the agent.
+    ///
+    /// Only when the agent asked for mouse reporting. Claude Code, opencode and
+    /// pi all turn it on and use it — for the file picker, for placing the
+    /// cursor in the composer, for the agents list — and until this existed a
+    /// click inside a pane went nowhere, because cctop holds the terminal's
+    /// mouse capture and had nothing to do with what it caught.
+    ///
+    /// What each mode wants is the whole reason this is not one sequence: an
+    /// agent in `Press` mode asked for presses and gets confused by releases it
+    /// never requested, and drags belong only to the motion modes. Reporting
+    /// more than was asked for is how a click turns into stray text.
+    ///
+    /// `false` means the agent is gone.
+    pub fn mouse(&mut self, kind: MouseKind, button: MouseButton, col: u16, row: u16) -> bool {
+        let screen = self.parser.screen();
+        let Some(bytes) = encode_mouse(
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+            kind,
+            button,
+            col,
+            row,
+        ) else {
+            // Either the agent never asked for this event, or the encoding
+            // cannot name where it happened. Both are silence, not failure.
+            return true;
+        };
+        self.send(&frame::encode(frame::KEYS, &bytes))
+    }
+
     pub fn wheel(&mut self, up: bool, col: u16, row: u16) -> bool {
         use vt100::{MouseProtocolEncoding as Enc, MouseProtocolMode as Mode};
         if self.parser.screen().mouse_protocol_mode() == Mode::None {
@@ -335,6 +366,102 @@ impl Drop for Attach {
     fn drop(&mut self) {
         (self.close)();
     }
+}
+
+/// The bytes an agent expects for one mouse event, or `None` when it should not
+/// be told at all.
+///
+/// What each mode wants is the whole reason this is not one sequence: an agent
+/// in `Press` mode asked for presses and would read a release it never
+/// requested as stray input, and drags belong only to the motion modes.
+fn encode_mouse(
+    mode: vt100::MouseProtocolMode,
+    encoding: vt100::MouseProtocolEncoding,
+    kind: MouseKind,
+    button: MouseButton,
+    col: u16,
+    row: u16,
+) -> Option<Vec<u8>> {
+    use vt100::{MouseProtocolEncoding as Enc, MouseProtocolMode as Mode};
+    let wanted = match kind {
+        MouseKind::Press => mode != Mode::None,
+        MouseKind::Release => matches!(
+            mode,
+            Mode::PressRelease | Mode::ButtonMotion | Mode::AnyMotion
+        ),
+        MouseKind::Drag => matches!(mode, Mode::ButtonMotion | Mode::AnyMotion),
+    };
+    if !wanted {
+        return None;
+    }
+    let code = match button {
+        MouseButton::Left => 0u16,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    };
+    // Bit 5 marks motion, which is what separates a drag from the press that
+    // began it.
+    let code = code
+        + if matches!(kind, MouseKind::Drag) {
+            32
+        } else {
+            0
+        };
+    match encoding {
+        // The only encoding that can say *which* button came up; the final
+        // letter carries press against release.
+        Enc::Sgr => {
+            let end = match kind {
+                MouseKind::Release => 'm',
+                _ => 'M',
+            };
+            Some(format!("\x1b[<{code};{};{}{end}", col + 1, row + 1).into_bytes())
+        }
+        // One printable byte each, biased by 32, so nothing past column 223 can
+        // be said at all — and naming the wrong cell is worse than staying
+        // quiet, because a click acts where it lands.
+        _ => {
+            if col > 222 || row > 222 {
+                return None;
+            }
+            // Legacy has no per-button release: 3 means "whatever was held is
+            // now up", which is all the encoding can express.
+            let code = match kind {
+                MouseKind::Release => 3,
+                _ => code,
+            };
+            let cell = |v: u16| u8::try_from(v + 33).unwrap_or(u8::MAX);
+            Some(vec![
+                0x1b,
+                b'[',
+                b'M',
+                u8::try_from(code + 32).unwrap_or(u8::MAX),
+                cell(col),
+                cell(row),
+            ])
+        }
+    }
+}
+
+/// Which of a button's events this is.
+///
+/// crossterm's `MouseEventKind` also carries the wheel and bare movement, which
+/// are reported by [`Attach::wheel`] and deliberately not at all respectively —
+/// capture delivers motion continuously and an agent in a press-only mode has
+/// no use for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Press,
+    Release,
+    Drag,
+}
+
+/// The three buttons xterm can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
 }
 
 /// Connect to the shim owning `pid` and start collecting its output.
@@ -720,6 +847,81 @@ fn csi_tilde(number: u8, mods: KeyModifiers) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An agent is told only what it asked for. Reporting more than that is how
+    /// a click becomes stray text in somebody's prompt: a press-only agent reads
+    /// the release it never requested as input.
+    #[test]
+    fn an_agent_hears_only_the_events_it_asked_for() {
+        use vt100::{MouseProtocolEncoding as Enc, MouseProtocolMode as Mode};
+        let at = |mode, kind| encode_mouse(mode, Enc::Sgr, kind, MouseButton::Left, 0, 0);
+
+        // Mouse off: nothing at all, whatever happens.
+        assert!(at(Mode::None, MouseKind::Press).is_none());
+        assert!(at(Mode::None, MouseKind::Release).is_none());
+
+        // Presses only.
+        assert!(at(Mode::Press, MouseKind::Press).is_some());
+        assert!(at(Mode::Press, MouseKind::Release).is_none());
+        assert!(at(Mode::Press, MouseKind::Drag).is_none());
+
+        // Presses and releases, but a drag is motion and was not asked for.
+        assert!(at(Mode::PressRelease, MouseKind::Release).is_some());
+        assert!(at(Mode::PressRelease, MouseKind::Drag).is_none());
+
+        // Motion modes take everything.
+        assert!(at(Mode::ButtonMotion, MouseKind::Drag).is_some());
+        assert!(at(Mode::AnyMotion, MouseKind::Drag).is_some());
+    }
+
+    /// SGR is one-based and can name which button was released; the legacy
+    /// encoding is byte-biased and cannot, which is the whole reason both exist
+    /// here rather than one being emitted for everybody.
+    #[test]
+    fn each_encoding_says_it_its_own_way() {
+        use vt100::{MouseProtocolEncoding as Enc, MouseProtocolMode as Mode};
+        let sgr = |kind, button, col, row| {
+            String::from_utf8(
+                encode_mouse(Mode::AnyMotion, Enc::Sgr, kind, button, col, row).expect("wanted"),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            sgr(MouseKind::Press, MouseButton::Left, 0, 0),
+            "\x1b[<0;1;1M"
+        );
+        assert_eq!(
+            sgr(MouseKind::Press, MouseButton::Right, 9, 4),
+            "\x1b[<2;10;5M"
+        );
+        // A release ends with `m`, and still names its button.
+        assert_eq!(
+            sgr(MouseKind::Release, MouseButton::Middle, 0, 0),
+            "\x1b[<1;1;1m"
+        );
+        // A drag is the button with the motion bit set.
+        assert_eq!(
+            sgr(MouseKind::Drag, MouseButton::Left, 0, 0),
+            "\x1b[<32;1;1M"
+        );
+
+        let legacy = |kind, button, col, row| {
+            encode_mouse(Mode::AnyMotion, Enc::Utf8, kind, button, col, row)
+        };
+        assert_eq!(
+            legacy(MouseKind::Press, MouseButton::Left, 0, 0),
+            Some(vec![0x1b, b'[', b'M', 32, 33, 33])
+        );
+        // Button 3 is all a release can be said as here.
+        assert_eq!(
+            legacy(MouseKind::Release, MouseButton::Right, 0, 0),
+            Some(vec![0x1b, b'[', b'M', 35, 33, 33])
+        );
+        // Past column 223 it would name the wrong cell, and a click acts where
+        // it lands — so it says nothing instead.
+        assert!(legacy(MouseKind::Press, MouseButton::Left, 300, 0).is_none());
+        assert!(legacy(MouseKind::Press, MouseButton::Left, 0, 300).is_none());
+    }
     use super::*;
 
     /// An `Attach` writing to memory instead of a socket, and the buffer it
