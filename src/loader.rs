@@ -122,10 +122,7 @@ impl Loader {
         }
         on_discovered(&sessions);
 
-        {
-            let _span = crate::trace::span("walk.tails");
-            self.attach_tail_state(&mut sessions);
-        }
+        self.attach_tail_state(&mut sessions, eager);
         let store = self.store();
 
         // Extraction dominates wall time on large transcripts, and each session
@@ -209,24 +206,89 @@ impl Loader {
     }
 
     /// Read the last tool and context usage from transcript tails.
-    fn attach_tail_state(&mut self, sessions: &mut [Session]) {
-        for s in sessions.iter_mut() {
-            self.tail_state(s);
-        }
-    }
-
-    /// Activity dot, last tool, and context window for one row.
-    fn tail_state(&mut self, s: &mut Session) {
-        let key = s.key();
+    ///
+    /// Fanned out, because each session's tail is an independent read and there
+    /// are as many as have ever been recorded. Serially this was the largest
+    /// thing left in a walk once extraction was cached — 2.07s of a 3.03s run
+    /// on a 2020-session machine, done one session at a time on 52 cores.
+    ///
+    /// Which sessions need reading is decided first, so the parallel pass
+    /// borrows nothing of the loader, and the caches are folded back in
+    /// afterwards. The alternative — locking them — would serialise the reads
+    /// again for the sake of two maps that are only written once each.
+    fn attach_tail_state(&mut self, sessions: &mut [Session], eager: bool) {
+        let _span = crate::trace::span("walk.tails");
         // A stopped session's transcript cannot change, so its tail only needs
-        // reading once. Without this a walk opens and seeks every transcript ever
-        // recorded — thousands of files, serially, which is the half of the walk
-        // that no amount of capping the extraction pool can smooth out.
+        // reading once.
         //
         // ponytail: keyed by session, not by mtime, so a stopped session whose
         // file is edited behind cctop's back keeps its old dot until it runs
         // again. Extraction still notices, so only the tail-derived fields go
         // stale; re-check the mtime here if that ever matters.
+        let wanted: Vec<Option<bool>> = sessions
+            .iter()
+            .map(|s| {
+                let running = s.is_running();
+                if !running && self.tail_cache.contains_key(&s.key()) {
+                    return None; // already known, and it cannot have changed
+                }
+                Some(running || !self.context_cache.contains_key(&s.key()))
+            })
+            .collect();
+
+        let read = || {
+            sessions
+                .par_iter()
+                .zip(wanted.par_iter())
+                .map(|(s, want)| want.map(|context| read_tail(s, context)))
+                .collect::<Vec<_>>()
+        };
+        // Same bargain as extraction: seize the machine only when somebody is
+        // waiting for the first table.
+        let reads = match self.gentle.as_ref().filter(|_| !eager) {
+            Some(pool) => pool.install(read),
+            None => read(),
+        };
+
+        for (s, read) in sessions.iter_mut().zip(reads) {
+            let key = s.key();
+            let Some(read) = read else {
+                if let Some((state, tool)) = self.tail_cache.get(&key) {
+                    s.activity_state = *state;
+                    s.last_tool = tool.clone();
+                }
+                s.context = self.context_cache.get(&key).copied();
+                continue;
+            };
+            self.apply_tail(s, read, &key);
+        }
+    }
+
+    /// Copy one tail read onto its row and remember what it found.
+    fn apply_tail(&mut self, s: &mut Session, read: TailRead, key: &str) {
+        s.activity_state = read.state;
+        // The transcript is the baseline, and every Claude Code session has one
+        // whether or not cctop's hooks are installed. A live agent's own report
+        // is fresher and outranks it, which `App::apply_permissions` applies on
+        // top of this.
+        s.permission = read.permission;
+        if s.is_running() {
+            s.last_tool = read.last_tool;
+        }
+        if let Some(ctx) = read.context {
+            self.context_cache.insert(key.to_string(), ctx);
+        }
+        s.context = self.context_cache.get(key).copied();
+        self.tail_cache
+            .insert(key.to_string(), (s.activity_state, s.last_tool.clone()));
+    }
+
+    /// Activity dot, last tool, and context window for one row.
+    ///
+    /// The single-session path, for the light refresh. The full walk reads every
+    /// session at once through [`Self::attach_tail_state`].
+    fn tail_state(&mut self, s: &mut Session) {
+        let key = s.key();
         if !s.is_running()
             && let Some((state, tool)) = self.tail_cache.get(&key)
         {
@@ -235,36 +297,9 @@ impl Loader {
             s.context = self.context_cache.get(&key).copied();
             return;
         }
-        let (state, permission) = session::live_state(s);
-        s.activity_state = state;
-        // The transcript is the baseline, and every Claude Code session has one
-        // whether or not cctop's hooks are installed. A live agent's own report
-        // is fresher and outranks it, which `App::apply_permissions` applies on
-        // top of this.
-        s.permission = permission;
-        if s.is_running() {
-            s.last_tool = match s.provider {
-                Provider::Claude => session::claude::extract_last_tool(s),
-                Provider::Codex => session::codex::extract_last_tool(s),
-                Provider::Cursor | Provider::Gemini | Provider::Windsurf => String::new(),
-                Provider::OpenCode => session::opencode::extract_last_tool(s),
-                Provider::Pi => session::pi::extract_last_tool(s),
-            };
-        }
-        if s.is_running() || !self.context_cache.contains_key(&key) {
-            let fresh = match s.provider {
-                Provider::Claude => session::claude::extract_context(s),
-                Provider::Codex => session::codex::extract_context(s),
-                Provider::OpenCode => session::opencode::extract_context(s),
-                Provider::Cursor | Provider::Gemini | Provider::Pi | Provider::Windsurf => None,
-            };
-            if let Some(ctx) = fresh {
-                self.context_cache.insert(key.clone(), ctx);
-            }
-        }
-        s.context = self.context_cache.get(&key).copied();
-        self.tail_cache
-            .insert(key, (s.activity_state, s.last_tool.clone()));
+        let want_context = s.is_running() || !self.context_cache.contains_key(&key);
+        let read = read_tail(s, want_context);
+        self.apply_tail(s, read, &key);
     }
 
     /// Refresh only what can have moved since the last full walk.
@@ -365,6 +400,62 @@ impl Loader {
 /// Infer the host application from a matched process without confusing it with
 /// the model. The Codex binary may be installed under Cursor's server
 /// extension directory, which does not make the running harness Cursor.
+/// Everything a tail read produces for one session.
+struct TailRead {
+    state: session::ActivityState,
+    permission: Option<crate::hook::Permission>,
+    last_tool: String,
+    context: Option<ContextUsage>,
+}
+
+/// Read one session's tail, borrowing nothing that the caller holds — which is
+/// what lets every session be read at once.
+fn read_tail(s: &Session, want_context: bool) -> TailRead {
+    // Split by provider and by step: this is the dominant cost of a walk once
+    // extraction is cached, and "the tails are slow" cannot say whether that is
+    // reading transcript text or querying a database.
+    let _by_provider = crate::trace::span(match s.provider {
+        Provider::Claude => "tails.claude",
+        Provider::Codex => "tails.codex",
+        Provider::Cursor => "tails.cursor",
+        Provider::Gemini => "tails.gemini",
+        Provider::OpenCode => "tails.opencode",
+        Provider::Pi => "tails.pi",
+        Provider::Windsurf => "tails.windsurf",
+    });
+    let (state, permission) = {
+        let _span = crate::trace::span("tails.state");
+        session::live_state(s)
+    };
+    let last_tool = match s.is_running() {
+        false => String::new(),
+        true => match s.provider {
+            Provider::Claude => session::claude::extract_last_tool(s),
+            Provider::Codex => session::codex::extract_last_tool(s),
+            Provider::Cursor | Provider::Gemini | Provider::Windsurf => String::new(),
+            Provider::OpenCode => session::opencode::extract_last_tool(s),
+            Provider::Pi => session::pi::extract_last_tool(s),
+        },
+    };
+    let context = want_context
+        .then(|| {
+            let _span = crate::trace::span("tails.context");
+            match s.provider {
+                Provider::Claude => session::claude::extract_context(s),
+                Provider::Codex => session::codex::extract_context(s),
+                Provider::OpenCode => session::opencode::extract_context(s),
+                Provider::Cursor | Provider::Gemini | Provider::Pi | Provider::Windsurf => None,
+            }
+        })
+        .flatten();
+    TailRead {
+        state,
+        permission,
+        last_tool,
+        context,
+    }
+}
+
 /// Copy an extraction's figures onto the row that owns it.
 ///
 /// Shared by the full walk and the light refresh so the two can never disagree
