@@ -14,6 +14,22 @@ use std::sync::OnceLock;
 /// enough to react to a burst, long enough not to jitter between refreshes.
 const EMA_HALF_LIFE_MS: f64 = 10_000.0;
 
+/// Cores an aggregate CPU reading is measured against.
+///
+/// A process's CPU% is measured against one core, so summing the agents on a
+/// 128-core machine reads 9000% — a true number answering a question nobody
+/// asked, and one the sparkline beside it cannot draw, since that is scaled to
+/// 100. Divided by the cores available it becomes the share of the machine,
+/// which is what a summary line is for. The per-row `CPU%` column keeps the
+/// per-core reading, because "this agent is using a whole core" is exactly what
+/// you want from a row and htop spells it the same way.
+///
+/// `available_parallelism` rather than a physical core count, so a container
+/// with a CPU quota is measured against what it may actually use.
+static CORES: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+    std::thread::available_parallelism().map_or(1.0, |n| n.get() as f32)
+});
+
 /// Per-session state carried across refreshes to derive rates.
 #[derive(Debug, Clone)]
 struct RateState {
@@ -551,6 +567,8 @@ pub struct Stats {
     pub running: usize,
     pub total_input: u64,
     pub total_output: u64,
+    /// Share of the whole machine the agents are using, 0-100 — not the sum of
+    /// their per-core readings. See [`CORES`].
     pub total_cpu: f32,
     pub total_memory: u64,
     pub total_tools: u64,
@@ -694,6 +712,8 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         + st.spend_pi
         + st.spend_windsurf;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
+    // Summed per-core above; reported as a share of the machine.
+    st.total_cpu /= *CORES;
     st
 }
 
@@ -763,6 +783,36 @@ mod tests {
         assert_eq!(st.spend_calendar_month, 0.0);
         assert_eq!(st.spend_per_min, 0.0);
         assert_eq!(st.total_input, 100);
+    }
+
+    /// Summed per-core readings are what a process reports and not what a
+    /// machine has: four agents each using a whole core is 400% of a core and,
+    /// on anything with four or more of them, a fraction of the box. The
+    /// headline figure answers the second question — the row answers the first.
+    #[test]
+    fn agent_cpu_is_a_share_of_the_machine_not_a_sum_of_cores() {
+        let busy = |cpu: f32| {
+            let mut s = Session::new(Provider::Claude, "x".into());
+            s.process = Some(crate::proc::ProcInfo {
+                cpu,
+                ..Default::default()
+            });
+            s
+        };
+        let st = compute_stats(&[busy(100.0), busy(100.0), busy(50.0)]);
+
+        // 250% of a core, divided by however many this machine has.
+        let expected = 250.0 / *CORES;
+        assert!(
+            (st.total_cpu - expected).abs() < 1e-3,
+            "got {}, expected {expected}",
+            st.total_cpu
+        );
+        // …and on any machine with three or more cores it cannot read above 100,
+        // which is the scale the sparkline beside it is drawn against.
+        if *CORES >= 3.0 {
+            assert!(st.total_cpu <= 100.0, "{} is off the chart", st.total_cpu);
+        }
     }
 
     #[test]
