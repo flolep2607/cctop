@@ -243,6 +243,13 @@ pub struct ReportCall {
     pub ts: String,
     pub duration_ms: Option<i64>,
     pub failed: bool,
+    /// The subagent that issued the call, or `None` for the session itself.
+    ///
+    /// A subagent's tool activity is interleaved into the same log, so without
+    /// this a report of a session that fanned out reads as one agent doing
+    /// everything — and the twelve `Grep`s that were four subagents searching in
+    /// parallel look like one agent that could not find anything.
+    pub origin: Option<String>,
 }
 
 /// Assemble the report for one session.
@@ -395,6 +402,7 @@ fn failures(data: &SessionData) -> Vec<ReportFailure> {
                     ts: call.ts.clone(),
                     duration_ms: call.dur_ms,
                     failed: true,
+                    origin: call.origin.clone(),
                 });
         }
     }
@@ -442,6 +450,7 @@ fn calls(data: &SessionData) -> Vec<ReportCall> {
                 ts: call.ts.clone(),
                 duration_ms: call.dur_ms,
                 failed: call.failed,
+                origin: call.origin.clone(),
             })
         })
         .collect();
@@ -557,6 +566,7 @@ fn slowest(data: &SessionData) -> Vec<ReportCall> {
                     ts: call.ts.clone(),
                     duration_ms: Some(ms),
                     failed: call.failed,
+                    origin: call.origin.clone(),
                 })
             })
         })
@@ -774,6 +784,33 @@ mod tests {
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].tool, "Read");
         assert_eq!(log[1].tool, "Bash");
+    }
+
+    /// A fan-out's calls are interleaved with the session's own, so the log has
+    /// to say who made each one — otherwise four subagents searching in
+    /// parallel read as one agent that could not find anything.
+    #[test]
+    fn the_call_log_keeps_the_subagent_that_made_a_call() {
+        let data = data_with(HashMap::from([(
+            "Grep".to_string(),
+            vec![
+                ToolDetail {
+                    d: "fn main".into(),
+                    ts: "2026-08-19T10:00:00Z".into(),
+                    origin: Some("Explore".into()),
+                    ..Default::default()
+                },
+                ToolDetail {
+                    d: "fn build".into(),
+                    ts: "2026-08-19T10:01:00Z".into(),
+                    ..Default::default()
+                },
+            ],
+        )]));
+
+        let log = calls(&data);
+        assert_eq!(log[0].origin, None, "the session's own call names no agent");
+        assert_eq!(log[1].origin.as_deref(), Some("Explore"));
     }
 
     /// A question the user took a minute to answer is not the session being

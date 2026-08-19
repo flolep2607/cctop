@@ -123,6 +123,18 @@ const tokens = (v) => {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(n);
 };
+// How long ago, for a session that has stopped. The clock time says when; this
+// says how long ago, which is the part a reader actually holds in their head.
+const ago = (iso) => {
+  const then = Date.parse(iso);
+  if (!isFinite(then)) return "";
+  const s = Math.max(0, (Date.now() - then) / 1000);
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+};
+
 const secs = (ms) => {
   const n = Number(ms) || 0;
   if (n >= 60000) return Math.round(n / 60000) + "m";
@@ -139,6 +151,20 @@ const block = (heading, note) => {
 
 // --- the pieces ------------------------------------------------------------
 
+// The session's span, in words: when it started, how long it ran, and — for one
+// that has stopped — how long ago it stopped. `duration` arrives already
+// rendered because the server owns this codebase's rounding rules.
+const when = (r) => {
+  const spansDays =
+    new Date(r.started_at).toDateString() !== new Date(r.last_active).toDateString();
+  const start = clock(r.started_at, spansDays);
+  if (!start) return r.duration;
+  // A running session's end is "now", and printing it as a clock time invites
+  // the reader to believe the page updates. It does not.
+  const tail = r.running ? "still going" : ago(r.last_active);
+  return start + " · " + r.duration + " · " + tail;
+};
+
 function subject(r) {
   const box = el("div", "subject");
   box.appendChild(el("h2", null, r.title || r.project || r.session_id));
@@ -149,7 +175,10 @@ function subject(r) {
   tag(r.branch);
   if (r.profile && r.profile !== "default") tag("profile: " + r.profile);
   tag(r.model || r.provider);
-  tag(r.duration);
+  // When, not just how long. A duration on its own answers "was this a long
+  // session" and nothing else — the reader who opened this because something
+  // happened this morning needs to know whether they are looking at it.
+  tag(when(r));
   if (r.plan !== "retail") tag("plan: " + r.plan);
   where.appendChild(el("span", "faint mono", r.session_id));
   box.appendChild(where);
@@ -430,6 +459,7 @@ function slowest(r) {
     const what = el("td");
     what.appendChild(el("span", "mono", c.detail));
     if (c.failed) what.appendChild(el("span", "pill bad", "failed"));
+    if (c.origin) what.appendChild(el("span", "pill", c.origin));
     tr.appendChild(what);
     tr.appendChild(el("td", "num", secs(c.duration_ms)));
     table.appendChild(tr);
@@ -526,7 +556,10 @@ function callLog(r) {
     ? "Newest first. The transcript keeps only its most recent " + calls.length +
       " calls, of " + made + " the session made."
     : "Newest first. All " + calls.length + " calls.";
-  const s = block("Every tool call", note);
+  const note2 = calls.some((c) => c.origin)
+    ? " A call a subagent made carries its name; the rest are the session's own."
+    : "";
+  const s = block("Every tool call", note + note2);
 
   const card = el("div", "card log");
   const table = el("table");
@@ -546,6 +579,9 @@ function callLog(r) {
     const what = el("td");
     what.appendChild(el("span", "mono", c.detail));
     if (c.failed) what.appendChild(el("span", "pill bad", "failed"));
+    // Whose call it was. Absent for the session's own, so the pill appears
+    // exactly where it distinguishes something.
+    if (c.origin) what.appendChild(el("span", "pill", c.origin));
     tr.appendChild(what);
     tr.appendChild(el("td", "num", c.duration_ms == null ? "—" : secs(c.duration_ms)));
     tr.appendChild(el("td", "when", (c.ts || "").replace("T", " ").replace(/\..*$/, "")));
