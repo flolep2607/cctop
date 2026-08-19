@@ -109,6 +109,10 @@ pub enum Mode {
     Launch,
     /// Everything that can be done to the selected row, in one list.
     RowMenu,
+    /// Typing the directory the launcher's pick will start in. Drawn as the
+    /// launcher with its `in` line in an editable state, so the list of agents
+    /// stays visible while the path is being changed.
+    LaunchCwd,
     /// The agent-integration panel: what is installed where, and whether the
     /// agents are actually reporting in.
     Hooks,
@@ -621,6 +625,12 @@ pub struct App {
     pub menu_cursor: usize,
     /// Raw digits being typed into the cost-floor modal.
     pub cost_input: String,
+    /// The directory being typed into the launcher, spelled as the user is
+    /// spelling it — `~` and all, expanded only when it is accepted.
+    pub launch_cwd_input: String,
+    /// Set when the typed directory does not name one, so the field can say so
+    /// where it is rather than behind the modal that covers the status line.
+    pub launch_cwd_bad: bool,
     /// Line being typed into the selected session's terminal.
     pub send_input: String,
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
@@ -912,6 +922,8 @@ impl App {
             launch_into: LaunchInto::Tab,
             launch_root: std::env::current_dir().ok(),
             launch_cwd: None,
+            launch_cwd_input: String::new(),
+            launch_cwd_bad: false,
             tmux_install: None,
             tmux_deferred: None,
             tmux_declined: false,
@@ -2626,6 +2638,62 @@ impl App {
             .iter()
             .find(|session| session_root_pid(session) == Some(pid))
             .map(|session| session.display_label().to_string())
+    }
+
+    /// Whether the launcher's pick is an agent already running somewhere.
+    ///
+    /// Reattaching lands wherever that agent already is, so a directory typed
+    /// for it would be accepted and then ignored — which is worse than the key
+    /// not being offered.
+    pub(super) fn launch_is_reattach(&self) -> bool {
+        matches!(
+            self.launch_offer.get(self.launch_cursor),
+            Some(tabs::Choice::Waiting(_))
+        )
+    }
+
+    /// Open the launcher's directory field, prefilled with where it would go.
+    ///
+    /// Prefilled with `~` spelling rather than the absolute path: that is how
+    /// the line already reads, and a field that changed what it showed the
+    /// moment it became editable would look like it had lost the setting.
+    pub(super) fn edit_launch_cwd(&mut self) {
+        self.launch_cwd_input = self
+            .launch_cwd
+            .as_ref()
+            .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
+            .unwrap_or_default();
+        self.launch_cwd_bad = false;
+        self.mode = Mode::LaunchCwd;
+        self.needs_redraw = true;
+    }
+
+    /// Take the typed directory, if it names one.
+    ///
+    /// Checked here rather than at launch. A path that does not exist fails
+    /// somewhere inside the shim with a message about spawning, by which point
+    /// the launcher is gone and there is nothing left to correct.
+    pub(super) fn accept_launch_cwd(&mut self) {
+        let typed = self.launch_cwd_input.trim();
+        // Empty means "wherever cctop was started", which is what the launcher
+        // offers by default and what the footer calls "this directory".
+        let taken = match typed.is_empty() {
+            true => None,
+            false => {
+                let path = std::path::PathBuf::from(crate::util::untildify(typed));
+                if !path.is_dir() {
+                    self.launch_cwd_bad = true;
+                    return;
+                }
+                Some(path)
+            }
+        };
+        // Cleared on the way out, not only on the way in: a path corrected
+        // after a refusal would otherwise carry the mark back to a field that
+        // now holds something perfectly good.
+        self.launch_cwd_bad = false;
+        self.launch_cwd = taken;
+        self.mode = Mode::Launch;
     }
 
     /// Start the launcher's pick.
@@ -4436,6 +4504,65 @@ mod tests {
         assert_eq!(app.visible.len(), 1);
         assert!(app.sessions[app.visible[0].session()].is_running());
         assert!(app.sessions[app.visible[0].session()].process.is_none());
+    }
+
+    /// The launcher's directory is a field, not a caption. A `claude` opened on
+    /// the wrong project reads its way into the wrong repository before anyone
+    /// notices, and until now the only way to change it was to restart cctop
+    /// somewhere else.
+    #[test]
+    fn the_launchers_directory_can_be_typed_and_is_checked_before_it_is_taken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::new(Plan::Retail, channel().0);
+        app.launch_cwd = Some(dir.path().to_path_buf());
+
+        // Opens prefilled with what it would have used, so nothing looks lost.
+        app.edit_launch_cwd();
+        assert_eq!(app.mode, Mode::LaunchCwd);
+        assert_eq!(
+            app.launch_cwd_input,
+            crate::util::tildify(&dir.path().to_string_lossy())
+        );
+
+        // A directory that is not one is refused where it was typed, and the
+        // field stays open. Failing at launch instead would report it from
+        // inside the shim, after the launcher had gone.
+        app.launch_cwd_input = dir.path().join("nope").to_string_lossy().into_owned();
+        app.accept_launch_cwd();
+        assert!(app.launch_cwd_bad);
+        assert_eq!(app.mode, Mode::LaunchCwd, "the field stays open");
+        assert_eq!(app.launch_cwd.as_deref(), Some(dir.path()), "unchanged");
+
+        // A real one is taken.
+        let sub = dir.path().join("work");
+        std::fs::create_dir(&sub).expect("mkdir");
+        app.launch_cwd_input = sub.to_string_lossy().into_owned();
+        app.accept_launch_cwd();
+        assert!(!app.launch_cwd_bad);
+        assert_eq!(app.mode, Mode::Launch);
+        assert_eq!(app.launch_cwd.as_deref(), Some(sub.as_path()));
+
+        // Empty means where cctop was started, which is what the footer calls
+        // "this directory" — not an error, and not the previous value.
+        app.edit_launch_cwd();
+        app.launch_cwd_input = "   ".into();
+        app.accept_launch_cwd();
+        assert_eq!(app.launch_cwd, None);
+        assert_eq!(app.mode, Mode::Launch);
+    }
+
+    /// Esc has to leave the launch as it was found, or it becomes a way to lose
+    /// the setting you opened the field to change.
+    #[test]
+    fn cancelling_the_directory_field_keeps_the_old_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::new(Plan::Retail, channel().0);
+        app.launch_cwd = Some(dir.path().to_path_buf());
+        app.edit_launch_cwd();
+        app.launch_cwd_input = "/somewhere/else".into();
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Launch);
+        assert_eq!(app.launch_cwd.as_deref(), Some(dir.path()));
     }
 
     /// The menu and the keyboard must never disagree about what is possible.

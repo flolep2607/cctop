@@ -250,6 +250,23 @@ pub fn tildify(path: &str) -> String {
     path.to_string()
 }
 
+/// The inverse of [`tildify`]: turn a leading `~` back into the home directory.
+///
+/// Only a leading one, and only when it stands for the whole first component.
+/// `~/x` is home; `~other/x` is another user's home, which this does not know
+/// how to find and must not silently resolve to the wrong one.
+pub fn untildify(path: &str) -> String {
+    let home = crate::config::HOME.to_string_lossy();
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path {
+        "~" => home.into_owned(),
+        rest if rest.starts_with("~/") => format!("{home}{}", &rest[1..]),
+        other => other.to_string(),
+    }
+}
+
 /// Drop routing prefixes, version-date suffixes, and the `claude-` vendor prefix.
 ///
 /// Custom providers name models by the whole route they are reached through
@@ -556,6 +573,20 @@ mod tests {
         );
         assert_eq!(ms_to_rfc3339(0), "1970-01-01T00:00:00+00:00");
         assert_eq!(ms_to_rfc3339(i64::MAX), "");
+    }
+
+    #[test]
+    fn tildify_and_back_are_inverses() {
+        let home = crate::config::HOME.to_string_lossy().into_owned();
+        assert_eq!(untildify(&tildify(&home)), home);
+        let inside = format!("{home}/cctop/src");
+        assert_eq!(untildify(&tildify(&inside)), inside);
+        // An absolute path elsewhere is left alone by both.
+        assert_eq!(untildify("/etc/hosts"), "/etc/hosts");
+        assert_eq!(tildify("/etc/hosts"), "/etc/hosts");
+        // Another user's home is not this one's, and guessing would resolve a
+        // launch into the wrong directory entirely.
+        assert_eq!(untildify("~other/x"), "~other/x");
     }
 
     #[test]

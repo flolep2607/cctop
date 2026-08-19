@@ -439,7 +439,20 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Show sessions active within", lines, 34);
 }
 
-/// The launcher: what to put in the tab, and where it will run.
+/// The last `width` characters of `s`, elided at the front.
+///
+/// For a field being typed into, where the end is the part that is moving.
+/// [`truncate`](crate::util::truncate) keeps the head, which is the right
+/// answer for a label and the wrong one for a cursor.
+fn tail(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count <= width {
+        return s.to_string();
+    }
+    let skip = count - width.saturating_sub(1);
+    format!("…{}", s.chars().skip(skip).collect::<String>())
+}
+
 /// The most of a refusal the menu will show before eliding it.
 ///
 /// Long enough for every reason in [`menu::items`](super::menu::items) and for
@@ -549,6 +562,7 @@ pub(super) fn draw_row_menu(
         .collect();
 }
 
+/// The launcher: what to put in the tab, and where it will run.
 pub(super) fn draw_launch(
     frame: &mut Frame,
     area: Rect,
@@ -705,26 +719,54 @@ pub(super) fn draw_launch(
     // nothing about reattaching, which lands wherever the agent already is.
     let picked = choices.get(app.launch_cursor);
     let picked_waiting = matches!(picked, Some(tabs::Choice::Waiting(_)));
-    lines.push(Line::from(Span::styled(
-        match (picked, &app.launch_cwd) {
-            // The ring is the only unexplained mark on the row, and it is the one
-            // worth explaining: it is the difference between coming back to an
-            // agent and joining someone else on it.
-            (Some(tabs::Choice::Waiting(agent)), _) if agent.attached => {
-                " ◉ already open elsewhere — both windows share one size".to_string()
-            }
-            (Some(tabs::Choice::Waiting(_)), _) => " where it already is".to_string(),
-            (_, Some(dir)) => format!(
-                " in {}",
-                crate::util::truncate(
-                    &crate::util::tildify(&dir.to_string_lossy()),
-                    WIDTH as usize - 6
-                )
+    let editing = app.mode == super::Mode::LaunchCwd;
+    lines.push(if editing {
+        // The field, in place of the line it replaces. Editing here rather than
+        // in a modal of its own keeps the list of agents on screen: which agent
+        // is picked is half of what the directory is being chosen for.
+        Line::from(vec![
+            Span::styled(" in ", Style::default().fg(theme::colors().label)),
+            Span::styled(
+                // The tail, when a long path outgrows the box. The end is the
+                // part being typed, and a field that showed the start would
+                // hide the cursor as soon as it mattered.
+                tail(&app.launch_cwd_input, WIDTH as usize - 8),
+                match app.launch_cwd_bad {
+                    true => Style::default().fg(theme::colors().cost_high),
+                    false => theme::value(),
+                },
             ),
-            (_, None) => " in this directory".to_string(),
-        },
-        Style::default().fg(theme::colors().label),
-    )));
+            Span::styled("▏", theme::value()),
+            Span::styled(
+                match app.launch_cwd_bad {
+                    true => "  no such directory",
+                    false => "",
+                },
+                Style::default().fg(theme::colors().cost_high),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            match (picked, &app.launch_cwd) {
+                // The ring is the only unexplained mark on the row, and it is
+                // the one worth explaining: it is the difference between coming
+                // back to an agent and joining someone else on it.
+                (Some(tabs::Choice::Waiting(agent)), _) if agent.attached => {
+                    " ◉ already open elsewhere — both windows share one size".to_string()
+                }
+                (Some(tabs::Choice::Waiting(_)), _) => " where it already is".to_string(),
+                (_, Some(dir)) => format!(
+                    " in {}  (c to change)",
+                    crate::util::truncate(
+                        &crate::util::tildify(&dir.to_string_lossy()),
+                        WIDTH as usize - 22
+                    )
+                ),
+                (_, None) => " in this directory  (c to change)".to_string(),
+            },
+            Style::default().fg(theme::colors().label),
+        ))
+    });
     // Only for an agent the profile reaches, and only where there is more than
     // one to be in: on a machine with a single account this says nothing, and a
     // line offering a key that changes nothing is worse than no line.
@@ -739,9 +781,10 @@ pub(super) fn draw_launch(
             Span::styled("  (p to change)", theme::dim()),
         ]));
     }
-    let keys = match picked_waiting {
-        true => " ↑/↓  Enter reattach  Esc cancel",
-        false => " ↑/↓  Enter start  Esc cancel",
+    let keys = match (editing, picked_waiting) {
+        (true, _) => " Enter accept  Esc keep the old one",
+        (false, true) => " ↑/↓  Enter reattach  Esc cancel",
+        (false, false) => " ↑/↓  Enter start  Esc cancel",
     };
     lines.push(Line::from(Span::styled(
         // A scrolled list has to say so, or the choices above and below the

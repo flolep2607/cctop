@@ -76,7 +76,15 @@ coordinate.
 
 The session table is tab 1. `t` opens another: pick an agent — whichever of
 `claude`, `codex`, `opencode`, and `pi` you have installed — or your shell, and
-it starts on a pty cctop owns and draws in the window. `Alt+v` and `Alt+s` split
+it starts on a pty cctop owns and draws in the window.
+
+The launcher says where the agent will start, and `c` makes that line editable:
+type or paste a path, `~` included, `Enter` to take it and `Esc` to keep the one
+it had. An empty field means the directory cctop itself was started in. A path
+that does not name a directory is refused in the field rather than at launch —
+by then the launcher is gone, and the failure arrives from inside the pty as a
+message about spawning. Reattaching to a running agent does not offer this: that
+agent is already somewhere, and a path typed for it would be ignored. `Alt+v` and `Alt+s` split
 the tab you are in, side by side or stacked, so `claude` and a shell for
 `git diff` are one keystroke apart. Fresh tabs start in the directory where you
 started `cctop`; use `R` to reopen a session in that session's project directory.

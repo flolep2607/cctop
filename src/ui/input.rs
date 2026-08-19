@@ -4,6 +4,13 @@ use super::columns::{COLUMNS, ColumnId};
 use super::{
     AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render, session_root_pid,
 };
+/// Longest path the launcher's directory field accepts.
+///
+/// Comfortably past any real working directory — Linux caps a path at 4096
+/// bytes and this is about the width of four terminals — while still bounding
+/// what a runaway paste can put in one line.
+const MAX_PATH_INPUT: usize = 512;
+
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -111,6 +118,7 @@ impl App {
             Mode::SendKeys => self.on_key_send(key),
             Mode::Launch => self.on_key_launch(key),
             Mode::RowMenu => self.on_key_menu(key),
+            Mode::LaunchCwd => self.on_key_launch_cwd(key),
             Mode::Hooks => self.on_key_hooks(key),
             Mode::Help => self.on_key_help(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
@@ -155,6 +163,13 @@ impl App {
             Mode::SendKeys => {
                 let room = 500usize.saturating_sub(self.send_input.len());
                 self.send_input.push_str(&flatten(text, room));
+            }
+            // Pasting a path in is the point of this field: a directory deep
+            // enough to be worth typing is one you copied from somewhere.
+            Mode::LaunchCwd => {
+                let room = MAX_PATH_INPUT.saturating_sub(self.launch_cwd_input.chars().count());
+                self.launch_cwd_input.push_str(&flatten(text, room));
+                self.launch_cwd_bad = false;
             }
             // The cost floor is a number, so a paste is filtered the way typing
             // one is rather than flattened: anything that is not a digit or a
@@ -215,12 +230,43 @@ impl App {
             // Only where there is more than one account to be in, so the key is
             // absent rather than inert on the machines that have never had two.
             KeyCode::Char('p') => self.cycle_launch_profile(),
+            // `c` for the directory it will start in. Not offered while
+            // reattaching: that agent is already somewhere, and the footer says
+            // so — a path typed there would be quietly ignored.
+            KeyCode::Char('c') if !self.launch_is_reattach() => self.edit_launch_cwd(),
             KeyCode::Enter => {
                 self.mode = Mode::List;
                 self.launch_selected();
             }
             _ => {}
         }
+    }
+
+    /// Typing the launcher's working directory.
+    ///
+    /// Accepting is where the path is checked, not where it is typed: a
+    /// directory half-spelled is not yet wrong, and colouring it red on the way
+    /// through would be noise on every keystroke.
+    fn on_key_launch_cwd(&mut self, key: KeyEvent) {
+        match key.code {
+            // Back to the list with the old directory intact. Cancelling has to
+            // leave the launch exactly as it was found, or Esc becomes a way to
+            // lose the setting you were trying to change.
+            KeyCode::Esc => self.mode = Mode::Launch,
+            KeyCode::Enter => self.accept_launch_cwd(),
+            KeyCode::Backspace => {
+                self.launch_cwd_input.pop();
+                self.launch_cwd_bad = false;
+            }
+            // Bounded like every other one-line input here: a path longer than
+            // this is not one anybody typed on purpose.
+            KeyCode::Char(c) if self.launch_cwd_input.chars().count() < MAX_PATH_INPUT => {
+                self.launch_cwd_input.push(c);
+                self.launch_cwd_bad = false;
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
     }
 
     /// The integration panel. Every action rewrites somebody's settings file,

@@ -186,7 +186,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         draw_overview(frame, chunks[0], app);
         draw_panes(frame, chunks[1], app, &mut layout);
         draw_footer(frame, chunks[2], app);
-        if app.mode == Mode::Launch {
+        if matches!(app.mode, Mode::Launch | Mode::LaunchCwd) {
             modals::draw_launch(frame, area, app, &mut layout);
         }
         return layout;
@@ -232,7 +232,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
-        Mode::Launch => modals::draw_launch(frame, area, app, &mut layout),
+        // The same modal: the directory field replaces one line of it, so the
+        // list of agents stays on screen while the path is being typed.
+        Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
         Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::List => {}
