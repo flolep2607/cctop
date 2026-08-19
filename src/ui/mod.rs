@@ -2,6 +2,7 @@
 
 pub mod columns;
 mod input;
+pub mod menu;
 mod modals;
 pub mod panels;
 pub mod render;
@@ -106,12 +107,50 @@ pub enum Mode {
     SendKeys,
     /// Picking which agent a new tab or split should run.
     Launch,
+    /// Everything that can be done to the selected row, in one list.
+    RowMenu,
+    /// Typing the directory the launcher's pick will start in. Drawn as the
+    /// launcher with its `in` line in an editable state, so the list of agents
+    /// stays visible while the path is being changed.
+    LaunchCwd,
     /// The agent-integration panel: what is installed where, and whether the
     /// agents are actually reporting in.
     Hooks,
     /// Offering to install tmux, a launch having found it missing.
     TmuxInstall,
 }
+
+/// Everything [`App::open_tab`] needs beyond the command itself.
+///
+/// A struct rather than six more parameters: they had already outgrown a
+/// readable call, and at a call site `verb: "Attached to"` says what the
+/// fifth positional string never did.
+struct NewTab<'a> {
+    cwd: Option<std::path::PathBuf>,
+    /// The thing being opened, as a status message would name it.
+    what: &'a str,
+    own: tabs::Own,
+    /// What happened, for the status line: resumed, reattached, attached.
+    verb: &'a str,
+    /// The session this pane resumes, when it resumes one.
+    resumed: Option<String>,
+    /// What to call the tab, when the command would call it badly.
+    ///
+    /// A launch is its command — a `claude` tab is called `claude`, which is
+    /// both true and short. A *resume* is not: its command carries the session
+    /// id, and `claude --resume 4ebf1ab4-2ef8-4fb2-a7d5-d445b5026dc9` is 45
+    /// characters of tab bar whose only variable part is a uuid nobody reads.
+    /// The caller that knows which session this is passes its name instead.
+    label: Option<String>,
+}
+
+/// How much of a session's name a resumed tab's label carries.
+///
+/// The bar elides labels itself once it is crowded, but only then — with two
+/// tabs open there is room for a whole title, and a title can be a sentence.
+/// This is the point past which a tab name stops identifying the session and
+/// starts being its own paragraph.
+pub(super) const TAB_LABEL_CHARS: usize = 24;
 
 /// A launch that stopped to ask about tmux, and how to pick it up again.
 ///
@@ -578,8 +617,20 @@ pub struct App {
     /// Which Claude profile the launcher will start an agent under, as an index
     /// into [`crate::config::CLAUDE_PROFILES`].
     pub launch_profile: usize,
+    /// Which entry of the row menu is under the cursor.
+    ///
+    /// Only ever points at an entry that can run: the menu draws the blocked
+    /// ones to explain them and never lets the cursor rest there. See
+    /// [`menu::step`].
+    pub menu_cursor: usize,
     /// Raw digits being typed into the cost-floor modal.
     pub cost_input: String,
+    /// The directory being typed into the launcher, spelled as the user is
+    /// spelling it — `~` and all, expanded only when it is accepted.
+    pub launch_cwd_input: String,
+    /// Set when the typed directory does not name one, so the field can say so
+    /// where it is rather than behind the modal that covers the status line.
+    pub launch_cwd_bad: bool,
     /// Line being typed into the selected session's terminal.
     pub send_input: String,
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
@@ -817,6 +868,7 @@ impl App {
                         .position(|p| p.name == name)
                 })
                 .unwrap_or(0),
+            menu_cursor: 0,
             cost_input: String::new(),
             send_input: String::new(),
             list_height: 0,
@@ -870,6 +922,8 @@ impl App {
             launch_into: LaunchInto::Tab,
             launch_root: std::env::current_dir().ok(),
             launch_cwd: None,
+            launch_cwd_input: String::new(),
+            launch_cwd_bad: false,
             tmux_install: None,
             tmux_deferred: None,
             tmux_declined: false,
@@ -1038,7 +1092,7 @@ impl App {
     /// parent that child came from rather than doing nothing — the row the
     /// cursor lands on afterwards is then the parent, not a line that no longer
     /// exists.
-    fn toggle_expanded(&mut self) {
+    pub(super) fn toggle_expanded(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
         };
@@ -1719,7 +1773,7 @@ impl App {
     }
 
     /// Toggle whether the selected session is marked for a batch action.
-    fn toggle_mark(&mut self) {
+    pub(super) fn toggle_mark(&mut self) {
         let Some(s) = self.selected_session() else {
             return;
         };
@@ -2293,6 +2347,14 @@ impl App {
         // resumed session belongs in the same directory.
         let cwd = session.work_dir();
         let what = format!("{} · {}", session.display_label(), argv[0]);
+        // What the tab is called: the agent, then which session it is. The
+        // command cannot say the second half without spelling out a uuid, and
+        // the uuid is the half nobody reads.
+        let label = format!(
+            "{} · {}",
+            argv[0],
+            crate::util::truncate(session.display_label(), TAB_LABEL_CHARS)
+        );
         // Named after the session, so resuming it a second time reattaches to
         // the agent already doing it rather than starting a rival.
         let tmux = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
@@ -2326,7 +2388,17 @@ impl App {
             tabs::Own::Tmux(name) if crate::tmux::exists(name) => "Reattached to",
             _ => "Resumed",
         };
-        self.open_tab(&argv, cwd, &what, own, verb, Some(tmux));
+        self.open_tab(
+            &argv,
+            NewTab {
+                cwd,
+                what: &what,
+                own,
+                verb,
+                resumed: Some(tmux),
+                label: Some(label),
+            },
+        );
     }
 
     /// Where the agent about to start should live, offering to install tmux if
@@ -2446,15 +2518,15 @@ impl App {
     ///
     /// `resumed` names the session the tab is going back to, when it is going
     /// back to one — what the next resume of it looks itself up by.
-    fn open_tab(
-        &mut self,
-        argv: &[String],
-        cwd: Option<std::path::PathBuf>,
-        what: &str,
-        own: tabs::Own,
-        verb: &str,
-        resumed: Option<String>,
-    ) {
+    fn open_tab(&mut self, argv: &[String], tab: NewTab<'_>) {
+        let NewTab {
+            cwd,
+            what,
+            own,
+            verb,
+            resumed,
+            label,
+        } = tab;
         let mut pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
             Err(error) => {
@@ -2463,6 +2535,9 @@ impl App {
             }
         };
         pane.resumed = resumed;
+        if let Some(label) = label {
+            pane.label = label;
+        }
         // Worth saying once per tab: it changes what quitting cctop means.
         let kept = match pane.outlives_cctop() {
             true => " — it will outlive cctop",
@@ -2563,6 +2638,62 @@ impl App {
             .iter()
             .find(|session| session_root_pid(session) == Some(pid))
             .map(|session| session.display_label().to_string())
+    }
+
+    /// Whether the launcher's pick is an agent already running somewhere.
+    ///
+    /// Reattaching lands wherever that agent already is, so a directory typed
+    /// for it would be accepted and then ignored — which is worse than the key
+    /// not being offered.
+    pub(super) fn launch_is_reattach(&self) -> bool {
+        matches!(
+            self.launch_offer.get(self.launch_cursor),
+            Some(tabs::Choice::Waiting(_))
+        )
+    }
+
+    /// Open the launcher's directory field, prefilled with where it would go.
+    ///
+    /// Prefilled with `~` spelling rather than the absolute path: that is how
+    /// the line already reads, and a field that changed what it showed the
+    /// moment it became editable would look like it had lost the setting.
+    pub(super) fn edit_launch_cwd(&mut self) {
+        self.launch_cwd_input = self
+            .launch_cwd
+            .as_ref()
+            .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
+            .unwrap_or_default();
+        self.launch_cwd_bad = false;
+        self.mode = Mode::LaunchCwd;
+        self.needs_redraw = true;
+    }
+
+    /// Take the typed directory, if it names one.
+    ///
+    /// Checked here rather than at launch. A path that does not exist fails
+    /// somewhere inside the shim with a message about spawning, by which point
+    /// the launcher is gone and there is nothing left to correct.
+    pub(super) fn accept_launch_cwd(&mut self) {
+        let typed = self.launch_cwd_input.trim();
+        // Empty means "wherever cctop was started", which is what the launcher
+        // offers by default and what the footer calls "this directory".
+        let taken = match typed.is_empty() {
+            true => None,
+            false => {
+                let path = std::path::PathBuf::from(crate::util::untildify(typed));
+                if !path.is_dir() {
+                    self.launch_cwd_bad = true;
+                    return;
+                }
+                Some(path)
+            }
+        };
+        // Cleared on the way out, not only on the way in: a path corrected
+        // after a refusal would otherwise carry the mark back to a field that
+        // now holds something perfectly good.
+        self.launch_cwd_bad = false;
+        self.launch_cwd = taken;
+        self.mode = Mode::Launch;
     }
 
     /// Start the launcher's pick.
@@ -2772,11 +2903,15 @@ impl App {
             }
             self.open_tab(
                 &[title],
-                None,
-                &label,
-                tabs::Own::TmuxExisting(name),
-                "Attached to",
-                Some(resumed),
+                NewTab {
+                    cwd: None,
+                    what: &label,
+                    own: tabs::Own::TmuxExisting(name),
+                    verb: "Attached to",
+                    resumed: Some(resumed),
+                    // Already a bare agent name, so the command names it right.
+                    label: None,
+                },
             );
             return;
         }
@@ -4369,6 +4504,119 @@ mod tests {
         assert_eq!(app.visible.len(), 1);
         assert!(app.sessions[app.visible[0].session()].is_running());
         assert!(app.sessions[app.visible[0].session()].process.is_none());
+    }
+
+    /// The launcher's directory is a field, not a caption. A `claude` opened on
+    /// the wrong project reads its way into the wrong repository before anyone
+    /// notices, and until now the only way to change it was to restart cctop
+    /// somewhere else.
+    #[test]
+    fn the_launchers_directory_can_be_typed_and_is_checked_before_it_is_taken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::new(Plan::Retail, channel().0);
+        app.launch_cwd = Some(dir.path().to_path_buf());
+
+        // Opens prefilled with what it would have used, so nothing looks lost.
+        app.edit_launch_cwd();
+        assert_eq!(app.mode, Mode::LaunchCwd);
+        assert_eq!(
+            app.launch_cwd_input,
+            crate::util::tildify(&dir.path().to_string_lossy())
+        );
+
+        // A directory that is not one is refused where it was typed, and the
+        // field stays open. Failing at launch instead would report it from
+        // inside the shim, after the launcher had gone.
+        app.launch_cwd_input = dir.path().join("nope").to_string_lossy().into_owned();
+        app.accept_launch_cwd();
+        assert!(app.launch_cwd_bad);
+        assert_eq!(app.mode, Mode::LaunchCwd, "the field stays open");
+        assert_eq!(app.launch_cwd.as_deref(), Some(dir.path()), "unchanged");
+
+        // A real one is taken.
+        let sub = dir.path().join("work");
+        std::fs::create_dir(&sub).expect("mkdir");
+        app.launch_cwd_input = sub.to_string_lossy().into_owned();
+        app.accept_launch_cwd();
+        assert!(!app.launch_cwd_bad);
+        assert_eq!(app.mode, Mode::Launch);
+        assert_eq!(app.launch_cwd.as_deref(), Some(sub.as_path()));
+
+        // Empty means where cctop was started, which is what the footer calls
+        // "this directory" — not an error, and not the previous value.
+        app.edit_launch_cwd();
+        app.launch_cwd_input = "   ".into();
+        app.accept_launch_cwd();
+        assert_eq!(app.launch_cwd, None);
+        assert_eq!(app.mode, Mode::Launch);
+    }
+
+    /// Esc has to leave the launch as it was found, or it becomes a way to lose
+    /// the setting you opened the field to change.
+    #[test]
+    fn cancelling_the_directory_field_keeps_the_old_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::new(Plan::Retail, channel().0);
+        app.launch_cwd = Some(dir.path().to_path_buf());
+        app.edit_launch_cwd();
+        app.launch_cwd_input = "/somewhere/else".into();
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Launch);
+        assert_eq!(app.launch_cwd.as_deref(), Some(dir.path()));
+    }
+
+    /// The menu and the keyboard must never disagree about what is possible.
+    /// Both ask the same predicates; this pins that they still do.
+    #[test]
+    fn the_menu_refuses_a_remote_row_the_way_the_keys_do() {
+        let mut app = App::new(Plan::Retail, channel().0);
+        let mut s = session("a", true, "/repo");
+        s.remote = Some(crate::session::Remote {
+            host: "devbox".into(),
+            branch: None,
+        });
+        app.sessions = vec![s];
+        app.refilter();
+        app.selected = 0;
+
+        let items = menu::items(&app);
+        assert!(!items.is_empty(), "a selected row has a menu");
+
+        // Everything that reaches into this filesystem is refused, and every
+        // refusal names the host — the same answer pressing the key gives.
+        for item in &items {
+            match item.action {
+                menu::Action::Expand | menu::Action::Mark => {
+                    assert!(item.enabled(), "{} works on a remote row", item.label);
+                }
+                _ => {
+                    let why = item.blocked.as_deref().unwrap_or("");
+                    assert!(
+                        why.contains("devbox"),
+                        "{} must name the host, said {why:?}",
+                        item.label
+                    );
+                }
+            }
+        }
+        // And the cursor never rests on one of the refusals.
+        assert!(items[menu::first_enabled(&items)].enabled());
+    }
+
+    #[test]
+    fn opening_the_menu_needs_a_row_and_lands_on_something_runnable() {
+        let mut app = App::new(Plan::Retail, channel().0);
+        // No rows: Enter must not open an empty box.
+        app.open_row_menu();
+        assert_eq!(app.mode, Mode::List);
+
+        app.sessions = vec![session("a", false, "/repo")];
+        app.refilter();
+        app.selected = 0;
+        app.open_row_menu();
+        assert_eq!(app.mode, Mode::RowMenu);
+        let items = menu::items(&app);
+        assert!(items[app.menu_cursor].enabled());
     }
 
     #[test]

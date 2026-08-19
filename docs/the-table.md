@@ -140,10 +140,44 @@ transcripts store their text as JSON, so a phrase containing a quote or a
 newline is escaped on disk and will not match; and a single session is scanned
 up to 64 MiB.
 
+## The row menu
+
+Every action below has a key, and the keys are worth learning. But you have to
+know they exist first, and a key that quietly declines — because the row is on
+another machine, or is a subagent, or has no process left to signal — teaches
+nothing about why.
+
+`Enter` on a row opens everything you can do to it:
+
+```
+╭ Improve super cctop ─────────────────────────────────────╮
+│ Resume in a tab                                        R │
+│ Attach to it                                           a │
+│ Type into it               no local process to type into │
+│ Hand off to another agent                              O │
+│ Show its subagents                                     e │
+│ Mark for a batch action                            space │
+│ ──────────────────────────────────────────────────────── │
+│ Terminate the agent                    it is not running │
+│ Delete the transcript                                  d │
+╰ ↑↓ Enter · Esc ──────────────────────────────────────────╯
+```
+
+Entries that cannot run stay on the list, greyed, with the reason where their
+key would be — one or the other, never both, since pressing the key of a
+refused entry only repeats the refusal. They are not hidden: a menu that
+changed shape from row to row would teach you less than one that says why.
+
+The cursor never lands on a refusal, so `Enter` always does something. The
+letters stay live inside the menu, so `Enter` `R` and a plain `R` are the same
+two keystrokes — the menu shows the shortcuts rather than replacing them.
+Clicking works too. `Esc`, or a click outside, closes it.
+
 ## Every key
 
 | Key | Action |
 |-----|--------|
+| `Enter` | Everything you can do to this row, in one menu (see above) |
 | `↑`, `↓`/`j` | Move between sessions |
 | `PgUp`, `PgDn` | Page up / down |
 | `Ctrl+U`, `Ctrl+D` | Half a page up / down |

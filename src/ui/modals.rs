@@ -147,6 +147,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("U", "Clear all marks"),
         Line::default(),
         section("Other"),
+        item("Enter", "Everything you can do to this row, in one menu"),
         item("w", "Bell + desktop alert when a session needs you"),
         item("y", "Copy resume command or transcript path"),
         item("d", "Delete the selected session (not running)"),
@@ -438,6 +439,129 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Show sessions active within", lines, 34);
 }
 
+/// The last `width` characters of `s`, elided at the front.
+///
+/// For a field being typed into, where the end is the part that is moving.
+/// [`truncate`](crate::util::truncate) keeps the head, which is the right
+/// answer for a label and the wrong one for a cursor.
+fn tail(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count <= width {
+        return s.to_string();
+    }
+    let skip = count - width.saturating_sub(1);
+    format!("…{}", s.chars().skip(skip).collect::<String>())
+}
+
+/// The most of a refusal the menu will show before eliding it.
+///
+/// Long enough for every reason in [`menu::items`](super::menu::items) and for
+/// the useful half of a remote row's, which names the host first.
+const MAX_REASON: usize = 34;
+
+/// What sits at the right of an entry: the key, or why there is no point
+/// pressing it.
+fn trailing(item: &super::menu::Item) -> String {
+    match &item.blocked {
+        Some(why) => why.clone(),
+        None => item.key.to_string(),
+    }
+}
+
+/// The per-row action menu.
+///
+/// Sized to its widest entry rather than to a constant: the labels are fixed
+/// strings, so the one width that always fits is the one measured from them.
+pub(super) fn draw_row_menu(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut super::render::Layout,
+) {
+    let items = super::menu::items(app);
+    if items.is_empty() {
+        return;
+    }
+
+    // Two columns: what it does, and — flush right — either the key that does
+    // it or the reason it cannot be done. One or the other, never both, because
+    // the key of an entry that is refused is not information: pressing it only
+    // repeats the refusal.
+    //
+    // On one line each. The reason used to sit on a line of its own underneath,
+    // which doubled the height of exactly the entries the reader has already
+    // decided not to use.
+    let label_w = items.iter().map(|i| i.label.len()).max().unwrap_or(0);
+    // Bounded so one long refusal cannot stretch the menu across the terminal;
+    // the tail of `remote_refusal` is the part that repeats.
+    let right_w = items
+        .iter()
+        .map(|i| trailing(i).chars().count().min(MAX_REASON))
+        .max()
+        .unwrap_or(0);
+    let width = (label_w + right_w + 6).clamp(30, 76) as u16;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Which line each entry landed on, so a click lands on the entry rather
+    // than on whatever the menu is covering.
+    let mut rows: Vec<(usize, usize)> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if item.rule {
+            // Inset a cell each side, so the rule reads as a divider between
+            // entries rather than as another border.
+            lines.push(Line::from(Span::styled(
+                format!(" {} ", "─".repeat(width.saturating_sub(4) as usize)),
+                theme::dim(),
+            )));
+        }
+        let selected = i == app.menu_cursor && item.enabled();
+        let style = match (item.enabled(), selected) {
+            (false, _) => theme::dim(),
+            (true, true) => Style::default()
+                .bg(theme::colors().selected_bg)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+            (true, false) => Style::default(),
+        };
+        rows.push((lines.len(), i));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<label_w$}  ", item.label), style),
+            Span::styled(
+                format!(
+                    "{:>right_w$} ",
+                    crate::util::truncate(&trailing(item), MAX_REASON)
+                ),
+                theme::dim(),
+            ),
+        ]));
+    }
+
+    // The row this is about, on the border: it costs no content line, and a
+    // menu floating over a table of seventy rows has to say which one it means.
+    let subject = app
+        .selected_session()
+        .map(|s| crate::util::truncate(s.display_label(), width.saturating_sub(4) as usize))
+        .unwrap_or_default();
+
+    let height = lines.len() as u16 + 2;
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .title(Span::styled(format!(" {subject} "), theme::title()))
+        .title_bottom(Span::styled(" ↑↓ Enter · Esc ", theme::dim()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    layout.modal_rect = Some(rect);
+    layout.menu_rows = rows
+        .into_iter()
+        .map(|(line, i)| (inner.y + line as u16, i))
+        .collect();
+}
+
 /// The launcher: what to put in the tab, and where it will run.
 pub(super) fn draw_launch(
     frame: &mut Frame,
@@ -595,26 +719,54 @@ pub(super) fn draw_launch(
     // nothing about reattaching, which lands wherever the agent already is.
     let picked = choices.get(app.launch_cursor);
     let picked_waiting = matches!(picked, Some(tabs::Choice::Waiting(_)));
-    lines.push(Line::from(Span::styled(
-        match (picked, &app.launch_cwd) {
-            // The ring is the only unexplained mark on the row, and it is the one
-            // worth explaining: it is the difference between coming back to an
-            // agent and joining someone else on it.
-            (Some(tabs::Choice::Waiting(agent)), _) if agent.attached => {
-                " ◉ already open elsewhere — both windows share one size".to_string()
-            }
-            (Some(tabs::Choice::Waiting(_)), _) => " where it already is".to_string(),
-            (_, Some(dir)) => format!(
-                " in {}",
-                crate::util::truncate(
-                    &crate::util::tildify(&dir.to_string_lossy()),
-                    WIDTH as usize - 6
-                )
+    let editing = app.mode == super::Mode::LaunchCwd;
+    lines.push(if editing {
+        // The field, in place of the line it replaces. Editing here rather than
+        // in a modal of its own keeps the list of agents on screen: which agent
+        // is picked is half of what the directory is being chosen for.
+        Line::from(vec![
+            Span::styled(" in ", Style::default().fg(theme::colors().label)),
+            Span::styled(
+                // The tail, when a long path outgrows the box. The end is the
+                // part being typed, and a field that showed the start would
+                // hide the cursor as soon as it mattered.
+                tail(&app.launch_cwd_input, WIDTH as usize - 8),
+                match app.launch_cwd_bad {
+                    true => Style::default().fg(theme::colors().cost_high),
+                    false => theme::value(),
+                },
             ),
-            (_, None) => " in this directory".to_string(),
-        },
-        Style::default().fg(theme::colors().label),
-    )));
+            Span::styled("▏", theme::value()),
+            Span::styled(
+                match app.launch_cwd_bad {
+                    true => "  no such directory",
+                    false => "",
+                },
+                Style::default().fg(theme::colors().cost_high),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            match (picked, &app.launch_cwd) {
+                // The ring is the only unexplained mark on the row, and it is
+                // the one worth explaining: it is the difference between coming
+                // back to an agent and joining someone else on it.
+                (Some(tabs::Choice::Waiting(agent)), _) if agent.attached => {
+                    " ◉ already open elsewhere — both windows share one size".to_string()
+                }
+                (Some(tabs::Choice::Waiting(_)), _) => " where it already is".to_string(),
+                (_, Some(dir)) => format!(
+                    " in {}  (c to change)",
+                    crate::util::truncate(
+                        &crate::util::tildify(&dir.to_string_lossy()),
+                        WIDTH as usize - 22
+                    )
+                ),
+                (_, None) => " in this directory  (c to change)".to_string(),
+            },
+            Style::default().fg(theme::colors().label),
+        ))
+    });
     // Only for an agent the profile reaches, and only where there is more than
     // one to be in: on a machine with a single account this says nothing, and a
     // line offering a key that changes nothing is worse than no line.
@@ -629,9 +781,10 @@ pub(super) fn draw_launch(
             Span::styled("  (p to change)", theme::dim()),
         ]));
     }
-    let keys = match picked_waiting {
-        true => " ↑/↓  Enter reattach  Esc cancel",
-        false => " ↑/↓  Enter start  Esc cancel",
+    let keys = match (editing, picked_waiting) {
+        (true, _) => " Enter accept  Esc keep the old one",
+        (false, true) => " ↑/↓  Enter reattach  Esc cancel",
+        (false, false) => " ↑/↓  Enter start  Esc cancel",
     };
     lines.push(Line::from(Span::styled(
         // A scrolled list has to say so, or the choices above and below the

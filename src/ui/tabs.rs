@@ -478,6 +478,32 @@ pub fn label_of(argv: &[String]) -> String {
 #[cfg(test)]
 mod tests {
 
+    /// A resumed tab is named after its session, not its command.
+    ///
+    /// `claude --resume 4ebf1ab4-2ef8-4fb2-a7d5-d445b5026dc9` is 45 characters
+    /// of tab bar whose only variable part is a uuid nobody reads. The label
+    /// the resume path builds is what the bar should show instead.
+    #[test]
+    fn a_resume_command_is_not_a_tab_name() {
+        let argv: Vec<String> = ["claude", "--resume", "4ebf1ab4-2ef8-4fb2-a7d5-d445b5026dc9"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // What the command alone would give: the uuid, in full.
+        let from_argv = super::label_of(&argv);
+        assert!(from_argv.contains("4ebf1ab4"), "{from_argv}");
+        assert!(from_argv.chars().count() > 40, "{from_argv}");
+
+        // What the resume path builds instead: the agent, then the session.
+        let label = format!(
+            "{} · {}",
+            argv[0],
+            crate::util::truncate("Improve super cctop", super::super::TAB_LABEL_CHARS)
+        );
+        assert_eq!(label, "claude · Improve super cctop");
+        assert!(!label.contains("4ebf1ab4"));
+    }
+
     /// A tab launched under a profile is still a `claude` tab. The `env` prefix
     /// is how it was started, and naming a tab after its plumbing is the same
     /// mistake as calling one `tmux new-session -A -s cctop-claude`.
