@@ -116,6 +116,38 @@ pub enum Mode {
     TmuxInstall,
 }
 
+/// Everything [`App::open_tab`] needs beyond the command itself.
+///
+/// A struct rather than six more parameters: they had already outgrown a
+/// readable call, and at a call site `verb: "Attached to"` says what the
+/// fifth positional string never did.
+struct NewTab<'a> {
+    cwd: Option<std::path::PathBuf>,
+    /// The thing being opened, as a status message would name it.
+    what: &'a str,
+    own: tabs::Own,
+    /// What happened, for the status line: resumed, reattached, attached.
+    verb: &'a str,
+    /// The session this pane resumes, when it resumes one.
+    resumed: Option<String>,
+    /// What to call the tab, when the command would call it badly.
+    ///
+    /// A launch is its command — a `claude` tab is called `claude`, which is
+    /// both true and short. A *resume* is not: its command carries the session
+    /// id, and `claude --resume 4ebf1ab4-2ef8-4fb2-a7d5-d445b5026dc9` is 45
+    /// characters of tab bar whose only variable part is a uuid nobody reads.
+    /// The caller that knows which session this is passes its name instead.
+    label: Option<String>,
+}
+
+/// How much of a session's name a resumed tab's label carries.
+///
+/// The bar elides labels itself once it is crowded, but only then — with two
+/// tabs open there is room for a whole title, and a title can be a sentence.
+/// This is the point past which a tab name stops identifying the session and
+/// starts being its own paragraph.
+pub(super) const TAB_LABEL_CHARS: usize = 24;
+
 /// A launch that stopped to ask about tmux, and how to pick it up again.
 ///
 /// The launch is re-run from the top rather than resumed mid-way, because
@@ -2303,6 +2335,14 @@ impl App {
         // resumed session belongs in the same directory.
         let cwd = session.work_dir();
         let what = format!("{} · {}", session.display_label(), argv[0]);
+        // What the tab is called: the agent, then which session it is. The
+        // command cannot say the second half without spelling out a uuid, and
+        // the uuid is the half nobody reads.
+        let label = format!(
+            "{} · {}",
+            argv[0],
+            crate::util::truncate(session.display_label(), TAB_LABEL_CHARS)
+        );
         // Named after the session, so resuming it a second time reattaches to
         // the agent already doing it rather than starting a rival.
         let tmux = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
@@ -2336,7 +2376,17 @@ impl App {
             tabs::Own::Tmux(name) if crate::tmux::exists(name) => "Reattached to",
             _ => "Resumed",
         };
-        self.open_tab(&argv, cwd, &what, own, verb, Some(tmux));
+        self.open_tab(
+            &argv,
+            NewTab {
+                cwd,
+                what: &what,
+                own,
+                verb,
+                resumed: Some(tmux),
+                label: Some(label),
+            },
+        );
     }
 
     /// Where the agent about to start should live, offering to install tmux if
@@ -2456,15 +2506,15 @@ impl App {
     ///
     /// `resumed` names the session the tab is going back to, when it is going
     /// back to one — what the next resume of it looks itself up by.
-    fn open_tab(
-        &mut self,
-        argv: &[String],
-        cwd: Option<std::path::PathBuf>,
-        what: &str,
-        own: tabs::Own,
-        verb: &str,
-        resumed: Option<String>,
-    ) {
+    fn open_tab(&mut self, argv: &[String], tab: NewTab<'_>) {
+        let NewTab {
+            cwd,
+            what,
+            own,
+            verb,
+            resumed,
+            label,
+        } = tab;
         let mut pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
             Err(error) => {
@@ -2473,6 +2523,9 @@ impl App {
             }
         };
         pane.resumed = resumed;
+        if let Some(label) = label {
+            pane.label = label;
+        }
         // Worth saying once per tab: it changes what quitting cctop means.
         let kept = match pane.outlives_cctop() {
             true => " — it will outlive cctop",
@@ -2782,11 +2835,15 @@ impl App {
             }
             self.open_tab(
                 &[title],
-                None,
-                &label,
-                tabs::Own::TmuxExisting(name),
-                "Attached to",
-                Some(resumed),
+                NewTab {
+                    cwd: None,
+                    what: &label,
+                    own: tabs::Own::TmuxExisting(name),
+                    verb: "Attached to",
+                    resumed: Some(resumed),
+                    // Already a bare agent name, so the command names it right.
+                    label: None,
+                },
             );
             return;
         }

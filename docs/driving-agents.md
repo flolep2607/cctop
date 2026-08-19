@@ -62,6 +62,10 @@ show the terminal of an agent cctop is already hosting, while resuming starts a
 fresh agent from the transcript and so works for any session in the table,
 however it was launched and however long ago it ended.
 
+The tab is named after the session, not the command that reopened it — `claude ·
+Improve super cctop` rather than `claude --resume 4ebf1ab4-2ef8-4fb2-a7d5-…`,
+whose only variable part is a uuid nobody reads.
+
 Cursor, Gemini and Windsurf keep their conversations inside an editor and have
 no such command, so `R` says so rather than guessing at a flag; `y` copies their
 transcript path instead. Resuming a session that is *still running* asks first —
