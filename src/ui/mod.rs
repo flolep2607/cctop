@@ -1476,7 +1476,7 @@ impl App {
         // per refresh, and lowercasing them all was the whole per-refresh
         // allocation; it also stops a query matching across the seam between
         // two unrelated fields.
-        let fields: [&str; 7] = [
+        let fields: [&str; 8] = [
             s.display_label(),
             &s.model,
             &s.harness,
@@ -1486,6 +1486,9 @@ impl App {
             // Empty for this user's own rows, which no query can match, so
             // searching a name finds that person's sessions and nothing else.
             s.owner.as_deref().unwrap_or_default(),
+            // Likewise empty for every harness but Claude Code, so `work` finds
+            // that login's sessions rather than everything that mentions work.
+            s.profile.as_deref().unwrap_or_default(),
         ];
         if fields.iter().any(|f| contains_ascii_ci(f, query)) {
             return true;
@@ -2948,6 +2951,11 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // the person reading the screen.
     if crate::config::OTHER_HOMES.is_empty() {
         app.hidden_columns.push(ColumnId::User);
+    }
+    // And PROFILE, which most machines have exactly one of. A column repeating
+    // `default` down every row is a column that answers nothing.
+    if crate::config::claude_profile_count() <= 1 {
+        app.hidden_columns.push(ColumnId::Profile);
     }
     let _ = req_tx.send(Request::Refresh);
 

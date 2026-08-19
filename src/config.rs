@@ -517,6 +517,48 @@ pub fn owner_of(path: &Path) -> Option<&'static str> {
         .map(|o| o.user.as_str())
 }
 
+/// Every Claude profile in view: this user's, and each other home's when cctop
+/// is sweeping them.
+///
+/// Separate from [`CLAUDE_PROFILES`], which is this user's alone and is what
+/// the launcher offers to start an agent under. Attribution has to cover every
+/// home the walk reaches, or a row read out of somebody else's `.claude-work`
+/// would come back unlabelled.
+static PROFILES_IN_VIEW: LazyLock<Vec<ClaudeProfile>> = LazyLock::new(|| {
+    let mut out = CLAUDE_PROFILES.clone();
+    for other in OTHER_HOMES.iter() {
+        out.extend(claude_profiles_in(&other.home));
+    }
+    out
+});
+
+/// Which Claude profile `path` was read out of.
+///
+/// The counterpart of [`owner_of`] for the other axis a machine splits on: one
+/// user can hold several logins, each with its own subscription, its own limits
+/// and its own `projects/`. Until a row says which, a personal session and a
+/// work one are the same row twice — the same confusion USER exists to remove
+/// between two people.
+///
+/// The longest match wins. Profiles are normally siblings, so any prefix test
+/// would do; `$CLAUDE_CONFIG_DIR` can name a directory inside another one, and
+/// there the specific answer is the true one.
+pub fn claude_profile_for(path: &Path) -> Option<&'static str> {
+    PROFILES_IN_VIEW
+        .iter()
+        .filter(|p| path.starts_with(&p.dir))
+        .max_by_key(|p| p.dir.as_os_str().len())
+        .map(|p| p.name.as_str())
+}
+
+/// How many Claude profiles are in view.
+///
+/// One is the ordinary case, and a column repeating `default` on every row
+/// tells nobody anything — so the table asks this before drawing one.
+pub fn claude_profile_count() -> usize {
+    PROFILES_IN_VIEW.len()
+}
+
 pub const CLAUDE_DEFAULT_CTX: u64 = 200_000;
 /// A decimal million, not a mebi-token. Anthropic advertises the large window as
 /// 1M tokens and LiteLLM's `max_input_tokens` says 1000000 for the models that
@@ -640,6 +682,41 @@ mod tests {
 
     /// `~/.claude` is what every install starts with, so it is the one a picker
     /// should open on however the directory happened to be read.
+    /// The attribution a row depends on, over the layout profiles actually
+    /// take: siblings in one home, told apart by their directory name.
+    #[test]
+    fn a_transcript_is_attributed_to_the_profile_it_lives_under() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        for name in [".claude", ".claude-work"] {
+            let profile = home.join(name);
+            std::fs::create_dir_all(profile.join("projects")).expect("mkdir");
+            std::fs::write(profile.join(".credentials.json"), "{}").expect("write");
+        }
+        let found = claude_profiles_in(home);
+        let named = |path: &Path| -> Option<String> {
+            found
+                .iter()
+                .filter(|p| path.starts_with(&p.dir))
+                .max_by_key(|p| p.dir.as_os_str().len())
+                .map(|p| p.name.clone())
+        };
+
+        // `.claude-work` must not be read as living under `.claude`. Path
+        // prefixes compare by component, which is the whole reason this holds —
+        // a string prefix test would put every work session on the default.
+        assert_eq!(
+            named(&home.join(".claude/projects/repo/a.jsonl")).as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            named(&home.join(".claude-work/projects/repo/a.jsonl")).as_deref(),
+            Some("work")
+        );
+        // A path under neither belongs to neither.
+        assert_eq!(named(&home.join(".codex/sessions/a.jsonl")), None);
+    }
+
     #[test]
     fn the_default_profile_leads_and_the_rest_are_ordered() {
         let dir = std::env::temp_dir().join(format!("cctop-prof2-{}", std::process::id()));
