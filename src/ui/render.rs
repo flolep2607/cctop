@@ -38,6 +38,8 @@ pub struct Layout {
     pub(super) modal_rect: Option<Rect>,
     /// `(row, choice_index)` for each row of the launcher's list.
     pub(super) launch_rows: Vec<(u16, usize)>,
+    /// `(row, item_index)` for each entry of the row menu.
+    pub(super) menu_rows: Vec<(u16, usize)>,
     /// Tool Activity sidebar: `(x_end, y_start, first_index, row_count)`.
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
@@ -128,6 +130,14 @@ impl Layout {
             (col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
                 .then(|| (i, col - r.x, row - r.y))
         })
+    }
+
+    /// Index of the row-menu entry under the cursor, if any.
+    pub fn menu_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.in_modal(col, row)
+            .then(|| self.menu_rows.iter().find(|(y, _)| *y == row))
+            .flatten()
+            .map(|(_, i)| *i)
     }
 
     pub fn launch_row_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -223,6 +233,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
         Mode::Launch => modals::draw_launch(frame, area, app, &mut layout),
+        Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::List => {}
     }
@@ -1411,6 +1422,7 @@ mod tests {
             tool_log: Some((19, 21, 4)),
             modal_rect: Some(Rect::new(10, 8, 20, 6)),
             launch_rows: vec![(10, 0), (11, 1)],
+            menu_rows: vec![(9, 0), (10, 1)],
             pane_rects: vec![Rect::new(1, 7, 40, 10)],
         };
         // A modal takes the clicks that land on it, and its rows resolve to the
@@ -1419,6 +1431,14 @@ mod tests {
         assert_eq!(layout.launch_row_at(15, 12), None);
         // Same row, but outside the modal: still not a choice.
         assert_eq!(layout.launch_row_at(5, 11), None);
+
+        // The row menu is hit-tested the same way, and by the same rule: a
+        // click outside the modal rectangle is not the menu's, whatever row it
+        // happens to share with one of its entries.
+        assert_eq!(layout.menu_row_at(15, 9), Some(0));
+        assert_eq!(layout.menu_row_at(15, 10), Some(1));
+        assert_eq!(layout.menu_row_at(15, 13), None);
+        assert_eq!(layout.menu_row_at(5, 9), None);
         assert!(layout.in_modal(10, 8));
         assert!(!layout.in_modal(30, 8));
         // The bar's tabs and its new-tab button are separate targets, and both
@@ -1556,6 +1576,72 @@ mod tests {
         let (a, _) = layout.workspace_new.expect("no new-tab hit region");
         assert!(layout.workspace_new_at(a, 0));
         assert!(!layout.workspace_new_at(a, 1));
+    }
+
+    /// One line per entry, whether or not it can run.
+    ///
+    /// The reason a blocked entry carries used to sit on a line of its own,
+    /// which doubled the height of exactly the entries the reader has already
+    /// decided against — a menu mostly made of grey.
+    #[test]
+    fn the_row_menu_gives_every_entry_exactly_one_line() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use crate::session::Session;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        // A stopped session: nothing to type into and nothing to terminate, so
+        // the menu carries two refusals and this actually tests the case.
+        let mut session = Session::new(crate::pricing::Provider::Claude, "abc".into());
+        session.started_at = "2026-01-01T00:00:00Z".into();
+        session.last_active = session.started_at.clone();
+        session.label_source = "/repo".into();
+        app.sessions = vec![session];
+        app.refilter();
+        app.selected = 0;
+        app.open_row_menu();
+        assert_eq!(app.mode, super::super::Mode::RowMenu);
+
+        let (cols, rows) = (120u16, 40u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+
+        let items = super::super::menu::items(&app);
+        let blocked: Vec<&str> = items.iter().filter_map(|i| i.blocked.as_deref()).collect();
+        assert!(!blocked.is_empty(), "a stopped session refuses something");
+
+        // Every entry got a hit region, and no two share a line — which is the
+        // same thing as saying nothing spilled onto a second one.
+        assert_eq!(layout.menu_rows.len(), items.len());
+        let mut lines: Vec<u16> = layout.menu_rows.iter().map(|(y, _)| *y).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        assert_eq!(lines.len(), items.len(), "entries share or straddle lines");
+
+        // And the refusal is on the same line as the label it explains.
+        let buffer = terminal.backend().buffer().clone();
+        let text_at = |y: u16| -> String { (0..cols).map(|x| buffer[(x, y)].symbol()).collect() };
+        for (y, i) in &layout.menu_rows {
+            let line = text_at(*y);
+            assert!(
+                line.contains(items[*i].label),
+                "entry {i} is not on its own line: {line:?}"
+            );
+            if let Some(why) = &items[*i].blocked {
+                let head: String = why.chars().take(12).collect();
+                assert!(
+                    line.contains(&head),
+                    "the refusal for {:?} is not beside it: {line:?}",
+                    items[*i].label
+                );
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]

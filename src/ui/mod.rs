@@ -2,6 +2,7 @@
 
 pub mod columns;
 mod input;
+pub mod menu;
 mod modals;
 pub mod panels;
 pub mod render;
@@ -106,6 +107,8 @@ pub enum Mode {
     SendKeys,
     /// Picking which agent a new tab or split should run.
     Launch,
+    /// Everything that can be done to the selected row, in one list.
+    RowMenu,
     /// The agent-integration panel: what is installed where, and whether the
     /// agents are actually reporting in.
     Hooks,
@@ -578,6 +581,12 @@ pub struct App {
     /// Which Claude profile the launcher will start an agent under, as an index
     /// into [`crate::config::CLAUDE_PROFILES`].
     pub launch_profile: usize,
+    /// Which entry of the row menu is under the cursor.
+    ///
+    /// Only ever points at an entry that can run: the menu draws the blocked
+    /// ones to explain them and never lets the cursor rest there. See
+    /// [`menu::step`].
+    pub menu_cursor: usize,
     /// Raw digits being typed into the cost-floor modal.
     pub cost_input: String,
     /// Line being typed into the selected session's terminal.
@@ -817,6 +826,7 @@ impl App {
                         .position(|p| p.name == name)
                 })
                 .unwrap_or(0),
+            menu_cursor: 0,
             cost_input: String::new(),
             send_input: String::new(),
             list_height: 0,
@@ -1038,7 +1048,7 @@ impl App {
     /// parent that child came from rather than doing nothing — the row the
     /// cursor lands on afterwards is then the parent, not a line that no longer
     /// exists.
-    fn toggle_expanded(&mut self) {
+    pub(super) fn toggle_expanded(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
         };
@@ -1719,7 +1729,7 @@ impl App {
     }
 
     /// Toggle whether the selected session is marked for a batch action.
-    fn toggle_mark(&mut self) {
+    pub(super) fn toggle_mark(&mut self) {
         let Some(s) = self.selected_session() else {
             return;
         };
@@ -4369,6 +4379,60 @@ mod tests {
         assert_eq!(app.visible.len(), 1);
         assert!(app.sessions[app.visible[0].session()].is_running());
         assert!(app.sessions[app.visible[0].session()].process.is_none());
+    }
+
+    /// The menu and the keyboard must never disagree about what is possible.
+    /// Both ask the same predicates; this pins that they still do.
+    #[test]
+    fn the_menu_refuses_a_remote_row_the_way_the_keys_do() {
+        let mut app = App::new(Plan::Retail, channel().0);
+        let mut s = session("a", true, "/repo");
+        s.remote = Some(crate::session::Remote {
+            host: "devbox".into(),
+            branch: None,
+        });
+        app.sessions = vec![s];
+        app.refilter();
+        app.selected = 0;
+
+        let items = menu::items(&app);
+        assert!(!items.is_empty(), "a selected row has a menu");
+
+        // Everything that reaches into this filesystem is refused, and every
+        // refusal names the host — the same answer pressing the key gives.
+        for item in &items {
+            match item.action {
+                menu::Action::Expand | menu::Action::Mark => {
+                    assert!(item.enabled(), "{} works on a remote row", item.label);
+                }
+                _ => {
+                    let why = item.blocked.as_deref().unwrap_or("");
+                    assert!(
+                        why.contains("devbox"),
+                        "{} must name the host, said {why:?}",
+                        item.label
+                    );
+                }
+            }
+        }
+        // And the cursor never rests on one of the refusals.
+        assert!(items[menu::first_enabled(&items)].enabled());
+    }
+
+    #[test]
+    fn opening_the_menu_needs_a_row_and_lands_on_something_runnable() {
+        let mut app = App::new(Plan::Retail, channel().0);
+        // No rows: Enter must not open an empty box.
+        app.open_row_menu();
+        assert_eq!(app.mode, Mode::List);
+
+        app.sessions = vec![session("a", false, "/repo")];
+        app.refilter();
+        app.selected = 0;
+        app.open_row_menu();
+        assert_eq!(app.mode, Mode::RowMenu);
+        let items = menu::items(&app);
+        assert!(items[app.menu_cursor].enabled());
     }
 
     #[test]

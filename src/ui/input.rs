@@ -110,6 +110,7 @@ impl App {
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
             Mode::Launch => self.on_key_launch(key),
+            Mode::RowMenu => self.on_key_menu(key),
             Mode::Hooks => self.on_key_hooks(key),
             Mode::Help => self.on_key_help(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
@@ -436,6 +437,119 @@ impl App {
         }
     }
 
+    /// Open the row menu on the first entry that can actually run.
+    pub(super) fn open_row_menu(&mut self) {
+        let items = super::menu::items(self);
+        if items.is_empty() {
+            return;
+        }
+        self.menu_cursor = super::menu::first_enabled(&items);
+        self.mode = Mode::RowMenu;
+        self.needs_redraw = true;
+    }
+
+    /// Keys inside the row menu.
+    ///
+    /// The shortcut letters stay live in here too, so `Enter d` and a plain `d`
+    /// are the same two keystrokes and neither has to be unlearned — the menu
+    /// shows the letters precisely so they get used.
+    fn on_key_menu(&mut self, key: KeyEvent) {
+        let items = super::menu::items(self);
+        if items.is_empty() {
+            self.mode = Mode::List;
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::List,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.menu_cursor = super::menu::step(&items, self.menu_cursor, -1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.menu_cursor = super::menu::step(&items, self.menu_cursor, 1);
+            }
+            KeyCode::Enter => {
+                if let Some(item) = items.get(self.menu_cursor)
+                    && item.enabled()
+                {
+                    let action = item.action;
+                    self.mode = Mode::List;
+                    self.run_menu_action(action);
+                }
+            }
+            // A blocked entry's letter says why rather than doing nothing,
+            // which is the same answer the table gives for the same key.
+            KeyCode::Char(c) => {
+                let hit = items
+                    .iter()
+                    .find(|i| i.key.len() == 1 && i.key.starts_with(c));
+                if let Some(item) = hit {
+                    let action = item.action;
+                    let blocked = item.blocked.clone();
+                    self.mode = Mode::List;
+                    match blocked {
+                        Some(why) => self.set_status(why),
+                        None => self.run_menu_action(action),
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Run one menu entry, through the same method its key calls.
+    fn run_menu_action(&mut self, action: super::menu::Action) {
+        use super::menu::Action;
+        match action {
+            Action::Resume => self.resume_selected(),
+            Action::Attach => self.attach_selected(),
+            Action::Send => self.send_prompt(),
+            Action::Handoff => self.handoff_selected(),
+            Action::Expand => self.toggle_expanded(),
+            Action::Mark => self.toggle_mark(),
+            Action::Terminate => self.confirm_terminate(),
+            Action::Delete => self.delete_selected(),
+        }
+    }
+
+    /// Start deleting the selected session's transcript, or say why not.
+    ///
+    /// Split out from the `d` arm so the row menu runs the identical path. Two
+    /// routes to one action must not have two ideas of when it is allowed.
+    pub(super) fn delete_selected(&mut self) {
+        if self.on_subagent() {
+            self.set_status("A subagent cannot be deleted on its own");
+            return;
+        }
+        match self.selected_session() {
+            Some(s) if self.deleting.contains(&s.key()) => {
+                self.set_status("Session deletion is already in progress")
+            }
+            Some(s) if s.is_running() => self.mode = Mode::DeleteBlocked,
+            Some(_) => self.mode = Mode::DeleteConfirm,
+            None => {}
+        }
+    }
+
+    /// Open the send box on the selected session, or say why not.
+    ///
+    /// Prefilled with the answer a stalled session usually wants, so s-Enter is
+    /// the whole interaction.
+    pub(super) fn send_prompt(&mut self) {
+        if self.on_subagent() {
+            self.set_status("A subagent cannot be typed into on its own");
+            return;
+        }
+        match self.selected_session() {
+            Some(s) if session_root_pid(s).is_some() => {
+                self.send_input = "continue".into();
+                self.mode = Mode::SendKeys;
+            }
+            Some(_) => self.set_status("Selected session has no local process to type into"),
+            None => {}
+        }
+    }
+
     fn on_key_list(&mut self, key: KeyEvent) {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -568,30 +682,13 @@ impl App {
                     self.set_status(why);
                 }
             }
-            KeyCode::Char('d') if self.on_subagent() => {
-                self.set_status("A subagent cannot be deleted on its own")
-            }
-            KeyCode::Char('d') => match self.selected_session() {
-                Some(s) if self.deleting.contains(&s.key()) => {
-                    self.set_status("Session deletion is already in progress")
-                }
-                Some(s) if s.is_running() => self.mode = Mode::DeleteBlocked,
-                Some(_) => self.mode = Mode::DeleteConfirm,
-                None => {}
-            },
-            // Prefilled with the answer a stalled session usually wants, so
-            // s-Enter is the whole interaction.
-            KeyCode::Char('s') if self.on_subagent() => {
-                self.set_status("A subagent cannot be typed into on its own")
-            }
-            KeyCode::Char('s') => match self.selected_session() {
-                Some(s) if session_root_pid(s).is_some() => {
-                    self.send_input = "continue".into();
-                    self.mode = Mode::SendKeys;
-                }
-                Some(_) => self.set_status("Selected session has no local process to type into"),
-                None => {}
-            },
+            // Enter is the one key in this map that does not do a thing so
+            // much as show what the others do. It was free, it is what "open
+            // this row" means everywhere else, and unlike a bare modifier every
+            // terminal actually delivers it.
+            KeyCode::Enter if self.selected_session().is_some() => self.open_row_menu(),
+            KeyCode::Char('d') => self.delete_selected(),
+            KeyCode::Char('s') => self.send_prompt(),
             KeyCode::Char('a') if self.on_subagent() => {
                 self.set_status("A subagent has no terminal of its own to attach to")
             }
@@ -663,6 +760,24 @@ impl App {
         // to drive.
         if self.mode != Mode::List && layout.modal_rect.is_some() {
             if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+                return;
+            }
+            // The row menu answers a single click: unlike the launcher, every
+            // entry is an action the keyboard reaches in one keystroke too, and
+            // the destructive two both stop at a confirmation of their own.
+            if self.mode == Mode::RowMenu {
+                if let Some(i) = layout.menu_row_at(ev.column, ev.row) {
+                    let items = super::menu::items(self);
+                    if let Some(item) = items.get(i)
+                        && item.enabled()
+                    {
+                        let action = item.action;
+                        self.mode = Mode::List;
+                        self.run_menu_action(action);
+                    }
+                } else if !layout.in_modal(ev.column, ev.row) {
+                    self.mode = Mode::List;
+                }
                 return;
             }
             // One click picks; Enter, or a second click on the row already

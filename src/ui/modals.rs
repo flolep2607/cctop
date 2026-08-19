@@ -147,6 +147,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("U", "Clear all marks"),
         Line::default(),
         section("Other"),
+        item("Enter", "Everything you can do to this row, in one menu"),
         item("w", "Bell + desktop alert when a session needs you"),
         item("y", "Copy resume command or transcript path"),
         item("d", "Delete the selected session (not running)"),
@@ -439,6 +440,115 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The launcher: what to put in the tab, and where it will run.
+/// The most of a refusal the menu will show before eliding it.
+///
+/// Long enough for every reason in [`menu::items`](super::menu::items) and for
+/// the useful half of a remote row's, which names the host first.
+const MAX_REASON: usize = 34;
+
+/// What sits at the right of an entry: the key, or why there is no point
+/// pressing it.
+fn trailing(item: &super::menu::Item) -> String {
+    match &item.blocked {
+        Some(why) => why.clone(),
+        None => item.key.to_string(),
+    }
+}
+
+/// The per-row action menu.
+///
+/// Sized to its widest entry rather than to a constant: the labels are fixed
+/// strings, so the one width that always fits is the one measured from them.
+pub(super) fn draw_row_menu(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut super::render::Layout,
+) {
+    let items = super::menu::items(app);
+    if items.is_empty() {
+        return;
+    }
+
+    // Two columns: what it does, and — flush right — either the key that does
+    // it or the reason it cannot be done. One or the other, never both, because
+    // the key of an entry that is refused is not information: pressing it only
+    // repeats the refusal.
+    //
+    // On one line each. The reason used to sit on a line of its own underneath,
+    // which doubled the height of exactly the entries the reader has already
+    // decided not to use.
+    let label_w = items.iter().map(|i| i.label.len()).max().unwrap_or(0);
+    // Bounded so one long refusal cannot stretch the menu across the terminal;
+    // the tail of `remote_refusal` is the part that repeats.
+    let right_w = items
+        .iter()
+        .map(|i| trailing(i).chars().count().min(MAX_REASON))
+        .max()
+        .unwrap_or(0);
+    let width = (label_w + right_w + 6).clamp(30, 76) as u16;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Which line each entry landed on, so a click lands on the entry rather
+    // than on whatever the menu is covering.
+    let mut rows: Vec<(usize, usize)> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if item.rule {
+            // Inset a cell each side, so the rule reads as a divider between
+            // entries rather than as another border.
+            lines.push(Line::from(Span::styled(
+                format!(" {} ", "─".repeat(width.saturating_sub(4) as usize)),
+                theme::dim(),
+            )));
+        }
+        let selected = i == app.menu_cursor && item.enabled();
+        let style = match (item.enabled(), selected) {
+            (false, _) => theme::dim(),
+            (true, true) => Style::default()
+                .bg(theme::colors().selected_bg)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+            (true, false) => Style::default(),
+        };
+        rows.push((lines.len(), i));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<label_w$}  ", item.label), style),
+            Span::styled(
+                format!(
+                    "{:>right_w$} ",
+                    crate::util::truncate(&trailing(item), MAX_REASON)
+                ),
+                theme::dim(),
+            ),
+        ]));
+    }
+
+    // The row this is about, on the border: it costs no content line, and a
+    // menu floating over a table of seventy rows has to say which one it means.
+    let subject = app
+        .selected_session()
+        .map(|s| crate::util::truncate(s.display_label(), width.saturating_sub(4) as usize))
+        .unwrap_or_default();
+
+    let height = lines.len() as u16 + 2;
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .title(Span::styled(format!(" {subject} "), theme::title()))
+        .title_bottom(Span::styled(" ↑↓ Enter · Esc ", theme::dim()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    layout.modal_rect = Some(rect);
+    layout.menu_rows = rows
+        .into_iter()
+        .map(|(line, i)| (inner.y + line as u16, i))
+        .collect();
+}
+
 pub(super) fn draw_launch(
     frame: &mut Frame,
     area: Rect,
