@@ -47,6 +47,40 @@
 
   .files { columns: 2 260px; column-gap: 22px; font-family: var(--mono); font-size: 12px; }
   .files div { break-inside: avoid; color: var(--dim); padding: 1px 0; overflow-wrap: anywhere; }
+
+  /* One file's edits. <details> rather than scripted toggling: it opens with
+     no JavaScript, it is keyboard-reachable, and the browser already knows
+     how to do it. */
+  .diff { border-top: 1px solid var(--line); }
+  .diff:first-child { border-top: 0; }
+  .diff > summary {
+    padding: 9px 14px; cursor: pointer; display: flex; gap: 10px;
+    align-items: baseline; flex-wrap: wrap; list-style: none;
+  }
+  .diff > summary::-webkit-details-marker { display: none; }
+  .diff > summary::before { content: "▸"; color: var(--faint); flex: 0 0 auto; }
+  .diff[open] > summary::before { content: "▾"; }
+  .diff > summary:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .diff .path { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+  .diff .plus { color: var(--green); font-family: var(--mono); font-size: 12px; }
+  .diff .minus { color: var(--red); font-family: var(--mono); font-size: 12px; }
+  .diff pre {
+    margin: 0; padding: 8px 0 12px; font-family: var(--mono); font-size: 12px;
+    line-height: 1.45; overflow-x: auto;
+  }
+  .diff pre span { display: block; padding: 0 14px; white-space: pre; }
+  .diff pre .add { background: color-mix(in srgb, var(--green) 14%, transparent); }
+  .diff pre .del { background: color-mix(in srgb, var(--red) 14%, transparent); }
+  .diff pre .meta { color: var(--faint); }
+
+  /* The full call log. Capped in height so it is a panel rather than the rest
+     of the page, and scrolled inside itself. */
+  .log { max-height: 60vh; overflow-y: auto; }
+  .log table { font-size: 12px; }
+  .log thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; padding-top: 10px; }
+  .log td { padding: 4px 10px; }
+  .log tr.bad td { background: color-mix(in srgb, var(--red) 9%, transparent); }
+  .log .when { color: var(--faint); white-space: nowrap; font-family: var(--mono); }
 </style>
 
 <div class="wrap">
@@ -165,17 +199,22 @@ function failures(r) {
   const found = r.activity.failures || [];
   if (!found.length) return null;
   const repeated = found.filter((f) => f.count > 1).length;
+  // The heading follows the content. Calling a list of one-offs "Repeated
+  // failures" promises a loop and then shows ×1 down the whole section, which
+  // teaches the reader to stop believing the headings.
   const s = block(
-    "Repeated failures",
+    repeated ? "Repeated failures" : "Failed tool calls",
     repeated
-      ? "Failed calls grouped by tool and by argument. A group with a count above one is the same call retried — the agent paid for every attempt."
-      : "Failed calls grouped by tool and by argument. None repeated, so these are one-offs rather than a loop."
+      ? "Grouped by tool and by argument. A count above one is the same call retried — the agent paid for every attempt."
+      : "Grouped by tool and by argument. Nothing repeated, so these are one-offs rather than a loop."
   );
   const card = el("div", "card");
   for (const f of found) {
     const item = el("div", "failure");
     const head = el("div", "head");
-    head.appendChild(el("span", "count", "×" + f.count));
+    // ×1 is not a count, it is the absence of one. Shown only where it says
+    // something.
+    if (f.count > 1) head.appendChild(el("span", "count", "×" + f.count));
     head.appendChild(el("span", "tool", f.tool));
     const when = f.samples && f.samples.length ? f.samples[0].ts : null;
     if (when) head.appendChild(el("span", "faint", "first at " + when.replace("T", " ").replace(/\..*$/, "")));
@@ -238,20 +277,46 @@ function breakdown(r) {
   return s;
 }
 
+// A clock time from an ISO timestamp, with the date when the session spans
+// more than one.
+const clock = (iso, withDate) => {
+  const at = new Date(iso);
+  if (isNaN(at)) return "";
+  const hm = String(at.getHours()).padStart(2, "0") + ":" +
+             String(at.getMinutes()).padStart(2, "0");
+  if (!withDate) return hm;
+  return at.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + hm;
+};
+
 // The window measured at every request, oldest first. A steady climb is a
 // conversation growing; a step is one tool result that will do it again.
 function windowChart(r) {
   const series = (r.context && r.context.series) || [];
   if (series.length < 3) return null;
 
-  const s = block("How the window filled", "One point per request, oldest first. Vertical marks are compactions.");
-  const W = 900, H = 190, PAD_L = 46, PAD_B = 18, PAD_T = 8;
+  const first = series[0].ts, last = series[series.length - 1].ts;
+  // Requests are not evenly spaced in time, so the axis is labelled with the
+  // clock but the spacing is per request. Saying so is the whole point of the
+  // note: a reader who assumes a time axis reads every flat stretch as a pause
+  // and every steep one as a burst, and neither is what the chart shows.
+  const spansDays = new Date(first).toDateString() !== new Date(last).toDateString();
+  const s = block(
+    "How the window filled",
+    "Left to right, one point per request in the order they were made — evenly spaced, " +
+    "so this is not a time axis: a wide flat stretch is many requests, not a long pause. " +
+    "The labels underneath say when each end happened. Up is tokens in the window; " +
+    "dashed vertical marks are compactions, where the harness reclaimed it."
+  );
+  const W = 900, H = 205, PAD_L = 46, PAD_B = 32, PAD_T = 8;
   const max = Math.max(...series.map((p) => p.window), 1);
   const x = (i) => PAD_L + (i / (series.length - 1)) * (W - PAD_L - 8);
   const y = (v) => PAD_T + (1 - v / max) * (H - PAD_T - PAD_B);
 
   const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: H,
-                             role: "img", "aria-label": "Context window over time" });
+                             role: "img",
+                             "aria-label": "Context window size across " + series.length +
+                                           " requests, from " + clock(first, true) +
+                                           " to " + clock(last, true) });
   for (const frac of [0, 0.5, 1]) {
     const yy = y(max * frac);
     chart.appendChild(svg("line", { x1: PAD_L, y1: yy, x2: W - 8, y2: yy, class: "gridline" }));
@@ -259,6 +324,16 @@ function windowChart(r) {
     label.textContent = tokens(Math.round(max * frac));
     chart.appendChild(label);
   }
+
+  // The x axis: what the ends are, and what the distance between them counts.
+  const foot = (xPos, anchor, text) => {
+    const t = svg("text", { x: xPos, y: H - 14, "text-anchor": anchor, class: "axis" });
+    t.textContent = text;
+    chart.appendChild(t);
+  };
+  foot(PAD_L, "start", clock(first, spansDays));
+  foot((PAD_L + W - 8) / 2, "middle", series.length + " requests →");
+  foot(W - 8, "end", clock(last, spansDays));
 
   const line = series.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.window).toFixed(1)}`).join("");
   chart.appendChild(svg("path", {
@@ -398,6 +473,90 @@ function files(r) {
   return s;
 }
 
+// What the session actually changed. A list of file names says it touched
+// something; this says what it did to it.
+function diffs(r) {
+  const files = r.diffs || [];
+  if (!files.length) return null;
+  const total = files.reduce((a, f) => a + f.added + f.removed, 0);
+  const s = block(
+    "What it changed",
+    files.length + (files.length === 1 ? " file, " : " files, ") + total +
+      " changed lines. Most-changed first; click a file for its diff. Reconstructed from the patches the transcript recorded, so it is what the agent applied rather than what the file holds now."
+  );
+  const card = el("div", "card");
+  for (const f of files) {
+    const box = el("details", "diff");
+    const head = el("summary");
+    head.appendChild(el("span", "path", f.file));
+    if (f.added) head.appendChild(el("span", "plus", "+" + f.added));
+    if (f.removed) head.appendChild(el("span", "minus", "−" + f.removed));
+    if (f.edits > 1) head.appendChild(el("span", "faint", f.edits + " edits"));
+    box.appendChild(head);
+
+    const pre = el("pre");
+    for (const line of f.hunks) {
+      // Classed by the diff marker, never by parsing the content: a line of
+      // code beginning with a minus is not a deletion.
+      const cls = line.startsWith("+") ? "add"
+        : line.startsWith("-") ? "del"
+        : line.startsWith("@@") || line.startsWith("diff ") ? "meta"
+        : "";
+      pre.appendChild(el("span", cls, line));
+    }
+    if (f.truncated) {
+      pre.appendChild(el("span", "meta", "… the rest of this file's edits are not kept"));
+    }
+    box.appendChild(pre);
+    card.appendChild(box);
+  }
+  s.appendChild(card);
+  return s;
+}
+
+// Every call the extraction still holds. The slowest ten answer one question;
+// this answers "what did it actually do, in order".
+function callLog(r) {
+  const calls = r.activity.calls || [];
+  if (!calls.length) return null;
+  const made = r.activity.tool_count || 0;
+  // Never presented as the whole record when it is not. A log that silently
+  // stopped short reads as a session that stopped doing things.
+  const note = calls.length < made
+    ? "Newest first. The transcript keeps only its most recent " + calls.length +
+      " calls, of " + made + " the session made."
+    : "Newest first. All " + calls.length + " calls.";
+  const s = block("Every tool call", note);
+
+  const card = el("div", "card log");
+  const table = el("table");
+  const head = el("thead");
+  const hrow = el("tr");
+  hrow.appendChild(el("th", null, "Tool"));
+  hrow.appendChild(el("th", null, "Call"));
+  hrow.appendChild(el("th", "num", "Took"));
+  hrow.appendChild(el("th", null, "When"));
+  head.appendChild(hrow);
+  table.appendChild(head);
+
+  const body = el("tbody");
+  for (const c of calls) {
+    const tr = el("tr", c.failed ? "bad" : null);
+    tr.appendChild(el("td", "mono", c.tool));
+    const what = el("td");
+    what.appendChild(el("span", "mono", c.detail));
+    if (c.failed) what.appendChild(el("span", "pill bad", "failed"));
+    tr.appendChild(what);
+    tr.appendChild(el("td", "num", c.duration_ms == null ? "—" : secs(c.duration_ms)));
+    tr.appendChild(el("td", "when", (c.ts || "").replace("T", " ").replace(/\..*$/, "")));
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  card.appendChild(table);
+  s.appendChild(card);
+  return s;
+}
+
 function subagents(r) {
   if (!r.subagents || !r.subagents.length) return null;
   const s = block("Subagents");
@@ -435,7 +594,15 @@ fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
     main.appendChild(subject(r));
     if (r.error) main.appendChild(el("div", "banner", "This transcript could not be fully read: " + r.error));
     main.appendChild(tiles(r));
-    for (const part of [failures, breakdown, windowChart, spend, slowest, toolTable, files, subagents]) {
+    // Order of the sections: what went wrong, what it changed, where the
+    // window and the money went, then the detail anyone who is still reading
+    // came for. The diff sits high because "what did this session do" is the
+    // question a report is most often opened to answer.
+    const sections = [
+      failures, diffs, breakdown, windowChart, spend,
+      slowest, toolTable, callLog, files, subagents,
+    ];
+    for (const part of sections) {
       const node = part(r);
       if (node) main.appendChild(node);
     }

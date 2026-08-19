@@ -51,8 +51,42 @@ const MAX_TOOLS: usize = 20;
 /// How many of the slowest individual calls are singled out.
 const MAX_SLOWEST: usize = 10;
 
+/// Tools whose duration is a person deciding, not an agent working.
+///
+/// `AskUserQuestion` sitting at the top of "slowest calls" at fifty seconds is
+/// not a finding about the session — it is how long somebody took to read four
+/// options. Ranking it alongside a two-minute `cargo build` puts the reader's
+/// own thinking time in a list they opened to find out where the *agent's* time
+/// went, and buries the real answer under it.
+///
+/// They stay in the full call log, which is a record of what happened rather
+/// than a ranking of what was slow.
+///
+/// Spelled in the variants the harnesses use, the way
+/// [`EDIT_TOOLS`](crate::session::EDIT_TOOLS) is: a name known here but not
+/// there would quietly let one back into the list.
+const HUMAN_WAIT_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "ask_user_question",
+    "ExitPlanMode",
+    "exit_plan_mode",
+];
+
 /// How many written files are listed.
 const MAX_FILES: usize = 40;
+
+/// How many files the diff section covers, most-changed first.
+///
+/// A session that touched more than this many files is a migration, and the
+/// tail of that list is where the interesting edits are not.
+const MAX_DIFF_FILES: usize = 40;
+
+/// How many diff lines one file's entry carries.
+///
+/// Each edit contributes at most [`MAX_DIFF_LINES`](crate::config::MAX_DIFF_LINES);
+/// a file edited twenty times would otherwise arrive as twelve hundred lines
+/// nobody scrolls through.
+const MAX_HUNKS_PER_FILE: usize = 300;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -85,7 +119,31 @@ pub struct Report {
     pub context: Option<ReportContext>,
     pub activity: ReportActivity,
     pub files: Vec<String>,
+    /// What the session changed, per file.
+    pub diffs: Vec<ReportFileDiff>,
     pub subagents: Vec<Subagent>,
+}
+
+/// One file's worth of edits, as a diff.
+///
+/// The question a report is opened to answer is often "what did it actually
+/// do", and a list of file names does not answer it. The transcript records the
+/// patch each edit applied, so the report can show the change rather than
+/// describe it.
+#[derive(Serialize)]
+pub struct ReportFileDiff {
+    pub file: String,
+    pub added: u32,
+    pub removed: u32,
+    /// How many separate edits landed on this file. A file edited eleven times
+    /// is a different story from one edited once, and the hunks alone do not
+    /// tell them apart.
+    pub edits: usize,
+    /// Unified-diff lines, oldest edit first.
+    pub hunks: Vec<String>,
+    /// The hunks were cut at [`MAX_HUNKS_PER_FILE`], so this is not the whole
+    /// change. Said rather than left to be inferred from a diff that stops.
+    pub truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -151,6 +209,14 @@ pub struct ReportActivity {
     pub tools: Vec<ReportTool>,
     pub failures: Vec<ReportFailure>,
     pub slowest: Vec<ReportCall>,
+    /// Every call the extraction still holds, newest first.
+    ///
+    /// Not every call the session made: the transcript's tool history is
+    /// trimmed to [`MAX_SESSION_TOOL_DETAILS`](crate::config::MAX_SESSION_TOOL_DETAILS)
+    /// newest, which is why `tool_count` above can be larger. The page says so
+    /// rather than presenting this as the whole record — a log that silently
+    /// stopped short would be read as a session that stopped doing things.
+    pub calls: Vec<ReportCall>,
 }
 
 #[derive(Serialize)]
@@ -257,11 +323,13 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
             tools: tools(data),
             failures: failures(data),
             slowest: slowest(data),
+            calls: calls(data),
         },
         files: util::abbreviate_paths(&data.recent_writes)
             .into_iter()
             .take(MAX_FILES)
             .collect(),
+        diffs: diffs(data),
         subagents: data.subagents.clone(),
     }
 }
@@ -358,15 +426,129 @@ fn failures(data: &SessionData) -> Vec<ReportFailure> {
     out
 }
 
+/// Every recorded call, newest first.
+///
+/// Newest first because a report is usually opened about something that just
+/// happened, and the tail of a long session is where it happened.
+fn calls(data: &SessionData) -> Vec<ReportCall> {
+    let mut out: Vec<ReportCall> = data
+        .metrics
+        .tool_details
+        .iter()
+        .flat_map(|(tool, calls)| {
+            calls.iter().map(move |call| ReportCall {
+                tool: tool.clone(),
+                detail: call.d.clone(),
+                ts: call.ts.clone(),
+                duration_ms: call.dur_ms,
+                failed: call.failed,
+            })
+        })
+        .collect();
+    // By timestamp, which is the only order that means anything across tools —
+    // the per-tool vectors are each chronological and say nothing about each
+    // other.
+    out.sort_by(|a, b| b.ts.cmp(&a.ts));
+    out
+}
+
+/// One file's edits, accumulated before they become a [`ReportFileDiff`].
+///
+/// A named type rather than a tuple in the map: four fields of which two are
+/// counts and one is a vector of pairs is exactly the shape nobody can read at
+/// the call site six months later.
+#[derive(Default)]
+struct FileEdits<'a> {
+    added: u32,
+    removed: u32,
+    edits: usize,
+    /// `(timestamp, hunks)` per edit, replayed in timestamp order so the diff
+    /// reads in the order it was applied.
+    parts: Vec<(&'a str, &'a Vec<String>)>,
+}
+
+/// What the session changed, per file, most-changed first.
+///
+/// Grouped by the detail string because that is the file: for `Edit` and
+/// `Write` it is the path the call named, and for `apply_patch` it is the path
+/// the patch touched. Edits are replayed oldest-first within a file, so the
+/// hunks read in the order they were applied.
+fn diffs(data: &SessionData) -> Vec<ReportFileDiff> {
+    let mut by_file: HashMap<&str, FileEdits<'_>> = HashMap::new();
+    for calls in data.metrics.tool_details.values() {
+        for call in calls {
+            let Some(delta) = &call.delta else { continue };
+            if delta.hunks.is_empty() {
+                continue;
+            }
+            let entry = by_file.entry(call.d.as_str()).or_default();
+            entry.added += delta.added;
+            entry.removed += delta.removed;
+            entry.edits += 1;
+            entry.parts.push((call.ts.as_str(), &delta.hunks));
+        }
+    }
+
+    // Abbreviated together rather than each truncated: the identifying part of
+    // a path is its tail, and these are frequently sibling files under a
+    // worktree whose whole prefix is the same forty characters. This keeps
+    // whatever makes each one unique and drops the rest — the same treatment
+    // the file list above gets, and for the same reason.
+    let paths: Vec<String> = by_file.keys().map(|f| (*f).to_string()).collect();
+    let short: HashMap<String, String> = paths
+        .iter()
+        .cloned()
+        .zip(util::abbreviate_paths(&paths))
+        .collect();
+
+    let mut out: Vec<ReportFileDiff> = by_file
+        .into_iter()
+        .map(|(file, mut edits)| {
+            edits.parts.sort_by_key(|(ts, _)| *ts);
+            let mut hunks: Vec<String> = Vec::new();
+            let mut truncated = false;
+            for (_, lines) in &edits.parts {
+                for line in lines.iter() {
+                    if hunks.len() >= MAX_HUNKS_PER_FILE {
+                        truncated = true;
+                        break;
+                    }
+                    hunks.push(line.clone());
+                }
+            }
+            ReportFileDiff {
+                file: short.get(file).cloned().unwrap_or_else(|| file.to_string()),
+                added: edits.added,
+                removed: edits.removed,
+                edits: edits.edits,
+                hunks,
+                truncated,
+            }
+        })
+        .collect();
+    // Most-changed first: the file a session rewrote is the one worth reading,
+    // and a one-line tweak at the top would bury it.
+    out.sort_by(|a, b| {
+        (b.added + b.removed)
+            .cmp(&(a.added + a.removed))
+            .then(a.file.cmp(&b.file))
+    });
+    out.truncate(MAX_DIFF_FILES);
+    out
+}
+
 /// The individual calls that took longest.
 ///
 /// Wall time, not cost: a call that blocked the session for four minutes is
 /// worth seeing whether or not it was billed for, and it usually is not.
+///
+/// Excludes the tools that block on a person — see [`HUMAN_WAIT_TOOLS`].
 fn slowest(data: &SessionData) -> Vec<ReportCall> {
     let mut out: Vec<ReportCall> = data
         .metrics
         .tool_details
         .iter()
+        .filter(|(tool, _)| !HUMAN_WAIT_TOOLS.contains(&tool.as_str()))
         .flat_map(|(tool, calls)| {
             calls.iter().filter_map(move |call| {
                 call.dur_ms.map(|ms| ReportCall {
@@ -478,6 +660,143 @@ mod tests {
         let ranked = slowest(&data);
         assert_eq!(ranked.len(), 2, "the untimed call cannot be ranked");
         assert_eq!(ranked[0].duration_ms, Some(9_000));
+    }
+
+    #[test]
+    fn edits_to_one_file_become_one_diff_in_the_order_they_landed() {
+        use crate::session::Delta;
+        let edit = |file: &str, ts: &str, added, removed, hunk: &str| ToolDetail {
+            d: file.to_string(),
+            ts: ts.to_string(),
+            delta: Some(Delta {
+                added,
+                removed,
+                hunks: vec![hunk.to_string()],
+            }),
+            ..Default::default()
+        };
+        let data = data_with(HashMap::from([(
+            "Edit".to_string(),
+            vec![
+                edit("b.rs", "2026-08-19T10:00:00Z", 1, 0, "+one"),
+                edit("a.rs", "2026-08-19T10:02:00Z", 5, 2, "+second"),
+                edit("a.rs", "2026-08-19T10:01:00Z", 4, 1, "+first"),
+            ],
+        )]));
+
+        let found = diffs(&data);
+        assert_eq!(found.len(), 2);
+        // Names stay whole where nothing needs eliding.
+        assert!(found.iter().all(|f| f.file.ends_with(".rs")));
+        // Most-changed first: the file the session rewrote, not the one it
+        // tweaked, is what the reader came for.
+        assert_eq!(found[0].file, "a.rs");
+        assert_eq!((found[0].added, found[0].removed), (9, 3));
+        assert_eq!(found[0].edits, 2);
+        // Replayed in the order they were applied, not the order the map held.
+        assert_eq!(found[0].hunks, vec!["+first", "+second"]);
+        assert!(!found[0].truncated);
+    }
+
+    /// Sibling files under one long worktree path are told apart by their
+    /// tails, not by forty identical leading characters.
+    #[test]
+    fn diff_file_names_are_abbreviated_against_each_other() {
+        use crate::session::Delta;
+        let edit = |file: &str| ToolDetail {
+            d: file.to_string(),
+            ts: "2026-08-19T10:00:00Z".into(),
+            delta: Some(Delta {
+                added: 1,
+                removed: 0,
+                hunks: vec!["+x".into()],
+            }),
+            ..Default::default()
+        };
+        let data = data_with(HashMap::from([(
+            "Edit".to_string(),
+            vec![
+                edit("/home/flo/cctop/.claude/worktrees/agent-9/src/ui/theme.rs"),
+                edit("/home/flo/cctop/.claude/worktrees/agent-9/src/ui/table.rs"),
+            ],
+        )]));
+
+        for f in diffs(&data) {
+            assert!(
+                !f.file.starts_with("/home/flo"),
+                "the shared prefix survived: {}",
+                f.file
+            );
+            assert!(f.file.ends_with(".rs"), "{}", f.file);
+        }
+    }
+
+    #[test]
+    fn a_call_with_no_patch_contributes_no_diff() {
+        let data = data_with(HashMap::from([(
+            "Bash".to_string(),
+            vec![ToolDetail {
+                d: "ls".into(),
+                ..Default::default()
+            }],
+        )]));
+        assert!(diffs(&data).is_empty());
+    }
+
+    #[test]
+    fn the_call_log_is_newest_first_across_every_tool() {
+        let at = |tool: &str, ts: &str| (tool.to_string(), ts.to_string());
+        let (bash, read) = (
+            at("Bash", "2026-08-19T10:00:00Z"),
+            at("Read", "2026-08-19T10:05:00Z"),
+        );
+        let data = data_with(HashMap::from([
+            (
+                bash.0,
+                vec![ToolDetail {
+                    d: "ls".into(),
+                    ts: bash.1,
+                    ..Default::default()
+                }],
+            ),
+            (
+                read.0,
+                vec![ToolDetail {
+                    d: "a.rs".into(),
+                    ts: read.1,
+                    ..Default::default()
+                }],
+            ),
+        ]));
+        // The per-tool vectors are each chronological and say nothing about
+        // each other, so only the timestamp can order the log.
+        let log = calls(&data);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].tool, "Read");
+        assert_eq!(log[1].tool, "Bash");
+    }
+
+    /// A question the user took a minute to answer is not the session being
+    /// slow, and putting it first buries whatever was.
+    #[test]
+    fn waiting_on_a_person_is_not_a_slow_call() {
+        let timed = |ms: i64| ToolDetail {
+            d: "x".into(),
+            dur_ms: Some(ms),
+            ..Default::default()
+        };
+        let data = data_with(HashMap::from([
+            ("AskUserQuestion".to_string(), vec![timed(90_000)]),
+            ("ExitPlanMode".to_string(), vec![timed(80_000)]),
+            ("Bash".to_string(), vec![timed(4_000)]),
+        ]));
+
+        let ranked = slowest(&data);
+        assert_eq!(ranked.len(), 1, "only the agent's own work is ranked");
+        assert_eq!(ranked[0].tool, "Bash");
+
+        // Still a real call, so the log that records what happened keeps it.
+        assert_eq!(calls(&data).len(), 3);
     }
 
     #[test]

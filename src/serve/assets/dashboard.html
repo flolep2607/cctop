@@ -220,8 +220,11 @@ function rowFor(s) {
   tag(s.model ? shortModel(s.model) : s.provider);
   if (s.branch) tag(s.branch);
   tag(ago(s.last_active) + " ago");
-  if (s.state === "waiting") tag("waiting on you", "pill warn");
-  if (s.state === "error") tag("api error", "pill bad");
+  if (s.running && s.state === "waiting") tag("waiting on you", "pill warn");
+  // "api error" in the present tense is a claim about now. For a stopped
+  // session it is something that happened, and the row's last-active time is
+  // already saying when.
+  if (s.state === "error") tag(s.running ? "api error" : "ended on an api error", "pill bad");
   // A session with a quarter of its tool calls failing is retrying something
   // that will not work, and paying for every attempt.
   if (s.activity.tool_errors > 0 && s.activity.tool_count > 0) {
@@ -251,9 +254,16 @@ function render() {
     .filter((s) => matches(s, filter))
     .filter((s) => !runningOnly || s.running);
 
-  // Anything a person has to answer, first and on its own. A session that has
-  // errored is in the same category: it is stopped, and only a person restarts it.
-  const wanting = shown.filter((s) => s.state === "waiting" || s.state === "error");
+  // Anything a person has to answer, first and on its own.
+  //
+  // Live sessions only. A session that hit an API error in May and has not run
+  // since is history, not a call to action — promoting it puts four dead rows
+  // above the one agent actually waiting, which is the opposite of what this
+  // block is for. The row keeps its red dot either way; that is the table
+  // saying what happened, which is a different claim from "answer me".
+  const wanting = shown.filter(
+    (s) => s.running && (s.state === "waiting" || s.state === "error"),
+  );
   const rest = shown.filter((s) => !wanting.includes(s));
 
   const attention = document.getElementById("attention");
