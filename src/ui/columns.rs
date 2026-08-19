@@ -30,6 +30,7 @@ pub enum ColumnId {
     Conflict,
     Host,
     User,
+    Profile,
     Branch,
     Project,
 }
@@ -225,6 +226,18 @@ pub const COLUMNS: &[Column] = &[
         desc: "User whose home the session was read from, when cctop is watching\nevery user (running as root, or $CCTOP_ALL_USERS). Blank for your own.\nHidden when only your own sessions are in view.",
     },
     Column {
+        id: ColumnId::Profile,
+        label: "PROFILE",
+        width: Some(9),
+        // Just under USER, and for the neighbouring reason: USER tells two
+        // people's rows apart, this tells one person's two logins apart. A
+        // personal session and a work one in the same checkout are otherwise
+        // identical rows with different bills.
+        priority: 66,
+        right_align: false,
+        desc: "Claude profile the session was read from — the $CLAUDE_CONFIG_DIR\nit belongs to, named by its directory (~/.claude is `default`).\nEach is a separate account with its own subscription and limits.\nBlank for harnesses that have no such concept.\nHidden unless you have more than one.",
+    },
+    Column {
         id: ColumnId::Branch,
         label: "BRANCH",
         width: Some(12),
@@ -266,6 +279,7 @@ pub fn key(id: ColumnId) -> &'static str {
         ColumnId::Conflict => "conflict",
         ColumnId::Host => "host",
         ColumnId::User => "user",
+        ColumnId::Profile => "profile",
         ColumnId::Branch => "branch",
         ColumnId::Project => "project",
     }
@@ -451,6 +465,10 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         // table says nothing, and the point of the column is the ones that
         // are not theirs.
         ColumnId::User => s.owner.clone().unwrap_or_default(),
+        // Blank rather than a dash for a provider with no profiles: the column
+        // is about Claude's config directories, and every other harness is not
+        // missing one so much as not having the idea.
+        ColumnId::Profile => s.profile.clone().unwrap_or_default(),
         ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
         ColumnId::Project => s.display_label().to_string(),
     }
@@ -531,6 +549,8 @@ pub fn render_subagent_cell(
         | ColumnId::Host
         // ...and belongs to whoever owns its parent.
         | ColumnId::User
+        // ...and runs under whichever login started its parent.
+        | ColumnId::Profile
         | ColumnId::TokenTotal
         | ColumnId::TokenRate
         | ColumnId::Harness
@@ -736,6 +756,7 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         // Your own rows sort together, and first, for the same reason: they are
         // the ones you can act on without stepping into someone else's session.
         ColumnId::User => a.owner.cmp(&b.owner),
+        ColumnId::Profile => a.profile.cmp(&b.profile),
         // Sessions outside a repository sort together, below every branch.
         ColumnId::Branch => branch_of(a).cmp(&branch_of(b)),
         ColumnId::Project => a
@@ -758,6 +779,33 @@ mod tests {
         s.started_at = "2026-01-01T00:00:00Z".into();
         s.last_active = "2026-01-01T00:00:00Z".into();
         s
+    }
+
+    /// PROFILE says which login a row belongs to, and says nothing where there
+    /// is no such thing — which is every harness but Claude Code.
+    #[test]
+    fn the_profile_cell_names_the_login_or_stays_blank() {
+        let now = chrono::Utc::now();
+
+        let mut work = session("a");
+        work.profile = Some("work".into());
+        assert_eq!(render_cell(ColumnId::Profile, &work, &now), "work");
+
+        // A harness with no profiles is not a session missing one. A dash would
+        // read as "unknown", which is a different and wronger claim.
+        let mut codex = Session::new(Provider::Codex, "b".into());
+        codex.started_at = "2026-01-01T00:00:00Z".into();
+        codex.last_active = codex.started_at.clone();
+        assert_eq!(render_cell(ColumnId::Profile, &codex, &now), "");
+    }
+
+    #[test]
+    fn profiles_sort_together() {
+        let (mut a, mut b) = (session("a"), session("b"));
+        a.profile = Some("work".into());
+        b.profile = Some("default".into());
+        let now = chrono::Utc::now();
+        assert_eq!(compare(ColumnId::Profile, &a, &b, &now), Ordering::Greater);
     }
 
     #[test]

@@ -15,6 +15,7 @@ mod notify;
 mod pricing;
 mod proc;
 mod quota;
+mod serve;
 mod session;
 #[cfg(unix)]
 mod shim;
@@ -91,6 +92,16 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("doctor") {
             std::process::exit(doctor::run(&argv[2..]));
+        }
+    }
+
+    // `cctop serve` is intercepted alongside `doctor`, and for the same reason:
+    // it is a bare word, and cctop has no positionals for clap to read one as.
+    // Every platform — a socket and a browser are not unix-only.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("serve") {
+            std::process::exit(serve::run(&argv[2..])?);
         }
     }
 

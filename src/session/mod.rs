@@ -279,6 +279,19 @@ pub struct Session {
     /// same-named path if it ran for a remote row.
     pub remote: Option<Remote>,
 
+    /// Which Claude profile's directory this session was read out of.
+    ///
+    /// `$CLAUDE_CONFIG_DIR` lets one user hold several logins side by side, each
+    /// with its own subscription, its own limits and its own `projects/`. cctop
+    /// reads all of them, so without this a personal session and a work one are
+    /// indistinguishable rows — the same confusion [`Session::owner`] removes
+    /// between two people, on the axis of one person with two accounts.
+    ///
+    /// `None` for every provider but Claude Code, which is the only one with the
+    /// concept. Stamped from the transcript's path in [`list_all`], the one
+    /// place every provider's rows meet.
+    pub profile: Option<String>,
+
     /// Login name of the user whose home this session was read out of, when
     /// that is not the user running cctop.
     ///
@@ -404,6 +417,7 @@ impl Session {
             recent_writes: Vec::new(),
             conflict: None,
             remote: None,
+            profile: None,
             owner: None,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
@@ -1373,6 +1387,17 @@ pub fn list_all() -> Vec<Session> {
             if let Some(file) = &s.data_file {
                 s.owner = crate::config::owner_of(file).map(str::to_string);
             }
+        }
+    }
+    // And which login it ran under, for the same reason and in the same place.
+    // Claude Code only: it is the only harness whose config directory is
+    // relocatable per-account, so for anything else the answer is not "default"
+    // but "the question does not apply".
+    for s in &mut sessions {
+        if s.provider == Provider::Claude
+            && let Some(file) = &s.data_file
+        {
+            s.profile = crate::config::claude_profile_for(file).map(str::to_string);
         }
     }
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));

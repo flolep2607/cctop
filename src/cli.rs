@@ -17,6 +17,7 @@ use serde::Serialize;
     override_usage = "cctop [OPTIONS]\n       \
                       cctop <agent> [args…]\n       \
                       cctop attach [pid]\n       \
+                      cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop doctor",
     // Shown by `-h` as well as `--help`: the long description is the only place
     // that mentioned launching agents, and nobody reads `--help` to find out a
@@ -27,6 +28,9 @@ so the UI can watch it and type into it. Same as\n                         \
 `cctop run <agent>`; everything after the name goes to it.\n  \
 cctop attach [pid]     Put a running agent on this terminal. With no pid, lists\n                         \
 them. F12 detaches and leaves it running.\n  \
+cctop serve            Serve the table, and a per-session report, to a browser.\n                         \
+Loopback and read-only by default; `serve --help` for the\n                         \
+flags. Handy on a phone for the sessions waiting on you.\n  \
 cctop doctor           Check this installation and say what is wrong with it:\n                         \
 where sessions are read from, pricing, hooks, and what\n                         \
 `s` can reach. --host also tests an ssh target.\n  \
@@ -62,6 +66,12 @@ RESUMING\n  \
 harness's resume command in the directory it was working in. Unlike `a` this\n  \
 needs nothing of cctop at the time the session ran, so it reaches the sessions\n  \
 started from anywhere — including ones that ended long ago.\n\n\
+IN A BROWSER\n  \
+`cctop serve` puts the same table on an HTTP port, streaming it over SSE, plus\n  \
+a per-session report — repeated tool failures, where the context window went,\n  \
+what each model cost. It listens on 127.0.0.1 with a per-run access token in\n  \
+the URL; `--bind` is what puts it on the network, and says so when it does.\n  \
+The page is read-only: it starts nothing and types at nothing.\n\n\
 SEARCHING\n  \
 `/` filters on what the table shows plus the full working directory and the\n  \
 branch; `Tab` in that prompt extends the search into the transcripts, which\n  \
@@ -293,7 +303,7 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-struct JsonAccount {
+pub struct JsonAccount {
     #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -301,7 +311,7 @@ struct JsonAccount {
 }
 
 #[derive(Serialize)]
-struct JsonCost {
+pub struct JsonCost {
     available: bool,
     /// `null` when the plan bundles this provider's usage.
     total: Option<String>,
@@ -352,7 +362,7 @@ fn trimmed_buckets(
 }
 
 #[derive(Serialize)]
-struct JsonTokens {
+pub struct JsonTokens {
     input: u64,
     output: u64,
     total: u64,
@@ -360,7 +370,7 @@ struct JsonTokens {
 }
 
 #[derive(Serialize)]
-struct JsonActivity {
+pub struct JsonActivity {
     tool_count: u64,
     /// Calls the transcript reported as failed. Absent — rather than zero —
     /// where the harness records no per-call outcome, since the two mean very
@@ -384,7 +394,7 @@ struct JsonActivity {
 }
 
 #[derive(Serialize)]
-struct JsonSession {
+pub struct JsonSession {
     provider: &'static str,
     surface: &'static str,
     /// What the status dot says: `working`, `waiting` for the user, or `error`
@@ -399,6 +409,10 @@ struct JsonSession {
     /// every user's homes and this one is not the reader's own.
     #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<String>,
+    /// Which Claude profile — which `$CLAUDE_CONFIG_DIR` — the session was read
+    /// out of. Absent for every other harness, none of which has the concept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<JsonAccount>,
     model: Option<String>,
@@ -441,7 +455,7 @@ struct JsonSession {
 }
 
 #[derive(Serialize)]
-struct JsonProcess {
+pub struct JsonProcess {
     cpu: f32,
     memory: u64,
     command: String,
@@ -450,7 +464,7 @@ struct JsonProcess {
 }
 
 #[derive(Serialize)]
-struct JsonConflict {
+pub struct JsonConflict {
     /// `file` when a peer has written a file this session also wrote,
     /// `directory` when they merely share a repository.
     level: &'static str,
@@ -529,12 +543,19 @@ fn json_conflict(sessions: &[Session], c: &crate::collide::Collision) -> JsonCon
     }
 }
 
-pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
+/// Build the `--json` document for a set of sessions.
+///
+/// Split out from [`run_json`] because the same document is the wire format for
+/// two other readers now: `--host`, which parses it back off an ssh pipe, and
+/// the web dashboard, which streams it to a browser. Anything that is true of
+/// the printed JSON has to stay true of theirs, so there is one builder rather
+/// than three that drift.
+pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<JsonSession> {
     let claude_account = crate::quota::claude_account();
     let codex_account = crate::quota::codex_account();
     let collisions = crate::collide::detect(sessions);
 
-    let out: Vec<JsonSession> = sessions
+    sessions
         .iter()
         .map(|s| {
             let data = loader.store().session_data(s);
@@ -578,6 +599,7 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 project: (!s.label_source.is_empty()).then(|| s.label_source.clone()),
                 title: s.title.clone(),
                 user: s.owner.clone(),
+                profile: s.profile.clone(),
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
                 harness: (!s.harness.is_empty()).then(|| s.harness.clone()),
@@ -634,8 +656,11 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
                 error: data.error.clone(),
             }
         })
-        .collect();
+        .collect()
+}
 
+pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
+    let out = json_sessions(sessions, plan, loader);
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }

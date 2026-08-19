@@ -1,0 +1,96 @@
+/* Shared between the dashboard and the report. Inlined into both by the
+   server, because a page that fetches its own stylesheet is a page the content
+   policy has to loosen for. */
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --line: #e3e1dc;
+  --ink: #1b1a17;
+  --dim: #6d6a63;
+  --faint: #97938a;
+  --accent: #b4530a;
+  --green: #2f7d32;
+  --amber: #b6740b;
+  --red: #b3261e;
+  --shadow: 0 1px 2px rgba(20, 18, 14, .06), 0 4px 14px rgba(20, 18, 14, .04);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16151a;
+    --panel: #1e1d23;
+    --line: #302e37;
+    --ink: #eceaf2;
+    --dim: #a29eae;
+    --faint: #746f80;
+    --accent: #e8873d;
+    --green: #5ec269;
+    --amber: #e0a52c;
+    --red: #f0645a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 14px rgba(0, 0, 0, .22);
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 var(--sans);
+  -webkit-text-size-adjust: 100%;
+}
+a { color: inherit; }
+h1, h2, h3 { font-weight: 600; letter-spacing: -.01em; margin: 0; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 18px 16px 64px; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dim { color: var(--dim); }
+.faint { color: var(--faint); }
+
+/* Wide content — tables, charts, long paths — scrolls inside its own box.
+   The page body must never scroll sideways on a phone. */
+.scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+header.top {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding-bottom: 14px; border-bottom: 1px solid var(--line); margin-bottom: 16px;
+}
+header.top h1 { font-size: 17px; }
+header.top h1 .v { color: var(--faint); font-weight: 400; font-size: 12px; margin-left: 6px; }
+.spacer { flex: 1 1 auto; }
+
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: var(--shadow);
+}
+
+/* Status dot, the same three states the table's dot has. */
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; display: inline-block; }
+.dot.working { background: var(--green); }
+.dot.waiting { background: var(--amber); }
+.dot.error   { background: var(--red); }
+.dot.idle    { background: var(--faint); }
+
+.pill {
+  display: inline-block; padding: 1px 7px; border-radius: 99px;
+  border: 1px solid var(--line); font-size: 11px; color: var(--dim);
+  white-space: nowrap;
+}
+.pill.warn { color: var(--amber); border-color: var(--amber); }
+.pill.bad  { color: var(--red); border-color: var(--red); }
+
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th {
+  text-align: left; font-weight: 500; color: var(--faint); font-size: 11px;
+  letter-spacing: .06em; text-transform: uppercase;
+  padding: 0 10px 7px; white-space: nowrap;
+}
+td { padding: 7px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.empty { padding: 40px 16px; text-align: center; color: var(--faint); }
+.banner {
+  padding: 9px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px;
+  border: 1px solid var(--red); color: var(--red);
+}

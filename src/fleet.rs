@@ -219,6 +219,13 @@ fn row(host: &str, v: &Value) -> Option<Session> {
         .and_then(Value::as_str)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
+    // Absent from an older cctop on the far side, and absent for every harness
+    // but Claude Code, which read the same either way: no profile to name.
+    s.profile = v
+        .get("profile")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
     s.permission = crate::hook::Permission::parse(text(v, "permission"));
     s.activity_state = match text(v, "state") {
         "waiting" => ActivityState::WaitingForInput,
