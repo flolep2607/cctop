@@ -873,10 +873,20 @@ impl App {
             // in the composer, picking a file, choosing from the agents list —
             // and cctop holds the terminal's capture, so without forwarding the
             // click simply went nowhere.
+            //
+            // The right button is the exception, and tmux is the reason. With
+            // `mouse` on — which cctop turns on so the wheel scrolls — tmux
+            // binds `MouseDown3Pane` to its own pane menu, so a right-click
+            // inside an agent opened a tmux popup whose entries split the pane
+            // in two. The binding lives in the server's `root` key table, not in
+            // the session, so cctop cannot unbind it without changing the user's
+            // own tmux sessions too; not sending the button is the fix that
+            // stays inside cctop. No agent cctop hosts asks for right-click, so
+            // nothing is lost by keeping it.
             let button = |b| match b {
                 MouseButton::Left => Some(crate::attach::MouseButton::Left),
                 MouseButton::Middle => Some(crate::attach::MouseButton::Middle),
-                MouseButton::Right => Some(crate::attach::MouseButton::Right),
+                MouseButton::Right => None,
             };
             let action = match ev.kind {
                 MouseEventKind::Down(b) => button(b).map(|b| (crate::attach::MouseKind::Press, b)),
