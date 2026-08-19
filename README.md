@@ -91,8 +91,15 @@ Beyond watching, cctop can answer an agent (`s`), reopen any session in a tab of
 its own (`R`), hold several agents side by side, hand a session's context over to
 a *different* harness (`O`), and read the sessions on another machine over ssh.
 
+**And it can do all the watching in a browser.** `cctop serve` streams the same
+table to a page — useful on a phone, where the sessions waiting on you can find
+*you* — and gives every session a report that says which tool calls it kept
+retrying, where its context window went, and what each model cost. Read-only,
+loopback by default. See [In a browser](docs/serve.md).
+
 - [Reading the table](docs/the-table.md) — every column, the status dot, filtering, and the full key list
 - [Driving agents](docs/driving-agents.md) — typing into sessions, resuming, tabs and splits, notifications, handoff
+- [In a browser](docs/serve.md) — `cctop serve`, the session report, and reaching it from a phone
 - [The bottom panels](docs/panels.md) — Tool Activity and the context breakdown
 - [What the cost figures mean](docs/costs.md) — how each provider is priced, and where the data comes from
 - [Integrations](docs/integrations.md) — agent hooks, the MCP server, and `--host`

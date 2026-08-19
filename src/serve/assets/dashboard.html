@@ -1,0 +1,381 @@
+<title>cctop</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<style>__CCTOP_CSS__
+  .totals { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; }
+  .totals b { font-family: var(--mono); font-weight: 600; }
+  .totals .k { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  input[type=search] {
+    flex: 1 1 200px; min-width: 0; padding: 7px 11px; font: inherit; font-size: 14px;
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    padding: 7px 11px; font: inherit; font-size: 13px; cursor: pointer;
+    background: var(--panel); color: var(--dim);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  button[aria-pressed=true] { color: var(--accent); border-color: var(--accent); }
+
+  /* Sessions waiting on a person get their own block at the top. The whole
+     reason to look at this on a phone is to find them. */
+  .attention { border-color: var(--amber); margin-bottom: 16px; }
+  .attention h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+                  color: var(--amber); padding: 11px 14px 0; }
+
+  .rows { display: block; }
+  .row {
+    display: grid; gap: 2px 10px; padding: 11px 14px; border-top: 1px solid var(--line);
+    grid-template-columns: 8px minmax(0, 1fr) auto;
+    text-decoration: none; color: inherit; cursor: pointer;
+  }
+  .row:first-of-type { border-top: 0; }
+  .row:hover, .row:focus-visible { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .row .dot { margin-top: 7px; }
+  .row .name { min-width: 0; font-weight: 500; }
+  .row .name .title { color: var(--dim); font-weight: 400; }
+  .row .meta { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--faint); }
+  .row .figures { grid-row: 1 / span 2; grid-column: 3; text-align: right; font-family: var(--mono);
+                  font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
+  .row .figures .sub { font-size: 11px; color: var(--faint); }
+  .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* The context bar, the one figure that is a proportion rather than a count. */
+  .ctx { display: inline-block; width: 46px; height: 5px; border-radius: 3px;
+         background: var(--line); overflow: hidden; vertical-align: middle; }
+  .ctx i { display: block; height: 100%; background: var(--dim); }
+  .ctx i.hot { background: var(--amber); }
+  .ctx i.full { background: var(--red); }
+
+  footer { margin-top: 20px; font-size: 12px; color: var(--faint);
+           display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .live { display: inline-flex; align-items: center; gap: 6px; }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <h1>cctop<span class="v mono">__CCTOP_VERSION__</span></h1>
+    <div class="spacer"></div>
+    <div class="totals" id="totals"></div>
+  </header>
+
+  <div id="banners"></div>
+
+  <div class="controls">
+    <input type="search" id="filter" placeholder="Filter on project, model, branch, title…" autocomplete="off" spellcheck="false">
+    <button id="running" aria-pressed="false" title="Show only sessions with a live process">Running</button>
+    <button id="bell" aria-pressed="false" title="Notify when a session starts waiting on you">Notify</button>
+  </div>
+
+  <section class="card attention" id="attention" hidden>
+    <h2 id="attention-heading"></h2>
+    <div class="rows" id="attention-rows"></div>
+  </section>
+
+  <section class="card">
+    <div class="rows" id="rows"></div>
+    <div class="empty" id="empty">Waiting for the first refresh…</div>
+  </section>
+
+  <footer>
+    <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
+    <span class="spacer"></span>
+    <span id="counts"></span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const TOKEN = "__CCTOP_TOKEN__";
+const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
+
+// Every string from a transcript — titles, branches, paths, model names — is
+// written through textContent or this. None of it is trusted markup, and a
+// project directory is perfectly free to be called `<img onerror=…>`.
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+};
+
+const money = (n) => {
+  if (n === null || n === undefined) return "—";
+  const v = Number(n);
+  if (!isFinite(v)) return "—";
+  if (v === 0) return "$0";
+  if (v < 0.01) return "<$0.01";
+  return "$" + (v < 10 ? v.toFixed(2) : Math.round(v).toLocaleString());
+};
+
+const tokens = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + "G";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "k";
+  return String(v);
+};
+
+const ago = (iso) => {
+  const then = Date.parse(iso);
+  if (!isFinite(then)) return "";
+  const secs = Math.max(0, (Date.now() - then) / 1000);
+  if (secs < 60) return Math.floor(secs) + "s";
+  if (secs < 3600) return Math.floor(secs / 60) + "m";
+  if (secs < 86400) return Math.floor(secs / 3600) + "h";
+  return Math.floor(secs / 86400) + "d";
+};
+
+// The cost a row shows. `total` arrives as a six-decimal string — the JSON
+// document is exact on purpose — so it is reformatted here rather than printed,
+// which would put `$0.000000` in a column four characters wide.
+//
+// `incl`, `—` and a figure are three different claims: the plan bundles this,
+// the provider records no usage at all, and here is what it cost. None of them
+// may be rendered as either of the others.
+const rowCost = (s) => {
+  if (s.cost.included) return "incl";
+  if (!s.cost.available) return "—";
+  if (s.cost.total === null || s.cost.total === undefined) return "—";
+  return money(Number(s.cost.total));
+};
+
+// The home directory, so paths under it read as `~/…` the way they do in the
+// terminal. Substituted by the server rather than derived here, because a
+// browser cannot know it — and this page may be open on a different machine.
+const HOME = "__CCTOP_HOME__";
+
+// A working directory is often deep enough to fill a phone's width on its own,
+// and the part that says which checkout this is lives at the end. The whole
+// path stays on the element's title.
+const shortPath = (path) => {
+  const full = String(path);
+  if (HOME && full.startsWith(HOME + "/")) return "~" + full.slice(HOME.length);
+  if (HOME && full === HOME) return "~";
+  const parts = full.split("/").filter(Boolean);
+  return parts.length <= 2 ? full : "…/" + parts.slice(-2).join("/");
+};
+
+// Model names arrive fully qualified from gateways and proxies
+// (`vendor/publisher/model`). The last segment is the part anyone reads.
+const shortModel = (model) => {
+  const parts = String(model).split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : model;
+};
+
+let sessions = [];
+let filter = "";
+let runningOnly = false;
+// What each session's state was last render, so a *transition* into waiting can
+// be told from a session that has been waiting since before the page opened.
+// Without it every refresh would re-notify about the same idle agent.
+let previousState = new Map();
+let firstRender = true;
+
+const matches = (s, needle) => {
+  if (!needle) return true;
+  const hay = [
+    s.project, s.title, s.model, s.harness, s.branch, s.provider,
+    s.session_id, s.user, s.state,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return needle.split(/\s+/).filter(Boolean).every((word) => hay.includes(word));
+};
+
+function contextBar(s) {
+  const box = el("span", "ctx");
+  const ctx = s.context;
+  if (!ctx || !ctx.max) return null;
+  const pct = Math.min(100, (ctx.used / ctx.max) * 100);
+  const fill = el("i");
+  fill.style.width = pct.toFixed(1) + "%";
+  if (pct >= 90) fill.className = "full";
+  else if (pct >= 70) fill.className = "hot";
+  box.appendChild(fill);
+  box.title = Math.round(pct) + "% of the context window";
+  return box;
+}
+
+function rowFor(s) {
+  const row = el("a", "row");
+  row.href = "/session/" + encodeURIComponent(s.session_id) + QUERY;
+  row.setAttribute("role", "listitem");
+
+  row.appendChild(el("span", "dot " + (s.running || s.state === "error" ? s.state : "idle")));
+
+  const name = el("div", "name trunc");
+  name.appendChild(el("span", null, s.project ? shortPath(s.project) : s.session_id.slice(0, 8)));
+  if (s.title) {
+    name.appendChild(el("span", "title", " · " + s.title));
+  }
+  // The full path is worth having, but not worth the width. `title` is also
+  // what a screen reader reads out, which is the same trade.
+  if (s.project) name.title = s.project;
+  row.appendChild(name);
+
+  const meta = el("div", "meta");
+  const tag = (text, cls) => { if (text) meta.appendChild(el("span", cls || null, text)); };
+  tag(s.model ? shortModel(s.model) : s.provider);
+  if (s.branch) tag(s.branch);
+  tag(ago(s.last_active) + " ago");
+  if (s.state === "waiting") tag("waiting on you", "pill warn");
+  if (s.state === "error") tag("api error", "pill bad");
+  // A session with a quarter of its tool calls failing is retrying something
+  // that will not work, and paying for every attempt.
+  if (s.activity.tool_errors > 0 && s.activity.tool_count > 0) {
+    const rate = s.activity.tool_errors / s.activity.tool_count;
+    if (rate >= 0.25) tag(Math.round(rate * 100) + "% tool errors", "pill bad");
+  }
+  if (s.conflict) tag(s.conflict.level === "file" ? "same file as another agent" : "same repo as another agent", "pill warn");
+  if (s.user) tag(s.user);
+  // Which Claude login this ran under. Absent for a machine with one profile
+  // and for every harness that has no such concept, so the tag appears exactly
+  // where it distinguishes something.
+  if (s.profile && s.profile !== "default") tag(s.profile);
+  const bar = contextBar(s);
+  if (bar) meta.appendChild(bar);
+  row.appendChild(meta);
+
+  const figures = el("div", "figures");
+  figures.appendChild(el("div", null, rowCost(s)));
+  figures.appendChild(el("div", "sub", tokens(s.tokens.total) + " tok"));
+  row.appendChild(figures);
+
+  return row;
+}
+
+function render() {
+  const shown = sessions
+    .filter((s) => matches(s, filter))
+    .filter((s) => !runningOnly || s.running);
+
+  // Anything a person has to answer, first and on its own. A session that has
+  // errored is in the same category: it is stopped, and only a person restarts it.
+  const wanting = shown.filter((s) => s.state === "waiting" || s.state === "error");
+  const rest = shown.filter((s) => !wanting.includes(s));
+
+  const attention = document.getElementById("attention");
+  const attentionRows = document.getElementById("attention-rows");
+  attentionRows.replaceChildren(...wanting.map(rowFor));
+  attention.hidden = wanting.length === 0;
+  document.getElementById("attention-heading").textContent =
+    wanting.length === 1 ? "1 session needs you" : wanting.length + " sessions need you";
+
+  document.getElementById("rows").replaceChildren(...rest.map(rowFor));
+  const empty = document.getElementById("empty");
+  empty.hidden = shown.length > 0;
+  if (shown.length === 0 && sessions.length > 0) empty.textContent = "Nothing matches that filter.";
+
+  const running = sessions.filter((s) => s.running).length;
+  document.getElementById("counts").textContent =
+    sessions.length + " sessions · " + running + " running" +
+    (shown.length !== sessions.length ? " · " + shown.length + " shown" : "");
+
+  const totals = document.getElementById("totals");
+  const today = sessions.reduce((sum, s) => sum + (s.cost.today || 0), 0);
+  const hour = sessions.reduce((sum, s) => sum + (s.cost.this_hour || 0), 0);
+  totals.replaceChildren();
+  for (const [label, value] of [["today", money(today)], ["this hour", money(hour)]]) {
+    const box = el("span");
+    box.appendChild(el("b", null, value));
+    box.appendChild(document.createTextNode(" "));
+    box.appendChild(el("span", "k", label));
+    totals.appendChild(box);
+  }
+}
+
+// A desktop notification for the moment a session crosses into waiting — the
+// same event the terminal's `w` rings a bell for, and the reason this page is
+// worth having open on a second screen at all.
+const bell = document.getElementById("bell");
+let notifying = false;
+bell.addEventListener("click", async () => {
+  if (notifying) {
+    notifying = false;
+    bell.setAttribute("aria-pressed", "false");
+    return;
+  }
+  if (!("Notification" in window)) {
+    bell.textContent = "No notifications";
+    bell.disabled = true;
+    return;
+  }
+  // Must be inside the click: browsers refuse a permission prompt that no
+  // gesture asked for, and refusing it once is remembered.
+  const granted = await Notification.requestPermission();
+  notifying = granted === "granted";
+  bell.setAttribute("aria-pressed", String(notifying));
+  if (!notifying) bell.title = "Your browser refused notification permission for this page";
+});
+
+function announce(next) {
+  if (!notifying || firstRender) return;
+  for (const s of next) {
+    const was = previousState.get(s.session_id);
+    if (was && was !== "waiting" && s.state === "waiting") {
+      new Notification("Waiting on you", {
+        body: (s.project || s.session_id.slice(0, 8)) + (s.title ? " · " + s.title : ""),
+        tag: s.session_id,
+      });
+    }
+  }
+}
+
+function apply(next) {
+  announce(next);
+  previousState = new Map(next.map((s) => [s.session_id, s.state]));
+  sessions = next;
+  firstRender = false;
+  render();
+}
+
+// --- the live connection ---------------------------------------------------
+
+const link = document.getElementById("link");
+const linkText = document.getElementById("link-text");
+function setLink(state, text) {
+  link.className = "dot " + state;
+  linkText.textContent = text;
+}
+
+let source;
+function connect() {
+  source = new EventSource("/api/events" + QUERY);
+  source.addEventListener("sessions", (event) => {
+    setLink("working", "live");
+    try { apply(JSON.parse(event.data)); } catch (e) { setLink("error", "bad payload"); }
+  });
+  // EventSource reconnects on its own; this only reports it, because a stale
+  // table that looks live is the one failure this page must not have.
+  source.addEventListener("error", () => setLink("waiting", "reconnecting…"));
+  source.addEventListener("open", () => setLink("working", "live"));
+}
+
+fetch("/api/hosts" + QUERY)
+  .then((r) => r.ok ? r.json() : [])
+  .then((failed) => {
+    const banners = document.getElementById("banners");
+    for (const [host, why] of failed) {
+      banners.appendChild(el("div", "banner", host + " could not be read: " + why));
+    }
+  })
+  .catch(() => {});
+
+document.getElementById("filter").addEventListener("input", (e) => {
+  filter = e.target.value.trim().toLowerCase();
+  render();
+});
+document.getElementById("running").addEventListener("click", (e) => {
+  runningOnly = !runningOnly;
+  e.currentTarget.setAttribute("aria-pressed", String(runningOnly));
+  render();
+});
+
+// Ages are relative and nothing else changes between snapshots, so a slow tick
+// keeps "4m ago" honest without waiting on the next refresh.
+setInterval(() => { if (sessions.length) render(); }, 15000);
+
+connect();
+</script>

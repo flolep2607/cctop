@@ -1,0 +1,446 @@
+<title>cctop — session report</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<style>__CCTOP_CSS__
+  .back { font-size: 13px; color: var(--dim); text-decoration: none; }
+  .back:hover { color: var(--accent); }
+
+  .subject { margin-bottom: 18px; }
+  .subject h2 { font-size: 20px; margin-bottom: 4px; }
+  .subject .where { color: var(--dim); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+  .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); margin-bottom: 22px; }
+  .tile { padding: 12px 14px; }
+  .tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+  .tile .v { font-family: var(--mono); font-size: 21px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .tile .n { font-size: 11px; color: var(--faint); margin-top: 2px; }
+  .tile.bad .v { color: var(--red); }
+  .tile.warn .v { color: var(--amber); }
+
+  section.block { margin-bottom: 26px; }
+  section.block > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+                       color: var(--faint); margin-bottom: 9px; }
+  section.block > .note { font-size: 12px; color: var(--faint); margin: -4px 0 9px; max-width: 62ch; }
+  .pad { padding: 12px 14px; }
+
+  /* The one finding worth leading with, so it is styled like one. */
+  .failure { border-top: 1px solid var(--line); padding: 11px 14px; }
+  .failure:first-child { border-top: 0; }
+  .failure .head { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; }
+  .failure .count { font-family: var(--mono); font-weight: 600; color: var(--red); }
+  .failure .tool { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .failure pre { margin: 6px 0 0; font-family: var(--mono); font-size: 12px; color: var(--ink);
+                 background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+                 padding: 8px 10px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+
+  /* Stacked proportion bar for the context breakdown. */
+  .stack { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: var(--line); }
+  .stack span { display: block; height: 100%; min-width: 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 11px; font-size: 12px; }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 9px; }
+  .legend .amt { color: var(--faint); font-family: var(--mono); }
+
+  svg { display: block; max-width: 100%; }
+  .axis { fill: var(--faint); font-size: 10px; font-family: var(--mono); }
+  .gridline { stroke: var(--line); stroke-width: 1; }
+
+  .files { columns: 2 260px; column-gap: 22px; font-family: var(--mono); font-size: 12px; }
+  .files div { break-inside: avoid; color: var(--dim); padding: 1px 0; overflow-wrap: anywhere; }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <a class="back" href="/__CCTOP_BACK__">← all sessions</a>
+    <div class="spacer"></div>
+    <span class="faint mono" style="font-size:12px">cctop __CCTOP_VERSION__</span>
+  </header>
+  <main id="main"><div class="empty">Reading the transcript…</div></main>
+</div>
+
+<script>
+"use strict";
+const TOKEN = "__CCTOP_TOKEN__";
+const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
+const ID = decodeURIComponent(location.pathname.replace(/^\/session\//, ""));
+
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+};
+const svg = (tag, attrs) => {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, String(v));
+  return node;
+};
+
+const money = (v) => {
+  const n = Number(v) || 0;
+  if (n === 0) return "$0";
+  if (n < 0.01) return "<$0.01";
+  return "$" + (n < 100 ? n.toFixed(2) : Math.round(n).toLocaleString());
+};
+const tokens = (v) => {
+  const n = Number(v) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "G";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+};
+const secs = (ms) => {
+  const n = Number(ms) || 0;
+  if (n >= 60000) return Math.round(n / 60000) + "m";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "s";
+  return n + "ms";
+};
+
+const block = (heading, note) => {
+  const s = el("section", "block");
+  s.appendChild(el("h3", null, heading));
+  if (note) s.appendChild(el("p", "note", note));
+  return s;
+};
+
+// --- the pieces ------------------------------------------------------------
+
+function subject(r) {
+  const box = el("div", "subject");
+  box.appendChild(el("h2", null, r.title || r.project || r.session_id));
+  const where = el("div", "where");
+  where.appendChild(el("span", "dot " + (r.running ? r.state : "idle")));
+  const tag = (t) => { if (t) where.appendChild(el("span", null, t)); };
+  tag(r.project);
+  tag(r.branch);
+  if (r.profile && r.profile !== "default") tag("profile: " + r.profile);
+  tag(r.model || r.provider);
+  tag(r.duration);
+  if (r.plan !== "retail") tag("plan: " + r.plan);
+  where.appendChild(el("span", "faint mono", r.session_id));
+  box.appendChild(where);
+  return box;
+}
+
+function tiles(r) {
+  const grid = el("div", "tiles");
+  const add = (k, v, note, cls) => {
+    const t = el("div", "card tile" + (cls ? " " + cls : ""));
+    t.appendChild(el("div", "k", k));
+    t.appendChild(el("div", "v", v));
+    if (note) t.appendChild(el("div", "n", note));
+    grid.appendChild(t);
+  };
+
+  // "incl" and "—" are different claims: one says the plan bundles this, the
+  // other says the transcript records no billable usage at all.
+  const cost = r.cost.included ? "incl" : (r.cost.available ? money(r.cost.total) : "—");
+  add("Cost", cost, r.cost.included ? "bundled by this plan" : null);
+  add("Tokens", tokens(r.tokens.total || (r.tokens.input + r.tokens.output)),
+      tokens(r.tokens.input) + " in · " + tokens(r.tokens.output) + " out");
+  add("Tool calls", (r.activity.tool_count || 0).toLocaleString());
+
+  if (r.activity.error_rate !== null && r.activity.error_rate !== undefined) {
+    const pct = Math.round(r.activity.error_rate * 100);
+    add("Tool errors", pct + "%", (r.activity.tool_errors || 0) + " failed",
+        pct >= 25 ? "bad" : (pct >= 10 ? "warn" : null));
+  }
+  if (r.context) {
+    const pct = Math.round(r.context.percent_to_compact);
+    add("Context", pct + "%", tokens(r.context.used) + " of " + tokens(r.context.max),
+        pct >= 90 ? "bad" : (pct >= 70 ? "warn" : null));
+    if (r.context.compactions > 0) {
+      // A session that compacts repeatedly is rebuilding a window it keeps
+      // refilling, and paying to read it back each time.
+      add("Compactions", r.context.compactions, null, r.context.compactions >= 3 ? "warn" : null);
+    }
+  }
+  if (r.activity.lines_added || r.activity.lines_removed) {
+    add("Lines", "+" + r.activity.lines_added, "−" + r.activity.lines_removed);
+  }
+  return grid;
+}
+
+function failures(r) {
+  const found = r.activity.failures || [];
+  if (!found.length) return null;
+  const repeated = found.filter((f) => f.count > 1).length;
+  const s = block(
+    "Repeated failures",
+    repeated
+      ? "Failed calls grouped by tool and by argument. A group with a count above one is the same call retried — the agent paid for every attempt."
+      : "Failed calls grouped by tool and by argument. None repeated, so these are one-offs rather than a loop."
+  );
+  const card = el("div", "card");
+  for (const f of found) {
+    const item = el("div", "failure");
+    const head = el("div", "head");
+    head.appendChild(el("span", "count", "×" + f.count));
+    head.appendChild(el("span", "tool", f.tool));
+    const when = f.samples && f.samples.length ? f.samples[0].ts : null;
+    if (when) head.appendChild(el("span", "faint", "first at " + when.replace("T", " ").replace(/\..*$/, "")));
+    item.appendChild(head);
+    item.appendChild(el("pre", null, f.detail));
+    card.appendChild(item);
+  }
+  s.appendChild(card);
+  return s;
+}
+
+const CONTEXT_PARTS = [
+  ["startup", "Startup", "var(--dim)"],
+  ["tool_output", "Tool output", "var(--accent)"],
+  ["tool_input", "Tool input", "var(--amber)"],
+  ["attachments", "Attachments", "var(--green)"],
+  ["user_text", "You", "var(--red)"],
+  ["assistant_text", "Assistant", "var(--faint)"],
+];
+
+function breakdown(r) {
+  const b = r.context && r.context.breakdown;
+  if (!b || !b.total) return null;
+
+  const s = block(
+    "What is in the context window",
+    "Startup and the window total are exact; the rest is estimated from transcript characters, so read them as proportions. " +
+    (b.unaccounted >= 0
+      ? "Unaccounted is thinking — stored stripped — plus the harness's per-turn reminders and estimation error."
+      : "The estimate overshoots the measured window, which happens when the harness has dropped old tool results the transcript still holds.") +
+    (b.superseded ? " A compaction has since replaced this segment, so these describe the window before it." : "")
+  );
+
+  const card = el("div", "card pad");
+  const bar = el("div", "stack");
+  const legend = el("div", "legend");
+  const parts = CONTEXT_PARTS.map(([key, label, color]) => [label, b[key] || 0, color]);
+  if (b.unaccounted > 0) parts.push(["Unaccounted", b.unaccounted, "var(--line)"]);
+
+  const shown = parts.reduce((sum, [, v]) => sum + v, 0) || 1;
+  for (const [label, value, color] of parts) {
+    if (value <= 0) continue;
+    const seg = el("span");
+    seg.style.width = (value / shown * 100).toFixed(2) + "%";
+    seg.style.background = color;
+    seg.title = label + ": " + tokens(value);
+    bar.appendChild(seg);
+
+    const item = el("div", "item");
+    const swatch = el("span", "swatch");
+    swatch.style.background = color;
+    item.appendChild(swatch);
+    item.appendChild(el("span", null, label));
+    item.appendChild(el("span", "amt", tokens(value)));
+    legend.appendChild(item);
+  }
+  card.appendChild(bar);
+  card.appendChild(legend);
+  s.appendChild(card);
+  return s;
+}
+
+// The window measured at every request, oldest first. A steady climb is a
+// conversation growing; a step is one tool result that will do it again.
+function windowChart(r) {
+  const series = (r.context && r.context.series) || [];
+  if (series.length < 3) return null;
+
+  const s = block("How the window filled", "One point per request, oldest first. Vertical marks are compactions.");
+  const W = 900, H = 190, PAD_L = 46, PAD_B = 18, PAD_T = 8;
+  const max = Math.max(...series.map((p) => p.window), 1);
+  const x = (i) => PAD_L + (i / (series.length - 1)) * (W - PAD_L - 8);
+  const y = (v) => PAD_T + (1 - v / max) * (H - PAD_T - PAD_B);
+
+  const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: H,
+                             role: "img", "aria-label": "Context window over time" });
+  for (const frac of [0, 0.5, 1]) {
+    const yy = y(max * frac);
+    chart.appendChild(svg("line", { x1: PAD_L, y1: yy, x2: W - 8, y2: yy, class: "gridline" }));
+    const label = svg("text", { x: PAD_L - 6, y: yy + 3, "text-anchor": "end", class: "axis" });
+    label.textContent = tokens(Math.round(max * frac));
+    chart.appendChild(label);
+  }
+
+  const line = series.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.window).toFixed(1)}`).join("");
+  chart.appendChild(svg("path", {
+    d: `${line}L${x(series.length - 1).toFixed(1)},${y(0)}L${x(0).toFixed(1)},${y(0)}Z`,
+    fill: "var(--accent)", "fill-opacity": ".13",
+  }));
+  chart.appendChild(svg("path", { d: line, fill: "none", stroke: "var(--accent)", "stroke-width": "1.5" }));
+
+  series.forEach((p, i) => {
+    if (!p.after_compaction) return;
+    chart.appendChild(svg("line", {
+      x1: x(i), y1: PAD_T, x2: x(i), y2: y(0),
+      stroke: "var(--amber)", "stroke-width": "1", "stroke-dasharray": "3 3",
+    }));
+  });
+
+  const holder = el("div", "card pad scroll-x");
+  holder.appendChild(chart);
+  s.appendChild(holder);
+  return s;
+}
+
+function spend(r) {
+  const byModel = r.cost.by_model || [];
+  const byHour = r.cost.by_hour || [];
+  if (!byModel.length && !byHour.length) return null;
+  const s = block("What it cost");
+  const card = el("div", "card");
+
+  if (byHour.length > 1) {
+    const W = 900, H = 110, PAD_L = 46, PAD_B = 16;
+    const max = Math.max(...byHour.map(([, v]) => v), 0.0001);
+    const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: H,
+                               role: "img", "aria-label": "Spend per hour" });
+    const gap = 1;
+    const bw = Math.max(1, (W - PAD_L - 8) / byHour.length - gap);
+    byHour.forEach(([key, value], i) => {
+      const h = Math.max(1, (value / max) * (H - PAD_B - 4));
+      const bar = svg("rect", {
+        x: PAD_L + i * (bw + gap), y: H - PAD_B - h, width: bw, height: h,
+        fill: "var(--accent)", rx: 1,
+      });
+      const tip = svg("title");
+      tip.textContent = key.replace("T", " ") + ":00 — " + money(value);
+      bar.appendChild(tip);
+      chart.appendChild(bar);
+    });
+    const top = svg("text", { x: PAD_L - 6, y: 12, "text-anchor": "end", class: "axis" });
+    top.textContent = money(max);
+    chart.appendChild(top);
+    const holder = el("div", "pad scroll-x");
+    holder.appendChild(chart);
+    holder.appendChild(el("div", "faint", "Per hour, most recent at the right."));
+    card.appendChild(holder);
+  }
+
+  if (byModel.length) {
+    const holder = el("div", "pad scroll-x");
+    const table = el("table");
+    const head = el("tr");
+    for (const [label, cls] of [["Model", ""], ["Input", "num"], ["Output", "num"], ["Cost", "num"]]) {
+      head.appendChild(el("th", cls, label));
+    }
+    table.appendChild(head);
+    for (const m of byModel) {
+      const tr = el("tr");
+      tr.appendChild(el("td", null, m.model));
+      tr.appendChild(el("td", "num", tokens(m.tokens.input)));
+      tr.appendChild(el("td", "num", tokens(m.tokens.output)));
+      tr.appendChild(el("td", "num", r.cost.included ? "incl" : money(m.total)));
+      table.appendChild(tr);
+    }
+    holder.appendChild(table);
+    card.appendChild(holder);
+  }
+  s.appendChild(card);
+  return s;
+}
+
+function slowest(r) {
+  const calls = r.activity.slowest || [];
+  if (!calls.length) return null;
+  const s = block("Slowest calls", "Wall time from the call being issued to its result arriving.");
+  const card = el("div", "card pad scroll-x");
+  const table = el("table");
+  const head = el("tr");
+  head.appendChild(el("th", null, "Tool"));
+  head.appendChild(el("th", null, "Call"));
+  head.appendChild(el("th", "num", "Took"));
+  table.appendChild(head);
+  for (const c of calls) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", c.tool));
+    const what = el("td");
+    what.appendChild(el("span", "mono", c.detail));
+    if (c.failed) what.appendChild(el("span", "pill bad", "failed"));
+    tr.appendChild(what);
+    tr.appendChild(el("td", "num", secs(c.duration_ms)));
+    table.appendChild(tr);
+  }
+  card.appendChild(table);
+  s.appendChild(card);
+  return s;
+}
+
+function toolTable(r) {
+  const tools = r.activity.tools || [];
+  if (!tools.length) return null;
+  const s = block("Tools");
+  const card = el("div", "card pad scroll-x");
+  const table = el("table");
+  const head = el("tr");
+  head.appendChild(el("th", null, "Tool"));
+  head.appendChild(el("th", "num", "Calls"));
+  head.appendChild(el("th", "num", "Failed"));
+  table.appendChild(head);
+  for (const t of tools) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", t.name));
+    tr.appendChild(el("td", "num", t.calls.toLocaleString()));
+    tr.appendChild(el("td", "num", t.failed ? String(t.failed) : "—"));
+    table.appendChild(tr);
+  }
+  card.appendChild(table);
+  s.appendChild(card);
+  return s;
+}
+
+function files(r) {
+  if (!r.files || !r.files.length) return null;
+  const s = block("Files it wrote", "Most recent first.");
+  const card = el("div", "card pad");
+  const list = el("div", "files");
+  for (const f of r.files) list.appendChild(el("div", null, f));
+  card.appendChild(list);
+  s.appendChild(card);
+  return s;
+}
+
+function subagents(r) {
+  if (!r.subagents || !r.subagents.length) return null;
+  const s = block("Subagents");
+  const card = el("div", "card pad scroll-x");
+  const table = el("table");
+  const head = el("tr");
+  for (const [label, cls] of [["Type", ""], ["Description", ""], ["Tools", "num"], ["Cost", "num"]]) {
+    head.appendChild(el("th", cls, label));
+  }
+  table.appendChild(head);
+  for (const a of r.subagents) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", a.type));
+    tr.appendChild(el("td", null, a.description));
+    tr.appendChild(el("td", "num", a.tool_count));
+    tr.appendChild(el("td", "num", r.cost.included ? "incl" : money(a.cost)));
+    table.appendChild(tr);
+  }
+  card.appendChild(table);
+  s.appendChild(card);
+  return s;
+}
+
+// --- load ------------------------------------------------------------------
+
+fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
+  .then(async (response) => {
+    if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+    return response.json();
+  })
+  .then((r) => {
+    document.title = "cctop — " + (r.title || r.project || r.session_id);
+    const main = document.getElementById("main");
+    main.replaceChildren();
+    main.appendChild(subject(r));
+    if (r.error) main.appendChild(el("div", "banner", "This transcript could not be fully read: " + r.error));
+    main.appendChild(tiles(r));
+    for (const part of [failures, breakdown, windowChart, spend, slowest, toolTable, files, subagents]) {
+      const node = part(r);
+      if (node) main.appendChild(node);
+    }
+  })
+  .catch((e) => {
+    document.getElementById("main").replaceChildren(el("div", "empty", String(e.message || e)));
+  });
+</script>
