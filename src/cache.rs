@@ -628,6 +628,11 @@ pub struct UiPrefs {
     /// tab revert to the personal one would be a mistake made silently, in the
     /// place where it costs the most to notice late.
     pub claude_profile: Option<String>,
+    /// Codex profile a new tab launches under, by name. Separate from
+    /// [`Self::claude_profile`] because they are separate accounts on separate
+    /// subscriptions, and a prefs file written before Codex had profiles still
+    /// reads correctly.
+    pub codex_profile: Option<String>,
     /// Recent `/` queries, newest first, so a search worth running twice does
     /// not have to be typed twice. Capped at [`MAX_SEARCH_HISTORY`].
     pub search_history: Vec<String>,
@@ -656,6 +661,7 @@ impl Default for UiPrefs {
             hidden_columns: Vec::new(),
             theme: None,
             claude_profile: None,
+            codex_profile: None,
             search_history: Vec::new(),
         }
     }

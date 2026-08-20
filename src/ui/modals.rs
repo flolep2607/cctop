@@ -820,7 +820,9 @@ pub(super) fn draw_launch(
     // one to be in: on a machine with a single account this says nothing, and a
     // line offering a key that changes nothing is worse than no line.
     let profile = match picked {
-        Some(tabs::Choice::Start(argv)) if App::takes_claude_profile(argv) => app.launch_profile(),
+        // `launch_profile` already answers for the highlighted choice, so the
+        // line appears exactly when the harness has an account to pick.
+        Some(tabs::Choice::Start(_)) => app.launch_profile(),
         _ => None,
     };
     if let Some(profile) = profile {

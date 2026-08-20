@@ -791,12 +791,20 @@ mod tests {
         work.profile = Some("work".into());
         assert_eq!(render_cell(ColumnId::Profile, &work, &now), "work");
 
-        // A harness with no profiles is not a session missing one. A dash would
-        // read as "unknown", which is a different and wronger claim.
+        // Codex holds accounts of its own, under `$CODEX_HOME`, so the cell
+        // names them the same way — the column is not Claude's alone.
         let mut codex = Session::new(Provider::Codex, "b".into());
         codex.started_at = "2026-01-01T00:00:00Z".into();
         codex.last_active = codex.started_at.clone();
-        assert_eq!(render_cell(ColumnId::Profile, &codex, &now), "");
+        codex.profile = Some("work".into());
+        assert_eq!(render_cell(ColumnId::Profile, &codex, &now), "work");
+
+        // A harness with no such variable is not a session missing a profile. A
+        // dash would read as "unknown", which is a different and wronger claim.
+        let mut cursor = Session::new(Provider::Cursor, "c".into());
+        cursor.started_at = "2026-01-01T00:00:00Z".into();
+        cursor.last_active = cursor.started_at.clone();
+        assert_eq!(render_cell(ColumnId::Profile, &cursor, &now), "");
     }
 
     #[test]

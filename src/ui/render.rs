@@ -385,7 +385,7 @@ fn pane_quota(
     let status = if command.starts_with("claude") {
         quota.claude_for(profile)?
     } else if command.starts_with("codex") {
-        &quota.codex
+        quota.codex_for(profile)?
     } else {
         return None;
     };
@@ -1030,23 +1030,19 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     // One column per account rather than a fixed two: a machine with a personal
     // and a work login has three things to report, and the panel exists to say
     // how much room is left in each.
-    let mut accounts: Vec<(String, &crate::quota::ProviderStatus)> = app
-        .quota
-        .claude
-        .iter()
-        .enumerate()
-        .map(|(i, q)| {
-            // The first is the one Claude Code itself would use, and naming it
-            // costs width the figures need — so only the others are qualified.
-            // On the overwhelming majority of machines there are no others.
+    // The first of a harness's accounts is the one it would use unasked, and
+    // naming it costs width the figures need — so only the others are
+    // qualified. On the overwhelming majority of machines there are no others.
+    let mut accounts: Vec<(String, &crate::quota::ProviderStatus)> = Vec::new();
+    for (harness, qs) in [("Claude", &app.quota.claude), ("Codex", &app.quota.codex)] {
+        for (i, q) in qs.iter().enumerate() {
             let name = match i {
-                0 => "Claude".to_string(),
-                _ => format!("Claude ({})", q.profile),
+                0 => harness.to_string(),
+                _ => format!("{harness} ({})", q.profile),
             };
-            (name, &q.status)
-        })
-        .collect();
-    accounts.push(("Codex".to_string(), &app.quota.codex));
+            accounts.push((name, &q.status));
+        }
+    }
 
     let share = 100 / accounts.len().max(1) as u16;
     let cols = RLayout::horizontal(
@@ -1356,7 +1352,7 @@ mod tests {
     #[test]
     fn pane_quota_narrows_to_fit_and_only_for_a_provider() {
         let quota = crate::quota::Quota {
-            claude: vec![crate::quota::ClaudeQuota {
+            claude: vec![crate::quota::ProfileQuota {
                 profile: "default".into(),
                 status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
                     plan: None,

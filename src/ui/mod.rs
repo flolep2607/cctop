@@ -145,6 +145,9 @@ struct NewTab<'a> {
     /// characters of tab bar whose only variable part is a uuid nobody reads.
     /// The caller that knows which session this is passes its name instead.
     label: Option<String>,
+    /// The account this pane runs as, when it is one cctop chose — so the pane
+    /// border reports that account's limits rather than the default's.
+    profile: Option<String>,
 }
 
 /// How much of a session's name a resumed tab's label carries.
@@ -617,9 +620,14 @@ pub struct App {
     pub refresh_secs: f64,
     /// Only show sessions whose total cost reaches this floor.
     pub cost_floor: f64,
-    /// Which Claude profile the launcher will start an agent under, as an index
-    /// into [`crate::config::CLAUDE_PROFILES`].
-    pub launch_profile: usize,
+    /// Which profile the launcher will start each harness under, as an index
+    /// into that harness's [`crate::config::profiles_for`] list.
+    ///
+    /// Per harness rather than one index: the launcher cursor moves between
+    /// `claude` and `codex`, and an index is only meaningful against the list
+    /// it came from — carrying one across would point at whichever account
+    /// happened to sit in that position.
+    pub launch_profile: HashMap<Provider, usize>,
     /// Which entry of the row menu is under the cursor.
     ///
     /// Only ever points at an entry that can run: the menu draws the blocked
@@ -896,15 +904,22 @@ impl App {
             // The one used last, or the default when that profile has since
             // gone: a name that no longer resolves must not silently launch
             // under somebody else's account.
-            launch_profile: prefs
-                .claude_profile
-                .as_deref()
-                .and_then(|name| {
-                    crate::config::CLAUDE_PROFILES
-                        .iter()
-                        .position(|p| p.name == name)
-                })
-                .unwrap_or(0),
+            launch_profile: [
+                (Provider::Claude, prefs.claude_profile.as_deref()),
+                (Provider::Codex, prefs.codex_profile.as_deref()),
+            ]
+            .into_iter()
+            .map(|(provider, remembered)| {
+                let at = remembered
+                    .and_then(|name| {
+                        crate::config::profiles_for(provider)
+                            .iter()
+                            .position(|p| p.name == name)
+                    })
+                    .unwrap_or(0);
+                (provider, at)
+            })
+            .collect(),
             menu_cursor: 0,
             cost_input: String::new(),
             send_input: String::new(),
@@ -1192,7 +1207,10 @@ impl App {
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;
-        self.prefs.claude_profile = self.launch_profile().map(|p| p.name.clone());
+        self.prefs.claude_profile = self
+            .chosen_profile(Provider::Claude)
+            .map(|p| p.name.clone());
+        self.prefs.codex_profile = self.chosen_profile(Provider::Codex).map(|p| p.name.clone());
         self.prefs.notify = self.notify.enabled;
         self.prefs.search_history = self.search_history.clone();
         self.prefs.save();
@@ -2478,6 +2496,20 @@ impl App {
         let Some(argv) = session.resume_argv() else {
             return;
         };
+        // Resumed under the account the transcript lives in, not under
+        // whatever the launcher last chose. For Codex this is the difference
+        // between resuming and not: a session id under `~/.codex-work` does not
+        // exist under `~/.codex`, so `codex resume <id>` would start a blank
+        // session and report nothing wrong. The row already knows which account
+        // it came from — `Session::profile` is stamped from the transcript path.
+        let profile = session
+            .profile
+            .as_deref()
+            .and_then(|name| crate::config::profile_named(session.provider, name));
+        let argv = match profile {
+            Some(profile) => Self::under_profile(argv, profile),
+            None => argv,
+        };
         // The transcript is full of paths relative to where the agent ran, so a
         // resumed session belongs in the same directory.
         let cwd = session.work_dir();
@@ -2536,6 +2568,7 @@ impl App {
                 verb,
                 resumed: Some(tmux),
                 label: Some(label),
+                profile: profile.map(|p| p.name.clone()),
             },
         );
     }
@@ -2665,6 +2698,7 @@ impl App {
             verb,
             resumed,
             label,
+            profile,
         } = tab;
         let mut pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
@@ -2674,6 +2708,7 @@ impl App {
             }
         };
         pane.resumed = resumed;
+        pane.profile = profile;
         if let Some(label) = label {
             pane.label = label;
         }
@@ -2789,31 +2824,64 @@ impl App {
         &self.launch_offer
     }
 
-    /// The profile a launch would use, or `None` when there is only the one and
-    /// so nothing to choose between.
-    pub fn launch_profile(&self) -> Option<&'static crate::config::ClaudeProfile> {
-        let profiles = &*crate::config::CLAUDE_PROFILES;
-        (profiles.len() > 1).then(|| profiles.get(self.launch_profile))?
+    /// The profile a launch would use, or `None` when the highlighted command
+    /// takes none — or takes one but has only a single account, so there is
+    /// nothing to choose between.
+    pub fn launch_profile(&self) -> Option<&'static crate::config::Profile> {
+        self.chosen_profile(self.launch_provider()?)
     }
 
-    /// Move to the next profile. Wraps, because with two — which is the case
-    /// this exists for — a key that toggles is the whole interaction.
+    /// Which harness the highlighted choice would start, when it is one whose
+    /// account cctop can pick.
+    fn launch_provider(&self) -> Option<Provider> {
+        match self.launch_offer.get(self.launch_cursor) {
+            Some(tabs::Choice::Start(argv)) => Self::profile_provider(argv),
+            _ => None,
+        }
+    }
+
+    /// The profile `provider` would be started under, or `None` when it has
+    /// only the one and so nothing to choose between.
+    pub fn chosen_profile(&self, provider: Provider) -> Option<&'static crate::config::Profile> {
+        let profiles = crate::config::profiles_for(provider);
+        if profiles.len() <= 1 {
+            return None;
+        }
+        let at = self.launch_profile.get(&provider).copied().unwrap_or(0);
+        profiles.get(at).copied()
+    }
+
+    /// Move to the next profile of the highlighted harness. Wraps, because with
+    /// two — which is the case this exists for — a key that toggles is the whole
+    /// interaction.
     pub(super) fn cycle_launch_profile(&mut self) {
-        let n = crate::config::CLAUDE_PROFILES.len();
+        let Some(provider) = self.launch_provider() else {
+            return;
+        };
+        let n = crate::config::profiles_for(provider).len();
         if n > 1 {
-            self.launch_profile = (self.launch_profile + 1) % n;
+            let at = self.launch_profile.entry(provider).or_insert(0);
+            *at = (*at + 1) % n;
             self.save_prefs();
             self.needs_redraw = true;
         }
     }
 
-    /// Whether `argv` starts Claude Code, and so whether a profile means
-    /// anything to it. `$CLAUDE_CONFIG_DIR` is Claude's; setting it in front of
-    /// codex would be a promise the env var cannot keep.
-    pub(super) fn takes_claude_profile(argv: &[String]) -> bool {
-        argv.first()
-            .map(|c| c.rsplit(['/', '\\']).next().unwrap_or(c))
-            .is_some_and(|c| c == "claude" || c == "claude.exe")
+    /// Which harness `argv` starts, when it is one whose account is selected by
+    /// an environment variable — and so one a profile means something to.
+    ///
+    /// `$CLAUDE_CONFIG_DIR` is Claude's and `$CODEX_HOME` is Codex's; putting
+    /// either in front of anything else would be a promise the env var cannot
+    /// keep.
+    pub(super) fn profile_provider(argv: &[String]) -> Option<Provider> {
+        let command = argv
+            .first()
+            .map(|c| c.rsplit(['/', '\\']).next().unwrap_or(c))?;
+        match command.strip_suffix(".exe").unwrap_or(command) {
+            "claude" => Some(Provider::Claude),
+            "codex" => Some(Provider::Codex),
+            _ => None,
+        }
     }
 
     /// Put the chosen profile in front of the command that will read it.
@@ -2824,15 +2892,21 @@ impl App {
     /// [`tabs::label_of`] drops the prefix again so the tab is named after the
     /// agent rather than after how it was started.
     fn with_profile(&self, argv: Vec<String>) -> Vec<String> {
-        let Some(profile) = self
-            .launch_profile()
-            .filter(|_| Self::takes_claude_profile(&argv))
-        else {
+        let profile = Self::profile_provider(&argv).and_then(|p| self.chosen_profile(p));
+        let Some(profile) = profile else {
+            return argv;
+        };
+        Self::under_profile(argv, profile)
+    }
+
+    /// `argv`, prefixed with the environment that selects `profile`.
+    fn under_profile(argv: Vec<String>, profile: &crate::config::Profile) -> Vec<String> {
+        let Some((var, _)) = crate::config::profile_env(profile.provider) else {
             return argv;
         };
         let mut out = vec![
             "env".to_string(),
-            format!("CLAUDE_CONFIG_DIR={}", profile.dir.display()),
+            format!("{var}={}", profile.dir.display()),
         ];
         out.extend(argv);
         out
@@ -3262,6 +3336,9 @@ impl App {
                     resumed: Some(resumed),
                     // Already a bare agent name, so the command names it right.
                     label: None,
+                    // Somebody else started it; its account is whatever they
+                    // chose, which the tmux session name does not record.
+                    profile: None,
                 },
             );
             return;
@@ -3448,7 +3525,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     }
     // And PROFILE, which most machines have exactly one of. A column repeating
     // `default` down every row is a column that answers nothing.
-    if crate::config::claude_profile_count() <= 1 {
+    if crate::config::profile_count() <= 1 {
         app.hidden_columns.push(ColumnId::Profile);
     }
     let _ = req_tx.send(Request::Refresh);
@@ -3620,9 +3697,9 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                 // is asked separately. They share one due time: the interval
                 // exists to be polite to the provider, and a machine with two
                 // logins is not entitled to twice the requests.
-                quota.claude = crate::config::CLAUDE_PROFILES
+                quota.claude = crate::config::profiles_for(Provider::Claude)
                     .iter()
-                    .map(|profile| crate::quota::ClaudeQuota {
+                    .map(|profile| crate::quota::ProfileQuota {
                         profile: profile.name.clone(),
                         status: crate::quota::fetch_claude(profile),
                     })
@@ -3639,9 +3716,22 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                 changed = true;
             }
             if now >= codex_due {
-                let status = crate::quota::fetch_codex();
-                codex_due = now + Duration::from_secs(status.retry_delay_secs(QUOTA_INTERVAL_SECS));
-                quota.codex = status;
+                // Per account for the same reason as Claude's, and sharing one
+                // due time for the same reason too.
+                quota.codex = crate::config::profiles_for(Provider::Codex)
+                    .iter()
+                    .map(|profile| crate::quota::ProfileQuota {
+                        profile: profile.name.clone(),
+                        status: crate::quota::fetch_codex(profile),
+                    })
+                    .collect();
+                let delay = quota
+                    .codex
+                    .iter()
+                    .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
+                    .max()
+                    .unwrap_or(QUOTA_INTERVAL_SECS);
+                codex_due = now + Duration::from_secs(delay);
                 changed = true;
             }
 
@@ -4248,6 +4338,54 @@ mod tests {
         app.mode = Mode::List;
         app.on_paste("q");
         assert!(!app.should_quit);
+    }
+
+    /// Which harness an argv names, and so which variable may be put in front
+    /// of it. Getting this wrong is not a cosmetic error: `CODEX_HOME` in front
+    /// of `claude` is ignored, and the agent then runs as an account the pane
+    /// says it is not.
+    #[test]
+    fn only_a_harness_with_a_config_variable_takes_a_profile() {
+        let of = |c: &str| App::profile_provider(&[c.to_string()]);
+        assert_eq!(of("claude"), Some(Provider::Claude));
+        assert_eq!(of("codex"), Some(Provider::Codex));
+        // Found by basename, however it was spelled on the way in.
+        assert_eq!(of("/usr/local/bin/codex"), Some(Provider::Codex));
+        assert_eq!(of("codex.exe"), Some(Provider::Codex));
+        assert_eq!(of(r"C:\tools\claude.exe"), Some(Provider::Claude));
+        // No such variable: a profile would be a setting that did nothing.
+        assert_eq!(of("cursor-agent"), None);
+        assert_eq!(of("gemini"), None);
+        // Not a prefix match — `codex-something` is not codex.
+        assert_eq!(of("codexa"), None);
+        assert_eq!(App::profile_provider(&[]), None);
+    }
+
+    /// The prefix a launch actually carries, per harness.
+    #[test]
+    fn a_profile_reaches_the_agent_as_its_own_variable() {
+        let under = |dir: &str, provider, command: &str| {
+            let profile = crate::config::Profile {
+                provider,
+                name: "work".to_string(),
+                dir: std::path::PathBuf::from(dir),
+            };
+            App::under_profile(vec![command.to_string()], &profile)
+        };
+        assert_eq!(
+            under("/home/x/.codex-work", Provider::Codex, "codex"),
+            ["env", "CODEX_HOME=/home/x/.codex-work", "codex"]
+        );
+        assert_eq!(
+            under("/home/x/.claude-work", Provider::Claude, "claude"),
+            ["env", "CLAUDE_CONFIG_DIR=/home/x/.claude-work", "claude"]
+        );
+        // A harness with no variable is handed its command untouched rather
+        // than an `env` prefix that promises something.
+        assert_eq!(
+            under("/home/x/.cursor", Provider::Cursor, "cursor-agent"),
+            ["cursor-agent"]
+        );
     }
 
     /// Regression: a click on the launcher used to be answered twice — once by

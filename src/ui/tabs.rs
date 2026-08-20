@@ -730,6 +730,13 @@ mod tests {
             .collect();
         assert_eq!(label_of(&argv), "claude --resume");
 
+        // Codex is selected by a different variable and must strip the same.
+        let argv: Vec<String> = ["env", "CODEX_HOME=/home/x/.codex-work", "codex"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(label_of(&argv), "codex");
+
         // A command that merely happens to be called `env` keeps its name.
         assert_eq!(label_of(&["env".to_string()]), "env");
         assert_eq!(label_of(&["claude".to_string()]), "claude");
