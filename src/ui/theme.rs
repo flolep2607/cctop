@@ -529,7 +529,7 @@ pub fn signal_color(signal: crate::hook::Signal) -> Color {
     match signal {
         Signal::NeedsInput => colors().cost_high,
         Signal::Idle => colors().cost_mid,
-        Signal::Busy | Signal::Started | Signal::Compacting => colors().cost_low,
+        Signal::Busy | Signal::Acting | Signal::Started | Signal::Compacting => colors().cost_low,
         Signal::Ended => colors().dimmer,
     }
 }

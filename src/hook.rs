@@ -249,6 +249,15 @@ pub enum Signal {
     Idle,
     /// The agent started working, which cancels either of the above.
     Busy,
+    /// A tool call has begun and has not come back yet.
+    ///
+    /// Working, like [`Signal::Busy`] — but told apart from it because it is the
+    /// only state a *held permission prompt* can be in, and nothing else
+    /// reports one in time to be useful. Claude Code does raise a
+    /// `Notification` for it, on a six-second timer (`NOTIFY_HOOKS` in 2.1.x),
+    /// by which point you have either answered or gone looking for the tab
+    /// yourself. See [`Tab::attention`](crate::ui::tabs::Tab::attention).
+    Acting,
     /// The agent is compacting its context: working, and about to lose history.
     Compacting,
     /// The session has begun. Like [`Signal::Busy`], but there is a row to find.
@@ -260,7 +269,18 @@ pub enum Signal {
 impl Signal {
     /// Whether the agent is working rather than waiting on you.
     pub fn is_working(self) -> bool {
-        matches!(self, Signal::Busy | Signal::Compacting | Signal::Started)
+        matches!(
+            self,
+            Signal::Busy | Signal::Acting | Signal::Compacting | Signal::Started
+        )
+    }
+
+    /// Whether typing at the agent is an answer to this state, and so cancels
+    /// it. A tool call in flight counts: the answer to a permission prompt is
+    /// keystrokes, and no event reports that it arrived — see
+    /// [`App::mark_answered`](crate::ui::App::mark_answered).
+    pub fn awaits_you(self) -> bool {
+        matches!(self, Signal::NeedsInput | Signal::Idle | Signal::Acting)
     }
 
     /// Whether this changes *which sessions exist*, and so is worth a rescan
@@ -275,6 +295,7 @@ impl Signal {
             Signal::NeedsInput => "asking",
             Signal::Idle => "idle",
             Signal::Busy => "working",
+            Signal::Acting => "acting",
             Signal::Compacting => "compacting",
             Signal::Started => "started",
             Signal::Ended => "ended",
@@ -437,14 +458,21 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // Nothing between the answer and this event says the answer happened,
         // so without it a prompt you have already dealt with keeps its tab
         // blinking until the *next* tool call or the end of the turn.
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SubagentStop"
-        // Gemini CLI: a prompt submitted, and a tool about to run.
-        | "BeforeAgent" | "BeforeTool"
-        // Cursor: the same three moments, lower-cased. A shell command is the
-        // one tool call it reports, which is enough to answer an amber row.
-        | "beforeSubmitPrompt" | "beforeShellExecution" | "subagentStop"
-        // OpenCode, whose plugin reports a tool starting and nothing finer.
-        | "tool.execute.before" => Some(Signal::Busy),
+        "UserPromptSubmit" | "PostToolUse" | "SubagentStop"
+        // Gemini CLI: a prompt submitted.
+        | "BeforeAgent"
+        // Cursor: the same two moments, lower-cased.
+        | "beforeSubmitPrompt" | "subagentStop" => Some(Signal::Busy),
+        // A tool call has started, which is the same "working" fact with one
+        // more thing known about it: it is the state a permission prompt is
+        // held in. See [`Signal::Acting`].
+        //
+        // Cursor's shell command is the one tool call it reports, and
+        // OpenCode's plugin reports a tool starting and nothing finer; both are
+        // enough for the cue.
+        "PreToolUse" | "BeforeTool" | "beforeShellExecution" | "tool.execute.before" => {
+            Some(Signal::Acting)
+        }
         // A held permission prompt, in the harnesses that have an event for it.
         // Cursor and Gemini both raise `Notification` the way Claude Code does,
         // and it is matched above.
@@ -1745,9 +1773,13 @@ mod tests {
 
     /// A permission prompt is the one exchange with no event of its own for the
     /// *answer*, so the tool running afterwards has to carry that news.
+    ///
+    /// The prompt itself is reported twice over: `PreToolUse` says a tool is in
+    /// flight, which is enough for the tab to blink as soon as the screen goes
+    /// still, and the `Notification` confirms it six seconds later.
     #[test]
     fn an_answered_permission_prompt_stops_asking() {
-        assert_eq!(signal_of("PreToolUse", ""), Some(Signal::Busy));
+        assert_eq!(signal_of("PreToolUse", ""), Some(Signal::Acting));
         assert_eq!(signal_of("Notification", ""), Some(Signal::NeedsInput));
         assert_eq!(
             signal_of("PostToolUse", ""),

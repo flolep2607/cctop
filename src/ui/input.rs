@@ -192,6 +192,10 @@ impl App {
     /// reaches the agent.
     fn on_key_workspace(&mut self, key: KeyEvent) -> bool {
         match key.code {
+            // Shifted, the arrows carry the tab instead of moving between them
+            // — the keyboard's half of dragging one along the bar.
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_workspace(-1),
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_workspace(1),
             KeyCode::Left => self.cycle_workspace(-1),
             KeyCode::Right => self.cycle_workspace(1),
             // The dashboard is tab 1, matching where it sits in the tab bar.
@@ -780,6 +784,49 @@ impl App {
         }
     }
 
+    /// The workspace bar's mouse: picking a tab, the new-tab button, and
+    /// dragging a tab to a different place in the bar. Returns whether the
+    /// event belonged to the bar, in which case nothing downstream sees it.
+    ///
+    /// Consuming the whole drag, not just the part over the bar, is what keeps a
+    /// rearrangement out of the agents: a press on a tab followed by a pointer
+    /// that wanders down into a pane would otherwise arrive there as a click and
+    /// a release the agent never saw the press for.
+    fn on_mouse_workspace(&mut self, ev: event::MouseEvent, layout: &render::Layout) -> bool {
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
+                    self.show_tab(tab);
+                    // The dashboard is tab zero wherever the bar is drawn and
+                    // stays there, so only a real tab is picked up.
+                    self.drag_tab = (tab > 0).then_some(tab);
+                    return true;
+                }
+                if layout.workspace_new_at(ev.column, ev.row) {
+                    self.launch_prompt(LaunchInto::Tab);
+                    return true;
+                }
+                false
+            }
+            // Reordering as the pointer moves rather than on the release: the
+            // bar is the only feedback there is for where the tab will land, and
+            // one that only redraws at the end is a drag you have to guess at.
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(from) = self.drag_tab else {
+                    return false;
+                };
+                if let Some(to) = layout.workspace_at(ev.column, ev.row).filter(|to| *to > 0) {
+                    self.move_tab(from, to);
+                    self.drag_tab = Some(to);
+                    self.needs_redraw = true;
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.drag_tab.take().is_some(),
+            _ => false,
+        }
+    }
+
     pub(super) fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
         // Anything the mouse actually does changes the screen, and unlike
         // `on_key` there is nothing downstream to rely on for the frame:
@@ -848,26 +895,17 @@ impl App {
             return;
         }
 
-        // Inside a tab the mouse has two targets: the tab bar, and the agents
-        // themselves. Clicks are the bar's — mouse capture also reports
-        // movement, and switching tabs on a hover means the pointer resting
-        // anywhere near the bar drags you out of the agent you are typing into.
-        if self.tab > 0 {
-            // cctop's own chrome first. The workspace bar is drawn above the
-            // panes and is the one thing in a tab that is not the agent's.
-            if ev.kind == MouseEventKind::Down(MouseButton::Left)
-                && let Some(tab) = layout.workspace_at(ev.column, ev.row)
-            {
-                self.show_tab(tab);
-                return;
-            }
-            if ev.kind == MouseEventKind::Down(MouseButton::Left)
-                && layout.workspace_new_at(ev.column, ev.row)
-            {
-                self.launch_prompt(LaunchInto::Tab);
-                return;
-            }
+        // The workspace bar owns its own row wherever it is drawn — over the
+        // dashboard as much as over a set of panes — so it is asked before
+        // either. Clicks and drags only: mouse capture also reports movement,
+        // and switching tabs on a hover means the pointer resting anywhere near
+        // the bar drags you out of the agent you are typing into.
+        if self.on_mouse_workspace(ev, layout) {
+            return;
+        }
 
+        // Inside a tab the rest of the mouse is the agents'.
+        if self.tab > 0 {
             // Inside a pane the mouse is the agent's. Claude Code, opencode and
             // pi all ask for mouse reporting and act on it — placing the cursor
             // in the composer, picking a file, choosing from the agents list —
@@ -950,11 +988,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
-                    self.show_tab(tab);
-                } else if layout.workspace_new_at(ev.column, ev.row) {
-                    self.launch_prompt(LaunchInto::Tab);
-                } else if self.bottom_tab == 3
+                if self.bottom_tab == 3
                     && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
                 {
                     self.toggle_tool_expansion(offset);
