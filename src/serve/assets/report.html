@@ -503,6 +503,53 @@ function files(r) {
   return s;
 }
 
+// Which results filled the window. The breakdown says tool output is most of
+// it; this says which calls put it there.
+//
+// The figure is the window's growth after the call, which the transcript can
+// give and a result size it cannot: nothing records how big a tool result was,
+// but every request records the prompt it was billed for, and that prompt is the
+// conversation so far. The difference is the result.
+function heaviest(r) {
+  const calls = r.activity.heaviest || [];
+  if (!calls.length) return null;
+  const shared = calls.some((c) => c.shared > 1);
+  const s = block(
+    "What filled the window",
+    "How much the context window grew after each call — which is what its result " +
+    "added. Largest first. Measured from the prompt each request was billed for, " +
+    "not from the result itself, which no transcript records" +
+    (shared
+      ? ": a turn that issued several calls grew it by all of their results together, " +
+        "and those are marked."
+      : ". Anything else that arrived in the same gap — a message you typed while it " +
+        "worked — is counted here too.")
+  );
+  const card = el("div", "card pad scroll-x");
+  const table = el("table");
+  const head = el("tr");
+  head.appendChild(el("th", null, "Tool"));
+  head.appendChild(el("th", null, "Call"));
+  head.appendChild(el("th", "num", "Grew by"));
+  table.appendChild(head);
+  for (const c of calls) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", c.tool));
+    const what = el("td");
+    what.appendChild(el("span", "mono", c.detail));
+    // The one honest caveat per row: this figure covers every result that
+    // turn's calls returned, and the page must not imply otherwise.
+    if (c.shared > 1) what.appendChild(el("span", "pill", "with " + (c.shared - 1) + " more"));
+    if (c.origin) what.appendChild(el("span", "pill", c.origin));
+    tr.appendChild(what);
+    tr.appendChild(el("td", "num", tokens(c.window_growth)));
+    table.appendChild(tr);
+  }
+  card.appendChild(table);
+  s.appendChild(card);
+  return s;
+}
+
 // What the session actually changed. A list of file names says it touched
 // something; this says what it did to it.
 function diffs(r) {
@@ -568,6 +615,7 @@ function callLog(r) {
   hrow.appendChild(el("th", null, "Tool"));
   hrow.appendChild(el("th", null, "Call"));
   hrow.appendChild(el("th", "num", "Took"));
+  hrow.appendChild(el("th", "num", "Grew"));
   hrow.appendChild(el("th", null, "When"));
   head.appendChild(hrow);
   table.appendChild(head);
@@ -584,6 +632,12 @@ function callLog(r) {
     if (c.origin) what.appendChild(el("span", "pill", c.origin));
     tr.appendChild(what);
     tr.appendChild(el("td", "num", c.duration_ms == null ? "—" : secs(c.duration_ms)));
+    // How much this call's result added to the window. A dash where it could not
+    // be measured — the last call of the session, or a window that shrank around
+    // a compaction — because a zero would read as a result that was empty.
+    const grew = el("td", "num", c.window_growth == null ? "—" : "+" + tokens(c.window_growth));
+    if (c.shared > 1) grew.title = "shared with " + (c.shared - 1) + " more calls in the same turn";
+    tr.appendChild(grew);
     tr.appendChild(el("td", "when", (c.ts || "").replace("T", " ").replace(/\..*$/, "")));
     body.appendChild(tr);
   }
@@ -635,7 +689,7 @@ fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
     // came for. The diff sits high because "what did this session do" is the
     // question a report is most often opened to answer.
     const sections = [
-      failures, diffs, breakdown, windowChart, spend,
+      failures, diffs, breakdown, windowChart, heaviest, spend,
       slowest, toolTable, callLog, files, subagents,
     ];
     for (const part of sections) {

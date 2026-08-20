@@ -466,6 +466,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             shared: 0,
+            window_growth: None,
             delta: None,
             failed: false,
             origin: None,

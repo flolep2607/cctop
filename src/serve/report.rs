@@ -72,6 +72,9 @@ const HUMAN_WAIT_TOOLS: &[&str] = &[
     "exit_plan_mode",
 ];
 
+/// How many calls the window-growth ranking names.
+const MAX_HEAVIEST: usize = 12;
+
 /// How many written files are listed.
 const MAX_FILES: usize = 40;
 
@@ -209,6 +212,13 @@ pub struct ReportActivity {
     pub tools: Vec<ReportTool>,
     pub failures: Vec<ReportFailure>,
     pub slowest: Vec<ReportCall>,
+    /// The calls whose results grew the context window most, largest first.
+    ///
+    /// The question the context breakdown raises and cannot answer: it says
+    /// tool output is most of the window, and this says which calls put it
+    /// there. Empty for every harness but Claude Code, which is the only one
+    /// that records a per-request prompt size to difference.
+    pub heaviest: Vec<ReportCall>,
     /// Every call the extraction still holds, newest first.
     ///
     /// Not every call the session made: the transcript's tool history is
@@ -243,6 +253,14 @@ pub struct ReportCall {
     pub ts: String,
     pub duration_ms: Option<i64>,
     pub failed: bool,
+    /// How much the window grew after this call's turn — in all but the awkward
+    /// cases, the size of its result. See
+    /// [`ToolDetail::window_growth`](crate::session::ToolDetail::window_growth).
+    pub window_growth: Option<u64>,
+    /// How many calls that turn issued, when it issued more than one. The growth
+    /// above belongs to all of them together, and a page that showed the figure
+    /// without this would be claiming one call's result was the whole of it.
+    pub shared: u8,
     /// The subagent that issued the call, or `None` for the session itself.
     ///
     /// A subagent's tool activity is interleaved into the same log, so without
@@ -330,6 +348,7 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
             tools: tools(data),
             failures: failures(data),
             slowest: slowest(data),
+            heaviest: heaviest(data),
             calls: calls(data),
         },
         files: util::abbreviate_paths(&data.recent_writes)
@@ -402,6 +421,8 @@ fn failures(data: &SessionData) -> Vec<ReportFailure> {
                     ts: call.ts.clone(),
                     duration_ms: call.dur_ms,
                     failed: true,
+                    window_growth: call.window_growth,
+                    shared: call.shared,
                     origin: call.origin.clone(),
                 });
         }
@@ -434,6 +455,21 @@ fn failures(data: &SessionData) -> Vec<ReportFailure> {
     out
 }
 
+/// The calls whose results filled the most window, largest first.
+///
+/// Built off [`calls`] rather than the details directly, so there is one
+/// definition of what a call looks like in this document and the ranking cannot
+/// drift from the log it is a view of.
+fn heaviest(data: &SessionData) -> Vec<ReportCall> {
+    let mut out: Vec<ReportCall> = calls(data)
+        .into_iter()
+        .filter(|c| c.window_growth.is_some_and(|g| g > 0))
+        .collect();
+    out.sort_by_key(|c| std::cmp::Reverse(c.window_growth));
+    out.truncate(MAX_HEAVIEST);
+    out
+}
+
 /// Every recorded call, newest first.
 ///
 /// Newest first because a report is usually opened about something that just
@@ -450,6 +486,8 @@ fn calls(data: &SessionData) -> Vec<ReportCall> {
                 ts: call.ts.clone(),
                 duration_ms: call.dur_ms,
                 failed: call.failed,
+                window_growth: call.window_growth,
+                shared: call.shared,
                 origin: call.origin.clone(),
             })
         })
@@ -566,6 +604,8 @@ fn slowest(data: &SessionData) -> Vec<ReportCall> {
                     ts: call.ts.clone(),
                     duration_ms: Some(ms),
                     failed: call.failed,
+                    window_growth: call.window_growth,
+                    shared: call.shared,
                     origin: call.origin.clone(),
                 })
             })
@@ -811,6 +851,37 @@ mod tests {
         let log = calls(&data);
         assert_eq!(log[0].origin, None, "the session's own call names no agent");
         assert_eq!(log[1].origin.as_deref(), Some("Explore"));
+    }
+
+    /// The ranking the per-request token totals cannot produce: those climb all
+    /// session long, so ranking on them would put the last calls first whatever
+    /// they did.
+    #[test]
+    fn the_window_ranking_is_by_what_a_result_added_not_by_when_it_ran() {
+        let call = |detail: &str, ts: &str, held: u64, grew: Option<u64>| ToolDetail {
+            d: detail.to_string(),
+            ts: ts.to_string(),
+            tokens_in: held,
+            window_growth: grew,
+            ..Default::default()
+        };
+        let data = data_with(HashMap::from([(
+            "Read".to_string(),
+            vec![
+                // Early call, small context behind it, enormous result.
+                call("huge.rs", "2026-08-19T10:00:00Z", 12_000, Some(40_000)),
+                // Late call, the whole session behind it, and it read one line.
+                call("tiny.rs", "2026-08-19T11:00:00Z", 190_000, Some(60)),
+                // Last call of the session: nothing followed it to weigh it.
+                call("unweighed.rs", "2026-08-19T11:01:00Z", 191_000, None),
+            ],
+        )]));
+
+        let ranked = heaviest(&data);
+        assert_eq!(ranked.len(), 2, "a call with no measurement is not ranked");
+        assert_eq!(ranked[0].detail, "huge.rs");
+        assert_eq!(ranked[0].window_growth, Some(40_000));
+        assert_eq!(ranked[1].detail, "tiny.rs");
     }
 
     /// A question the user took a minute to answer is not the session being
