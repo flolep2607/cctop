@@ -224,6 +224,12 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
         .args(["set-option", "-t", name, "history-limit", HISTORY_LINES])
         .args([";", "set-option", "-t", name, "mouse", "on"])
         .args([";", "set-option", "-t", name, "status", "off"])
+        // Several cctops may hold a client on this session at once — that is
+        // what sharing tabs means. Left at tmux's default the window is sized to
+        // the *smallest* of them, so one cctop in a narrow terminal cramps the
+        // agent for everybody. `latest` sizes it to whichever client is being
+        // used, which is the one whose window is worth fitting.
+        .args([";", "set-option", "-t", name, "window-size", "latest"])
         .output();
 
     // Current, not background: this is the window the client is about to attach
@@ -379,6 +385,22 @@ pub fn quiet(name: &str) {
         .output();
 }
 
+/// Record on the session itself what this tab is called.
+///
+/// The session is the only thing every cctop can see, so it is the only place a
+/// tab's name can live if the tabs are to look the same in all of them. Without
+/// it a cctop that did not start the agent has nothing to go on but the session
+/// name — `cctop-claude-32cca860` for a launch, a sanitised uuid for a resume —
+/// and the same agent would be called two different things on two screens.
+///
+/// Best effort, like every other option set here: a tab named after its session
+/// is worse than one named properly, and better than a launch that failed.
+pub fn set_label(name: &str, label: &str) {
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", name, "@cctop_label", label])
+        .output();
+}
+
 /// Let the wheel scroll one of cctop's own tmux sessions.
 ///
 /// Without this a tmux-backed pane cannot be scrolled at all. tmux is on the
@@ -428,6 +450,20 @@ pub struct Running {
     /// and reattaching to it from here would leave the two clients arguing over
     /// one window's size.
     pub attached: bool,
+    /// When the session last produced output, in unix seconds.
+    ///
+    /// tmux keeps this whether or not anyone is attached, which is what lets a
+    /// tab nobody is watching still say its agent has gone quiet — the same
+    /// reading a pane takes off its own screen, from the one place that has it
+    /// when there is no pane.
+    pub activity: Option<u64>,
+    /// What the cctop that started this agent called its tab, when it said.
+    ///
+    /// Written onto the session by [`set_label`] so that every other cctop names
+    /// the tab the same thing. Nothing else can supply it: a resumed session is
+    /// labelled after the conversation it is going back to, which the tmux name
+    /// — a sanitised provider and uuid — cannot be read back out of.
+    pub label: Option<String>,
 }
 
 /// Every cctop-owned tmux session currently alive, newest first.
@@ -448,7 +484,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{session_activity}\t#{@cctop_label}",
         ])
         .output()
     else {
@@ -487,6 +523,13 @@ pub fn running() -> Vec<Running> {
             .next()
             .and_then(|c| c.trim().parse::<u64>().ok())
             .unwrap_or(0);
+        let activity = parts.next().and_then(|a| a.trim().parse::<u64>().ok());
+        // Unset reads back as the empty string, not as a missing field.
+        let label = parts
+            .next()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
         found.push((
             created,
             Running {
@@ -494,6 +537,8 @@ pub fn running() -> Vec<Running> {
                 pid,
                 cwd,
                 attached,
+                activity,
+                label,
             },
         ));
     }

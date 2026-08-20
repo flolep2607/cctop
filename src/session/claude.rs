@@ -457,9 +457,10 @@ struct Extractor {
     sub_stats: HashMap<PathBuf, SubStats>,
     agent_uses: Vec<(String, AgentUse)>,
     agent_results: HashSet<String>,
-    /// tool_use id -> the request key of the turn that issued it, and how many
-    /// calls that turn issued. Tokens are billed per request, not per call.
-    tool_turn: HashMap<String, (String, u8)>,
+    /// tool_use id -> the request key of the turn that issued it. Tokens are
+    /// billed per request, not per call, so how many calls shared a request is
+    /// counted from this map once the file is read — see `attach_call_details`.
+    tool_turn: HashMap<String, String>,
     /// tool_use id -> timestamp its result arrived.
     tool_result_ts: HashMap<String, String>,
     /// tool_use ids whose result was flagged `is_error`.
@@ -468,6 +469,10 @@ struct Extractor {
     tool_delta: HashMap<String, super::Delta>,
     /// Request key -> final (input, output) tokens, filled when the file flushes.
     req_usage: HashMap<String, (u64, u64)>,
+    /// Request key -> how much the window grew after that request, which is what
+    /// its tool results added. See
+    /// [`ToolDetail::window_growth`](super::ToolDetail::window_growth).
+    req_growth: HashMap<String, u64>,
     /// The segment the window is being measured over, restarted at each
     /// compaction.
     ctx: CtxSegment,
@@ -809,18 +814,6 @@ impl Extractor {
             .and_then(Value::as_str)
             .or_else(|| message.get("id").and_then(Value::as_str))
             .map(str::to_string);
-        let tool_calls_in_turn = message
-            .get("content")
-            .and_then(Value::as_array)
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-                    .count()
-                    .min(u8::MAX as usize) as u8
-            })
-            .unwrap_or(0);
-
         // Tool scanning runs independently of the token dedup below: a streaming
         // partial and its final entry share a requestId, but each tool_use block
         // carries its own id, so global id dedup is what prevents double-counting.
@@ -877,8 +870,7 @@ impl Extractor {
                 if let Some(id) = block_id
                     && let Some(key) = &turn_key
                 {
-                    self.tool_turn
-                        .insert(id.to_string(), (key.clone(), tool_calls_in_turn));
+                    self.tool_turn.insert(id.to_string(), key.clone());
                 }
                 self.record_tool(name, &input, ts, file, is_main, block_id);
             }
@@ -1054,6 +1046,32 @@ pub fn extract(transcript: &Path) -> SessionData {
                 .cmp(&util::parse_ts(&b.ts))
                 .then_with(|| ka.cmp(kb))
         });
+        // How much the window grew after each request, before the snapshots are
+        // consumed below — it is a property of a request *and its successor*, so
+        // it cannot be worked out one at a time.
+        //
+        // Against the next request in the same lane, never simply the next one:
+        // a subagent's turns are interleaved into this same file and carry their
+        // own conversation, so differencing across the boundary would subtract
+        // one context from another and call the result a tool result.
+        for lane in [true, false] {
+            let same: Vec<&(String, Snapshot)> = snapshots
+                .iter()
+                .filter(|(_, s)| s.main_ctx == lane)
+                .collect();
+            for pair in same.windows(2) {
+                let (key, this) = pair[0];
+                let next = &pair[1].1;
+                let held = |s: &Snapshot| s.input + s.cache_read + s.cw5m + s.cw1h;
+                // Signed on purpose: a compaction makes this deeply negative and
+                // cache accounting makes it slightly so, and neither is a size.
+                let grew = held(next) as i64 - held(this) as i64 - this.output as i64;
+                if grew > 0 {
+                    ext.req_growth.insert(key.clone(), grew as u64);
+                }
+            }
+        }
+
         for (key, s) in snapshots {
             ext.req_usage
                 .insert(key, (s.input + s.cache_read + s.cw5m + s.cw1h, s.output));
@@ -1186,6 +1204,32 @@ fn attach_call_details(ext: &mut Extractor) {
     // which are capped: a session busy enough to overflow that cap is exactly
     // the one whose error rate is worth reading.
     ext.metrics.tool_errors = ext.tool_failed.len() as u64;
+
+    // How many calls each request issued, counted across the whole file rather
+    // than from the record the call arrived in.
+    //
+    // Parallel calls are not one record with several `tool_use` blocks, as the
+    // API shape suggests: Claude Code writes one assistant record per block,
+    // all of them carrying the same `requestId` and message id. Counting blocks
+    // within a record therefore says "1" for every one of them, and anything
+    // that divides a request's tokens by that count — or reports the request's
+    // window growth as this one call's result — is then quietly wrong for every
+    // fan-out in the session.
+    let mut per_request: HashMap<&str, u8> = HashMap::new();
+    for key in ext.tool_turn.values() {
+        let n = per_request.entry(key.as_str()).or_insert(0);
+        *n = n.saturating_add(1);
+    }
+    let shared_by: HashMap<String, u8> = ext
+        .tool_turn
+        .iter()
+        .map(|(id, key)| {
+            (
+                id.clone(),
+                per_request.get(key.as_str()).copied().unwrap_or(1),
+            )
+        })
+        .collect();
     for details in ext.metrics.tool_details.values_mut() {
         for d in details.iter_mut() {
             let Some(id) = d.id.clone() else { continue };
@@ -1199,12 +1243,13 @@ fn attach_call_details(ext: &mut Extractor) {
                 d.delta = Some(delta.clone());
             }
             d.failed = ext.tool_failed.contains(&id);
-            if let Some((key, shared)) = ext.tool_turn.get(&id) {
-                d.shared = *shared;
+            if let Some(key) = ext.tool_turn.get(&id) {
+                d.shared = shared_by.get(&id).copied().unwrap_or(1);
                 if let Some((tin, tout)) = ext.req_usage.get(key) {
                     d.tokens_in = *tin;
                     d.tokens_out = *tout;
                 }
+                d.window_growth = ext.req_growth.get(key).copied();
             }
         }
     }
@@ -2002,6 +2047,105 @@ mod tests {
         // of failed ids rather than from the capped details above.
         assert_eq!(data.metrics.tool_errors, 1);
         assert_eq!(data.metrics.tool_count, 2);
+    }
+
+    /// Parallel calls arrive as one assistant record each, all carrying the same
+    /// `requestId` — not as one record holding several `tool_use` blocks. Count
+    /// blocks per record and every fan-out claims to be a lone call, which makes
+    /// the turn's tokens and its window growth read as one call's own.
+    #[test]
+    fn calls_issued_in_parallel_know_they_shared_a_request() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-claude-shared-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_1","message":{"id":"m1","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_a","name":"Read","input":{"file_path":"/a.rs"}}],"usage":{"input_tokens":10000,"output_tokens":100}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_1","message":{"id":"m1","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"/b.rs"}}],"usage":{"input_tokens":10000,"output_tokens":100}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:02.000Z","requestId":"req_2","message":{"id":"m2","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_c","name":"Read","input":{"file_path":"/c.rs"}}],"usage":{"input_tokens":15100,"output_tokens":50}}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let calls = &data.metrics.tool_details["Read"];
+        let of = |needle: &str| {
+            calls
+                .iter()
+                .find(|d| d.d.contains(needle))
+                .expect("the call")
+        };
+        assert_eq!(of("a.rs").shared, 2, "two calls came out of req_1");
+        assert_eq!(of("b.rs").shared, 2);
+        assert_eq!(of("c.rs").shared, 1);
+        // 15,100 − 10,000 − 100 covers both results of req_1 together, which is
+        // why each of them says it is sharing.
+        assert_eq!(of("a.rs").window_growth, Some(5_000));
+        assert_eq!(of("b.rs").window_growth, Some(5_000));
+    }
+
+    /// The transcript never records how big a tool result was, so the only way
+    /// to the figure is the window: the prompt billed for the next request is
+    /// this conversation plus this result. A per-request total cannot answer it —
+    /// that climbs all session long and would rank calls by how late they were.
+    #[test]
+    fn a_calls_result_is_measured_by_how_much_the_window_grew() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-claude-growth-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        // Three turns. The first reads a big file — the window jumps by 6,000
+        // over the 100 the assistant itself wrote. The second reads a small one.
+        // The third has no successor to be measured against.
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_1","message":{"id":"m1","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_big","name":"Read","input":{"file_path":"/big.rs"}}],"usage":{"input_tokens":10000,"output_tokens":100}}}"#,
+                "\n",
+                r#"{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_big","content":"…"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:02.000Z","requestId":"req_2","message":{"id":"m2","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_small","name":"Read","input":{"file_path":"/small.rs"}}],"usage":{"input_tokens":16100,"output_tokens":50}}}"#,
+                "\n",
+                r#"{"type":"user","timestamp":"2026-08-05T10:00:03.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_small","content":"…"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:04.000Z","requestId":"req_3","message":{"id":"m3","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_last","name":"Read","input":{"file_path":"/last.rs"}}],"usage":{"input_tokens":16300,"output_tokens":20}}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let call = |needle: &str| {
+            data.metrics.tool_details["Read"]
+                .iter()
+                .find(|d| d.d.contains(needle))
+                .expect("the call")
+                .clone()
+        };
+        // 16,100 − 10,000 − 100: the next prompt, less this conversation and
+        // less what the assistant wrote to ask for the file.
+        assert_eq!(call("big").window_growth, Some(6_000));
+        assert_eq!(call("small").window_growth, Some(150));
+        // Nothing followed the last call, so its result was never weighed. A
+        // zero here would read as a call that returned nothing.
+        assert_eq!(call("last").window_growth, None);
     }
 
     /// Every route to the large window has to name the same size. Two sessions on

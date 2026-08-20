@@ -720,6 +720,16 @@ pub struct App {
     /// `tabs`. Zero-length `tabs` is the ordinary case: the bar still shows the
     /// dashboard and its new-tab button, so the feature is findable.
     pub tab: usize,
+    /// When the tab bar was last reconciled against the tmux sessions on this
+    /// machine. See [`App::sync_shared_tabs`].
+    shared_at: Option<Instant>,
+    /// The tab being dragged along the bar, indexed as the bar is: `1..=len`,
+    /// and never `0` because the dashboard does not move.
+    ///
+    /// Set on the press and cleared on the release, which is also what makes the
+    /// release the bar's rather than the agent's: a drag that started on the bar
+    /// and ended over a pane must not be delivered as a click inside it.
+    pub(super) drag_tab: Option<usize>,
     /// What each session's own hooks last said about it, keyed by session id.
     ///
     /// Only sessions whose agent has cctop's hooks installed appear here, so an
@@ -914,6 +924,8 @@ impl App {
             tx,
             tabs: Vec::new(),
             tab: 0,
+            shared_at: None,
+            drag_tab: None,
             hooked: HashMap::new(),
             hooks: None,
             listener: None,
@@ -1956,6 +1968,14 @@ const PAGE: isize = 10;
 /// fast enough to catch the eye.
 const BLINK_MS: u128 = 600;
 
+/// How often the tab bar is reconciled against the tmux sessions on this
+/// machine, so a tab opened in one cctop shows up in the others.
+///
+/// It costs a `tmux list-panes`, so it cannot ride the draw loop. Two seconds is
+/// short enough that a tab opened next door is there before you have switched
+/// windows to look for it, and long enough that the subprocess is nothing.
+const SHARE_EVERY: Duration = Duration::from_secs(2);
+
 // ---------------------------------------------------------------------------
 // Workspace tabs
 // ---------------------------------------------------------------------------
@@ -2176,6 +2196,11 @@ impl App {
     /// Only an existing report is overwritten. Inserting one for an agent
     /// without hooks would shadow the transcript, which is that agent's only
     /// source of state and the thing that would otherwise correct this.
+    ///
+    /// A tool call in flight is overwritten too, even though it is a working
+    /// state: [`Signal::Acting`](crate::hook::Signal::Acting) plus a still
+    /// screen is how a held permission prompt is recognised, and the keystroke
+    /// that answered it is the only sign the prompt is gone.
     fn mark_answered(&mut self, pid: u32) {
         let answered: Vec<String> = self
             .sessions
@@ -2185,7 +2210,7 @@ impl App {
             .collect();
         for id in answered {
             if let Some(reported) = self.hooked.get_mut(&id)
-                && !reported.signal.is_working()
+                && reported.signal.awaits_you()
             {
                 reported.signal = crate::hook::Signal::Busy;
             }
@@ -2204,15 +2229,85 @@ impl App {
 
     /// Show `tab`, clamped to what exists.
     pub fn show_tab(&mut self, tab: usize) {
-        self.tab = tab.min(self.tabs.len());
-        self.needs_redraw = true;
+        self.go_to_tab(tab.min(self.tabs.len()));
     }
 
     /// Move `delta` tabs along, wrapping through the dashboard.
+    /// Move the tab at `from` to `to`, both indexed the way the bar is: `0` is
+    /// the dashboard, which neither moves nor is displaced.
+    ///
+    /// The view follows the tab it was on rather than the position it was at —
+    /// dragging a tab must not move you to a different agent, and neither must
+    /// dragging one past the tab you are watching.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        let (Some(a), Some(b)) = (from.checked_sub(1), to.checked_sub(1)) else {
+            return;
+        };
+        if a == b || a >= self.tabs.len() || b >= self.tabs.len() {
+            return;
+        }
+        let moved = self.tabs.remove(a);
+        self.tabs.insert(b, moved);
+        self.tab = match self.tab {
+            here if here == from => to,
+            // Everything the tab was lifted out of shifts one place towards the
+            // gap it left.
+            here if a < b && here > from && here <= to => here - 1,
+            here if b < a && here >= to && here < from => here + 1,
+            here => here,
+        };
+        self.needs_redraw = true;
+    }
+
+    /// Move the tab on screen one place along the bar, for the keyboard.
+    ///
+    /// Clamped rather than wrapped, unlike [`App::cycle_workspace`]: wrapping is
+    /// natural when you are stepping *through* tabs and disorienting when you
+    /// are rearranging them, where a tab at the end jumping to the front reads
+    /// as having lost it.
+    pub fn move_workspace(&mut self, delta: isize) {
+        let Some(from) = (self.tab > 0).then_some(self.tab) else {
+            return;
+        };
+        let to = (from as isize + delta).clamp(1, self.tabs.len() as isize) as usize;
+        self.move_tab(from, to);
+    }
+
     pub fn cycle_workspace(&mut self, delta: isize) {
         let count = self.tabs.len() as isize + 1;
-        self.tab = (self.tab as isize + delta).rem_euclid(count) as usize;
+        self.go_to_tab((self.tab as isize + delta).rem_euclid(count) as usize);
+    }
+
+    /// Move to `want`, taking the tmux client with you.
+    ///
+    /// This is what makes one set of tabs work across several cctops. Every tab
+    /// in the bar is a tmux session any of them can attach to, but only the one
+    /// you are looking at is worth holding a client on — several clients on one
+    /// window and tmux has to pick a size that suits none of them. So the client
+    /// follows the view: the tab arrived at takes one, the tab left behind gives
+    /// its up, and the agent in between never notices either.
+    ///
+    /// The order matters. Attaching first means a session that has ended since
+    /// the last sync leaves you where you were, reading why, rather than on a
+    /// blank tab with the one you could see now detached as well.
+    pub fn go_to_tab(&mut self, want: usize) {
         self.needs_redraw = true;
+        if want == self.tab {
+            return;
+        }
+        if let Some(tab) = want.checked_sub(1).and_then(|i| self.tabs.get_mut(i))
+            && tab.detached()
+        {
+            let title = tab.title();
+            if let Err(error) = tab.attach() {
+                self.set_status(format!("Could not open {title}: {error}"));
+                return;
+            }
+        }
+        if let Some(tab) = self.tab.checked_sub(1).and_then(|i| self.tabs.get_mut(i)) {
+            tab.detach();
+        }
+        self.tab = want;
     }
 
     /// Open the launcher, remembering where the pick should go and which
@@ -2369,12 +2464,16 @@ impl App {
         // the thing `ResumeConfirm` exists to warn about and which would happen
         // here with no warning at all, the session having already stopped.
         if let Some(at) = self.tabs.iter().position(|tab| {
-            tab.panes
-                .iter()
-                .any(|p| p.tmux.as_deref() == Some(&tmux) || p.resumed.as_deref() == Some(&tmux))
+            // `sessions`, not just the panes: the tab may be one this cctop has
+            // no client on — another cctop's, or one it detached from itself —
+            // and resuming into a second agent is exactly what this guards.
+            tab.sessions().any(|name| name == tmux)
+                || tab
+                    .panes
+                    .iter()
+                    .any(|p| p.resumed.as_deref() == Some(&tmux))
         }) {
-            self.tab = at + 1;
-            self.needs_redraw = true;
+            self.go_to_tab(at + 1);
             self.set_status(format!("Already open: {what}"));
             return;
         }
@@ -2462,7 +2561,7 @@ impl App {
             Ok(pane) => {
                 self.tmux_installing = Some(pane.pid);
                 self.tabs.push(tabs::Tab::new(pane));
-                self.tab = self.tabs.len();
+                self.go_to_tab(self.tabs.len());
                 self.set_status(format!("Installing tmux with {}", offer.manager));
             }
             Err(error) => {
@@ -2544,19 +2643,104 @@ impl App {
             false => "",
         };
         self.tabs.push(tabs::Tab::new(pane));
-        self.tab = self.tabs.len();
+        self.go_to_tab(self.tabs.len());
         let where_ = cwd
             .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
             .unwrap_or_default();
         self.set_status(format!("{verb} {what}{where_}{kept}"));
     }
 
+    /// Reconcile the tab bar against every cctop-owned tmux session on this
+    /// machine, so all the cctops running here show one set of tabs.
+    ///
+    /// There is no protocol here and no state file, because tmux is already the
+    /// shared registry: a tab *is* one of its sessions, the sessions outlive the
+    /// cctop that started them, and any cctop can list them. Open a tab in one
+    /// window and it appears in the others within [`SHARE_EVERY`]; end its agent
+    /// and it leaves them all, for the same reason.
+    ///
+    /// Only detached tabs are retired here. A tab this cctop is holding a client
+    /// on has the reap to notice its agent leaving, which it does the moment the
+    /// pty closes rather than at the next sweep.
+    ///
+    /// New sessions are appended oldest-first, which is the order a cctop that
+    /// watched them start already has them in. That is what keeps the bars in
+    /// agreement — and with them what Alt+3 means — rather than a cctop opened
+    /// later listing the same tabs backwards.
+    pub(super) fn sync_shared_tabs(&mut self) {
+        if self.shared_at.is_some_and(|at| at.elapsed() < SHARE_EVERY) {
+            return;
+        }
+        self.shared_at = Some(Instant::now());
+        let running = crate::tmux::running();
+
+        let mut index = 0;
+        let mut retired = false;
+        self.tabs.retain(|tab| {
+            index += 1;
+            let gone = tab.shared.as_ref().is_some_and(|s| {
+                // Asked twice, because the listing failing wholesale and every
+                // session having ended look identical from here — an empty
+                // answer would otherwise empty the tab bar every time the tmux
+                // server was restarted. The second question only gets asked
+                // about a tab already on its way out, so it costs nothing per
+                // sweep.
+                !running.iter().any(|agent| agent.name == s.name) && !crate::tmux::exists(&s.name)
+            });
+            if !gone {
+                return true;
+            }
+            // The tabs after this one shift down by one, so a view sitting on any
+            // of them has to follow — the same fixup [`drop_empty_tabs`] does,
+            // and for the same reason.
+            //
+            // [`drop_empty_tabs`]: Self::drop_empty_tabs
+            if self.tab >= index {
+                self.tab -= 1;
+            }
+            retired = true;
+            false
+        });
+        self.tab = self.tab.min(self.tabs.len());
+
+        // What tmux now says about the tabs already here. Activity above all:
+        // it is how a tab nobody is attached to knows its agent has stopped, and
+        // a reading taken once when the tab appeared would have it idle forever.
+        for tab in &mut self.tabs {
+            let Some(shared) = tab.shared.as_mut() else {
+                continue;
+            };
+            let Some(agent) = running.iter().find(|a| a.name == shared.name) else {
+                continue;
+            };
+            shared.activity = agent.activity;
+            // Both can arrive late: the pid in the moment before tmux has
+            // spawned the command, the label when the cctop that owns the tab
+            // has not written it yet.
+            shared.pid = agent.pid.or(shared.pid);
+            if let Some(label) = &agent.label {
+                shared.label = label.clone();
+            }
+        }
+
+        let mine = self.open_tmux();
+        let mut arrived = false;
+        for agent in running.iter().rev() {
+            if mine.iter().any(|name| name == &agent.name) {
+                continue;
+            }
+            self.tabs.push(tabs::Tab::shared(agent));
+            arrived = true;
+        }
+        self.needs_redraw |= retired || arrived;
+    }
+
     /// The tmux sessions this cctop already has a pane onto.
     pub fn open_tmux(&self) -> Vec<String> {
         self.tabs
             .iter()
-            .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| pane.tmux.clone())
+            .flat_map(tabs::Tab::sessions)
+            .map(str::to_string)
             .collect()
     }
 
@@ -2773,7 +2957,7 @@ impl App {
             }
             LaunchInto::Tab => {
                 self.tabs.push(tabs::Tab::new(pane));
-                self.tab = self.tabs.len();
+                self.go_to_tab(self.tabs.len());
             }
         }
         // Reattaching is not starting, and it does not land in the launcher's
@@ -2813,6 +2997,21 @@ impl App {
         let Some(tab) = self.active_tab() else {
             return;
         };
+        // A tab standing for a session no client of ours is on has no pane here
+        // to close — but the agent is still cctop's to end, and this tab is the
+        // only handle on screen for it. So the key means what it means anywhere
+        // else, and the tab leaves every cctop rather than just this one.
+        if tab.detached()
+            && let Some(shared) = tab.shared.take()
+        {
+            let stopped = crate::tmux::kill(&shared.name);
+            self.drop_empty_tabs();
+            self.set_status(match stopped {
+                Err(error) => format!("Could not stop {}: {error}", shared.label),
+                Ok(()) => format!("Stopped {}", shared.label),
+            });
+            return;
+        }
         if tab.focus >= tab.panes.len() {
             return;
         }
@@ -2846,7 +3045,8 @@ impl App {
         let mut index = 0;
         self.tabs.retain(|tab| {
             index += 1;
-            if !tab.panes.is_empty() {
+            // A detached tab holds no pane on purpose; only the sync retires it.
+            if !tab.panes.is_empty() || tab.shared.is_some() {
                 return true;
             }
             // The tabs after this one shift down by one, so a view sitting on
@@ -2894,10 +3094,9 @@ impl App {
             if let Some(at) = self
                 .tabs
                 .iter()
-                .position(|tab| tab.panes.iter().any(|p| p.tmux.as_deref() == Some(&name)))
+                .position(|tab| tab.sessions().any(|open| open == name))
             {
-                self.tab = at + 1;
-                self.needs_redraw = true;
+                self.go_to_tab(at + 1);
                 self.set_status(format!("Already open: {label}"));
                 return;
             }
@@ -2934,24 +3133,26 @@ impl App {
         }
     }
 
-    /// Restore the tmux-backed agents cctop left alive on a previous exit.
+    /// Take up the tmux-backed agents already running on this machine — the ones
+    /// this cctop left alive on a previous exit, and the ones another cctop has
+    /// open right now.
     ///
     /// The tmux session is the durable workspace state: it preserves the agent,
-    /// its scrollback, and working directory. Recreating a client for each one
-    /// makes reopening cctop resume the tabs the user had open, while leaving a
-    /// failed or concurrently ended session out of the workspace.
+    /// its scrollback, and working directory. There is no difference worth
+    /// drawing between a session left by a cctop that has quit and one another
+    /// cctop is using, so this makes no attempt to: both are tabs, and both
+    /// arrive detached. Only the one put on screen takes a client.
+    ///
+    /// Oldest first, matching [`sync_shared_tabs`] — a cctop opened now and one
+    /// that watched these start must number their tabs the same way.
+    ///
+    /// [`sync_shared_tabs`]: Self::sync_shared_tabs
     pub(super) fn restore_running_tabs(&mut self) {
-        for agent in crate::tmux::running() {
-            let choice = tabs::Choice::Waiting(agent.clone());
-            let label = choice.label();
-            if let Ok(pane) =
-                tabs::Pane::launch(&[label], None, tabs::Own::TmuxExisting(agent.name))
-            {
-                self.tabs.push(tabs::Tab::new(pane));
-            }
+        for agent in crate::tmux::running().iter().rev() {
+            self.tabs.push(tabs::Tab::shared(agent));
         }
         if !self.tabs.is_empty() {
-            self.tab = 1;
+            self.go_to_tab(1);
         }
     }
 
@@ -2964,23 +3165,29 @@ impl App {
     /// agent already on screen got a second window onto it.
     fn open_view(&mut self, pid: u32, label: String) -> bool {
         let shows = |pane: &tabs::Pane| pane.pid == pid || pane.agent() == pid;
-        if let Some((index, tab)) = self
-            .tabs
-            .iter_mut()
-            .enumerate()
-            .find(|(_, tab)| tab.panes.iter().any(shows))
-        {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.panes.iter().any(shows)) {
+            let tab = &mut self.tabs[index];
             tab.focus = tab.panes.iter().position(shows).unwrap_or(0);
-            self.tab = index + 1;
-            self.needs_redraw = true;
+            self.go_to_tab(index + 1);
+            return true;
+        }
+        // The agent may be one of the shared tabs instead, watched by no client
+        // of this cctop. Switching there attaches one, which is the same window
+        // onto the same agent that the branch above found — and still not a
+        // second one.
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.shared.as_ref().is_some_and(|s| s.pid == Some(pid)))
+        {
+            self.go_to_tab(index + 1);
             return true;
         }
         let Some(pane) = tabs::Pane::view_of(pid, label) else {
             return false;
         };
         self.tabs.push(tabs::Tab::new(pane));
-        self.tab = self.tabs.len();
-        self.needs_redraw = true;
+        self.go_to_tab(self.tabs.len());
         true
     }
 }
@@ -3496,6 +3703,9 @@ fn event_loop(
         // After the reap, so a finished install is seen as finished on the same
         // tick its pane goes away.
         app.poll_tmux_install();
+        // And after both, so a tab this cctop has just lost is not immediately
+        // re-added by a listing taken before its session went.
+        app.sync_shared_tabs();
         if drawn || closed {
             app.needs_redraw = true;
         }
@@ -3629,6 +3839,141 @@ mod tests {
         // Keep the receiver alive so sends in tests don't fail.
         std::mem::forget(rx);
         App::with_prefs(Plan::Retail, tx, UiPrefs::default())
+    }
+
+    /// A tab dragged along the bar takes its place there, and the view stays on
+    /// the agent it was watching — whether that is the tab that moved or one the
+    /// move shifted past. Getting the second wrong drops you into somebody
+    /// else's terminal for rearranging the bar around it.
+    #[test]
+    fn a_dragged_tab_moves_without_moving_the_view() {
+        let named = |name: &str| {
+            tabs::Tab::shared(&crate::tmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+            })
+        };
+        let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
+
+        let mut app = test_app();
+        app.tabs = vec![named("a"), named("b"), named("c")];
+
+        // The tab you are on, dragged to the end: it goes there and you go with
+        // it.
+        app.tab = 1;
+        app.move_tab(1, 3);
+        assert_eq!(titles(&app), ["b", "c", "a"]);
+        assert_eq!(app.tab, 3);
+
+        // A tab dragged past the one you are watching: the bar changes, the
+        // agent in front of you does not.
+        app.tab = 1; // "b"
+        app.move_tab(3, 1); // "a" back to the front
+        assert_eq!(titles(&app), ["a", "b", "c"]);
+        assert_eq!(app.tab, 2, "the view followed the position, not the tab");
+
+        // The dashboard is not a tab in the list, and neither end of a move can
+        // be it.
+        app.move_tab(0, 2);
+        app.move_tab(2, 0);
+        assert_eq!(titles(&app), ["a", "b", "c"]);
+
+        // The keyboard's half, clamped at both ends rather than wrapping.
+        app.tab = 1;
+        app.move_workspace(-1);
+        assert_eq!(
+            titles(&app),
+            ["a", "b", "c"],
+            "the first tab has nowhere to go"
+        );
+        app.move_workspace(1);
+        assert_eq!(titles(&app), ["b", "a", "c"]);
+        assert_eq!(app.tab, 2);
+    }
+
+    /// The drag itself: pressing a tab picks it up, moving over another one
+    /// carries it there, and the release ends it. The whole gesture is the
+    /// bar's, so none of it reaches the agents underneath.
+    #[test]
+    fn dragging_a_tab_along_the_bar_reorders_it() {
+        let named = |name: &str| {
+            tabs::Tab::shared(&crate::tmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+            })
+        };
+        let layout = render::Layout {
+            // The dashboard, then a tab per name, as the bar draws them.
+            workspace_spans: vec![(0, 11, 0), (11, 15, 1), (15, 19, 2), (19, 23, 3)],
+            ..Default::default()
+        };
+        let at = |kind, column| event::MouseEvent {
+            kind,
+            column,
+            row: 0,
+            modifiers: event::KeyModifiers::NONE,
+        };
+        let press = event::MouseEventKind::Down(event::MouseButton::Left);
+        let drag = event::MouseEventKind::Drag(event::MouseButton::Left);
+        let release = event::MouseEventKind::Up(event::MouseButton::Left);
+
+        let mut app = test_app();
+        app.tabs = vec![named("a"), named("b"), named("c")];
+        let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
+
+        // Press on the first tab: it is picked up, and shown — where there is
+        // anything to show. These tabs are shared ones, which is to say tmux
+        // sessions, and `go_to_tab` attaches before it switches: on a machine
+        // with no tmux the attach cannot succeed, and the documented outcome is
+        // to stay put and say why rather than to open a blank tab. Both are the
+        // gesture working; only one of them is reachable on a given runner.
+        app.on_mouse(at(press, 12), &layout);
+        assert_eq!(app.drag_tab, Some(1), "the press did not pick the tab up");
+        match crate::tmux::available() {
+            true => assert_eq!(app.tab, 1, "the press did not show the tab"),
+            false => {
+                assert_eq!(app.tab, 0, "a tab that cannot be attached moved the view");
+                let status = app
+                    .status
+                    .as_ref()
+                    .map(|(s, _)| s.clone())
+                    .unwrap_or_default();
+                assert!(status.contains("Could not open"), "silently: {status:?}");
+            }
+        }
+
+        // Carried to the third slot, one tab at a time as the pointer crosses
+        // them, with the view following it. The view is what is under test from
+        // here, so it starts where the press would have put it — which on a
+        // machine without tmux is somewhere the press could not reach.
+        app.tab = 1;
+        app.on_mouse(at(drag, 16), &layout);
+        app.on_mouse(at(drag, 20), &layout);
+        assert_eq!(titles(&app), ["b", "c", "a"]);
+        assert_eq!(app.tab, 3);
+
+        app.on_mouse(at(release, 20), &layout);
+        assert_eq!(app.drag_tab, None);
+        // A later drag with nothing picked up moves nothing.
+        app.on_mouse(at(drag, 12), &layout);
+        assert_eq!(titles(&app), ["b", "c", "a"]);
+
+        // The dashboard is not draggable, and nothing can be dropped onto it.
+        app.on_mouse(at(press, 4), &layout);
+        assert_eq!(app.tab, 0);
+        assert_eq!(app.drag_tab, None);
+        app.on_mouse(at(press, 12), &layout);
+        app.on_mouse(at(drag, 4), &layout);
+        assert_eq!(titles(&app), ["b", "c", "a"]);
+        assert_eq!(app.drag_tab, Some(1), "the tab is still in hand");
     }
 
     /// A paste on the dashboard is typing into whichever one-line box is open,
@@ -3816,6 +4161,39 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+    }
+
+    /// A tab standing for another cctop's agent has no pane here, so every key
+    /// that works through the focused pane does nothing on it. Closing has to
+    /// keep working anyway: the tab is the only handle on screen for that agent,
+    /// and a `w` that silently did nothing would read as a stuck tab.
+    #[test]
+    fn a_shared_tab_can_be_closed_without_a_pane_to_close() {
+        let mut app = test_app();
+        app.tabs.push(tabs::Tab::shared(&crate::tmux::Running {
+            name: "cctop-claude-nosuchsession".into(),
+            pid: Some(4321),
+            cwd: None,
+            attached: false,
+            activity: None,
+            label: Some("claude · Improve super cctop".into()),
+        }));
+        app.tab = 1;
+        // Nothing has emptied it: a tab with no pane is still a tab, or every
+        // cctop would drop the ones it is not looking at.
+        app.drop_empty_tabs();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].title(), "claude · Improve super cctop");
+
+        app.close_pane();
+        assert!(
+            app.tabs.is_empty(),
+            "closing a shared tab left it in the bar"
+        );
+        // And the view followed it back rather than pointing past the end.
+        assert_eq!(app.tab, 0);
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("Improve super cctop"), "{status}");
     }
 
     /// Regression: the "already open" guard asked only about `tmux`, which is

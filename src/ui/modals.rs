@@ -169,6 +169,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+v / Alt+s", "Split the tab right / down"),
         item("Alt+← / →", "Previous / next tab"),
         item("Alt+1 – 9", "Jump to a tab (1 is the dashboard)"),
+        item(
+            "Alt+Shift+← / →",
+            "Move this tab along the bar (or drag it with the mouse)",
+        ),
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),

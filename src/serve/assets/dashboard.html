@@ -19,6 +19,11 @@
     border: 1px solid var(--line); border-radius: 8px;
   }
   button[aria-pressed=true] { color: var(--accent); border-color: var(--accent); }
+  select {
+    padding: 7px 9px; font: inherit; font-size: 13px; cursor: pointer;
+    background: var(--panel); color: var(--dim);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
 
   /* Sessions waiting on a person get their own block at the top. The whole
      reason to look at this on a phone is to find them. */
@@ -68,6 +73,12 @@
     <input type="search" id="filter" placeholder="Filter on project, model, branch, title…" autocomplete="off" spellcheck="false">
     <button id="running" aria-pressed="false" title="Show only sessions with a live process">Running</button>
     <button id="bell" aria-pressed="false" title="Notify when a session starts waiting on you">Notify</button>
+    <select id="sort" title="Order the table">
+      <option value="recent">Recent</option>
+      <option value="cost">Cost</option>
+      <option value="tokens">Tokens</option>
+      <option value="context">Context</option>
+    </select>
   </div>
 
   <section class="card attention" id="attention" hidden>
@@ -169,6 +180,27 @@ const shortModel = (model) => {
 let sessions = [];
 let filter = "";
 let runningOnly = false;
+let sortBy = "recent";
+
+// How the table is ordered, by what the reader picked.
+//
+// Every one of these is descending, because every one of them is a question of
+// the form "which is the most" — the most recent, the most expensive, the
+// fullest window. An ascending sort would answer a question nobody asks of this
+// table.
+//
+// `recent` is what the server already sends, and re-sorting it here rather than
+// leaning on that keeps the order a property of the page: a payload that ever
+// arrives in a different order does not silently change what "Recent" means.
+const ORDER = {
+  recent: (a, b) => String(b.last_active).localeCompare(String(a.last_active)),
+  cost: (a, b) => (Number(b.cost.total) || 0) - (Number(a.cost.total) || 0),
+  tokens: (a, b) => (Number(b.tokens.total) || 0) - (Number(a.tokens.total) || 0),
+  // A session whose harness reports no window sorts last rather than as zero:
+  // "nothing is known" is not "the window is empty".
+  context: (a, b) => share(b) - share(a),
+};
+const share = (s) => (s.context && s.context.max ? s.context.used / s.context.max : -1);
 // What each session's state was last render, so a *transition* into waiting can
 // be told from a session that has been waiting since before the page opened.
 // Without it every refresh would re-notify about the same idle agent.
@@ -220,8 +252,11 @@ function rowFor(s) {
   tag(s.model ? shortModel(s.model) : s.provider);
   if (s.branch) tag(s.branch);
   tag(ago(s.last_active) + " ago");
-  if (s.state === "waiting") tag("waiting on you", "pill warn");
-  if (s.state === "error") tag("api error", "pill bad");
+  if (s.running && s.state === "waiting") tag("waiting on you", "pill warn");
+  // "api error" in the present tense is a claim about now. For a stopped
+  // session it is something that happened, and the row's last-active time is
+  // already saying when.
+  if (s.state === "error") tag(s.running ? "api error" : "ended on an api error", "pill bad");
   // A session with a quarter of its tool calls failing is retrying something
   // that will not work, and paying for every attempt.
   if (s.activity.tool_errors > 0 && s.activity.tool_count > 0) {
@@ -249,11 +284,19 @@ function rowFor(s) {
 function render() {
   const shown = sessions
     .filter((s) => matches(s, filter))
-    .filter((s) => !runningOnly || s.running);
+    .filter((s) => !runningOnly || s.running)
+    .sort(ORDER[sortBy] || ORDER.recent);
 
-  // Anything a person has to answer, first and on its own. A session that has
-  // errored is in the same category: it is stopped, and only a person restarts it.
-  const wanting = shown.filter((s) => s.state === "waiting" || s.state === "error");
+  // Anything a person has to answer, first and on its own.
+  //
+  // Live sessions only. A session that hit an API error in May and has not run
+  // since is history, not a call to action — promoting it puts four dead rows
+  // above the one agent actually waiting, which is the opposite of what this
+  // block is for. The row keeps its red dot either way; that is the table
+  // saying what happened, which is a different claim from "answer me".
+  const wanting = shown.filter(
+    (s) => s.running && (s.state === "waiting" || s.state === "error"),
+  );
   const rest = shown.filter((s) => !wanting.includes(s));
 
   const attention = document.getElementById("attention");
@@ -365,6 +408,10 @@ fetch("/api/hosts" + QUERY)
 
 document.getElementById("filter").addEventListener("input", (e) => {
   filter = e.target.value.trim().toLowerCase();
+  render();
+});
+document.getElementById("sort").addEventListener("change", (e) => {
+  sortBy = e.target.value;
   render();
 });
 document.getElementById("running").addEventListener("click", (e) => {

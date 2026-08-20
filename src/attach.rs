@@ -461,6 +461,11 @@ pub enum MouseKind {
 pub enum MouseButton {
     Left,
     Middle,
+    /// Encoded but never sent: `on_mouse` drops the right button before it gets
+    /// here, because under tmux it opens tmux's own pane menu over the agent.
+    /// The arm stays so the encoding is complete if that ever changes — hence
+    /// `allow` rather than removing the variant.
+    #[allow(dead_code)]
     Right,
 }
 

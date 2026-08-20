@@ -1086,6 +1086,30 @@ pub struct ToolDetail {
     pub tokens_out: u64,
     #[serde(default)]
     pub shared: u8,
+    /// How much the context window grew after the turn that issued this call —
+    /// which is, in all but the awkward cases, the size of this call's result.
+    ///
+    /// The transcript never records the size of a tool result, but it records
+    /// the prompt billed for every request, and that prompt is the whole
+    /// conversation. So the growth between one request and the next, less what
+    /// the assistant itself wrote, is what the turn's results added. This is the
+    /// figure that answers "what filled the window", which the per-request
+    /// [`tokens_in`](Self::tokens_in) cannot: that one climbs all session long
+    /// and ranks calls by how late they happened.
+    ///
+    /// The awkward cases, all of which this deliberately does not try to split
+    /// apart, because the transcript cannot say how:
+    ///
+    /// - A turn that issued several calls (`shared` above) grew the window by
+    ///   all of their results together.
+    /// - Anything else that arrived between the two requests is in here too —
+    ///   a message the user typed while the agent worked, most of all.
+    ///
+    /// `None` where there is no next request to compare against, or where the
+    /// window shrank instead: a compaction, or the few hundred tokens of noise
+    /// that cache accounting moves between adjacent requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_growth: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
     /// The call reported an error. Providers that do not record a per-call
