@@ -52,7 +52,7 @@ pub enum ProviderStatus {
 pub struct Quota {
     pub fetched: bool,
     /// One entry per Claude profile, in the order
-    /// [`config::CLAUDE_PROFILES`] lists them.
+    /// [`config::profiles_for`] lists them.
     ///
     /// A profile is an account with its own subscription and its own limits, so
     /// one figure cannot stand for all of them. It used to: the poller read
@@ -60,31 +60,39 @@ pub struct Quota {
     /// pane, so a tab running as somebody's work login showed their personal
     /// account's usage — wrong in the direction that matters, since the number
     /// is consulted to decide whether there is room to keep working.
-    pub claude: Vec<ClaudeQuota>,
-    pub codex: ProviderStatus,
+    pub claude: Vec<ProfileQuota>,
+    /// One entry per Codex profile, for the same reason: a second
+    /// subscription exists because the first one runs out of window, so the
+    /// figure that decides whether there is room to keep working has to be the
+    /// one belonging to the account the pane is running as.
+    pub codex: Vec<ProfileQuota>,
 }
 
-/// One Claude account's limits, and which profile they belong to.
+/// One account's limits, and which profile they belong to.
 #[derive(Debug, Clone)]
-pub struct ClaudeQuota {
+pub struct ProfileQuota {
     pub profile: String,
     pub status: ProviderStatus,
+}
+
+/// Every profile of `provider`'s, pending — so a panel can say it is checking
+/// rather than claiming an account has no limits before it has looked.
+fn pending_for(provider: crate::pricing::Provider) -> Vec<ProfileQuota> {
+    config::profiles_for(provider)
+        .iter()
+        .map(|p| ProfileQuota {
+            profile: p.name.clone(),
+            status: ProviderStatus::Pending,
+        })
+        .collect()
 }
 
 impl Default for Quota {
     fn default() -> Self {
         Quota {
             fetched: false,
-            // Every profile starts pending, so the panel can say it is checking
-            // rather than claiming an account has no limits before it has looked.
-            claude: config::CLAUDE_PROFILES
-                .iter()
-                .map(|p| ClaudeQuota {
-                    profile: p.name.clone(),
-                    status: ProviderStatus::Pending,
-                })
-                .collect(),
-            codex: ProviderStatus::Pending,
+            claude: pending_for(crate::pricing::Provider::Claude),
+            codex: pending_for(crate::pricing::Provider::Codex),
         }
     }
 }
@@ -93,13 +101,18 @@ impl Quota {
     /// The limits for `profile`, or the default profile's when a pane does not
     /// name one — which is every pane started before there was a choice to make.
     pub fn claude_for(&self, profile: Option<&str>) -> Option<&ProviderStatus> {
+        Self::lookup(&self.claude, profile)
+    }
+
+    /// The same, for Codex.
+    pub fn codex_for(&self, profile: Option<&str>) -> Option<&ProviderStatus> {
+        Self::lookup(&self.codex, profile)
+    }
+
+    fn lookup<'a>(qs: &'a [ProfileQuota], profile: Option<&str>) -> Option<&'a ProviderStatus> {
         match profile {
-            Some(name) => self
-                .claude
-                .iter()
-                .find(|q| q.profile == name)
-                .map(|q| &q.status),
-            None => self.claude.first().map(|q| &q.status),
+            Some(name) => qs.iter().find(|q| q.profile == name).map(|q| &q.status),
+            None => qs.first().map(|q| &q.status),
         }
     }
 }
@@ -248,8 +261,8 @@ fn read_claude_credential_in(dir: &Path, is_default: bool) -> Credential {
     Credential::None
 }
 
-fn read_codex_token() -> Option<String> {
-    let text = std::fs::read_to_string(config::CODEX_HOME.join("auth.json")).ok()?;
+fn read_codex_token_in(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("auth.json")).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
     v.get("tokens")
         .and_then(|t| t.get("access_token"))
@@ -381,8 +394,8 @@ fn as_epoch_secs(v: Option<&Value>) -> Option<i64> {
     }
 }
 
-pub fn fetch_claude(profile: &config::ClaudeProfile) -> ProviderStatus {
-    let is_default = config::CLAUDE_PROFILES
+pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
+    let is_default = config::profiles_for(crate::pricing::Provider::Claude)
         .first()
         .is_some_and(|first| first.dir == profile.dir);
     let token = match read_claude_credential_in(&profile.dir, is_default) {
@@ -429,8 +442,8 @@ pub fn fetch_claude(profile: &config::ClaudeProfile) -> ProviderStatus {
     ProviderStatus::Ok(q)
 }
 
-pub fn fetch_codex() -> ProviderStatus {
-    let Some(token) = read_codex_token() else {
+pub fn fetch_codex(profile: &config::Profile) -> ProviderStatus {
+    let Some(token) = read_codex_token_in(&profile.dir) else {
         return ProviderStatus::NotSignedIn;
     };
     let data = match get_json(
@@ -504,7 +517,7 @@ mod tests {
     /// about which account it describes is worse than showing nothing.
     #[test]
     fn each_profile_reports_its_own_limits() {
-        let of = |profile: &str, pct: u32| ClaudeQuota {
+        let of = |profile: &str, pct: u32| ProfileQuota {
             profile: profile.to_string(),
             status: ProviderStatus::Ok(ProviderQuota {
                 plan: None,
@@ -520,7 +533,7 @@ mod tests {
         let quota = Quota {
             fetched: true,
             claude: vec![of("default", 10), of("work", 90)],
-            codex: ProviderStatus::Pending,
+            codex: vec![of("default", 30), of("work", 60)],
         };
         let pct = |status: Option<&ProviderStatus>| match status {
             Some(ProviderStatus::Ok(q)) => q.windows.first().map(|w| w.pct),
@@ -534,6 +547,12 @@ mod tests {
         // A profile that has since gone reports nothing rather than somebody
         // else's remaining budget.
         assert!(quota.claude_for(Some("deleted")).is_none());
+
+        // Codex splits the same way, and the two harnesses do not answer for
+        // each other: `work` names a different subscription in each.
+        assert_eq!(pct(quota.codex_for(Some("work"))), Some(60));
+        assert_eq!(pct(quota.codex_for(None)), Some(30));
+        assert!(quota.codex_for(Some("deleted")).is_none());
     }
     use super::*;
 

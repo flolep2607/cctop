@@ -9,7 +9,14 @@ use super::{
 /// Comfortably past any real working directory — Linux caps a path at 4096
 /// bytes and this is about the width of four terminals — while still bounding
 /// what a runaway paste can put in one line.
-const MAX_PATH_INPUT: usize = 512;
+pub(super) const MAX_PATH_INPUT: usize = 512;
+
+/// Longest name a tab will take.
+///
+/// The bar truncates well before this, so a longer name is one nobody can read
+/// anyway; the cap is here so a paste cannot fill the tmux option with a
+/// transcript.
+pub(super) const TAB_NAME_MAX: usize = 64;
 
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -68,16 +75,13 @@ impl App {
             return;
         }
 
-        // Inside a pane the keyboard belongs to the agent. F10 and F12 remain
-        // cctop's because the dashboard promises them as quit and back, and
-        // function keys otherwise go straight through to the focused agent.
+        // Inside a pane the keyboard belongs to the agent — every key but the
+        // function keys, which are cctop's wherever you are. The footer offers
+        // them from inside a pane, so one that reached the agent instead would
+        // be a promise the pane quietly broke.
         if self.tab > 0 && self.mode == Mode::List {
-            if key.code == KeyCode::F(10) {
-                self.request_quit();
-                return;
-            }
-            if key.code == KeyCode::F(12) {
-                self.show_tab(0);
+            if matches!(key.code, KeyCode::F(_)) {
+                self.on_key_function(key);
                 return;
             }
             if let Some(pane) = self.focused_pane() {
@@ -116,6 +120,7 @@ impl App {
             }
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
+            Mode::RenameTab => self.on_key_rename(key),
             Mode::Launch => self.on_key_launch(key),
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
@@ -164,12 +169,17 @@ impl App {
                 let room = 500usize.saturating_sub(self.send_input.len());
                 self.send_input.push_str(&flatten(text, room));
             }
+            Mode::RenameTab => {
+                let room = TAB_NAME_MAX.saturating_sub(self.rename_input.chars().count());
+                self.rename_input.push_str(&flatten(text, room));
+            }
             // Pasting a path in is the point of this field: a directory deep
             // enough to be worth typing is one you copied from somewhere.
             Mode::LaunchCwd => {
                 let room = MAX_PATH_INPUT.saturating_sub(self.launch_cwd_input.chars().count());
                 self.launch_cwd_input.push_str(&flatten(text, room));
                 self.launch_cwd_bad = false;
+                self.launch_cwd_suggest();
             }
             // The cost floor is a number, so a paste is filtered the way typing
             // one is rather than flattened: anything that is not a digit or a
@@ -257,16 +267,27 @@ impl App {
             // leave the launch exactly as it was found, or Esc becomes a way to
             // lose the setting you were trying to change.
             KeyCode::Esc => self.mode = Mode::Launch,
-            KeyCode::Enter => self.accept_launch_cwd(),
+            KeyCode::Enter => self.take_launch_cwd(),
+            // Tab fills in what the suggestions agree on. The list below the
+            // field is what makes the key discoverable; without it a path still
+            // has to be spelled to the last character.
+            KeyCode::Tab => self.complete_launch_cwd(),
+            // Into the suggestions and back out again. Nothing else in this
+            // field wanted the arrows, and the launcher's own list is not being
+            // moved while its directory is being typed.
+            KeyCode::Down => self.step_launch_cwd(true),
+            KeyCode::Up => self.step_launch_cwd(false),
             KeyCode::Backspace => {
                 self.launch_cwd_input.pop();
                 self.launch_cwd_bad = false;
+                self.launch_cwd_suggest();
             }
             // Bounded like every other one-line input here: a path longer than
             // this is not one anybody typed on purpose.
             KeyCode::Char(c) if self.launch_cwd_input.chars().count() < MAX_PATH_INPUT => {
                 self.launch_cwd_input.push(c);
                 self.launch_cwd_bad = false;
+                self.launch_cwd_suggest();
             }
             _ => {}
         }
@@ -417,6 +438,39 @@ impl App {
     /// `q` is muscle memory in an htop-like list, and here it would end a live
     /// coding session: the agent runs on a pty this process owns, so there is
     /// nothing left of it once cctop is gone.
+    /// A function key pressed inside a pane.
+    ///
+    /// None of them is passed on. Agents do not read them — nothing in
+    /// `claude`, `codex`, or a shell binds one — and cctop's own map is written
+    /// in them, which is why they were the keys it kept.
+    ///
+    /// Most act on the dashboard: a search box, a sort order, or the help sheet
+    /// drawn over a pane would be a modal on a screen the agent is repainting
+    /// underneath, and the thing being filtered is not on screen at all. So the
+    /// dashboard comes forward first and the key then does exactly what it does
+    /// there. The three that need no dashboard stay where they are pressed.
+    fn on_key_function(&mut self, key: KeyEvent) {
+        match key.code {
+            // Back to the dashboard, which is the one function key that only
+            // means anything inside a pane.
+            KeyCode::F(12) => self.show_tab(0),
+            // Quitting is the pane's own key, and refreshing acts on the walk
+            // rather than on anything drawn — pulling the dashboard forward for
+            // it would take you off the agent you are watching in order to
+            // reload a table you were not looking at.
+            KeyCode::F(10) | KeyCode::F(5) => self.on_key_list(key),
+            // The keys the dashboard binds, on the dashboard.
+            KeyCode::F(1) | KeyCode::F(3) | KeyCode::F(6) | KeyCode::F(7) | KeyCode::F(8) => {
+                self.show_tab(0);
+                self.on_key_list(key);
+            }
+            // Everything else: swallowed. An unbound function key does nothing
+            // here rather than arriving at the agent as an escape sequence it
+            // will print or misread.
+            _ => {}
+        }
+    }
+
     fn request_quit(&mut self) {
         match self.hosted.is_some() {
             true => self.mode = Mode::QuitConfirm,
@@ -485,6 +539,54 @@ impl App {
             KeyCode::Char(c) if self.send_input.len() < 500 => self.send_input.push(c),
             _ => {}
         }
+    }
+
+    /// The tab-rename field. Empty is not a name, so Enter with nothing typed
+    /// backs out the same way Esc does rather than blanking the tab bar.
+    fn on_key_rename(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Enter => {
+                let name = self.rename_input.trim().to_string();
+                self.mode = Mode::List;
+                if name.is_empty() {
+                    return;
+                }
+                // The bar may have moved while the field was open — see
+                // [`App::rename_was`]. A tab that is no longer the one the
+                // right-click landed on keeps its name.
+                let Some(tab) = self
+                    .tabs
+                    .get_mut(self.rename_tab.saturating_sub(1))
+                    .filter(|tab| tab.title() == self.rename_was)
+                else {
+                    self.set_status("That tab is gone; nothing was renamed");
+                    return;
+                };
+                tab.rename(name.clone());
+                self.set_status(format!("Tab renamed to {name}"));
+            }
+            KeyCode::Backspace => {
+                self.rename_input.pop();
+            }
+            KeyCode::Char(c) if self.rename_input.chars().count() < TAB_NAME_MAX => {
+                self.rename_input.push(c)
+            }
+            _ => {}
+        }
+    }
+
+    /// Ask for a new name for a tab, addressed the way the bar numbers them:
+    /// tab 0 is the dashboard, which is not a tab anything renames.
+    fn rename_prompt(&mut self, tab: usize) {
+        let Some(target) = self.tabs.get(tab.saturating_sub(1)) else {
+            return;
+        };
+        self.rename_tab = tab;
+        self.rename_was = target.title();
+        self.rename_input.clear();
+        self.mode = Mode::RenameTab;
+        self.needs_redraw = true;
     }
 
     /// Open the row menu on the first entry that can actually run.
@@ -823,6 +925,23 @@ impl App {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag_tab.take().is_some(),
+            // Right-click renames. The bar is the only place cctop answers the
+            // right button at all — inside a pane it is deliberately dropped
+            // (see [`App::on_mouse`]) — so there is nothing here to compete
+            // with, and a tab called `3:claude-4` is precisely the thing you
+            // want to rename by pointing at it.
+            MouseEventKind::Down(MouseButton::Right) => {
+                match layout
+                    .workspace_at(ev.column, ev.row)
+                    .filter(|tab| *tab > 0)
+                {
+                    Some(tab) => {
+                        self.rename_prompt(tab);
+                        true
+                    }
+                    None => false,
+                }
+            }
             _ => false,
         }
     }
@@ -871,6 +990,22 @@ impl App {
                 } else if !layout.in_modal(ev.column, ev.row) {
                     self.mode = Mode::List;
                 }
+                return;
+            }
+            // A click on a suggestion is answered before the choices behind
+            // it: the two lists are drawn in one modal, and while the field is
+            // open the lower rows are the directories, not the agents.
+            if self.mode == Mode::LaunchCwd
+                && let Some(i) = layout.launch_cwd_row_at(ev.column, ev.row)
+            {
+                // One click picks, a second takes it — the same two-step the
+                // choices above use, for the same reason: a stray click must
+                // not silently move where the agent will start.
+                match self.launch_cwd_pick == Some(i) {
+                    true => self.take_launch_cwd(),
+                    false => self.launch_cwd_pick = Some(i),
+                }
+                self.needs_redraw = true;
                 return;
             }
             // One click picks; Enter, or a second click on the row already

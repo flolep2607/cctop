@@ -229,6 +229,37 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `F12` | Back to the dashboard, leaving everything running |
 
+Every function key is cctop's, inside a pane as much as on the dashboard: none
+of them is passed to the agent. `F10` (quit) and `F5` (refresh) act where you
+press them; `F12` returns to the dashboard; `F1`, `F3`, `F6`, `F7`, and `F8`
+bring the dashboard forward and then do what they do there, since a search box
+or a sort order over a pane would be drawn on a screen the agent is repainting.
+An unbound function key does nothing rather than reaching the agent as an escape
+sequence.
+
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+### More than one account
+
+Claude Code and Codex both let one machine hold several logins — `$CLAUDE_CONFIG_DIR`
+for the first, `$CODEX_HOME` for the second — and a second subscription usually
+exists because the first one runs out of window before the day does.
+
+cctop finds them the same way for both: the directories beside the conventional
+one that are actually signed in, so `~/.claude-work` and `~/.codex-work` are both
+an account called `work`. Where there is more than one, the new-tab launcher
+carries an `as <name>` line and `p` cycles it — the choice is remembered, because
+somebody working out of their work login is working out of it all afternoon.
+
+Everything downstream follows the account rather than assuming the default: rows
+from every login appear in the table, the PROFILE column says which one each came
+from, the limits panel reports each subscription's own 5h and weekly figures, and
+`R` resumes a session under the account whose directory the transcript lives in —
+without which a resumed Codex session would come back blank, its id being unknown
+to any other home.
+
+In the tab bar, drag a tab to move it along the bar, and right-click one to
+rename it: `3:claude-4` says nothing about what that agent is doing, and the
+name you give it follows the tab into every cctop on the machine.

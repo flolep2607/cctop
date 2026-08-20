@@ -1414,14 +1414,13 @@ pub fn list_all() -> Vec<Session> {
         }
     }
     // And which login it ran under, for the same reason and in the same place.
-    // Claude Code only: it is the only harness whose config directory is
-    // relocatable per-account, so for anything else the answer is not "default"
-    // but "the question does not apply".
+    // Only harnesses whose config directory is relocatable per-account answer
+    // at all; for the rest the path matches no profile and the cell stays
+    // blank, because there the answer is not "default" but "the question does
+    // not apply".
     for s in &mut sessions {
-        if s.provider == Provider::Claude
-            && let Some(file) = &s.data_file
-        {
-            s.profile = crate::config::claude_profile_for(file).map(str::to_string);
+        if let Some(file) = &s.data_file {
+            s.profile = crate::config::profile_for(file).map(str::to_string);
         }
     }
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));

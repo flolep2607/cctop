@@ -1,5 +1,6 @@
 //! Filesystem locations and process-wide constants.
 
+use crate::pricing::Provider;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -17,7 +18,7 @@ pub static CLAUDE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 pub static CLAUDE_PROJECTS_ROOT: LazyLock<PathBuf> =
     LazyLock::new(|| CLAUDE_CONFIG_DIR.join("projects"));
 
-/// One Claude configuration directory: its own credentials, settings, and
+/// One harness configuration directory: its own credentials, settings, and
 /// transcripts.
 ///
 /// `$CLAUDE_CONFIG_DIR` lets one machine hold several accounts side by side —
@@ -27,44 +28,89 @@ pub static CLAUDE_PROJECTS_ROOT: LazyLock<PathBuf> =
 /// which was running at the time and showed as a row with a process and no
 /// model, no cost and no tokens, because its transcript was somewhere cctop
 /// was not looking.
+///
+/// Codex has the same shape under a different name — `$CODEX_HOME`, an
+/// `auth.json` instead of a `.credentials.json` — and the same reason to hold
+/// more than one: a subscription runs out of window before the day does. So a
+/// profile is keyed by the harness it belongs to rather than being Claude's
+/// alone, and the launcher, the walk, the PROFILE column and the limits panel
+/// all read the one list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaudeProfile {
-    /// What to call it on screen: `default` for `~/.claude`, else the suffix —
-    /// `~/.claude-work` is `work`.
+pub struct Profile {
+    /// Which harness reads this directory. The env var that selects it, and
+    /// the file that proves an account is logged in, differ per harness.
+    pub provider: Provider,
+    /// What to call it on screen: `default` for the conventional directory,
+    /// else the suffix — `~/.claude-work` and `~/.codex-work` are both `work`.
     pub name: String,
     pub dir: PathBuf,
 }
 
-/// The name a profile directory goes by.
-fn profile_name(dir: &Path) -> String {
+/// Every harness whose accounts cctop can tell apart, and how to recognise one:
+/// the directory prefix under a home, and the file that makes such a directory
+/// an account rather than a folder that happens to be named like one.
+///
+/// A harness belongs here once launching it under a chosen directory is a
+/// promise the env var can keep. The rest of the providers cctop reads have no
+/// such variable, and offering a profile for them would be a setting that
+/// silently did nothing.
+const PROFILED: [(Provider, &str, &str); 2] = [
+    (Provider::Claude, ".claude", ".credentials.json"),
+    (Provider::Codex, ".codex", "auth.json"),
+];
+
+/// How `provider` names its directories and proves one is logged in.
+fn conventions(provider: Provider) -> Option<(&'static str, &'static str)> {
+    PROFILED
+        .iter()
+        .find(|(p, _, _)| *p == provider)
+        .map(|(_, prefix, credential)| (*prefix, *credential))
+}
+
+/// The env var that points `provider` at one of its directories, and where it
+/// points today.
+pub fn profile_env(provider: Provider) -> Option<(&'static str, &'static Path)> {
+    match provider {
+        Provider::Claude => Some(("CLAUDE_CONFIG_DIR", CLAUDE_CONFIG_DIR.as_path())),
+        Provider::Codex => Some(("CODEX_HOME", CODEX_HOME.as_path())),
+        _ => None,
+    }
+}
+
+/// The name a profile directory goes by, given the prefix its harness uses.
+fn profile_name(dir: &Path, prefix: &str) -> String {
     let raw = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    match raw.strip_prefix(".claude") {
-        // `~/.claude` itself, the one every install starts with.
+    match raw.strip_prefix(prefix) {
+        // The conventional directory itself, the one every install starts with.
         Some("") => "default".to_string(),
         Some(rest) => rest.trim_start_matches(['-', '_', '.']).to_string(),
-        // Somewhere else entirely, named by `$CLAUDE_CONFIG_DIR`.
+        // Somewhere else entirely, named by the env var.
         None => raw,
     }
 }
 
-/// Every Claude profile in `home`, newest naming first, `~/.claude` leading.
+/// Every one of `provider`'s profiles in `home`, the conventional one leading.
 ///
-/// A profile is a directory holding `.credentials.json`: that file is what
-/// makes a directory an account rather than a folder that happens to be called
-/// `.claude-something`. Only the home's immediate children are considered —
-/// a profile can contain a nested `.claude` of its own, and treating that as a
-/// second account would list one login twice.
-pub fn claude_profiles_in(home: &Path) -> Vec<ClaudeProfile> {
-    let mut out: Vec<ClaudeProfile> = list_dir(home)
+/// A profile is a directory holding the harness's credential file: that file is
+/// what makes a directory an account rather than a folder that happens to be
+/// called `.claude-something`. Only the home's immediate children are
+/// considered — a profile can contain a nested `.claude` of its own, and
+/// treating that as a second account would list one login twice.
+pub fn profiles_in(home: &Path, provider: Provider) -> Vec<Profile> {
+    let Some((prefix, credential)) = conventions(provider) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Profile> = list_dir(home)
         .into_iter()
-        .filter(|name| name.starts_with(".claude"))
+        .filter(|name| name.starts_with(prefix))
         .map(|name| home.join(name))
-        .filter(|dir| dir.join(".credentials.json").is_file())
-        .map(|dir| ClaudeProfile {
-            name: profile_name(&dir),
+        .filter(|dir| dir.join(credential).is_file())
+        .map(|dir| Profile {
+            provider,
+            name: profile_name(&dir, prefix),
             dir,
         })
         .collect();
@@ -74,21 +120,45 @@ pub fn claude_profiles_in(home: &Path) -> Vec<ClaudeProfile> {
     out
 }
 
-/// Every profile of this user's, `$CLAUDE_CONFIG_DIR` included even when it
-/// points somewhere that discovery would never have looked.
-pub static CLAUDE_PROFILES: LazyLock<Vec<ClaudeProfile>> = LazyLock::new(|| {
-    let mut out = claude_profiles_in(&HOME);
-    if !out.iter().any(|p| p.dir == *CLAUDE_CONFIG_DIR) {
-        out.insert(
-            0,
-            ClaudeProfile {
-                name: profile_name(&CLAUDE_CONFIG_DIR),
-                dir: CLAUDE_CONFIG_DIR.clone(),
-            },
-        );
+/// Every profile of this user's, across every profiled harness, each one's env
+/// var included even when it points somewhere discovery would never have looked.
+pub static PROFILES: LazyLock<Vec<Profile>> = LazyLock::new(|| {
+    let mut out = Vec::new();
+    for (provider, prefix, _) in PROFILED {
+        let mut found = profiles_in(&HOME, provider);
+        if let Some((_, named)) = profile_env(provider)
+            && !found.iter().any(|p| p.dir == named)
+        {
+            found.insert(
+                0,
+                Profile {
+                    provider,
+                    name: profile_name(named, prefix),
+                    dir: named.to_path_buf(),
+                },
+            );
+        }
+        out.extend(found);
     }
     out
 });
+
+/// One named profile of this user's, when it still exists.
+///
+/// A name is what gets remembered — in the prefs file, on a session row — and
+/// a directory is what a launch needs. This turns one into the other, and
+/// answers `None` for an account that has since been logged out of, so a stale
+/// name cannot start an agent under somebody else's subscription.
+pub fn profile_named(provider: Provider, name: &str) -> Option<&'static Profile> {
+    PROFILES
+        .iter()
+        .find(|p| p.provider == provider && p.name == name)
+}
+
+/// This user's profiles for one harness, in the order the launcher offers them.
+pub fn profiles_for(provider: Provider) -> Vec<&'static Profile> {
+    PROFILES.iter().filter(|p| p.provider == provider).collect()
+}
 
 /// `$CODEX_HOME`, falling back to `~/.codex`.
 pub static CODEX_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -419,31 +489,42 @@ pub fn claude_config_dir_in(home: &Path) -> PathBuf {
 }
 
 /// Per-provider session roots, this user's first.
-/// Every `projects/` directory Claude Code writes to, across every profile and
-/// every home in view.
+/// Every directory a profiled harness writes transcripts to, across every
+/// profile and every home in view.
 ///
 /// One entry per profile rather than one per home: a machine with a personal
-/// and a work login has two, and reading only the one `$CLAUDE_CONFIG_DIR`
-/// happens to name is how a running session ends up with a row and no figures.
-pub fn claude_projects_roots() -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = CLAUDE_PROFILES
+/// and a work login has two, and reading only the one the env var happens to
+/// name is how a running session ends up with a row and no figures.
+///
+/// `leaf` is where the harness keeps them inside a profile — `projects` for
+/// Claude Code, `sessions` for Codex.
+fn profile_roots(provider: Provider, leaf: &str) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = profiles_for(provider)
         .iter()
-        .map(|p| p.dir.join("projects"))
+        .map(|p| p.dir.join(leaf))
         .collect();
     for other in OTHER_HOMES.iter() {
-        match claude_profiles_in(&other.home).as_slice() {
+        match profiles_in(&other.home, provider).as_slice() {
             // A home cctop cannot read the inside of still has the one
             // conventional location worth trying.
-            [] => roots.push(claude_config_dir_in(&other.home).join("projects")),
-            found => roots.extend(found.iter().map(|p| p.dir.join("projects"))),
+            [] => {
+                if let Some((prefix, _)) = conventions(provider) {
+                    roots.push(other.home.join(prefix).join(leaf));
+                }
+            }
+            found => roots.extend(found.iter().map(|p| p.dir.join(leaf))),
         }
     }
     roots.dedup();
     roots
 }
 
+pub fn claude_projects_roots() -> Vec<PathBuf> {
+    profile_roots(Provider::Claude, "projects")
+}
+
 pub fn codex_sessions_roots() -> Vec<PathBuf> {
-    roots_across_homes(&CODEX_SESSIONS_ROOT, |h| h.join(".codex").join("sessions"))
+    profile_roots(Provider::Codex, "sessions")
 }
 
 pub fn cursor_projects_roots() -> Vec<PathBuf> {
@@ -517,17 +598,19 @@ pub fn owner_of(path: &Path) -> Option<&'static str> {
         .map(|o| o.user.as_str())
 }
 
-/// Every Claude profile in view: this user's, and each other home's when cctop
+/// Every profile in view: this user's, and each other home's when cctop
 /// is sweeping them.
 ///
-/// Separate from [`CLAUDE_PROFILES`], which is this user's alone and is what
+/// Separate from [`PROFILES`], which is this user's alone and is what
 /// the launcher offers to start an agent under. Attribution has to cover every
 /// home the walk reaches, or a row read out of somebody else's `.claude-work`
 /// would come back unlabelled.
-static PROFILES_IN_VIEW: LazyLock<Vec<ClaudeProfile>> = LazyLock::new(|| {
-    let mut out = CLAUDE_PROFILES.clone();
+static PROFILES_IN_VIEW: LazyLock<Vec<Profile>> = LazyLock::new(|| {
+    let mut out = PROFILES.clone();
     for other in OTHER_HOMES.iter() {
-        out.extend(claude_profiles_in(&other.home));
+        for (provider, _, _) in PROFILED {
+            out.extend(profiles_in(&other.home, provider));
+        }
     }
     out
 });
@@ -543,7 +626,7 @@ static PROFILES_IN_VIEW: LazyLock<Vec<ClaudeProfile>> = LazyLock::new(|| {
 /// The longest match wins. Profiles are normally siblings, so any prefix test
 /// would do; `$CLAUDE_CONFIG_DIR` can name a directory inside another one, and
 /// there the specific answer is the true one.
-pub fn claude_profile_for(path: &Path) -> Option<&'static str> {
+pub fn profile_for(path: &Path) -> Option<&'static str> {
     PROFILES_IN_VIEW
         .iter()
         .filter(|p| path.starts_with(&p.dir))
@@ -551,12 +634,25 @@ pub fn claude_profile_for(path: &Path) -> Option<&'static str> {
         .map(|p| p.name.as_str())
 }
 
-/// How many Claude profiles are in view.
+/// The most accounts any one harness has in view.
 ///
 /// One is the ordinary case, and a column repeating `default` on every row
 /// tells nobody anything — so the table asks this before drawing one.
-pub fn claude_profile_count() -> usize {
-    PROFILES_IN_VIEW.len()
+///
+/// Per harness rather than a total across them: every machine with Claude Code
+/// and Codex installed has two profiles in view and nothing to tell apart,
+/// which a plain count would read as a reason to draw the column.
+pub fn profile_count() -> usize {
+    PROFILED
+        .iter()
+        .map(|(provider, _, _)| {
+            PROFILES_IN_VIEW
+                .iter()
+                .filter(|p| p.provider == *provider)
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 pub const CLAUDE_DEFAULT_CTX: u64 = 200_000;
@@ -672,7 +768,7 @@ mod tests {
         // Not a profile at all.
         make(&dir.join(".config"), true);
 
-        let found = claude_profiles_in(&dir);
+        let found = profiles_in(&dir, Provider::Claude);
         let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
 
         assert_eq!(names, ["default", "work"], "{found:?}");
@@ -693,7 +789,7 @@ mod tests {
             std::fs::create_dir_all(profile.join("projects")).expect("mkdir");
             std::fs::write(profile.join(".credentials.json"), "{}").expect("write");
         }
-        let found = claude_profiles_in(home);
+        let found = profiles_in(home, Provider::Claude);
         let named = |path: &Path| -> Option<String> {
             found
                 .iter()
@@ -717,6 +813,90 @@ mod tests {
         assert_eq!(named(&home.join(".codex/sessions/a.jsonl")), None);
     }
 
+    /// The same rule for Codex, whose accounts are `auth.json` rather than
+    /// `.credentials.json` — the reason discovery is parameterised at all.
+    ///
+    /// The bug this closes: a session started under `~/.codex-work` was read out
+    /// of nobody's sessions directory, so it showed as a row with a process and
+    /// no model, no cost and no tokens.
+    #[test]
+    fn codex_profiles_are_the_directories_holding_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        for (name, signed_in) in [
+            (".codex", true),
+            (".codex-work", true),
+            // Logged out: a folder, not an account.
+            (".codex-old", false),
+        ] {
+            let profile = home.join(name);
+            std::fs::create_dir_all(profile.join("sessions")).expect("mkdir");
+            if signed_in {
+                std::fs::write(profile.join("auth.json"), "{}").expect("write");
+            }
+        }
+        // Claude's credential file does not make a Codex profile, and the two
+        // harnesses do not see each other's directories.
+        std::fs::create_dir_all(home.join(".claude")).expect("mkdir");
+        std::fs::write(home.join(".claude").join(".credentials.json"), "{}").expect("write");
+
+        let found = profiles_in(home, Provider::Codex);
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["default", "work"], "{found:?}");
+        assert_eq!(found[0].dir, home.join(".codex"));
+        assert!(found.iter().all(|p| p.provider == Provider::Codex));
+
+        // And a transcript is attributed to the account it lives under, by the
+        // same longest-match rule the Claude side documents.
+        let named = |path: &Path| -> Option<String> {
+            found
+                .iter()
+                .filter(|p| path.starts_with(&p.dir))
+                .max_by_key(|p| p.dir.as_os_str().len())
+                .map(|p| p.name.clone())
+        };
+        assert_eq!(
+            named(&home.join(".codex-work/sessions/2026/a.jsonl")).as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            named(&home.join(".codex/sessions/2026/a.jsonl")).as_deref(),
+            Some("default")
+        );
+    }
+
+    /// The column exists to tell one account from another, so what decides it
+    /// is whether a single harness has two — not how many harnesses there are.
+    ///
+    /// The bug this closes: counting every profile in view meant an ordinary
+    /// machine with Claude Code and Codex each signed in once had a PROFILE
+    /// column reading `default` on every row.
+    #[test]
+    fn the_profile_column_answers_to_one_harness_holding_two_accounts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let make = |name: &str, credential: &str| {
+            let path = home.join(name);
+            std::fs::create_dir_all(&path).expect("mkdir");
+            std::fs::write(path.join(credential), "{}").expect("write");
+        };
+        // One account each: nothing to distinguish.
+        make(".claude", ".credentials.json");
+        make(".codex", "auth.json");
+        let most = |home: &Path| {
+            PROFILED
+                .iter()
+                .map(|(provider, _, _)| profiles_in(home, *provider).len())
+                .max()
+                .unwrap_or(0)
+        };
+        assert_eq!(most(home), 1);
+
+        // A second Codex subscription is the case the column is for.
+        make(".codex-work", "auth.json");
+        assert_eq!(most(home), 2);
+    }
+
     #[test]
     fn the_default_profile_leads_and_the_rest_are_ordered() {
         let dir = std::env::temp_dir().join(format!("cctop-prof2-{}", std::process::id()));
@@ -726,7 +906,7 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             std::fs::write(path.join(".credentials.json"), "{}").unwrap();
         }
-        let names: Vec<String> = claude_profiles_in(&dir)
+        let names: Vec<String> = profiles_in(&dir, Provider::Claude)
             .into_iter()
             .map(|p| p.name)
             .collect();
@@ -740,7 +920,7 @@ mod tests {
     #[test]
     fn an_unreadable_home_still_offers_the_usual_place() {
         let missing = Path::new("/nonexistent-home-cctop");
-        assert!(claude_profiles_in(missing).is_empty());
+        assert!(profiles_in(missing, Provider::Claude).is_empty());
         assert_eq!(
             claude_config_dir_in(missing).join("projects"),
             missing.join(".claude").join("projects")
