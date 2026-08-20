@@ -1033,14 +1033,17 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     // The first of a harness's accounts is the one it would use unasked, and
     // naming it costs width the figures need — so only the others are
     // qualified. On the overwhelming majority of machines there are no others.
-    let mut accounts: Vec<(String, &crate::quota::ProviderStatus)> = Vec::new();
+    // The harness travels alongside the label rather than being read back out
+    // of it: `Codex (work)` is still Codex, and a hint chosen by comparing the
+    // label told a Codex account to run `claude login`.
+    let mut accounts: Vec<(String, &'static str, &crate::quota::ProviderStatus)> = Vec::new();
     for (harness, qs) in [("Claude", &app.quota.claude), ("Codex", &app.quota.codex)] {
         for (i, q) in qs.iter().enumerate() {
             let name = match i {
                 0 => harness.to_string(),
                 _ => format!("{harness} ({})", q.profile),
             };
-            accounts.push((name, &q.status));
+            accounts.push((name, harness, &q.status));
         }
     }
 
@@ -1056,7 +1059,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     .spacing(2)
     .split(inner);
 
-    for (i, (name, status)) in accounts.iter().enumerate() {
+    for (i, (name, harness, status)) in accounts.iter().enumerate() {
         let mut spans = vec![Span::styled(format!("{name} "), theme::label())];
         // Each failure mode gets its own message: an expired sign-in needs the
         // user to act, a rate-limit clears on its own, and "not signed in" is
@@ -1072,7 +1075,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled("API billing, no limits", theme::dim()));
             }
             crate::quota::ProviderStatus::Expired => {
-                let cmd = if name == "Codex" {
+                let cmd = if *harness == "Codex" {
                     "codex login"
                 } else {
                     "claude login"
@@ -1602,6 +1605,59 @@ mod tests {
         let (a, _) = layout.workspace_new.expect("no new-tab hit region");
         assert!(layout.workspace_new_at(a, 0));
         assert!(!layout.workspace_new_at(a, 1));
+    }
+
+    /// A named account is still its own harness's account.
+    ///
+    /// The bug this closes was on screen the first time the limits panel drew
+    /// two Codex logins: the expired-sign-in hint was chosen by comparing the
+    /// *label*, and `Codex (work)` is not `Codex`, so it told a Codex account
+    /// to run `claude login`.
+    #[test]
+    fn an_expired_account_is_told_to_log_into_its_own_harness() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let expired = |profile: &str| crate::quota::ProfileQuota {
+            profile: profile.to_string(),
+            status: crate::quota::ProviderStatus::Expired,
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.quota.claude = vec![expired("default")];
+        app.quota.codex = vec![expired("default"), expired("work")];
+
+        let (cols, rows) = (200u16, 50u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        terminal
+            .draw(|frame| {
+                draw(frame, &mut app);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Every account shares one line, so the assertion has to look at this
+        // account's own segment of it — the column to its left is also a Codex
+        // one, and would satisfy a whole-line match on its behalf.
+        let line = screen
+            .lines()
+            .find(|l| l.contains("Codex (work)"))
+            .expect("the named account was not drawn");
+        let mine = &line[line.find("Codex (work)").expect("found above")..];
+        assert!(
+            mine.contains("codex login") && !mine.contains("claude login"),
+            "a Codex account was pointed at another harness's login: {mine:?}"
+        );
     }
 
     /// One line per entry, whether or not it can run.
