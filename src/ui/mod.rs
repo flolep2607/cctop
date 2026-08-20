@@ -3929,13 +3929,32 @@ mod tests {
         app.tabs = vec![named("a"), named("b"), named("c")];
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
 
-        // Press on the first tab: it is shown, and picked up.
+        // Press on the first tab: it is picked up, and shown — where there is
+        // anything to show. These tabs are shared ones, which is to say tmux
+        // sessions, and `go_to_tab` attaches before it switches: on a machine
+        // with no tmux the attach cannot succeed, and the documented outcome is
+        // to stay put and say why rather than to open a blank tab. Both are the
+        // gesture working; only one of them is reachable on a given runner.
         app.on_mouse(at(press, 12), &layout);
-        assert_eq!(app.tab, 1);
-        assert_eq!(app.drag_tab, Some(1));
+        assert_eq!(app.drag_tab, Some(1), "the press did not pick the tab up");
+        match crate::tmux::available() {
+            true => assert_eq!(app.tab, 1, "the press did not show the tab"),
+            false => {
+                assert_eq!(app.tab, 0, "a tab that cannot be attached moved the view");
+                let status = app
+                    .status
+                    .as_ref()
+                    .map(|(s, _)| s.clone())
+                    .unwrap_or_default();
+                assert!(status.contains("Could not open"), "silently: {status:?}");
+            }
+        }
 
         // Carried to the third slot, one tab at a time as the pointer crosses
-        // them, with the view following it.
+        // them, with the view following it. The view is what is under test from
+        // here, so it starts where the press would have put it — which on a
+        // machine without tmux is somewhere the press could not reach.
+        app.tab = 1;
         app.on_mouse(at(drag, 16), &layout);
         app.on_mouse(at(drag, 20), &layout);
         assert_eq!(titles(&app), ["b", "c", "a"]);
