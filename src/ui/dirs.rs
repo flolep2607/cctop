@@ -120,6 +120,16 @@ pub(super) fn complete(typed: &str, hits: &[PathBuf]) -> Option<String> {
             crate::util::tildify(&shared)
         }
     };
+    // Windows takes either separator, and the field is the user's own line: a
+    // Tab that answered `C:/src/a` with `C:\src\alpha` would respell the path
+    // it was completing, and the check below would never be true again — two
+    // spellings of one directory never compare equal, so Tab on a finished path
+    // would redraw it forever.
+    let sep = std::path::MAIN_SEPARATOR;
+    let filled = match sep != '/' && typed.contains('/') && !typed.contains(sep) {
+        true => filled.replace(sep, "/"),
+        false => filled,
+    };
     (filled != typed).then_some(filled)
 }
 
@@ -158,7 +168,13 @@ mod tests {
         }
         std::fs::write(root.path().join("afile"), "").expect("write");
 
-        let base = root.path().to_string_lossy().into_owned();
+        // Spelled with `/` throughout, which Windows accepts as readily as its
+        // own separator: the assertions below are about what the field does
+        // with a path, not about which of the two the platform prefers.
+        let base = root
+            .path()
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
         // A trailing separator asks for everything inside, files excluded and
         // dotted names left out until they are asked for by name.
         let all = suggest(&format!("{base}/"), &[]);
@@ -188,6 +204,30 @@ mod tests {
 
         // Nothing left to add: Tab on a finished path must not redraw it.
         assert_eq!(complete(&format!("{base}/al"), &hits), None);
+    }
+
+    /// Tab answers in the spelling it was asked in.
+    ///
+    /// On Windows this is the difference between a field that settles and one
+    /// that rewrites itself: `suggest` joins with `\`, the line was typed with
+    /// `/`, and a completion that swapped them would leave the two spellings
+    /// unequal forever — so Tab would keep "completing" a path that was already
+    /// finished. Elsewhere there is only one separator and this is a tautology.
+    #[test]
+    fn completing_keeps_the_separator_that_was_typed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(root.path().join("beta")).expect("mkdir");
+        let base = root
+            .path()
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+
+        let hits = suggest(&format!("{base}/be"), &[]);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        let filled = complete(&format!("{base}/be"), &hits).expect("something to add");
+        assert_eq!(filled, format!("{base}/beta/"));
+        // And having been filled in, it is finished: nothing more to add.
+        assert_eq!(complete(&filled, &suggest(&filled, &[])), None);
     }
 
     /// The empty field is the case the feature exists for: nothing typed, and
