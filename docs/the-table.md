@@ -229,6 +229,18 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `F12` | Back to the dashboard, leaving everything running |
 
+Every function key is cctop's, inside a pane as much as on the dashboard: none
+of them is passed to the agent. `F10` (quit) and `F5` (refresh) act where you
+press them; `F12` returns to the dashboard; `F1`, `F3`, `F6`, `F7`, and `F8`
+bring the dashboard forward and then do what they do there, since a search box
+or a sort order over a pane would be drawn on a screen the agent is repainting.
+An unbound function key does nothing rather than reaching the agent as an escape
+sequence.
+
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+In the tab bar, drag a tab to move it along the bar, and right-click one to
+rename it: `3:claude-4` says nothing about what that agent is doing, and the
+name you give it follows the tab into every cctop on the machine.

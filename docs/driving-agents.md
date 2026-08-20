@@ -83,7 +83,18 @@ type or paste a path, `~` included, `Enter` to take it and `Esc` to keep the one
 it had. An empty field means the directory cctop itself was started in. A path
 that does not name a directory is refused in the field rather than at launch —
 by then the launcher is gone, and the failure arrives from inside the pty as a
-message about spawning. Reattaching to a running agent does not offer this: that
+message about spawning.
+
+You do not have to remember the path. The field lists what it can see under
+itself: with nothing typed, the projects cctop has seen agents run in, newest
+first; type part of a name and the list narrows by substring, so `api` finds
+`~/work/api` without the `~/work`. Once the text reads as a path — anything with
+a `/` in it — the list comes off the disk instead: the directories under it,
+hidden ones only once you type the dot. `Tab` fills in as far as the entries
+agree (one match completes outright and adds the `/`, so you can walk down a
+tree a keystroke at a time), `↑`/`↓` move into the list and back out into the
+text, and `Enter` on a highlighted entry takes it. Clicking works too: once to
+pick, again to take it. Reattaching to a running agent does not offer this: that
 agent is already somewhere, and a path typed for it would be ignored. `Alt+v` and `Alt+s` split
 the tab you are in, side by side or stacked, so `claude` and a shell for
 `git diff` are one keystroke apart. Fresh tabs start in the directory where you
@@ -164,9 +175,12 @@ cctop is the opposite and leaves them running. A pane opened onto someone
 else's session with `a` only stops watching.
 
 Everything cctop does not claim goes to the focused agent, `Ctrl-C` included:
-inside a pane, that interrupts the agent rather than quitting cctop. `F12` and
-`Alt` are what cctop keeps — the function keys because they are the ones agents
-never want, and `Alt` because `Ctrl` is the agent's. The full list is in
+inside a pane, that interrupts the agent rather than quitting cctop. The
+function keys and `Alt` are what cctop keeps — the function keys because they
+are the ones agents never want, and `Alt` because `Ctrl` is the agent's. No
+function key is passed on: `F10` quits and `F5` refreshes where you pressed
+them, `F12` goes back to the dashboard, and the rest bring the dashboard
+forward and act there. The full list is in
 [Reading the table](the-table.md#every-key).
 
 ## Getting pinged when a session needs you

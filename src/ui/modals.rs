@@ -173,6 +173,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "Alt+Shift+← / →",
             "Move this tab along the bar (or drag it with the mouse)",
         ),
+        item("Right-click", "Rename the tab under the pointer"),
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
@@ -706,7 +707,17 @@ pub(super) fn draw_launch(
     // directory is stated; scrolling that off would answer "in which project?"
     // with silence for exactly the launches that need asking about.
     // Two for the borders, two more for what `centered` will not give.
-    let room = (area.height as usize).saturating_sub(4 + FOOTER).max(1);
+    // The suggestions live in the footer while the field is open: they are what
+    // the field is being typed against, so scrolling them off would leave the
+    // key that fills them in with nothing to explain it.
+    let editing = app.mode == super::Mode::LaunchCwd;
+    let hits: &[std::path::PathBuf] = match editing {
+        true => &app.launch_cwd_hits,
+        false => &[],
+    };
+    let room = (area.height as usize)
+        .saturating_sub(4 + FOOTER + hits.len())
+        .max(1);
     let total = rows.len();
     let scrolled = total > room;
     let cursor_line = choice_lines.get(app.launch_cursor).copied().unwrap_or(0);
@@ -723,7 +734,6 @@ pub(super) fn draw_launch(
     // nothing about reattaching, which lands wherever the agent already is.
     let picked = choices.get(app.launch_cursor);
     let picked_waiting = matches!(picked, Some(tabs::Choice::Waiting(_)));
-    let editing = app.mode == super::Mode::LaunchCwd;
     lines.push(if editing {
         // The field, in place of the line it replaces. Editing here rather than
         // in a modal of its own keeps the list of agents on screen: which agent
@@ -771,6 +781,41 @@ pub(super) fn draw_launch(
             Style::default().fg(theme::colors().label),
         ))
     });
+    // What the field can see, under the field. Half a path plus this list is
+    // how a directory gets reached without being recalled: a name matches the
+    // projects agents have run in, and anything with a separator in it is read
+    // off the disk.
+    let mut hit_lines: Vec<usize> = Vec::new();
+    for (i, dir) in hits.iter().enumerate() {
+        let selected = app.launch_cwd_pick == Some(i);
+        // The tail, like the field itself: the part that distinguishes two
+        // long paths is their end, and the marker keeps the column of names
+        // clear of the `in` line above it.
+        let shown = tail(
+            &crate::util::tildify(&dir.to_string_lossy()),
+            WIDTH as usize - 8,
+        );
+        hit_lines.push(lines.len());
+        lines.push(Line::from(vec![
+            Span::styled(
+                match selected {
+                    true => " › ",
+                    false => "   ",
+                },
+                theme::dim(),
+            ),
+            Span::styled(
+                shown,
+                match selected {
+                    true => Style::default()
+                        .bg(theme::colors().selected_bg)
+                        .fg(Color::White),
+                    false => theme::dim(),
+                },
+            ),
+        ]));
+    }
+
     // Only for an agent the profile reaches, and only where there is more than
     // one to be in: on a machine with a single account this says nothing, and a
     // line offering a key that changes nothing is worse than no line.
@@ -786,6 +831,7 @@ pub(super) fn draw_launch(
         ]));
     }
     let keys = match (editing, picked_waiting) {
+        (true, _) if !hits.is_empty() => " Enter accept  Tab fill in  ↑/↓ pick  Esc cancel",
         (true, _) => " Enter accept  Esc keep the old one",
         (false, true) => " ↑/↓  Enter reattach  Esc cancel",
         (false, false) => " ↑/↓  Enter start  Esc cancel",
@@ -810,6 +856,13 @@ pub(super) fn draw_launch(
     };
     let (outer, inner) = modal(frame, area, title, lines, WIDTH);
     layout.modal_rect = Some(outer);
+    // Clickable for the same reason the choices are: the list is there to be
+    // read, and a path you can see but not click reads as decoration.
+    layout.launch_cwd_rows = hit_lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| (inner.y + line as u16, i))
+        .collect();
     layout.launch_rows = choice_lines
         .into_iter()
         .enumerate()
@@ -1164,6 +1217,49 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(" Enter send   Esc cancel", theme::dim())),
     ];
     modal(frame, area, "Send to session", lines, 64);
+}
+
+/// Renaming a workspace tab, opened by right-clicking it in the bar.
+///
+/// The old name is shown rather than pre-filled into the field: the reason to
+/// rename `3:claude-4` is that it says nothing, so starting from it would only
+/// have to be deleted first. It is still on screen because the bar behind the
+/// modal may have scrolled the tab out of view.
+///
+/// The rectangle is recorded, unlike the other one-line fields, because this
+/// modal is reached by mouse: a click off it dismisses it, which is what
+/// anything opened by a click should answer to.
+pub(super) fn draw_rename_tab(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut super::render::Layout,
+) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" Now called ", theme::dim()),
+            Span::styled(app.rename_was.clone(), theme::value()),
+        ]),
+        Line::from(Span::styled(
+            " The name follows the tab into every cctop on this machine.",
+            theme::dim(),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::raw(" > "),
+            Span::styled(
+                app.rename_input.clone(),
+                Style::default()
+                    .fg(theme::colors().value)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(theme::colors().accent)),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(" Enter rename   Esc cancel", theme::dim())),
+    ];
+    let (outer, _) = modal(frame, area, "Rename tab", lines, 64);
+    layout.modal_rect = Some(outer);
 }
 
 // ---------------------------------------------------------------------------

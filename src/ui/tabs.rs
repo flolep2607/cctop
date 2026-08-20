@@ -425,6 +425,27 @@ impl Tab {
         true
     }
 
+    /// Call the tab something other than the command that started it.
+    ///
+    /// Written onto the tmux session as well as the pane, because the label is
+    /// how every *other* cctop names this tab — and how this one names it again
+    /// after a detach. A rename only the pane remembered would come back as the
+    /// old name the moment either happened.
+    ///
+    /// The first pane, not the focused one: a split tab is titled after its
+    /// first pane with a count of the rest, so that is the label the bar shows.
+    pub fn rename(&mut self, name: String) {
+        if let Some(pane) = self.panes.first_mut() {
+            if let Some(session) = pane.tmux.as_deref() {
+                crate::tmux::set_label(session, &name);
+            }
+            pane.label = name;
+        } else if let Some(shared) = self.shared.as_mut() {
+            crate::tmux::set_label(&shared.name, &name);
+            shared.label = name;
+        }
+    }
+
     /// What the tab bar calls this tab.
     pub fn title(&self) -> String {
         match self.panes.len() {

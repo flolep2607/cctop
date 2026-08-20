@@ -38,6 +38,8 @@ pub struct Layout {
     pub(super) modal_rect: Option<Rect>,
     /// `(row, choice_index)` for each row of the launcher's list.
     pub(super) launch_rows: Vec<(u16, usize)>,
+    /// `(row, suggestion_index)` for each directory the `in` field is offering.
+    pub(super) launch_cwd_rows: Vec<(u16, usize)>,
     /// `(row, item_index)` for each entry of the row menu.
     pub(super) menu_rows: Vec<(u16, usize)>,
     /// Tool Activity sidebar: `(x_end, y_start, first_index, row_count)`.
@@ -123,6 +125,14 @@ impl Layout {
             .is_some_and(|r| r.contains((col, row).into()))
     }
 
+    /// Index of the directory suggestion under the cursor, if any.
+    pub fn launch_cwd_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.in_modal(col, row)
+            .then(|| self.launch_cwd_rows.iter().find(|(y, _)| *y == row))
+            .flatten()
+            .map(|(_, i)| *i)
+    }
+
     /// Index of the launcher choice under the cursor, if any.
     /// The pane under `(col, row)`, and where in its agent's screen that is.
     pub fn pane_at(&self, col: u16, row: u16) -> Option<(usize, u16, u16)> {
@@ -186,8 +196,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         draw_overview(frame, chunks[0], app);
         draw_panes(frame, chunks[1], app, &mut layout);
         draw_footer(frame, chunks[2], app);
-        if matches!(app.mode, Mode::Launch | Mode::LaunchCwd) {
-            modals::draw_launch(frame, area, app, &mut layout);
+        match app.mode {
+            Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
+            // F10 is cctop's inside a pane, and when there is an agent to warn
+            // about it raises a question. Drawn here as well as on the
+            // dashboard, because a question asked on a screen you are not
+            // looking at is indistinguishable from a key that did nothing —
+            // and the keyboard is waiting on the answer either way.
+            Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
+            // A tab is renamed by right-clicking it, and the bar is on screen
+            // inside a tab as much as over the dashboard.
+            Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
+            _ => {}
         }
         return layout;
     }
@@ -232,6 +252,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
+        Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
         // The same modal: the directory field replaces one line of it, so the
         // list of agents stays on screen while the path is being typed.
         Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
@@ -1424,6 +1445,7 @@ mod tests {
             tool_log: Some((19, 21, 4)),
             modal_rect: Some(Rect::new(10, 8, 20, 6)),
             launch_rows: vec![(10, 0), (11, 1)],
+            launch_cwd_rows: vec![(12, 0)],
             menu_rows: vec![(9, 0), (10, 1)],
             pane_rects: vec![Rect::new(1, 7, 40, 10)],
         };
@@ -1433,6 +1455,12 @@ mod tests {
         assert_eq!(layout.launch_row_at(15, 12), None);
         // Same row, but outside the modal: still not a choice.
         assert_eq!(layout.launch_row_at(5, 11), None);
+
+        // The directory suggestions are their own targets, on rows the choices
+        // above them do not claim.
+        assert_eq!(layout.launch_cwd_row_at(15, 12), Some(0));
+        assert_eq!(layout.launch_cwd_row_at(15, 11), None);
+        assert_eq!(layout.launch_cwd_row_at(5, 12), None);
 
         // The row menu is hit-tested the same way, and by the same rule: a
         // click outside the modal rectangle is not the menu's, whatever row it

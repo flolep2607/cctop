@@ -450,12 +450,18 @@ pub struct Running {
     /// and reattaching to it from here would leave the two clients arguing over
     /// one window's size.
     pub attached: bool,
-    /// When the session last produced output, in unix seconds.
+    /// When the session's window last produced output, in unix seconds.
     ///
-    /// tmux keeps this whether or not anyone is attached, which is what lets a
-    /// tab nobody is watching still say its agent has gone quiet — the same
-    /// reading a pane takes off its own screen, from the one place that has it
-    /// when there is no pane.
+    /// This is what lets a tab nobody is watching still say its agent has gone
+    /// quiet — the same reading a pane takes off its own screen, from the one
+    /// place that has it when there is no pane.
+    ///
+    /// `window_activity` and not `session_activity`, which is not what its name
+    /// suggests: tmux advances the session's clock on *client* activity, so a
+    /// detached session's stands still however much its agent prints. Reading
+    /// that one drew every unwatched agent as idle a few seconds after the last
+    /// keystroke — and, with a tool call in flight, blinked its tab as if it
+    /// were holding a permission prompt. The window's clock follows the output.
     pub activity: Option<u64>,
     /// What the cctop that started this agent called its tab, when it said.
     ///
@@ -484,7 +490,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{session_activity}\t#{@cctop_label}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}",
         ])
         .output()
     else {
@@ -848,6 +854,68 @@ mod tests {
             "placeholder window left over"
         );
         assert!(agent.is_some_and(|p| p > 0), "no agent in the session");
+    }
+
+    /// An agent nobody is attached to still has to read as busy while it is
+    /// printing. `session_activity` does not say so — tmux advances that on
+    /// client activity, so a detached session's stands still — and reading it
+    /// blinked every unwatched working tab as if it were asking a question.
+    /// Only a real detached session producing output shows the difference.
+    #[test]
+    fn a_detached_session_that_is_printing_never_reads_as_quiet() {
+        if !available() {
+            eprintln!("skipping: tmux not installed");
+            return;
+        }
+        let _turn = test_lock();
+        let ours = format!("cctop-probe-busy-{}", std::process::id());
+        assert!(
+            Command::new("tmux")
+                .args([
+                    "new-session",
+                    "-d",
+                    "-s",
+                    &ours,
+                    "--",
+                    "sh",
+                    "-c",
+                    "while true; do date; sleep 0.2; done",
+                ])
+                .status()
+                .is_ok_and(|s| s.success()),
+            "could not start {ours}"
+        );
+
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        };
+        let first = wait_for(|| running().into_iter().find(|s| s.name == ours))
+            .and_then(|s| s.activity)
+            .expect("no activity reported for a session that is printing");
+        // Long enough that a clock which only moves on keystrokes has visibly
+        // stopped: the stale reading is what made the tab go quiet.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let later = running()
+            .into_iter()
+            .find(|s| s.name == ours)
+            .and_then(|s| s.activity);
+        let _ = kill(&ours);
+
+        let later = later.expect("the session stopped being listed");
+        assert!(
+            later > first,
+            "the clock stood still while the agent printed: {first} then {later}"
+        );
+        // And it is current, not merely moving — the judgement made of it is
+        // "has this gone quiet in the last couple of seconds".
+        assert!(
+            now().saturating_sub(later) <= 2,
+            "reported {later}, now {}",
+            now()
+        );
     }
 
     /// tmux creates sessions and spawns their commands asynchronously, so poll

@@ -1,6 +1,7 @@
 //! Terminal UI: application state, the worker thread, and the event loop.
 
 pub mod columns;
+mod dirs;
 mod input;
 pub mod menu;
 mod modals;
@@ -118,6 +119,8 @@ pub enum Mode {
     Hooks,
     /// Offering to install tmux, a launch having found it missing.
     TmuxInstall,
+    /// Typing a new name for a workspace tab, opened by right-clicking it.
+    RenameTab,
 }
 
 /// Everything [`App::open_tab`] needs beyond the command itself.
@@ -631,8 +634,32 @@ pub struct App {
     /// Set when the typed directory does not name one, so the field can say so
     /// where it is rather than behind the modal that covers the status line.
     pub launch_cwd_bad: bool,
+    /// Directories agents are already known to have run in, newest first, as of
+    /// the moment the field opened.
+    ///
+    /// A snapshot for the same reason the launcher's list of agents is one: a
+    /// list that reshuffles under the cursor while a walk lands means Enter
+    /// takes a directory other than the one highlighted.
+    pub launch_cwd_known: Vec<std::path::PathBuf>,
+    /// What the field is currently offering for what has been typed. Every one
+    /// of them is a directory that exists, which is what lets a picked
+    /// suggestion skip the check the typed path gets.
+    pub launch_cwd_hits: Vec<std::path::PathBuf>,
+    /// The suggestion under the cursor, when the cursor has left the text.
+    /// `None` means the field is being typed in, and Enter takes what is typed.
+    pub launch_cwd_pick: Option<usize>,
     /// Line being typed into the selected session's terminal.
     pub send_input: String,
+    /// The new name being typed for a tab, and which tab it is for.
+    ///
+    /// The title as it stood when the rename opened is kept alongside the
+    /// index because the bar moves under a modal: a tab whose agent exits is
+    /// retired mid-typing and every index after it shifts down one. Checking
+    /// the title back means a rename either lands on the tab it was aimed at or
+    /// is dropped, rather than renaming whichever tab slid into the slot.
+    pub rename_input: String,
+    pub rename_tab: usize,
+    pub rename_was: String,
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
     /// page by half a screen.
     pub list_height: u16,
@@ -881,6 +908,9 @@ impl App {
             menu_cursor: 0,
             cost_input: String::new(),
             send_input: String::new(),
+            rename_input: String::new(),
+            rename_tab: 0,
+            rename_was: String::new(),
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
@@ -936,6 +966,9 @@ impl App {
             launch_cwd: None,
             launch_cwd_input: String::new(),
             launch_cwd_bad: false,
+            launch_cwd_known: Vec::new(),
+            launch_cwd_hits: Vec::new(),
+            launch_cwd_pick: None,
             tmux_install: None,
             tmux_deferred: None,
             tmux_declined: false,
@@ -1964,6 +1997,13 @@ impl App {
 /// Rows moved by PageUp/PageDown and the fallback for half-page scrolls.
 const PAGE: isize = 10;
 
+/// Directories the launcher's `in` field will remember, at most.
+///
+/// The list is a way of not having to recall a path, so it is worth being
+/// generous — but it is filtered by what is typed, and a machine with hundreds
+/// of transcripts would otherwise stat every project on it on every keystroke.
+const MAX_KNOWN_DIRS: usize = 40;
+
 /// Half-period of the tab-bar blink. Slow enough to read the title through,
 /// fast enough to catch the eye.
 const BLINK_MS: u128 = 600;
@@ -2848,8 +2888,120 @@ impl App {
             .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
             .unwrap_or_default();
         self.launch_cwd_bad = false;
+        self.launch_cwd_known = self.known_dirs();
+        self.launch_cwd_suggest();
         self.mode = Mode::LaunchCwd;
         self.needs_redraw = true;
+    }
+
+    /// Directories agents are known to have run in, newest first.
+    ///
+    /// Drawn from the dashboard's own rows, which is the list of projects cctop
+    /// has any evidence of, plus where it was started and where this launch was
+    /// already headed — those two are what "in this directory" and the line the
+    /// field replaces already meant, and a suggestion list that omitted them
+    /// would look like it had forgotten them.
+    ///
+    /// Only directories that still exist: a session's recorded project can have
+    /// been moved or deleted since, and offering one leads to the refusal this
+    /// list exists to avoid.
+    fn known_dirs(&self) -> Vec<std::path::PathBuf> {
+        let mut recent: Vec<&Session> = self.sessions.iter().collect();
+        // Newest first, so the projects worked on today are the ones on screen
+        // before anything is typed.
+        recent.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+
+        let mut seen = HashSet::new();
+        self.launch_cwd
+            .clone()
+            .into_iter()
+            .chain(self.launch_root.clone())
+            .chain(
+                self.launch_offer
+                    .iter()
+                    .filter_map(|c| c.cwd().map(std::path::Path::to_path_buf)),
+            )
+            .chain(
+                recent
+                    .iter()
+                    .filter(|s| !s.label_source.is_empty())
+                    .map(|s| std::path::PathBuf::from(&s.label_source)),
+            )
+            .filter(|dir| seen.insert(dir.clone()) && dir.is_dir())
+            .take(MAX_KNOWN_DIRS)
+            .collect()
+    }
+
+    /// Recompute what the field is offering, after anything that changed what
+    /// is in it.
+    ///
+    /// The pick goes with it: a suggestion highlighted for the old text would
+    /// otherwise still be what Enter took, which is a directory the field is no
+    /// longer showing.
+    pub(super) fn launch_cwd_suggest(&mut self) {
+        self.launch_cwd_hits = dirs::suggest(&self.launch_cwd_input, &self.launch_cwd_known);
+        self.launch_cwd_pick = None;
+    }
+
+    /// Move the cursor through the suggestions, or back into the text.
+    ///
+    /// Leaving the list at the top rather than wrapping to the bottom is what
+    /// makes the text reachable again: the field is the thing being edited, and
+    /// a list that cycled would trap the cursor in it.
+    pub(super) fn step_launch_cwd(&mut self, down: bool) {
+        let last = self.launch_cwd_hits.len().saturating_sub(1);
+        self.launch_cwd_pick = match (self.launch_cwd_pick, down) {
+            (_, _) if self.launch_cwd_hits.is_empty() => None,
+            (None, true) => Some(0),
+            (None, false) => Some(last),
+            (Some(i), true) => Some((i + 1).min(last)),
+            (Some(0), false) => None,
+            (Some(i), false) => Some(i - 1),
+        };
+        self.needs_redraw = true;
+    }
+
+    /// Fill in as much of the path as the suggestions agree on.
+    ///
+    /// Completing re-suggests: `~/c` completing to `~/cctop/` is only useful if
+    /// the list then shows what is inside it, which is how a deep path gets
+    /// walked to without being remembered.
+    pub(super) fn complete_launch_cwd(&mut self) {
+        // The highlighted one, if the cursor is in the list — there Tab means
+        // "that one", the same as Enter, minus the launching.
+        let filled = match self
+            .launch_cwd_pick
+            .and_then(|i| self.launch_cwd_hits.get(i))
+        {
+            Some(dir) => format!("{}/", crate::util::tildify(&dir.to_string_lossy())),
+            None => match dirs::complete(&self.launch_cwd_input, &self.launch_cwd_hits) {
+                Some(filled) => filled,
+                None => return,
+            },
+        };
+        if filled.chars().count() > input::MAX_PATH_INPUT {
+            return;
+        }
+        self.launch_cwd_input = filled;
+        self.launch_cwd_bad = false;
+        self.launch_cwd_suggest();
+        self.needs_redraw = true;
+    }
+
+    /// Take the highlighted suggestion, or what is typed if there is none.
+    ///
+    /// A suggestion is a directory this code listed off the disk moments ago, so
+    /// it is taken without the check the typed path gets — and it is taken by
+    /// filling the field with it first, so that a suggestion which has since
+    /// been deleted is refused in the field like anything else.
+    pub(super) fn take_launch_cwd(&mut self) {
+        if let Some(dir) = self
+            .launch_cwd_pick
+            .and_then(|i| self.launch_cwd_hits.get(i))
+        {
+            self.launch_cwd_input = crate::util::tildify(&dir.to_string_lossy());
+        }
+        self.accept_launch_cwd();
     }
 
     /// Take the typed directory, if it names one.
@@ -3976,6 +4128,80 @@ mod tests {
         assert_eq!(app.drag_tab, Some(1), "the tab is still in hand");
     }
 
+    /// Right-clicking a tab asks for a new name, and Enter puts it in the bar.
+    ///
+    /// The dashboard is not renamable and a right-click on it must fall through
+    /// untouched — it is the one entry in the bar that is not a tab.
+    #[test]
+    fn right_clicking_a_tab_renames_it() {
+        let named = |name: &str| {
+            tabs::Tab::shared(&crate::tmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+            })
+        };
+        let layout = render::Layout {
+            workspace_spans: vec![(0, 11, 0), (11, 15, 1), (15, 19, 2)],
+            ..Default::default()
+        };
+        let click = |column| event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Right),
+            column,
+            row: 0,
+            modifiers: event::KeyModifiers::NONE,
+        };
+        let typed = |app: &mut App, text: &str| {
+            for c in text.chars() {
+                app.on_key(key(KeyCode::Char(c)));
+            }
+        };
+
+        let mut app = test_app();
+        app.tabs = vec![named("a"), named("b")];
+
+        app.on_mouse(click(4), &layout);
+        assert_eq!(app.mode, Mode::List, "the dashboard offered to be renamed");
+
+        app.on_mouse(click(16), &layout);
+        assert_eq!(app.mode, Mode::RenameTab);
+        assert_eq!(app.rename_tab, 2);
+        assert_eq!(app.rename_was, "b");
+        typed(&mut app, "review");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(
+            app.tabs.iter().map(tabs::Tab::title).collect::<Vec<_>>(),
+            ["a", "review"]
+        );
+
+        // Esc leaves the name alone, and so does an empty field: blanking a tab
+        // would leave a numbered gap in the bar and no way back to it.
+        app.on_mouse(click(16), &layout);
+        typed(&mut app, "x");
+        app.on_key(key(KeyCode::Esc));
+        app.on_mouse(click(16), &layout);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.tabs.iter().map(tabs::Tab::title).collect::<Vec<_>>(),
+            ["a", "review"]
+        );
+
+        // The tab the right-click landed on has gone; the name goes nowhere
+        // rather than onto whichever tab took its place.
+        app.on_mouse(click(16), &layout);
+        app.tabs.remove(1);
+        typed(&mut app, "late");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.tabs.iter().map(tabs::Tab::title).collect::<Vec<_>>(),
+            ["a"]
+        );
+    }
+
     /// A paste on the dashboard is typing into whichever one-line box is open,
     /// and the line breaks in it must not go in: none of these inputs can show a
     /// second row or let you delete back onto one.
@@ -4292,6 +4518,63 @@ mod tests {
                 "where it would run scrolled off"
             );
         }
+    }
+
+    /// The suggestions are part of the footer, not part of the list: a short
+    /// terminal has to lose choices before it loses the paths being offered,
+    /// because they are what the field is being typed against.
+    #[test]
+    fn the_directory_suggestions_stay_on_screen_under_a_long_list() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path().join("chosen-project");
+        std::fs::create_dir(&project).expect("mkdir");
+
+        let mut app = test_app();
+        app.launch_offer = (0..20)
+            .map(|i| tabs::Choice::Start(vec![format!("agent-{i}")]))
+            .collect();
+        app.launch_cwd_known = vec![project.clone()];
+        app.launch_cwd_input = String::new();
+        app.launch_cwd_suggest();
+        app.launch_cwd_pick = Some(0);
+        app.mode = Mode::LaunchCwd;
+
+        let (cols, rows) = (80u16, 14u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = render::Layout::default();
+        terminal
+            .draw(|frame| layout = render::draw(frame, &mut app))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            text.contains("chosen-project"),
+            "the suggestion is not drawn"
+        );
+        assert!(text.contains("Tab fill in"), "the key that fills it in");
+
+        // And it is clickable where it was drawn, rather than on a row the
+        // choices above it also claim.
+        let (row, i) = *layout
+            .launch_cwd_rows
+            .first()
+            .expect("no clickable suggestion");
+        assert_eq!(i, 0);
+        assert!(row < rows, "the suggestion is drawn off screen");
+        assert!(
+            !layout.launch_rows.iter().any(|(y, _)| *y == row),
+            "a choice and a suggestion share row {row}"
+        );
     }
 
     /// The three ways the ownership decision can go, since only one of them is
@@ -4929,6 +5212,69 @@ mod tests {
         assert_eq!(app.mode, Mode::Launch);
     }
 
+    /// The field is the only place in cctop where a path has to be produced from
+    /// memory, so it offers what it can see: the projects agents have run in
+    /// before anything is typed, the directories under whatever is typed after.
+    #[test]
+    fn the_directory_field_offers_paths_instead_of_asking_you_to_recall_them() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path().join("api");
+        let deep = project.join("service");
+        std::fs::create_dir_all(&deep).expect("mkdir");
+        let gone = root.path().join("deleted");
+
+        let mut app = test_app();
+        // One project that still exists and one that does not: a recorded
+        // directory outlives the checkout it named.
+        app.sessions = vec![
+            session("a", true, &project.to_string_lossy()),
+            session("b", false, &gone.to_string_lossy()),
+        ];
+        app.launch_root = None;
+        app.edit_launch_cwd();
+
+        // Nothing typed, and the project is already on screen. The one that has
+        // since been deleted is not, because taking it could only fail.
+        assert_eq!(app.launch_cwd_hits, vec![project.clone()]);
+        assert!(!app.launch_cwd_hits.contains(&gone));
+
+        // The arrows move into the list and back out of it. Out, because the
+        // field is still what is being typed in.
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.launch_cwd_pick, Some(0));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.launch_cwd_pick, None);
+
+        // Tab on the highlighted project fills it in and then shows what is
+        // inside it, which is how a path nobody remembers gets walked to.
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(
+            app.launch_cwd_input,
+            format!("{}/", project.to_string_lossy())
+        );
+        assert_eq!(app.launch_cwd_hits, vec![deep.clone()]);
+        assert_eq!(app.launch_cwd_pick, None, "a fresh list picks nothing");
+
+        // Enter on a suggestion takes it without the refusal a mistyped path
+        // gets — it was listed off the disk moments ago.
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Launch);
+        assert!(!app.launch_cwd_bad);
+        assert_eq!(app.launch_cwd.as_deref(), Some(deep.as_path()));
+
+        // Typing still decides on its own: a path with no match offers nothing
+        // and is refused where it was typed, exactly as before.
+        app.edit_launch_cwd();
+        app.launch_cwd_input = root.path().join("nowhere").to_string_lossy().into_owned();
+        app.launch_cwd_suggest();
+        assert!(app.launch_cwd_hits.is_empty());
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.launch_cwd_bad);
+        assert_eq!(app.mode, Mode::LaunchCwd);
+    }
+
     /// Esc has to leave the launch as it was found, or it becomes a way to lose
     /// the setting you opened the field to change.
     #[test]
@@ -5465,6 +5811,85 @@ mod tests {
 
         app.on_key(key(KeyCode::F(10)));
 
+        assert!(app.should_quit);
+    }
+
+    /// The footer inside a pane advertises the function keys, so none of them
+    /// may reach the agent — and the ones that open something have to bring the
+    /// dashboard with them, or they land on a screen the agent is repainting.
+    #[test]
+    fn function_keys_are_cctops_inside_a_pane_and_bring_the_dashboard_with_them() {
+        // Each key, and the dashboard state it must leave behind.
+        for (code, mode) in [
+            (KeyCode::F(1), Mode::Help),
+            (KeyCode::F(3), Mode::Search),
+            (KeyCode::F(6), Mode::SortBy),
+            (KeyCode::F(7), Mode::AgeFilter),
+        ] {
+            let mut app = test_app();
+            app.tab = 1;
+            app.on_key(key(code));
+            assert_eq!(app.tab, 0, "{code:?} left the dashboard behind");
+            assert_eq!(app.mode, mode, "{code:?} did not open its modal");
+        }
+
+        // F12 is the pane's own key and F5 acts on the walk, so neither takes
+        // you off the agent — F5 says so on the footer instead.
+        let mut app = test_app();
+        app.tab = 1;
+        app.on_key(key(KeyCode::F(5)));
+        assert_eq!(app.tab, 1, "refreshing must not leave the agent");
+        assert!(app.status.is_some(), "the refresh said nothing");
+        app.on_key(key(KeyCode::F(12)));
+        assert_eq!(app.tab, 0);
+
+        // An unbound one is swallowed rather than delivered as an escape
+        // sequence for the agent to print.
+        let mut app = test_app();
+        app.tab = 1;
+        app.on_key(key(KeyCode::F(2)));
+        assert_eq!(app.tab, 1);
+        assert_eq!(app.mode, Mode::List);
+    }
+
+    /// Regression: F10 in a pane with a launched agent asks before it quits, and
+    /// the question was drawn on the dashboard only — so from a pane the key
+    /// looked dead while the keyboard was in fact waiting for `y`.
+    #[test]
+    fn the_quit_question_is_drawn_over_the_pane_that_raised_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        app.tab = 1;
+        app.hosted = Some((1234, "claude".into()));
+
+        app.on_key(key(KeyCode::F(10)));
+        assert!(!app.should_quit, "an owned agent is worth a question");
+        assert_eq!(app.mode, Mode::QuitConfirm);
+
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        terminal
+            .draw(|frame| {
+                render::draw(frame, &mut app);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            text.contains("quit anyway"),
+            "the question is not on the pane's screen"
+        );
+
+        // And the answer still lands: the modal owns the keyboard, not the pane.
+        app.on_key(key(KeyCode::Char('y')));
         assert!(app.should_quit);
     }
 
