@@ -2749,8 +2749,9 @@ impl App {
         self.shared_at = Some(Instant::now());
         let running = crate::tmux::running();
 
+        let was = self.tab;
         let mut index = 0;
-        let mut retired = false;
+        let mut retired: Vec<usize> = Vec::new();
         self.tabs.retain(|tab| {
             index += 1;
             let gone = tab.shared.as_ref().is_some_and(|s| {
@@ -2765,18 +2766,17 @@ impl App {
             if !gone {
                 return true;
             }
-            // The tabs after this one shift down by one, so a view sitting on any
-            // of them has to follow — the same fixup [`drop_empty_tabs`] does,
-            // and for the same reason.
+            // Where the view ends up is [`land_after`]'s answer, below: a tab
+            // retired out from under it has the same two corrections as one
+            // closed by hand.
             //
-            // [`drop_empty_tabs`]: Self::drop_empty_tabs
-            if self.tab >= index {
-                self.tab -= 1;
-            }
-            retired = true;
+            // [`land_after`]: Self::land_after
+            retired.push(index);
             false
         });
-        self.tab = self.tab.min(self.tabs.len());
+        if !retired.is_empty() {
+            self.land_after(was, &retired);
+        }
 
         // What tmux now says about the tabs already here. Activity above all:
         // it is how a tab nobody is attached to knows its agent has stopped, and
@@ -2807,7 +2807,7 @@ impl App {
             self.tabs.push(tabs::Tab::shared(agent));
             arrived = true;
         }
-        self.needs_redraw |= retired || arrived;
+        self.needs_redraw |= !retired.is_empty() || arrived;
     }
 
     /// The tmux sessions this cctop already has a pane onto.
@@ -3268,6 +3268,8 @@ impl App {
     /// Forget the tabs whose agents have all exited, keeping the view on
     /// something that still exists.
     pub fn drop_empty_tabs(&mut self) {
+        let was = self.tab;
+        let mut gone: Vec<usize> = Vec::new();
         let mut index = 0;
         self.tabs.retain(|tab| {
             index += 1;
@@ -3275,15 +3277,50 @@ impl App {
             if !tab.panes.is_empty() || tab.shared.is_some() {
                 return true;
             }
-            // The tabs after this one shift down by one, so a view sitting on
-            // any of them has to follow — otherwise closing tab 1 silently
-            // moves you to what used to be tab 2.
-            if self.tab >= index {
-                self.tab -= 1;
-            }
+            gone.push(index);
             false
         });
-        self.tab = self.tab.min(self.tabs.len());
+        if gone.is_empty() {
+            return;
+        }
+        self.land_after(was, &gone);
+    }
+
+    /// Where the view goes once `gone` — tab numbers, ascending — have left the
+    /// bar, given that it was on `was`.
+    ///
+    /// Two different corrections, which is why closing a tab used to be
+    /// confusing. A view on a *later* tab has to slide down by however many
+    /// went before it, or closing tab 1 silently moves you to what used to be
+    /// tab 2. A view on the tab that just closed has nowhere to slide to: its
+    /// number now belongs to the tab that was next to it, which is the one to
+    /// land on — walking backwards to the previous tab instead is what dropped
+    /// you onto the dashboard every time you closed the first tab.
+    ///
+    /// And it lands through [`go_to_tab`] rather than by assignment, because a
+    /// tab another cctop is on holds no pane until this one attaches to it: set
+    /// directly, the view arrives on a tab that draws nothing at all.
+    ///
+    /// [`go_to_tab`]: Self::go_to_tab
+    fn land_after(&mut self, was: usize, gone: &[usize]) {
+        let want = Self::landing(was, gone, self.tabs.len());
+        // `go_to_tab` answers a move to where it already is with nothing at
+        // all, and here the field still holds the number of a tab that is gone.
+        self.tab = 0;
+        self.go_to_tab(want);
+    }
+
+    /// The tab number to land on, kept separate from the move itself so the
+    /// arithmetic can be checked without a tmux server to attach to.
+    fn landing(was: usize, gone: &[usize], remaining: usize) -> usize {
+        let before = gone.iter().filter(|&&i| i < was).count();
+        match gone.contains(&was) {
+            // Stay on the number, unless it was the last tab in the bar — then
+            // the neighbour is the one before it, and with nothing left the
+            // dashboard is all there is to land on.
+            true => (was - before).min(remaining),
+            false => was - before,
+        }
     }
 
     /// Put the selected agent's own terminal on screen, in a tab of its own.
@@ -4081,6 +4118,64 @@ mod tests {
         // Keep the receiver alive so sends in tests don't fail.
         std::mem::forget(rx);
         App::with_prefs(Plan::Retail, tx, UiPrefs::default())
+    }
+
+    /// Closing a tab leaves you on the tab beside it, not on the dashboard.
+    ///
+    /// The bug this closes: the view was corrected by decrementing, which is
+    /// right for a tab that merely shifted down and wrong for the one that
+    /// closed — so closing tab 2 of three landed on tab 1, and closing the only
+    /// tab or the first one dropped you onto the dashboard with the agents you
+    /// were watching still there in the bar.
+    #[test]
+    fn closing_a_tab_lands_on_its_neighbour() {
+        // Three tabs, the middle one closed: its number now belongs to what was
+        // the third, which is the tab next to the one that went.
+        assert_eq!(App::landing(2, &[2], 2), 2);
+        // The last one closed: there is no tab to the right, so the neighbour
+        // is the one before it.
+        assert_eq!(App::landing(3, &[3], 2), 2);
+        // The first of several: still a neighbour, still not the dashboard.
+        assert_eq!(App::landing(1, &[1], 2), 1);
+        // The only tab: the dashboard is all that is left.
+        assert_eq!(App::landing(1, &[1], 0), 0);
+        // A tab closing before the one being watched slides the view down, so
+        // it stays on the same agent rather than the same number.
+        assert_eq!(App::landing(3, &[1], 2), 2);
+        // Several at once, from either side of the view.
+        assert_eq!(App::landing(4, &[1, 2], 3), 2);
+        assert_eq!(App::landing(2, &[2, 3], 1), 1);
+        // The dashboard is not a tab and never moves.
+        assert_eq!(App::landing(0, &[1], 1), 0);
+    }
+
+    /// And the whole way through, on real panes: the view ends up on the
+    /// neighbour's agent rather than on the dashboard.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn closing_a_pane_leaves_the_next_agent_on_screen() {
+        let mut app = test_app();
+        let mut children = Vec::new();
+        for name in ["first", "second"] {
+            let (child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+            children.push(child);
+            let pane = tabs::Pane::view_of(pid, name.to_string()).expect("attach");
+            app.tabs.push(tabs::Tab::new(pane));
+        }
+        // Watching the first of the two.
+        app.tab = 1;
+        app.close_pane();
+
+        assert_eq!(app.tabs.len(), 1, "the closed tab stayed in the bar");
+        assert_eq!(app.tab, 1, "closing the first tab left the view nowhere");
+        assert_eq!(
+            app.tabs[0].title(),
+            "second",
+            "the view landed on the wrong agent"
+        );
+        for child in &mut children {
+            let _ = child.kill();
+        }
     }
 
     /// A tab dragged along the bar takes its place there, and the view stays on
