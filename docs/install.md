@@ -82,11 +82,42 @@ already in place — so a network that fails at that moment costs you the summar
 and not the update, and you get the link instead.
 
 cctop checks for a new release once an hour in the background and, when one
-exists, says so in the footer. It never updates itself: the check only reports,
-and replacing the binary always takes an explicit `--update`. If you installed
-with `cargo install` or a package manager, update it the same way you installed
-it — `--update` will refuse rather than overwrite a managed install it cannot
-write to.
+exists, says so in the footer. The next time you start it, it installs that
+release before opening: the version was already known, so nothing is waited on
+to discover it, and the download is the only pause. It then prints what changed,
+waits for you to press Enter, and starts as the new version.
+
+Startup is the only moment it will do this. Nothing is open yet — no terminal
+held, no agent hosted, no pane to lose — so the new binary can simply take the
+place of the old one. That is not true of any later moment, which is why an
+update that becomes available while cctop is running waits for the next start
+rather than interrupting the one you are in.
+
+To start on the version you already have, pass `--no-auto-update`. To stop it
+happening at all, set `"auto_update": false` in `ui-prefs.json` under your cache
+directory (`~/.cache/cctop` on Linux, `~/Library/Caches/cctop` on macOS);
+`cctop --update` still works whenever you want it. `cctop claude` and the other
+agent aliases skip it too — you are waiting on an agent, and a download between
+the command and the agent starting is not what you asked for.
+
+If cargo installed cctop, it asks instead of acting:
+
+```
+cctop 0.7.6 is out, and cargo installed this one (0.7.5) — replacing the binary
+here would leave `cargo install --list` naming a version that is gone.
+Run `cargo install cctop --version 0.7.6 --locked`? It builds from source. [y] update / [n] not now:
+```
+
+Answering `y` runs exactly that command, with cargo's own output on screen, and
+starts the new version when it finishes. The objection was never the file —
+`~/.cargo/bin` is writable — but the bookkeeping, and `cargo install` is what
+keeps cargo's record straight. It builds from source, so it takes minutes, which
+is why it is a question and not a default. Answering `n` is remembered against
+that version and the question waits for the next release; `cctop --update` asks
+again whenever you want it.
+
+A package manager other than cargo is left alone entirely — cctop will not touch
+a binary something else is responsible for. Update it the way you installed it.
 
 ## With cargo
 

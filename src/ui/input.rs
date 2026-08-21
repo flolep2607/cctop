@@ -1,6 +1,6 @@
 //! Key and mouse handling: translate input events into state changes.
 
-use super::columns::{COLUMNS, ColumnId};
+use super::columns::COLUMNS;
 use super::{
     AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render, session_root_pid,
 };
@@ -737,22 +737,12 @@ impl App {
                 self.ensure_available_tab();
                 self.needs_redraw = true;
             }
-            KeyCode::Home => {
-                self.selected = 0;
-                self.ensure_available_tab();
-            }
-            KeyCode::End => {
-                self.selected = self.visible.len().saturating_sub(1);
-                self.ensure_available_tab();
-            }
             KeyCode::Char('u') if ctrl => {
                 self.move_selection(-(self.half_page() as isize));
             }
             KeyCode::Char('d') if ctrl => {
                 self.move_selection(self.half_page() as isize);
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_refresh(0.5),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_refresh(-0.5),
             KeyCode::Char('f') => {
                 self.follow = !self.follow;
                 self.set_status(if self.follow {
@@ -780,10 +770,6 @@ impl App {
                 };
                 self.mode = Mode::CostFilter;
             }
-            KeyCode::Char('H') => self.set_sort(ColumnId::Harness),
-            KeyCode::Char('X') => self.set_sort(ColumnId::Context),
-            KeyCode::Char('S') => self.set_sort(ColumnId::Tools),
-
             KeyCode::Tab => self.cycle_tab(1),
             KeyCode::BackTab => self.cycle_tab(-1),
             // Bounded by the tab list rather than a literal range, so a panel
@@ -805,7 +791,13 @@ impl App {
             KeyCode::Char('h') | KeyCode::F(8) => self.open_hooks(),
             KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
             KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
-            KeyCode::Char('>') | KeyCode::Char('<') | KeyCode::F(6) => {
+            // One way in, rather than the six single-letter sort keys this
+            // replaced. `P`/`M`/`T` were htop's, and `H`/`X`/`S` were three
+            // more that only cctop has columns for: six keys spent on an
+            // ordering you set once, none of them guessable without the help.
+            // The panel names every column, says which is current, and `S` is
+            // the letter anyone tries first.
+            KeyCode::Char('S') | KeyCode::Char('>') | KeyCode::Char('<') | KeyCode::F(6) => {
                 self.sortby_cursor = COLUMNS
                     .iter()
                     .position(|c| c.id == self.sort_col)
@@ -872,11 +864,6 @@ impl App {
             // Move through the Tool Activity filter sidebar.
             KeyCode::Char('[') => self.cycle_tool_filter(-1),
             KeyCode::Char(']') => self.cycle_tool_filter(1),
-
-            // htop muscle memory.
-            KeyCode::Char('P') => self.set_sort(ColumnId::Status),
-            KeyCode::Char('M') => self.set_sort(ColumnId::Memory),
-            KeyCode::Char('T') => self.set_sort(ColumnId::Cost),
 
             // Arrows move between bottom panels; Shift+arrows scroll within one.
             KeyCode::Left => self.cycle_tab(-1),

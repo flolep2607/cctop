@@ -121,6 +121,10 @@ pub struct Args {
     #[arg(long)]
     pub update: bool,
 
+    /// Start on the version already installed, even if a newer one is known
+    #[arg(long)]
+    pub no_auto_update: bool,
+
     /// Write the agent aliases into your shell startup files and exit
     #[arg(long)]
     pub install_alias: bool,

@@ -1780,6 +1780,20 @@ impl App {
     /// that took four deliberate keystrokes to set up. Every layer that paints
     /// a badge in the footer is reachable from here, so nothing can stay on
     /// with no way to turn it off.
+    /// Whether any filter layer is on, and so whether `Esc` would do anything.
+    ///
+    /// The same layers [`clear_one_filter`](Self::clear_one_filter) peels, in
+    /// one place: a footer that offered `Esc Clear filter` with nothing to
+    /// clear would be teaching a key that does nothing.
+    pub(super) fn has_filter(&self) -> bool {
+        !self.search.is_empty()
+            || self.cost_floor > 0.0
+            || self.live_only
+            || self.age_filter.is_some()
+            || self.tool_tab != 0
+            || self.tool_live_only
+    }
+
     fn clear_one_filter(&mut self) {
         let cleared = if !self.search.is_empty() {
             self.search.clear();
@@ -1998,12 +2012,6 @@ impl App {
             // than moving the cursor somewhere arbitrary.
             None => self.set_status("The session that rang is hidden by the current filter"),
         }
-    }
-
-    /// Adjust the live refresh interval, clamping to sane bounds.
-    fn adjust_refresh(&mut self, delta: f64) {
-        self.refresh_secs = (self.refresh_secs + delta).clamp(0.5, 60.0);
-        self.needs_redraw = true;
     }
 
     /// Half the visible table height, used by Ctrl+U/Ctrl+D. Falls back to a
@@ -6231,18 +6239,6 @@ mod tests {
         app.jump_to_bell();
         assert_eq!(app.selected, 0);
         assert!(app.status.is_some());
-    }
-
-    #[test]
-    fn refresh_interval_adjusts_and_clamps() {
-        let mut app = test_app();
-        app.refresh_secs = 2.0;
-        app.adjust_refresh(0.5);
-        assert_eq!(app.refresh_secs, 2.5);
-        app.adjust_refresh(-10.0);
-        assert_eq!(app.refresh_secs, 0.5);
-        app.adjust_refresh(100.0);
-        assert_eq!(app.refresh_secs, 60.0);
     }
 
     fn key(code: KeyCode) -> KeyEvent {
