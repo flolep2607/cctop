@@ -183,6 +183,41 @@ them, `F12` goes back to the dashboard, and the rest bring the dashboard
 forward and act there. The full list is in
 [Reading the table](the-table.md#every-key).
 
+### Shift+Enter, and the keys a terminal cannot spell
+
+Enter is a carriage return, and Shift+Enter is the same carriage return: the
+difference exists only in a protocol invented to carry it. So it has to be
+asked for at both ends. cctop asks its own terminal for the disambiguating
+form on the way in, where the terminal says it can send one, and sends
+Shift+Enter on to the agent as `CSI 13;2u` — but only to an agent that turned
+a keyboard protocol on, or through a tmux that will drop it if the pane's
+program did not. A shell in a tab is never handed a sequence it would print as
+text.
+
+Which agents ask, as of writing: Claude Code turns on both the kitty protocol
+and xterm's `modifyOtherKeys`, and Codex turns on kitty and explicitly turns
+`modifyOtherKeys` off. Older tmux understands only the xterm one, so a Codex
+pane needs tmux 3.4 or a pane cctop hosts itself. If your terminal has no
+extended keyboard protocol at all, nothing changes: `Ctrl+J` is the newline
+every agent also accepts.
+
+### The questions an agent asks the terminal
+
+An agent asks the terminal what it can do before it draws anything — Codex asks
+five questions, Claude Code two. Under `cctop run` the real terminal is behind
+cctop and answers for itself. A pane is different: cctop rebuilds the screen
+from the agent's output, and a picture of a terminal has nothing to say back,
+so a hosted agent's questions used to go into the dark and it assumed the least
+about them.
+
+The shim now answers the ones with an honest fixed answer: device attributes,
+device status, synchronized output, and the foreground and background colour —
+which it reports from cctop's own palette, so an agent set to follow the
+terminal's theme follows the pane it is drawn in. The cursor position is
+deliberately not answered; the shim relays bytes rather than parsing them, so
+it does not know where the cursor is, and a made-up position would put an
+agent's first frame in the wrong place.
+
 ## Getting pinged when a session needs you
 
 cctop is a monitor you look away from, so `w` turns on the other direction:
@@ -211,6 +246,28 @@ finished its turn and is sitting at its prompt. In the transcript that looks
 the same as an agent still thinking, and a timer would fire in the middle of
 every long reasoning turn.
 
+### When the agent is the one ringing
+
+That is cctop's own bell, rung about a session's state. An agent can also ring
+for itself — Claude Code with `preferredNotifChannel: terminal_bell` does
+nothing else, and several harnesses send an `OSC 9` notification — and a tab
+whose agent rang turns the attention colour immediately, ahead of every
+inference the tab bar otherwise makes. If the notification carried text
+("Claude needs your permission to use Bash"), the status line shows it once,
+when you switch to the tab.
+
+This matters because it is the only signal that arrives *in time*. Everything
+else the tab bar has is inferred: a hook event on a six-second timer, or a
+screen that stopped moving. An agent blocked on a permission prompt keeps its
+spinner turning and reports itself as working, so it used to be drawn as busy
+for as long as it sat there.
+
+The bell survives the whole stack — the agent rings, tmux passes it to its
+client, the shim relays it, and the pane's parser keeps it instead of parsing it
+away. cctop does not pass it on to your own terminal: the bell is answered by
+looking at the pane, and a beep per agent per prompt is the alarm clock this
+page already argues against.
+
 ## Handing a session to a different agent
 
 `O` takes the selected session's context across to another harness. Where `R`
@@ -218,8 +275,21 @@ puts the *same* agent back on the *same* transcript, a handoff carries what the
 session was doing over to a different agent entirely — the one thing no harness
 can do for itself, since each can only read its own transcripts.
 
-cctop writes a markdown brief, opens the launcher, and types a line at whichever
-agent you pick pointing it at the file. The brief holds the task, the plan the
+cctop writes a markdown brief, opens the launcher, and starts whichever agent you
+pick with a line pointing it at the file. Where the harness takes an opening
+prompt on its command line — `claude`, `codex`, `opencode` — that line is part of
+the argv, so the agent opens on the brief. Anything else is typed at once it has
+had a moment to start listening.
+
+The distinction matters more than it looks. Every one of these CLIs asks the
+terminal what it can do as it starts, and reads its own input looking for the
+answer; a line arriving in that window loses however much of itself was in the
+queue at the time. Handing a Claude session to Codex used to produce a prompt
+beginning halfway through the path, so Codex went looking for a file that had
+never existed and asked for the brief to be pasted instead. An argument cannot
+be eaten that way.
+
+The brief holds the task, the plan the
 session was working to, the files it changed and read, the commands it ran, what
 it delegated, and what it looked up — with paths relative to the project, and
 every list bounded so a long session hands over its most recent and most-touched

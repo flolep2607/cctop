@@ -383,6 +383,20 @@ pub fn quiet(name: &str) {
     let _ = Command::new("tmux")
         .args(["set-option", "-t", name, "status", "off"])
         .output();
+    // Let the agent's own notifications out. A harness that wants a desktop
+    // notification wraps it in tmux's passthrough sequence, and tmux swallows
+    // that unless told otherwise — so the OSC 9 an agent sends when it is
+    // blocked never reached the pane's parser, where cctop now listens for it.
+    // The bell always got through; this is the half that says what about.
+    //
+    // A pane option, not a session one, and set here rather than in [`prepare`]:
+    // a pane inherits its options from the global set when it is made, so there
+    // is nothing to configure until the agent's own pane exists. Best effort
+    // like the rest — tmux before 3.3 has no such option and rejects it, which
+    // costs a process and leaves the pane exactly as it was.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-p", "-t", name, "allow-passthrough", "on"])
+        .output();
 }
 
 /// Record on the session itself what this tab is called.

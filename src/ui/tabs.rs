@@ -96,6 +96,22 @@ impl Pane {
         self.drew_at.elapsed() >= QUIET_IS_IDLE
     }
 
+    /// Whether the agent in this pane has rung and not yet been looked at.
+    ///
+    /// The one signal in `attention` that the agent sends deliberately. Every
+    /// other input there is inference — a hook event, or a screen that stopped
+    /// moving — and this is the agent saying it outright, in the language every
+    /// terminal has understood for fifty years.
+    fn rang(&self) -> bool {
+        self.view.rang().is_some()
+    }
+
+    /// Answer the bell, because this pane is the one being looked at, and give
+    /// back what the agent said when it rang.
+    pub fn answer_bell(&mut self) -> Option<String> {
+        self.view.answer()
+    }
+
     /// The pid of the agent this pane shows.
     ///
     /// The same thing as [`Pane::pid`] everywhere except under tmux, where that
@@ -203,12 +219,17 @@ impl Pane {
         let hosted = crate::shim::host(&spawn, cwd)?;
         // The shim binds and serves the socket before returning, so there is
         // something to connect to even though the agent has drawn nothing yet.
-        let view = crate::attach::attach(hosted.pid).ok_or_else(|| {
+        let mut view = crate::attach::attach(hosted.pid).ok_or_else(|| {
             anyhow::anyhow!(
                 "{} started but its terminal could not be opened",
                 label_of(argv)
             )
         })?;
+        // With tmux in the middle the agent's keyboard-protocol request never
+        // reaches this end; see [`attach::Attach::assume_extended_keys`].
+        if tmux.is_some() {
+            view.assume_extended_keys();
+        }
         Ok(Pane {
             pid: hosted.pid,
             // The agent's name, not the wrapper's: a tab reading `tmux
@@ -548,6 +569,9 @@ impl Tab {
             .enumerate()
             .filter(|(i, _)| !(focused && *i == self.focus))
             .filter_map(|(_, pane)| match known(pane.agent()) {
+                // Before anything inferred: the agent rang. A harness rings when
+                // it is blocked on you and nothing else — see [`Pane::rang`].
+                _ if pane.rang() => Some(Attention::NeedsInput),
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // A tool call that started, has not come back, and has stopped
                 // repainting is a permission prompt waiting on you. Nothing
@@ -820,6 +844,51 @@ mod tests {
             label: label.map(str::to_string),
             profile: None,
         }
+    }
+
+    /// A pane whose agent rang, with everything else saying it is busy.
+    fn ringing_tab(bell: &[u8]) -> Tab {
+        let mut pane = Pane {
+            hosted: None,
+            tmux: None,
+            resumed: None,
+            profile: None,
+            pid: 4321,
+            agent: None,
+            asked_at: None,
+            label: "claude".into(),
+            view: crate::attach::Attach::for_test(),
+            drew_at: Instant::now(),
+        };
+        pane.view.parser.process(bell);
+        Tab::new(pane)
+    }
+
+    /// The bell outranks every inference. A harness rings when it is blocked on
+    /// you, and it keeps drawing its spinner and reporting itself as working
+    /// while it waits — which is exactly the state the rest of `attention` reads
+    /// as "leave it alone". Before the bell was kept, a tab blocked on a
+    /// permission prompt was drawn as busy for as long as it sat there.
+    #[test]
+    fn an_agent_that_rang_outranks_looking_busy() {
+        let ringing = ringing_tab(b"\x07");
+        assert_eq!(
+            ringing.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            Some(Attention::NeedsInput),
+        );
+
+        // The control: the same freshly drawn pane, silent, is left alone.
+        let quiet = ringing_tab(b"thinking");
+        assert_eq!(
+            quiet.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            None,
+        );
+
+        // And the pane you are looking at is never the one blinking at you.
+        assert_eq!(
+            ringing.attention(true, &|_| Some(crate::hook::Signal::Busy)),
+            None,
+        );
     }
 
     /// The point of writing the label onto the session: two cctops showing the

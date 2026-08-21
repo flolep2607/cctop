@@ -16,6 +16,121 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
+use std::time::Instant;
+
+/// What an agent says about itself that never reaches its screen.
+///
+/// A terminal's job is mostly the picture, and [`vt100`] keeps that. But some of
+/// what an agent writes is addressed to the terminal rather than drawn by it —
+/// the bell it rings when it is blocked, the notification it asks to be raised —
+/// and a parser with nowhere to put those simply drops them. That is the state
+/// cctop was in: every terminal *outside* it lights up when an agent rings, and
+/// the one place built to watch agents was the one place that did not notice.
+///
+/// This is the collector. It holds a signal until something answers it, because
+/// the whole point of a bell is that it survives you being away from the screen.
+#[derive(Debug, Default)]
+pub struct Signals {
+    /// When the agent last asked to be noticed, until that is answered.
+    rang: Option<Instant>,
+    /// The message from a notification sequence, when it carried one. The bell
+    /// on its own says only "look at me"; OSC 9 says what about.
+    note: Option<String>,
+    /// Whether the agent asked to be sent keys that have no legacy encoding.
+    extended_keys: bool,
+}
+
+impl Signals {
+    /// When the agent last rang, if nothing has answered it yet.
+    pub fn rang(&self) -> Option<Instant> {
+        self.rang
+    }
+
+    /// What the agent said when it rang, if it said anything.
+    fn into_note(self) -> Option<String> {
+        self.note
+    }
+
+    fn ring(&mut self, note: Option<String>) {
+        self.rang = Some(Instant::now());
+        // A bell arriving after a notification must not blank its text: the two
+        // are usually the same event announced twice, and the words are the half
+        // worth keeping.
+        if note.is_some() {
+            self.note = note;
+        }
+    }
+}
+
+/// Text of a notification sequence, when `params` are one.
+///
+/// Two shapes, both of which an agent may send: `OSC 9 ; text` (iTerm2, Ghostty,
+/// kitty, Windows Terminal) and `OSC 777 ; notify ; title ; body` (urxvt, which
+/// several harnesses copy).
+///
+/// `OSC 9` is also ConEmu's progress-bar sequence — `OSC 9 ; 4 ; state ; pct` —
+/// which an agent sends on every tick of a running turn. vt100 splits an OSC on
+/// its semicolons, so progress arrives here as three or more parameters and a
+/// notification as exactly two; matching the shape is what keeps a progress bar
+/// from ringing the bell a hundred times a turn.
+fn notification(params: &[&[u8]]) -> Option<String> {
+    let text = match params {
+        [b"9", text] => text,
+        [b"777", b"notify", title] => title,
+        // Title and body: the title alone is what fits a status line, and the
+        // body is usually the same sentence at greater length.
+        [b"777", b"notify", title, _body] => title,
+        _ => return None,
+    };
+    Some(String::from_utf8_lossy(text).trim().to_string())
+        .filter(|text| !text.is_empty())
+        .map(|text| text.chars().filter(|c| !c.is_control()).collect())
+}
+
+impl vt100::Callbacks for Signals {
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.ring(None);
+    }
+
+    /// A terminal with the bell turned off draws it instead, and an agent that
+    /// asked for one meant the other: both are "look at me".
+    fn visual_bell(&mut self, _: &mut vt100::Screen) {
+        self.ring(None);
+    }
+
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let Some(note) = notification(params) {
+            self.ring(Some(note));
+        }
+    }
+
+    /// Watch for the agent turning on a keyboard protocol.
+    ///
+    /// Two of them, and the harnesses do not agree: Codex pushes the kitty
+    /// protocol (`CSI > 7 u`) and switches xterm's `modifyOtherKeys` off, while
+    /// Claude Code turns on both (`CSI > 1 u` and `CSI > 4 ; 2 m`). Either one
+    /// is the answer to the same question — whether this agent will read a key
+    /// that plain ASCII cannot spell, which is what Shift+Enter is.
+    ///
+    /// Sticky, and deliberately so: an agent asks once at startup, and a pane
+    /// attached later would otherwise never learn it.
+    fn unhandled_csi(
+        &mut self,
+        _: &mut vt100::Screen,
+        i1: Option<u8>,
+        _: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        let param = |i: usize| params.get(i).and_then(|p| p.first()).copied().unwrap_or(0);
+        self.extended_keys |= match (i1, c) {
+            // Pushing no flags at all is the protocol being turned off.
+            (Some(b'>'), 'u') => param(0) > 0,
+            (Some(b'>'), 'm') => param(0) == 4 && param(1) > 0,
+            _ => false,
+        };
+    }
+}
 
 /// Lines of the agent's output cctop keeps behind the top of a pane.
 ///
@@ -153,8 +268,13 @@ pub struct Attach {
     /// The last size asked for, so an unchanged panel doesn't re-ask every frame.
     /// Each request costs the agent a SIGWINCH and a full repaint.
     requested: (u16, u16),
-    /// The agent's screen, rebuilt from its output.
-    pub parser: vt100::Parser,
+    /// Whether keys may be sent in the extended form without having seen the
+    /// agent ask. Set when a multiplexer sits in between — see
+    /// [`Attach::assume_extended_keys`].
+    assume_extended: bool,
+    /// The agent's screen, rebuilt from its output, and the signals it raised
+    /// alongside it — see [`Signals`].
+    pub parser: vt100::Parser<Signals>,
 }
 
 impl Attach {
@@ -180,6 +300,51 @@ impl Attach {
             }
         }
         true
+    }
+
+    /// Send keys in their extended form without waiting to be asked.
+    ///
+    /// For a pane with tmux between cctop and the agent, where the request never
+    /// arrives: tmux answers the agent's keyboard-protocol calls itself and says
+    /// nothing about them to its own client. Sending anyway is safe in exactly
+    /// that case, and only there — tmux forwards an extended key to a pane whose
+    /// program asked for one and *drops* it for a program that did not, so a
+    /// shell in a tab is never handed a sequence it would print as text.
+    pub fn assume_extended_keys(&mut self) {
+        self.assume_extended = true;
+    }
+
+    /// Whether the far end reads keys that have no legacy encoding.
+    fn extended_keys(&self) -> bool {
+        self.assume_extended || self.parser.callbacks().extended_keys
+    }
+
+    /// When the agent last rang or asked for a notification, until answered.
+    pub fn rang(&self) -> Option<Instant> {
+        self.parser.callbacks().rang()
+    }
+
+    /// Answer the agent's signal, because it has now been seen, and hand back
+    /// whatever it said — which is worth showing exactly once, to whoever just
+    /// looked.
+    pub fn answer(&mut self) -> Option<String> {
+        std::mem::take(self.parser.callbacks_mut()).into_note()
+    }
+
+    /// An `Attach` with a sink where its socket would be, for tests elsewhere
+    /// that need a pane without a shim behind it.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Attach {
+            input: Box::new(std::io::sink()),
+            close: Box::new(|| {}),
+            pending: std::sync::Arc::default(),
+            closed: std::sync::Arc::default(),
+            size: (80, 24),
+            requested: (0, 0),
+            assume_extended: false,
+            parser: vt100::Parser::new_with_callbacks(24, 80, SCROLLBACK, Signals::default()),
+        }
     }
 
     /// Whether the shim has hung up, so this screen will never change again.
@@ -208,7 +373,11 @@ impl Attach {
         if self.parser.screen().scrollback() > 0 {
             self.parser.screen_mut().set_scrollback(0);
         }
-        match encode(key) {
+        let bytes = match self.extended_keys() {
+            true => extended(key).or_else(|| encode(key)),
+            false => encode(key),
+        };
+        match bytes {
             Some(bytes) => self.send(&frame::encode(frame::KEYS, &bytes)),
             None => true,
         }
@@ -543,7 +712,8 @@ pub fn attach(pid: u32) -> Option<Attach> {
         closed,
         size,
         requested: (0, 0),
-        parser: vt100::Parser::new(size.1, size.0, SCROLLBACK),
+        assume_extended: false,
+        parser: vt100::Parser::new_with_callbacks(size.1, size.0, SCROLLBACK, Signals::default()),
     })
 }
 
@@ -777,6 +947,40 @@ fn read_event(decoder: &mut frame::Decoder) -> Option<Event> {
 /// Only what an agent reads: text, the editing keys, and the arrows. Anything
 /// unmapped is dropped rather than guessed at, since a wrong escape sequence is
 /// worse in a live session than a key that did nothing.
+/// The keys a terminal can only send in the newer form, encoded that way.
+///
+/// Just modified Enter, and for one reason: it is the press that has no legacy
+/// encoding at all. Enter is a carriage return, and Shift+Enter is the same
+/// carriage return — the distinction exists only in a protocol invented to
+/// carry it, so a pane without one cannot offer the newline-without-submitting
+/// that every agent's prompt is built around.
+///
+/// `CSI 13 ; <mods> u` is the kitty spelling. Nothing here sends xterm's
+/// `CSI 27 ; <mods> ; 13 ~`, which says the same thing: tmux rewrites either
+/// into the kitty form on its way to the pane, and both harnesses that ask for
+/// anything ask for kitty.
+///
+/// `None` for everything else, so each key keeps the one encoding every agent
+/// already reads. Two dialects for one key is how one of them quietly stops
+/// working.
+fn extended(key: KeyEvent) -> Option<Vec<u8>> {
+    if key.code != KeyCode::Enter {
+        return None;
+    }
+    let mods = key.modifiers;
+    // Alt alone is left to its legacy `ESC` prefix, which agents already read.
+    // It is only spelled out here when it arrives alongside one of the two that
+    // have no spelling of their own.
+    if !mods.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) {
+        return None;
+    }
+    let bits = 1
+        + u8::from(mods.contains(KeyModifiers::SHIFT))
+        + 2 * u8::from(mods.contains(KeyModifiers::ALT))
+        + 4 * u8::from(mods.contains(KeyModifiers::CONTROL));
+    Some(format!("\x1b[13;{bits}u").into_bytes())
+}
+
 fn encode(key: KeyEvent) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -929,6 +1133,166 @@ mod tests {
     }
     use super::*;
 
+    /// Shift+Enter is the press a terminal cannot spell. It reaches an agent
+    /// only in the newer form, and only an agent that asked for it — a shell in
+    /// a tab would print the sequence as text.
+    #[test]
+    fn shift_enter_is_sent_only_where_it_will_be_read() {
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let (mut attach, written) = probe();
+
+        // Nothing asked yet: the legacy carriage return, exactly as before.
+        attach.send_key(shift_enter);
+        assert!(
+            written.lock().unwrap().ends_with(b"\r"),
+            "an agent that never asked was sent a sequence it cannot read"
+        );
+
+        // Claude Code's request, and Codex's, each on their own.
+        for asked in [b"\x1b[>1u".as_slice(), b"\x1b[>4;2m", b"\x1b[>7u"] {
+            let (mut attach, written) = probe();
+            attach.parser.process(asked);
+            attach.send_key(shift_enter);
+            assert!(
+                written.lock().unwrap().ends_with(b"\x1b[13;2u"),
+                "{asked:?} asked for extended keys and got a bare return"
+            );
+        }
+
+        // Pushing an empty flag set is the protocol being switched off, which
+        // Codex does to `modifyOtherKeys` in the same breath as enabling kitty.
+        let (mut attach, written) = probe();
+        attach.parser.process(b"\x1b[>0u\x1b[>4;0m");
+        attach.send_key(shift_enter);
+        assert!(written.lock().unwrap().ends_with(b"\r"));
+    }
+
+    /// Only Enter, and only with the modifiers that have no other spelling.
+    /// Everything else keeps the single encoding every agent already reads.
+    #[test]
+    fn no_other_key_changes_dialect() {
+        let (mut attach, _) = probe();
+        attach.parser.process(b"\x1b[>1u");
+        for key in [
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(extended(key), None, "{key:?} was re-spelled");
+        }
+        // Held together, they are spelled out: 1 + shift + 4·ctrl.
+        assert_eq!(
+            extended(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::SHIFT | KeyModifiers::CONTROL
+            )),
+            Some(b"\x1b[13;6u".to_vec())
+        );
+    }
+
+    /// The bell is how a harness says "I am blocked on you" — Claude Code with
+    /// `preferredNotifChannel: terminal_bell` rings and nothing else. It has to
+    /// survive being parsed, because the screen it arrives with looks no
+    /// different from the screen of an agent still thinking.
+    #[test]
+    fn a_bell_from_the_agent_is_kept_rather_than_parsed_away() {
+        let (mut attach, _) = probe();
+        assert!(attach.rang().is_none());
+        attach.parser.process(b"working\x07");
+        assert!(attach.rang().is_some(), "the bell went nowhere");
+        // And it survives everything the agent draws afterwards: the prompt it
+        // rang about is painted in the same breath as the bell.
+        attach.parser.process(b"\r\n> ");
+        assert!(attach.rang().is_some());
+        assert_eq!(attach.answer(), None);
+        assert!(attach.rang().is_none(), "answering left the bell ringing");
+    }
+
+    /// A notification carries the sentence the terminal would have popped up,
+    /// and that sentence is the useful half — "needs your permission to use
+    /// Bash" says what a bell cannot.
+    #[test]
+    fn a_notification_rings_and_keeps_what_it_said() {
+        let (mut attach, _) = probe();
+        attach
+            .parser
+            .process(b"\x1b]9;Claude needs your permission\x07");
+        assert!(attach.rang().is_some());
+        assert_eq!(
+            attach.answer().as_deref(),
+            Some("Claude needs your permission")
+        );
+
+        // The urxvt shape, which several harnesses send instead.
+        let (mut attach, _) = probe();
+        attach
+            .parser
+            .process(b"\x1b]777;notify;Waiting for input;in ~/repo\x1b\\");
+        assert_eq!(attach.answer().as_deref(), Some("Waiting for input"));
+    }
+
+    /// `OSC 9` is two sequences wearing one number: a notification, and
+    /// ConEmu's progress bar, which a working agent sends on every tick. Ringing
+    /// for progress would light the tab up for the whole of a turn — the exact
+    /// state the attention colour exists to distinguish from.
+    #[test]
+    fn a_progress_bar_is_not_a_notification() {
+        let (mut attach, _) = probe();
+        for pct in [0, 25, 50, 99] {
+            attach
+                .parser
+                .process(format!("\x1b]9;4;1;{pct}\x07").as_bytes());
+        }
+        // Removing the progress bar again, which is how a finished turn ends.
+        attach.parser.process(b"\x1b]9;4;0;\x07");
+        assert!(
+            attach.rang().is_none(),
+            "a progress bar rang the bell {} times a turn",
+            5
+        );
+    }
+
+    /// A title change is not a signal. Every harness rewrites the window title
+    /// as it works, so treating one as a bell would ring continuously.
+    #[test]
+    fn a_window_title_is_not_a_signal() {
+        let (mut attach, _) = probe();
+        attach.parser.process(b"\x1b]0;claude: editing\x07");
+        attach.parser.process(b"\x1b]2;claude: done\x07");
+        assert!(attach.rang().is_none());
+    }
+
+    /// The whole path, on a real pty: a process rings, the shim relays it, and
+    /// the watcher that never sees the byte itself still knows it happened.
+    /// Nothing smaller covers it — the bell has to survive the framing, the
+    /// socket and the parser, and each of those is where it used to be lost.
+    #[cfg(unix)]
+    #[test]
+    fn a_bell_travels_from_a_real_pty_to_a_watcher() {
+        let argv: Vec<String> = ["sh", "-c", "printf 'x\\a'; sleep 30"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let Ok(hosted) = crate::shim::host(&argv, None) else {
+            eprintln!("skipping: no pty available");
+            return;
+        };
+        let mut attach = crate::attach::attach(hosted.pid).expect("attach to the shim");
+        // The shim serves the socket before returning, but the child has not
+        // necessarily been scheduled yet, so this polls rather than sleeps.
+        let rang = (0..50).any(|_| {
+            attach.pump();
+            if attach.rang().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            false
+        });
+        drop(hosted);
+        assert!(rang, "the bell never reached the watcher");
+    }
+
     /// An `Attach` writing to memory instead of a socket, and the buffer it
     /// writes to.
     fn probe() -> (Attach, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
@@ -952,7 +1316,8 @@ mod tests {
             closed: std::sync::Arc::default(),
             size: (80, 24),
             requested: (0, 0),
-            parser: vt100::Parser::new(24, 80, SCROLLBACK),
+            assume_extended: false,
+            parser: vt100::Parser::new_with_callbacks(24, 80, SCROLLBACK, Signals::default()),
         };
         (attach, written)
     }
