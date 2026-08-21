@@ -96,6 +96,22 @@ impl Pane {
         self.drew_at.elapsed() >= QUIET_IS_IDLE
     }
 
+    /// Whether the agent in this pane has rung and not yet been looked at.
+    ///
+    /// The one signal in `attention` that the agent sends deliberately. Every
+    /// other input there is inference — a hook event, or a screen that stopped
+    /// moving — and this is the agent saying it outright, in the language every
+    /// terminal has understood for fifty years.
+    fn rang(&self) -> bool {
+        self.view.rang().is_some()
+    }
+
+    /// Answer the bell, because this pane is the one being looked at, and give
+    /// back what the agent said when it rang.
+    pub fn answer_bell(&mut self) -> Option<String> {
+        self.view.answer()
+    }
+
     /// The pid of the agent this pane shows.
     ///
     /// The same thing as [`Pane::pid`] everywhere except under tmux, where that
@@ -144,6 +160,11 @@ impl Pane {
             // without this a resumed agent would be one thing here and a uuid
             // next door.
             crate::tmux::set_label(name, &self.label);
+            // Only when there is one to record: an unset option reads back as
+            // "the default account", which is exactly what `None` means here.
+            if let Some(profile) = &self.profile {
+                crate::tmux::set_profile(name, profile);
+            }
         }
     }
 
@@ -198,12 +219,17 @@ impl Pane {
         let hosted = crate::shim::host(&spawn, cwd)?;
         // The shim binds and serves the socket before returning, so there is
         // something to connect to even though the agent has drawn nothing yet.
-        let view = crate::attach::attach(hosted.pid).ok_or_else(|| {
+        let mut view = crate::attach::attach(hosted.pid).ok_or_else(|| {
             anyhow::anyhow!(
                 "{} started but its terminal could not be opened",
                 label_of(argv)
             )
         })?;
+        // With tmux in the middle the agent's keyboard-protocol request never
+        // reaches this end; see [`attach::Attach::assume_extended_keys`].
+        if tmux.is_some() {
+            view.assume_extended_keys();
+        }
         Ok(Pane {
             pid: hosted.pid,
             // The agent's name, not the wrapper's: a tab reading `tmux
@@ -285,6 +311,10 @@ pub struct Shared {
     /// When the session last drew anything, in unix seconds, as of the last
     /// sync. Stands in for [`Pane::drew_at`] on a tab that has no pane to watch.
     pub activity: Option<u64>,
+    /// The account the agent was started under, carried across the trade so the
+    /// pane this becomes again reports the same limits it did before. See
+    /// [`Pane::profile`].
+    pub profile: Option<String>,
 }
 
 impl Shared {
@@ -357,6 +387,7 @@ impl Tab {
                 name: agent.name.clone(),
                 pid: agent.pid,
                 activity: agent.activity,
+                profile: agent.profile.clone(),
             }),
         }
     }
@@ -392,6 +423,10 @@ impl Tab {
         // The label the other cctop chose, not one reconstructed from the argv
         // above — which is the label already, but only by coincidence.
         pane.label = shared.label;
+        // Reattaching is not relaunching, so nothing here chose an account —
+        // this is the one the session was started under, read back off tmux by
+        // the sweep that found it or kept from the pane this tab last had.
+        pane.profile = shared.profile;
         self.panes = vec![pane];
         self.focus = 0;
         self.shared = None;
@@ -419,6 +454,7 @@ impl Tab {
             // Nothing has been read off tmux for this tab yet, and the pane it
             // is replacing was on screen a moment ago. The next sweep fills it.
             activity: None,
+            profile: pane.profile.clone(),
         });
         self.panes.clear();
         self.focus = 0;
@@ -533,6 +569,9 @@ impl Tab {
             .enumerate()
             .filter(|(i, _)| !(focused && *i == self.focus))
             .filter_map(|(_, pane)| match known(pane.agent()) {
+                // Before anything inferred: the agent rang. A harness rings when
+                // it is blocked on you and nothing else — see [`Pane::rang`].
+                _ if pane.rang() => Some(Attention::NeedsInput),
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // A tool call that started, has not come back, and has stopped
                 // repainting is a permission prompt waiting on you. Nothing
@@ -803,7 +842,53 @@ mod tests {
             attached: false,
             activity: Some(now.saturating_sub(ago)),
             label: label.map(str::to_string),
+            profile: None,
         }
+    }
+
+    /// A pane whose agent rang, with everything else saying it is busy.
+    fn ringing_tab(bell: &[u8]) -> Tab {
+        let mut pane = Pane {
+            hosted: None,
+            tmux: None,
+            resumed: None,
+            profile: None,
+            pid: 4321,
+            agent: None,
+            asked_at: None,
+            label: "claude".into(),
+            view: crate::attach::Attach::for_test(),
+            drew_at: Instant::now(),
+        };
+        pane.view.parser.process(bell);
+        Tab::new(pane)
+    }
+
+    /// The bell outranks every inference. A harness rings when it is blocked on
+    /// you, and it keeps drawing its spinner and reporting itself as working
+    /// while it waits — which is exactly the state the rest of `attention` reads
+    /// as "leave it alone". Before the bell was kept, a tab blocked on a
+    /// permission prompt was drawn as busy for as long as it sat there.
+    #[test]
+    fn an_agent_that_rang_outranks_looking_busy() {
+        let ringing = ringing_tab(b"\x07");
+        assert_eq!(
+            ringing.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            Some(Attention::NeedsInput),
+        );
+
+        // The control: the same freshly drawn pane, silent, is left alone.
+        let quiet = ringing_tab(b"thinking");
+        assert_eq!(
+            quiet.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            None,
+        );
+
+        // And the pane you are looking at is never the one blinking at you.
+        assert_eq!(
+            ringing.attention(true, &|_| Some(crate::hook::Signal::Busy)),
+            None,
+        );
     }
 
     /// The point of writing the label onto the session: two cctops showing the
@@ -824,6 +909,30 @@ mod tests {
         // session name stands in, minus the prefix every one of them carries.
         let tab = Tab::shared(&session("cctop-claude-32cca860", None, 0));
         assert_eq!(tab.title(), "claude-32cca860");
+    }
+
+    /// Switching tabs must not silently move an agent to another account.
+    ///
+    /// `go_to_tab` trades the pane you leave for a `Shared` and trades it back
+    /// when you return, and a tab this cctop never launched is built from the
+    /// session alone. The account used to survive neither, and a lost account is
+    /// not "unknown" on the border — it reads as the default one, so a pane
+    /// running as a second login was shown the first login's remaining budget,
+    /// which is the figure you decide by.
+    #[test]
+    fn the_account_a_pane_runs_as_survives_a_tab_switch() {
+        let mut running = session("cctop-claude-32cca860", Some("claude"), 0);
+        running.profile = Some("work".into());
+        let adopted = Tab::shared(&running);
+        assert_eq!(
+            adopted.shared.as_ref().and_then(|s| s.profile.as_deref()),
+            Some("work"),
+        );
+
+        // And nothing invented for the ordinary account, which writes no option
+        // and so reads back as none.
+        let plain = Tab::shared(&session("cctop-claude-4e2b1c90", Some("claude"), 0));
+        assert_eq!(plain.shared.as_ref().and_then(|s| s.profile.clone()), None);
     }
 
     /// A tab this cctop holds no client on still has to blink: that is the whole
@@ -894,6 +1003,7 @@ mod tests {
             attached: false,
             activity: None,
             label: None,
+            profile: None,
         })
     }
 

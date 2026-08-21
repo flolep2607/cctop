@@ -607,6 +607,8 @@ enum Echo {
 fn pump_output(mut master: File, fan: Arc<Mutex<Fanout>>, echo: Echo) {
     let mut out = std::io::stdout();
     let mut buf = [0u8; 8192];
+    let mut answers = Answers::default();
+    let mut reply = master.try_clone().ok();
     // Flush every chunk: a TUI's escape sequences must not sit in a line buffer
     // waiting for a newline that never comes.
     while let Ok(n) = master.read(&mut buf) {
@@ -616,8 +618,140 @@ fn pump_output(mut master: File, fan: Arc<Mutex<Fanout>>, echo: Echo) {
         if echo == Echo::Yes && (out.write_all(&buf[..n]).is_err() || out.flush().is_err()) {
             break;
         }
+        // Only when nothing is echoing: with a real terminal behind this one it
+        // answers for itself, and two answers to one question is worse than
+        // none — the second is read as input the user typed.
+        if echo == Echo::No
+            && let Some(reply) = reply.as_mut()
+        {
+            answers.answer(&buf[..n], reply);
+        }
         locked(&fan).push(&buf[..n]);
     }
+}
+
+/// What an agent asks its terminal at startup, and what to say back.
+///
+/// Every question here was captured from a real launch. Codex asks five before
+/// it draws a cell — cursor position, foreground and background colour, the
+/// kitty keyboard protocol, and the device attributes — and Claude Code asks for
+/// device attributes and subscribes to theme changes.
+///
+/// A terminal answers those. A watcher is a picture of one: [`attach`] rebuilds
+/// the screen from the agent's output and has nothing to say back, so under
+/// `cctop run` the questions reach the real terminal and are answered, while a
+/// hosted agent's questions used to fall into the dark. What an agent does then
+/// is wait out a timeout and assume the least — no keyboard protocol, no
+/// synchronized output, and whichever theme it guesses. A pane cctop hosts was
+/// a worse terminal than a pane tmux hosts, for no reason other than that tmux
+/// bothers to reply.
+///
+/// The device-attributes reply is also what unblocks the wait: an application
+/// asking about the keyboard protocol sends `CSI c` behind it precisely so that
+/// a terminal which knows nothing of the newer query still says *something*,
+/// and the answer arriving is what ends the timeout.
+#[derive(Default)]
+struct Answers {
+    /// The end of the last chunk, so a query split across two reads is still
+    /// recognised. Long enough for the longest question below.
+    tail: Vec<u8>,
+}
+
+/// Longest query, and so how much of a chunk has to be carried over.
+const QUERY_MAX: usize = 16;
+
+impl Answers {
+    /// Reply to every question in `chunk`.
+    fn answer(&mut self, chunk: &[u8], reply: &mut impl Write) {
+        let mut seen = std::mem::take(&mut self.tail);
+        seen.extend_from_slice(chunk);
+        for (query, answer) in Self::table() {
+            for _ in 0..strike(&mut seen, query) {
+                let _ = reply.write_all(answer.as_bytes());
+            }
+        }
+        let _ = reply.flush();
+        // The tail is carried so a query split across two reads is still seen
+        // whole. It is carried *struck out*, which is the whole reason the
+        // matches above are erased rather than counted: answered once and left
+        // intact, every question in the last few bytes of a chunk would be
+        // answered a second time on the next one.
+        let keep = seen.len().saturating_sub(QUERY_MAX);
+        self.tail = seen.split_off(keep);
+    }
+
+    /// The questions and their answers.
+    ///
+    /// ponytail: no reply to `CSI 6 n`, the cursor position. It is the one
+    /// question whose answer changes as the agent draws, and the shim relays
+    /// bytes rather than parsing them, so it does not know where the cursor is.
+    /// A made-up position is worse than silence: an agent that believes the
+    /// cursor is somewhere it is not draws its first frame in the wrong place.
+    /// Codex asks and carries on regardless, which is why this has stayed a
+    /// note rather than a parser.
+    fn table() -> Vec<(&'static [u8], String)> {
+        // A VT220 with ANSI colour: what the vt100 parser behind every watcher
+        // actually implements, so this is a description rather than a boast.
+        let da1 = "\x1b[?62;22c".to_string();
+        vec![
+            (b"\x1b[c".as_slice(), da1.clone()),
+            (b"\x1b[0c".as_slice(), da1),
+            // Secondary attributes: terminal type 0, "firmware" version 0.
+            (b"\x1b[>c".as_slice(), "\x1b[>0;0;0c".to_string()),
+            (b"\x1b[>0c".as_slice(), "\x1b[>0;0;0c".to_string()),
+            // Device status: ready, no malfunction.
+            (b"\x1b[5n".as_slice(), "\x1b[0n".to_string()),
+            // Synchronized output: understood, currently reset. An agent told
+            // this wraps its frames in it, which costs nothing here — the
+            // watcher's parser ignores the mode and cctop's own draw is already
+            // one flush — and saves the agent from assuming it must not.
+            (b"\x1b[?2026$p".as_slice(), "\x1b[?2026;2$y".to_string()),
+            (b"\x1b]10;?".as_slice(), color_reply(10)),
+            (b"\x1b]11;?".as_slice(), color_reply(11)),
+        ]
+    }
+}
+
+/// Erase every occurrence of `needle` from `haystack`, and say how many there
+/// were.
+///
+/// Zeroed rather than removed, so the positions of everything else are
+/// untouched. A zero cannot begin any query here — all of them start with an
+/// escape — so a struck-out match can never match again.
+fn strike(haystack: &mut [u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+    let mut found = 0;
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            haystack[i..i + needle.len()].fill(0);
+            i += needle.len();
+            found += 1;
+            continue;
+        }
+        i += 1;
+    }
+    found
+}
+
+/// The foreground (10) or background (11) colour to report.
+///
+/// An agent that asks is deciding whether to draw for a light or a dark
+/// terminal — Claude Code's `theme: auto` is exactly this question — and the
+/// honest answer is cctop's own palette, because a hosted agent is drawn inside
+/// it. Only the luminance is really being asked about, so the two ends of the
+/// ramp say it unambiguously.
+fn color_reply(which: u16) -> String {
+    let light = crate::ui::theme::variant() == crate::ui::theme::Variant::Light;
+    let bright = "ffff/ffff/ffff";
+    let dark = "0000/0000/0000";
+    let value = match (which, light) {
+        (11, true) | (10, false) => bright,
+        _ => dark,
+    };
+    format!("\x1b]{which};rgb:{value}\x1b\\")
 }
 
 fn pump_input(mut master: File) {
@@ -869,6 +1003,81 @@ mod tests {
         assert!(
             error.contains("legacy_tiocsti") || error.contains("root"),
             "expected a named precondition, got: {error}"
+        );
+    }
+
+    /// A question split across two reads is still answered, and answered once.
+    ///
+    /// The pty hands over whatever has arrived, so a query can straddle a chunk
+    /// boundary — and the carried-over tail is scanned again on the next chunk,
+    /// which is how answering twice would happen. An agent that asked one
+    /// question and got two answers reads the second as something the user
+    /// typed.
+    #[test]
+    fn a_question_split_across_two_reads_is_answered_exactly_once() {
+        let mut answers = Answers::default();
+        let mut said = Vec::new();
+        answers.answer(b"drawing\x1b", &mut said);
+        assert!(said.is_empty(), "answered half a question");
+        answers.answer(b"[c and on", &mut said);
+        assert_eq!(said, b"\x1b[?62;22c");
+
+        // The same question wholly inside the carried tail: answered on the
+        // chunk it arrived in, and never again.
+        let mut answers = Answers::default();
+        let mut said = Vec::new();
+        answers.answer(b"\x1b[5n", &mut said);
+        answers.answer(b"more output", &mut said);
+        answers.answer(b"and more", &mut said);
+        assert_eq!(said, b"\x1b[0n", "the tail was answered twice");
+    }
+
+    /// Every question Codex and Claude Code were seen to ask, and the one this
+    /// deliberately does not answer.
+    #[test]
+    fn the_questions_a_harness_asks_at_startup_get_answers() {
+        let mut answers = Answers::default();
+        let mut said = Vec::new();
+        // Codex's opening, verbatim.
+        answers.answer(b"\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c", &mut said);
+        let said = String::from_utf8_lossy(&said).to_string();
+        assert!(said.contains("[?62;22c"), "no device attributes: {said:?}");
+        assert!(said.contains("]10;rgb:"), "no foreground colour: {said:?}");
+        assert!(said.contains("]11;rgb:"), "no background colour: {said:?}");
+        // The cursor position is the one question with no honest fixed answer.
+        assert!(
+            !said.contains('R'),
+            "answered the cursor position: {said:?}"
+        );
+    }
+
+    /// The whole path on a real pty: an agent asks, and the answer arrives on
+    /// its own stdin without any terminal being involved.
+    #[test]
+    fn a_hosted_agent_gets_an_answer_from_the_shim() {
+        // Raw mode so the reply is not line-buffered or echoed back, then read
+        // exactly the nine bytes of the reply and draw them where a watcher can
+        // see them.
+        let script = "stty raw -echo; printf '\\033[c'; dd bs=1 count=9 2>/dev/null | tr -d '\\033'; sleep 30";
+        let argv: Vec<String> = ["sh", "-c", script].iter().map(|s| s.to_string()).collect();
+        let Ok(hosted) = host(&argv, None) else {
+            eprintln!("skipping: no pty available");
+            return;
+        };
+        let mut view = crate::attach::attach(hosted.pid).expect("attach to the shim");
+        let seen = (0..50).find_map(|_| {
+            view.pump();
+            let screen = view.parser.screen().contents();
+            if screen.contains("[?62;22c") {
+                return Some(screen);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            None
+        });
+        drop(hosted);
+        assert!(
+            seen.is_some(),
+            "the agent's question went unanswered on a real pty"
         );
     }
 }

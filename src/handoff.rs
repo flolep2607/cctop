@@ -435,10 +435,10 @@ pub fn write(brief: &Brief) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
-/// The line typed at the receiving agent so it goes and reads the brief.
+/// The line the receiving agent is given so it goes and reads the brief.
 ///
 /// A path rather than the brief's text: the text is thousands of tokens, and
-/// pasting it through a pty is both slow and at the mercy of the terminal's
+/// pushing it into an agent is both slow and at the mercy of the terminal's
 /// bracketed-paste handling. A one-line instruction the agent acts on itself is
 /// the same information with none of that.
 pub fn prompt_for(path: &Path) -> String {
@@ -448,6 +448,59 @@ pub fn prompt_for(path: &Path) -> String {
          against the repository, then continue from where it leaves off.",
         path.display()
     )
+}
+
+/// `argv` with `line` added as the agent's opening prompt, for the harnesses
+/// that take one on their command line.
+///
+/// This is how a brief should reach an agent, and typing it is the fallback.
+/// Every one of these CLIs starts by asking the terminal what it can do — the
+/// keyboard-enhancement query, and whatever else — and reads its stdin looking
+/// for the answer, discarding what does not match. A brief that arrives during
+/// that window loses however much of itself was in the input queue at the time,
+/// which is not a partial failure the user can see: what landed still looks like
+/// a sentence. Handing off a Claude session to Codex produced
+///
+/// ```text
+/// bc09dce-4d0a-4568-b4b7-870bcec98aa3.md — it is a cctop handoff brief …
+/// ```
+///
+/// from a file called `3bc09dce-…`, so Codex went looking for a path that had
+/// never existed, found nothing, and asked for the brief to be pasted. No settle
+/// delay fixes that: the query happens when the agent starts, which is exactly
+/// when there is a brief waiting for it. An argument is read after the agent is
+/// running, from somewhere nothing else is competing for.
+///
+/// `None` for anything not listed — a login shell, or a harness whose flag isn't
+/// known here — which leaves that agent on the typed path it used before.
+pub fn opening_argv(argv: &[String], line: &str) -> Option<Vec<String>> {
+    // `None` is a positional prompt, which is what most of them take.
+    let flag = match command_of(argv)? {
+        "claude" | "codex" | "cursor-agent" => None,
+        "opencode" => Some("--prompt"),
+        _ => return None,
+    };
+    let mut out = argv.to_vec();
+    out.extend(flag.map(str::to_string));
+    out.push(line.to_string());
+    Some(out)
+}
+
+/// The command an argv runs, bare of any path and of the `env VAR=value` prefix
+/// a profile launch carries.
+fn command_of(argv: &[String]) -> Option<&str> {
+    let mut rest = argv;
+    if rest.first().map(String::as_str) == Some("env") {
+        rest = &rest[1..];
+        while rest
+            .first()
+            .is_some_and(|a| a.contains('=') && !a.starts_with('-'))
+        {
+            rest = &rest[1..];
+        }
+    }
+    let first = rest.first()?.as_str();
+    Some(first.rsplit('/').next().unwrap_or(first))
 }
 
 #[cfg(test)]
@@ -531,6 +584,52 @@ mod tests {
         assert_eq!(brief.files[0].edits, 2);
         assert_eq!(brief.files[0].added, 3);
         assert!(brief.to_markdown().contains("`src/main.rs` ×2 (+3/-1)"));
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The whole point: the brief reaches the agent as an argument, so nothing
+    /// it does to the terminal on startup can eat the first half of the line.
+    #[test]
+    fn a_harness_that_takes_a_prompt_is_given_one_in_its_argv() {
+        assert_eq!(
+            opening_argv(&argv(&["codex"]), "Read /tmp/b.md and continue"),
+            Some(argv(&["codex", "Read /tmp/b.md and continue"]))
+        );
+        // The prompt stays one argument, whatever is in it — nothing between
+        // here and the exec re-splits it.
+        let flagged = opening_argv(&argv(&["opencode"]), "Read /tmp/b.md").unwrap();
+        assert_eq!(flagged, argv(&["opencode", "--prompt", "Read /tmp/b.md"]));
+    }
+
+    /// A profile launch is `env CODEX_HOME=… codex`, and the prompt belongs to
+    /// the agent at the end of it rather than to `env`.
+    #[test]
+    fn a_profile_prefix_does_not_hide_the_harness() {
+        assert_eq!(
+            opening_argv(
+                &argv(&["env", "CODEX_HOME=/home/x/.codex-work", "codex"]),
+                "go"
+            ),
+            Some(argv(&[
+                "env",
+                "CODEX_HOME=/home/x/.codex-work",
+                "codex",
+                "go"
+            ]))
+        );
+        // An absolute path is the same harness.
+        assert!(opening_argv(&argv(&["/usr/bin/claude"]), "go").is_some());
+    }
+
+    /// A shell has no prompt to be given, and inventing an argument for it would
+    /// mean launching `zsh "Read …"` — so these fall back to being typed at.
+    #[test]
+    fn a_command_with_no_known_prompt_argument_is_left_alone() {
+        assert_eq!(opening_argv(&argv(&["/bin/zsh"]), "go"), None);
+        assert_eq!(opening_argv(&[], "go"), None);
     }
 
     /// The brief tells the receiving agent what it is reading. Without that an

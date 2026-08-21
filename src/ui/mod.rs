@@ -67,10 +67,11 @@ const SCAN_DEBOUNCE: Duration = Duration::from_millis(300);
 /// How long a freshly launched agent is given before a handoff brief is typed
 /// at it.
 ///
-/// Tuned against Claude Code and Codex, both of which print a banner and build
-/// their prompt before the first keystroke registers. Too short and the line is
-/// lost; too long and the user is left looking at an idle agent wondering
-/// whether the handoff worked.
+/// Only reached by a harness that takes no opening prompt on its command line —
+/// everything in [`handoff::opening_argv`](crate::handoff::opening_argv) is
+/// handed the brief as an argument instead, because no delay is long enough to
+/// win that race reliably. Too short and the line is lost; too long and the user
+/// is left looking at an idle agent wondering whether the handoff worked.
 const HANDOFF_SETTLE: Duration = Duration::from_secs(3);
 
 /// Shortest query worth reading every transcript for.
@@ -2793,6 +2794,10 @@ impl App {
             // spawned the command, the label when the cctop that owns the tab
             // has not written it yet.
             shared.pid = agent.pid.or(shared.pid);
+            // Kept rather than overwritten when tmux has nothing: the pane that
+            // launched this agent knew its account before the option landed on
+            // the session, and a sweep in that window must not forget it.
+            shared.profile = agent.profile.clone().or_else(|| shared.profile.take());
             if let Some(label) = &agent.label {
                 shared.label = label.clone();
             }
@@ -3144,31 +3149,57 @@ impl App {
             return;
         }
 
-        let argv = &argv;
-        let mut pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
-            Ok(pane) => pane,
-            Err(error) => {
-                self.set_status(format!("Could not start {}: {error}", tabs::label_of(argv)));
-                return;
-            }
+        // A brief goes to an agent that is starting fresh. Reattaching lands in
+        // a conversation already under way, where a "read this and continue"
+        // line would interrupt whatever it is doing mid-turn.
+        let brief = match matches!(choice, tabs::Choice::Start(_)) {
+            true => self.pending_brief.clone(),
+            false => None,
         };
+        let line = brief.as_deref().map(crate::handoff::prompt_for);
+        // Handed over in the argv wherever the harness takes an opening prompt;
+        // `opening_argv` says why that is not the same as typing it.
+        let opening = line
+            .as_deref()
+            .and_then(|line| crate::handoff::opening_argv(&argv, line));
+        let argv = &argv;
+        let mut pane =
+            match tabs::Pane::launch(opening.as_ref().unwrap_or(argv), cwd.as_deref(), own) {
+                Ok(pane) => pane,
+                Err(error) => {
+                    self.set_status(format!("Could not start {}: {error}", tabs::label_of(argv)));
+                    return;
+                }
+            };
         // The profile is only knowable here: it reached the agent as an
-        // environment variable, which nothing downstream can read back.
-        if matches!(choice, tabs::Choice::Start(_)) {
-            pane.profile = self.launch_profile().map(|p| p.name.clone());
+        // environment variable, which nothing downstream can read back. A fresh
+        // agent takes the account the launcher was showing; one being reattached
+        // takes the one it was started under, which the sweep read back off its
+        // tmux session.
+        pane.profile = match &choice {
+            tabs::Choice::Start(_) => self.launch_profile().map(|p| p.name.clone()),
+            tabs::Choice::Waiting(agent) => agent.profile.clone(),
+        };
+        // The tab is named after the agent, not after the brief it was handed:
+        // `Pane::launch` names it from the argv it was given, and that argv now
+        // ends in a paragraph.
+        if opening.is_some() {
+            pane.label = tabs::label_of(argv);
         }
         let label = pane.label.clone();
-        // A brief goes to an agent that is starting fresh. Reattaching lands in
-        // a conversation already under way, where typing a "read this and
-        // continue" line would interrupt whatever it is doing mid-turn.
-        if let Some(path) = self.pending_brief.take()
-            && matches!(choice, tabs::Choice::Start(_))
-        {
-            self.handoff_send = Some((
-                pane.pid,
-                crate::handoff::prompt_for(&path),
-                Instant::now() + HANDOFF_SETTLE,
-            ));
+        let mut carried = "";
+        if let Some(line) = line {
+            self.pending_brief = None;
+            match opening.is_some() {
+                // Already in the agent's argv — there is nothing left to send,
+                // and the agent opens on the brief instead of on an empty prompt.
+                true => carried = " with the brief",
+                // No prompt argument to use, so it goes the old way: typed once
+                // the agent has had long enough to be listening.
+                false => {
+                    self.handoff_send = Some((pane.pid, line, Instant::now() + HANDOFF_SETTLE));
+                }
+            }
         }
         let kept = match pane.outlives_cctop() {
             true => " — it will outlive cctop",
@@ -3203,7 +3234,7 @@ impl App {
                 let where_ = cwd
                     .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
                     .unwrap_or_default();
-                format!("Started {label}{where_}{kept}")
+                format!("Started {label}{where_}{carried}{kept}")
             }
         });
     }
@@ -3598,6 +3629,25 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // from typing, and the newlines in a pasted message reach the agent as the
     // Enter that submits it — a five-line paste asking five questions.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // Ask the terminal to tell Shift+Enter apart from Enter, which it otherwise
+    // cannot: both are a carriage return, and a terminal has no other way to
+    // send the difference. An agent in a pane wants that difference badly —
+    // Shift+Enter is how you write a second line of a prompt without submitting
+    // the first — and until cctop asks for it, the keypress reaches cctop as a
+    // plain Enter and the distinction is lost before any pane could carry it.
+    //
+    // Only the disambiguating flag, and only where the terminal says it can:
+    // the richer flags report key releases and repeats, which would double
+    // every keystroke cctop already handles. Terminals without the protocol are
+    // left alone, and there Shift+Enter stays what it has always been.
+    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = execute!(
+            std::io::stdout(),
+            event::PushKeyboardEnhancementFlags(
+                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        );
+    }
 
     // Established before the loop so the first tick already has it; `None` just
     // means discovery falls back to the periodic walk.
@@ -3685,6 +3735,10 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 /// alternate screen; it does not restore cursor visibility. Keep this separate
 /// so regular exits, input errors, and panics all use the same cleanup path.
 fn restore_terminal() {
+    // Popped unconditionally: a push that never happened pops nothing, and a
+    // terminal left in the protocol would report keys to the user's shell in a
+    // form it does not read.
+    let _ = execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     let _ = execute!(std::io::stdout(), Show);
@@ -3975,6 +4029,14 @@ fn event_loop(
         for tab in &mut app.tabs {
             drawn |= tab.pump();
         }
+        // An agent that said what it wanted says it once, to the person who
+        // just looked: the tab colour is the alarm, this is the message. Here
+        // rather than on the keypress that focused the pane — a bell arriving
+        // while you are already on it has also been seen, and a tab you switch
+        // away from must keep its bell rather than have it cleared by the tick.
+        if let Some(note) = app.focused_pane().and_then(tabs::Pane::answer_bell) {
+            app.set_status(note);
+        }
         let closed = app.tabs.iter_mut().fold(false, |any, tab| tab.reap() | any);
         if closed {
             app.drop_empty_tabs();
@@ -4192,6 +4254,7 @@ mod tests {
                 attached: false,
                 activity: None,
                 label: Some(name.to_string()),
+                profile: None,
             })
         };
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
@@ -4245,6 +4308,7 @@ mod tests {
                 attached: false,
                 activity: None,
                 label: Some(name.to_string()),
+                profile: None,
             })
         };
         let layout = render::Layout {
@@ -4327,6 +4391,7 @@ mod tests {
                 attached: false,
                 activity: None,
                 label: Some(name.to_string()),
+                profile: None,
             })
         };
         let layout = render::Layout {
@@ -4636,6 +4701,7 @@ mod tests {
             attached: false,
             activity: None,
             label: Some("claude · Improve super cctop".into()),
+            profile: None,
         }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every
