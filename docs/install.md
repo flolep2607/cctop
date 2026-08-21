@@ -82,11 +82,27 @@ already in place — so a network that fails at that moment costs you the summar
 and not the update, and you get the link instead.
 
 cctop checks for a new release once an hour in the background and, when one
-exists, says so in the footer. It never updates itself: the check only reports,
-and replacing the binary always takes an explicit `--update`. If you installed
-with `cargo install` or a package manager, update it the same way you installed
-it — `--update` will refuse rather than overwrite a managed install it cannot
-write to.
+exists, says so in the footer. The next time you start it, it installs that
+release before opening: the version was already known, so nothing is waited on
+to discover it, and the download is the only pause. It then prints what changed,
+waits for you to press Enter, and starts as the new version.
+
+Startup is the only moment it will do this. Nothing is open yet — no terminal
+held, no agent hosted, no pane to lose — so the new binary can simply take the
+place of the old one. That is not true of any later moment, which is why an
+update that becomes available while cctop is running waits for the next start
+rather than interrupting the one you are in.
+
+To start on the version you already have, pass `--no-auto-update`. To stop it
+happening at all, set `"auto_update": false` in `ui-prefs.json` under your cache
+directory (`~/.cache/cctop` on Linux, `~/Library/Caches/cctop` on macOS);
+`cctop --update` still works whenever you want it. `cctop claude` and the other
+agent aliases skip it too — you are waiting on an agent, and a download between
+the command and the agent starting is not what you asked for.
+
+If you installed with `cargo install` or a package manager, none of this
+applies: cctop will not touch a binary something else is responsible for, and
+`--update` refuses for the same reason. Update it the way you installed it.
 
 ## With cargo
 

@@ -613,6 +613,15 @@ pub struct UiPrefs {
     /// Opt-in and remembered, because whether a terminal may make noise is a
     /// property of the room you sit in, not of this run.
     pub notify: bool,
+    /// Update to a newer release as the UI starts, when the hourly check has
+    /// already found one.
+    ///
+    /// On by default, unlike [`UiPrefs::notify`]: a bell is about the room you
+    /// are sitting in and has to be asked for, while an update is about the
+    /// binary and is what someone running a downloaded tool wants by the time
+    /// they notice a version exists. Off means off for good — `--no-auto-update`
+    /// is the way to skip one run.
+    pub auto_update: bool,
     /// The shell alias block has been written once. Kept here so removing the
     /// block — by flag or by hand — isn't undone by the next launch.
     pub shell_alias_installed: bool,
@@ -657,6 +666,7 @@ impl Default for UiPrefs {
             subagent_sort_asc: false,
             cost_floor: 0.0,
             notify: false,
+            auto_update: true,
             shell_alias_installed: false,
             hidden_columns: Vec::new(),
             theme: None,

@@ -3,8 +3,24 @@
 //! A downloaded binary has no package manager behind it, so without this it
 //! stays on whatever version it was fetched at. Installs that *do* have a
 //! package manager (`cargo install`, a distro package) must not be overwritten
-//! behind the manager's back, so replacing the executable only ever happens
-//! when the user asks for it with `--update`. The passive check just reports.
+//! behind the manager's back — that refusal is absolute and is checked before
+//! anything else.
+//!
+//! For an install cctop does own, it updates itself as the interactive UI
+//! starts, when the hourly check has *already* found a newer version. That is a
+//! change of position: this module used to replace the binary only on an
+//! explicit `--update`, on the grounds that a program should not swap itself out
+//! from under someone. What moved the argument is where the swap happens. At
+//! startup there is no pty open, no agent hosted and no pane to lose, so the new
+//! binary can be exec'd in place of the old one and the session that follows is
+//! simply the new version — which is not true of any later moment, and is why
+//! this is a startup-only path and not a background one.
+//!
+//! It stays out of the way of everything else: no non-interactive mode reaches
+//! it, the version it acts on is the cached one so nothing is waited for to
+//! discover it, and every failure falls through to launching the version already
+//! installed. `--no-auto-update` skips it for one run, and turning it off in the
+//! UI's preferences skips it for good.
 
 use crate::config;
 use anyhow::{Context, Result, anyhow, bail};
@@ -364,9 +380,9 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 /// replaced: the update has succeeded by this point, and failing it over notes
 /// that are a nicety would be absurd. When they cannot be had, the release page
 /// is one line and one click away instead.
-fn show_changes(from: &str, to: &str) {
+fn show_changes(from: &str, to: &str) -> bool {
     if !is_newer(to, from) {
-        return;
+        return false;
     }
     let notes = fetch_release_list().map(|list| {
         selected(&list, from, to)
@@ -381,11 +397,11 @@ fn show_changes(from: &str, to: &str) {
     });
     let Ok(notes) = notes else {
         println!("Release notes: {RELEASE_PAGE}");
-        return;
+        return false;
     };
     if notes.iter().all(|(_, lines)| lines.is_empty()) {
         println!("Release notes: {RELEASE_PAGE}");
-        return;
+        return false;
     }
     // The terminal's width less the deepest indent these lines are printed at.
     let room = crossterm::terminal::size()
@@ -418,6 +434,7 @@ fn show_changes(from: &str, to: &str) {
     }
     println!();
     println!("Full notes: {RELEASE_PAGE}");
+    true
 }
 
 /// Where the notes live in full, for anything this cannot summarise.
@@ -454,6 +471,15 @@ pub fn run(force: bool) -> Result<()> {
         return Ok(());
     }
 
+    install(&release, target, current).map(|_| ())
+}
+
+/// Fetch the archive for `target` and put it in place of the running binary.
+///
+/// Shared by `--update` and the startup path, which differ only in how they
+/// decided to be here.
+fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
+    let latest = release.version();
     let asset = release
         .assets
         .iter()
@@ -486,8 +512,142 @@ pub fn run(force: bool) -> Result<()> {
     println!("Updated {current} -> {latest}.");
     // After the replace, so an install that worked is never held up by the
     // network call that only decorates it.
-    show_changes(current, latest);
-    Ok(())
+    Ok(show_changes(current, latest))
+}
+
+/// Set on the process that replaces this one, so the new binary knows it has
+/// just arrived and does not go looking for another update.
+///
+/// The version comparison would stop it anyway — the cache names a release the
+/// new binary now *is* — but a self-replacing program that re-execs itself is
+/// one bad comparison away from doing it forever, and the guard costs a string.
+const JUST_UPDATED: &str = "CCTOP_JUST_UPDATED";
+
+/// Whether this process is the one that a startup update exec'd into.
+pub fn just_updated() -> bool {
+    std::env::var_os(JUST_UPDATED).is_some()
+}
+
+/// The version to update to at startup, if any.
+///
+/// Split out so the order of the refusals is a thing that can be tested rather
+/// than a thing that can be reordered: a managed install must be refused whatever
+/// the cache says, and being asked not to has to be honoured before either is
+/// consulted.
+fn wanted(
+    enabled: bool,
+    just_updated: bool,
+    managed: bool,
+    latest: Option<String>,
+) -> Option<String> {
+    if !enabled || just_updated || managed {
+        return None;
+    }
+    latest
+}
+
+/// How the new binary is started: the same arguments this run was given, plus
+/// the marker that stops it updating again.
+///
+/// The arguments matter more than they look. A `cctop --host box --plan max` that
+/// came back as a bare `cctop` would be a different program than the one asked
+/// for, and the user would have no reason to connect the difference to an update
+/// they never asked about.
+fn relaunch_command(
+    exe: std::path::PathBuf,
+    args: Vec<std::ffi::OsString>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command.args(args).env(JUST_UPDATED, "1");
+    command
+}
+
+/// Update before the UI opens, if the check already knows there is something to
+/// update to.
+///
+/// Returns only when the run should continue as the version already installed —
+/// on success it does not return at all, having exec'd the new binary in place
+/// of this process. See the module docs for why startup is the one moment that
+/// is safe to do that.
+///
+/// Every reason not to act is silent. This is a convenience on the way to
+/// something the user actually asked for, and a paragraph about a release that
+/// could not be fetched, printed before every launch, would be worse than the
+/// old version they are about to keep using.
+pub fn auto_at_startup(enabled: bool) {
+    // The cached answer alone: this is the whole point of doing it here. The
+    // hourly check has already been paid for, so nothing is waited on to learn
+    // that there is a newer version — only to fetch it.
+    let Some(latest) = wanted(
+        enabled,
+        just_updated(),
+        managed_by_cargo(),
+        available_update(),
+    ) else {
+        return;
+    };
+    // An install cctop cannot write to is not worth a download, and finding out
+    // costs nothing: it is the same question `--update` asks before spending one.
+    if staging_dir().is_err() {
+        return;
+    }
+    let Some(target) = asset_target() else {
+        return;
+    };
+    let current = current_version();
+    println!("cctop {latest} is out; updating from {current} before starting…");
+    let updated = fetch_latest().and_then(|release| {
+        match is_newer(release.version(), current) {
+            // The cache was stale in the direction that matters: it named a
+            // release that has since been replaced by the very version running.
+            false => Ok(false),
+            true => install(&release, target, current),
+        }
+    });
+    let Ok(showed_notes) = updated else {
+        println!("Could not update just now; starting {current} instead.");
+        return;
+    };
+    // The UI is about to take the alternate screen, which puts everything above
+    // on the other side of a curtain until cctop exits. Notes nobody gets to
+    // read are not notes, and this is the one moment they are what the user is
+    // looking at — so it costs them a keypress, once per release.
+    if showed_notes {
+        print!("Press Enter to start cctop… ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+    relaunch();
+}
+
+/// Start the new binary in place of this process.
+///
+/// Nothing of this run is worth keeping — the UI has not opened, no pty is held,
+/// no agent has been hosted — so the cleanest thing is to become the new version
+/// and let it start normally. Falls through to running the old image in memory if
+/// even that fails, which is the same outcome as never having tried.
+fn relaunch() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = relaunch_command(exe, std::env::args_os().skip(1).collect());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Replaces this process outright, so there is no wrapper left holding a
+        // terminal that two programs then both believe they own.
+        let error = command.exec();
+        println!("Could not start the new version ({error}); continuing.");
+    }
+    #[cfg(not(unix))]
+    {
+        // No exec on Windows, so the old process stays as a parent and exits
+        // with whatever the new one reports.
+        match command.status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(0)),
+            Err(error) => println!("Could not start the new version ({error}); continuing."),
+        }
+    }
 }
 
 /// How to retry with the privileges this platform needs.
@@ -764,6 +924,51 @@ fn confirm(dir: &Path, exe: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refusals, in the order that matters. A managed install is the one
+    /// that has to hold whatever else is true: `cargo install --list` would go
+    /// on naming a version that is no longer on disk, and nothing about a newer
+    /// release makes that acceptable.
+    #[test]
+    fn a_startup_update_gives_way_to_every_reason_not_to() {
+        let latest = || Some("0.9.0".to_string());
+        assert_eq!(wanted(true, false, false, latest()), latest());
+
+        // Asked not to, for this run or for good.
+        assert_eq!(wanted(false, false, false, latest()), None);
+        // Already the product of one update: never twice in a chain.
+        assert_eq!(wanted(true, true, false, latest()), None);
+        // Cargo owns this binary.
+        assert_eq!(wanted(true, false, true, latest()), None);
+        // Nothing to update to, which is the ordinary case.
+        assert_eq!(wanted(true, false, false, None), None);
+    }
+
+    /// The relaunch has to be the same program, or an update silently changes
+    /// what the user ran.
+    #[test]
+    fn the_new_binary_is_started_the_way_this_one_was() {
+        let args = ["--host", "box", "--plan", "max"]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect();
+        let command = relaunch_command("/usr/local/bin/cctop".into(), args);
+        let passed: Vec<_> = command.get_args().collect();
+        assert_eq!(passed, ["--host", "box", "--plan", "max"]);
+        // And the marker, so the version that arrives does not go looking again.
+        let marked = command
+            .get_envs()
+            .any(|(k, v)| k == JUST_UPDATED && v == Some(std::ffi::OsStr::new("1")));
+        assert!(marked, "the new process could update itself again");
+    }
+
+    /// Nothing to report when nothing moved, which is what `--update --force`
+    /// on the newest version does.
+    #[test]
+    fn there_are_no_notes_for_a_version_that_did_not_change() {
+        assert!(!show_changes("0.7.5", "0.7.5"));
+        assert!(!show_changes("0.7.5", "0.7.4"));
+    }
 
     fn release(tag: &str, body: &str) -> Release {
         Release {

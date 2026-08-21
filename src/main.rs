@@ -255,6 +255,20 @@ fn main() -> anyhow::Result<()> {
         alias::ask_on_first_run(&mut cache::UiPrefs::load());
     }
 
+    // Before the pricing fetch, the shim and the UI, because this is the one
+    // moment a replacement is free: nothing is open yet, so the new binary can
+    // be exec'd in place of this process and the session that follows is simply
+    // the new version. Every non-interactive mode has already returned above, so
+    // no script and no hook can reach this. It returns when there is nothing to
+    // do or nothing worked, and does not return at all when it worked.
+    //
+    // `cctop claude` is excluded for the reason the alias prompt above is: an
+    // agent is being waited on, and a download and a keypress between the
+    // command and the agent starting is not what was asked for.
+    let auto_update =
+        !args.no_auto_update && !launching_agent && cache::UiPrefs::load().auto_update;
+    update::auto_at_startup(auto_update);
+
     // Load whatever pricing is already cached so the first frame isn't zeroed
     // while the network fetch is still in flight.
     pricing::load_cached_pricing();
