@@ -1155,62 +1155,107 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
 // Footer
 // ---------------------------------------------------------------------------
 
-fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
-    if let Some((msg, _)) = &app.status {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                msg.clone(),
-                Style::default().fg(theme::colors().cost_low),
-            ))),
-            area,
-        );
-        return;
-    }
+/// One key hint, and how hard it fights for a place on the footer.
+///
+/// The footer used to be a fixed list of twelve, which meant a narrow terminal
+/// lost whichever three happened to be last and a wide one still never showed
+/// `Enter`. Ordering the hints by what they earn, and fitting them to the
+/// width that is actually left, fixes both: the row menu is always there and
+/// the speed control is there only when nothing better wants the space.
+struct Hint {
+    key: &'static str,
+    name: &'static str,
+}
 
+impl Hint {
+    /// `key` + a space + `name` + a trailing space, matching how it renders.
+    fn width(&self) -> usize {
+        self.key.chars().count() + self.name.chars().count() + 2
+    }
+}
+
+const fn hint(key: &'static str, name: &'static str) -> Hint {
+    Hint { key, name }
+}
+
+/// Lay hints out left to right until the next one would not fit, then stop.
+///
+/// Dropping from the tail rather than truncating mid-word is what makes the
+/// priority order mean anything: a half-drawn `Qu` teaches nobody that `q`
+/// quits, so the hint that cannot fit whole is simply not shown.
+fn fit_hints(hints: &[Hint], mut room: usize) -> Vec<Span<'static>> {
     let key_style = theme::key_cap();
     let label_style = Style::default().fg(theme::colors().dim);
-
-    // A terminal tab has no dashboard selection, filters, or panels to act on.
-    // Its footer is the compact map of the keys cctop keeps while the rest of
-    // the keyboard belongs to the focused agent.
-    if app.tab > 0 {
-        let mut spans = Vec::new();
-        for (key, name) in [
-            ("F12", "Dashboard"),
-            ("F10", "Quit"),
-            ("F1", "Help"),
-            ("Alt+←→", "Tabs"),
-            ("Alt+n", "New"),
-            ("Alt+v/s", "Split"),
-            ("Alt+o", "Focus"),
-            ("Alt+w", "Close"),
-            ("Alt+Shift+W", "Stop"),
-        ] {
-            spans.push(Span::styled(key, key_style));
-            spans.push(Span::styled(format!(" {name} "), label_style));
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
-        return;
-    }
-
     let mut spans = Vec::new();
-    for (key, name) in [
-        ("F1", "Help"),
-        ("F3", "Filter"),
-        ("F5", "Refresh"),
-        ("F7", "Age"),
-        ("←→", "Panel"),
-        ("Space", "Mark"),
-        ("D", "Batch"),
-        ("y", "Copy"),
-        ("d", "Delete"),
-        ("^K", "Kill"),
-        ("+/-", "Speed"),
-        ("F10", "Quit"),
-    ] {
-        spans.push(Span::styled(key, key_style));
-        spans.push(Span::styled(format!("{name} "), label_style));
+    for h in hints {
+        let w = h.width();
+        if w > room {
+            break;
+        }
+        room -= w;
+        spans.push(Span::styled(h.key, key_style));
+        spans.push(Span::styled(format!(" {} ", h.name), label_style));
     }
+    spans
+}
+
+/// The keys a terminal tab keeps while the rest of the keyboard belongs to the
+/// focused agent, most-used first.
+fn tab_hints() -> Vec<Hint> {
+    vec![
+        hint("F12", "Dashboard"),
+        hint("Alt+←→", "Tabs"),
+        hint("Alt+n", "New"),
+        hint("Alt+w", "Close"),
+        hint("Alt+o", "Focus"),
+        hint("F1", "Help"),
+        hint("Alt+v/s", "Split"),
+        hint("F10", "Quit"),
+    ]
+}
+
+/// The dashboard's hints for the state it is actually in.
+///
+/// Context, not a fixed list: `Enter` is worth nothing with an empty table,
+/// `Esc` is worth nothing with no filter to clear, and once rows are marked the
+/// batch actions matter more than the mark key that is already doing its job.
+fn list_hints(app: &App) -> Vec<Hint> {
+    let mut hints = vec![hint("↑↓", "Move")];
+    if app.selected_session().is_some() {
+        // First, and by some distance. Every per-row action is behind it, and
+        // it is the one key that teaches the others their letters.
+        hints.push(hint("↵", "Actions"));
+    }
+    hints.push(hint("/", "Filter"));
+    if app.marked.is_empty() {
+        hints.push(hint("Space", "Mark"));
+    } else {
+        // Marking is done; what is unobvious now is how to act on the marks.
+        hints.push(hint("D", "Delete marked"));
+        hints.push(hint("K", "Kill marked"));
+        hints.push(hint("U", "Unmark"));
+    }
+    if app.has_filter() {
+        hints.push(hint("Esc", "Clear filter"));
+    }
+    if app.selected_session().is_some() {
+        hints.push(hint("a", "Attach"));
+        hints.push(hint("R", "Resume"));
+    }
+    hints.push(hint("t", "New tab"));
+    hints.push(hint("Tab", "Panel"));
+    hints.push(hint("S", "Sort"));
+    hints.push(hint("?", "Help"));
+    hints.push(hint("q", "Quit"));
+    hints
+}
+
+/// The badges: what cctop is doing to the table right now, and anything that
+/// wants answering. These take their width before the hints do, because a hint
+/// is a thing you could learn from the help and a badge is a fact about this
+/// screen that is on show nowhere else.
+fn footer_badges(app: &App) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
     if let Some(age) = app.age_filter {
         spans.push(Span::styled(
             format!(" Age<{} ", age.short()),
@@ -1245,10 +1290,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    spans.push(Span::styled(
-        format!(" {}s ", app.refresh_secs),
-        Style::default().fg(theme::colors().dimmer),
-    ));
     if app.follow {
         spans.push(Span::styled(
             " FOLLOW ",
@@ -1286,7 +1327,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    // Last, so it never pushes a key hint off the end of a narrow footer.
     if let Some(version) = &app.update_available {
         spans.push(Span::styled(
             format!(" v{version} available — cctop --update "),
@@ -1295,6 +1335,40 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    spans
+}
+
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+    if let Some((msg, _)) = &app.status {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                msg.clone(),
+                Style::default().fg(theme::colors().cost_low),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    let total = area.width as usize;
+    let (hints, badges) = if app.tab > 0 {
+        // A terminal tab has no dashboard selection, filters or panels to act
+        // on, so it has no badges either — just the compact map of the keys
+        // cctop keeps.
+        (tab_hints(), Vec::new())
+    } else {
+        (list_hints(app), footer_badges(app))
+    };
+
+    let badge_w: usize = badges.iter().map(|s| s.content.chars().count()).sum();
+    // The badges never squeeze the hints below the first few: a footer that is
+    // all state and no keys is what the terminal is for. Past that the badges
+    // win, and the tail hints are the ones that go.
+    let floor = hints.iter().take(3).map(Hint::width).sum::<usize>();
+    let room = total.saturating_sub(badge_w).max(floor.min(total));
+
+    let mut spans = fit_hints(&hints, room);
+    spans.extend(badges);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -1350,6 +1424,54 @@ mod tests {
             duration: None,
             resets_at: Some(resets_at),
         }
+    }
+
+    /// A hint that does not fit whole is dropped, not cut: half a key cap
+    /// teaches the wrong key.
+    #[test]
+    fn a_narrow_footer_drops_whole_hints_from_the_tail() {
+        let hints = [hint("↑↓", "Move"), hint("↵", "Actions"), hint("q", "Quit")];
+        // Two spans per hint that fits, so the count says how many made it.
+        assert_eq!(fit_hints(&hints, 100).len(), 6);
+        // "↑↓ Move " is 8, "↵ Actions " is 10: room for the first, and one
+        // column short of the second.
+        assert_eq!(fit_hints(&hints, 17).len(), 2);
+        assert_eq!(fit_hints(&hints, 18).len(), 4);
+        assert!(fit_hints(&hints, 3).is_empty());
+    }
+
+    /// The footer is a map of the state you are in, not a fixed list. Marking
+    /// rows swaps the mark key for the things you can now do with the marks,
+    /// and a filter that is on brings `Esc` forward.
+    #[test]
+    fn the_footer_hints_follow_what_the_dashboard_is_doing() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        let names =
+            |app: &App| -> Vec<&'static str> { list_hints(app).iter().map(|h| h.name).collect() };
+
+        // Nothing selected: no per-row key is offered, because none would work.
+        assert!(app.selected_session().is_none());
+        let empty = names(&app);
+        assert!(!empty.contains(&"Actions"), "{empty:?}");
+        assert!(!empty.contains(&"Attach"), "{empty:?}");
+        assert!(!empty.contains(&"Clear filter"), "{empty:?}");
+        assert!(
+            empty.contains(&"Help") && empty.contains(&"Quit"),
+            "{empty:?}"
+        );
+
+        app.marked.insert("session-key".into());
+        let marked = names(&app);
+        assert!(!marked.contains(&"Mark"), "{marked:?}");
+        assert!(marked.contains(&"Delete marked"), "{marked:?}");
+        assert!(marked.contains(&"Unmark"), "{marked:?}");
+
+        app.search = "web".into();
+        assert!(names(&app).contains(&"Clear filter"));
     }
 
     #[test]
