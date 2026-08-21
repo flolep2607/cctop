@@ -68,6 +68,45 @@ This is why the `hook` dispatch in `main.rs` is not behind `#[cfg(unix)]`:
 `--install-hooks` writes the settings file on any platform, and a hook that fell
 through to clap would exit non-zero on every fire.
 
+## A pull request title is a release note
+
+Whatever you call the PR is what users read. `release.yml` asks GitHub to
+generate the release notes, which is one line per merged PR — `* <title> by
+@someone in <url>` — and `cctop --update` prints those lines to whoever updates,
+having stripped the attribution and the URL. The title is all that survives, so
+it is the whole note.
+
+Write it as the sentence you would want someone three versions behind to read:
+
+```
+Codex accounts per subscription, and a tab you can close without losing your place
+Fix the login hint for a named account, and add a run skill that drives the TUI
+```
+
+Both of those are real titles, and both read correctly on an updater's screen.
+These do not:
+
+- **`chore: release 0.7.4`.** This is what 0.7.4 actually shipped as its only
+  release note, on the release that introduced the feature that prints them.
+  A release PR's title has to name what the release *contains* — its theme, in
+  the user's terms — because the bump is the least interesting thing about it.
+- **A type prefix.** `fix:` and `feat:` belong on commits, where the audience is
+  someone reading `git log`. On an updater's screen they spend width telling a
+  user what a maintainer would have wanted to know.
+- **A leading version.** `0.7.0: shared tabs` and `release 0.7.3: …` are both in
+  this history. The updater prints each note under a version heading and strips
+  a version that repeats it, but that strip is a rescue for what is already
+  published, not a licence.
+
+Keep the point inside the first sixty characters or so. Long titles are wrapped
+to the terminal with a hanging indent rather than truncated, so nothing is lost
+— but the first line is what gets read.
+
+A note is fetched when someone updates, not when the release is cut, so a bad
+one can be fixed after the fact: edit the release body on GitHub and everyone who
+has not updated yet gets the better version. `gh release view v<version> --json
+body` shows what they would see now.
+
 ## Conventions
 
 - **`ponytail:` comments** mark a deliberate, documented limit — a thing this

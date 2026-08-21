@@ -146,7 +146,10 @@ cctop claude          # start an agent on a pty cctop can watch and type into
 
 Bug reports and patches welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), which
 also has the architecture notes and the things about this codebase that are not
-obvious from reading it.
+obvious from reading it. If you are sending a pull request, name it after what
+changes for someone using cctop: the title becomes the release note that
+`cctop --update` prints, and [CLAUDE.md](CLAUDE.md) — which applies to coding
+agents as much as to people — says what reads well there and what does not.
 
 ## License
 

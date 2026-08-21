@@ -108,6 +108,17 @@ bump is the release** — there is no separate confirmation step, and
 `cargo publish` to crates.io cannot be undone. Do not create a release tag by
 hand for a normal version bump.
 
+**Name the pull request after what the release contains.** The notes GitHub
+generates are one line per merged PR, and `cctop --update` prints those lines to
+everyone who updates — so the PR title is the release note, and `chore: release
+0.7.4` tells a user nothing. `CLAUDE.md` has the full rule and the shapes to
+avoid; the short version is to write the sentence you would want someone three
+versions behind to read.
+
+Notes are fetched when someone updates rather than when the release is cut, so a
+note that landed badly is still worth fixing: edit the release body on GitHub and
+everyone who has not updated yet sees the better one.
+
 ## Refreshing the screenshots
 
 `docs/assets/` holds real captures, not mock-ups. Regenerate them after any
