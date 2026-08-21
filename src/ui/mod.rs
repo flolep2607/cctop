@@ -2793,6 +2793,10 @@ impl App {
             // spawned the command, the label when the cctop that owns the tab
             // has not written it yet.
             shared.pid = agent.pid.or(shared.pid);
+            // Kept rather than overwritten when tmux has nothing: the pane that
+            // launched this agent knew its account before the option landed on
+            // the session, and a sweep in that window must not forget it.
+            shared.profile = agent.profile.clone().or_else(|| shared.profile.take());
             if let Some(label) = &agent.label {
                 shared.label = label.clone();
             }
@@ -3153,10 +3157,14 @@ impl App {
             }
         };
         // The profile is only knowable here: it reached the agent as an
-        // environment variable, which nothing downstream can read back.
-        if matches!(choice, tabs::Choice::Start(_)) {
-            pane.profile = self.launch_profile().map(|p| p.name.clone());
-        }
+        // environment variable, which nothing downstream can read back. A fresh
+        // agent takes the account the launcher was showing; one being reattached
+        // takes the one it was started under, which the sweep read back off its
+        // tmux session.
+        pane.profile = match &choice {
+            tabs::Choice::Start(_) => self.launch_profile().map(|p| p.name.clone()),
+            tabs::Choice::Waiting(agent) => agent.profile.clone(),
+        };
         let label = pane.label.clone();
         // A brief goes to an agent that is starting fresh. Reattaching lands in
         // a conversation already under way, where typing a "read this and
@@ -4192,6 +4200,7 @@ mod tests {
                 attached: false,
                 activity: None,
                 label: Some(name.to_string()),
+                profile: None,
             })
         };
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
@@ -4245,6 +4254,7 @@ mod tests {
                 attached: false,
                 activity: None,
                 label: Some(name.to_string()),
+                profile: None,
             })
         };
         let layout = render::Layout {
@@ -4327,6 +4337,7 @@ mod tests {
                 attached: false,
                 activity: None,
                 label: Some(name.to_string()),
+                profile: None,
             })
         };
         let layout = render::Layout {
@@ -4636,6 +4647,7 @@ mod tests {
             attached: false,
             activity: None,
             label: Some("claude · Improve super cctop".into()),
+            profile: None,
         }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every

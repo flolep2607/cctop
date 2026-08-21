@@ -144,6 +144,11 @@ impl Pane {
             // without this a resumed agent would be one thing here and a uuid
             // next door.
             crate::tmux::set_label(name, &self.label);
+            // Only when there is one to record: an unset option reads back as
+            // "the default account", which is exactly what `None` means here.
+            if let Some(profile) = &self.profile {
+                crate::tmux::set_profile(name, profile);
+            }
         }
     }
 
@@ -285,6 +290,10 @@ pub struct Shared {
     /// When the session last drew anything, in unix seconds, as of the last
     /// sync. Stands in for [`Pane::drew_at`] on a tab that has no pane to watch.
     pub activity: Option<u64>,
+    /// The account the agent was started under, carried across the trade so the
+    /// pane this becomes again reports the same limits it did before. See
+    /// [`Pane::profile`].
+    pub profile: Option<String>,
 }
 
 impl Shared {
@@ -357,6 +366,7 @@ impl Tab {
                 name: agent.name.clone(),
                 pid: agent.pid,
                 activity: agent.activity,
+                profile: agent.profile.clone(),
             }),
         }
     }
@@ -392,6 +402,10 @@ impl Tab {
         // The label the other cctop chose, not one reconstructed from the argv
         // above — which is the label already, but only by coincidence.
         pane.label = shared.label;
+        // Reattaching is not relaunching, so nothing here chose an account —
+        // this is the one the session was started under, read back off tmux by
+        // the sweep that found it or kept from the pane this tab last had.
+        pane.profile = shared.profile;
         self.panes = vec![pane];
         self.focus = 0;
         self.shared = None;
@@ -419,6 +433,7 @@ impl Tab {
             // Nothing has been read off tmux for this tab yet, and the pane it
             // is replacing was on screen a moment ago. The next sweep fills it.
             activity: None,
+            profile: pane.profile.clone(),
         });
         self.panes.clear();
         self.focus = 0;
@@ -803,6 +818,7 @@ mod tests {
             attached: false,
             activity: Some(now.saturating_sub(ago)),
             label: label.map(str::to_string),
+            profile: None,
         }
     }
 
@@ -824,6 +840,30 @@ mod tests {
         // session name stands in, minus the prefix every one of them carries.
         let tab = Tab::shared(&session("cctop-claude-32cca860", None, 0));
         assert_eq!(tab.title(), "claude-32cca860");
+    }
+
+    /// Switching tabs must not silently move an agent to another account.
+    ///
+    /// `go_to_tab` trades the pane you leave for a `Shared` and trades it back
+    /// when you return, and a tab this cctop never launched is built from the
+    /// session alone. The account used to survive neither, and a lost account is
+    /// not "unknown" on the border — it reads as the default one, so a pane
+    /// running as a second login was shown the first login's remaining budget,
+    /// which is the figure you decide by.
+    #[test]
+    fn the_account_a_pane_runs_as_survives_a_tab_switch() {
+        let mut running = session("cctop-claude-32cca860", Some("claude"), 0);
+        running.profile = Some("work".into());
+        let adopted = Tab::shared(&running);
+        assert_eq!(
+            adopted.shared.as_ref().and_then(|s| s.profile.as_deref()),
+            Some("work"),
+        );
+
+        // And nothing invented for the ordinary account, which writes no option
+        // and so reads back as none.
+        let plain = Tab::shared(&session("cctop-claude-4e2b1c90", Some("claude"), 0));
+        assert_eq!(plain.shared.as_ref().and_then(|s| s.profile.clone()), None);
     }
 
     /// A tab this cctop holds no client on still has to blink: that is the whole
@@ -894,6 +934,7 @@ mod tests {
             attached: false,
             activity: None,
             label: None,
+            profile: None,
         })
     }
 

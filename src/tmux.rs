@@ -401,6 +401,20 @@ pub fn set_label(name: &str, label: &str) {
         .output();
 }
 
+/// Record which account the agent in `name` was started under.
+///
+/// The same trick as [`set_label`], for the same reason: the profile reached the
+/// agent as an environment variable, and nothing outside the process can read
+/// one back. Without it written down here, the answer lives only in the `Pane`
+/// that chose it — and a pane is traded for a `Shared` on every tab switch, so
+/// the account a border reports would fall back to whichever one cctop itself
+/// would have used. The default profile writes nothing: unset is what it means.
+pub fn set_profile(name: &str, profile: &str) {
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", name, "@cctop_profile", profile])
+        .output();
+}
+
 /// Let the wheel scroll one of cctop's own tmux sessions.
 ///
 /// Without this a tmux-backed pane cannot be scrolled at all. tmux is on the
@@ -470,6 +484,9 @@ pub struct Running {
     /// labelled after the conversation it is going back to, which the tmux name
     /// — a sanitised provider and uuid — cannot be read back out of.
     pub label: Option<String>,
+    /// The account this agent was started under, when it was not the default
+    /// one. Written onto the session by [`set_profile`], which says why.
+    pub profile: Option<String>,
 }
 
 /// Every cctop-owned tmux session currently alive, newest first.
@@ -490,7 +507,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}",
         ])
         .output()
     else {
@@ -531,11 +548,15 @@ pub fn running() -> Vec<Running> {
             .unwrap_or(0);
         let activity = parts.next().and_then(|a| a.trim().parse::<u64>().ok());
         // Unset reads back as the empty string, not as a missing field.
-        let label = parts
-            .next()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string);
+        let mut option = || {
+            parts
+                .next()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let label = option();
+        let profile = option();
         found.push((
             created,
             Running {
@@ -545,6 +566,7 @@ pub fn running() -> Vec<Running> {
                 attached,
                 activity,
                 label,
+                profile,
             },
         ));
     }
@@ -810,6 +832,59 @@ mod tests {
         // And once it is gone there is no agent to name.
         assert_eq!(agent_pid(&ours), None);
         assert!(!exists(&ours));
+    }
+
+    /// Two options on one session, read back off one listing.
+    ///
+    /// The profile is written beside the label because it has the same problem:
+    /// it exists only in the process that chose it, and every other cctop — and
+    /// this one after a tab switch — has nothing but the session. Worth a real
+    /// server because the failure mode is positional: both arrive as fields of
+    /// one `-F` line, an unset one comes back as the empty string rather than as
+    /// a missing field, and reading them in the wrong order would put an account
+    /// name in the tab bar.
+    #[test]
+    fn a_session_remembers_which_account_its_agent_runs_as() {
+        if !available() {
+            eprintln!("skipping: tmux not installed");
+            return;
+        }
+        let _turn = test_lock();
+        let named = format!("cctop-probe-named-{}", std::process::id());
+        let plain = format!("cctop-probe-plain-{}", std::process::id());
+        for name in [&named, &plain] {
+            assert!(
+                Command::new("tmux")
+                    .args([
+                        "new-session",
+                        "-d",
+                        "-s",
+                        name,
+                        "--",
+                        "sh",
+                        "-c",
+                        "sleep 30"
+                    ])
+                    .status()
+                    .is_ok_and(|s| s.success()),
+                "could not start {name}"
+            );
+        }
+        set_profile(&named, "work");
+        // Deliberately no label on this one: the label field then reads back
+        // empty, and the profile after it must still be the profile.
+        let found = wait_for(|| running().into_iter().find(|s| s.name == named));
+        let bare = running().into_iter().find(|s| s.name == plain);
+        for name in [&named, &plain] {
+            let _ = kill(name);
+        }
+
+        let found = found.expect("the session cctop just created was not listed");
+        assert_eq!(found.profile.as_deref(), Some("work"));
+        assert_eq!(found.label, None);
+        // The default account writes nothing, and nothing is what it reads as —
+        // not an empty string that would name a profile no one has.
+        assert_eq!(bare.and_then(|s| s.profile), None);
     }
 
     /// A pane's scrollback is fixed when the pane is made, so the only proof
