@@ -258,20 +258,104 @@ fn selected<'a>(releases: &'a [Release], from: &str, to: &str) -> Vec<&'a Releas
 /// lines to say nothing. Prose bodies — a release that wrote its own notes —
 /// come through as their own paragraphs, since there is nothing to strip.
 fn bullets(body: &str) -> Vec<String> {
-    body.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+    let mut items: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in body.lines().map(str::trim) {
+        // A blank line ends whatever was being collected: it is the only thing
+        // in markdown that reliably separates one thought from the next.
+        if line.is_empty() {
+            items.extend(current.take());
+            continue;
+        }
         // Headings and the trailing compare link: structure for a page that has
         // other things on it, and this listing is already under a version.
-        .filter(|line| !line.starts_with('#'))
-        .filter(|line| !line.starts_with("**Full Changelog**"))
-        .map(|line| line.trim_start_matches(['*', '-', ' ']))
+        if line.starts_with('#') || line.starts_with("**Full Changelog**") {
+            items.extend(current.take());
+            continue;
+        }
+        match line.starts_with(['*', '-', '•']) {
+            true => {
+                items.extend(current.take());
+                current = Some(line.trim_start_matches(['*', '-', '•', ' ']).to_string());
+            }
+            // A line that is not a bullet continues the one before it. Release
+            // prose is hard-wrapped in the commit it came from, so without this
+            // a paragraph arrives as one bullet per line of the file it was
+            // typed into.
+            false => match current.as_mut() {
+                Some(item) => {
+                    item.push(' ');
+                    item.push_str(line);
+                }
+                None => current = Some(line.to_string()),
+            },
+        }
+    }
+    items.extend(current);
+    items
+        .into_iter()
         // "…title by @someone in https://github.com/…/pull/6" — the attribution
         // is on the release page for anyone who wants it.
-        .map(|line| line.split(" by @").next().unwrap_or(line).trim())
-        .map(|line| line.replace("**", ""))
-        .filter(|line| !line.is_empty())
+        .map(|item| {
+            item.split(" by @")
+                .next()
+                .unwrap_or(&item)
+                .trim()
+                .to_string()
+        })
+        .map(|item| item.replace("**", ""))
+        // "release 0.7.3: what it fixed" — the version is the heading this line
+        // is printed under, so saying it again spends the width twice.
+        .map(|item| strip_release_prefix(&item))
+        .filter(|item| !item.is_empty())
         .collect()
+}
+
+/// `release 0.7.3: the rest`, or `0.7.0: the rest`, without the part the heading
+/// above it already said.
+///
+/// Both shapes appear in this project's own history, because the line comes from
+/// a pull request title and those were written for a list that had no version
+/// beside them. Stripped only when what is left still says something: a note
+/// whose whole text is the version has nothing else to give.
+fn strip_release_prefix(item: &str) -> String {
+    let candidate = item.strip_prefix("release ").unwrap_or(item);
+    let Some((version, rest)) = candidate.split_once(": ") else {
+        return item.to_string();
+    };
+    let numeric = !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == 'v');
+    match numeric && !rest.trim().is_empty() {
+        true => rest.trim().to_string(),
+        false => item.to_string(),
+    }
+}
+
+/// `text` broken into lines that fit `width`, for printing under an indent.
+///
+/// Release prose arrives as a paragraph once the lines it was typed on have been
+/// joined back together, and a paragraph printed into a terminal that wraps it
+/// itself loses the indent on every line but the first.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        // A word longer than the whole width goes on its own line rather than
+        // being broken: a URL is more useful whole than tidy.
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Print what changed between `from` and `to`.
@@ -303,6 +387,12 @@ fn show_changes(from: &str, to: &str) {
         println!("Release notes: {RELEASE_PAGE}");
         return;
     }
+    // The terminal's width less the deepest indent these lines are printed at.
+    let room = crossterm::terminal::size()
+        .map(|(cols, _)| usize::from(cols))
+        .unwrap_or(80)
+        .clamp(40, 100)
+        .saturating_sub(6);
     println!();
     println!("What changed since {from}:");
     for (version, lines) in &notes {
@@ -314,7 +404,14 @@ fn show_changes(from: &str, to: &str) {
             true => println!("    (no notes published)"),
             false => {
                 for line in lines {
-                    println!("    - {line}");
+                    let mut wrapped = wrap(line, room).into_iter();
+                    if let Some(first) = wrapped.next() {
+                        println!("    - {first}");
+                    }
+                    // Hanging indent, so a wrapped item still reads as one.
+                    for rest in wrapped {
+                        println!("      {rest}");
+                    }
                 }
             }
         }
@@ -703,6 +800,28 @@ mod tests {
             .map(|r| r.version())
             .collect();
         assert_eq!(picked, ["0.7.3"]);
+    }
+
+    /// A line that opens by naming its own version says it twice: the version is
+    /// the heading it is printed under. Both spellings appear in this project's
+    /// own releases.
+    #[test]
+    fn a_bullet_does_not_repeat_the_version_above_it() {
+        assert_eq!(
+            bullets("* release 0.7.3: the signals stop getting lost"),
+            ["the signals stop getting lost"]
+        );
+        assert_eq!(
+            bullets("* 0.7.0: shared tabs, and a report"),
+            ["shared tabs, and a report"]
+        );
+        // Nothing left over means nothing to strip.
+        assert_eq!(bullets("* release 0.7.3"), ["release 0.7.3"]);
+        // And a colon after something that is not a version is just a colon.
+        assert_eq!(
+            bullets("* fix: the login hint for a named account"),
+            ["fix: the login hint for a named account"]
+        );
     }
 
     /// The real body of a real release, which is markdown written for a web
