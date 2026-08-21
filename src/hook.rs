@@ -6,8 +6,8 @@
 //! a question, a session beginning or ending — because a transcript records
 //! "answered you" and "still thinking" identically, and a session that has
 //! ended looks exactly like one that is merely quiet. The agents can say all of
-//! it outright: Claude Code through its hooks, Codex through its `notify`
-//! program.
+//! it outright: Claude Code and Codex through their hooks, Codex also through
+//! its `notify` program.
 //!
 //! Two halves live here. [`emit`] is `cctop hook`, the command the agent spawns;
 //! [`Listener`] is the socket a running UI holds open. The wire between them is
@@ -24,7 +24,8 @@
 //! machine, for a feature they only turned on to get a nicer notification.
 //!
 //! So `cctop hook` has one guarantee it keeps ahead of doing its job: it exits
-//! 0, writes nothing to stdout, and returns promptly. Not by being careful —
+//! 0, writes nothing to stdout that could be read as a decision, and returns
+//! promptly. Not by being careful —
 //! by construction. Every fallible step discards its error, the whole exchange
 //! runs under a deadline on a thread the process is willing to abandon, and a
 //! panic hook turns even an unexpected unwind into a silent success. cctop being
@@ -102,6 +103,7 @@ pub fn emit(args: &[String]) -> i32 {
     // agent on every hook — which was measured, not imagined. Bounding the whole
     // operation also covers whatever else turns out to block that this comment
     // does not predict.
+    let event = args.first().cloned().unwrap_or_default();
     let args = args.to_vec();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -111,7 +113,41 @@ pub fn emit(args: &[String]) -> i32 {
     // Returning exits the process, which takes the thread with it wherever it
     // got to. A dropped event is a cheaper failure than a stalled agent.
     let _ = rx.recv_timeout(DEADLINE);
+    answer(&event);
     0
+}
+
+/// The one thing `cctop hook` ever writes to stdout, and only where staying
+/// quiet is the riskier move.
+///
+/// Codex documents its `Stop` and `SubagentStop` hooks as expecting JSON on
+/// stdout when they exit 0, and plain text as invalid for those two events.
+/// Silence is *probably* fine — "exit 0 with no output is treated as success" is
+/// the general rule — but a hook that fires at the end of every turn is the last
+/// place to be relying on probably: getting it wrong means a failure notice in
+/// somebody's session, once a turn, from a monitor.
+///
+/// So those two get the one answer that cannot mean anything: `continue: true`
+/// is the documented default in both Codex and Claude Code, so writing it says
+/// exactly what saying nothing was meant to. Every other event still gets
+/// silence, because for them stdout is content the model may act on.
+fn answer(event: &str) {
+    let Some(line) = answer_for(event) else {
+        return;
+    };
+    // `println!` panics on a closed stdout, which would exit 101 — the one exit
+    // code that has a meaning to the agent.
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout(), "{line}");
+}
+
+/// What to write for this event, or `None` for the silence every other event
+/// gets. Separate from the writing so it can be asserted on.
+fn answer_for(event: &str) -> Option<&'static str> {
+    match event {
+        "Stop" | "SubagentStop" => Some(r#"{"continue": true}"#),
+        _ => None,
+    }
 }
 
 /// Read the event however this agent hands it over, and deliver it.
@@ -192,11 +228,15 @@ fn deliver(_line: &[u8]) {}
 /// agent this is — the payload does not always say, and a harness that renames a
 /// field in a release should degrade to a missing value rather than a wrong one.
 ///
-/// | fact | Claude Code, Gemini CLI | Codex | Cursor | OpenCode |
+/// | fact | Claude Code, Gemini CLI, Codex hooks | Codex `notify` | Cursor | OpenCode |
 /// |---|---|---|---|---|
 /// | event | `hook_event_name` | `type` | `hook_event_name` | `type` |
 /// | session | `session_id` | `thread-id` | `session_id`, `conversation_id` | `sessionID` |
 /// | directory | `cwd` | `cwd` | `workspace_roots[0]` | `directory` |
+///
+/// Codex appears twice because it reports twice: its hook framework borrowed
+/// Claude Code's spelling wholesale, while the older `notify` program keeps its
+/// own.
 fn envelope(name: &str, payload: &[u8]) -> Option<Vec<u8>> {
     let body: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let field = |key: &str| body.get(key).and_then(|v| v.as_str()).unwrap_or_default();
@@ -543,6 +583,11 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         "PreCompact" | "PreCompress" | "preCompact" | "session.compacted" => {
             Some(Signal::Compacting)
         }
+        // And the other end of it, where the harness has one: compaction is
+        // over and the agent is moving again. Claude Code raises a
+        // `SessionStart` after compacting, which says the same thing, so only
+        // Codex needs this asked for.
+        "PostCompact" => Some(Signal::Busy),
         "SessionStart" | "sessionStart" | "session.created" => Some(Signal::Started),
         "SessionEnd" | "sessionEnd" | "session.deleted" => Some(Signal::Ended),
         _ => None,
@@ -763,6 +808,32 @@ const CURSOR_EVENTS: &[&str] = &[
     "subagentStop",
 ];
 
+/// The same list in Codex's vocabulary.
+///
+/// Codex grew a hook framework of its own, and it borrowed Claude Code's
+/// spelling wholesale — same event names, same nested `hooks` object, same JSON
+/// on stdin — so everything that reads a Claude Code event already reads a
+/// Codex one. What it does not have is the pair of failure events: Codex's
+/// `PostToolUse` fires for a command that exited non-zero as well as one that
+/// succeeded, and a turn that dies has no second ending, so nothing here needs
+/// to close those out.
+///
+/// `notify` stays installed alongside. It says only that a turn finished, but it
+/// says it without being trusted first, and until somebody has run `/hooks`
+/// inside Codex these hooks deliver nothing at all.
+const CODEX_EVENTS: &[&str] = &[
+    "Stop",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "SessionStart",
+    "SessionEnd",
+    "PreCompact",
+    "PostCompact",
+    "SubagentStop",
+];
+
 /// The word that separates the binary from the event in a command cctop wrote.
 ///
 /// Entries are recognised by their command text rather than by a marker key:
@@ -832,6 +903,90 @@ enum Config {
     Plugin(PathBuf),
 }
 
+impl Config {
+    /// The file this writes.
+    fn path(&self) -> &Path {
+        match self {
+            Config::Json { path, .. } | Config::Notify(path) | Config::Plugin(path) => path,
+        }
+    }
+
+    /// Write cctop into this one file, and say what happened to it.
+    fn install(&self, exe: &str) -> anyhow::Result<String> {
+        match self {
+            Config::Json {
+                path,
+                shape,
+                events,
+            } => {
+                json_install(path, *shape, events, exe)?;
+                let note = match self.note() {
+                    Some(note) => format!(" — {note}"),
+                    None => String::new(),
+                };
+                Ok(format!(
+                    "added {} hooks to {}{note}",
+                    events.len(),
+                    path.display()
+                ))
+            }
+            Config::Notify(path) => {
+                notify_install(path, exe)?;
+                Ok("notify points at cctop".to_string())
+            }
+            Config::Plugin(path) => {
+                plugin_install(path, exe)?;
+                Ok(format!("wrote plugin {}", path.display()))
+            }
+        }
+    }
+
+    /// Take cctop back out of this one file.
+    fn remove(&self) -> anyhow::Result<String> {
+        match self {
+            Config::Json { path, .. } => {
+                let removed = json_remove(path)?;
+                Ok(format!("removed {removed} hooks from {}", path.display()))
+            }
+            Config::Notify(path) => notify_remove(path),
+            Config::Plugin(path) => {
+                let removed = plugin_remove(path)?;
+                Ok(match removed {
+                    true => format!("removed plugin {}", path.display()),
+                    false => "nothing of cctop's installed".to_string(),
+                })
+            }
+        }
+    }
+
+    /// What is in this one file right now.
+    fn health(&self) -> Health {
+        match self {
+            Config::Json {
+                path,
+                shape,
+                events,
+            } => json_health(path, *shape, events),
+            Config::Notify(path) => notify_health(path),
+            Config::Plugin(path) => plugin_health(path),
+        }
+    }
+
+    /// What a reader needs told about this file beyond its state.
+    ///
+    /// Only Codex has one: its hooks are inert until a person has looked at
+    /// them, and an install that reads as done while delivering nothing is
+    /// worse than one that says what is left to do.
+    fn note(&self) -> Option<&'static str> {
+        match self {
+            Config::Json { events, .. } if std::ptr::eq(*events, CODEX_EVENTS) => {
+                Some("trust them with /hooks inside Codex")
+            }
+            _ => None,
+        }
+    }
+}
+
 impl Harness {
     /// The name to print. Long enough to be unambiguous in a list of five.
     pub fn label(self) -> &'static str {
@@ -844,15 +999,19 @@ impl Harness {
         }
     }
 
-    /// What an install writes for this harness at this scope, or `None` where
-    /// the harness has no such scope.
-    fn config(self, scope: &Scope) -> Option<Config> {
+    /// Every file an install writes for this harness at this scope, in the order
+    /// they are reported. Empty where the harness has no such scope.
+    ///
+    /// A list because Codex has two: hooks, which say everything, and `notify`,
+    /// which says only that a turn ended but works the moment it is written.
+    /// Every other harness has exactly one.
+    fn configs(self, scope: &Scope) -> Vec<Config> {
         let project = match scope {
             Scope::User => None,
             Scope::Project(dir) => Some(dir.as_path()),
         };
-        Some(match self {
-            Harness::Claude => Config::Json {
+        match self {
+            Harness::Claude => vec![Config::Json {
                 // Honours the same `$CLAUDE_CONFIG_DIR` override as the rest of
                 // cctop.
                 path: match project {
@@ -861,114 +1020,97 @@ impl Harness {
                 },
                 shape: Shape::Nested,
                 events: CLAUDE_EVENTS,
-            },
-            Harness::Gemini => Config::Json {
+            }],
+            Harness::Gemini => vec![Config::Json {
                 path: match project {
                     None => crate::config::GEMINI_HOME.join("settings.json"),
                     Some(dir) => dir.join(".gemini").join("settings.json"),
                 },
                 shape: Shape::Nested,
                 events: GEMINI_EVENTS,
-            },
-            Harness::Cursor => Config::Json {
+            }],
+            Harness::Cursor => vec![Config::Json {
                 path: match project {
                     None => crate::config::CURSOR_HOME.join("hooks.json"),
                     Some(dir) => dir.join(".cursor").join("hooks.json"),
                 },
                 shape: Shape::Flat,
                 events: CURSOR_EVENTS,
-            },
-            // Codex is configured machine-wide or not at all.
-            Harness::Codex => match project {
-                Some(_) => return None,
-                None => Config::Notify(crate::config::CODEX_HOME.join("config.toml")),
-            },
-            Harness::OpenCode => Config::Plugin(
+            }],
+            Harness::Codex => {
+                let hooks = Config::Json {
+                    path: match project {
+                        None => crate::config::CODEX_HOME.join("hooks.json"),
+                        Some(dir) => dir.join(".codex").join("hooks.json"),
+                    },
+                    shape: Shape::Nested,
+                    events: CODEX_EVENTS,
+                };
+                match project {
+                    // `notify` is a single machine-wide program, so only the
+                    // user scope has one; a project install is hooks alone.
+                    Some(_) => vec![hooks],
+                    None => vec![
+                        hooks,
+                        Config::Notify(crate::config::CODEX_HOME.join("config.toml")),
+                    ],
+                }
+            }
+            Harness::OpenCode => vec![Config::Plugin(
                 match project {
                     None => crate::config::OPENCODE_CONFIG_DIR.clone(),
                     Some(dir) => dir.join(".opencode"),
                 }
                 .join("plugins")
                 .join(PLUGIN_FILE),
-            ),
-        })
+            )],
+        }
     }
 
-    /// The file an install for this scope would write, for reporting.
-    pub fn config_file(self, scope: &Scope) -> Option<PathBuf> {
-        Some(match self.config(scope)? {
-            Config::Json { path, .. } | Config::Notify(path) | Config::Plugin(path) => path,
-        })
+    /// The first file an install for this scope would write.
+    ///
+    /// For the tests: the report names each file from its own entry.
+    #[cfg(test)]
+    fn config_file(self, scope: &Scope) -> Option<PathBuf> {
+        self.configs(scope)
+            .first()
+            .map(|config| config.path().to_path_buf())
     }
 
     /// Ask this harness to report, leaving everything else in its config alone.
-    fn install(self, scope: &Scope, exe: &str) -> anyhow::Result<String> {
-        let Some(config) = self.config(scope) else {
-            anyhow::bail!("{} has no {} scope", self.label(), scope.label());
-        };
-        match config {
-            Config::Json {
-                path,
-                shape,
-                events,
-            } => {
-                json_install(&path, shape, events, exe)?;
-                Ok(format!(
-                    "{}: added {} hooks to {}",
-                    self.label(),
-                    events.len(),
-                    path.display()
-                ))
-            }
-            Config::Notify(path) => {
-                notify_install(&path, exe)?;
-                Ok(format!("{}: notify points at cctop", self.label()))
-            }
-            Config::Plugin(path) => {
-                plugin_install(&path, exe)?;
-                Ok(format!("{}: wrote plugin {}", self.label(), path.display()))
-            }
+    fn install(self, scope: &Scope, exe: &str) -> Vec<String> {
+        let configs = self.configs(scope);
+        if configs.is_empty() {
+            return vec![format!("{}: has no {} scope", self.label(), scope.label())];
         }
+        configs
+            .iter()
+            .map(|config| match config.install(exe) {
+                Ok(what) => format!("{}: {what}", self.label()),
+                Err(e) => format!("{}: {e}", self.label()),
+            })
+            .collect()
+    }
+
+    /// The state of the first file this harness writes, which is the whole of
+    /// it for every harness but Codex.
+    ///
+    /// For the tests only: everything else wants one entry per file, which is
+    /// what [`harness_status`] gives it.
+    #[cfg(test)]
+    fn health(self, scope: &Scope) -> Option<Health> {
+        self.configs(scope).first().map(Config::health)
     }
 
     /// Take cctop back out, leaving every other entry untouched.
-    fn remove(self, scope: &Scope) -> anyhow::Result<String> {
-        let Some(config) = self.config(scope) else {
-            return Ok(String::new());
-        };
-        match config {
-            Config::Json { path, .. } => {
-                let removed = json_remove(&path)?;
-                Ok(format!(
-                    "{}: removed {removed} hooks from {}",
-                    self.label(),
-                    path.display()
-                ))
-            }
-            Config::Notify(path) => {
-                notify_remove(&path).map(|what| format!("{}: {what}", self.label()))
-            }
-            Config::Plugin(path) => {
-                let removed = plugin_remove(&path)?;
-                Ok(match removed {
-                    true => format!("{}: removed plugin {}", self.label(), path.display()),
-                    false => format!("{}: nothing of cctop's installed", self.label()),
-                })
-            }
-        }
-    }
-
-    /// What is actually in this harness's config right now.
-    fn health(self, scope: &Scope) -> Option<Health> {
-        Some(match self.config(scope)? {
-            Config::Json {
-                path,
-                shape,
-                events,
-            } => json_health(&path, shape, events),
-            Config::Notify(path) => notify_health(&path),
-            Config::Plugin(path) => plugin_health(&path),
-        })
+    fn remove(self, scope: &Scope) -> Vec<String> {
+        self.configs(scope)
+            .iter()
+            .map(|config| match config.remove() {
+                Ok(what) => format!("{}: {what}", self.label()),
+                Err(e) => format!("{}: {e}", self.label()),
+            })
+            .collect()
     }
 }
 
@@ -1027,11 +1169,7 @@ pub fn install(scope: &Scope) -> Vec<String> {
     };
     HARNESSES
         .iter()
-        .filter(|h| h.config(scope).is_some())
-        .map(|h| match h.install(scope, &exe) {
-            Ok(what) => what,
-            Err(e) => format!("{}: {e}", h.label()),
-        })
+        .flat_map(|h| h.install(scope, &exe))
         .collect()
 }
 
@@ -1039,11 +1177,7 @@ pub fn install(scope: &Scope) -> Vec<String> {
 pub fn remove(scope: &Scope) -> Vec<String> {
     HARNESSES
         .iter()
-        .filter(|h| h.config(scope).is_some())
-        .map(|h| match h.remove(scope) {
-            Ok(what) => what,
-            Err(e) => format!("{}: {e}", h.label()),
-        })
+        .flat_map(|h| h.remove(scope))
         .filter(|line| !line.is_empty())
         .collect()
 }
@@ -1563,13 +1697,16 @@ impl Health {
     }
 }
 
-/// What one harness's config, in one scope, has to say.
+/// What one of a harness's config files, in one scope, has to say.
 #[derive(Debug, Clone)]
 pub struct ScopeStatus {
     pub harness: Harness,
     pub scope: Scope,
     pub path: PathBuf,
     pub health: Health,
+    /// What a reader needs told beyond the state — Codex's hooks needing to be
+    /// trusted before they fire, and nothing else so far.
+    pub note: Option<&'static str>,
 }
 
 /// The whole integration, in one value the CLI and the UI both render.
@@ -1582,14 +1719,23 @@ pub struct Report {
     pub peers: usize,
 }
 
-/// Inspect one harness's config in one scope.
-pub fn harness_status(harness: Harness, scope: Scope) -> Option<ScopeStatus> {
-    Some(ScopeStatus {
-        path: harness.config_file(&scope)?,
-        health: harness.health(&scope)?,
-        harness,
-        scope,
-    })
+/// Inspect every file one harness writes in one scope.
+///
+/// One entry per file, which for Codex is two: hooks and `notify` are installed
+/// and go wrong independently, and one line covering both would have to lie
+/// about one of them.
+pub fn harness_status(harness: Harness, scope: Scope) -> Vec<ScopeStatus> {
+    harness
+        .configs(&scope)
+        .iter()
+        .map(|config| ScopeStatus {
+            harness,
+            scope: scope.clone(),
+            path: config.path().to_path_buf(),
+            health: config.health(),
+            note: config.note(),
+        })
+        .collect()
 }
 
 /// Inspect the whole integration. `cwd` decides which project scope is looked
@@ -1607,7 +1753,7 @@ pub fn status(cwd: Option<&Path>, listener: Option<&Listener>) -> Report {
         .flat_map(|harness| {
             scopes
                 .iter()
-                .filter_map(|scope| harness_status(*harness, scope.clone()))
+                .flat_map(|scope| harness_status(*harness, scope.clone()))
         })
         .collect();
 
@@ -1652,9 +1798,16 @@ impl Report {
             // second doubles the panel to say nothing.
             for entry in mine.iter().filter(|entry| entry.health != Health::Absent) {
                 let (text, bad) = describe(&entry.health);
+                // The note rides on the end rather than replacing the state:
+                // Codex's hooks really are installed once they are written, and
+                // still deliver nothing until a person has trusted them.
+                let note = match entry.note {
+                    Some(note) if entry.health == Health::Installed => format!(" — {note}"),
+                    _ => String::new(),
+                };
                 out.push((
                     format!(
-                        "{} ({}) {}: {text}",
+                        "{} ({}) {}: {text}{note}",
                         harness.label(),
                         entry.scope.label(),
                         entry.path.display()
@@ -1737,24 +1890,25 @@ fn repair_in(scopes: &[Scope]) -> Vec<String> {
     let mut fixed = Vec::new();
     for harness in HARNESSES {
         for scope in scopes {
-            let Some(health) = harness.health(scope) else {
-                continue;
-            };
-            // Written whole either way: `install` replaces cctop's entries for
-            // every event it wants, so topping up a short install and
-            // repointing a dead one are the same write with a different path.
-            let (exe, what) = match &health {
-                Health::Broken(_) => (own.clone(), "repointed at this cctop".to_string()),
-                _ => match health.shortfall() {
-                    None => continue,
-                    Some((count, at)) => (
-                        at.unwrap_or(&own).to_string(),
-                        format!("filled in {count} missing hooks"),
-                    ),
-                },
-            };
-            if harness.install(scope, &exe).is_ok() {
-                fixed.push(format!("{} ({}): {what}", harness.label(), scope.label()));
+            for config in harness.configs(scope) {
+                let health = config.health();
+                // Written whole either way: `install` replaces cctop's entries
+                // for every event it wants, so topping up a short install and
+                // repointing a dead one are the same write with a different
+                // path.
+                let (exe, what) = match &health {
+                    Health::Broken(_) => (own.clone(), "repointed at this cctop".to_string()),
+                    _ => match health.shortfall() {
+                        None => continue,
+                        Some((count, at)) => (
+                            at.unwrap_or(&own).to_string(),
+                            format!("filled in {count} missing hooks"),
+                        ),
+                    },
+                };
+                if config.install(&exe).is_ok() {
+                    fixed.push(format!("{} ({}): {what}", harness.label(), scope.label()));
+                }
             }
         }
     }
@@ -2192,12 +2346,19 @@ mod tests {
         let done = install(&scope);
         assert_eq!(
             done.len(),
-            4,
+            5,
             "every harness with a project scope should have been written: {done:?}"
         );
 
-        // Claude Code and Gemini CLI: the nested wrapper, under their own names.
-        for (harness, event) in [(Harness::Claude, "Stop"), (Harness::Gemini, "AfterAgent")] {
+        // Claude Code, Gemini CLI and Codex: the nested wrapper, under their own
+        // names. Codex borrowed Claude Code's shape outright, which is why one
+        // reader serves both — but it is written to its own file, and `notify`
+        // is the machine-wide half it does not have here.
+        for (harness, event) in [
+            (Harness::Claude, "Stop"),
+            (Harness::Gemini, "AfterAgent"),
+            (Harness::Codex, "PermissionRequest"),
+        ] {
             let path = harness.config_file(&scope).unwrap();
             let root = read_settings(&path).unwrap();
             let command = root["hooks"][event][0]["hooks"][0]["command"]
@@ -2475,6 +2636,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Codex reports twice, and the two halves are installed and go wrong
+    /// independently: hooks say everything but are inert until a person has
+    /// trusted them, and `notify` says only that a turn ended but works the
+    /// moment it is written.
+    ///
+    /// Codex grew its hook framework after cctop had settled for `notify`, and
+    /// it borrowed Claude Code's spelling wholesale — so what this mostly checks
+    /// is that the reader needed nothing new, and that a report carrying one
+    /// line per file tells the truth about both.
+    #[test]
+    fn codex_is_asked_through_its_hooks_and_its_notify_both() {
+        // Only the project scope is written here. `$CODEX_HOME` resolves once
+        // per process, so a test that pointed it somewhere else would be
+        // gambling on running first — and losing that gamble means editing the
+        // config of whoever ran `cargo test`.
+        let dir = scratch("codex-hooks");
+        let scope = Scope::Project(dir.clone());
+        let done = install(&scope);
+        let codex: Vec<&String> = done.iter().filter(|l| l.starts_with("Codex:")).collect();
+        assert_eq!(codex.len(), 1, "the project scope is hooks alone: {done:?}");
+        assert!(
+            codex[0].contains("/hooks inside Codex"),
+            "an install that reads as done while delivering nothing has to say \
+             so: {:?}",
+            codex[0]
+        );
+
+        // The hooks file is Claude Code's shape, in Codex's own file.
+        let hooks = dir.join(".codex").join("hooks.json");
+        let root = read_settings(&hooks).unwrap();
+        let command = root["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(is_our_command(command), "Codex got {command:?}");
+
+        let entries = harness_status(Harness::Codex, scope.clone());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].health, Health::Installed);
+        assert!(entries[0].note.is_some(), "the trust step went unsaid");
+
+        // The user scope is the one that also has `notify`, which is a single
+        // machine-wide program. Only its shape is checked: writing it would mean
+        // writing the real `$CODEX_HOME`.
+        let both = Harness::Codex.configs(&Scope::User);
+        assert_eq!(both.len(), 2, "the user scope is hooks and notify");
+        assert!(matches!(both[0], Config::Json { .. }));
+        assert!(both[0].path().ends_with("hooks.json"));
+        assert!(matches!(both[1], Config::Notify(_)));
+        assert!(both[1].path().ends_with("config.toml"));
+        assert!(both[1].note().is_none(), "notify needs no trusting");
+
+        // And a Codex hook event needs nothing new to be understood: the payload
+        // is Claude Code's, so the same reader takes it.
+        let raw = br#"{"session_id":"thr_123","cwd":"/home/flo/cctop","hook_event_name":"PermissionRequest","model":"gpt-5.6","permission_mode":"default","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#;
+        let line = envelope("PermissionRequest", raw).expect("envelope");
+        let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+        assert_eq!(event.session_id, "thr_123");
+        assert_eq!(event.reported.signal, Signal::NeedsInput);
+        assert_eq!(event.reported.permission, Some(Permission::Ask));
+
+        remove(&scope);
+        for entry in harness_status(Harness::Codex, scope) {
+            assert_eq!(
+                entry.health,
+                Health::Absent,
+                "{} was left",
+                entry.path.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Codex's config is hand-written and full of comments, so the edit has to
     /// leave everything it did not touch byte for byte.
     #[test]
@@ -2560,6 +2793,40 @@ mod tests {
             waited < DEADLINE * 2,
             "the agent was held up for {waited:?} (finished={finished})"
         );
+    }
+
+    /// The only stdout `cctop hook` ever writes, and the reason it writes it.
+    ///
+    /// Codex reads its `Stop` and `SubagentStop` hooks as expecting JSON when
+    /// they exit 0 and treats plain text there as invalid, so those two answer
+    /// with the one thing that cannot mean anything — `continue: true` is the
+    /// documented default in both Codex and Claude Code. Every other event stays
+    /// silent, because for them stdout is content the model may act on.
+    #[test]
+    fn only_the_two_events_that_demand_an_answer_get_one() {
+        for event in ["Stop", "SubagentStop"] {
+            let line = answer_for(event).unwrap_or_default();
+            let value: serde_json::Value = serde_json::from_str(line).expect("must be JSON");
+            assert_eq!(value["continue"], serde_json::json!(true));
+            assert_eq!(
+                value.as_object().map(serde_json::Map::len),
+                Some(1),
+                "a decision snuck into the no-op"
+            );
+        }
+        for quiet in [
+            "PreToolUse",
+            "PostToolUse",
+            "PermissionRequest",
+            "UserPromptSubmit",
+            "SessionStart",
+            "SessionEnd",
+            "Notification",
+            CODEX_SELECTOR,
+            "",
+        ] {
+            assert_eq!(answer_for(quiet), None, "{quiet} wrote to stdout");
+        }
     }
 
     /// With no cctop listening at all — the ordinary case, on every tool call of
