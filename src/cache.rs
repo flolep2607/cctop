@@ -622,6 +622,12 @@ pub struct UiPrefs {
     /// they notice a version exists. Off means off for good — `--no-auto-update`
     /// is the way to skip one run.
     pub auto_update: bool,
+    /// A version the user has already said "not now" to.
+    ///
+    /// Only the cargo-install path asks, and only about the version named here —
+    /// so a decline is remembered until the next release rather than forever,
+    /// and the question does not come back on every launch in between.
+    pub declined_update: Option<String>,
     /// The shell alias block has been written once. Kept here so removing the
     /// block — by flag or by hand — isn't undone by the next launch.
     pub shell_alias_installed: bool,
@@ -667,6 +673,7 @@ impl Default for UiPrefs {
             cost_floor: 0.0,
             notify: false,
             auto_update: true,
+            declined_update: None,
             shell_alias_installed: false,
             hidden_columns: Vec::new(),
             theme: None,

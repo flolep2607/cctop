@@ -457,7 +457,25 @@ pub fn run(force: bool) -> Result<()> {
     // newer release or a determined user can settle: the objection is to cctop
     // replacing the file at all, and it holds whatever the versions say.
     if managed_by_cargo() {
-        return Err(cargo_managed());
+        // A terminal means there is someone to ask, and asking beats a paragraph
+        // explaining what they should have typed instead. A pipe or a script gets
+        // the explanation, since nothing there can answer.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return Err(cargo_managed());
+        }
+        let Some(latest) = fetch_latest().ok().map(|r| r.version().to_string()) else {
+            return Err(cargo_managed());
+        };
+        if !is_newer(&latest, current) && !force {
+            println!("Already on the newest version ({current}).");
+            return Ok(());
+        }
+        let mut prefs = crate::cache::UiPrefs::load();
+        // Asked for outright, so a "not now" from some earlier launch is not an
+        // answer to this one.
+        prefs.declined_update = None;
+        offer_cargo_upgrade(&latest, &mut prefs);
+        return Ok(());
     }
     let target =
         asset_target().ok_or_else(|| anyhow!("no release is published for this platform"))?;
@@ -530,17 +548,12 @@ pub fn just_updated() -> bool {
 
 /// The version to update to at startup, if any.
 ///
-/// Split out so the order of the refusals is a thing that can be tested rather
-/// than a thing that can be reordered: a managed install must be refused whatever
-/// the cache says, and being asked not to has to be honoured before either is
-/// consulted.
-fn wanted(
-    enabled: bool,
-    just_updated: bool,
-    managed: bool,
-    latest: Option<String>,
-) -> Option<String> {
-    if !enabled || just_updated || managed {
+/// Split out so the refusals are a thing that can be tested rather than a thing
+/// that can be reordered. Whether cargo owns the binary is deliberately not one
+/// of them: that decides *how* to update, not whether — see
+/// [`offer_cargo_upgrade`].
+fn wanted(enabled: bool, just_updated: bool, latest: Option<String>) -> Option<String> {
+    if !enabled || just_updated {
         return None;
     }
     latest
@@ -574,18 +587,19 @@ fn relaunch_command(
 /// something the user actually asked for, and a paragraph about a release that
 /// could not be fetched, printed before every launch, would be worse than the
 /// old version they are about to keep using.
-pub fn auto_at_startup(enabled: bool) {
+pub fn auto_at_startup(enabled: bool, prefs: &mut crate::cache::UiPrefs) {
     // The cached answer alone: this is the whole point of doing it here. The
     // hourly check has already been paid for, so nothing is waited on to learn
     // that there is a newer version — only to fetch it.
-    let Some(latest) = wanted(
-        enabled,
-        just_updated(),
-        managed_by_cargo(),
-        available_update(),
-    ) else {
+    let Some(latest) = wanted(enabled, just_updated(), available_update()) else {
         return;
     };
+    // cargo's binary is cargo's to replace, so it is asked about rather than
+    // taken.
+    if managed_by_cargo() {
+        offer_cargo_upgrade(&latest, prefs);
+        return;
+    }
     // An install cctop cannot write to is not worth a download, and finding out
     // costs nothing: it is the same question `--update` asks before spending one.
     if staging_dir().is_err() {
@@ -618,6 +632,92 @@ pub fn auto_at_startup(enabled: bool) {
         let _ = std::io::stdin().read_line(&mut String::new());
     }
     relaunch();
+}
+
+/// Offer to let cargo install the newer release, and do it if that is wanted.
+///
+/// The objection to swapping a cargo binary was never the file — `~/.cargo/bin`
+/// is writable and the replacement would work — it was the bookkeeping: cargo
+/// keeps a record of what it installed, and a file changed underneath it leaves
+/// that record naming a version that is gone. `cargo install` is the thing that
+/// keeps the record straight, so the refusal can become an offer.
+///
+/// Asked, not assumed, because unlike a downloaded archive this builds from
+/// source: minutes of compiling, and someone who opened cctop to look at a
+/// session should get to say no. A no is remembered against that version, or the
+/// question would come back on every launch until the next release.
+fn offer_cargo_upgrade(latest: &str, prefs: &mut crate::cache::UiPrefs) {
+    if prefs.declined_update.as_deref() == Some(latest) {
+        return;
+    }
+    // Nothing to offer without the tool that would do it: a cargo install whose
+    // cargo has since gone is a real state, and a prompt for a command that
+    // cannot run is worse than silence.
+    if !crate::shim::is_command("cargo") {
+        return;
+    }
+    let current = current_version();
+    let command = cargo_install_argv(latest).join(" ");
+    eprintln!(
+        "cctop {latest} is out, and cargo installed this one ({current}) — replacing the \
+         binary here would leave `cargo install --list` naming a version that is gone."
+    );
+    eprint!("Run `{command}`? It builds from source. [y] update / [n] not now: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        // No answer available: leave the question open rather than guessing.
+        return;
+    }
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        prefs.declined_update = Some(latest.to_string());
+        prefs.save();
+        eprintln!("Left on {current}. `cctop --update` asks again whenever you want it.");
+        return;
+    }
+
+    match cargo_upgrade(latest) {
+        Ok(()) => {
+            println!("Updated {current} -> {latest}.");
+            if show_changes(current, latest) {
+                print!("Press Enter to start cctop… ");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let _ = std::io::stdin().read_line(&mut String::new());
+            }
+            relaunch();
+        }
+        // Left where it is on purpose: a build that failed is a thing to read,
+        // and the version already installed still runs.
+        Err(error) => eprintln!("cargo could not install {latest} ({error}); starting {current}."),
+    }
+}
+
+/// The command that replaces a cargo install, in its own words.
+///
+/// Pinned to the version being announced rather than left as "whatever is newest
+/// now": that is the version the user was told about and agreed to. `--locked` so
+/// the build is the one the release was tested with.
+fn cargo_install_argv(latest: &str) -> Vec<String> {
+    ["cargo", "install", "cctop", "--version", latest, "--locked"]
+        .iter()
+        .map(|part| part.to_string())
+        .collect()
+}
+
+/// Run it, with cargo's own output left on screen: a build that takes minutes
+/// has to look like it is doing something, and cargo already says so better than
+/// anything here would.
+fn cargo_upgrade(latest: &str) -> Result<()> {
+    let argv = cargo_install_argv(latest);
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .context("could not run cargo")?;
+    match status.success() {
+        true => Ok(()),
+        false => bail!("`{}` exited with {status}", argv.join(" ")),
+    }
 }
 
 /// Start the new binary in place of this process.
@@ -925,23 +1025,51 @@ fn confirm(dir: &Path, exe: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// The refusals, in the order that matters. A managed install is the one
-    /// that has to hold whatever else is true: `cargo install --list` would go
-    /// on naming a version that is no longer on disk, and nothing about a newer
-    /// release makes that acceptable.
+    /// The two things that stop a startup update before anything is looked at.
+    /// Who owns the binary is not one of them — that decides which of the two
+    /// routes is taken, not whether either runs.
     #[test]
     fn a_startup_update_gives_way_to_every_reason_not_to() {
         let latest = || Some("0.9.0".to_string());
-        assert_eq!(wanted(true, false, false, latest()), latest());
+        assert_eq!(wanted(true, false, latest()), latest());
 
         // Asked not to, for this run or for good.
-        assert_eq!(wanted(false, false, false, latest()), None);
+        assert_eq!(wanted(false, false, latest()), None);
         // Already the product of one update: never twice in a chain.
-        assert_eq!(wanted(true, true, false, latest()), None);
-        // Cargo owns this binary.
-        assert_eq!(wanted(true, false, true, latest()), None);
+        assert_eq!(wanted(true, true, latest()), None);
         // Nothing to update to, which is the ordinary case.
-        assert_eq!(wanted(true, false, false, None), None);
+        assert_eq!(wanted(true, false, None), None);
+    }
+
+    /// A cargo install is never replaced by hand, and the command that does
+    /// replace it names the version the user was actually told about.
+    #[test]
+    fn a_cargo_install_is_upgraded_by_cargo_and_pinned_to_what_was_offered() {
+        assert_eq!(
+            cargo_install_argv("0.9.0").join(" "),
+            "cargo install cctop --version 0.9.0 --locked"
+        );
+    }
+
+    /// "Not now" has to mean not now — but only about the version it was said
+    /// to, or the next release would go unmentioned as well.
+    #[test]
+    fn a_declined_version_is_not_asked_about_again() {
+        let mut prefs = crate::cache::UiPrefs {
+            declined_update: Some("0.9.0".into()),
+            ..Default::default()
+        };
+
+        // Nothing is printed and nothing is run for the version already
+        // declined: reaching the prompt would need stdin, which a test has no
+        // business answering.
+        assert_eq!(prefs.declined_update.as_deref(), Some("0.9.0"));
+        offer_cargo_upgrade("0.9.0", &mut prefs);
+        assert_eq!(
+            prefs.declined_update.as_deref(),
+            Some("0.9.0"),
+            "the decline was disturbed by a version it already covered"
+        );
     }
 
     /// The relaunch has to be the same program, or an update silently changes

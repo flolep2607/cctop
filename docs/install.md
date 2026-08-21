@@ -100,9 +100,24 @@ directory (`~/.cache/cctop` on Linux, `~/Library/Caches/cctop` on macOS);
 agent aliases skip it too — you are waiting on an agent, and a download between
 the command and the agent starting is not what you asked for.
 
-If you installed with `cargo install` or a package manager, none of this
-applies: cctop will not touch a binary something else is responsible for, and
-`--update` refuses for the same reason. Update it the way you installed it.
+If cargo installed cctop, it asks instead of acting:
+
+```
+cctop 0.7.6 is out, and cargo installed this one (0.7.5) — replacing the binary
+here would leave `cargo install --list` naming a version that is gone.
+Run `cargo install cctop --version 0.7.6 --locked`? It builds from source. [y] update / [n] not now:
+```
+
+Answering `y` runs exactly that command, with cargo's own output on screen, and
+starts the new version when it finishes. The objection was never the file —
+`~/.cargo/bin` is writable — but the bookkeeping, and `cargo install` is what
+keeps cargo's record straight. It builds from source, so it takes minutes, which
+is why it is a question and not a default. Answering `n` is remembered against
+that version and the question waits for the next release; `cctop --update` asks
+again whenever you want it.
+
+A package manager other than cargo is left alone entirely — cctop will not touch
+a binary something else is responsible for. Update it the way you installed it.
 
 ## With cargo
 
