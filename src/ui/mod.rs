@@ -2151,7 +2151,56 @@ impl App {
 
     /// The integration's state, scoped to whichever project the cursor is on.
     fn hook_status(&self) -> crate::hook::Report {
-        crate::hook::status(self.hook_project().as_deref(), self.listener.as_ref())
+        let mut report =
+            crate::hook::status(self.hook_project().as_deref(), self.listener.as_ref());
+        // Codex's entry carries a reminder to go and trust its hooks, which is
+        // advice until it is done and noise afterwards. Only the events can tell
+        // which — see [`App::codex_hooks_heard`] — so the panel is where the
+        // reminder is dropped rather than where it is written.
+        if self.codex_hooks_heard() {
+            for entry in &mut report.entries {
+                if entry.harness == crate::hook::Harness::Codex {
+                    entry.note = None;
+                }
+            }
+        }
+        report
+    }
+
+    /// Whether Codex's hooks have ever fired into this cctop.
+    ///
+    /// Codex is the one harness whose hooks sit there inert until a person has
+    /// reviewed and trusted them, and where that trust is recorded is not
+    /// something Codex documents — so an install that reads as complete on disk
+    /// may be delivering nothing at all.
+    ///
+    /// What answers it is the permission mode. `notify`, Codex's other channel,
+    /// carries no such field, and a hook carries it on every event worth having
+    /// — so a Codex row that knows how much it asks before it acts is a Codex
+    /// whose hooks are firing. Rows from another machine are excluded: their
+    /// mode arrived over `--host` from a cctop where the hooks work, which says
+    /// nothing about this one.
+    fn codex_hooks_heard(&self) -> bool {
+        self.sessions.iter().any(|session| {
+            session.provider == Provider::Codex
+                && session.remote.is_none()
+                && session.permission.is_some()
+        })
+    }
+
+    /// The line a Codex being started needs, when it needs one.
+    ///
+    /// The moment of starting one is when this is worth saying and cheap to act
+    /// on: there is a fresh prompt on screen, `/hooks` costs a keystroke there,
+    /// and the alternative is a session that runs for an hour reporting only
+    /// that its turns ended. Said only when the hooks are installed and have
+    /// never been heard from — an install nobody asked for is not something to
+    /// nag about, and one that is already working needs nothing.
+    fn codex_trust_hint(&self, installed: bool) -> &'static str {
+        match installed && !self.codex_hooks_heard() {
+            true => " — run /hooks in it and trust cctop's to see it here",
+            false => "",
+        }
     }
 
     /// The project a `project`-scoped install would write into: the directory
@@ -3128,6 +3177,12 @@ impl App {
             return;
         };
         let cwd = self.launch_cwd.clone();
+        // Read off the choice rather than the argv below, which by then carries
+        // the `env VAR=value` prefix a profile is passed through.
+        let starting = match &choice {
+            tabs::Choice::Start(argv) => Self::profile_provider(argv),
+            tabs::Choice::Waiting(_) => None,
+        };
         let (argv, own) = match &choice {
             // Reattaching: the agent chose its own command long ago, and the
             // argv here only names the tab.
@@ -3245,7 +3300,17 @@ impl App {
                 let where_ = cwd
                     .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
                     .unwrap_or_default();
-                format!("Started {label}{where_}{carried}{kept}")
+                // Only for a fresh Codex, and only where its hooks are waiting
+                // to be trusted. A reattached one is deliberately left out: it
+                // has been running since before whatever is installed now, so
+                // the answer for it is a restart rather than a keystroke.
+                let trust = match starting {
+                    Some(Provider::Codex) => self.codex_trust_hint(
+                        crate::hook::codex_hooks_installed(self.hook_project().as_deref()),
+                    ),
+                    _ => "",
+                };
+                format!("Started {label}{where_}{carried}{kept}{trust}")
             }
         });
     }
@@ -4963,6 +5028,54 @@ mod tests {
         assert!(app.age_filter.is_none());
         assert!(app.search.is_empty());
         assert_eq!(app.sort_col, ColumnId::Last);
+    }
+
+    /// Codex's hooks are written to disk and then sit there doing nothing until
+    /// a person has trusted them, and where that trust is recorded is not
+    /// something Codex documents — so the only way to know is whether anything
+    /// has arrived.
+    ///
+    /// The permission mode is what answers it: `notify`, Codex's other channel,
+    /// carries no such field, so a Codex row that knows its mode is a Codex
+    /// whose hooks are firing. Said when a Codex is *started*, which is the
+    /// moment `/hooks` is a keystroke away rather than a thing to remember.
+    #[test]
+    fn a_codex_whose_hooks_are_untrusted_is_told_so_when_it_starts() {
+        let mut app = test_app();
+        let mut codex = session("c", true, "proj");
+        codex.provider = Provider::Codex;
+        app.sessions = vec![codex];
+
+        assert!(!app.codex_hooks_heard(), "nothing has reported yet");
+        assert!(
+            !app.codex_trust_hint(true).is_empty(),
+            "a written-but-silent install is exactly the case worth saying"
+        );
+        assert!(
+            app.codex_trust_hint(false).is_empty(),
+            "an install nobody asked for is not something to nag about"
+        );
+
+        // One hook event carries the mode, which nothing but a hook does.
+        app.sessions[0].permission = Some(crate::hook::Permission::Ask);
+        assert!(app.codex_hooks_heard());
+        assert!(
+            app.codex_trust_hint(true).is_empty(),
+            "the reminder outlived its purpose"
+        );
+
+        // A row from another machine says nothing about this one's hooks: its
+        // mode came over `--host` from a cctop where they work.
+        app.sessions[0].remote = Some(crate::session::Remote {
+            host: "elsewhere".into(),
+            branch: None,
+        });
+        assert!(!app.codex_hooks_heard());
+
+        // And a Claude Code row reporting its mode is not Codex's answer.
+        app.sessions[0].remote = None;
+        app.sessions[0].provider = Provider::Claude;
+        assert!(!app.codex_hooks_heard());
     }
 
     /// The mode is reported by a live agent but drawn on a row rebuilt by every

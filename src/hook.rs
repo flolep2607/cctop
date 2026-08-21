@@ -1738,6 +1738,26 @@ pub fn harness_status(harness: Harness, scope: Scope) -> Vec<ScopeStatus> {
         .collect()
 }
 
+/// Whether Codex's hooks are written anywhere that would apply.
+///
+/// Written, not working: Codex will not run a hook until a person has reviewed
+/// and trusted it, and it records that trust against a hash of the hook in a
+/// place it does not document — so nothing on disk here can say whether it
+/// happened. The caller pairs this with whether Codex has actually reported, and
+/// the two together are what distinguish "not set up" from "set up and waiting
+/// on you".
+pub fn codex_hooks_installed(cwd: Option<&Path>) -> bool {
+    let mut scopes = vec![Scope::User];
+    if let Some(dir) = cwd {
+        scopes.push(Scope::Project(dir.to_path_buf()));
+    }
+    scopes.iter().any(|scope| {
+        Harness::Codex.configs(scope).iter().any(|config| {
+            matches!(config, Config::Json { .. }) && config.health() != Health::Absent
+        })
+    })
+}
+
 /// Inspect the whole integration. `cwd` decides which project scope is looked
 /// at; `listener` is this instance's, when it has one.
 pub fn status(cwd: Option<&Path>, listener: Option<&Listener>) -> Report {

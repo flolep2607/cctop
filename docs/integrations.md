@@ -41,6 +41,22 @@ and trust them, or they deliver nothing. `notify` stays installed alongside for
 exactly that reason. It says only that a turn finished, and it says it the
 moment it is written.
 
+Nothing on disk says whether you have trusted them — Codex records that against
+a hash of the hook, somewhere it does not document — so cctop reads it from the
+events instead. `notify` carries no permission mode and a hook carries one on
+every event worth having, which makes a Codex row that knows how much it asks
+before it acts a Codex whose hooks are firing. Until one has, the panel keeps
+the reminder on Codex's line, and starting a Codex from the launcher says it
+where it is a keystroke away rather than a thing to remember:
+
+```
+Started codex in ~/proj — run /hooks in it and trust cctop's to see it here
+```
+
+A Codex you reattached to is left out of that: it has been running since before
+whatever is installed now, so the answer for it is a restart rather than a
+keystroke.
+
 Each hook runs `cctop hook <event>`; the plugin and Codex's `notify` hand the
 event over as an argument instead. Whichever way it arrives, it is reduced to
 the same three facts — which session, what happened, which directory — and sent
