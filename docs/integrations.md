@@ -24,11 +24,22 @@ One install covers five agents, each asked in its own dialect:
 
 | Agent | Where it is written | What is written |
 |---|---|---|
-| **Claude Code** | `~/.claude/settings.json`, or `<project>/.claude/` | nine hooks — `Stop`, `Notification`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`, `SubagentStop` |
-| **Gemini CLI** | `~/.gemini/settings.json`, or `<project>/.gemini/` | seven — `BeforeAgent`, `AfterAgent`, `BeforeTool`, `Notification`, `SessionStart`, `SessionEnd`, `PreCompress` |
+| **Claude Code** | `~/.claude/settings.json`, or `<project>/.claude/` | twelve hooks — `Stop`, `StopFailure`, `Notification`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `SessionStart`, `SessionEnd`, `PreCompact`, `SubagentStop` |
+| **Gemini CLI** | `~/.gemini/settings.json`, or `<project>/.gemini/` | eight — `BeforeAgent`, `AfterAgent`, `BeforeTool`, `AfterTool`, `Notification`, `SessionStart`, `SessionEnd`, `PreCompress` |
 | **Cursor** | `~/.cursor/hooks.json`, or `<project>/.cursor/` | seven — `stop`, `beforeSubmitPrompt`, `beforeShellExecution`, `sessionStart`, `sessionEnd`, `preCompact`, `subagentStop` |
-| **Codex** | `~/.codex/config.toml` | `notify = ["cctop", "hook", "codex"]`, its one turn-complete report |
+| **Codex** | `~/.codex/hooks.json`, or `<project>/.codex/`, and `~/.codex/config.toml` | ten hooks — `Stop`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`, `SubagentStop` — and `notify = ["cctop", "hook", "codex"]` |
 | **OpenCode** | `~/.config/opencode/plugins/cctop.ts`, or `<project>/.opencode/` | a plugin, since OpenCode extends by code rather than by command |
+
+Codex is asked twice, because its two ways of saying things fail differently.
+Its hook framework borrowed Claude Code's spelling wholesale — same event names,
+same nested `hooks` object, same JSON on stdin — so cctop needed no new reader
+for it, and it reports everything Claude Code does bar the two failure events
+Codex has no use for: its `PostToolUse` fires for a command that exited non-zero
+as well as one that succeeded, and a turn that dies has no second ending. But a
+Codex hook is inert until a person has looked at it: run `/hooks` inside Codex
+and trust them, or they deliver nothing. `notify` stays installed alongside for
+exactly that reason. It says only that a turn finished, and it says it the
+moment it is written.
 
 Each hook runs `cctop hook <event>`; the plugin and Codex's `notify` hand the
 event over as an argument instead. Whichever way it arrives, it is reduced to
@@ -37,11 +48,40 @@ to every running cctop over a unix socket. The agents disagree about all three
 spellings (`session_id`, `thread-id`, `conversation_id`, `sessionID`; a `cwd` or
 a `workspace_roots` array), so each is read under every name anyone uses.
 
-If you installed before an event was added — `PostToolUse`, or a whole agent —
-the panel shows that install as partial, and installing again fills it in.
+Half the list is there to *end* a state rather than start one, which is the
+half that goes wrong when it is missing. Claude Code fires `PostToolUse` only
+for a tool call that succeeded and `Stop` only for a turn that ended cleanly, so
+without their partners — `PostToolUseFailure` and `StopFailure` — a grep that
+matched nothing leaves a tool call in flight forever, and cctop draws a tool
+call in flight over a still screen as a permission prompt waiting for you.
+`PermissionRequest` is the same fact said properly: it fires the instant Claude
+Code asks, where the `Notification` for the same prompt is on a six-second
+timer and the tool-in-flight reading is a guess.
+
+If you installed before an event was added — `PostToolUseFailure`, or a whole
+agent — that install is short exactly those events, and cctop fills it in on
+the way up rather than only mentioning it in the panel. It is filled in *where
+it stands*: an install naming a different cctop keeps that binary, because
+events reach every cctop that is listening whoever fires them. Only an install
+naming a binary that no longer exists is repointed at this one, there being
+nothing left to respect. The OpenCode plugin is topped up the same way, by
+being rewritten: cctop owns that file outright, and an old copy of it forwards
+fewer events for the same reason an old settings file registers fewer hooks.
+
 Cursor also reads Claude Code's `settings.json` of its own accord, so with both
 installed each moment arrives twice; that costs a process spawn and nothing
-else, since the second event says exactly what the first did.
+else, since the second event says exactly what the first did. The same goes for
+Codex once its hooks are trusted: `Stop` and `notify` both report the end of a
+turn, and applying the same fact twice changes nothing.
+
+A state cctop was told about is believed until the agent says otherwise, with
+one exception: "I am working" has a shelf life of fifteen minutes. An agent
+mid-turn says something again well inside that — the next tool starts, the tool
+comes back, the turn ends — so silence that long means the event that would
+have closed it never came, which is what a killed session, a closed terminal
+and an interrupted turn all look like. "I am waiting on you" never expires,
+because nothing else was going to say it again and you may be away for the
+afternoon.
 
 A reported turn beats a still screen: the green appears the instant the turn
 ends rather than two seconds later, and the amber no longer waits for a

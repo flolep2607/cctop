@@ -569,17 +569,27 @@ impl Tab {
             .enumerate()
             .filter(|(i, _)| !(focused && *i == self.focus))
             .filter_map(|(_, pane)| match known(pane.agent()) {
-                // Before anything inferred: the agent rang. A harness rings when
-                // it is blocked on you and nothing else — see [`Pane::rang`].
+                // A bell over a turn the agent has already reported as finished
+                // is the nudge, not a question: Claude Code rings its
+                // `idle_prompt` notification a minute after `Stop` down the
+                // same bell it rings a permission prompt with, and reading that
+                // as a held question is how a tab that is merely done goes
+                // amber and stays amber. The agent's own word for its state is
+                // the one thing that can tell the two apart.
+                Some(crate::hook::Signal::Idle) if pane.rang() => Some(Attention::Idle),
+                // Otherwise, before anything inferred: the agent rang. A harness
+                // rings when it is blocked on you — see [`Pane::rang`].
                 _ if pane.rang() => Some(Attention::NeedsInput),
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // A tool call that started, has not come back, and has stopped
-                // repainting is a permission prompt waiting on you. Nothing
-                // says so outright in time to be useful: Claude Code's
-                // `Notification` for a held prompt is on a six-second timer, and
-                // a permission prompt leaves no trace in a transcript at all —
-                // so without this a tab blocked on one is drawn as merely idle,
-                // the same green as a tab whose turn is simply over.
+                // repainting is a permission prompt waiting on you. Claude Code
+                // says so outright — `PermissionRequest` arrives as
+                // `NeedsInput`, matched above — but it is the only harness that
+                // does: the rest raise a `Notification` on a six-second timer or
+                // nothing at all, and a permission prompt leaves no trace in a
+                // transcript either. So without this a tab blocked on one is
+                // drawn as merely idle, the same green as a tab whose turn is
+                // simply over.
                 //
                 // The two halves are both needed. A tool in flight alone is the
                 // ordinary case; a still screen alone is the finished turn the
@@ -869,11 +879,26 @@ mod tests {
     /// while it waits — which is exactly the state the rest of `attention` reads
     /// as "leave it alone". Before the bell was kept, a tab blocked on a
     /// permission prompt was drawn as busy for as long as it sat there.
+    ///
+    /// What it does not outrank is the agent saying its turn is over. Claude
+    /// Code rings the idle nudge a minute after `Stop`, down the same bell, and
+    /// a finished turn drawn as a held question is the false alarm that teaches
+    /// people to ignore the amber.
     #[test]
     fn an_agent_that_rang_outranks_looking_busy() {
         let ringing = ringing_tab(b"\x07");
         assert_eq!(
             ringing.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            Some(Attention::NeedsInput),
+        );
+        assert_eq!(
+            ringing.attention(false, &|_| Some(crate::hook::Signal::Idle)),
+            Some(Attention::Idle),
+            "the idle nudge was read as a question"
+        );
+        // A tool call held over a rung bell is the permission prompt itself.
+        assert_eq!(
+            ringing.attention(false, &|_| Some(crate::hook::Signal::Acting)),
             Some(Attention::NeedsInput),
         );
 

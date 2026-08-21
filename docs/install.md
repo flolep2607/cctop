@@ -55,6 +55,32 @@ above puts it in `/usr/local/bin` with `sudo`, so updating it needs `sudo` too:
 sudo cctop --update
 ```
 
+An update that lands prints what it brought, one heading per version crossed,
+so a machine three versions behind sees all three rather than only the newest:
+
+```
+Updated 0.7.0 -> 0.7.3.
+
+What changed since 0.7.0:
+
+  0.7.1
+    - Codex accounts per subscription, and a tab you can close without losing
+      your place
+
+  0.7.2
+    - Fix the login hint for a named account, and add a run skill that drives
+      the TUI
+
+  0.7.3
+    - the signals between cctop and its agents stop getting lost
+
+Full notes: https://github.com/flolep2607/cctop/releases
+```
+
+The notes come from the GitHub releases themselves, fetched after the binary is
+already in place — so a network that fails at that moment costs you the summary
+and not the update, and you get the link instead.
+
 cctop checks for a new release once an hour in the background and, when one
 exists, says so in the footer. It never updates itself: the check only reports,
 and replacing the binary always takes an explicit `--update`. If you installed

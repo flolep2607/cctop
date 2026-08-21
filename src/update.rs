@@ -13,6 +13,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const RELEASES_URL: &str = "https://api.github.com/repos/flolep2607/cctop/releases/latest";
+/// Every release, newest first, for the notes an update prints.
+///
+/// A page of thirty covers any jump anyone will make in practice — cctop has not
+/// published thirty versions in the life of an install that still runs — and
+/// asking for more would cost a second request to say the same thing.
+const RELEASE_LIST_URL: &str = "https://api.github.com/repos/flolep2607/cctop/releases?per_page=30";
 /// GitHub rejects API requests without one.
 const USER_AGENT: &str = concat!("cctop/", env!("CARGO_PKG_VERSION"));
 /// How long a release check stays good for.
@@ -50,6 +56,17 @@ struct Release {
     tag_name: String,
     #[serde(default)]
     assets: Vec<Asset>,
+    /// The notes GitHub holds for the release. Absent on a release published
+    /// without any, which is why this is not simply a `String`.
+    #[serde(default)]
+    body: Option<String>,
+}
+
+impl Release {
+    /// The version this release is of, without the tag's `v`.
+    fn version(&self) -> &str {
+        self.tag_name.trim_start_matches('v')
+    }
 }
 
 #[derive(Deserialize)]
@@ -213,6 +230,210 @@ fn unpack(archive: &[u8], target: &str, into: &Path) -> Result<PathBuf> {
 /// sidecars are served from that same origin, so verifying against them would
 /// only catch corruption that TLS already rules out — it would not defend
 /// against a compromised release.
+/// The releases between the version being left behind and the one arriving.
+///
+/// Ascending, because the reader is walking forward in time: someone four
+/// versions behind wants to read what happened in order, not newest-first the
+/// way the API returns it. `from` is exclusive and `to` inclusive — the version
+/// you were on is not news, and the one you just got is the whole point.
+fn selected<'a>(releases: &'a [Release], from: &str, to: &str) -> Vec<&'a Release> {
+    let mut picked: Vec<&Release> = releases
+        .iter()
+        .filter(|r| is_newer(r.version(), from))
+        .filter(|r| !is_newer(r.version(), to))
+        .collect();
+    picked.sort_by(|a, b| match is_newer(a.version(), b.version()) {
+        true => std::cmp::Ordering::Greater,
+        false => std::cmp::Ordering::Less,
+    });
+    picked
+}
+
+/// A release body reduced to lines worth printing in a terminal.
+///
+/// GitHub's generated notes are markdown written for a web page: a `What's
+/// Changed` heading, one bullet per pull request with its author and URL
+/// trailing behind the title, and a compare link at the end. The title is the
+/// part that says what changed; the rest is chrome that costs a terminal three
+/// lines to say nothing. Prose bodies — a release that wrote its own notes —
+/// come through as their own paragraphs, since there is nothing to strip.
+fn bullets(body: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in body.lines().map(str::trim) {
+        // A blank line ends whatever was being collected: it is the only thing
+        // in markdown that reliably separates one thought from the next.
+        if line.is_empty() {
+            items.extend(current.take());
+            continue;
+        }
+        // Headings and the trailing compare link: structure for a page that has
+        // other things on it, and this listing is already under a version.
+        if line.starts_with('#') || line.starts_with("**Full Changelog**") {
+            items.extend(current.take());
+            continue;
+        }
+        match line.starts_with(['*', '-', '•']) {
+            true => {
+                items.extend(current.take());
+                current = Some(line.trim_start_matches(['*', '-', '•', ' ']).to_string());
+            }
+            // A line that is not a bullet continues the one before it. Release
+            // prose is hard-wrapped in the commit it came from, so without this
+            // a paragraph arrives as one bullet per line of the file it was
+            // typed into.
+            false => match current.as_mut() {
+                Some(item) => {
+                    item.push(' ');
+                    item.push_str(line);
+                }
+                None => current = Some(line.to_string()),
+            },
+        }
+    }
+    items.extend(current);
+    items
+        .into_iter()
+        // "…title by @someone in https://github.com/…/pull/6" — the attribution
+        // is on the release page for anyone who wants it.
+        .map(|item| {
+            item.split(" by @")
+                .next()
+                .unwrap_or(&item)
+                .trim()
+                .to_string()
+        })
+        .map(|item| item.replace("**", ""))
+        // "release 0.7.3: what it fixed" — the version is the heading this line
+        // is printed under, so saying it again spends the width twice.
+        .map(|item| strip_release_prefix(&item))
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// `release 0.7.3: the rest`, or `0.7.0: the rest`, without the part the heading
+/// above it already said.
+///
+/// Both shapes appear in this project's own history, because the line comes from
+/// a pull request title and those were written for a list that had no version
+/// beside them. Stripped only when what is left still says something: a note
+/// whose whole text is the version has nothing else to give.
+fn strip_release_prefix(item: &str) -> String {
+    let candidate = item.strip_prefix("release ").unwrap_or(item);
+    let Some((version, rest)) = candidate.split_once(": ") else {
+        return item.to_string();
+    };
+    let numeric = !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == 'v');
+    match numeric && !rest.trim().is_empty() {
+        true => rest.trim().to_string(),
+        false => item.to_string(),
+    }
+}
+
+/// `text` broken into lines that fit `width`, for printing under an indent.
+///
+/// Release prose arrives as a paragraph once the lines it was typed on have been
+/// joined back together, and a paragraph printed into a terminal that wraps it
+/// itself loses the indent on every line but the first.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        // A word longer than the whole width goes on its own line rather than
+        // being broken: a URL is more useful whole than tidy.
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Print what changed between `from` and `to`.
+///
+/// Best effort by design, and called only after the binary has already been
+/// replaced: the update has succeeded by this point, and failing it over notes
+/// that are a nicety would be absurd. When they cannot be had, the release page
+/// is one line and one click away instead.
+fn show_changes(from: &str, to: &str) {
+    if !is_newer(to, from) {
+        return;
+    }
+    let notes = fetch_release_list().map(|list| {
+        selected(&list, from, to)
+            .into_iter()
+            .map(|r| {
+                (
+                    r.version().to_string(),
+                    bullets(r.body.as_deref().unwrap_or_default()),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let Ok(notes) = notes else {
+        println!("Release notes: {RELEASE_PAGE}");
+        return;
+    };
+    if notes.iter().all(|(_, lines)| lines.is_empty()) {
+        println!("Release notes: {RELEASE_PAGE}");
+        return;
+    }
+    // The terminal's width less the deepest indent these lines are printed at.
+    let room = crossterm::terminal::size()
+        .map(|(cols, _)| usize::from(cols))
+        .unwrap_or(80)
+        .clamp(40, 100)
+        .saturating_sub(6);
+    println!();
+    println!("What changed since {from}:");
+    for (version, lines) in &notes {
+        // A version whose release carried no notes still earns its heading:
+        // silence about it would read as though the jump skipped it.
+        println!();
+        println!("  {version}");
+        match lines.is_empty() {
+            true => println!("    (no notes published)"),
+            false => {
+                for line in lines {
+                    let mut wrapped = wrap(line, room).into_iter();
+                    if let Some(first) = wrapped.next() {
+                        println!("    - {first}");
+                    }
+                    // Hanging indent, so a wrapped item still reads as one.
+                    for rest in wrapped {
+                        println!("      {rest}");
+                    }
+                }
+            }
+        }
+    }
+    println!();
+    println!("Full notes: {RELEASE_PAGE}");
+}
+
+/// Where the notes live in full, for anything this cannot summarise.
+const RELEASE_PAGE: &str = "https://github.com/flolep2607/cctop/releases";
+
+fn fetch_release_list() -> Result<Vec<Release>> {
+    let text = agent()
+        .get(RELEASE_LIST_URL)
+        .call()
+        .context("could not reach GitHub")?
+        .body_mut()
+        .read_to_string()
+        .context("could not read the release list")?;
+    serde_json::from_str(&text).context("could not parse the release list")
+}
+
 pub fn run(force: bool) -> Result<()> {
     let current = current_version();
     // Before the network and before `force`, because this is not a check that a
@@ -263,6 +484,9 @@ pub fn run(force: bool) -> Result<()> {
     self_replace::self_replace(&new_binary).context("could not replace the running executable")?;
 
     println!("Updated {current} -> {latest}.");
+    // After the replace, so an install that worked is never held up by the
+    // network call that only decorates it.
+    show_changes(current, latest);
     Ok(())
 }
 
@@ -540,6 +764,108 @@ fn confirm(dir: &Path, exe: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn release(tag: &str, body: &str) -> Release {
+        Release {
+            tag_name: tag.to_string(),
+            assets: Vec::new(),
+            body: Some(body.to_string()),
+        }
+    }
+
+    /// What an update prints is the versions strictly after the one being left
+    /// and up to the one arriving. The version you were already running is not
+    /// news, and a release newer than what you got has not arrived yet — it can
+    /// be in the list, since the check and the download are separate requests
+    /// and a release can land between them.
+    #[test]
+    fn the_notes_cover_the_versions_actually_crossed() {
+        let list = [
+            release("v0.7.4", "later"),
+            release("v0.7.3", "third"),
+            release("v0.7.2", "second"),
+            release("v0.7.1", "first"),
+            release("v0.7.0", "already had this"),
+        ];
+        let picked: Vec<&str> = selected(&list, "0.7.0", "0.7.3")
+            .iter()
+            .map(|r| r.version())
+            .collect();
+        // Ascending: someone three versions behind reads forward in time.
+        assert_eq!(picked, ["0.7.1", "0.7.2", "0.7.3"]);
+
+        // One step is the ordinary case, and the boundaries hold there too.
+        let picked: Vec<&str> = selected(&list, "0.7.2", "0.7.3")
+            .iter()
+            .map(|r| r.version())
+            .collect();
+        assert_eq!(picked, ["0.7.3"]);
+    }
+
+    /// A line that opens by naming its own version says it twice: the version is
+    /// the heading it is printed under. Both spellings appear in this project's
+    /// own releases.
+    #[test]
+    fn a_bullet_does_not_repeat_the_version_above_it() {
+        assert_eq!(
+            bullets("* release 0.7.3: the signals stop getting lost"),
+            ["the signals stop getting lost"]
+        );
+        assert_eq!(
+            bullets("* 0.7.0: shared tabs, and a report"),
+            ["shared tabs, and a report"]
+        );
+        // Nothing left over means nothing to strip.
+        assert_eq!(bullets("* release 0.7.3"), ["release 0.7.3"]);
+        // And a colon after something that is not a version is just a colon.
+        assert_eq!(
+            bullets("* fix: the login hint for a named account"),
+            ["fix: the login hint for a named account"]
+        );
+    }
+
+    /// The real body of a real release, which is markdown written for a web
+    /// page. What survives is the sentence that says what changed.
+    #[test]
+    fn a_generated_release_body_becomes_one_line() {
+        let body = "## What's Changed\n\
+             * Fix the login hint for a named account, and add a run skill that \
+             drives the TUI by @flolep2607 in https://github.com/flolep2607/cctop/pull/5\n\
+             \n\n**Full Changelog**: https://github.com/flolep2607/cctop/compare/v0.7.1...v0.7.2";
+        assert_eq!(
+            bullets(body),
+            ["Fix the login hint for a named account, and add a run skill that drives the TUI"]
+        );
+    }
+
+    /// A release that wrote its own notes keeps them: there is no chrome to
+    /// strip, and throwing away prose because it is not a bullet would lose the
+    /// only bodies worth reading.
+    #[test]
+    fn a_hand_written_release_body_survives_intact() {
+        let body = "A patch, because every line of it fixes something.\n\n                    - **Handoff** briefs travel in the argv now\n                    - Bells reach the tab bar";
+        assert_eq!(
+            bullets(body),
+            [
+                "A patch, because every line of it fixes something.",
+                "Handoff briefs travel in the argv now",
+                "Bells reach the tab bar",
+            ]
+        );
+    }
+
+    /// A release with no notes at all must not be silently skipped — a version
+    /// missing from the list reads as though the jump went around it.
+    #[test]
+    fn a_release_with_no_notes_is_still_a_release() {
+        let empty = Release {
+            tag_name: "v0.7.3".into(),
+            assets: Vec::new(),
+            body: None,
+        };
+        assert!(bullets(empty.body.as_deref().unwrap_or_default()).is_empty());
+        assert_eq!(selected(&[empty], "0.7.2", "0.7.3").len(), 1);
+    }
 
     /// A cargo install is the case the permission check cannot see, because the
     /// directory it would test is writable. Only the executable's location
