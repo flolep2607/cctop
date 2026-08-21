@@ -2087,6 +2087,12 @@ impl App {
                 }
             }
         }
+        // A working claim that nothing has confirmed for a quarter of an hour is
+        // dropped rather than believed: see
+        // [`Reported::is_current`](crate::hook::Reported::is_current). Swept
+        // here because this is the only place the map grows, and a session that
+        // was killed mid-turn will never send the event that would clear it.
+        self.hooked.retain(|_, reported| reported.is_current());
         self.apply_finished_agents();
         self.apply_permissions();
         (changed, lifecycle)
@@ -2188,6 +2194,7 @@ impl App {
         let mut rows: Vec<(String, &'static str)> = self
             .hooked
             .values()
+            .filter(|r| r.is_current())
             .map(|r| {
                 let name = std::path::Path::new(&r.cwd)
                     .file_name()
@@ -2202,8 +2209,11 @@ impl App {
 
     /// What a session's own hooks last said about it, if it has any.
     fn hooked_signal(&self, session_id: &str) -> Option<crate::hook::Signal> {
+        // Checked here as well as in the sweep: the sweep runs when an event
+        // arrives, and a session that has gone silent is precisely the one that
+        // sends none — so between events the map still holds the stale claim.
         if let Some(reported) = self.hooked.get(session_id) {
-            return Some(reported.signal);
+            return reported.is_current().then_some(reported.signal);
         }
         // Gemini CLI reports a full session id, but names the chat file it
         // writes — which is the only identity cctop's rows have, because
@@ -2214,6 +2224,7 @@ impl App {
         self.hooked
             .iter()
             .find(|(id, _)| id.starts_with(tail))
+            .filter(|(_, reported)| reported.is_current())
             .map(|(_, reported)| reported.signal)
     }
 
@@ -4964,6 +4975,7 @@ mod tests {
                 signal: crate::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: mode,
+                at: std::time::Instant::now(),
             },
             finished_agent: None,
         };
@@ -5009,6 +5021,7 @@ mod tests {
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
+                at: std::time::Instant::now(),
             },
             // This test is about the session's own state; subagent events are
             // covered where subagents are.
@@ -5047,6 +5060,46 @@ mod tests {
         assert!(app.reporting().is_empty());
     }
 
+    /// A session that was killed, interrupted, or had its terminal closed sends
+    /// no event saying so — the tool never comes back, the turn never ends — and
+    /// a claim to be working is the one thing that cannot quietly stay true.
+    ///
+    /// Regression. Before this, whatever a session last said it was doing was
+    /// believed for as long as cctop ran: a tab whose agent had been dead for an
+    /// hour was still drawn as busy, and a tool call cut off mid-flight still
+    /// read as a permission prompt waiting for an answer.
+    #[test]
+    fn a_working_claim_nothing_confirms_is_dropped() {
+        let stale = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
+            session_id: id.into(),
+            reported: crate::hook::Reported {
+                signal,
+                cwd: "/w/proj".into(),
+                permission: None,
+                at: std::time::Instant::now() - std::time::Duration::from_secs(60 * 60),
+            },
+            finished_agent: None,
+        };
+        let mut app = test_app();
+
+        // An hour-old tool call in flight: the tool is not coming back, and
+        // reading it as a held question is how a dead tab keeps blinking.
+        app.apply_hooks(vec![stale("gone", crate::hook::Signal::Acting)]);
+        assert!(app.hooked_signal("gone").is_none());
+        assert!(
+            app.reporting().is_empty(),
+            "the panel listed a state nothing was in"
+        );
+
+        // A question that old is still a question: it is waiting on a person,
+        // and people take longer than an hour.
+        app.apply_hooks(vec![stale("asking", crate::hook::Signal::NeedsInput)]);
+        assert_eq!(
+            app.hooked_signal("asking"),
+            Some(crate::hook::Signal::NeedsInput)
+        );
+    }
+
     /// Gemini CLI is the one harness whose rows are not named after the id it
     /// reports: a chat file is named after the first eight characters of the
     /// session id, and that filename is the row's identity because resuming
@@ -5061,6 +5114,7 @@ mod tests {
                 signal: crate::hook::Signal::Idle,
                 cwd: "/w/proj".into(),
                 permission: None,
+                at: std::time::Instant::now(),
             },
             finished_agent: None,
         }]);
@@ -5110,6 +5164,7 @@ mod tests {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
+                at: std::time::Instant::now(),
             },
             finished_agent: None,
         }]);
@@ -5129,6 +5184,7 @@ mod tests {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
+                at: std::time::Instant::now(),
             },
             finished_agent: None,
         }]);
