@@ -84,10 +84,43 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare-release.outputs.tag }}
+          # The notes below are read out of a commit that this one merged, which
+          # a shallow checkout does not have.
+          fetch-depth: 0
+      # Generated notes are one line per merged pull request: a fine index and a
+      # poor summary — and `cctop --update` prints these to whoever updates. The
+      # release commit already says why the digit moved, in prose, and that was
+      # being thrown away.
+      - id: notes
+        name: Take the release commit's own prose as the notes
+        run: |
+          # The tag lands on a merge commit whose message is GitHub's, so the
+          # prose is in the `chore: release` commit underneath it. `--no-merges`
+          # matters: a merge commit repeats the branch's subject in its own body,
+          # so without it the newest match is the merge and the whole body is one
+          # line reading "chore: release X.Y.Z".
+          sha="$(git log --no-merges --format=%H --grep='^chore: release' -n 1 HEAD || true)"
+          body=""
+          if [ -n "$sha" ]; then
+            body="$(git log --format=%b -n 1 "$sha")"
+            echo "notes from $(git log --format='%h %s' -n 1 "$sha")"
+          else
+            echo "no release commit found; falling back to generated notes alone"
+          fi
+          {
+            echo "body<<CCTOP_RELEASE_NOTES"
+            printf '%s\n' "$body"
+            echo "CCTOP_RELEASE_NOTES"
+          } >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare-release.outputs.tag }}
           draft: false
+          # GitHub puts the generated notes after this, so a release reads as its
+          # own summary followed by the pull requests it was made of. An empty
+          # body — a bump with nothing written under it — leaves exactly the
+          # generated notes that were here before.
+          body: ${{ steps.notes.outputs.body }}
           generate_release_notes: true
 
   build:
