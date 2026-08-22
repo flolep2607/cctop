@@ -124,6 +124,12 @@ pub struct Args {
     /// what the other agents on this machine are doing. Read-only
     #[arg(long)]
     pub mcp: bool,
+
+    /// Store a Claude account token (from `claude setup-token`) in cctop's
+    /// config, read from stdin, and exit. Takes a name for the account;
+    /// defaults to `default`
+    #[arg(long, num_args = 0..=1, default_missing_value = "default", value_name = "NAME")]
+    pub add_account: Option<String>,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {

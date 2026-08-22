@@ -125,6 +125,30 @@ fn extract_claude_token(raw: &str) -> Option<String> {
 }
 
 fn read_claude_credential() -> Credential {
+    // Claude Code itself prefers this variable over the stored login, so a
+    // session started with it spends an account this machine may never have
+    // signed into. Reading it first is what makes the quota shown here the
+    // quota that session is actually burning; it is also the only way to watch
+    // an account from a machine with no login at all (`claude setup-token`).
+    if let Ok(tok) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        let tok = tok.trim();
+        if !tok.is_empty() {
+            return if is_api_key(tok) {
+                Credential::ApiKey
+            } else {
+                Credential::OAuth(tok.to_string())
+            };
+        }
+    }
+
+    if let Some(tok) = stored_token() {
+        return if is_api_key(&tok) {
+            Credential::ApiKey
+        } else {
+            Credential::OAuth(tok)
+        };
+    }
+
     // macOS keychain. Current builds use "Claude Code-credentials"; older ones
     // used "Claude Code".
     #[cfg(target_os = "macos")]
@@ -185,6 +209,110 @@ fn read_claude_credential() -> Credential {
         }
     }
     Credential::None
+}
+
+/// Which account in cctop's own config to use.
+///
+/// `active = "name"` picks one; otherwise the first `[accounts.…]` in the file
+/// wins, which is the only account there in the common case. Document order
+/// rather than alphabetical so the answer is the one the user can see by
+/// looking at the top of their file.
+///
+/// ponytail: one account is polled, not all of them. Showing several at once
+/// needs per-account rows in the quota panel, which is hardcoded to one Claude
+/// and one Codex (`ui::render::draw_limits`). The file format already carries
+/// the names, so that change stays additive.
+fn pick_token(text: &str) -> Option<String> {
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let accounts = doc.get("accounts")?.as_table_like()?;
+    let wanted = doc.get("active").and_then(|v| v.as_str());
+    let account = match wanted {
+        Some(name) => accounts.get(name)?,
+        None => accounts.iter().next()?.1,
+    };
+    let tok = account.as_table_like()?.get("token")?.as_str()?.trim();
+    (!tok.is_empty()).then(|| tok.to_string())
+}
+
+fn stored_token() -> Option<String> {
+    pick_token(&std::fs::read_to_string(&*config::CONFIG_FILE).ok()?)
+}
+
+/// Store a token under `name`, reading it from stdin so it never lands in the
+/// shell's history the way an argument would.
+pub fn add_account(name: &str) -> anyhow::Result<()> {
+    let path = &*config::CONFIG_FILE;
+    eprintln!("Paste a token from `claude setup-token`, then Enter:");
+    let mut token = String::new();
+    std::io::stdin().read_line(&mut token)?;
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("no token given; nothing written");
+    }
+
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    // Same refusal as the harness config files: one cctop cannot parse is one
+    // it must not rewrite, and toml_edit keeps the user's comments and layout.
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))?;
+    // Built as real tables rather than by indexing straight through, which
+    // toml_edit renders as one inline `accounts = { work = { token = … } }`
+    // line. A config a user is expected to open and edit gets `[accounts.work]`
+    // stanzas; `set_implicit` keeps the bare `[accounts]` header out of it.
+    if !doc.contains_key("accounts") {
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(true);
+        doc.insert("accounts", toml_edit::Item::Table(table));
+    }
+    let accounts = doc["accounts"]
+        .as_table_like_mut()
+        .ok_or_else(|| anyhow::anyhow!("`accounts` in {} is not a table", path.display()))?;
+    if accounts.get(name).is_none() {
+        accounts.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    accounts
+        .get_mut(name)
+        .and_then(|a| a.as_table_like_mut())
+        .ok_or_else(|| anyhow::anyhow!("account '{name}' in {} is not a table", path.display()))?
+        .insert("token", toml_edit::value(token));
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Write through a temporary file so an interrupted write cannot leave the
+    // config truncated, and create it unreadable to anyone else from the start:
+    // widening a file after writing a secret into it is a window, however short.
+    let tmp = path.with_extension("toml.cctop-tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    restrict(&tmp)?;
+    std::fs::rename(&tmp, path)?;
+
+    eprintln!("Stored account '{name}' in {}.", path.display());
+    if !is_api_key(token) && !token.starts_with("sk-ant-oat") {
+        eprintln!("! That does not look like a `claude setup-token` token.");
+    }
+    Ok(())
+}
+
+/// Owner-only permissions, where the platform has them.
+///
+/// ponytail: Windows keeps whatever the profile directory grants, which is
+/// normally the user alone. Tightening a Windows ACL means a DACL dance for a
+/// file that is already outside other users' reach by default.
+fn restrict(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn read_codex_token() -> Option<String> {
@@ -463,6 +591,21 @@ mod tests {
     #[test]
     fn short_error_keeps_the_informative_part() {
         assert_eq!(short_error(&"http status: 429"), "http status: 429");
+    }
+
+    #[test]
+    fn a_stored_account_is_picked_by_active_then_by_position() {
+        let two = "active = \"work\"\n\n[accounts.personal]\ntoken = \"sk-ant-oat01-p\"\n\n[accounts.work]\ntoken = \"sk-ant-oat01-w\"\n";
+        assert_eq!(pick_token(two).as_deref(), Some("sk-ant-oat01-w"));
+        // Without `active`, the first account in the file.
+        let no_active = two.replace("active = \"work\"\n", "");
+        assert_eq!(pick_token(&no_active).as_deref(), Some("sk-ant-oat01-p"));
+        // An `active` naming an account that is not there is not silently
+        // downgraded to a different account's token.
+        assert_eq!(pick_token(&two.replace("\"work\"\n", "\"gone\"\n")), None);
+        assert_eq!(pick_token("[accounts.a]\ntoken = \"  \"\n"), None);
+        assert_eq!(pick_token(""), None);
+        assert_eq!(pick_token("not = toml ["), None);
     }
 
     #[test]

@@ -133,6 +133,17 @@ pub static CACHE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
         .join("cctop")
 });
 
+/// cctop's own config, holding the account tokens a user added by hand.
+///
+/// Separate from `CACHE_DIR` on purpose: a cache is something cctop may delete
+/// to recover, and `--clear-cache` does. A token the user typed in is not.
+pub static CONFIG_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
+    dirs::config_dir()
+        .unwrap_or_else(|| HOME.join(".config"))
+        .join("cctop")
+        .join("config.toml")
+});
+
 pub static COST_CACHE_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join("cost-cache.json"));
 pub static PRICING_CACHE_FILE: LazyLock<PathBuf> =
     LazyLock::new(|| CACHE_DIR.join("litellm-pricing.json"));

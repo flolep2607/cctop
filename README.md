@@ -467,6 +467,33 @@ every long reasoning turn.
 `OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and
 `WINDSURF_USER_DIR` are honoured. Caches live in `~/.cache/cctop/`.
 
+### Watching an account you are not signed in to
+
+Claude's usage limits are read from whatever token cctop can find, in this
+order: `CLAUDE_CODE_OAUTH_TOKEN`, then cctop's own config, then the sign-in
+Claude Code stored. The environment variable comes first because Claude Code
+prefers it too — a session launched with it spends that account, and cctop
+should show the limits being spent rather than a different account's.
+
+`claude setup-token` prints a long-lived token. To keep one:
+
+```bash
+cctop --add-account work    # reads the token from stdin, so it stays out of history
+```
+
+It lands in `config.toml` under your config directory, readable only by you:
+
+```toml
+[accounts.work]
+token = "sk-ant-oat01-…"
+```
+
+Add a second account by running `--add-account` again with another name, and
+choose between them with a top-level `active = "work"`. Without `active`, the
+first account in the file is the one polled — one at a time, because the limits
+panel has a row per provider rather than per account. Removing an account is
+deleting its two lines.
+
 Gemini and Windsurf sessions are read from disk but not matched to a running
 process: neither takes a session id on its command line, so there is nothing to
 tie a PID to a transcript. Their rows always read as stopped, and the CPU and
