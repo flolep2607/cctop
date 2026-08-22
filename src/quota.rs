@@ -187,7 +187,27 @@ fn extract_claude_token(raw: &str) -> Option<String> {
     }
 }
 
-fn read_claude_credential_in(dir: &Path, is_default: bool) -> Credential {
+fn read_claude_credential_in(profile: &config::Profile, is_default: bool) -> Credential {
+    // Claude Code prefers this variable over anything it has stored, so a
+    // session started with it spends an account cctop would otherwise never
+    // read. One variable is one value per machine, though — the same argument
+    // that keeps the keychain and `~/.claude.json` to the default profile below
+    // — so it answers for that profile alone rather than being reported as
+    // every profile's usage.
+    if is_default && let Ok(tok) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        let tok = tok.trim();
+        if !tok.is_empty() {
+            return classify(tok);
+        }
+    }
+
+    // A token the user typed in beats one that was discovered: it is the only
+    // way to say "poll this account, not whatever is in that directory", and a
+    // silently-ignored token is worse than none.
+    if let Some(tok) = stored_token(&profile.name) {
+        return classify(&tok);
+    }
+
     // macOS keychain. Current builds use "Claude Code-credentials"; older ones
     // used "Claude Code".
     // Only for the profile Claude Code itself would use. The keychain holds one
@@ -218,7 +238,7 @@ fn read_claude_credential_in(dir: &Path, is_default: bool) -> Credential {
     // directory, and there is only one of it — so it answers for the default
     // profile alone. A named profile has to prove itself from its own
     // credentials or count as signed out.
-    let mut candidates = vec![dir.join(".credentials.json")];
+    let mut candidates = vec![profile.dir.join(".credentials.json")];
     if is_default {
         candidates.push(config::HOME.join(".claude.json"));
     }
@@ -259,6 +279,127 @@ fn read_claude_credential_in(dir: &Path, is_default: bool) -> Credential {
         }
     }
     Credential::None
+}
+
+fn classify(token: &str) -> Credential {
+    if is_api_key(token) {
+        Credential::ApiKey
+    } else {
+        Credential::OAuth(token.to_string())
+    }
+}
+
+/// The token stored for `profile` in cctop's own config, if any.
+///
+/// Keyed by profile name so it reads as the same list of accounts everything
+/// else shows — `[accounts.work]` is the token for the `work` profile, the one
+/// the PROFILE column and the limits panel already call `work`.
+fn pick_token(text: &str, profile: &str) -> Option<String> {
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let tok = doc
+        .get("accounts")?
+        .as_table_like()?
+        .get(profile)?
+        .as_table_like()?
+        .get("token")?
+        .as_str()?
+        .trim();
+    (!tok.is_empty()).then(|| tok.to_string())
+}
+
+fn stored_token(profile: &str) -> Option<String> {
+    pick_token(
+        &std::fs::read_to_string(&*config::CONFIG_FILE).ok()?,
+        profile,
+    )
+}
+
+/// Store a token for `profile`, reading it from stdin so it never lands in the
+/// shell's history the way an argument would.
+pub fn add_account(profile: &str) -> anyhow::Result<()> {
+    let path = &*config::CONFIG_FILE;
+    eprintln!("Paste a token from `claude setup-token`, then Enter:");
+    let mut token = String::new();
+    std::io::stdin().read_line(&mut token)?;
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("no token given; nothing written");
+    }
+
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    // Same refusal as the harness config writers: a file cctop cannot parse is
+    // one it must not rewrite, and `toml_edit` keeps the comments and layout of
+    // a file the user is expected to open.
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))?;
+    // Built as real tables rather than by indexing straight through, which
+    // toml_edit renders as a single inline `accounts = { work = { … } }` line.
+    if !doc.contains_key("accounts") {
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(true);
+        doc.insert("accounts", toml_edit::Item::Table(table));
+    }
+    let accounts = doc["accounts"]
+        .as_table_like_mut()
+        .ok_or_else(|| anyhow::anyhow!("`accounts` in {} is not a table", path.display()))?;
+    if accounts.get(profile).is_none() {
+        accounts.insert(profile, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    accounts
+        .get_mut(profile)
+        .and_then(|a| a.as_table_like_mut())
+        .ok_or_else(|| anyhow::anyhow!("account '{profile}' in {} is not a table", path.display()))?
+        .insert("token", toml_edit::value(token));
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Written through a temporary file so an interrupted write cannot truncate
+    // the config, and created unreadable to anyone else from the start:
+    // widening a file that already holds a secret is a window, however short.
+    let tmp = path.with_extension("toml.cctop-tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    restrict(&tmp)?;
+    std::fs::rename(&tmp, path)?;
+    eprintln!(
+        "Stored a token for profile '{profile}' in {}.",
+        path.display()
+    );
+
+    if !is_api_key(token) && !token.starts_with("sk-ant-oat") {
+        eprintln!("! That does not look like a `claude setup-token` token.");
+    }
+    // A token is read as one profile's, and a profile is a directory holding
+    // credentials, so a name with no directory behind it has no row to appear
+    // in. Say so rather than leaving the token to be silently unread.
+    if config::profile_named(crate::pricing::Provider::Claude, profile).is_none() {
+        eprintln!(
+            "! No Claude profile is named '{profile}', so nothing polls this token yet.\n\
+             \x20 Profiles are the `~/.claude*` directories holding a `.credentials.json`."
+        );
+    }
+    Ok(())
+}
+
+/// Owner-only permissions, where the platform has them.
+///
+/// ponytail: Windows keeps whatever the profile directory grants, which is
+/// normally the user alone. Tightening a Windows ACL means a DACL dance for a
+/// file already outside other users' reach by default.
+fn restrict(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn read_codex_token_in(dir: &Path) -> Option<String> {
@@ -398,7 +539,7 @@ pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
     let is_default = config::profiles_for(crate::pricing::Provider::Claude)
         .first()
         .is_some_and(|first| first.dir == profile.dir);
-    let token = match read_claude_credential_in(&profile.dir, is_default) {
+    let token = match read_claude_credential_in(profile, is_default) {
         Credential::ApiKey => return ProviderStatus::ApiBilling,
         Credential::None => return ProviderStatus::NotSignedIn,
         Credential::OAuth(t) => t,
@@ -584,6 +725,17 @@ mod tests {
     #[test]
     fn short_error_keeps_the_informative_part() {
         assert_eq!(short_error(&"http status: 429"), "http status: 429");
+    }
+
+    #[test]
+    fn a_stored_token_is_read_for_the_profile_it_names() {
+        let text = "# mine\n[accounts.work]\ntoken = \"sk-ant-oat01-w\"\n\n[accounts.blank]\ntoken = \"  \"\n";
+        assert_eq!(pick_token(text, "work").as_deref(), Some("sk-ant-oat01-w"));
+        // Another profile's token is never handed out as this one's.
+        assert_eq!(pick_token(text, "default"), None);
+        assert_eq!(pick_token(text, "blank"), None);
+        assert_eq!(pick_token("", "work"), None);
+        assert_eq!(pick_token("not = toml [", "work"), None);
     }
 
     #[test]
