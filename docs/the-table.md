@@ -262,6 +262,29 @@ from, the limits panel reports each subscription's own 5h and weekly figures, an
 without which a resumed Codex session would come back blank, its id being unknown
 to any other home.
 
+An account whose limits cctop cannot read from its directory can be given a
+token instead. `claude setup-token` prints a long-lived one, and
+
+```bash
+cctop --add-account work   # reads the token from stdin, so it stays out of history
+```
+
+keeps it in `config.toml` under your config directory, readable only by you:
+
+```toml
+[accounts.work]
+token = "sk-ant-oat01-…"
+```
+
+The name is the profile's, so `[accounts.work]` is the token for the account the
+PROFILE column calls `work`, and a token you put there wins over the credentials
+in that profile's directory — being explicit is the point of typing it in.
+`CLAUDE_CODE_OAUTH_TOKEN` wins over both, for the default profile only: Claude
+Code prefers that variable too, so a session started with it spends the account
+the variable names rather than the one the directory holds. One variable is one
+value per machine, which is why it answers for one profile rather than being
+reported as every account's usage.
+
 In the tab bar, drag a tab to move it along the bar, and right-click one to
 rename it: `3:claude-4` says nothing about what that agent is doing, and the
 name you give it follows the tab into every cctop on the machine.

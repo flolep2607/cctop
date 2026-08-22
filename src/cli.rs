@@ -166,6 +166,12 @@ pub struct Args {
     #[arg(long)]
     pub mcp: bool,
 
+    /// Store a Claude token (from `claude setup-token`) for a profile in
+    /// cctop's config, read from stdin, and exit. Takes the profile name;
+    /// defaults to `default`
+    #[arg(long, num_args = 0..=1, default_missing_value = "default", value_name = "PROFILE")]
+    pub add_account: Option<String>,
+
     /// Also show the sessions on another machine, read over ssh. Repeatable.
     /// Takes `[user@]host`, or `[user@]host:/path/to/cctop` where cctop is not
     /// on the PATH a non-interactive ssh gets. $CCTOP_HOSTS adds more, comma

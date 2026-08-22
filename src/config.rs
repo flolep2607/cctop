@@ -194,6 +194,17 @@ pub fn profiles_for(provider: Provider) -> Vec<&'static Profile> {
     PROFILES.iter().filter(|p| p.provider == provider).collect()
 }
 
+/// cctop's own config, holding the account tokens a user added by hand.
+///
+/// Separate from `CACHE_DIR` on purpose: a cache is something cctop may delete
+/// to recover, and `--clear-cache` does. A token the user typed in is not.
+pub static CONFIG_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
+    dirs::config_dir()
+        .unwrap_or_else(|| HOME.join(".config"))
+        .join("cctop")
+        .join("config.toml")
+});
+
 /// `$CODEX_HOME`, falling back to `~/.codex`.
 pub static CODEX_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::var_os("CODEX_HOME")
