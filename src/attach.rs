@@ -459,16 +459,35 @@ pub fn run_terminal(args: &[String]) -> anyhow::Result<i32> {
     proxy(pid)
 }
 
+/// An agent reachable through a shim: the pid its socket is named for, and
+/// enough to tell it from the others.
+///
+/// The pid here is the shim's, not the agent's, and the difference matters.
+/// `cctop claude` hands the agent to tmux and the shim holds the pty running
+/// `tmux new-session` — so the socket belongs to the tmux *client* while the
+/// agent process sits inside the server, several reparentings away. Anything
+/// that starts from a session row and reasons about its own process will not
+/// arrive here; the socket is the fact, and this is the list of them.
 #[cfg(unix)]
-fn list_sessions(sessions: &[u32]) -> anyhow::Result<i32> {
+pub struct Attachable {
+    pub pid: u32,
+    /// The shim's command line — `tmux new-session … -- claude`, or the agent
+    /// directly when tmux is not in the picture.
+    pub command: String,
+    pub cwd: String,
+}
+
+/// Every agent a shim can hand over, in socket order.
+///
+/// Shared by `cctop attach`'s listing and the web dashboard, which ask the same
+/// question and were answering it differently: one from the sockets, the other
+/// by guessing at pids from session rows.
+#[cfg(unix)]
+pub fn attachable() -> Vec<Attachable> {
+    let sessions = crate::shim::sessions();
     if sessions.is_empty() {
-        eprintln!(
-            "No agents are running under cctop. Start one with `cctop claude` \
-             (or codex, opencode, pi) and it becomes attachable."
-        );
-        return Ok(1);
+        return Vec::new();
     }
-    eprintln!("Agents running under cctop:\n");
     let mut sys = sysinfo::System::new();
     let pids: Vec<sysinfo::Pid> = sessions
         .iter()
@@ -483,24 +502,52 @@ fn list_sessions(sessions: &[u32]) -> anyhow::Result<i32> {
             .with_cmd(sysinfo::UpdateKind::Always)
             .with_cwd(sysinfo::UpdateKind::Always),
     );
-    for &pid in sessions {
-        let process = sys.process(sysinfo::Pid::from_u32(pid));
-        let command = process
-            .map(|p| {
-                p.cmd()
-                    .iter()
-                    .map(|a| a.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default();
-        // Two agents of the same name are told apart by where they are working,
-        // which is the whole reason to print anything but the pid.
-        let cwd = process
-            .and_then(|p| p.cwd())
-            .map(|d| format!("  in {}", d.display()))
-            .unwrap_or_default();
-        eprintln!("  {pid:>7}  {}{cwd}", crate::util::truncate(&command, 60));
+    sessions
+        .iter()
+        .map(|&pid| {
+            let process = sys.process(sysinfo::Pid::from_u32(pid));
+            Attachable {
+                pid,
+                command: process
+                    .map(|p| {
+                        p.cmd()
+                            .iter()
+                            .map(|a| a.to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default(),
+                // Two agents of the same name are told apart by where they are
+                // working, which is the whole reason to carry anything but the pid.
+                cwd: process
+                    .and_then(|p| p.cwd())
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn list_sessions(sessions: &[u32]) -> anyhow::Result<i32> {
+    if sessions.is_empty() {
+        eprintln!(
+            "No agents are running under cctop. Start one with `cctop claude` \
+             (or codex, opencode, pi) and it becomes attachable."
+        );
+        return Ok(1);
+    }
+    eprintln!("Agents running under cctop:\n");
+    for agent in attachable() {
+        let cwd = match agent.cwd.is_empty() {
+            true => String::new(),
+            false => format!("  in {}", agent.cwd),
+        };
+        eprintln!(
+            "  {:>7}  {}{cwd}",
+            agent.pid,
+            crate::util::truncate(&agent.command, 60)
+        );
     }
     eprintln!("\nAttach with `cctop attach <pid>`.");
     Ok(0)

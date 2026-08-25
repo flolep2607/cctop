@@ -82,11 +82,16 @@
   .send button:disabled { opacity: .5; cursor: default; }
   .sent { font-size: .75rem; color: var(--dim); margin-top: .25rem; }
   .sent.bad { color: var(--warn); }
-  .term {
-    font-size: .75rem; text-decoration: none; padding: .1rem .4rem; border-radius: 4px;
-    color: var(--accent); border: 1px solid var(--line); white-space: nowrap;
+  #terms { margin-bottom: 1.4rem; }
+  #terms a {
+    display: flex; align-items: baseline; gap: .6rem; text-decoration: none; color: var(--fg);
+    padding: .4rem .55rem; border: 1px solid var(--line); border-radius: 6px;
+    margin-bottom: .35rem; background: var(--card);
   }
-  .term:hover { border-color: var(--accent); }
+  #terms a:hover { border-color: var(--accent); }
+  #terms .cmd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #terms .at { color: var(--dim); font-size: .75rem; margin-left: auto; white-space: nowrap; }
+  #terms .pid { color: var(--accent); font-size: .75rem; }
   .empty { color: var(--dim); padding: 2rem 0; text-align: center; }
   #err { color: var(--warn); font-size: .8rem; }
   @media (max-width: 640px) {
@@ -107,7 +112,16 @@
   <span id="err"></span>
   <span id="totals"></span>
 </header>
-<main id="out"><div class="empty">loading…</div></main>
+<main>
+  <!-- Agents whose pty a shim is holding. Its own section rather than a column
+       on the table, because these are a different set: the socket is what makes
+       one showable, and a session row cannot tell you whether there is one. -->
+  <section class="group" id="terms" hidden>
+    <h2 id="terms-h"></h2>
+    <div id="terms-list"></div>
+  </section>
+  <div id="out"><div class="empty">loading…</div></div>
+</main>
 <script>
 // Same order the `--list` output groups by, so the two agree.
 const ORDER = ["codex", "claude", "cursor", "opencode", "pi", "gemini", "windsurf"];
@@ -152,13 +166,6 @@ const label = (s) => {
   return { short: p.split("/").filter(Boolean).slice(-2).join("/") || "—", full: p };
 };
 
-// `pid` is present only for a session cctop owns the pty of — the ones with a
-// shim socket to bridge. Everything else has no terminal to show, which is a
-// fact about how the agent was started, not about this page.
-function termLink(s) {
-  return s.pid ? `<a class="term" href="t/${s.pid}" title="live terminal">terminal</a>` : "";
-}
-
 // Only where there is something to type into: the server refuses a stopped
 // session anyway, and an input that always fails is worse than no input.
 function sendBox(s) {
@@ -182,7 +189,6 @@ function row(s) {
       <div class="name">
         <span class="dot${s.running ? " live" : ""}"></span>
         <span class="title" title="${esc(l.full)}">${esc(s.title || l.short)}</span>
-        ${termLink(s)}
       </div>
       <div class="path" title="${esc(l.full)}">${esc(l.short)}</div>
       ${sendBox(s)}
@@ -284,6 +290,19 @@ document.getElementById("out").addEventListener("focusout", () => {
   setTimeout(() => { if (!typingHere()) render(latest); }, 0);
 });
 
+function renderTerminals(list) {
+  const box = document.getElementById("terms");
+  box.hidden = !list.length;
+  if (!list.length) return;
+  document.getElementById("terms-h").textContent = "Live terminals · " + list.length;
+  document.getElementById("terms-list").innerHTML = list.map((t) => `
+    <a href="t/${t.pid}">
+      <span class="pid">${t.pid}</span>
+      <span class="cmd">${esc(t.command || "agent")}</span>
+      <span class="at">${esc(t.cwd || "")}</span>
+    </a>`).join("");
+}
+
 let failures = 0;
 async function tick() {
   try {
@@ -293,6 +312,10 @@ async function tick() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     canSend = r.headers.get("X-Cctop-Input") === "on";
     render(await r.json());
+    // Separate request, separate list: these come from the shim sockets, not
+    // from the sessions above, and one being empty says nothing about the other.
+    const t = await fetch("terminals.json", { cache: "no-store" });
+    if (t.ok) renderTerminals(await t.json());
     failures = 0;
     document.getElementById("err").textContent = "";
     document.getElementById("meta").textContent = "updated " + new Date().toLocaleTimeString();

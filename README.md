@@ -673,9 +673,17 @@ cctop --serve --port 8080 --token my-secret   # pick both
 
 ### The live terminal
 
-A session started with `cctop run` has its pty owned by cctop, so the dashboard
-can show you the agent's actual screen. Those rows carry a **terminal** link;
-the rest do not, because there is nothing to bridge to.
+An agent started with `cctop run` — which is what `cctop claude` and the shell
+aliases do — has its pty held by a shim, and the dashboard lists those under
+**Live terminals** with the agent's actual screen a click away. It is the same
+set `cctop attach` prints, and for the same reason: the socket is what makes an
+agent showable.
+
+That list is deliberately not a column on the session table. The two describe
+different things. A session row knows about its own process; the socket belongs
+to whatever the shim is holding, which for anything handed to tmux is the tmux
+client several reparentings away from the agent. Matching one to the other
+means guessing, and a guess here is a link to a pid with nothing behind it.
 
 It is the same socket `a` and `cctop attach` use. The bytes the pty produces go
 to the browser untouched and into [xterm.js](https://xtermjs.org) — which is

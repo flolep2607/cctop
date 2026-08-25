@@ -99,7 +99,13 @@ struct Snapshot {
     json: String,
     /// Session id → the live agent root, for `POST /send`. A session absent
     /// here is not running.
+    ///
+    /// Not the same pid as a terminal's: this one is the agent, because
+    /// [`crate::inject::send_line`] reaches it through tmux when it has to.
+    /// A terminal needs the shim's socket, which is a different process.
     pids: HashMap<String, u32>,
+    /// The agents a shim can show, already serialised. See [`terminals_json`].
+    terminals: String,
 }
 
 /// Serve the dashboard until killed, optionally behind a trycloudflare URL.
@@ -176,6 +182,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 fn spawn_refresh(plan: crate::pricing::Plan, period: Duration) -> Arc<Mutex<Snapshot>> {
     let snapshot = Arc::new(Mutex::new(Snapshot {
         json: "[]".into(),
+        terminals: "[]".into(),
         ..Snapshot::default()
     }));
     let out = Arc::clone(&snapshot);
@@ -191,13 +198,11 @@ fn spawn_refresh(plan: crate::pricing::Plan, period: Duration) -> Arc<Mutex<Snap
             recent.sort_by(|a, b| b.last_active.cmp(&a.last_active));
             recent.truncate(LIMIT);
             if let Ok(json) = crate::cli::sessions_json(&recent, plan, &loader, false) {
-                let pids = live_pids(&recent);
-                // The page links to `/t/<pid>`, so it needs the pid the same
-                // map holds. Merged in here rather than added to the shared
-                // `--json` shape, which describes sessions and not the routes
-                // this one server happens to expose.
-                let json = with_pids(json, &pids);
-                *snapshot.lock().unwrap() = Snapshot { json, pids };
+                *snapshot.lock().unwrap() = Snapshot {
+                    json,
+                    pids: live_pids(&recent),
+                    terminals: terminals_json(),
+                };
             }
             loader.store().save();
             std::thread::sleep(period);
@@ -213,25 +218,24 @@ fn spawn_refresh(plan: crate::pricing::Plan, period: Duration) -> Arc<Mutex<Snap
     out
 }
 
-/// Add `"pid"` to each session the dashboard can offer a terminal for.
+/// The agents a shim can hand over, as the terminal list the page draws.
 ///
-/// A string edit would be cheaper than a reparse, and wrong: the payload is
-/// already `serde_json`'s output and re-serialising it is the only way to stay
-/// certain it is still JSON afterwards. It runs once per refresh, not per
-/// request.
-fn with_pids(json: String, pids: &HashMap<String, u32>) -> String {
-    let Ok(Value::Array(mut rows)) = serde_json::from_str::<Value>(&json) else {
-        return json;
-    };
-    for row in &mut rows {
-        let Some(id) = row.get("session_id").and_then(Value::as_str) else {
-            continue;
-        };
-        if let (Some(pid), Some(obj)) = (pids.get(id).copied(), row.as_object_mut()) {
-            obj.insert("pid".into(), json!(pid));
-        }
-    }
-    serde_json::to_string(&Value::Array(rows)).unwrap_or(json)
+/// Deliberately *not* derived from the session rows. A session knows about its
+/// own process; the socket belongs to whatever the shim is holding, which for
+/// anything started as `cctop claude` is the tmux client rather than the agent.
+/// Matching one to the other means guessing, and guessing here produced a link
+/// to a pid with no socket behind it — so the list is the sockets themselves,
+/// exactly what `cctop attach` prints.
+fn terminals_json() -> String {
+    #[cfg(unix)]
+    let rows: Vec<Value> = crate::attach::attachable()
+        .into_iter()
+        .map(|a| json!({ "pid": a.pid, "command": a.command, "cwd": a.cwd }))
+        .collect();
+    // No ptys, so no shim ever held one and the list is empty by construction.
+    #[cfg(not(unix))]
+    let rows: Vec<Value> = Vec::new();
+    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
 }
 
 /// Session id to the process a typed line would reach.
@@ -317,6 +321,11 @@ fn handle(
                 false => json_response(&mut stream, "200 OK", body.as_bytes(), extra),
             }
         }
+        ("GET", "terminals.json") => {
+            let body = snapshot.lock().unwrap().terminals.clone();
+            json_response(&mut stream, "200 OK", body.as_bytes(), "")
+        }
+
         // Version-pinned by the binary they came out of, so they never need
         // revalidating — unlike the page, which is `no-store`.
         ("GET", "xterm.js") => cached(&mut stream, "text/javascript", XTERM_JS, head.gzip),
@@ -944,6 +953,7 @@ mod tests {
         let snapshot = Arc::new(Mutex::new(Snapshot {
             json: r#"[{"provider":"claude"}]"#.into(),
             pids: HashMap::new(),
+            terminals: "[]".into(),
         }));
 
         std::thread::spawn(move || {
@@ -992,6 +1002,7 @@ mod tests {
         let snapshot = Mutex::new(Snapshot {
             json: "[]".into(),
             pids: HashMap::new(),
+            terminals: "[]".into(),
         });
         let post = |body: &str| send_line(body.as_bytes(), &snapshot);
 
