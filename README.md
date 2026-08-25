@@ -691,6 +691,14 @@ vendored under `src/vendor/`, MIT — so nothing in cctop parses ANSI on the way
 through, and what you see is what the terminal would draw. Keystrokes come back
 the same way.
 
+Keystrokes travel by `POST`, not back up the WebSocket the screen arrives on.
+That looks backwards and is deliberate: a trycloudflare tunnel delivers the
+upgrade and streams output perfectly, but drops everything sent the other way
+afterwards, and a phone on a tunnel is the case this exists for. One transport
+that works everywhere beats two where the better one fails exactly where it is
+needed. Whatever you type while a request is in flight rides along with the next
+one, so a paste is a single POST and keys cannot arrive out of order.
+
 Reading needs nothing; typing needs `--allow-input`, and so does resizing —
 the pty takes the size of the smallest window watching it, so a read-only
 viewer that resized would reach through the page and reshape someone else's

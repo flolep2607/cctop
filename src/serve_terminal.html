@@ -55,11 +55,18 @@
     border-radius: 5px; cursor: pointer;
   }
   #bar button:active { background: var(--accent); color: var(--bg); }
+  #mode {
+    font-size: .72rem; padding: .1rem .4rem; border-radius: 4px; border: 1px solid var(--line);
+    color: var(--dim);
+  }
+  #mode.ro { color: var(--warn); border-color: var(--warn); }
+  #mode.rw { color: var(--live); border-color: var(--live); }
   #ro {
-    display: none; padding: .45rem .8rem; border-top: 1px solid var(--line);
-    color: var(--dim); font-size: .78rem; flex: none;
+    display: none; padding: .5rem .8rem; border-top: 1px solid var(--warn);
+    color: var(--fg); font-size: .8rem; flex: none; background: #221d14;
   }
   #ro.on { display: block; }
+  #ro code { color: var(--warn); }
   #probe {
     position: absolute; visibility: hidden; white-space: pre; top: -9999px; left: -9999px;
   }
@@ -69,11 +76,12 @@
 <header>
   <a class="back" href="../">&larr; sessions</a>
   <span id="state">connecting…</span>
+  <span id="mode"></span>
   <span id="size"></span>
 </header>
 <div id="term"></div>
 <div id="bar"></div>
-<div id="ro">Read-only — cctop was started without <code>--allow-input</code>.</div>
+<div id="ro"></div>
 <span id="probe">WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW</span>
 
 <script src="../xterm.js"></script>
@@ -164,11 +172,45 @@ function connect() {
 }
 connect();
 
-const send = (data) => {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(new TextEncoder().encode(data));
+// Keystrokes go over HTTP, not back up the WebSocket the screen arrives on.
+// A trycloudflare tunnel delivers the 101 and streams output perfectly, but
+// drops everything sent the other way after the upgrade — and a phone on a
+// tunnel is the reason this page exists. One path that works everywhere beats
+// two where the better one fails exactly where it is needed.
+//
+// Nothing is timed or debounced: whatever piles up while a request is in flight
+// goes as the next one's body. Typing coalesces on its own, a paste lands in a
+// single POST, and keys can never arrive out of order because only one request
+// is ever open.
+let outbox = "";
+let inflight = false;
+
+function send(data) {
+  outbox += data;
+  flush();
+}
+
+async function flush() {
+  if (inflight || !outbox) return;
+  inflight = true;
+  const chunk = outbox;
+  outbox = "";
+  try {
+    const r = await fetch("../keys/" + PID, {
+      method: "POST",
+      body: new TextEncoder().encode(chunk),
+    });
+    if (!r.ok) {
+      state.textContent = "the agent is not accepting input";
+      state.className = "gone";
+    }
+  } catch (e) {
+    // Put it back: a dropped connection should not silently eat what was typed.
+    outbox = chunk + outbox;
   }
-};
+  inflight = false;
+  if (outbox) flush();
+}
 
 // A phone keyboard has no escape, no ctrl and no arrows, and an agent's TUI
 // wants all three. These send the bytes a real terminal would.
@@ -180,13 +222,32 @@ const KEYS = [
 // Whether typing is allowed is the server's call, and it says so on the header
 // the dashboard's own endpoint already carries — rather than this page guessing
 // and silently dropping what it sends.
+const mode = document.getElementById("mode");
+const ro = document.getElementById("ro");
+
+// Typing that silently goes nowhere is the worst of the three outcomes, so the
+// page says which one it is up in the header rather than leaving you to guess
+// from a terminal that will not respond.
+function readOnly(why, fix) {
+  mode.textContent = "read-only";
+  mode.className = "ro";
+  ro.className = "on";
+  ro.innerHTML = why + (fix ? " " + fix : "");
+  term.options.cursorBlink = false;
+  term.options.disableStdin = true;
+}
+
 fetch("../sessions.json", { cache: "no-store" })
   .then((r) => {
     if (r.headers.get("X-Cctop-Input") !== "on") {
-      document.getElementById("ro").className = "on";
-      term.options.cursorBlink = false;
+      readOnly(
+        "This terminal is <b>read-only</b> — keys you press will not reach the agent.",
+        "Restart cctop with <code>--allow-input</code> to type from here.",
+      );
       return;
     }
+    mode.textContent = "input on";
+    mode.className = "rw";
     term.onData(send);
 
     const bar = document.getElementById("bar");
@@ -202,16 +263,28 @@ fetch("../sessions.json", { cache: "no-store" })
     // is a button rather than something that happens because a phone rotated.
     const fitBtn = document.createElement("button");
     fitBtn.textContent = "fit to me";
-    fitBtn.onclick = () => {
-      const want = ideal();
-      socket.send(JSON.stringify(want));
-    };
+    fitBtn.onclick = () =>
+      fetch("../size/" + PID, {
+        method: "POST",
+        body: JSON.stringify(ideal()),
+      }).catch(() => {});
     sizeLabel.textContent = "";
     sizeLabel.appendChild(document.createTextNode(""));
     sizeLabel.appendChild(fitBtn);
     fit();
   })
-  .catch(() => {});
+  .catch((e) =>
+    readOnly(
+      "Could not ask cctop whether typing is allowed (" + esc(e.message || e) + "),",
+      "so this terminal is staying read-only rather than dropping your keys quietly.",
+    ),
+  );
+
+// The header is the one thing on this page that is not the agent's own output,
+// so it is also the only place a message about the page itself belongs.
+function esc(t) {
+  return String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
 
 addEventListener("resize", fit);
 term.focus();

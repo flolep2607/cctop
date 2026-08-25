@@ -342,10 +342,27 @@ fn handle(
         ("GET", p) if p.starts_with("ws/") => {
             let pid = p.trim_start_matches("ws/").parse::<u32>().ok();
             match (pid, head.ws_key.as_deref()) {
-                (Some(pid), Some(key)) => terminal(stream, reader, pid, key, allow_input),
+                (Some(pid), Some(key)) => terminal(stream, reader, pid, key),
                 // Not a websocket request, or not a pid. Either way there is
                 // nothing here for an ordinary GET.
                 _ => not_found(&mut stream),
+            }
+        }
+
+        // Keystrokes and resizes for a live terminal. Over HTTP rather than
+        // back up the WebSocket the screen arrives on — see `keys` for why.
+        ("POST", p) if allow_input && p.starts_with("keys/") => {
+            let body = read_body(&mut reader, head.length)?;
+            match p.trim_start_matches("keys/").parse::<u32>() {
+                Ok(pid) => typed(&mut stream, pid, &body),
+                Err(_) => not_found(&mut stream),
+            }
+        }
+        ("POST", p) if allow_input && p.starts_with("size/") => {
+            let body = read_body(&mut reader, head.length)?;
+            match p.trim_start_matches("size/").parse::<u32>() {
+                Ok(pid) => resized(&mut stream, pid, &body),
+                Err(_) => not_found(&mut stream),
             }
         }
 
@@ -621,6 +638,102 @@ fn random_token() -> String {
     token
 }
 
+/// Shim connections kept open for typing, one per agent.
+///
+/// Opening one costs a full screen replay the shim sends to every new watcher,
+/// which is a few hundred kilobytes to throw away — per keystroke, if this were
+/// opened per request. So the first key for an agent pays it and the rest ride
+/// along.
+#[cfg(unix)]
+static TYPING: std::sync::LazyLock<Mutex<HashMap<u32, std::os::unix::net::UnixStream>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Send an already-encoded shim frame to `pid`, reconnecting once if the socket
+/// we kept has since died.
+///
+/// A shim that exited leaves its socket refusing connections rather than
+/// vanishing, so a stale entry fails on write and the retry is what tells a
+/// restarted agent apart from a gone one.
+#[cfg(unix)]
+fn to_shim(pid: u32, framed: &[u8]) -> bool {
+    let mut open = lock(&TYPING);
+    for attempt in 0..2 {
+        if attempt == 1 || !open.contains_key(&pid) {
+            open.remove(&pid);
+            match crate::attach::connect(pid) {
+                Some(sock) => {
+                    open.insert(pid, sock);
+                }
+                None => return false,
+            }
+        }
+        if let Some(sock) = open.get_mut(&pid)
+            && sock.write_all(framed).and_then(|()| sock.flush()).is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Type raw bytes into a live terminal.
+///
+/// **Why this is not the WebSocket the screen comes back on.** It should be,
+/// and on localhost it works. Through a trycloudflare quick tunnel it does not:
+/// the edge delivers the 101 and streams the agent's output back perfectly, but
+/// bytes sent the other way after the upgrade never reach the origin. Verified
+/// by pinging through the tunnel — no pong, and the connection stays open, so
+/// nothing was rejected here; it simply never arrived.
+///
+/// A phone on a tunnel is the whole reason the terminal exists, so input takes
+/// the path that demonstrably works everywhere. POSTs cost a round trip that a
+/// frame would not, which is invisible next to how fast anyone types, and the
+/// page coalesces whatever piles up while one is in flight.
+///
+/// ponytail: one input path, not two, even though the WebSocket would be better
+/// where it works. If the tunnel crate learns to pump edge → origin after an
+/// upgrade, this route and its socket map are what to delete.
+#[cfg(unix)]
+fn typed(stream: &mut TcpStream, pid: u32, body: &[u8]) -> std::io::Result<()> {
+    use crate::attach::frame;
+    if body.is_empty() {
+        return json_response(stream, "400 Bad Request", br#"{"ok":false}"#, "");
+    }
+    match to_shim(pid, &frame::encode(frame::KEYS, body)) {
+        true => json_response(stream, "200 OK", br#"{"ok":true}"#, ""),
+        false => json_response(stream, "404 Not Found", br#"{"ok":false}"#, ""),
+    }
+}
+
+/// Ask the agent to take a size. Same transport and the same reason as [`typed`].
+#[cfg(unix)]
+fn resized(stream: &mut TcpStream, pid: u32, body: &[u8]) -> std::io::Result<()> {
+    use crate::attach::frame;
+    let size = serde_json::from_slice::<Value>(body).ok().and_then(|v| {
+        let cols = v.get("cols").and_then(Value::as_u64)?;
+        let rows = v.get("rows").and_then(Value::as_u64)?;
+        // A pty's size is two u16s, and the shim rejects a zero either way.
+        (cols > 0 && rows > 0).then(|| (cols.min(1000) as u16, rows.min(1000) as u16))
+    });
+    let Some((cols, rows)) = size else {
+        return json_response(stream, "400 Bad Request", br#"{"ok":false}"#, "");
+    };
+    match to_shim(pid, &frame::size(frame::RESIZE, cols, rows)) {
+        true => json_response(stream, "200 OK", br#"{"ok":true}"#, ""),
+        false => json_response(stream, "404 Not Found", br#"{"ok":false}"#, ""),
+    }
+}
+
+#[cfg(not(unix))]
+fn typed(stream: &mut TcpStream, _pid: u32, _body: &[u8]) -> std::io::Result<()> {
+    not_found(stream)
+}
+
+#[cfg(not(unix))]
+fn resized(stream: &mut TcpStream, _pid: u32, _body: &[u8]) -> std::io::Result<()> {
+    not_found(stream)
+}
+
 /// Bridge a browser's WebSocket to the shim that owns `pid`'s pty.
 ///
 /// The wire is deliberately thin, because both ends already speak the same
@@ -634,18 +747,16 @@ fn random_token() -> String {
 /// reads the shim. They share the socket behind a mutex rather than splitting
 /// it, because a pong written mid-repaint must not land inside another frame.
 ///
-/// Reading is always allowed; typing needs `--allow-input`. Resizing counts as
-/// typing: the pty takes the size of the smallest window watching it, so a
-/// read-only viewer that resized would reach through the page and reshape
-/// somebody's terminal. Without the flag the browser only ever follows the
-/// size the agent reports.
+/// Watching needs nothing; typing needs `--allow-input` and goes to [`typed`].
+/// Resizing counts as typing: the pty takes the size of the smallest window
+/// watching it, so a read-only viewer that resized would reach through the page
+/// and reshape somebody's terminal.
 #[cfg(unix)]
 fn terminal(
     stream: TcpStream,
     mut reader: BufReader<TcpStream>,
     pid: u32,
     key: &str,
-    allow_input: bool,
 ) -> std::io::Result<()> {
     use crate::attach::frame;
     use std::io::Read;
@@ -704,32 +815,21 @@ fn terminal(
         let _ = ws::write(&mut *lock(&feeder), ws::CLOSE, &[]);
     });
 
-    let mut to_shim = sock;
+    // This socket carries the screen outwards and nothing inwards: keystrokes
+    // arrive as POSTs, for the reason [`typed`] sets out. What is left to read
+    // is the protocol's own housekeeping, and a client that stops answering is
+    // how we learn the browser is gone.
     while let Some((opcode, payload)) = ws::read(&mut reader)? {
         match opcode {
-            ws::BINARY | ws::TEXT if !allow_input => {}
-            ws::BINARY => to_shim.write_all(&frame::encode(frame::KEYS, &payload))?,
-            ws::TEXT => {
-                if let Ok(v) = serde_json::from_slice::<Value>(&payload)
-                    && let (Some(cols), Some(rows)) = (
-                        v.get("cols").and_then(Value::as_u64),
-                        v.get("rows").and_then(Value::as_u64),
-                    )
-                    && cols > 0
-                    && rows > 0
-                {
-                    let size =
-                        frame::size(frame::RESIZE, cols.min(1000) as u16, rows.min(1000) as u16);
-                    to_shim.write_all(&size)?;
-                }
-            }
             ws::PING => ws::write(&mut *lock(&out), ws::PONG, &payload)?,
             ws::CLOSE => break,
+            // Data frames are not an error, just unused — a client written
+            // against the obvious design should not be disconnected for it.
             _ => {}
         }
     }
     // Dropping our end wakes the feeder thread out of its read.
-    let _ = to_shim.shutdown(std::net::Shutdown::Both);
+    let _ = sock.shutdown(std::net::Shutdown::Both);
     Ok(())
 }
 
@@ -739,7 +839,6 @@ fn terminal(
     _reader: BufReader<TcpStream>,
     _pid: u32,
     _key: &str,
-    _allow_input: bool,
 ) -> std::io::Result<()> {
     // No ptys and no unix sockets, so no agent was ever started under a shim
     // here and there is nothing on the other side of this route.
