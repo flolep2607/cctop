@@ -427,6 +427,71 @@ pub fn b64_encode(data: &[u8]) -> String {
     out
 }
 
+/// SHA-1 of `data`.
+///
+/// Here for exactly one reason: a WebSocket handshake answers the client's
+/// `Sec-WebSocket-Key` with `base64(sha1(key + GUID))`, and a browser will not
+/// open the socket without it. RFC 6455 fixed the algorithm in 2011 and it
+/// cannot be substituted — this is not a security claim about SHA-1, it is the
+/// protocol's checksum, and the value is public in both directions.
+///
+/// Hand-rolled rather than a dependency, the same bargain [`b64_encode`] takes
+/// two functions up: the algorithm is forty lines and frozen, and the crate
+/// that would replace it is a crate to carry, audit and bump forever.
+pub fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+
+    // The padded message: the data, a 1 bit, zeroes, then the bit length.
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
+
+    for block in msg.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for (i, word) in block.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes(word.try_into().expect("chunks_exact(4)"));
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (i, &word) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5A827999),
+                20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
+                _ => (b ^ c ^ d, 0xCA62C1D6),
+            };
+            // Wrapping throughout: SHA-1 is defined modulo 2^32, and a debug
+            // build would otherwise panic on the first block that overflows.
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        for (slot, value) in h.iter_mut().zip([a, b, c, d, e]) {
+            *slot = slot.wrapping_add(value);
+        }
+    }
+
+    let mut out = [0u8; 20];
+    for (chunk, word) in out.chunks_exact_mut(4).zip(h) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
 /// Decode base64, accepting both the standard and URL-safe alphabets and
 /// tolerating missing padding (JWT payloads omit it).
 pub fn b64_decode(input: &str) -> Option<Vec<u8>> {
@@ -508,6 +573,34 @@ pub fn scan_tail_escalating<T>(path: &Path, mut scan: impl FnMut(&str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two vectors FIPS 180-1 publishes, plus the worked example from RFC
+    /// 6455 §1.3 — which is the one that matters, because it is the exact
+    /// handshake a browser will check.
+    #[test]
+    fn sha1_matches_the_published_vectors() {
+        let hex = |b: [u8; 20]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+        assert_eq!(
+            hex(sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            hex(sha1(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
+        // Empty input exercises the padding path with no data block at all.
+        assert_eq!(hex(sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+
+        // RFC 6455: key "dGhlIHNhbXBsZSBub25jZQ==" + the GUID must produce
+        // "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".
+        let accept = b64_encode(&sha1(
+            b"dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
+        ));
+        assert_eq!(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
 
     #[test]
     fn compact_formats() {

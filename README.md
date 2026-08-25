@@ -116,6 +116,7 @@ cctop --update        # replace this binary with the newest release
 cctop --serve         # read-only web dashboard on 127.0.0.1:7654
 cctop --serve --tunnel   # …and put it on a public trycloudflare URL
 cctop --serve --allow-input  # …and let it type into running sessions
+                      # (rows started with `cctop run` get a live terminal)
 cctop run claude      # start an agent on a pty cctop can type into (see Keys)
 cctop claude --help   # the same, without the `run`; flags go to the agent
 cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias adds them)
@@ -669,6 +670,28 @@ sees what you see.
 ```bash
 cctop --serve --port 8080 --token my-secret   # pick both
 ```
+
+### The live terminal
+
+A session started with `cctop run` has its pty owned by cctop, so the dashboard
+can show you the agent's actual screen. Those rows carry a **terminal** link;
+the rest do not, because there is nothing to bridge to.
+
+It is the same socket `a` and `cctop attach` use. The bytes the pty produces go
+to the browser untouched and into [xterm.js](https://xtermjs.org) — which is
+vendored under `src/vendor/`, MIT — so nothing in cctop parses ANSI on the way
+through, and what you see is what the terminal would draw. Keystrokes come back
+the same way.
+
+Reading needs nothing; typing needs `--allow-input`, and so does resizing —
+the pty takes the size of the smallest window watching it, so a read-only
+viewer that resized would reach through the page and reshape someone else's
+terminal. Without the flag the browser scales its font to whatever the agent
+reports; with it, a **fit to me** button asks the agent to match this screen. A
+row of esc / tab / ^C / arrows sits under the terminal, because a phone keyboard
+has none of them and an agent's TUI wants all of them.
+
+Unix only: there are no ptys behind it on Windows.
 
 ### Typing from the dashboard
 

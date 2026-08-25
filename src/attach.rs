@@ -416,8 +416,12 @@ pub fn attach(pid: u32) -> Option<Attach> {
 }
 
 /// Open an attach connection to the shim owning `pid`.
+///
+/// `pub(crate)` for [`serve`](crate::serve), which bridges this socket to a
+/// browser rather than to a pane: it wants the frames raw, not an [`Attach`]
+/// with a vt100 parser behind it, because xterm.js is the parser at the far end.
 #[cfg(unix)]
-fn connect(pid: u32) -> Option<std::os::unix::net::UnixStream> {
+pub(crate) fn connect(pid: u32) -> Option<std::os::unix::net::UnixStream> {
     let path = crate::shim::socket_path(pid)?;
     let mut stream = std::os::unix::net::UnixStream::connect(path).ok()?;
     stream.write_all(crate::shim::ATTACH_MAGIC).ok()?;

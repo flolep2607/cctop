@@ -20,6 +20,11 @@
 //! start without one, because the alternative is publishing every project path,
 //! title and account email on this machine to whoever guesses the hostname.
 //!
+//! **A session cctop owns can be watched, not just counted.** `/t/<pid>` is
+//! xterm.js over a WebSocket bridged to the shim socket [`attach`] already
+//! speaks, so the browser sees the agent's real screen. Only sessions started
+//! with `cctop run` have that socket, which is why only some rows offer it.
+//!
 //! **It is read-only unless you say otherwise.** Plain `--serve` has no route
 //! that starts, stops, or types at anything — the line [`mcp`](crate::mcp)
 //! draws, for the same reason. `--allow-input` adds exactly one that does, and
@@ -29,7 +34,7 @@
 
 use crate::cli::Args;
 use crate::loader::Loader;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -39,6 +44,22 @@ use std::time::{Duration, Instant};
 /// The dashboard, inlined into the binary — a tunnel URL that needed a second
 /// request for a stylesheet would be a second thing to get wrong.
 const PAGE: &str = include_str!("serve.html");
+
+/// The live-terminal page. Separate from [`PAGE`] because it is a different
+/// screen with a different job, and because it is the only one that pays for
+/// xterm.js.
+const TERMINAL_PAGE: &str = include_str!("serve_terminal.html");
+
+/// xterm.js, vendored under `src/vendor/` — MIT, see `xterm.LICENSE` beside it.
+///
+/// Not inlined into the page the way the dashboard's CSS is: half a megabyte
+/// would be re-sent on every navigation, where a route of its own is fetched
+/// once and cached. It is the terminal emulator itself — the bytes cctop
+/// forwards from the pty are raw ANSI, and something has to turn them into a
+/// screen. Doing that server-side would mean shipping a rendered grid on every
+/// repaint; ANSI is already the compact form of exactly that.
+const XTERM_JS: &str = include_str!("vendor/xterm.js");
+const XTERM_CSS: &str = include_str!("vendor/xterm.css");
 
 /// How long between full walks of every provider's session directory.
 ///
@@ -171,6 +192,11 @@ fn spawn_refresh(plan: crate::pricing::Plan, period: Duration) -> Arc<Mutex<Snap
             recent.truncate(LIMIT);
             if let Ok(json) = crate::cli::sessions_json(&recent, plan, &loader, false) {
                 let pids = live_pids(&recent);
+                // The page links to `/t/<pid>`, so it needs the pid the same
+                // map holds. Merged in here rather than added to the shared
+                // `--json` shape, which describes sessions and not the routes
+                // this one server happens to expose.
+                let json = with_pids(json, &pids);
                 *snapshot.lock().unwrap() = Snapshot { json, pids };
             }
             loader.store().save();
@@ -185,6 +211,27 @@ fn spawn_refresh(plan: crate::pricing::Plan, period: Duration) -> Arc<Mutex<Snap
         }
     });
     out
+}
+
+/// Add `"pid"` to each session the dashboard can offer a terminal for.
+///
+/// A string edit would be cheaper than a reparse, and wrong: the payload is
+/// already `serde_json`'s output and re-serialising it is the only way to stay
+/// certain it is still JSON afterwards. It runs once per refresh, not per
+/// request.
+fn with_pids(json: String, pids: &HashMap<String, u32>) -> String {
+    let Ok(Value::Array(mut rows)) = serde_json::from_str::<Value>(&json) else {
+        return json;
+    };
+    for row in &mut rows {
+        let Some(id) = row.get("session_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let (Some(pid), Some(obj)) = (pids.get(id).copied(), row.as_object_mut()) {
+            obj.insert("pid".into(), json!(pid));
+        }
+    }
+    serde_json::to_string(&Value::Array(rows)).unwrap_or(json)
 }
 
 /// Session id to the process a typed line would reach.
@@ -270,6 +317,29 @@ fn handle(
                 false => json_response(&mut stream, "200 OK", body.as_bytes(), extra),
             }
         }
+        // Version-pinned by the binary they came out of, so they never need
+        // revalidating — unlike the page, which is `no-store`.
+        ("GET", "xterm.js") => cached(&mut stream, "text/javascript", XTERM_JS, head.gzip),
+        ("GET", "xterm.css") => cached(&mut stream, "text/css", XTERM_CSS, head.gzip),
+
+        // `/t/<pid>` is the page; `/ws/<pid>` is what it opens. Splitting them
+        // keeps the upgrade off any path a browser might navigate to.
+        ("GET", p) if p.starts_with("t/") => respond(
+            &mut stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            TERMINAL_PAGE.as_bytes(),
+        ),
+        ("GET", p) if p.starts_with("ws/") => {
+            let pid = p.trim_start_matches("ws/").parse::<u32>().ok();
+            match (pid, head.ws_key.as_deref()) {
+                (Some(pid), Some(key)) => terminal(stream, reader, pid, key, allow_input),
+                // Not a websocket request, or not a pid. Either way there is
+                // nothing here for an ordinary GET.
+                _ => not_found(&mut stream),
+            }
+        }
+
         // Absent, not forbidden, when the flag is off: a dashboard that answers
         // 403 here advertises that some other cctop somewhere would have typed.
         ("POST", "send") if allow_input => {
@@ -358,6 +428,11 @@ struct Head {
     path: String,
     gzip: bool,
     length: usize,
+    /// `Sec-WebSocket-Key`, present only on an upgrade request. Read solely by
+    /// the terminal bridge, which is unix-only — there is no shim to bridge to
+    /// anywhere else, so on Windows this is collected and never looked at.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    ws_key: Option<String>,
 }
 
 /// Read the request line and headers.
@@ -385,6 +460,7 @@ fn read_head(reader: &mut impl BufRead) -> std::io::Result<Option<Head>> {
     // nobody reads stalls it.
     let mut gzip = false;
     let mut length = 0usize;
+    let mut ws_key = None;
     loop {
         let mut header = String::new();
         let n = reader.read_line(&mut header)?;
@@ -399,6 +475,8 @@ fn read_head(reader: &mut impl BufRead) -> std::io::Result<Option<Head>> {
         if let Some((name, value)) = header.split_once(':') {
             if name.eq_ignore_ascii_case("accept-encoding") {
                 gzip = value.to_ascii_lowercase().contains("gzip");
+            } else if name.eq_ignore_ascii_case("sec-websocket-key") {
+                ws_key = Some(value.trim().to_string());
             } else if name.eq_ignore_ascii_case("content-length") {
                 // An unparsable length reads as no body, which `read_body` then
                 // turns into an empty one and the router rejects. Nothing here
@@ -412,6 +490,7 @@ fn read_head(reader: &mut impl BufRead) -> std::io::Result<Option<Head>> {
         path,
         gzip,
         length,
+        ws_key,
     }))
 }
 
@@ -467,6 +546,34 @@ fn compressed(stream: &mut TcpStream, body: &[u8], extra: &str) -> std::io::Resu
     stream.flush()
 }
 
+/// A vendored asset: immutable, because it changes only when the binary does.
+fn cached(stream: &mut TcpStream, ctype: &str, body: &str, gzip: bool) -> std::io::Result<()> {
+    let extra = "Cache-Control: public, max-age=31536000, immutable\r\n";
+    if !gzip {
+        return write_response(stream, "200 OK", ctype, body.as_bytes(), extra);
+    }
+    use flate2::{Compression, write::GzEncoder};
+    // `best`, not `fast`, unlike the poll payload: this is compressed once per
+    // process and then cached by the browser for a year, so the CPU is spent
+    // once and the saving is paid back on every cold load.
+    let mut enc = GzEncoder::new(Vec::new(), Compression::best());
+    let packed = enc.write_all(body.as_bytes()).and_then(|()| enc.finish());
+    let Ok(packed) = packed else {
+        return write_response(stream, "200 OK", ctype, body.as_bytes(), extra);
+    };
+    // 488KB of xterm.js becomes about 120KB, which is the difference between a
+    // terminal that opens on a phone and one that appears to hang.
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Encoding: gzip\r\n\
+         Content-Length: {}\r\n{extra}X-Content-Type-Options: nosniff\r\n\
+         Connection: close\r\n\r\n",
+        packed.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(&packed)?;
+    stream.flush()
+}
+
 fn not_found(stream: &mut TcpStream) -> std::io::Result<()> {
     respond(stream, "404 Not Found", "text/plain", b"not found")
 }
@@ -503,6 +610,249 @@ fn random_token() -> String {
         token.push_str(&format!("{:016x}", h.finish()));
     }
     token
+}
+
+/// Bridge a browser's WebSocket to the shim that owns `pid`'s pty.
+///
+/// The wire is deliberately thin, because both ends already speak the same
+/// thing. The shim sends `OUTPUT` frames of raw pty bytes and xterm.js consumes
+/// raw pty bytes, so a binary WebSocket message is that payload verbatim —
+/// nothing parses the ANSI on the way through. Keystrokes come back the same
+/// way and become `KEYS` frames. Only the size is text, as JSON, because it is
+/// the one thing the two sides describe differently.
+///
+/// Two directions need two threads. This one reads the browser; a spawned one
+/// reads the shim. They share the socket behind a mutex rather than splitting
+/// it, because a pong written mid-repaint must not land inside another frame.
+///
+/// Reading is always allowed; typing needs `--allow-input`. Resizing counts as
+/// typing: the pty takes the size of the smallest window watching it, so a
+/// read-only viewer that resized would reach through the page and reshape
+/// somebody's terminal. Without the flag the browser only ever follows the
+/// size the agent reports.
+#[cfg(unix)]
+fn terminal(
+    stream: TcpStream,
+    mut reader: BufReader<TcpStream>,
+    pid: u32,
+    key: &str,
+    allow_input: bool,
+) -> std::io::Result<()> {
+    use crate::attach::frame;
+    use std::io::Read;
+
+    let mut stream = stream;
+    // `connect` is the authoritative test that this pid is an agent cctop owns:
+    // there is a socket for it or there is not, and a pid that is anything else
+    // on this machine has none.
+    let Some(sock) = crate::attach::connect(pid) else {
+        return not_found(&mut stream);
+    };
+
+    // A terminal is idle for minutes at a time and must not be reaped for it.
+    stream.set_read_timeout(None)?;
+    let accept = ws::accept_key(key);
+    stream.write_all(
+        format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        .as_bytes(),
+    )?;
+    stream.flush()?;
+
+    let out = Arc::new(Mutex::new(stream));
+    let feeder = Arc::clone(&out);
+    let mut from_shim = sock.try_clone()?;
+    std::thread::spawn(move || {
+        let mut decoder = frame::Decoder::default();
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = from_shim.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            decoder.push(&buf[..n]);
+            while let Some((kind, payload)) = decoder.next() {
+                let sent = match kind {
+                    frame::OUTPUT => ws::write(&mut *lock(&feeder), ws::BINARY, &payload),
+                    frame::SIZE => match frame::parse_size(&payload) {
+                        Some((cols, rows)) => ws::write(
+                            &mut *lock(&feeder),
+                            ws::TEXT,
+                            json!({ "cols": cols, "rows": rows }).to_string().as_bytes(),
+                        ),
+                        None => Ok(()),
+                    },
+                    _ => Ok(()),
+                };
+                if sent.is_err() {
+                    return;
+                }
+            }
+        }
+        // The agent exited or the shim went away. Say so rather than leaving a
+        // dead terminal that looks merely quiet.
+        let _ = ws::write(&mut *lock(&feeder), ws::CLOSE, &[]);
+    });
+
+    let mut to_shim = sock;
+    while let Some((opcode, payload)) = ws::read(&mut reader)? {
+        match opcode {
+            ws::BINARY | ws::TEXT if !allow_input => {}
+            ws::BINARY => to_shim.write_all(&frame::encode(frame::KEYS, &payload))?,
+            ws::TEXT => {
+                if let Ok(v) = serde_json::from_slice::<Value>(&payload)
+                    && let (Some(cols), Some(rows)) = (
+                        v.get("cols").and_then(Value::as_u64),
+                        v.get("rows").and_then(Value::as_u64),
+                    )
+                    && cols > 0
+                    && rows > 0
+                {
+                    let size =
+                        frame::size(frame::RESIZE, cols.min(1000) as u16, rows.min(1000) as u16);
+                    to_shim.write_all(&size)?;
+                }
+            }
+            ws::PING => ws::write(&mut *lock(&out), ws::PONG, &payload)?,
+            ws::CLOSE => break,
+            _ => {}
+        }
+    }
+    // Dropping our end wakes the feeder thread out of its read.
+    let _ = to_shim.shutdown(std::net::Shutdown::Both);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminal(
+    mut stream: TcpStream,
+    _reader: BufReader<TcpStream>,
+    _pid: u32,
+    _key: &str,
+    _allow_input: bool,
+) -> std::io::Result<()> {
+    // No ptys and no unix sockets, so no agent was ever started under a shim
+    // here and there is nothing on the other side of this route.
+    not_found(&mut stream)
+}
+
+/// A poisoned mutex here means a writer thread panicked mid-frame. The stream
+/// is then desynchronised either way, so taking the lock and letting the next
+/// write fail is the same outcome as unwinding, minus the panic.
+#[cfg(unix)]
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Enough of RFC 6455 to carry a terminal.
+///
+/// Not a WebSocket library: no extensions, no permessage-deflate, no
+/// fragmentation on the way out. What it does implement is what a browser
+/// actually sends — masked client frames, continuation for a paste large enough
+/// to be split, and ping — because those arrive whether or not they are
+/// convenient.
+#[cfg(unix)]
+mod ws {
+    use std::io::{BufRead, Write};
+
+    /// The constant RFC 6455 §1.3 fixes into the handshake. It is not a secret
+    /// and not a key; it exists so a plain HTTP server cannot be talked into
+    /// answering an upgrade by accident.
+    const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+    pub const TEXT: u8 = 1;
+    pub const BINARY: u8 = 2;
+    pub const CLOSE: u8 = 8;
+    pub const PING: u8 = 9;
+    pub const PONG: u8 = 10;
+
+    /// A paste is the only client message that can be large; this is far past
+    /// any of them and short of anything worth allocating for a stranger.
+    const MAX_MESSAGE: usize = 1 << 20;
+
+    /// The `Sec-WebSocket-Accept` answering a client's key.
+    pub fn accept_key(key: &str) -> String {
+        crate::util::b64_encode(&crate::util::sha1(format!("{key}{GUID}").as_bytes()))
+    }
+
+    /// Write one unfragmented, unmasked server frame.
+    pub fn write(out: &mut impl Write, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
+        let mut head = vec![0x80 | opcode];
+        match payload.len() {
+            n if n < 126 => head.push(n as u8),
+            n if n <= u16::MAX as usize => {
+                head.push(126);
+                head.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            n => {
+                head.push(127);
+                head.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
+        out.write_all(&head)?;
+        out.write_all(payload)?;
+        out.flush()
+    }
+
+    /// The next complete message, reassembled across continuation frames.
+    ///
+    /// `None` means the peer hung up. A control frame is returned as it arrives:
+    /// they are never fragmented, and a ping waiting behind a half-sent paste
+    /// would be answered too late to be worth anything.
+    pub fn read(inp: &mut impl BufRead) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+        let mut message: Vec<u8> = Vec::new();
+        let mut kind = 0u8;
+        loop {
+            let mut head = [0u8; 2];
+            if inp.read_exact(&mut head).is_err() {
+                return Ok(None);
+            }
+            let fin = head[0] & 0x80 != 0;
+            let opcode = head[0] & 0x0f;
+            let masked = head[1] & 0x80 != 0;
+
+            let len = match head[1] & 0x7f {
+                126 => {
+                    let mut b = [0u8; 2];
+                    inp.read_exact(&mut b)?;
+                    u16::from_be_bytes(b) as usize
+                }
+                127 => {
+                    let mut b = [0u8; 8];
+                    inp.read_exact(&mut b)?;
+                    u64::from_be_bytes(b) as usize
+                }
+                n => n as usize,
+            };
+            // A client frame must be masked, and an oversized one is either a
+            // desynchronised stream or someone asking for the allocation.
+            if !masked || len > MAX_MESSAGE || message.len() + len > MAX_MESSAGE {
+                return Ok(None);
+            }
+
+            let mut mask = [0u8; 4];
+            inp.read_exact(&mut mask)?;
+            let mut payload = vec![0u8; len];
+            inp.read_exact(&mut payload)?;
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask[i % 4];
+            }
+
+            // Control frames (>= 8) interleave with a fragmented message and
+            // are answered on their own.
+            if opcode >= 8 {
+                return Ok(Some((opcode, payload)));
+            }
+            if opcode != 0 {
+                kind = opcode;
+            }
+            message.extend_from_slice(&payload);
+            if fin {
+                return Ok(Some((kind, message)));
+            }
+        }
+    }
 }
 
 /// Putting the local port on `*.trycloudflare.com`.
@@ -700,6 +1050,81 @@ mod tests {
             !pids.contains_key("stopped"),
             "a stopped session is unaddressable"
         );
+    }
+
+    /// The handshake a browser checks before it will open the socket. The
+    /// vector is RFC 6455's own worked example.
+    #[cfg(unix)]
+    #[test]
+    fn the_handshake_answers_what_rfc_6455_says_it_must() {
+        assert_eq!(
+            ws::accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    /// The three length encodings, at their boundaries — a frame written with
+    /// the wrong one desynchronises the stream rather than failing loudly.
+    #[cfg(unix)]
+    #[test]
+    fn frames_are_written_with_the_length_form_their_size_requires() {
+        let write = |n: usize| {
+            let mut out = Vec::new();
+            ws::write(&mut out, ws::BINARY, &vec![b'x'; n]).unwrap();
+            out
+        };
+
+        assert_eq!(&write(5)[..2], &[0x82, 5]);
+        // 125 is the last length that fits in the seven bits.
+        assert_eq!(&write(125)[..2], &[0x82, 125]);
+        assert_eq!(&write(126)[..4], &[0x82, 126, 0, 126]);
+        assert_eq!(&write(70_000)[..2], &[0x82, 127]);
+        assert_eq!(write(70_000).len(), 2 + 8 + 70_000);
+    }
+
+    /// What a browser actually sends: masked payloads, a message split across
+    /// continuation frames, and a control frame that must not be mistaken for
+    /// either.
+    #[cfg(unix)]
+    #[test]
+    fn a_masked_and_fragmented_message_arrives_whole() {
+        // Build client frames the way a browser would, mask included.
+        let client = |opcode: u8, payload: &[u8], fin: bool| {
+            let mask = [0xA1, 0xB2, 0xC3, 0xD4];
+            let mut out = vec![
+                if fin { 0x80 | opcode } else { opcode },
+                0x80 | payload.len() as u8,
+            ];
+            out.extend_from_slice(&mask);
+            out.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+            out
+        };
+
+        let mut wire = client(ws::TEXT, b"hel", false);
+        wire.extend(client(0, b"lo", true));
+        wire.extend(client(ws::PING, b"hb", true));
+        let mut wire = std::io::Cursor::new(wire);
+
+        assert_eq!(
+            ws::read(&mut wire).unwrap(),
+            Some((ws::TEXT, b"hello".to_vec())),
+            "continuation frames should reassemble into one message"
+        );
+        assert_eq!(
+            ws::read(&mut wire).unwrap(),
+            Some((ws::PING, b"hb".to_vec()))
+        );
+        assert_eq!(ws::read(&mut wire).unwrap(), None, "clean EOF is a hangup");
+    }
+
+    /// An unmasked client frame is a protocol violation, and the only things
+    /// that send one are broken or probing. Either way the answer is to stop.
+    #[cfg(unix)]
+    #[test]
+    fn an_unmasked_client_frame_ends_the_conversation() {
+        let unmasked = vec![0x81, 0x02, b'h', b'i'];
+        let mut wire = std::io::Cursor::new(unmasked);
+        assert_eq!(ws::read(&mut wire).unwrap(), None);
     }
 
     /// A tab is ordinary in a typed line; the check must not sweep it up with

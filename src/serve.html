@@ -82,6 +82,11 @@
   .send button:disabled { opacity: .5; cursor: default; }
   .sent { font-size: .75rem; color: var(--dim); margin-top: .25rem; }
   .sent.bad { color: var(--warn); }
+  .term {
+    font-size: .75rem; text-decoration: none; padding: .1rem .4rem; border-radius: 4px;
+    color: var(--accent); border: 1px solid var(--line); white-space: nowrap;
+  }
+  .term:hover { border-color: var(--accent); }
   .empty { color: var(--dim); padding: 2rem 0; text-align: center; }
   #err { color: var(--warn); font-size: .8rem; }
   @media (max-width: 640px) {
@@ -147,6 +152,13 @@ const label = (s) => {
   return { short: p.split("/").filter(Boolean).slice(-2).join("/") || "—", full: p };
 };
 
+// `pid` is present only for a session cctop owns the pty of — the ones with a
+// shim socket to bridge. Everything else has no terminal to show, which is a
+// fact about how the agent was started, not about this page.
+function termLink(s) {
+  return s.pid ? `<a class="term" href="t/${s.pid}" title="live terminal">terminal</a>` : "";
+}
+
 // Only where there is something to type into: the server refuses a stopped
 // session anyway, and an input that always fails is worse than no input.
 function sendBox(s) {
@@ -170,6 +182,7 @@ function row(s) {
       <div class="name">
         <span class="dot${s.running ? " live" : ""}"></span>
         <span class="title" title="${esc(l.full)}">${esc(s.title || l.short)}</span>
+        ${termLink(s)}
       </div>
       <div class="path" title="${esc(l.full)}">${esc(l.short)}</div>
       ${sendBox(s)}

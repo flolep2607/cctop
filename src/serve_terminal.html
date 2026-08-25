@@ -1,0 +1,220 @@
+<!doctype html>
+<!--
+  The live-terminal page: xterm.js on one side, the agent's real pty on the
+  other, with cctop's shim socket in between.
+
+  Nothing here parses the terminal stream. The bytes arriving on the WebSocket
+  are exactly what the pty produced and they go straight into xterm.js, which is
+  a terminal emulator and does this properly. The only structured message in
+  either direction is the size, as JSON, because that is the one thing the two
+  ends describe differently.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>cctop — terminal</title>
+<link rel="stylesheet" href="../xterm.css">
+<style>
+  :root { color-scheme: dark; --bg: #0f1116; --fg: #d7dae0; --dim: #7c828d; --line: #232733;
+          --accent: #7aa2f7; --live: #9ece6a; --warn: #e0af68; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg); display: flex; flex-direction: column;
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
+    padding: .5rem .8rem; border-bottom: 1px solid var(--line); flex: none;
+  }
+  a.back { color: var(--accent); text-decoration: none; }
+  a.back:hover { text-decoration: underline; }
+  #state { color: var(--dim); font-size: .8rem; }
+  #state.live { color: var(--live); }
+  #state.gone { color: var(--warn); }
+  #size { color: var(--dim); font-size: .8rem; margin-left: auto; }
+  #size button {
+    font: inherit; font-size: .75rem; margin-left: .5rem; padding: .15rem .45rem;
+    color: var(--fg); background: #1a1e27; border: 1px solid var(--line);
+    border-radius: 4px; cursor: pointer;
+  }
+  /* The terminal owns the rest of the window; xterm draws inside it and the
+     page itself never scrolls. */
+  #term { flex: 1; min-height: 0; padding: .4rem; overflow: hidden; }
+  #bar {
+    display: none; gap: .4rem; padding: .45rem .8rem; border-top: 1px solid var(--line);
+    flex: none; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  #bar.on { display: flex; }
+  #bar button {
+    font: inherit; font-size: .78rem; padding: .3rem .55rem; white-space: nowrap;
+    color: var(--fg); background: #1a1e27; border: 1px solid var(--line);
+    border-radius: 5px; cursor: pointer;
+  }
+  #bar button:active { background: var(--accent); color: var(--bg); }
+  #ro {
+    display: none; padding: .45rem .8rem; border-top: 1px solid var(--line);
+    color: var(--dim); font-size: .78rem; flex: none;
+  }
+  #ro.on { display: block; }
+  #probe {
+    position: absolute; visibility: hidden; white-space: pre; top: -9999px; left: -9999px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="../">&larr; sessions</a>
+  <span id="state">connecting…</span>
+  <span id="size"></span>
+</header>
+<div id="term"></div>
+<div id="bar"></div>
+<div id="ro">Read-only — cctop was started without <code>--allow-input</code>.</div>
+<span id="probe">WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW</span>
+
+<script src="../xterm.js"></script>
+<script>
+// /<token>/t/<pid> — the pid is the last segment, and the socket lives beside
+// it at /<token>/ws/<pid>, so both are relative to this page.
+const PID = location.pathname.replace(/\/$/, "").split("/").pop();
+const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+const state = document.getElementById("state");
+const sizeLabel = document.getElementById("size");
+const box = document.getElementById("term");
+
+const term = new Terminal({
+  cursorBlink: true,
+  fontFamily: FONT,
+  fontSize: 13,
+  scrollback: 5000,
+  // Matches the dashboard, and more importantly matches what the agent assumes
+  // it is drawing onto — a light background makes its colours unreadable.
+  theme: { background: "#0f1116", foreground: "#d7dae0", cursor: "#7aa2f7" },
+});
+term.open(box);
+
+// Cell size per pixel of font size, measured once from a real span in this
+// document's own font stack. Deriving it beats guessing a ratio, and beats
+// reaching into xterm's internals for numbers it does not promise to keep.
+const probe = document.getElementById("probe");
+probe.style.font = "100px " + FONT;
+const CELL_W = probe.getBoundingClientRect().width / 50 / 100;
+const CELL_H = 1.2;
+
+/// The agent's pty is the authority on size: it is shared with every other
+/// window watching it, so the browser scales its font to fit that grid rather
+/// than reshaping the grid to fit the browser.
+let grid = null;
+function fit() {
+  if (!grid) return;
+  const avail = { w: box.clientWidth - 8, h: box.clientHeight - 8 };
+  const size = Math.max(5, Math.min(20, Math.floor(Math.min(
+    avail.w / (CELL_W * grid.cols),
+    avail.h / (CELL_H * grid.rows),
+  ))));
+  if (term.options.fontSize !== size) term.options.fontSize = size;
+  term.resize(grid.cols, grid.rows);
+  sizeLabel.firstChild
+    ? (sizeLabel.firstChild.textContent = grid.cols + "×" + grid.rows)
+    : (sizeLabel.textContent = grid.cols + "×" + grid.rows);
+}
+
+/// What this screen could show comfortably, for the "fit to me" button.
+function ideal() {
+  return {
+    cols: Math.max(20, Math.floor((box.clientWidth - 8) / (CELL_W * 13))),
+    rows: Math.max(6, Math.floor((box.clientHeight - 8) / (CELL_H * 13))),
+  };
+}
+
+let socket, retry = 0;
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const path = location.pathname.replace(/\/t\/[^/]*\/?$/, "/ws/") + PID;
+  socket = new WebSocket(proto + "//" + location.host + path);
+  socket.binaryType = "arraybuffer";
+
+  socket.onopen = () => { retry = 0; state.textContent = "live"; state.className = "live"; };
+
+  socket.onmessage = (e) => {
+    // Binary is pty output, verbatim. Text is the one control message: size.
+    if (typeof e.data === "string") { grid = JSON.parse(e.data); fit(); }
+    else term.write(new Uint8Array(e.data));
+  };
+
+  socket.onclose = () => {
+    state.className = "gone";
+    // An agent that exited is not coming back, but a tunnel that blipped is.
+    // Try a few times, widening the gap, then stop claiming to be connected.
+    if (retry < 5) {
+      const wait = 500 * Math.pow(2, retry++);
+      state.textContent = "reconnecting in " + Math.round(wait / 1000) + "s…";
+      setTimeout(connect, wait);
+    } else {
+      state.textContent = "disconnected — the agent may have exited";
+    }
+  };
+
+  socket.onerror = () => { state.textContent = "connection error"; state.className = "gone"; };
+}
+connect();
+
+const send = (data) => {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(new TextEncoder().encode(data));
+  }
+};
+
+// A phone keyboard has no escape, no ctrl and no arrows, and an agent's TUI
+// wants all three. These send the bytes a real terminal would.
+const KEYS = [
+  ["esc", "\x1b"], ["tab", "\t"], ["^C", "\x03"], ["^D", "\x04"], ["^Z", "\x1a"],
+  ["↑", "\x1b[A"], ["↓", "\x1b[B"], ["←", "\x1b[D"], ["→", "\x1b[C"], ["↵", "\r"],
+];
+
+// Whether typing is allowed is the server's call, and it says so on the header
+// the dashboard's own endpoint already carries — rather than this page guessing
+// and silently dropping what it sends.
+fetch("../sessions.json", { cache: "no-store" })
+  .then((r) => {
+    if (r.headers.get("X-Cctop-Input") !== "on") {
+      document.getElementById("ro").className = "on";
+      term.options.cursorBlink = false;
+      return;
+    }
+    term.onData(send);
+
+    const bar = document.getElementById("bar");
+    bar.className = "on";
+    for (const [label, bytes] of KEYS) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.onclick = () => { send(bytes); term.focus(); };
+      bar.appendChild(b);
+    }
+
+    // Reshaping the pty reaches every other window watching this agent, so it
+    // is a button rather than something that happens because a phone rotated.
+    const fitBtn = document.createElement("button");
+    fitBtn.textContent = "fit to me";
+    fitBtn.onclick = () => {
+      const want = ideal();
+      socket.send(JSON.stringify(want));
+    };
+    sizeLabel.textContent = "";
+    sizeLabel.appendChild(document.createTextNode(""));
+    sizeLabel.appendChild(fitBtn);
+    fit();
+  })
+  .catch(() => {});
+
+addEventListener("resize", fit);
+term.focus();
+</script>
+</body>
+</html>
