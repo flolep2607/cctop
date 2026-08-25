@@ -144,6 +144,12 @@ pub struct Args {
     /// credential. Generated if --tunnel is given without one
     #[arg(long, requires = "serve", value_name = "TOKEN")]
     pub token: Option<String>,
+
+    /// Let the dashboard type into running sessions, the way `s` does in the
+    /// UI. Anyone who can reach it can then run commands as you — off by
+    /// default, and worth thinking about twice alongside --tunnel
+    #[arg(long, requires = "serve")]
+    pub allow_input: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {

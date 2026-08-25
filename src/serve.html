@@ -69,6 +69,19 @@
   .path { color: var(--dim); font-size: .75rem; }
   .model { color: var(--dim); }
   .ctx { color: var(--warn); }
+  .send { display: flex; gap: .4rem; margin-top: .4rem; }
+  .send input {
+    flex: 1; min-width: 0; font: inherit; font-size: .8rem; padding: .28rem .45rem;
+    color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
+  }
+  .send input:focus { outline: none; border-color: var(--accent); }
+  .send button {
+    font: inherit; font-size: .78rem; padding: .28rem .6rem; cursor: pointer;
+    color: var(--bg); background: var(--accent); border: 0; border-radius: 5px;
+  }
+  .send button:disabled { opacity: .5; cursor: default; }
+  .sent { font-size: .75rem; color: var(--dim); margin-top: .25rem; }
+  .sent.bad { color: var(--warn); }
   .empty { color: var(--dim); padding: 2rem 0; text-align: center; }
   #err { color: var(--warn); font-size: .8rem; }
   @media (max-width: 640px) {
@@ -134,6 +147,17 @@ const label = (s) => {
   return { short: p.split("/").filter(Boolean).slice(-2).join("/") || "—", full: p };
 };
 
+// Only where there is something to type into: the server refuses a stopped
+// session anyway, and an input that always fails is worse than no input.
+function sendBox(s) {
+  if (!canSend || !s.running) return "";
+  return `<form class="send" data-id="${esc(s.session_id)}">
+    <input name="t" maxlength="2000" autocomplete="off" spellcheck="false"
+           placeholder="type into this session\u2026">
+    <button type="submit">send</button>
+  </form><div class="sent" hidden></div>`;
+}
+
 function row(s) {
   const l = label(s);
   // `context` carries used/max, not a percentage — the TUI does the division
@@ -148,6 +172,7 @@ function row(s) {
         <span class="title" title="${esc(l.full)}">${esc(s.title || l.short)}</span>
       </div>
       <div class="path" title="${esc(l.full)}">${esc(l.short)}</div>
+      ${sendBox(s)}
     </td>
     <td data-l="model" class="model">${esc(s.model || "—")}</td>
     <td data-l="in">${tokens(s.tokens && s.tokens.input)}</td>
@@ -158,7 +183,21 @@ function row(s) {
   </tr>`;
 }
 
+// Whether the server said `--allow-input` is on. Set from a response header on
+// sessions.json rather than a second request or a templated page.
+let canSend = false;
+// The newest data, held back while someone is mid-line. A poll every two
+// seconds would otherwise replace the box under their cursor.
+let latest = [];
+
+function typingHere() {
+  const el = document.activeElement;
+  return el && el.tagName === "INPUT" && el.closest("#out");
+}
+
 function render(list) {
+  latest = list;
+  if (typingHere()) return;
   const out = document.getElementById("out");
   if (!list.length) {
     out.innerHTML = '<div class="empty">no sessions</div>';
@@ -189,6 +228,49 @@ function render(list) {
     `<b>${live}</b> running · <b>${list.length}</b> sessions · <b>${tokens(tok)}</b> tokens`;
 }
 
+document.getElementById("out").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const input = form.elements.t;
+  const note = form.nextElementSibling;
+  const text = input.value.trim();
+  if (!text) return;
+
+  form.elements[1].disabled = true;
+  note.hidden = false;
+  note.className = "sent";
+  note.textContent = "sending\u2026";
+  try {
+    const r = await fetch("send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: form.dataset.id, text }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.ok) {
+      input.value = "";
+      note.textContent = "sent to pid " + d.pid;
+    } else {
+      note.className = "sent bad";
+      // The server's own words: "not started in a way anything can type into"
+      // is a fact about the session, and paraphrasing it here would lose it.
+      note.textContent = d.error || ("HTTP " + r.status);
+    }
+  } catch (err) {
+    note.className = "sent bad";
+    note.textContent = String(err.message || err);
+  } finally {
+    form.elements[1].disabled = false;
+    input.focus();
+  }
+});
+
+// Once the line is gone the table can move again; without this it stays frozen
+// on whatever it showed when the box was first focused.
+document.getElementById("out").addEventListener("focusout", () => {
+  setTimeout(() => { if (!typingHere()) render(latest); }, 0);
+});
+
 let failures = 0;
 async function tick() {
   try {
@@ -196,6 +278,7 @@ async function tick() {
     // file ever having to know what the token is.
     const r = await fetch("sessions.json", { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
+    canSend = r.headers.get("X-Cctop-Input") === "on";
     render(await r.json());
     failures = 0;
     document.getElementById("err").textContent = "";

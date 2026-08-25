@@ -2654,7 +2654,11 @@ fn contains_ascii_ci(haystack: &str, lowercase_needle: &str) -> bool {
 }
 
 /// PID of the currently live agent root, excluding briefly retained exits.
-fn session_root_pid(session: &Session) -> Option<u32> {
+///
+/// `pub(crate)` for [`serve`](crate::serve), which answers the same question the
+/// `s` key does — which process would a typed line reach — from a web request
+/// instead of a keystroke.
+pub(crate) fn session_root_pid(session: &Session) -> Option<u32> {
     session
         .process
         .as_ref()?
