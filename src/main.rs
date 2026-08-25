@@ -12,6 +12,7 @@ mod notify;
 mod pricing;
 mod proc;
 mod quota;
+mod serve;
 mod session;
 #[cfg(unix)]
 mod shim;
@@ -149,6 +150,13 @@ fn main() -> anyhow::Result<()> {
         // Nothing may be printed to stdout but JSON-RPC: the transport is the
         // stream, and one stray line of logging desynchronises the client.
         return mcp::serve();
+    }
+
+    if args.serve {
+        // Before the TTY check below on purpose: a dashboard is exactly what
+        // you want from a machine you reached over ssh with no terminal to
+        // draw on, and it needs no terminal of its own.
+        return serve::run(&args);
     }
 
     if let Some(which) = &args.handoff {

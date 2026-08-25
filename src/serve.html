@@ -1,0 +1,217 @@
+<!doctype html>
+<!--
+  The dashboard cctop serves over `--serve`. Inlined into the binary by
+  serve.rs, so it carries no external stylesheet, script or font: a phone on
+  a hotel wifi behind a trycloudflare hostname should need exactly one request
+  to have something on screen.
+
+  It renders whatever `sessions.json` holds, which is the same shape `cctop
+  --json` prints. Fields it does not know about are ignored rather than
+  breaking the table, so the JSON can grow without this file being touched.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<!-- A trycloudflare URL is a public hostname; nothing here should be indexed
+     or handed to a third party as a referrer. -->
+<meta name="referrer" content="no-referrer">
+<title>cctop</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0f1116; --fg: #d7dae0; --dim: #7c828d; --line: #232733;
+    --card: #161922; --accent: #7aa2f7; --live: #9ece6a; --warn: #e0af68;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fbfbfd; --fg: #1e222a; --dim: #6b7280; --line: #e3e6ec;
+      --card: #ffffff; --accent: #2f5fd0; --live: #2f8f3f; --warn: #a86a00;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
+    padding: .8rem 1rem; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--bg); z-index: 1;
+  }
+  h1 { font-size: 1rem; margin: 0; letter-spacing: .04em; }
+  h1 b { color: var(--accent); }
+  #meta { color: var(--dim); font-size: .8rem; }
+  #totals { margin-left: auto; color: var(--dim); font-size: .8rem; }
+  #totals b { color: var(--fg); font-weight: 600; }
+  main { padding: 1rem; }
+  .group { margin-bottom: 1.4rem; }
+  .group > h2 {
+    font-size: .78rem; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--dim); margin: 0 0 .45rem; font-weight: 600;
+  }
+  /* The table is the desktop shape; below 640px each row becomes a card,
+     because seven columns on a phone is four columns of nothing. */
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: right; font-weight: 600; color: var(--dim);
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .06em;
+    padding: .25rem .5rem; border-bottom: 1px solid var(--line);
+  }
+  th:first-child, td:first-child { text-align: left; }
+  td { padding: .35rem .5rem; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tr:hover td { background: var(--card); }
+  .name { display: flex; align-items: center; gap: .45rem; min-width: 0; }
+  .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--line); flex: none; }
+  .dot.live { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent); }
+  .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42ch; }
+  .path { color: var(--dim); font-size: .75rem; }
+  .model { color: var(--dim); }
+  .ctx { color: var(--warn); }
+  .empty { color: var(--dim); padding: 2rem 0; text-align: center; }
+  #err { color: var(--warn); font-size: .8rem; }
+  @media (max-width: 640px) {
+    thead { display: none; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    tr { border: 1px solid var(--line); border-radius: 8px; margin-bottom: .6rem; padding: .5rem .65rem; background: var(--card); }
+    td { border: 0; padding: .1rem 0; text-align: left; display: flex; justify-content: space-between; gap: 1rem; }
+    td:first-child { display: block; margin-bottom: .35rem; }
+    td[data-l]::before { content: attr(data-l); color: var(--dim); font-size: .75rem; }
+    .title { max-width: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>cc<b>top</b></h1>
+  <span id="meta">connecting…</span>
+  <span id="err"></span>
+  <span id="totals"></span>
+</header>
+<main id="out"><div class="empty">loading…</div></main>
+<script>
+// Same order the `--list` output groups by, so the two agree.
+const ORDER = ["codex", "claude", "cursor", "opencode", "pi", "gemini", "windsurf"];
+const NAMES = {
+  codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode",
+  pi: "Pi", gemini: "Gemini", windsurf: "Windsurf",
+};
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const tokens = (n) => {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+};
+
+// `cost.total` is a preformatted string from Rust, `null` when the plan
+// bundles this provider — the two mean different things and read differently.
+const cost = (c) => {
+  if (!c || !c.available) return "—";
+  if (c.included || c.total == null) return "incl";
+  return c.total;
+};
+
+const age = (iso) => {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "—";
+  let s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return Math.round(s) + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) return Math.round(s / 3600) + "h";
+  return Math.round(s / 86400) + "d";
+};
+
+const label = (s) => {
+  const p = s.project || "";
+  // Whole path in the title attribute, last two segments on screen: the
+  // interesting part of ~/src/work/thing is always the tail.
+  return { short: p.split("/").filter(Boolean).slice(-2).join("/") || "—", full: p };
+};
+
+function row(s) {
+  const l = label(s);
+  // `context` carries used/max, not a percentage — the TUI does the division
+  // too, and a max of 0 means the window was never measured.
+  const c = s.context;
+  const ctx = c && c.max > 0
+    ? `<span class="ctx">${Math.round((c.used / c.max) * 100)}%</span>` : "—";
+  return `<tr>
+    <td>
+      <div class="name">
+        <span class="dot${s.running ? " live" : ""}"></span>
+        <span class="title" title="${esc(l.full)}">${esc(s.title || l.short)}</span>
+      </div>
+      <div class="path" title="${esc(l.full)}">${esc(l.short)}</div>
+    </td>
+    <td data-l="model" class="model">${esc(s.model || "—")}</td>
+    <td data-l="in">${tokens(s.tokens && s.tokens.input)}</td>
+    <td data-l="out">${tokens(s.tokens && s.tokens.output)}</td>
+    <td data-l="ctx">${ctx}</td>
+    <td data-l="cost">${esc(cost(s.cost))}</td>
+    <td data-l="last">${age(s.last_active)}</td>
+  </tr>`;
+}
+
+function render(list) {
+  const out = document.getElementById("out");
+  if (!list.length) {
+    out.innerHTML = '<div class="empty">no sessions</div>';
+    document.getElementById("totals").textContent = "";
+    return;
+  }
+  // Most recently touched first inside each provider — the same question the
+  // TUI's default sort answers.
+  list.sort((a, b) => Date.parse(b.last_active) - Date.parse(a.last_active));
+
+  const seen = [...new Set(list.map((s) => s.provider))]
+    .sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
+
+  out.innerHTML = seen.map((p) => {
+    const rows = list.filter((s) => s.provider === p);
+    return `<section class="group">
+      <h2>${esc(NAMES[p] || p)} · ${rows.length}</h2>
+      <table><thead><tr>
+        <th>session</th><th>model</th><th>in</th><th>out</th>
+        <th>ctx</th><th>cost</th><th>last</th>
+      </tr></thead><tbody>${rows.map(row).join("")}</tbody></table>
+    </section>`;
+  }).join("");
+
+  const live = list.filter((s) => s.running).length;
+  const tok = list.reduce((n, s) => n + ((s.tokens && s.tokens.total) || 0), 0);
+  document.getElementById("totals").innerHTML =
+    `<b>${live}</b> running · <b>${list.length}</b> sessions · <b>${tokens(tok)}</b> tokens`;
+}
+
+let failures = 0;
+async function tick() {
+  try {
+    // Relative, so the token prefix in the path carries over without this
+    // file ever having to know what the token is.
+    const r = await fetch("sessions.json", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    render(await r.json());
+    failures = 0;
+    document.getElementById("err").textContent = "";
+    document.getElementById("meta").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    failures++;
+    document.getElementById("err").textContent =
+      failures > 1 ? `disconnected (${esc(e.message)})` : "";
+  }
+}
+
+tick();
+setInterval(tick, 2000);
+// A phone locks its screen mid-poll; come back current rather than up to two
+// seconds stale.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+</script>
+</body>
+</html>

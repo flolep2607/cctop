@@ -124,6 +124,26 @@ pub struct Args {
     /// what the other agents on this machine are doing. Read-only
     #[arg(long)]
     pub mcp: bool,
+
+    /// Serve the dashboard over HTTP on 127.0.0.1 instead of drawing the TUI,
+    /// so another device on this machine — or, with --tunnel, anywhere — can
+    /// watch the same sessions. Read-only
+    #[arg(long)]
+    pub serve: bool,
+
+    /// Port for --serve. 0 picks a free one and prints it
+    #[arg(long, default_value_t = 7654, requires = "serve", value_name = "PORT")]
+    pub port: u16,
+
+    /// Put the --serve dashboard on a https://*.trycloudflare.com URL. Needs
+    /// no account and nothing installed; the URL lasts as long as this process
+    #[arg(long, requires = "serve")]
+    pub tunnel: bool,
+
+    /// Secret path prefix the dashboard is served under, so the URL is the
+    /// credential. Generated if --tunnel is given without one
+    #[arg(long, requires = "serve", value_name = "TOKEN")]
+    pub token: Option<String>,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {
@@ -377,6 +397,23 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
 }
 
 pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
+    println!("{}", sessions_json(sessions, plan, loader, true)?);
+    Ok(())
+}
+
+/// The `--json` payload as a string.
+///
+/// Split out from [`run_json`] because the web dashboard shows exactly this and
+/// nothing else — two renderings of one shape rather than two shapes to keep in
+/// step. `pretty` is what separates them: a person reads the piped output, and
+/// the dashboard is polled every couple of seconds over whatever connection a
+/// phone has, where the indentation is a third of the bytes.
+pub fn sessions_json(
+    sessions: &[Session],
+    plan: Plan,
+    loader: &Loader,
+    pretty: bool,
+) -> anyhow::Result<String> {
     let claude_account = crate::quota::claude_account();
     let codex_account = crate::quota::codex_account();
 
@@ -454,8 +491,10 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
+    Ok(match pretty {
+        true => serde_json::to_string_pretty(&out)?,
+        false => serde_json::to_string(&out)?,
+    })
 }
 
 #[cfg(test)]

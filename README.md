@@ -113,6 +113,8 @@ cctop --plan max      # treat Claude usage as bundled
 cctop --delay 5       # refresh every 5 seconds
 cctop --clear-cache   # re-extract all session activity; keeps preferences/pricing
 cctop --update        # replace this binary with the newest release
+cctop --serve         # read-only web dashboard on 127.0.0.1:7654
+cctop --serve --tunnel   # …and put it on a public trycloudflare URL
 cctop run claude      # start an agent on a pty cctop can type into (see Keys)
 cctop claude --help   # the same, without the `run`; flags go to the agent
 cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias adds them)
@@ -632,6 +634,44 @@ The same brief is available without the UI:
 cctop --handoff            # the most recently active session, as markdown
 cctop --handoff 2abd15fe   # a session id, or any unique prefix of one
 ```
+
+## Watching from another device
+
+```bash
+cctop --serve            # http://127.0.0.1:7654/
+cctop --serve --tunnel   # https://<random>.trycloudflare.com/<token>/
+```
+
+`--serve` draws the same sessions as the TUI, as a web page, instead of taking
+over the terminal. It needs no TTY — which is the point on a machine you reached
+over ssh — and it is read-only: there is no route that starts, stops, or types
+at anything, for the same reason `--mcp` has none.
+
+`--tunnel` puts that page on a `*.trycloudflare.com` hostname, so the device can
+be your phone rather than another window. It needs no Cloudflare account and
+nothing installed: cctop speaks the tunnel protocol itself — QUIC to the
+argotunnel edge, Cap'n Proto-RPC over it — rather than shelling out to
+`cloudflared`, so it stays the single binary you downloaded. The URL is
+ephemeral: a new one every run, gone when cctop exits.
+
+One consequence worth knowing — the tunnel's data path is inside cctop. A
+request from the internet arrives as a QUIC stream and is proxied to the same
+`127.0.0.1` listener a local browser would hit.
+
+**The URL is the password.** A public hostname would otherwise publish every
+project path, session title and account email on the machine to whoever finds
+it, so `--tunnel` serves the page under a random secret prefix and answers
+everything else with a 404 that says nothing about why. Pass `--token` to choose
+the prefix yourself. Treat the printed URL like a credential: anyone with it
+sees what you see.
+
+```bash
+cctop --serve --port 8080 --token my-secret   # pick both
+```
+
+The page polls a capped, gzipped snapshot — the hundred most recently active
+sessions, rebuilt on a timer rather than per request, so being visible costs the
+same whether one person is looking or a hundred are.
 
 ## Letting agents see each other
 
