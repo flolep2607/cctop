@@ -3536,7 +3536,13 @@ impl App {
         let reachable_at = self.share_route();
         match crate::rmux::web_share(&name, reachable_at.as_deref()) {
             Ok(share) => {
-                render::copy_to_clipboard(&share.operator);
+                // `web_share` refuses a share with no operator link, so this is
+                // the link or the error above it — never the spectator one.
+                let Some(operator) = share.operator.as_deref() else {
+                    self.set_status(format!("Could not share {label}: no operator link"));
+                    return;
+                };
+                render::copy_to_clipboard(operator);
                 let pin = match &share.pin {
                     Some(pin) => format!(" · pin {pin}"),
                     None => String::new(),

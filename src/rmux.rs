@@ -40,28 +40,43 @@ const PREFIX: &str = "cctop";
 /// see them. `tmux attach -t cctop-…` reaches them, and nothing here kills one.
 pub const BIN: &str = "rmux";
 
-/// The loopback address rmux's web-share daemon answers on, when it says.
+/// The loopback port rmux's web-share daemon answers on.
 ///
-/// `web-share --config` prints `HOST:PORT FRONTEND`, which is the only place
-/// the port is written down — it is a daemon setting, not a flag on the share,
-/// so cctop asks rather than assuming rmux's default. The answer is what a
-/// tunnel has to be pointed at for [`web_share`] to be reachable off this
-/// machine.
+/// A daemon setting rather than a flag on a share, so cctop asks for it instead
+/// of assuming rmux's default. It is what a tunnel has to be pointed at for
+/// [`web_share`] to be reachable off this machine.
 ///
-/// `None` when no server is running yet (there is nothing to share either) or
-/// when the line is not the shape this reads, which is a reason to share
-/// locally rather than to fail.
+/// `None` when no daemon is running — in which case there is no session to
+/// share either — which is a reason to share locally rather than to fail.
 pub fn share_port() -> Option<u16> {
-    let out = Command::new(BIN)
-        .args(["web-share", "--config"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let address = stdout.split_whitespace().next()?;
-    address.rsplit_once(':')?.1.parse().ok()
+    on_daemon(|rmux| async move { Ok(rmux.web_config().await?.port) }).ok()
+}
+
+/// Run one piece of SDK work against the local daemon and wait for it.
+///
+/// The SDK is async and cctop is not. Everything here is one short exchange
+/// with a daemon on a unix socket, so a current-thread runtime built for the
+/// call is the whole of what "async" needs to mean at this boundary — no
+/// runtime is kept, and nothing above this function learns that one existed.
+fn on_daemon<T, F, Fut>(work: F) -> Result<T, String>
+where
+    F: FnOnce(rmux_sdk::Rmux) -> Fut,
+    Fut: std::future::Future<Output = rmux_sdk::Result<T>>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("could not start a runtime for rmux: {error}"))?;
+    runtime.block_on(async move {
+        // `connect_or_start` rather than `connect`: the daemon is started by
+        // whichever of these runs first, and a cctop that only ever asks
+        // questions should still get answers.
+        let rmux = rmux_sdk::Rmux::builder()
+            .connect_or_start()
+            .await
+            .map_err(|error| format!("{error}"))?;
+        work(rmux).await.map_err(|error| format!("{error}"))
+    })
 }
 
 /// Whether the multiplexer can be used at all.
@@ -278,7 +293,11 @@ pub fn attach(name: &str) -> Vec<String> {
 pub struct Share {
     /// The link that can type into the agent. A shell credential, and named
     /// that way so nothing here hands it out by accident.
-    pub operator: String,
+    ///
+    /// An `Option` because rmux mints one per role and a `--spectator-only`
+    /// share has none — [`web_share`] refuses that rather than reaching for the
+    /// read-only link, which is a different thing wearing the same shape.
+    pub operator: Option<String>,
     /// The pairing code the browser asks for after the link, absent under
     /// `--no-pin`. Useless without the link and useless on its own, which is why
     /// it is safe to put on the status line while the link goes to the clipboard.
@@ -294,85 +313,46 @@ pub struct Share {
 /// whose endpoint is this machine's loopback: correct, and reachable only from
 /// a browser already on it.
 ///
+/// `--tunnel-url` and not `--tunnel-provider`: rmux can raise a tunnel of its
+/// own through half a dozen providers, and cctop already holds one for the
+/// served page. Reusing it keeps a single way out of this machine — one origin
+/// to trust, one thing to close — instead of a second ingress with its own
+/// lifetime that nothing in cctop is watching. rmux ships six providers and
+/// deliberately not this one: a `trycloudflare.com` hostname "can take an
+/// unpredictable amount of time to become reachable" and carries no uptime
+/// guarantee, so upstream points anyone who wants one at exactly this door.
+///
 /// The share itself is untouched by the route. rmux encrypts operator traffic
 /// end to end and pairs it with a PIN, so the tunnel carries ciphertext it
 /// cannot read — which is the difference between this and the served page,
 /// where Cloudflare terminates the TLS and reads what passes through.
 ///
-/// rmux ships six tunnel providers and deliberately not this one: a
-/// `trycloudflare.com` hostname "can take an unpredictable amount of time to
-/// become reachable" and carries no uptime guarantee, so upstream points anyone
-/// who wants one at `--tunnel-url`, which is the door taken here. The cost is
-/// upstream's to name and worth repeating: a link can 502 for a moment after it
-/// is minted, and a quick tunnel is for looking at this from a phone rather
-/// than for anything that has to be up.
-///
-/// Run and parsed rather than handed to a pane, because `web-share` returns as
-/// soon as the daemon has the share: the links outlive the command, so a pane
-/// would draw them and exit. The cost is rmux's card UI, which only renders to a
-/// terminal — the QR code in it is worth having, and someone who wants it can
-/// run the same command in one.
+/// Asked over the daemon's own IPC rather than by running `rmux web-share` and
+/// reading its output. That is not a tidiness: the CLI prints the operator link
+/// on stderr and the spectator link on stdout, the two are the same shape, and
+/// the *stream* is the only thing telling them apart. Handing out input to a
+/// live coding agent should not rest on which file descriptor a line arrived
+/// on, and here it does not — the two links are separate fields.
 pub fn web_share(name: &str, reachable_at: Option<&str>) -> Result<Share, String> {
-    let argv = web_share_argv(name, reachable_at);
-    let out = Command::new(&argv[0])
-        .args(&argv[1..])
-        .output()
-        .map_err(|error| format!("could not run {BIN}: {error}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        // rmux's own message names the reason — no such session, web support
-        // compiled out — and any summary here would only lose it.
-        return Err(stderr.lines().last().unwrap_or("the share failed").into());
-    }
-    parse_share(&stdout, &stderr).ok_or_else(|| "the share reported no link".to_string())
-}
-
-/// The argv for [`web_share`], split out so a test can read it without a daemon.
-///
-/// `--tunnel-url` and not `--tunnel-provider`: rmux can raise a tunnel of its
-/// own through half a dozen providers, and cctop already holds one for the
-/// served page. Reusing it keeps a single way out of this machine — one origin
-/// to trust, one thing to close — instead of a second ingress with its own
-/// lifetime that nothing in cctop is watching.
-fn web_share_argv(name: &str, reachable_at: Option<&str>) -> Vec<String> {
-    let mut argv = vec![
-        BIN.to_string(),
-        "web-share".to_string(),
-        "-t".to_string(),
-        name.to_string(),
-    ];
-    if let Some(origin) = reachable_at {
-        argv.push("--tunnel-url".into());
-        argv.push(origin.to_string());
-    }
-    argv
-}
-
-/// Pick the operator link and its pairing code out of what `web-share` printed.
-///
-/// The link is read from stderr, which is where rmux deliberately puts it: the
-/// spectator link goes to stdout, and reading the wrong stream would hand out
-/// input to a live shell believing it read-only. The two are the same shape, so
-/// the stream is the only thing telling them apart — it is not a detail to
-/// tidy into "first URL anywhere".
-///
-/// Within a stream the link is found by shape rather than by position, so a
-/// reworded label does not silently stop returning one.
-///
-/// ponytail: only the operator link is kept. The spectator link is parsed away
-/// because nothing asks for one yet; a read-only share wants its own key rather
-/// than a second thing on the same one.
-fn parse_share(stdout: &str, stderr: &str) -> Option<Share> {
-    Some(Share {
-        operator: stderr
-            .split_whitespace()
-            .find(|word| word.starts_with("https://"))
-            .map(str::to_string)?,
-        pin: stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("operator pin "))
-            .map(|pin| pin.trim().to_string()),
+    let name = name.to_string();
+    let reachable_at = reachable_at.map(str::to_string);
+    on_daemon(move |rmux| async move {
+        let session = rmux.session(rmux_sdk::SessionName::new(name)?).await?;
+        let mut builder = session.share();
+        if let Some(origin) = reachable_at {
+            builder = builder.tunnel_url(origin);
+        }
+        let handle = builder.await?;
+        Ok(Share {
+            operator: handle.operator_url().map(str::to_string),
+            pin: handle.operator_pairing_code().map(str::to_string),
+        })
+    })
+    .and_then(|share| match share.operator {
+        // `--spectator-only` is a share this cannot return: there is no
+        // operator link in it, and the read-only one is not a substitute.
+        None => Err("the share came back without an operator link".to_string()),
+        Some(_) => Ok(share),
     })
 }
 
@@ -763,94 +743,102 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
 
-    /// A share with nowhere public to be reached from is still a share, so the
-    /// flag is absent rather than empty — rmux reads `--tunnel-url ""` as an
-    /// endpoint and mints links pointing at nothing.
+    /// The widget cctop draws an rmux-backed pane with takes cctop's own
+    /// buffer.
+    ///
+    /// This is the whole of what Helvesec/rmux#220 fixes, checked from the side
+    /// that cares. `ratatui-rmux` 0.10.0 on crates.io links ratatui 0.29 under
+    /// the `ratatui-core` name; cctop draws with 0.30, and against the
+    /// published crate this does not compile — `PaneWidget: Widget is not
+    /// satisfied`, for a `Buffer` spelled exactly like the one it wants. The
+    /// dependency therefore points at the branch carrying the fix, and this is
+    /// what would start failing if it were moved back before a release
+    /// carrying it exists.
     #[test]
-    fn a_share_with_no_tunnel_names_no_endpoint() {
-        assert_eq!(
-            web_share_argv("cctop-claude-abc", None),
-            &["rmux", "web-share", "-t", "cctop-claude-abc"]
-        );
+    fn a_pane_snapshot_paints_into_the_buffer_cctop_draws_with() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Widget;
+        use ratatui_rmux::{PaneState, PaneWidget};
+        use rmux_sdk::{PaneAttributes, PaneCell, PaneColor, PaneCursor, PaneGlyph, PaneSnapshot};
+
+        let cell = |text: &str| PaneCell {
+            glyph: PaneGlyph::new(text, 1),
+            attributes: PaneAttributes::EMPTY,
+            foreground: PaneColor::Default,
+            background: PaneColor::Default,
+            underline: PaneColor::Default,
+        };
+        let snapshot = PaneSnapshot::new(2, 1, vec![cell("o"), cell("k")], PaneCursor::default())
+            .expect("a 2x1 snapshot of two cells");
+        let state = PaneState::from_snapshot(snapshot);
+
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buffer = Buffer::empty(area);
+        PaneWidget::new(&state).render(area, &mut buffer);
+
+        assert_eq!(buffer.cell((0, 0)).expect("a cell").symbol(), "o");
+        assert_eq!(buffer.cell((1, 0)).expect("a cell").symbol(), "k");
     }
 
-    /// The tunnel is cctop's own, handed to rmux rather than raised by it: one
-    /// way out of this machine, whose lifetime cctop controls.
-    #[test]
-    fn a_share_through_a_tunnel_hands_rmux_the_origin() {
-        assert_eq!(
-            web_share_argv("cctop-claude-abc", Some("https://x.trycloudflare.com")),
-            &[
-                "rmux",
-                "web-share",
-                "-t",
-                "cctop-claude-abc",
-                "--tunnel-url",
-                "https://x.trycloudflare.com"
-            ]
-        );
-    }
-
-    #[test]
-    fn the_operator_link_is_read_from_the_stream_rmux_puts_it_on() {
-        // Verbatim from `rmux 0.10.0 web-share -t …`, which splits the two
-        // links across the streams on purpose.
-        let stderr =
-            "rmux: operator URL (keep private):\nrmux:   https://share.rmux.io/#t=OPERATOR\n";
-        let stdout = concat!(
-            "spectator https://share.rmux.io/#t=SPECTATOR\n",
-            "operator URL emitted on stderr\n",
-            "share does not expire\n",
-            "operator pin 634138\n",
-            "spectator pin 988762\n",
-        );
-        let share = parse_share(stdout, stderr).expect("a link was printed");
-        assert_eq!(share.operator, "https://share.rmux.io/#t=OPERATOR");
-        assert_eq!(share.pin.as_deref(), Some("634138"));
-    }
-
-    /// The parse above is against captured output; this is against rmux. A
-    /// reworded label or a link moved between the streams would pass every unit
-    /// test here and hand out the wrong link in the field.
+    /// The share path, against a real daemon and through the same call the `W`
+    /// key makes. There is nothing left to unit-test here: the operator link
+    /// and its pairing code are fields on a typed handle rather than lines
+    /// picked out of two streams, so what is worth checking is that the daemon
+    /// answers and that what comes back is the operator's link and not the
+    /// spectator's.
     #[test]
     fn a_real_rmux_session_comes_back_with_an_operator_link() {
-        if !Command::new("rmux")
-            .arg("-V")
-            .output()
-            .is_ok_and(|out| out.status.success())
-        {
+        let _guard = test_lock();
+        if !available() {
             eprintln!("skipping: rmux not installed");
             return;
         }
         let name = format!("cctop-share-{}", std::process::id());
-        let made = Command::new("rmux")
-            .args(["new-session", "-d", "-s", &name, "--", "sleep", "30"])
-            .output()
-            .is_ok_and(|out| out.status.success());
-        assert!(made, "rmux would not start a session to share");
+        assert!(
+            Command::new(BIN)
+                .args(["new-session", "-d", "-s", &name, "--", "sleep", "30"])
+                .output()
+                .is_ok_and(|out| out.status.success()),
+            "rmux would not start a session to share"
+        );
 
-        let share = web_share(&name, None);
+        // A tunnel origin that goes nowhere. rmux does not dial it — it writes
+        // it into the link as the endpoint a viewer's browser should open — so
+        // a fake one exercises the whole path without a real tunnel, and
+        // proves the origin reached the share rather than only the argv.
+        let share = web_share(&name, Some("https://example-tunnel.trycloudflare.com"));
+        let port = share_port();
         // Killing the session ends its share; `web-share -X` would also end any
         // the user has open, which is not this test's to touch.
-        let _ = Command::new("rmux")
-            .args(["kill-session", "-t", &format!("={name}")])
-            .output();
+        let _ = kill(&name);
+        // And wait for it to be gone before the lock is. Killing the last
+        // session stops the server, and a `new-session` that reaches the socket
+        // while it is on its way down fails outright — so releasing the lock
+        // the moment `kill` returns hands the next test a daemon mid-shutdown.
+        // That is the race [`test_lock`] exists for, and serialising the tests
+        // does not close it on its own.
+        wait_for(|| (!exists(&name)).then_some(()));
 
         let share = share.expect("rmux shared the session");
+        let operator = share.operator.expect("an operator link");
+        assert!(operator.starts_with("https://"), "not a link: {operator}");
         assert!(
-            share.operator.starts_with("https://"),
-            "not a link: {}",
-            share.operator
+            operator.contains("example-tunnel.trycloudflare.com"),
+            "the tunnel origin never reached the link: {operator}"
+        );
+        // The spectator link is minted alongside it and must not be what came
+        // back: it is the same shape and grants a different thing.
+        assert!(
+            !operator.contains("spectator"),
+            "that is not the operator link: {operator}"
+        );
+        assert!(
+            port.is_some_and(|port| port > 0),
+            "a running daemon reported no web-share port"
         );
     }
 
-    #[test]
-    fn a_share_with_no_operator_link_is_not_a_share() {
-        // `--spectator-only` prints a link, but not one this can return: reading
-        // stdout here would hand out input to a live agent.
-        let stdout = "spectator https://share.rmux.io/#t=SPECTATOR\n";
-        assert!(parse_share(stdout, "").is_none());
-    }
     use super::*;
 
     /// Whatever is offered has to be runnable as offered. An install the user
