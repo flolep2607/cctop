@@ -77,6 +77,28 @@ pub fn profile_env(provider: Provider) -> Option<(&'static str, &'static Path)> 
     }
 }
 
+/// `argv` prefixed with the environment that points a harness at `profile`.
+///
+/// `env VAR=dir <argv>` rather than a variable set on the child process,
+/// because the argv is what gets handed to tmux — which runs it directly, with
+/// no shell to carry an environment for it — and what cctop later reads back
+/// off a running tab to say which account it was started under.
+///
+/// A provider with no such variable is returned unchanged: there is one
+/// directory, and pretending to select it would put an `env` prefix on every
+/// launch for nothing.
+pub fn argv_under_profile(argv: Vec<String>, profile: &Profile) -> Vec<String> {
+    let Some((var, _)) = profile_env(profile.provider) else {
+        return argv;
+    };
+    let mut out = vec![
+        "env".to_string(),
+        format!("{var}={}", profile.dir.display()),
+    ];
+    out.extend(argv);
+    out
+}
+
 /// The name a profile directory goes by, given the prefix its harness uses.
 fn profile_name(dir: &Path, prefix: &str) -> String {
     let raw = dir

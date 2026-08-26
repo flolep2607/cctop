@@ -1,9 +1,7 @@
 //! Key and mouse handling: translate input events into state changes.
 
 use super::columns::COLUMNS;
-use super::{
-    AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render, session_root_pid,
-};
+use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render};
 /// Longest path the launcher's directory field accepts.
 ///
 /// Comfortably past any real working directory — Linux caps a path at 4096
@@ -421,7 +419,7 @@ impl App {
 
     fn on_key_kill(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('y')
-            && let Some(pid) = self.selected_session().and_then(session_root_pid)
+            && let Some(pid) = self.selected_session().and_then(|s| s.root_pid())
             && let Some(session) = self.selected_session()
         {
             let _ = self.tx.send(Request::Terminate {
@@ -526,7 +524,7 @@ impl App {
             KeyCode::Enter => {
                 let text = self.send_input.clone();
                 if !text.is_empty()
-                    && let Some(pid) = self.selected_session().and_then(session_root_pid)
+                    && let Some(pid) = self.selected_session().and_then(|s| s.root_pid())
                 {
                     let _ = self.tx.send(Request::SendKeys { pid, text });
                     self.set_status("Sending…");
@@ -693,7 +691,7 @@ impl App {
             return;
         }
         match self.selected_session() {
-            Some(s) if session_root_pid(s).is_some() => {
+            Some(s) if s.root_pid().is_some() => {
                 self.send_input = "continue".into();
                 self.mode = Mode::SendKeys;
             }

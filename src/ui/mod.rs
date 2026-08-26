@@ -1766,7 +1766,7 @@ impl App {
             return;
         }
         match self.selected_session() {
-            Some(s) if session_root_pid(s).is_some() => self.mode = Mode::KillConfirm,
+            Some(s) if s.root_pid().is_some() => self.mode = Mode::KillConfirm,
             Some(s) if s.is_running() => self.mode = Mode::KillBlocked,
             Some(_) => self.set_status("Selected session is not running"),
             None => {}
@@ -1879,7 +1879,7 @@ impl App {
     fn batch_ok(&self, kind: BatchKind) -> bool {
         self.marked_sessions().iter().all(|s| match kind {
             BatchKind::Delete => !s.is_running(),
-            BatchKind::Kill => session_root_pid(s).is_some(),
+            BatchKind::Kill => s.root_pid().is_some(),
         })
     }
 
@@ -1933,7 +1933,7 @@ impl App {
                         failed += 1;
                     }
                 }
-                BatchKind::Kill => match session_root_pid(s) {
+                BatchKind::Kill => match s.root_pid() {
                     Some(pid) => {
                         self.tx
                             .send(Request::Terminate {
@@ -2298,7 +2298,7 @@ impl App {
     fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
         self.sessions
             .iter()
-            .filter(|session| session_root_pid(session) == Some(pid))
+            .filter(|session| session.root_pid() == Some(pid))
             .find_map(|session| {
                 self.hooked_signal(&session.session_id).or({
                     match session.activity_state {
@@ -2332,7 +2332,7 @@ impl App {
         let answered: Vec<String> = self
             .sessions
             .iter()
-            .filter(|session| session_root_pid(session) == Some(pid))
+            .filter(|session| session.root_pid() == Some(pid))
             .map(|session| session.session_id.clone())
             .collect();
         for id in answered {
@@ -2576,7 +2576,7 @@ impl App {
             .as_deref()
             .and_then(|name| crate::config::profile_named(session.provider, name));
         let argv = match profile {
-            Some(profile) => Self::under_profile(argv, profile),
+            Some(profile) => crate::config::argv_under_profile(argv, profile),
             None => argv,
         };
         // The transcript is full of paths relative to where the agent ran, so a
@@ -2969,20 +2969,7 @@ impl App {
         let Some(profile) = profile else {
             return argv;
         };
-        Self::under_profile(argv, profile)
-    }
-
-    /// `argv`, prefixed with the environment that selects `profile`.
-    fn under_profile(argv: Vec<String>, profile: &crate::config::Profile) -> Vec<String> {
-        let Some((var, _)) = crate::config::profile_env(profile.provider) else {
-            return argv;
-        };
-        let mut out = vec![
-            "env".to_string(),
-            format!("{var}={}", profile.dir.display()),
-        ];
-        out.extend(argv);
-        out
+        crate::config::argv_under_profile(argv, profile)
     }
 
     /// What a still-running agent in the launcher is doing, if it has said.
@@ -3007,7 +2994,7 @@ impl App {
         let pid = agent.pid?;
         self.sessions
             .iter()
-            .find(|session| session_root_pid(session) == Some(pid))
+            .find(|session| session.root_pid() == Some(pid))
             .map(|session| session.display_label().to_string())
     }
 
@@ -3456,7 +3443,7 @@ impl App {
         // starting a second one on one transcript — `a` and `R` reach the same
         // agent by different routes, and only this makes them agree.
         let resumed = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
-        let Some(pid) = session_root_pid(session) else {
+        let Some(pid) = session.root_pid() else {
             self.set_status("Selected session has no local process");
             return;
         };
@@ -3597,16 +3584,6 @@ fn contains_ascii_ci(haystack: &str, lowercase_needle: &str) -> bool {
     h.len() >= n.len()
         && h.windows(n.len())
             .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
-}
-
-/// PID of the currently live agent root, excluding briefly retained exits.
-fn session_root_pid(session: &Session) -> Option<u32> {
-    session
-        .process
-        .as_ref()?
-        .process_list
-        .iter()
-        .find_map(|process| (process.is_root && !process.ghost).then_some(process.pid))
 }
 
 /// The eight characters a Gemini chat file is named after, out of the row id
@@ -4614,7 +4591,7 @@ mod tests {
                 name: "work".to_string(),
                 dir: std::path::PathBuf::from(dir),
             };
-            App::under_profile(vec![command.to_string()], &profile)
+            crate::config::argv_under_profile(vec![command.to_string()], &profile)
         };
         assert_eq!(
             under("/home/x/.codex-work", Provider::Codex, "codex"),
@@ -5820,7 +5797,7 @@ mod tests {
     }
 
     #[test]
-    fn session_root_pid_excludes_ghost_and_child_processes() {
+    fn the_root_pid_excludes_ghost_and_child_processes() {
         let mut session = session("a", true, "x");
         session.process.as_mut().unwrap().process_list = vec![
             crate::proc::ProcEntry {
@@ -5849,7 +5826,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(session_root_pid(&session), Some(3));
+        assert_eq!(session.root_pid(), Some(3));
     }
 
     #[test]

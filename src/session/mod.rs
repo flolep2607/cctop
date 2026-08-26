@@ -464,6 +464,20 @@ impl Session {
         Some(argv.into_iter().map(str::to_string).collect())
     }
 
+    /// PID of this session's live agent root, excluding briefly retained exits.
+    ///
+    /// The one process worth aiming anything at: a session's process list holds
+    /// the agent, whatever it spawned, and — for a moment after they die —
+    /// ghosts, and typing at a child or at something that has already exited is
+    /// a silent no-op rather than an error.
+    pub fn root_pid(&self) -> Option<u32> {
+        self.process
+            .as_ref()?
+            .process_list
+            .iter()
+            .find_map(|process| (process.is_root && !process.ghost).then_some(process.pid))
+    }
+
     /// The working directory a resumed session should start in.
     ///
     /// The agent is being put back where it was, and half of what a transcript

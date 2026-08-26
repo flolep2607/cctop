@@ -2,7 +2,7 @@
 
 use super::columns::COLUMNS;
 use super::theme;
-use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, session_root_pid, tabs};
+use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, tabs};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -1133,7 +1133,7 @@ pub(super) fn draw_batch_blocked(frame: &mut Frame, area: Rect, app: &App, delet
         ),
         BatchKind::Kill => (
             "has no locally controllable process",
-            ms.iter().find(|s| session_root_pid(s).is_none()),
+            ms.iter().find(|s| s.root_pid().is_none()),
         ),
     };
     let lines = vec![

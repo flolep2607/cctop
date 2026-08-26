@@ -72,7 +72,7 @@ pub fn items(app: &App) -> Vec<Item> {
     let subagent = app.on_subagent();
     let running = session.is_running();
     let deleting = app.deleting.contains(&session.key());
-    let has_pid = super::session_root_pid(session).is_some();
+    let has_pid = session.root_pid().is_some();
 
     // A remote row's transcript, process and pty are all on the other machine,
     // so everything that reaches into this filesystem is refused with the host
