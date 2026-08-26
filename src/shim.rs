@@ -7,7 +7,7 @@
 //! byte-for-byte and listens on a unix socket for lines to type on the agent's
 //! behalf.
 //!
-//! It is tmux's trick minus the multiplexing, so the session behaves exactly
+//! It is rmux's trick minus the multiplexing, so the session behaves exactly
 //! like one started directly and needs no root and no kernel opt-in.
 
 use std::fs::File;
@@ -326,7 +326,7 @@ impl Fanout {
     ///
     /// A pty has one size and the agent draws to its edges, so with viewers of
     /// different sizes something has to give: either the small ones crop what
-    /// they cannot fit, or everyone gets the small one's dimensions. tmux takes
+    /// they cannot fit, or everyone gets the small one's dimensions. rmux takes
     /// the second, and so does this — a cropped agent hides exactly the thing
     /// you attached to read, the prompt at the bottom of its screen. The window
     /// `cctop run` was started in shrinks along with the rest and is restored
@@ -525,13 +525,21 @@ fn spawn_on_pty(
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    // The child is on a pty of ours, which is not a tmux pane whatever the
-    // terminal cctop was started from happened to be. Inheriting `$TMUX` would
-    // tell it otherwise: any tmux integration it attempted would address the
-    // pane cctop is drawn in rather than its own, and `tmux new-session` — how a
-    // tab hands its agent to tmux — refuses outright inside one.
-    cmd.env_remove("TMUX");
-    cmd.env_remove("TMUX_PANE");
+    // The child is on a pty of ours, which is not an rmux pane whatever the
+    // terminal cctop was started from happened to be. Inheriting these would
+    // tell it otherwise: any multiplexer integration it attempted would address
+    // the pane cctop is drawn in rather than its own, and `rmux new-session` —
+    // how a tab hands its agent to rmux — refuses outright inside one.
+    //
+    // Five variables and not two, because an rmux pane sets `TMUX` and
+    // `TMUX_PANE` as well as its own pair, plus `TMUX_PROGRAM` pointing at the
+    // shim it answers tmux commands through. Leaving any of the tmux-named
+    // three behind is how a cctop running inside rmux hands the whole set to
+    // its agent — and `RMUX` alone is refused with "no current client", which
+    // reads like a broken launch rather than a nested one.
+    for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
+        cmd.env_remove(var);
+    }
     // A directory that has since been removed would fail the spawn outright, so
     // an unusable one is simply not applied.
     if let Some(cwd) = cwd.filter(|dir| dir.is_dir()) {
@@ -643,7 +651,7 @@ fn pump_output(mut master: File, fan: Arc<Mutex<Fanout>>, echo: Echo) {
 /// hosted agent's questions used to fall into the dark. What an agent does then
 /// is wait out a timeout and assume the least — no keyboard protocol, no
 /// synchronized output, and whichever theme it guesses. A pane cctop hosts was
-/// a worse terminal than a pane tmux hosts, for no reason other than that tmux
+/// a worse terminal than a pane rmux hosts, for no reason other than that rmux
 /// bothers to reply.
 ///
 /// The device-attributes reply is also what unblocks the wait: an application
@@ -793,6 +801,52 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    /// A cctop running inside a multiplexer must not hand its own pane to the
+    /// agent it launches. rmux sets five variables — its own pair, tmux's pair
+    /// for compatibility, and `TMUX_PROGRAM` — and `rmux new-session -A`, which
+    /// is how a tab hands its agent over, refuses to nest under any of them:
+    /// "sessions should be nested with care" for `$TMUX`, and the more
+    /// confusing "no current client" for `$RMUX` alone. A tab that silently
+    /// never opens is what leaking one of these looks like.
+    #[test]
+    #[cfg(unix)]
+    fn a_hosted_agent_inherits_no_pane_of_its_own_parent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let seen = dir.path().join("env.txt");
+        // SAFETY: single-threaded at this point in the test, and the values are
+        // read back out of the child rather than by anything here.
+        unsafe {
+            for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
+                std::env::set_var(var, "leaked");
+            }
+        }
+        let argv: Vec<String> = ["sh", "-c", &format!("env > {}", seen.display())]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut hosted = host(&argv, None).expect("a pty for the child");
+        // `sh` writes the file and exits at once; poll rather than sleep.
+        for _ in 0..200 {
+            if hosted.finished().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        unsafe {
+            for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
+                std::env::remove_var(var);
+            }
+        }
+
+        let env = std::fs::read_to_string(&seen).expect("the child wrote its environment");
+        for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
+            assert!(
+                !env.lines().any(|line| line.starts_with(&format!("{var}="))),
+                "{var} reached the agent:\n{env}"
+            );
+        }
+    }
 
     /// `cctop <word> …` shims the word only when it is really a command, so this
     /// is what stands between a typo and an exec attempt.

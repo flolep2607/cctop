@@ -3,7 +3,7 @@
 //! Typing a prompt at a live agent, resuming a dead one, handing one's work to a
 //! different harness, and answering which harnesses are available to hand it to.
 //! Every one of them already existed for the terminal — [`crate::inject`],
-//! [`crate::tmux`], [`crate::handoff`] — and none of it is reimplemented here.
+//! [`crate::rmux`], [`crate::handoff`] — and none of it is reimplemented here.
 //! What this module is, is the part that has to be different because the caller
 //! is a socket rather than a keypress:
 //!
@@ -16,9 +16,9 @@
 //!   an escape sequence typed into one is not a prompt — it is a keystroke the
 //!   agent's TUI will act on.
 //! - **It never leaves an agent it started unreachable.** A resume or a handoff
-//!   goes into a detached tmux session named the way cctop names them, so the
+//!   goes into a detached rmux session named the way cctop names them, so the
 //!   answer can say how to get to it and the terminal UI lists it as a tab the
-//!   next time it looks. Without tmux there is nowhere to put a process that
+//!   next time it looks. Without rmux there is nowhere to put a process that
 //!   outlives the request, and the action says that instead of starting an agent
 //!   attached to a socket that is about to close.
 //!
@@ -54,10 +54,10 @@ const HANDOFF_SETTLE: std::time::Duration = std::time::Duration::from_millis(150
 pub struct Done {
     /// One sentence for the reader, whether it worked or not.
     pub message: String,
-    /// The tmux session an action started or found, when there is one, so the
+    /// The rmux session an action started or found, when there is one, so the
     /// answer can tell someone at a terminal where their agent went.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tmux: Option<String>,
+    pub rmux: Option<String>,
 }
 
 /// Every failure is a sentence and a status, because the page shows the sentence
@@ -67,7 +67,7 @@ pub type Failed = (u16, String);
 fn done(message: impl Into<String>) -> Result<Done, Failed> {
     Ok(Done {
         message: message.into(),
-        tmux: None,
+        rmux: None,
     })
 }
 
@@ -143,11 +143,11 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     // Named after the session, so resuming it twice reattaches to the agent
     // already doing it rather than starting a rival on one transcript — which no
     // harness coordinates, and which is why the terminal asks before doing it.
-    let name = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
-    if crate::tmux::exists(&name) {
+    let name = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+    if crate::rmux::exists(&name) {
         return Ok(Done {
-            message: format!("Already running — attach with `tmux attach -t {name}`"),
-            tmux: Some(name),
+            message: format!("Already running — attach with `rmux attach -t {name}`"),
+            rmux: Some(name),
         });
     }
     if session.is_running() {
@@ -160,8 +160,8 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     }
     launch(&argv, &name, session.work_dir().as_deref())?;
     Ok(Done {
-        message: format!("Resumed — attach with `tmux attach -t {name}`"),
-        tmux: Some(name),
+        message: format!("Resumed — attach with `rmux attach -t {name}`"),
+        rmux: Some(name),
     })
 }
 
@@ -221,7 +221,7 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
     // an agent still asking the terminal what it can do eats part of whatever
     // is in the input queue, and a half-swallowed path looks like a whole one.
     let opening = handoff::opening_argv(&argv, &line);
-    let name = crate::tmux::free_name(agent);
+    let name = crate::rmux::free_name(agent);
     launch(
         opening.as_ref().unwrap_or(&argv),
         &name,
@@ -235,17 +235,17 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
         let name_for_thread = name.clone();
         std::thread::spawn(move || {
             std::thread::sleep(HANDOFF_SETTLE);
-            if let Some(pid) = crate::tmux::agent_pid(&name_for_thread) {
+            if let Some(pid) = crate::rmux::agent_pid(&name_for_thread) {
                 let _ = crate::inject::send_line(pid, &line);
             }
         });
     }
     Ok(Done {
         message: format!(
-            "Handed {} to {agent} — attach with `tmux attach -t {name}`",
+            "Handed {} to {agent} — attach with `rmux attach -t {name}`",
             brief.summary()
         ),
-        tmux: Some(name),
+        rmux: Some(name),
     })
 }
 
@@ -267,13 +267,13 @@ fn forked(session: &Session, transcript: &std::path::Path) -> Result<Done, Faile
     );
     // A fresh id, so unlike a resume there is nothing to be idempotent about:
     // the copy has never been opened by anything.
-    let name = crate::tmux::free_name("claude");
+    let name = crate::rmux::free_name("claude");
     launch(&argv, &name, session.work_dir().as_deref())?;
     Ok(Done {
         message: format!(
-            "Handed the conversation to a new claude — attach with `tmux attach -t {name}`"
+            "Handed the conversation to a new claude — attach with `rmux attach -t {name}`"
         ),
-        tmux: Some(name),
+        rmux: Some(name),
     })
 }
 
@@ -289,29 +289,29 @@ pub fn agents() -> Vec<String> {
         .collect()
 }
 
-/// Put `argv` in a detached tmux session called `name`.
+/// Put `argv` in a detached rmux session called `name`.
 ///
-/// tmux rather than a bare child process, for a reason that is not stylistic: a
+/// rmux rather than a bare child process, for a reason that is not stylistic: a
 /// connection thread's children die with the request, and an agent needs a
-/// terminal to run in and to still be there afterwards. tmux provides both and
+/// terminal to run in and to still be there afterwards. rmux provides both and
 /// is already how cctop hosts agents it did not start in a tab, so an agent
 /// started from the browser is one the terminal UI lists and can attach to.
 fn launch(argv: &[String], name: &str, cwd: Option<&std::path::Path>) -> Result<(), Failed> {
-    if !crate::tmux::available() {
+    if !crate::rmux::available() {
         return Err((
             503,
-            "starting an agent from the browser needs tmux, which is not \
+            "starting an agent from the browser needs rmux, which is not \
              installed — `cctop` in a terminal can do this without it"
                 .into(),
         ));
     }
-    crate::tmux::prepare(argv, name, cwd);
+    crate::rmux::prepare(argv, name, cwd);
     // `prepare` is best-effort by design: every failure inside it leaves the
     // session absent. That is the one thing worth checking, because a caller
     // told "started" about a session that does not exist has nowhere to go.
-    match crate::tmux::exists(name) {
+    match crate::rmux::exists(name) {
         true => Ok(()),
-        false => Err((503, format!("tmux would not start {}", argv[0]))),
+        false => Err((503, format!("rmux would not start {}", argv[0]))),
     }
 }
 

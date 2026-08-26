@@ -20,6 +20,10 @@ rather than seven browser tabs.
 | [pi](pi/) | github.com/earendil-works/pi | sessions under `$PI_CODING_AGENT_DIR`, default `~/.pi/agent` |
 | [windsurf](windsurf/) | docs.windsurf.com | its session logs |
 
+rmux is mirrored the same way and for the same reason, one directory up in
+[`docs/rmux`](../rmux/): it is not a harness, but cctop drives it by a command
+surface nobody promised to keep.
+
 ## Refreshing it
 
 ```bash

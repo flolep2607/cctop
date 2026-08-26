@@ -12,7 +12,7 @@ pub(super) const MAX_PATH_INPUT: usize = 512;
 /// Longest name a tab will take.
 ///
 /// The bar truncates well before this, so a longer name is one nobody can read
-/// anyway; the cap is here so a paste cannot fill the tmux option with a
+/// anyway; the cap is here so a paste cannot fill the rmux option with a
 /// transcript.
 pub(super) const TAB_NAME_MAX: usize = 64;
 
@@ -110,7 +110,7 @@ impl App {
             Mode::KillConfirm => self.on_key_kill(key),
             Mode::ResumeConfirm => self.on_key_resume(key),
             Mode::TmuxInstall => {
-                self.tmux_install_answer(key.code == KeyCode::Char('y'));
+                self.rmux_install_answer(key.code == KeyCode::Char('y'));
             }
             Mode::QuitConfirm => self.on_key_quit(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
@@ -216,7 +216,7 @@ impl App {
                 None => return false,
             },
             KeyCode::Char('w') => self.close_pane(),
-            // Shifted, because it is the irreversible one: `w` on a tmux-backed
+            // Shifted, because it is the irreversible one: `w` on a rmux-backed
             // pane only detaches, and the key that ends the agent should not be
             // the same key with a slip of a finger.
             KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::SHIFT) => self.kill_pane(),
@@ -1044,13 +1044,13 @@ impl App {
             // and cctop holds the terminal's capture, so without forwarding the
             // click simply went nowhere.
             //
-            // The right button is the exception, and tmux is the reason. With
-            // `mouse` on — which cctop turns on so the wheel scrolls — tmux
+            // The right button is the exception, and rmux is the reason. With
+            // `mouse` on — which cctop turns on so the wheel scrolls — rmux
             // binds `MouseDown3Pane` to its own pane menu, so a right-click
-            // inside an agent opened a tmux popup whose entries split the pane
+            // inside an agent opened a rmux popup whose entries split the pane
             // in two. The binding lives in the server's `root` key table, not in
             // the session, so cctop cannot unbind it without changing the user's
-            // own tmux sessions too; not sending the button is the fix that
+            // own rmux sessions too; not sending the button is the fix that
             // stays inside cctop. No agent cctop hosts asks for right-click, so
             // nothing is lost by keeping it.
             let button = |b| match b {
@@ -1085,7 +1085,7 @@ impl App {
             }
             // The wheel is the agent's, wherever it is pointed — cctop keeps no
             // scrollback of its own, so a pane's history lives in the agent (or
-            // in the tmux around it) and only the agent can scroll it. The pane
+            // in the rmux around it) and only the agent can scroll it. The pane
             // under the pointer, not the focused one, because the wheel says
             // where it is aimed and stealing focus to answer it would move the
             // keyboard out from under someone mid-sentence.

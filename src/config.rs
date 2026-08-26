@@ -80,7 +80,7 @@ pub fn profile_env(provider: Provider) -> Option<(&'static str, &'static Path)> 
 /// `argv` prefixed with the environment that points a harness at `profile`.
 ///
 /// `env VAR=dir <argv>` rather than a variable set on the child process,
-/// because the argv is what gets handed to tmux — which runs it directly, with
+/// because the argv is what gets handed to rmux — which runs it directly, with
 /// no shell to carry an environment for it — and what cctop later reads back
 /// off a running tab to say which account it was started under.
 ///

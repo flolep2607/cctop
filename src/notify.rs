@@ -2,7 +2,7 @@
 //!
 //! cctop is a monitor you look away from, so the one thing it owes you is a
 //! nudge when an agent stops working and starts waiting. Both channels are the
-//! terminal's own: `BEL`, which tmux turns into a `monitor-bell` window flag,
+//! terminal's own: `BEL`, which rmux turns into a `monitor-bell` window flag,
 //! and OSC 9, which iTerm2, Ghostty, kitty, WezTerm and Windows Terminal raise
 //! as a real desktop notification. Neither needs a daemon, a D-Bus connection,
 //! or a crate.

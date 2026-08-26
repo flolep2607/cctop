@@ -66,7 +66,7 @@ mod actions;
 mod chat;
 mod http;
 mod report;
-mod tunnel;
+pub mod tunnel;
 
 use crate::cli;
 use crate::fleet;

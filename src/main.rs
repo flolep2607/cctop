@@ -23,10 +23,10 @@ mod shim;
 // The tabs and their agents are unix-only, but the code that opens them is not
 // cfg'd apart — so Windows gets the same surface with nothing behind it rather
 // than a cfg on every call site. See `shim_stub` for the bargain.
+mod rmux;
 #[cfg(not(unix))]
 #[path = "shim_stub.rs"]
 mod shim;
-mod tmux;
 mod trace;
 mod ui;
 mod update;

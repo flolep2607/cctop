@@ -188,13 +188,12 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         section("Elsewhere"),
         item("A", "Open the agent this cctop launched"),
         item("w", "Bell + desktop alert when a session needs you"),
-        item("W", "Share the agent's terminal to a browser (rmux only)"),
+        item("W", "Share the agent's terminal to a browser"),
         item("h  F8", "Agent integration: what reports to cctop"),
         item("r  F5", "Refresh now"),
         Line::default(),
         section("Environment"),
         item("CCTOP_THEME", "light / dark / auto (default: auto)"),
-        item("CCTOP_MUX", "rmux to run agents under rmux instead of tmux"),
         item("NO_COLOR", "Drop colour; shape and weight carry the state"),
         item(
             "CCTOP_COLUMNS_HIDE",
@@ -340,22 +339,21 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Resume a running session?", lines, 62);
 }
 
-/// Offering to install tmux, which is what would have made the agent about to
+/// Offering to install rmux, which is what would have made the agent about to
 /// start outlive cctop.
-pub(super) fn draw_tmux_install(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(install) = app.tmux_install.as_ref() else {
+pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(install) = app.rmux_install.as_ref() else {
         return;
     };
     let command = install.shown();
-    let sudo = command.starts_with("sudo ");
     let mut lines = vec![
         Line::from(Span::styled(
-            " tmux is not installed.",
+            " rmux is not installed.",
             Style::default().fg(theme::colors().cost_mid),
         )),
         Line::default(),
         Line::from(Span::raw(
-            " With it, agents run inside tmux and survive cctop",
+            " With it, agents run inside rmux and survive cctop",
         )),
         Line::from(Span::raw(
             " closing. Without it, quitting takes them with it.",
@@ -366,13 +364,6 @@ pub(super) fn draw_tmux_install(frame: &mut Frame, area: Rect, app: &App) {
             theme::value(),
         )),
     ];
-    if sudo {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            " Runs in a tab, so sudo can ask you for a password.",
-            theme::dim(),
-        )));
-    }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         " y to install · any other key to start without it",
@@ -384,7 +375,7 @@ pub(super) fn draw_tmux_install(frame: &mut Frame, area: Rect, app: &App) {
     modal(
         frame,
         area,
-        &format!("Install tmux with {}?", install.manager),
+        &format!("Install rmux with {}?", install.manager),
         lines,
         62,
     );
@@ -682,7 +673,7 @@ pub(super) fn draw_launch(
             false => String::new(),
         };
 
-        // The session's own title where cctop knows it. A resumed session's tmux
+        // The session's own title where cctop knows it. A resumed session's rmux
         // name carries the whole session id, which for Codex is a timestamp and a
         // uuid — two of those are identical for far more characters than this
         // column is wide, so the names alone would draw two rows that read the
@@ -1215,7 +1206,7 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
             theme::dim(),
         )),
         Line::from(Span::styled(
-            " Needs the agent under `cctop run`, tmux, or cctop as root.",
+            " Needs the agent under `cctop run`, rmux, or cctop as root.",
             theme::dim(),
         )),
         Line::default(),

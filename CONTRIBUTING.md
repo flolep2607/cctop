@@ -148,8 +148,10 @@ figures all appear as they are — look at what is in frame before committing.
 
 Three traps the script guards, each of which produced a wrong picture first:
 
-- a tmux session named `cctop-*` is adopted by cctop as one of its own tabs, so
-  it attaches to the terminal it is running in;
+- a multiplexer session named `cctop-*` is adopted by cctop as one of its own
+  tabs, so it attaches to the terminal it is running in. cctop drives rmux, and
+  the script drives tmux, so the two no longer collide — the guard stays because
+  the naming rule is what made it a trap, not which daemon held the session;
 - preferring `target/release` over `target/debug` captures whichever is *older*,
   which once shipped a screenshot missing two columns added that afternoon;
 - an SVG would be smaller and sharper, but cctop draws sparklines with eight-dot

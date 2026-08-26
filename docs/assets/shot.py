@@ -14,7 +14,7 @@ the glyphs are rasterised once, from a face known to have them.
     python3 docs/assets/shot.py docs/assets/dashboard.png
     python3 docs/assets/shot.py docs/assets/context.png --keys Tab*7 --size 146x34
 
-The tmux session must NOT be named `cctop-*`: cctop adopts sessions with that
+The session must NOT be named `cctop-*`: cctop adopts sessions with that
 prefix as its own tabs, and would attach to the one it is running in.
 """
 

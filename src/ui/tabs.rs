@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 // tiebreak.
 const QUIET_IS_IDLE: Duration = Duration::from_secs(2);
 
-/// How often a tmux-backed pane re-asks tmux which process the agent is, until
+/// How often a rmux-backed pane re-asks rmux which process the agent is, until
 /// it gets an answer.
 ///
 /// Bounded because the question is asked from the draw loop. It is only asked at
@@ -48,20 +48,20 @@ pub struct Pane {
     /// pane merely *looking at* someone else's session leaves this `None`: `a`
     /// on a session row must not make cctop responsible for its life.
     ///
-    /// For a tmux-backed pane the process here is the tmux *client*, not the
-    /// agent — see [`tmux`](crate::tmux).
+    /// For a rmux-backed pane the process here is the rmux *client*, not the
+    /// agent — see [`rmux`](crate::rmux).
     hosted: Option<crate::shim::Hosted>,
-    /// The tmux session the agent is really in, when there is one.
+    /// The rmux session the agent is really in, when there is one.
     ///
     /// Its presence is what separates closing a pane from ending an agent: with
     /// it, the two are different acts and only the second needs asking about.
-    pub tmux: Option<String>,
+    pub rmux: Option<String>,
     /// The session this pane was opened to resume, named as
-    /// [`tmux::name_for_session`](crate::tmux::name_for_session) names it.
+    /// [`rmux::name_for_session`](crate::rmux::name_for_session) names it.
     ///
-    /// Recorded whether or not tmux is what carries the agent, because it is the
-    /// only durable answer to "is this session already open?" — `tmux` alone is
-    /// `None` on every pane when tmux is not installed, and resuming one
+    /// Recorded whether or not rmux is what carries the agent, because it is the
+    /// only durable answer to "is this session already open?" — `rmux` alone is
+    /// `None` on every pane when rmux is not installed, and resuming one
     /// transcript into two agents is precisely what that question guards.
     pub resumed: Option<String>,
     /// The Claude profile this pane's agent was started under, when it is not
@@ -80,7 +80,7 @@ pub struct Pane {
     /// The agent's own pid, once known, for a pane that is not hosting it
     /// directly. See [`Pane::agent`] for why this is worth chasing.
     agent: Option<u32>,
-    /// When tmux was last asked who the agent is, so an unanswered question is
+    /// When rmux was last asked who the agent is, so an unanswered question is
     /// retried without being retried every frame.
     asked_at: Option<Instant>,
     pub label: String,
@@ -114,7 +114,7 @@ impl Pane {
 
     /// The pid of the agent this pane shows.
     ///
-    /// The same thing as [`Pane::pid`] everywhere except under tmux, where that
+    /// The same thing as [`Pane::pid`] everywhere except under rmux, where that
     /// is the client and this is the agent behind it. Everything asking what the
     /// agent *is doing* — its hooks, its transcript, its row in the table —
     /// wants this one, because that is the process all of it is keyed by.
@@ -128,14 +128,14 @@ impl Pane {
 
     /// Learn which process the agent is, if that is not known yet.
     ///
-    /// It cannot be settled at launch. cctop spawns a tmux *client* and returns;
+    /// It cannot be settled at launch. cctop spawns a rmux *client* and returns;
     /// the server creating the session and spawning the agent inside it happens
     /// on its own time, so for the first moments of a pane's life there is no
-    /// pane to ask about. Once found it is kept — a tmux pane's command outlives
+    /// pane to ask about. Once found it is kept — a rmux pane's command outlives
     /// every client that ever looks at it, so the answer cannot go stale while
     /// this pane is alive to hold it.
     fn find_agent(&mut self) {
-        let Some(name) = self.tmux.as_deref() else {
+        let Some(name) = self.rmux.as_deref() else {
             return;
         };
         if self.agent.is_some()
@@ -146,52 +146,52 @@ impl Pane {
             return;
         }
         self.asked_at = Some(Instant::now());
-        self.agent = crate::tmux::agent_pid(name);
+        self.agent = crate::rmux::agent_pid(name);
         // The first moment the session is known to be there is the first moment
         // its options can be set, and settling it here means it is done once per
         // pane rather than on a timer. Every attach passes through, so a session
         // left by an older cctop is quieted when it is picked up again.
         if self.agent.is_some() {
-            crate::tmux::quiet(name);
-            crate::tmux::mouse(name);
+            crate::rmux::quiet(name);
+            crate::rmux::mouse(name);
             // The one moment the session exists and this pane's label is settled
             // — the callers that rename a pane do it before it is ever pumped.
             // Every other cctop reads the tab's name back off the session, so
             // without this a resumed agent would be one thing here and a uuid
             // next door.
-            crate::tmux::set_label(name, &self.label);
+            crate::rmux::set_label(name, &self.label);
             // Only when there is one to record: an unset option reads back as
             // "the default account", which is exactly what `None` means here.
             if let Some(profile) = &self.profile {
-                crate::tmux::set_profile(name, profile);
+                crate::rmux::set_profile(name, profile);
             }
         }
     }
 
     /// Whether the agent survives this pane going away.
     pub fn outlives_cctop(&self) -> bool {
-        self.tmux.is_some()
+        self.rmux.is_some()
     }
 
     /// Whether ending this pane's agent is cctop's to do.
     ///
     /// False for a pane opened with `a`, which is a window onto an agent started
-    /// somewhere else: there is no pty to drop and no tmux session to kill, so
+    /// somewhere else: there is no pty to drop and no rmux session to kill, so
     /// the pane can be closed but the agent cannot be reached. Asking first is
     /// the difference between a key that declines and a key that appears to work
     /// and does nothing.
     pub fn owns_agent(&self) -> bool {
-        self.hosted.is_some() || self.tmux.is_some()
+        self.hosted.is_some() || self.rmux.is_some()
     }
 }
 
 /// Who owns the agent a pane is opened onto.
 #[derive(Debug, Clone)]
 pub enum Own {
-    /// A tmux session of this name, so the agent outlives cctop. An existing
+    /// A rmux session of this name, so the agent outlives cctop. An existing
     /// session of that name is attached to rather than replaced.
     Tmux(String),
-    /// A tmux session that is already running: attach, never create. Picking one
+    /// A rmux session that is already running: attach, never create. Picking one
     /// from the launcher that has since ended must fail and say so, not quietly
     /// start something new under its name.
     TmuxExisting(String),
@@ -202,18 +202,18 @@ pub enum Own {
 impl Pane {
     /// Start `argv` and open a pane onto it.
     pub fn launch(argv: &[String], cwd: Option<&Path>, own: Own) -> anyhow::Result<Pane> {
-        let tmux = match &own {
+        let rmux = match &own {
             Own::Tmux(name) | Own::TmuxExisting(name) => Some(name.clone()),
             Own::Cctop => None,
         };
         let spawn = match &own {
             Own::Tmux(name) => {
                 // Before the client, not after: the pane's scrollback is fixed
-                // the moment it is made. See [`tmux::prepare`].
-                crate::tmux::prepare(argv, name, cwd);
-                crate::tmux::attach_or_create(argv, name, cwd)
+                // the moment it is made. See [`rmux::prepare`].
+                crate::rmux::prepare(argv, name, cwd);
+                crate::rmux::attach_or_create(argv, name, cwd)
             }
-            Own::TmuxExisting(name) => crate::tmux::attach(name),
+            Own::TmuxExisting(name) => crate::rmux::attach(name),
             Own::Cctop => argv.to_vec(),
         };
         let hosted = crate::shim::host(&spawn, cwd)?;
@@ -225,18 +225,18 @@ impl Pane {
                 label_of(argv)
             )
         })?;
-        // With tmux in the middle the agent's keyboard-protocol request never
+        // With rmux in the middle the agent's keyboard-protocol request never
         // reaches this end; see [`attach::Attach::assume_extended_keys`].
-        if tmux.is_some() {
+        if rmux.is_some() {
             view.assume_extended_keys();
         }
         Ok(Pane {
             pid: hosted.pid,
-            // The agent's name, not the wrapper's: a tab reading `tmux
+            // The agent's name, not the wrapper's: a tab reading `rmux
             // new-session -A -s cctop-claude-32cca860` names the plumbing.
             label: label_of(argv),
             view,
-            tmux,
+            rmux,
             // Filled in by the caller that knows: launching is not resuming, and
             // most launches are not any session in particular.
             resumed: None,
@@ -252,7 +252,7 @@ impl Pane {
     pub fn view_of(pid: u32, label: String) -> Option<Pane> {
         Some(Pane {
             hosted: None,
-            tmux: None,
+            rmux: None,
             resumed: None,
             // Nothing was launched here, so there is no choice to record.
             profile: None,
@@ -269,12 +269,12 @@ impl Pane {
 
     /// End the agent behind this pane for good.
     ///
-    /// Only tmux-backed panes need this. Everywhere else, dropping the pane
+    /// Only rmux-backed panes need this. Everywhere else, dropping the pane
     /// already is the kill — which is the whole reason the two have to be told
-    /// apart once tmux is in the picture.
+    /// apart once rmux is in the picture.
     pub fn kill_agent(&self) -> Result<(), String> {
-        match &self.tmux {
-            Some(name) => crate::tmux::kill(name),
+        match &self.rmux {
+            Some(name) => crate::rmux::kill(name),
             None => Ok(()),
         }
     }
@@ -290,20 +290,20 @@ impl Pane {
     }
 }
 
-/// A tmux session a tab stands for while this cctop holds no client on it.
+/// A rmux session a tab stands for while this cctop holds no client on it.
 ///
-/// Every cctop on this machine shows a tab for every cctop-owned tmux session,
+/// Every cctop on this machine shows a tab for every cctop-owned rmux session,
 /// including the ones another cctop started. Holding a client on all of them
-/// would be the wrong way to do it: tmux would have several clients on one
+/// would be the wrong way to do it: rmux would have several clients on one
 /// window, and the size they argue their way to is nobody's. So an unwatched tab
 /// keeps only this — enough to name it, to say when its agent wants you, and to
 /// attach the moment you switch to it.
 #[derive(Debug, Clone)]
 pub struct Shared {
-    /// The tmux session, which is the tab's identity across every cctop.
+    /// The rmux session, which is the tab's identity across every cctop.
     pub name: String,
     /// What the cctop that started it called the tab. See
-    /// [`tmux::set_label`](crate::tmux::set_label).
+    /// [`rmux::set_label`](crate::rmux::set_label).
     pub label: String,
     /// The agent's own pid, so a tab nobody is attached to can still say that it
     /// is waiting on you — the hooks report under this and need no pane.
@@ -320,9 +320,9 @@ pub struct Shared {
 impl Shared {
     /// Whether the agent has gone quiet long enough to count as waiting for you.
     ///
-    /// The same judgement [`Pane::idle`] makes, from tmux's record of the
+    /// The same judgement [`Pane::idle`] makes, from rmux's record of the
     /// session rather than from a screen — an unwatched tab has no screen. A
-    /// second of slack on top of [`QUIET_IS_IDLE`], because tmux reports this to
+    /// second of slack on top of [`QUIET_IS_IDLE`], because rmux reports this to
     /// the second and the sweep that read it is already up to
     /// [`SHARE_EVERY`](super::SHARE_EVERY) old: without it a busy agent flickers
     /// idle between sweeps.
@@ -366,9 +366,9 @@ impl Tab {
         }
     }
 
-    /// A tab for a tmux session this cctop has not attached to — one another
+    /// A tab for a rmux session this cctop has not attached to — one another
     /// cctop started, or one this cctop left when you switched away.
-    pub fn shared(agent: &crate::tmux::Running) -> Tab {
+    pub fn shared(agent: &crate::rmux::Running) -> Tab {
         Tab {
             panes: Vec::new(),
             focus: 0,
@@ -397,11 +397,11 @@ impl Tab {
         self.panes.is_empty() && self.shared.is_some()
     }
 
-    /// The tmux sessions this tab stands for, whether attached or not.
+    /// The rmux sessions this tab stands for, whether attached or not.
     pub fn sessions(&self) -> impl Iterator<Item = &str> {
         self.panes
             .iter()
-            .filter_map(|pane| pane.tmux.as_deref())
+            .filter_map(|pane| pane.rmux.as_deref())
             .chain(self.shared.iter().map(|s| s.name.as_str()))
     }
 
@@ -409,7 +409,7 @@ impl Tab {
     ///
     /// Only ever called on the way to looking at the tab, which is what makes
     /// the trade sound: at most one cctop is being *used* on a session at a time,
-    /// so at most one of them holds the client whose size tmux fits the window
+    /// so at most one of them holds the client whose size rmux fits the window
     /// to.
     pub fn attach(&mut self) -> anyhow::Result<()> {
         let Some(shared) = self.shared.clone() else {
@@ -424,7 +424,7 @@ impl Tab {
         // above — which is the label already, but only by coincidence.
         pane.label = shared.label;
         // Reattaching is not relaunching, so nothing here chose an account —
-        // this is the one the session was started under, read back off tmux by
+        // this is the one the session was started under, read back off rmux by
         // the sweep that found it or kept from the pane this tab last had.
         pane.profile = shared.profile;
         self.panes = vec![pane];
@@ -435,7 +435,7 @@ impl Tab {
 
     /// Give up this cctop's client on the session, keeping the tab.
     ///
-    /// Dropping the pane kills the tmux client and nothing else — the session,
+    /// Dropping the pane kills the rmux client and nothing else — the session,
     /// and the agent in it, carry on for whichever cctop looks next. Declines for
     /// anything that could not be rebuilt from a session name: a split, a pty
     /// cctop owns and would therefore *end* here, or a pane merely looking at
@@ -444,14 +444,14 @@ impl Tab {
         let [pane] = &self.panes[..] else {
             return false;
         };
-        let Some(name) = pane.tmux.clone() else {
+        let Some(name) = pane.rmux.clone() else {
             return false;
         };
         self.shared = Some(Shared {
             name,
             label: pane.label.clone(),
             pid: Some(pane.agent()),
-            // Nothing has been read off tmux for this tab yet, and the pane it
+            // Nothing has been read off rmux for this tab yet, and the pane it
             // is replacing was on screen a moment ago. The next sweep fills it.
             activity: None,
             profile: pane.profile.clone(),
@@ -463,7 +463,7 @@ impl Tab {
 
     /// Call the tab something other than the command that started it.
     ///
-    /// Written onto the tmux session as well as the pane, because the label is
+    /// Written onto the rmux session as well as the pane, because the label is
     /// how every *other* cctop names this tab — and how this one names it again
     /// after a detach. A rename only the pane remembered would come back as the
     /// old name the moment either happened.
@@ -472,12 +472,12 @@ impl Tab {
     /// first pane with a count of the rest, so that is the label the bar shows.
     pub fn rename(&mut self, name: String) {
         if let Some(pane) = self.panes.first_mut() {
-            if let Some(session) = pane.tmux.as_deref() {
-                crate::tmux::set_label(session, &name);
+            if let Some(session) = pane.rmux.as_deref() {
+                crate::rmux::set_label(session, &name);
             }
             pane.label = name;
         } else if let Some(shared) = self.shared.as_mut() {
-            crate::tmux::set_label(&shared.name, &name);
+            crate::rmux::set_label(&shared.name, &name);
             shared.label = name;
         }
     }
@@ -538,7 +538,7 @@ impl Tab {
     /// The focused pane never asks: you are looking straight at it.
     ///
     /// `known` is asked about [`Pane::agent`] and not the pid cctop hosts, which
-    /// is the difference between a tmux-backed tab that knows what its agent is
+    /// is the difference between a rmux-backed tab that knows what its agent is
     /// doing and one reduced to guessing from its screen.
     pub fn attention(
         &self,
@@ -552,14 +552,14 @@ impl Tab {
         if let Some(shared) = &self.shared {
             return match shared.pid.and_then(&known) {
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
-                // The held-prompt shape, read off tmux's record of the session
+                // The held-prompt shape, read off rmux's record of the session
                 // instead of a screen. See the pane arm below for why a tool in
                 // flight over a still terminal is a question.
                 Some(crate::hook::Signal::Acting) => shared.idle().then_some(Attention::NeedsInput),
                 Some(signal) if signal.is_working() => None,
                 Some(_) => Some(Attention::Idle),
                 // No hooks, so the fallback is the same one a pane uses — that
-                // the thing has stopped drawing — asked of tmux instead of a
+                // the thing has stopped drawing — asked of rmux instead of a
                 // screen this cctop does not have.
                 None => shared.idle().then_some(Attention::Idle),
             };
@@ -647,8 +647,8 @@ pub fn harnesses() -> Vec<Vec<String>> {
 /// One line of the launcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
-    /// An agent cctop left running in tmux, from this run or an earlier one.
-    Waiting(crate::tmux::Running),
+    /// An agent cctop left running in rmux, from this run or an earlier one.
+    Waiting(crate::rmux::Running),
     /// A command to start fresh.
     Start(Vec<String>),
 }
@@ -656,7 +656,7 @@ pub enum Choice {
 impl Choice {
     pub fn label(&self) -> String {
         match self {
-            // The tmux name is `cctop-<what>`; the prefix is true of every one
+            // The rmux name is `cctop-<what>`; the prefix is true of every one
             // of them and so tells the reader nothing.
             Choice::Waiting(agent) => agent
                 .name
@@ -680,23 +680,23 @@ impl Choice {
     }
 }
 
-/// What the launcher offers: the agents still running in tmux first, then the
+/// What the launcher offers: the agents still running in rmux first, then the
 /// commands that start a new one.
 ///
 /// Agents outliving cctop is only half of the bargain — the other half is being
 /// able to get back to them. Without this they survive somewhere unnameable,
-/// reachable only by knowing to run `tmux attach` yourself, which is a worse
+/// reachable only by knowing to run `rmux attach` yourself, which is a worse
 /// deal than the panes that simply died.
 ///
-/// `open` is the tmux sessions already on screen in this cctop; they are left
+/// `open` is the rmux sessions already on screen in this cctop; they are left
 /// out, since a second client onto one agent only makes the two panes argue
 /// about the window size.
 ///
-/// A session attached from *elsewhere* — a `tmux attach` in another terminal —
+/// A session attached from *elsewhere* — a `rmux attach` in another terminal —
 /// is still offered. It has the same problem, but hiding a running agent is the
 /// worse of the two failures, so it is shown and labelled instead.
 pub fn choices(open: &[String]) -> Vec<Choice> {
-    crate::tmux::running()
+    crate::rmux::running()
         .into_iter()
         .filter(|agent| !open.contains(&agent.name))
         .map(Choice::Waiting)
@@ -710,7 +710,7 @@ pub fn choices(open: &[String]) -> Vec<Choice> {
 pub fn label_of(argv: &[String]) -> String {
     // `env VAR=value claude` is a `claude` tab. The prefix is how the agent was
     // started, which is plumbing, and naming a tab after its plumbing is the
-    // same mistake as calling one `tmux new-session -A -s cctop-claude`.
+    // same mistake as calling one `rmux new-session -A -s cctop-claude`.
     let mut argv = argv;
     if argv.first().map(String::as_str) == Some("env") {
         let mut rest = &argv[1..];
@@ -763,7 +763,7 @@ mod tests {
 
     /// A tab launched under a profile is still a `claude` tab. The `env` prefix
     /// is how it was started, and naming a tab after its plumbing is the same
-    /// mistake as calling one `tmux new-session -A -s cctop-claude`.
+    /// mistake as calling one `rmux new-session -A -s cctop-claude`.
     #[test]
     fn a_profile_prefix_does_not_become_the_tab_name() {
         let argv: Vec<String> = ["env", "CLAUDE_CONFIG_DIR=/home/x/.claude-work", "claude"]
@@ -810,7 +810,7 @@ mod tests {
     fn the_launcher_offers_what_is_running_before_what_is_new() {
         let starts = harnesses().len();
         let plain = choices(&[]);
-        // Whatever tmux happens to be holding, the "start new" block is intact
+        // Whatever rmux happens to be holding, the "start new" block is intact
         // and comes last.
         assert_eq!(
             plain
@@ -838,14 +838,14 @@ mod tests {
         }
     }
 
-    /// A session as tmux would describe it, with `ago` seconds since it last
+    /// A session as rmux would describe it, with `ago` seconds since it last
     /// drew anything.
-    fn session(name: &str, label: Option<&str>, ago: u64) -> crate::tmux::Running {
+    fn session(name: &str, label: Option<&str>, ago: u64) -> crate::rmux::Running {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        crate::tmux::Running {
+        crate::rmux::Running {
             name: name.to_string(),
             pid: Some(4321),
             cwd: None,
@@ -860,7 +860,7 @@ mod tests {
     fn ringing_tab(bell: &[u8]) -> Tab {
         let mut pane = Pane {
             hosted: None,
-            tmux: None,
+            rmux: None,
             resumed: None,
             profile: None,
             pid: 4321,
@@ -962,7 +962,7 @@ mod tests {
 
     /// A tab this cctop holds no client on still has to blink: that is the whole
     /// point of showing another cctop's agents. It has no screen to read, so the
-    /// hooks answer, and tmux's own record of the session answers when they
+    /// hooks answer, and rmux's own record of the session answers when they
     /// cannot.
     #[test]
     fn an_unwatched_tab_still_says_when_its_agent_wants_you() {
@@ -1000,7 +1000,7 @@ mod tests {
             "an agent still repainting mid-tool is working, not asking"
         );
 
-        // No hooks: tmux's last-output time is the fallback the missing screen
+        // No hooks: rmux's last-output time is the fallback the missing screen
         // would have provided.
         let unreported = |_: u32| None;
         assert_eq!(quiet.attention(false, &unreported), Some(Attention::Idle));
@@ -1019,9 +1019,9 @@ mod tests {
         assert!(tab.reap());
     }
 
-    /// A still-running agent in the launcher, as tmux would have described it.
+    /// A still-running agent in the launcher, as rmux would have described it.
     fn waiting(name: &str) -> Choice {
-        Choice::Waiting(crate::tmux::Running {
+        Choice::Waiting(crate::rmux::Running {
             name: name.to_string(),
             pid: Some(4321),
             cwd: Some(std::path::PathBuf::from("/home/x/proj")),
@@ -1053,19 +1053,19 @@ mod tests {
         assert_eq!(Choice::Start(vec!["claude".into()]).cwd(), None);
     }
 
-    /// The thing tmux breaks if nobody accounts for it: the pid cctop hosts is
-    /// the tmux client, so everything the agent reports about itself is filed
+    /// The thing rmux breaks if nobody accounts for it: the pid cctop hosts is
+    /// the rmux client, so everything the agent reports about itself is filed
     /// under a pid nothing on this side would ever ask about. A tab that asked
     /// the wrong one would fall back to reading the screen for exactly the panes
     /// where the agent is talking.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_tmux_backed_tab_asks_about_the_agent_and_not_the_client() {
-        // A pane standing in for a tmux client: what cctop hosts is one pid, and
+    fn a_rmux_backed_tab_asks_about_the_agent_and_not_the_client() {
+        // A pane standing in for a rmux client: what cctop hosts is one pid, and
         // the agent behind it is another.
         let (_child, client_pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut pane = Pane::view_of(client_pid, "claude".into()).expect("attach");
-        pane.tmux = Some("cctop-claude-abc".into());
+        pane.rmux = Some("cctop-claude-abc".into());
         let agent_pid = client_pid + 1_000;
         pane.agent = Some(agent_pid);
         assert_eq!(pane.agent(), agent_pid);
@@ -1159,16 +1159,16 @@ mod tests {
         }
     }
 
-    /// The trade that keeps several cctops off one tmux window: the tab you
+    /// The trade that keeps several cctops off one rmux window: the tab you
     /// leave gives up its client and keeps everything needed to take one back.
-    /// Only a lone tmux-backed pane may do it — a pty cctop owns would be
+    /// Only a lone rmux-backed pane may do it — a pty cctop owns would be
     /// *ended* by this, and a split cannot be rebuilt from one session name.
     #[cfg(target_os = "linux")]
     #[test]
-    fn leaving_a_tmux_tab_gives_up_its_client_and_nothing_else() {
+    fn leaving_a_rmux_tab_gives_up_its_client_and_nothing_else() {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut pane = Pane::view_of(pid, "claude · Improve super cctop".into()).expect("attach");
-        pane.tmux = Some("cctop-claude-abc".into());
+        pane.rmux = Some("cctop-claude-abc".into());
         let agent_pid = pid + 1_000;
         pane.agent = Some(agent_pid);
 
@@ -1183,18 +1183,18 @@ mod tests {
         assert_eq!(shared.pid, Some(agent_pid));
         assert_eq!(tab.title(), "claude · Improve super cctop");
 
-        // A pane with no tmux behind it: dropping it is the kill, so it stays.
+        // A pane with no rmux behind it: dropping it is the kill, so it stays.
         let mut owned = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
         assert!(!owned.detach());
         assert!(owned.shared.is_none());
 
         // A split has two sessions and one tab; there is nothing to attach back.
         let mut split = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
-        split.panes[0].tmux = Some("cctop-claude-abc".into());
+        split.panes[0].rmux = Some("cctop-claude-abc".into());
         split
             .panes
             .push(Pane::view_of(pid, "shell".into()).expect("attach"));
-        split.panes[1].tmux = Some("cctop-zsh".into());
+        split.panes[1].rmux = Some("cctop-zsh".into());
         assert!(!split.detach());
         assert_eq!(split.panes.len(), 2);
 

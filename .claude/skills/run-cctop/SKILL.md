@@ -7,7 +7,8 @@ cctop is a Rust TUI that watches *other* agents' sessions, so running it needs
 two things a clean machine lacks: sessions to show, and a terminal to draw in.
 `.claude/skills/run-cctop/driver.sh` supplies both — it writes a throwaway
 `$HOME` full of fake transcripts and drives the TUI inside a private tmux
-server. Start there; `cargo run` on its own draws an empty table.
+server. That tmux is the driver's terminal, not cctop's backend — cctop hands
+agents to rmux. Start there; `cargo run` on its own draws an empty table.
 
 Paths are relative to the repo root.
 
@@ -119,17 +120,20 @@ cargo publish --dry-run --allow-dirty
   `HOME=/tmp/x tmux new-session … cctop` silently gives cctop the real `$HOME` —
   it reads the operator's sessions and you never notice. Use `-e HOME=…`, as
   the driver does.
-- **cctop adopts every cctop-owned tmux session on the server as a tab.** Run
-  it on the default socket and tab 2 is somebody's live agent, displayed and
-  *typeable* — inside a pane only the function keys stay cctop's, so a stray
-  `Down` goes to that agent. The driver uses a private socket (`tmux -L
-  cctopdrv`) so cctop sees only its own server, and sends F12 on startup.
-- **The launcher cannot start an agent from inside tmux.** cctop runs `tmux
-  new-session -A`, which refuses to nest under a `$TMUX` it can see; the status
-  line says `Started codex …` and no session appears. `up --spawn` runs cctop
-  through a wrapper that unsets `TMUX`, which does work — at the price of the
-  bullet above, and any session it starts outlives the driver on the *default*
-  server.
+- **cctop adopts every cctop-owned `rmux` session on the machine as a tab.**
+  Since 0.8 cctop drives rmux and not tmux, so the driver's own tmux server is
+  invisible to it — but a real `cctop-*` rmux session belonging to the operator
+  is not, and it lands in tab 2 displayed and *typeable*: inside a pane only the
+  function keys stay cctop's, so a stray `Down` goes to that agent. The driver
+  still uses a private tmux socket (`tmux -L cctopdrv`) and sends F12 on
+  startup; if the machine has live `cctop-*` rmux sessions, expect them.
+- **The launcher cannot start an agent from inside a multiplexer.** cctop runs
+  `rmux new-session -A`, which refuses to nest under a `$RMUX`/`$TMUX` it can
+  see; the status line says `Started codex …` and no session appears. cctop's
+  own pty shim strips both pairs plus `TMUX_PROGRAM`, so an agent it launches is
+  clean — what is not clean is a cctop the driver started *inside* tmux, which
+  is why `up --spawn` runs it through a wrapper that unsets `TMUX`. Any session
+  that wrapper starts outlives the driver, on the rmux daemon.
 - **`CI=1` skips the first-run prompt** that offers to write shell aliases into
   `~/.zshrc` and `~/.bashrc` (`src/main.rs:254`). Without it the app waits on
   stdin for `y`/`n` behind the alias question and never draws. Never run

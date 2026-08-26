@@ -134,8 +134,8 @@ impl vt100::Callbacks for Signals {
 
 /// Lines of the agent's output cctop keeps behind the top of a pane.
 ///
-/// Only ever scrolled by a pane with no multiplexer behind it: under tmux the
-/// wheel goes to tmux, whose history is both deeper and cheaper. This one is not
+/// Only ever scrolled by a pane with no multiplexer behind it: under rmux the
+/// wheel goes to rmux, whose history is both deeper and cheaper. This one is not
 /// cheap — every row is a full-width array of 32-byte cells, so a pane that has
 /// scrolled this far has ~20MB behind it at a normal width. Enough to find what
 /// just went past, which is what the wheel is reached for, and short of the cost
@@ -304,12 +304,16 @@ impl Attach {
 
     /// Send keys in their extended form without waiting to be asked.
     ///
-    /// For a pane with tmux between cctop and the agent, where the request never
-    /// arrives: tmux answers the agent's keyboard-protocol calls itself and says
+    /// For a pane with rmux between cctop and the agent, where the request never
+    /// arrives: rmux answers the agent's keyboard-protocol calls itself and says
     /// nothing about them to its own client. Sending anyway is safe in exactly
-    /// that case, and only there — tmux forwards an extended key to a pane whose
-    /// program asked for one and *drops* it for a program that did not, so a
-    /// shell in a tab is never handed a sequence it would print as text.
+    /// that case, and only there — rmux forwards an extended key to a pane whose
+    /// program asked for one, and rewrites it to the plain key for a program
+    /// that did not. Measured against rmux 0.10 with `cat -v` in the pane: a
+    /// `CSI 13 ; 2 u` written into the client arrives as a newline, not as the
+    /// eight characters of the sequence. So a shell in a tab is never handed
+    /// something it would print as text, which is the whole risk of sending a
+    /// key nobody asked for.
     pub fn assume_extended_keys(&mut self) {
         self.assume_extended = true;
     }
@@ -438,7 +442,7 @@ impl Attach {
     /// Scroll the wheel at `(col, row)`, given pane-relative and zero-based.
     ///
     /// Goes to the agent only if the agent asked for mouse reporting — under
-    /// tmux it always has, and scrolling is then tmux's copy-mode, which is the
+    /// rmux it always has, and scrolling is then rmux's copy-mode, which is the
     /// history the agent actually has. Nothing else may be sent one: a pty
     /// filters nothing, so an application that never enabled tracking would read
     /// the report as the keystrokes its bytes spell, and a wheel over a plain
@@ -631,7 +635,7 @@ pub enum MouseButton {
     Left,
     Middle,
     /// Encoded but never sent: `on_mouse` drops the right button before it gets
-    /// here, because under tmux it opens tmux's own pane menu over the agent.
+    /// here, because under rmux it opens rmux's own pane menu over the agent.
     /// The arm stays so the encoding is complete if that ever changes — hence
     /// `allow` rather than removing the variant.
     #[allow(dead_code)]
@@ -956,9 +960,12 @@ fn read_event(decoder: &mut frame::Decoder) -> Option<Event> {
 /// that every agent's prompt is built around.
 ///
 /// `CSI 13 ; <mods> u` is the kitty spelling. Nothing here sends xterm's
-/// `CSI 27 ; <mods> ; 13 ~`, which says the same thing: tmux rewrites either
+/// `CSI 27 ; <mods> ; 13 ~`, which says the same thing: rmux rewrites either
 /// into the kitty form on its way to the pane, and both harnesses that ask for
-/// anything ask for kitty.
+/// anything ask for kitty. rmux's own Kitty *negotiation* is deferred — 0.9
+/// turned the incomplete half off and kept xterm's `modifyOtherKeys` — but that
+/// is about what rmux advertises to a program, not what it passes along, and
+/// what it passes along is what this depends on.
 ///
 /// `None` for everything else, so each key keeps the one encoding every agent
 /// already reads. Two dialects for one key is how one of them quietly stops
@@ -1330,7 +1337,7 @@ mod tests {
         assert!(attach.wheel(true, 2, 8));
         assert!(written.lock().unwrap().is_empty());
 
-        // 1000 turns tracking on, 1006 selects SGR — what tmux sends the moment
+        // 1000 turns tracking on, 1006 selects SGR — what rmux sends the moment
         // `mouse` is on, and what any modern application asks for.
         attach.parser.process(b"\x1b[?1000h\x1b[?1006h");
         assert!(attach.wheel(true, 2, 8));

@@ -244,7 +244,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app),
         Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
         Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app),
-        Mode::TmuxInstall => modals::draw_tmux_install(frame, area, app),
+        Mode::TmuxInstall => modals::draw_rmux_install(frame, area, app),
         Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
         Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
         Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),
@@ -474,7 +474,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         // Scrolled back, this pane is showing history rather than the agent, and
         // there is nothing on a still screen to say so — the agent may well be
         // working below it. Only cctop's own history says anything here: a pane
-        // scrolled inside tmux is in tmux's copy-mode, which draws its own.
+        // scrolled inside rmux is in rmux's copy-mode, which draws its own.
         let behind = pane.view.parser.screen().scrollback();
         if behind > 0 {
             block = block.title_bottom(
