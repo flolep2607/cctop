@@ -52,6 +52,26 @@
   .ctx { display: inline-block; width: 46px; height: 5px; border-radius: 3px;
          background: var(--line); overflow: hidden; vertical-align: middle; }
   .ctx i { display: block; height: 100%; background: var(--dim); }
+
+  /* A session that is waiting, with the box for answering it. The row stays a
+     link to the whole session; the form sits under it rather than inside it,
+     because a form inside an anchor is neither valid nor operable. */
+  .wanting { border-top: 1px solid var(--line); }
+  .wanting:first-child { border-top: 0; }
+  .wanting .row { border-top: 0; }
+  form.say { display: flex; gap: 8px; padding: 0 14px 11px 32px; }
+  form.say input {
+    flex: 1 1 auto; min-width: 0; font: inherit; font-size: 13px; padding: 6px 9px;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  form.say input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  form.say button {
+    font: inherit; font-size: 13px; padding: 0 13px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
+  }
+  form.say button:disabled { opacity: .5; cursor: default; }
+  form.say .said { font-size: 12px; align-self: center; color: var(--faint); }
+  form.say .said.bad { color: var(--red); }
   .ctx i.hot { background: var(--amber); }
   .ctx i.full { background: var(--red); }
 
@@ -102,6 +122,9 @@
 "use strict";
 const TOKEN = "__CCTOP_TOKEN__";
 const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
+// Whether this run serves the routes that act on a session. Substituted by the
+// server, so the answer box is never drawn for a page that could not send it.
+const CAN_ACT = "__CCTOP_ACTIONS__";
 
 // Every string from a transcript — titles, branches, paths, model names — is
 // written through textContent or this. None of it is trusted markup, and a
@@ -281,6 +304,65 @@ function rowFor(s) {
   return row;
 }
 
+// Answering a waiting agent from the list, which is the whole point of the
+// card it sits in: a page that says "this one needs you" and cannot be replied
+// to has shown someone a problem and kept the fix.
+//
+// One line, because that is what submitting to a pty is — the server refuses a
+// newline rather than sending half of a paragraph.
+function answerBox(s) {
+  if (!CAN_ACT || !s.running) return null;
+  const form = el("form", "say");
+  const input = el("input");
+  input.type = "text";
+  input.maxLength = 4000;
+  input.autocomplete = "off";
+  input.placeholder = "Answer this session…";
+  const send = el("button", null, "Send");
+  send.type = "submit";
+  const said = el("span", "said", "");
+  form.appendChild(input);
+  form.appendChild(send);
+  form.appendChild(said);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    send.disabled = true;
+    said.className = "said";
+    said.textContent = "…";
+    try {
+      const response = await fetch(
+        "/api/act/send/" + encodeURIComponent(s.session_id) + QUERY,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      );
+      const body = (await response.text()).trim();
+      if (!response.ok) throw new Error(body || response.statusText);
+      input.value = "";
+      said.textContent = "sent";
+    } catch (e) {
+      said.className = "said bad";
+      said.textContent = String(e.message || e);
+    } finally {
+      send.disabled = false;
+    }
+  });
+  return form;
+}
+
+// A row in the attention card: the link, and the box for replying to it.
+function wantingNode(s) {
+  const box = el("div", "wanting");
+  box.appendChild(rowFor(s));
+  const say = answerBox(s);
+  if (say) box.appendChild(say);
+  return box;
+}
+
 function render() {
   const shown = sessions
     .filter((s) => matches(s, filter))
@@ -301,7 +383,36 @@ function render() {
 
   const attention = document.getElementById("attention");
   const attentionRows = document.getElementById("attention-rows");
-  attentionRows.replaceChildren(...wanting.map(rowFor));
+  // Rebuilt on every refresh, so a half-typed answer would be thrown away
+  // twice a second — along with the focus and the cursor, which is worse: the
+  // rest of the word goes into a box that no longer exists. What is typed, what
+  // was focused and where the caret sat all cross over.
+  const typed = new Map();
+  let focused = null;
+  let caret = 0;
+  for (const form of attentionRows.querySelectorAll("form.say")) {
+    const input = form.querySelector("input");
+    if (!form.dataset.session) continue;
+    if (input.value) typed.set(form.dataset.session, input.value);
+    if (document.activeElement === input) {
+      focused = form.dataset.session;
+      caret = input.selectionStart;
+    }
+  }
+  attentionRows.replaceChildren(...wanting.map((s) => {
+    const node = wantingNode(s);
+    const form = node.querySelector("form.say");
+    if (!form) return node;
+    form.dataset.session = s.session_id;
+    const input = form.querySelector("input");
+    const carried = typed.get(s.session_id);
+    if (carried) input.value = carried;
+    if (focused === s.session_id) {
+      input.focus();
+      input.setSelectionRange(caret, caret);
+    }
+    return node;
+  }));
   attention.hidden = wanting.length === 0;
   document.getElementById("attention-heading").textContent =
     wanting.length === 1 ? "1 session needs you" : wanting.length + " sessions need you";

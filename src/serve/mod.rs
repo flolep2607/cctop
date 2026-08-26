@@ -4,15 +4,29 @@
 //! pays off while someone is looking at the terminal. Agents sit amber for
 //! twenty minutes because the person who could answer them is in a meeting.
 //! This is the same data on a surface they have with them: a page that streams
-//! the rows over SSE, and a per-session report that answers the question the
-//! live table cannot, which is where an afternoon's money went.
+//! the rows over SSE, a per-session report that answers the question the live
+//! table cannot — where an afternoon's money went — the conversation itself,
+//! what the session has edited, what it is allowed to reach, and a prompt box
+//! for answering the agent that was waiting.
 //!
-//! **Read-only, deliberately.** Nothing here starts, stops, resumes or types at
-//! anything — the same line [`crate::mcp`] and [`crate::fleet`] draw, for a
-//! sharper reason: those speak to a local agent and an ssh session that already
-//! authenticated. This listens on a socket. A bug in a route that only ever
-//! reads is a disclosure; the same bug in one that writes is someone else's
-//! agent taking an action in your repository.
+//! # It can act, and that is a decision with a cost
+//!
+//! This started read-only, and the argument for that is still true: a bug in a
+//! route that only reads is a disclosure, and the same bug in one that writes is
+//! someone else's agent taking an action in your repository. What changed is
+//! what the page is for. A dashboard that says an agent has been waiting twenty
+//! minutes, on a phone, from a meeting, and cannot answer it, has shown you a
+//! problem and withheld the fix. So [`actions`] can type a prompt at a live
+//! session, resume a dead one, and hand one's work to a different harness —
+//! nothing that destroys work, and nothing the terminal UI could not already do.
+//!
+//! The whole authorisation is the token in the URL, and that is worth stating
+//! plainly rather than burying: **whoever holds the link can drive the agents on
+//! this machine.** Hence the defaults — loopback, a token, and both of
+//! `--no-token` and `--no-actions` able to take the acting half away. On top of
+//! the token, an action must be a `POST` carrying a JSON body, which is what
+//! stops a page in another tab from firing one with a token it cannot read; see
+//! [`http`] for why that pairing and not a header of our own invention.
 //!
 //! # What guards the socket
 //!
@@ -21,11 +35,15 @@
 //! - **A token on every request**, generated per run, carried in the URL. The
 //!   URL is therefore the credential, which is what makes the link shareable
 //!   over whatever channel the user already trusts — and what makes `--no-token`
-//!   a thing to justify rather than a convenience.
+//!   a thing to justify rather than a convenience. It also gates the actions:
+//!   no token, no acting, because there would be nothing left to authorise with.
+//! - **Nothing destructive.** No route stops an agent, kills a process or
+//!   deletes a transcript. Those stay in the terminal, where the confirmation
+//!   prompt is.
 //! - **Bounded everything.** [`MAX_CONNECTIONS`] threads, one snapshot shared
 //!   between them, and reads deadlined in [`http`]. The expensive work — a full
-//!   transcript parse — happens on the report route alone, for one session, on
-//!   request.
+//!   transcript parse — happens on the routes that need one, for one session, on
+//!   request: the report, the conversation, and a handoff's brief.
 //!
 //! # Why a thread per connection
 //!
@@ -40,6 +58,8 @@
 //! answer there is the tunnel the user already has (ssh, Tailscale), which also
 //! authenticates rather than merely encrypting.
 
+mod actions;
+mod chat;
 mod http;
 mod report;
 
@@ -95,6 +115,12 @@ const FULL_WALK: Duration = Duration::from_secs(30);
 /// something is written at it.
 const SSE_KEEPALIVE: Duration = Duration::from_secs(20);
 
+/// What a request naming no session, or an ambiguous prefix of one, is told.
+///
+/// One string because four routes say it, and four spellings of one refusal is
+/// how a page comes to show three different messages for the same mistake.
+const NO_SUCH_SESSION: &str = "no session with that id, or the prefix matches more than one";
+
 /// The dashboard, and the report page, with their assets already inlined.
 ///
 /// `include_str!` rather than a directory served off disk: an installed cctop
@@ -115,6 +141,14 @@ const COMMON_CSS: &str = include_str!("assets/common.css");
 struct Shared {
     /// The per-run access token, or empty under `--no-token`.
     token: String,
+    /// Whether the routes that act on a session answer at all.
+    ///
+    /// The token is what makes them safe to have, so `--no-token` turns them
+    /// off and `--no-actions` turns them off for someone who wants the page and
+    /// not the buttons. Read on every action request rather than only when the
+    /// page is built: a page cached from a run that had them on must not be able
+    /// to act on a run that has them off.
+    actions: bool,
     plan: Plan,
     /// The latest snapshot, and a version that only ever increases.
     ///
@@ -155,7 +189,7 @@ struct Remotes {
 }
 
 pub const HELP: &str = "\
-cctop serve — the session table in a browser, read-only
+cctop serve — the session table, and the sessions themselves, in a browser
 
 USAGE:
   cctop serve [OPTIONS]
@@ -167,7 +201,10 @@ OPTIONS:
   --port <PORT>    Port to listen on [default: 7777]. Without this flag a busy
                    port is stepped past; with it, a busy port is an error
   --no-token       Serve without an access token. Every process and user on the
-                   machine can then read your sessions
+                   machine can then read your sessions — and since the token is
+                   what authorises an action, this also turns actions off
+  --no-actions     Serve the pages without the buttons: no prompts, no resuming,
+                   no handing a session to another agent
   --plan <PLAN>    Billing plan for cost figures: retail, max, or included
                    [default: retail]
   --delay <SECS>   Seconds between refreshes [default: 2]
@@ -175,7 +212,10 @@ OPTIONS:
                    Repeatable; same syntax as `cctop --host`
   -h, --help       Print this help
 
-The page is read-only: it starts nothing, stops nothing, and types at nothing.
+The page shows each session's conversation, what it edited, and what it can
+reach, and it can send a prompt to a live session, resume a dead one, or hand
+one to a different agent. Whoever holds the link can do all of that, which is
+why the link carries a token and the default is loopback only.
 ";
 
 /// Parse `cctop serve`'s own flags and run the server until interrupted.
@@ -188,6 +228,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let mut port = DEFAULT_PORT;
     let mut port_given = false;
     let mut no_token = false;
+    let mut no_actions = false;
     let mut plan = Plan::Retail;
     let mut delay = Duration::from_secs(2);
     let mut hosts: Vec<String> = Vec::new();
@@ -212,6 +253,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
                 port_given = true;
             }
             "--no-token" => no_token = true,
+            "--no-actions" => no_actions = true,
             "--plan" => {
                 let given = value()?;
                 plan = Plan::parse(&given).ok_or_else(|| {
@@ -235,10 +277,27 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let listener = listen(&bind, port, port_given)?;
     let addr = listener.local_addr()?;
     let token = if no_token { String::new() } else { new_token() };
+    // The token is the whole authorisation story for an action, so there are no
+    // actions without one. `--no-token` is already documented as "every process
+    // and user on this machine can read your sessions"; letting that also mean
+    // "and type at your agents" is a different sentence, and not one anybody
+    // reads a flag expecting.
+    let actions = !no_actions && !no_token;
     announce(&addr, &bind, &token, no_token);
+    if !actions {
+        eprintln!(
+            "  actions are off{} — the page can read this machine's sessions and \
+             nothing else",
+            match no_token {
+                true => " (no token, so nothing may act)",
+                false => "",
+            }
+        );
+    }
 
     let shared = Arc::new(Shared {
         token,
+        actions,
         plan,
         latest: Mutex::new(Arc::new(Snapshot {
             version: 0,
@@ -613,11 +672,140 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             );
         }
         "/api/events" => events(shared, stream, &request),
+        // What can be handed a session's work, and whether this run will act at
+        // all. The page asks once and hides the controls it cannot use, rather
+        // than offering buttons that answer 404.
+        "/api/agents" => {
+            let body = serde_json::json!({
+                "actions": shared.actions,
+                "agents": actions::agents(),
+            });
+            http::respond(
+                stream,
+                Some(&request),
+                200,
+                "application/json; charset=utf-8",
+                body.to_string().as_bytes(),
+            );
+        }
         _ if path.starts_with("/session/") => page(shared, stream, &request, REPORT_HTML),
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
+        _ if path.starts_with("/api/chat/") => {
+            api_chat(shared, stream, &request, &path["/api/chat/".len()..]);
+        }
+        _ if path.starts_with("/api/access/") => {
+            api_access(shared, stream, &request, &path["/api/access/".len()..]);
+        }
+        _ if path.starts_with("/api/act/") => {
+            api_act(shared, stream, &request, &path["/api/act/".len()..]);
+        }
         _ => http::respond_error(stream, Some(&request), 404, "no such page"),
+    }
+}
+
+/// Serve the conversation for one session.
+fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
+    let snapshot = current(shared);
+    let Some(session) = find(&snapshot.sessions, id) else {
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
+    };
+    json(stream, request, &chat::build(session));
+}
+
+/// Serve what one session can reach.
+fn api_access(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
+    let snapshot = current(shared);
+    let Some(session) = find(&snapshot.sessions, id) else {
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
+    };
+    // The tool counts are the one part of this that needs the transcript, and
+    // the rest of the answer is worth having without it — so a session whose
+    // extraction fails still reports its instructions, skills and servers.
+    let data = shared.store.session_data_fresh(session);
+    json(stream, request, &crate::access::build(session, Some(&data)));
+}
+
+/// Do something to a session: `/api/act/<verb>/<id>`.
+///
+/// One route for the three verbs rather than three, because the guards in front
+/// of them are the whole security surface and they are identical — a route added
+/// later that forgets one of them is the bug this shape prevents.
+fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &str) {
+    if !shared.actions {
+        return http::respond_error(
+            stream,
+            Some(request),
+            403,
+            "this cctop serve is read-only — restart it without --no-actions, \
+             and with a token, to act on a session",
+        );
+    }
+    // A `POST` with a JSON body, both of which are load-bearing: see the
+    // module docs in `http` for why a form on another origin cannot be one.
+    if !request.wants_json() {
+        return http::respond_error(
+            stream,
+            Some(request),
+            405,
+            "an action is a POST with a JSON body",
+        );
+    }
+    let body = match request.json() {
+        Ok(body) => body,
+        Err((status, why)) => return http::respond_error(stream, Some(request), status, why),
+    };
+    let Some((verb, id)) = rest.split_once('/') else {
+        return http::respond_error(stream, Some(request), 404, "no such action");
+    };
+
+    let snapshot = current(shared);
+    let Some(session) = find(&snapshot.sessions, id) else {
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
+    };
+
+    let field = |name: &str| {
+        body.get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let outcome = match verb {
+        "send" => actions::send(session, &field("text")),
+        "resume" => actions::resume(session),
+        "handoff" => {
+            // The brief is built from the extraction, so this one pays for a
+            // transcript read — the same read the report route makes, and for
+            // the same reason: a brief assembled from the row alone carries the
+            // header and none of the work.
+            let data = shared.store.session_data_fresh(session);
+            actions::handoff(session, Some(&data), &field("agent"))
+        }
+        _ => return http::respond_error(stream, Some(request), 404, "no such action"),
+    };
+    match outcome {
+        Ok(done) => json(stream, request, &done),
+        Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
+    }
+}
+
+/// Send a value as JSON, or say why it could not be rendered.
+fn json<T: serde::Serialize>(stream: &mut TcpStream, request: &Request, value: &T) {
+    match serde_json::to_string(value) {
+        Ok(body) => http::respond(
+            stream,
+            Some(request),
+            200,
+            "application/json; charset=utf-8",
+            body.as_bytes(),
+        ),
+        Err(e) => http::respond_error(
+            stream,
+            Some(request),
+            503,
+            &format!("could not render that: {e}"),
+        ),
     }
 }
 
@@ -662,6 +850,13 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str) 
     .unwrap_or_else(|_| "\"\"".to_string());
     let body = html
         .replace("__CCTOP_CSS__", COMMON_CSS)
+        .replace(
+            "\"__CCTOP_ACTIONS__\"",
+            match shared.actions {
+                true => "true",
+                false => "false",
+            },
+        )
         .replace("\"__CCTOP_TOKEN__\"", &token)
         .replace("\"__CCTOP_HOME__\"", &home)
         .replace("__CCTOP_BACK__", &back)
@@ -720,12 +915,7 @@ fn events(shared: &Shared, stream: &mut TcpStream, _request: &Request) {
 fn api_report(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
     let snapshot = current(shared);
     let Some(session) = find(&snapshot.sessions, id) else {
-        return http::respond_error(
-            stream,
-            Some(request),
-            404,
-            "no session with that id, or the prefix matches more than one",
-        );
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
     };
 
     // A remote row names a transcript on the machine it came from. Parsing the
@@ -850,6 +1040,9 @@ mod tests {
             assert!(html.contains("\"__CCTOP_TOKEN__\""));
             assert!(html.contains("__CCTOP_CSS__"));
             assert!(html.contains("__CCTOP_VERSION__"));
+            // Without this one a page decides for itself that the action routes
+            // exist, draws the controls, and every one of them answers 403.
+            assert!(html.contains("\"__CCTOP_ACTIONS__\""));
         }
         assert!(REPORT_HTML.contains("__CCTOP_BACK__"));
         assert!(DASHBOARD_HTML.contains("\"__CCTOP_HOME__\""));

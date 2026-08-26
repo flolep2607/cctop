@@ -68,10 +68,13 @@ needs nothing of cctop at the time the session ran, so it reaches the sessions\n
 started from anywhere — including ones that ended long ago.\n\n\
 IN A BROWSER\n  \
 `cctop serve` puts the same table on an HTTP port, streaming it over SSE, plus\n  \
-a per-session report — repeated tool failures, where the context window went,\n  \
-what each model cost. It listens on 127.0.0.1 with a per-run access token in\n  \
-the URL; `--bind` is what puts it on the network, and says so when it does.\n  \
-The page is read-only: it starts nothing and types at nothing.\n\n\
+a page per session: the conversation, what it edited, what it can reach, and\n  \
+where its money went. From there it can send a prompt to a live session,\n  \
+resume a dead one, or hand one to a different agent. It listens on 127.0.0.1\n  \
+with a per-run access token in the URL, which is the whole credential — so\n  \
+whoever holds the link can drive these agents. `--bind` is what puts it on the\n  \
+network and says so when it does; `--no-actions` serves the pages without the\n  \
+buttons.\n\n\
 SEARCHING\n  \
 `/` filters on what the table shows plus the full working directory and the\n  \
 branch; `Tab` in that prompt extends the search into the transcripts, which\n  \

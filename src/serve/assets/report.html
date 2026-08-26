@@ -81,6 +81,109 @@
   .log td { padding: 4px 10px; }
   .log tr.bad td { background: color-mix(in srgb, var(--red) 9%, transparent); }
   .log .when { color: var(--faint); white-space: nowrap; font-family: var(--mono); }
+
+  /* --- the views -------------------------------------------------------- */
+
+  /* One page, four things to read. Buttons rather than links: switching view
+     should not be a navigation, because the report behind it was expensive to
+     build and going back would build it again. */
+  nav.views { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 18px; }
+  nav.views button {
+    font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 99px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--dim);
+    cursor: pointer;
+  }
+  nav.views button:hover { color: var(--ink); }
+  nav.views button[aria-selected="true"] { color: var(--panel); background: var(--accent); border-color: var(--accent); }
+  nav.views button .n { font-family: var(--mono); font-size: 11px; opacity: .75; margin-left: 5px; }
+
+  /* --- acting on the session -------------------------------------------- */
+
+  .acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  .acts button, .acts select {
+    font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer;
+  }
+  .acts button:hover:enabled { border-color: var(--accent); color: var(--accent); }
+  .acts button:disabled { color: var(--faint); cursor: default; }
+  .said { font-size: 13px; margin-top: 10px; }
+  .said.bad { color: var(--red); }
+  .said.ok { color: var(--green); }
+
+  /* The prompt box. Sticky at the bottom of the conversation, which is where
+     the thing being replied to is. */
+  form.say { display: flex; gap: 8px; padding: 10px; position: sticky; bottom: 10px;
+             background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+             box-shadow: var(--shadow); margin-top: 14px; }
+  form.say input {
+    flex: 1 1 auto; font: inherit; font-size: 14px; padding: 8px 10px; min-width: 0;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  form.say input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  form.say button {
+    font: inherit; font-size: 13px; padding: 0 16px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
+  }
+  form.say button:disabled { opacity: .5; cursor: default; }
+
+  /* --- the conversation -------------------------------------------------- */
+
+  .turn { border-top: 1px solid var(--line); padding: 12px 14px; }
+  .turn:first-child { border-top: 0; }
+  .turn > .who {
+    display: flex; gap: 8px; align-items: baseline; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin-bottom: 5px;
+  }
+  .turn > .said-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+  .turn.user { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .turn.user > .who { color: var(--accent); }
+  .turn.system > .said-text, .turn.reasoning > .said-text { color: var(--dim); font-size: 13px; }
+  .turn.compaction { text-align: center; color: var(--faint); font-size: 12px; }
+  .turn .clip { font-size: 11px; color: var(--faint); margin-top: 4px; }
+
+  /* A tool call inside a turn: collapsed to one line, opened for the result. */
+  details.tool { margin-top: 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+  details.tool > summary {
+    padding: 6px 10px; cursor: pointer; display: flex; gap: 8px; align-items: baseline;
+    flex-wrap: wrap; list-style: none; font-size: 12.5px;
+  }
+  details.tool > summary::-webkit-details-marker { display: none; }
+  details.tool > summary .name { font-family: var(--mono); font-weight: 600; }
+  details.tool > summary .arg { font-family: var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+  details.tool.failed { border-color: var(--red); }
+  details.tool.failed > summary .name { color: var(--red); }
+  details.tool.running > summary .name { color: var(--amber); }
+  details.tool pre {
+    margin: 0; padding: 8px 10px; border-top: 1px solid var(--line); font-family: var(--mono);
+    font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim);
+  }
+  details.tool pre.patch { white-space: pre; overflow-x: auto; padding: 8px 0; color: var(--ink); }
+  details.tool pre.patch span { display: block; padding: 0 10px; }
+  details.tool pre.patch .add { background: color-mix(in srgb, var(--green) 14%, transparent); }
+  details.tool pre.patch .del { background: color-mix(in srgb, var(--red) 14%, transparent); }
+  details.tool pre.patch .meta { color: var(--faint); }
+
+  /* --- what it can reach ------------------------------------------------- */
+
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; font-size: 13px; }
+  .kv dt { color: var(--faint); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .rule { border-top: 1px solid var(--line); }
+  .rule:first-child { border-top: 0; }
+  .rule > summary {
+    padding: 9px 14px; cursor: pointer; display: flex; gap: 10px; align-items: baseline;
+    flex-wrap: wrap; list-style: none; font-size: 13px;
+  }
+  .rule > summary::-webkit-details-marker { display: none; }
+  .rule > summary .path { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+  .rule[data-present="false"] > summary { color: var(--faint); cursor: default; }
+  .rule pre {
+    margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); font-family: var(--mono);
+    font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-size: 12px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); }
+  .chip .n { font-family: var(--mono); color: var(--faint); margin-left: 5px; }
 </style>
 
 <div class="wrap">
@@ -97,6 +200,10 @@
 const TOKEN = "__CCTOP_TOKEN__";
 const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
 const ID = decodeURIComponent(location.pathname.replace(/^\/session\//, ""));
+// Whether this cctop serves the routes that act on a session. Substituted by
+// the server rather than discovered, so the controls are never drawn for a run
+// that would refuse them.
+const CAN_ACT = "__CCTOP_ACTIONS__";
 
 const el = (tag, cls, text) => {
   const node = document.createElement(tag);
@@ -670,34 +777,462 @@ function subagents(r) {
   return s;
 }
 
+// --- the conversation ------------------------------------------------------
+
+// One diff, coloured by line. Shared by the conversation's tool calls and the
+// Changes view, because a patch reads the same way in both.
+function patchLines(hunks) {
+  const pre = el("pre", "patch");
+  for (const line of hunks) {
+    const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del"
+      : line.startsWith("@@") ? "meta" : "";
+    pre.appendChild(el("span", cls, line));
+  }
+  return pre;
+}
+
+// A tool call: one line saying what it did, opening onto what came back.
+function toolNode(tool) {
+  const failed = !!tool.failed;
+  const running = tool.result === undefined || tool.result === null;
+  const node = el("details", "tool" + (failed ? " failed" : running ? " running" : ""));
+  const sum = el("summary");
+  sum.appendChild(el("span", "name", tool.name));
+  if (tool.detail) sum.appendChild(el("span", "arg", tool.detail));
+  if (tool.added || tool.removed) {
+    sum.appendChild(el("span", "plus", "+" + (tool.added || 0)));
+    sum.appendChild(el("span", "minus", "−" + (tool.removed || 0)));
+  }
+  if (failed) sum.appendChild(el("span", "pill bad", "failed"));
+  else if (running) sum.appendChild(el("span", "pill warn", "running"));
+  node.appendChild(sum);
+
+  if (tool.full && tool.full !== tool.detail) node.appendChild(el("pre", null, tool.full));
+  if (tool.diff && tool.diff.length) node.appendChild(patchLines(tool.diff));
+  if (!running && tool.result !== "") node.appendChild(el("pre", null, tool.result));
+  return node;
+}
+
+const WHO = { user: "you", assistant: "agent", system: "harness" };
+
+function turnNode(turn) {
+  const kind = turn.kind === "message" ? "" : " " + turn.kind;
+  const node = el("div", "turn " + turn.role + kind);
+  if (turn.kind === "compaction") {
+    node.appendChild(el("div", "said-text", "— context compacted here —"));
+    return node;
+  }
+  const who = el("div", "who");
+  who.appendChild(el("span", null, turn.kind === "reasoning" ? "thinking" : (WHO[turn.role] || turn.role)));
+  if (turn.ts) who.appendChild(el("span", "faint", clock(turn.ts, true) || ""));
+  node.appendChild(who);
+  if (turn.text) node.appendChild(el("div", "said-text", turn.text));
+  if (turn.clipped) node.appendChild(el("div", "clip", "… cut for length; the whole of it is in the transcript"));
+  for (const tool of turn.tools || []) node.appendChild(toolNode(tool));
+  return node;
+}
+
+function conversation(chat) {
+  const s = block("Conversation");
+  if (!chat.supported) {
+    s.appendChild(el("div", "card pad faint", chat.note || "no reader for this harness"));
+    return s;
+  }
+  const card = el("div", "card");
+  if (chat.earlier) {
+    card.appendChild(el("div", "turn faint", chat.earlier + " earlier turns are in the transcript and not shown"));
+  }
+  if (!chat.turns.length) {
+    card.appendChild(el("div", "empty", "Nothing has been said in this session yet."));
+  }
+  for (const turn of chat.turns) card.appendChild(turnNode(turn));
+  s.appendChild(card);
+  return s;
+}
+
+// --- acting ----------------------------------------------------------------
+
+// Every action is a POST with a JSON body. The token authorises it; the content
+// type is what stops a page on another origin from sending one — see the `http`
+// module for why that pairing carries the weight.
+async function act(verb, body) {
+  const response = await fetch("/api/act/" + verb + "/" + encodeURIComponent(ID) + QUERY, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const text = (await response.text()).trim();
+  if (!response.ok) throw new Error(text || response.statusText);
+  try { return JSON.parse(text); } catch (e) { return { message: text }; }
+}
+
+// What an action said, in the one place the page says such things. Kept on
+// screen rather than flashed: the message that matters most — a tmux session to
+// attach to — is one somebody has to copy.
+function report_said(text, ok) {
+  const node = document.getElementById("said");
+  if (!node) return;
+  node.className = "said " + (ok ? "ok" : "bad");
+  node.textContent = text;
+}
+
+async function run(button, verb, body, verb_label) {
+  const was = button.textContent;
+  button.disabled = true;
+  button.textContent = "…";
+  report_said("", true);
+  try {
+    const done = await act(verb, body);
+    report_said(done.message || (verb_label + " done"), true);
+  } catch (e) {
+    report_said(String(e.message || e), false);
+  } finally {
+    button.disabled = false;
+    button.textContent = was;
+  }
+}
+
+// The buttons that are not a prompt: put this session back, or give its work to
+// somebody else. Absent entirely when this run serves no actions, rather than
+// present and refusing.
+function actionBar(r, agents) {
+  if (!CAN_ACT) return null;
+  const bar = el("div", "acts");
+
+  const resume = el("button", null, r.running ? "Reattach" : "Resume");
+  resume.title = "Start this session's own harness back up on this transcript, in tmux";
+  resume.addEventListener("click", () => run(resume, "resume", {}, "Resume"));
+  bar.appendChild(resume);
+
+  if (agents.length) {
+    const pick = el("select");
+    pick.title = "Which agent takes this session's work";
+    for (const agent of agents) {
+      const option = el("option", null, agent);
+      option.value = agent;
+      pick.appendChild(option);
+    }
+    const hand = el("button", null, "Hand off →");
+    hand.title = "Write a brief of this session and start the chosen agent on it, here";
+    hand.addEventListener("click", () => run(hand, "handoff", { agent: pick.value }, "Handoff"));
+    bar.appendChild(pick);
+    bar.appendChild(hand);
+  }
+  return bar;
+}
+
+// The prompt box. One line, because that is what a pty submit is: the server
+// refuses a newline rather than sending half a paragraph, so the box will not
+// pretend to take one.
+function composer(r) {
+  if (!CAN_ACT) return null;
+  const form = el("form", "say");
+  form.id = "say";
+  const input = el("input");
+  input.type = "text";
+  input.maxLength = 4000;
+  input.autocomplete = "off";
+  input.placeholder = r.running ? "Answer this session…" : "Nothing is running this session — resume it first";
+  input.disabled = !r.running;
+  const send = el("button", null, "Send");
+  send.type = "submit";
+  send.disabled = !r.running;
+  form.appendChild(input);
+  form.appendChild(send);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    send.disabled = true;
+    try {
+      const done = await act("send", { text });
+      report_said(done.message || "Sent", true);
+      input.value = "";
+      // The turn takes a moment to reach the transcript, so the refresh is
+      // deliberately late rather than immediate-and-empty.
+      setTimeout(refreshChat, 1200);
+    } catch (e) {
+      report_said(String(e.message || e), false);
+    } finally {
+      send.disabled = false;
+      input.focus();
+    }
+  });
+  return form;
+}
+
+// --- what it can reach -----------------------------------------------------
+
+function fileRules(heading, files) {
+  if (!files || !files.length) return null;
+  const s = block(heading);
+  const card = el("div", "card");
+  for (const file of files) {
+    const node = el("details", "rule");
+    node.dataset.present = String(!!file.present);
+    const sum = el("summary");
+    sum.appendChild(el("span", "path", file.path));
+    sum.appendChild(el("span", "pill", file.scope));
+    sum.appendChild(el("span", "faint", file.present ? bytes(file.bytes) : "not there"));
+    node.appendChild(sum);
+    if (file.present) {
+      node.appendChild(el("pre", null, (file.head || "") + (file.clipped ? "\n\n… cut for length" : "")));
+    }
+    card.appendChild(node);
+  }
+  s.appendChild(card);
+  return s;
+}
+
+const bytes = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1048576) return (v / 1048576).toFixed(1) + " MB";
+  if (v >= 1024) return Math.round(v / 1024) + " KB";
+  return v + " B";
+};
+
+function accessView(a) {
+  const parts = [];
+
+  const s = block("In scope", "The files and servers that apply to a session in this directory — which is checkable. What the harness actually loaded is its own business, and this does not claim to know it.");
+  const card = el("div", "card pad");
+  const dl = el("dl", "kv");
+  const row = (k, v) => { if (v) { dl.appendChild(el("dt", null, k)); dl.appendChild(el("dd", null, v)); } };
+  row("Directory", a.cwd + (a.cwd_exists ? "" : " (gone)"));
+  row("Branch", a.branch);
+  row("Harness", a.harness);
+  row("Model", a.model);
+  if (a.permission) row("Permission", a.permission + " — " + (a.permission_detail || ""));
+  if (a.pid) row("Process", "pid " + a.pid);
+  card.appendChild(dl);
+  if (a.note) card.appendChild(el("p", "note", a.note));
+  s.appendChild(card);
+  parts.push(s);
+
+  parts.push(fileRules("Instructions", a.instructions));
+  parts.push(fileRules("Settings", a.configs));
+
+  if (a.mcp && a.mcp.length) {
+    const m = block("MCP servers", "Tools reaching outside this machine's filesystem come from here.");
+    const card = el("div", "card pad scroll-x");
+    const table = el("table");
+    const head = el("tr");
+    for (const label of ["Server", "Scope", "Command"]) head.appendChild(el("th", null, label));
+    table.appendChild(head);
+    for (const server of a.mcp) {
+      const tr = el("tr");
+      tr.appendChild(el("td", "mono", server.name));
+      tr.appendChild(el("td", null, server.scope));
+      tr.appendChild(el("td", "mono dim", server.command || "—"));
+      table.appendChild(tr);
+    }
+    card.appendChild(table);
+    m.appendChild(card);
+    parts.push(m);
+  }
+
+  if (a.skills && a.skills.length) {
+    const k = block("Skills", a.skills_dir || "");
+    const card = el("div", "card");
+    for (const skill of a.skills) {
+      const node = el("div", "rule");
+      const line = el("div", null, null);
+      line.style.padding = "9px 14px";
+      line.appendChild(el("span", "mono", skill.name));
+      if (skill.description) {
+        line.appendChild(el("span", "faint", " " + skill.description));
+      }
+      node.appendChild(line);
+      card.appendChild(node);
+    }
+    k.appendChild(card);
+    parts.push(k);
+  }
+
+  if (a.tools && a.tools.length) {
+    const t = block("Tools it has used", "What it reached for, not what it was offered.");
+    const card = el("div", "card pad");
+    const chips = el("div", "chips");
+    for (const tool of a.tools) {
+      const chip = el("span", "chip", tool.name);
+      chip.appendChild(el("span", "n", tool.count));
+      chips.appendChild(chip);
+    }
+    card.appendChild(chips);
+    t.appendChild(card);
+    parts.push(t);
+  }
+
+  if (a.hooks && a.hooks.length) {
+    const h = block("cctop's own hooks", "Whether this harness reports its state to cctop as it happens, rather than being read off disk after the fact.");
+    const card = el("div", "card pad scroll-x");
+    const table = el("table");
+    const head = el("tr");
+    for (const label of ["Harness", "Scope", "State", "File"]) head.appendChild(el("th", null, label));
+    table.appendChild(head);
+    for (const hook of a.hooks) {
+      const tr = el("tr");
+      tr.appendChild(el("td", null, hook.harness));
+      tr.appendChild(el("td", null, hook.scope));
+      const state = el("td");
+      const cls = hook.state === "installed" ? "" : hook.state === "absent" ? "" : hook.state === "broken" ? "bad" : "warn";
+      state.appendChild(el("span", "pill " + cls, hook.state));
+      if (hook.detail) state.appendChild(el("span", "faint", " " + hook.detail));
+      tr.appendChild(state);
+      tr.appendChild(el("td", "mono dim", hook.path));
+      table.appendChild(tr);
+    }
+    card.appendChild(table);
+    h.appendChild(card);
+    parts.push(h);
+  }
+
+  if (a.writes && a.writes.length) {
+    const w = block("Written lately");
+    const card = el("div", "card pad");
+    const files = el("div", "files");
+    for (const path of a.writes) files.appendChild(el("div", null, path));
+    card.appendChild(files);
+    w.appendChild(card);
+    parts.push(w);
+  }
+
+  return parts.filter(Boolean);
+}
+
 // --- load ------------------------------------------------------------------
+
+// One pane per view, built on first sight and kept. The report cost a full
+// transcript parse to build; switching away from it and back must not repeat
+// that, which is why these are panes rather than pages.
+const PANES = {};
+let CHAT_TIMER = null;
+
+function show(name) {
+  for (const [key, pane] of Object.entries(PANES)) pane.hidden = key !== name;
+  for (const button of document.querySelectorAll("nav.views button")) {
+    button.setAttribute("aria-selected", String(button.dataset.view === name));
+  }
+  location.hash = name;
+}
+
+async function refreshChat() {
+  const pane = PANES.chat;
+  if (!pane) return;
+  try {
+    const response = await fetch("/api/chat/" + encodeURIComponent(ID) + QUERY);
+    if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+    const chat = await response.json();
+    const rebuilt = conversation(chat);
+    // The composer is part of this pane and holds what someone is typing, so it
+    // is moved across rather than rebuilt underneath them.
+    const say = pane.querySelector("form.say");
+    pane.replaceChildren(rebuilt);
+    if (say) pane.appendChild(say);
+  } catch (e) {
+    pane.replaceChildren(el("div", "empty", String(e.message || e)));
+  }
+}
 
 fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
   .then(async (response) => {
     if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
     return response.json();
   })
-  .then((r) => {
+  .then(async (r) => {
     document.title = "cctop — " + (r.title || r.project || r.session_id);
     const main = document.getElementById("main");
     main.replaceChildren();
     main.appendChild(subject(r));
-    if (r.error) main.appendChild(el("div", "banner", "This transcript could not be fully read: " + r.error));
-    main.appendChild(tiles(r));
-    // Order of the sections: what went wrong, what it changed, where the
-    // window and the money went, then the detail anyone who is still reading
-    // came for. The diff sits high because "what did this session do" is the
-    // question a report is most often opened to answer.
-    const sections = [
-      failures, diffs, breakdown, windowChart, heaviest, spend,
-      slowest, toolTable, callLog, files, subagents,
-    ];
-    for (const part of sections) {
-      const node = part(r);
-      if (node) main.appendChild(node);
+
+    // Which agents this machine has, and whether this run acts at all. Asked
+    // once: it is a property of the server, not of the session.
+    let agents = [];
+    if (CAN_ACT) {
+      try {
+        const response = await fetch("/api/agents" + QUERY);
+        if (response.ok) agents = (await response.json()).agents || [];
+      } catch (e) { /* the buttons that need it simply do not appear */ }
     }
+    const bar = actionBar(r, agents);
+    if (bar) {
+      main.appendChild(bar);
+      const said = el("div", "said", "");
+      said.id = "said";
+      main.appendChild(said);
+    }
+
+    const nav = el("nav", "views");
+    main.appendChild(nav);
+    if (r.error) main.appendChild(el("div", "banner", "This transcript could not be fully read: " + r.error));
+
+    for (const name of ["chat", "changes", "access", "report"]) {
+      const pane = el("div");
+      pane.hidden = true;
+      PANES[name] = pane;
+      main.appendChild(pane);
+    }
+
+    // The report's own sections, split between the two views they belong to.
+    // Cost, failures and the window are a report; a diff and a file list are
+    // what changed. Nothing is rendered twice.
+    PANES.changes.replaceChildren(
+      ...[diffs, files].map((part) => part(r)).filter(Boolean)
+    );
+    PANES.report.replaceChildren(
+      tiles(r),
+      ...[failures, breakdown, windowChart, heaviest, spend, slowest, toolTable, callLog, subagents]
+        .map((part) => part(r))
+        .filter(Boolean)
+    );
+
+    const labels = {
+      chat: ["Conversation", ""],
+      changes: ["Changes", r.diffs ? r.diffs.length : 0],
+      access: ["Access", ""],
+      report: ["Report", ""],
+    };
+    for (const [name, [label, count]] of Object.entries(labels)) {
+      const button = el("button", null, label);
+      button.dataset.view = name;
+      button.setAttribute("aria-selected", "false");
+      if (count) button.appendChild(el("span", "n", count));
+      button.addEventListener("click", () => open_view(name, r));
+      nav.appendChild(button);
+    }
+
+    const wanted = location.hash.replace(/^#/, "");
+    open_view(labels[wanted] ? wanted : "chat", r);
   })
   .catch((e) => {
     document.getElementById("main").replaceChildren(el("div", "empty", String(e.message || e)));
   });
+
+// Fetched on first sight rather than up front: a conversation and an access
+// reading are each another pass over the disk, and the report is already one.
+async function open_view(name, r) {
+  show(name);
+  if (name === "chat" && !PANES.chat.dataset.loaded) {
+    PANES.chat.dataset.loaded = "1";
+    PANES.chat.replaceChildren(el("div", "empty", "Reading the conversation…"));
+    await refreshChat();
+    const say = composer(r);
+    if (say) PANES.chat.appendChild(say);
+    // A running session is still saying things, so its conversation follows
+    // along. A finished one is finished, and polling it would be a request a
+    // second for a file that will never change again.
+    if (r.running && !CHAT_TIMER) CHAT_TIMER = setInterval(refreshChat, 5000);
+  }
+  if (name === "access" && !PANES.access.dataset.loaded) {
+    PANES.access.dataset.loaded = "1";
+    PANES.access.replaceChildren(el("div", "empty", "Reading what it can reach…"));
+    try {
+      const response = await fetch("/api/access/" + encodeURIComponent(ID) + QUERY);
+      if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+      PANES.access.replaceChildren(...accessView(await response.json()));
+    } catch (e) {
+      PANES.access.replaceChildren(el("div", "empty", String(e.message || e)));
+    }
+  }
+}
 </script>
