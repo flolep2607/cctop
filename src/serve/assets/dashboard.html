@@ -304,6 +304,34 @@ function rowFor(s) {
   return row;
 }
 
+// --- talking to the server -------------------------------------------------
+
+// What went wrong, in words worth showing. A cctop error is short and arrives
+// as text/plain; anything else in the body was written by something between
+// this page and the server — a tunnel whose far end has gone answers with a
+// whole HTML error page, and that page used to land on screen verbatim.
+async function problem(response) {
+  const kind = (response.headers.get("content-type") || "").split(";")[0].trim();
+  const said = kind === "text/plain" ? (await response.text()).trim() : "";
+  if (said) return said.length > 400 ? said.slice(0, 400) + "…" : said;
+  if (response.status >= 502 && response.status <= 504) return "cctop is not answering";
+  if (response.status === 401 || response.status === 403) return "this link is no longer authorised";
+  return "the server answered " + response.status;
+}
+
+// Every request the page makes. A dropped connection rejects the fetch itself
+// with nothing in it worth reading, so it is named here instead.
+async function ask(url, init) {
+  let response;
+  try {
+    response = await fetch(url, init);
+  } catch (e) {
+    throw new Error("cctop is unreachable");
+  }
+  if (!response.ok) throw new Error(await problem(response));
+  return response;
+}
+
 // Answering a waiting agent from the list, which is the whole point of the
 // card it sits in: a page that says "this one needs you" and cannot be replied
 // to has shown someone a problem and kept the fix.
@@ -332,7 +360,7 @@ function answerBox(s) {
     said.className = "said";
     said.textContent = "…";
     try {
-      const response = await fetch(
+      await ask(
         "/api/act/send/" + encodeURIComponent(s.session_id) + QUERY,
         {
           method: "POST",
@@ -340,8 +368,6 @@ function answerBox(s) {
           body: JSON.stringify({ text }),
         },
       );
-      const body = (await response.text()).trim();
-      if (!response.ok) throw new Error(body || response.statusText);
       input.value = "";
       said.textContent = "sent";
     } catch (e) {
@@ -501,14 +527,25 @@ function connect() {
     setLink("working", "live");
     try { apply(JSON.parse(event.data)); } catch (e) { setLink("error", "bad payload"); }
   });
-  // EventSource reconnects on its own; this only reports it, because a stale
-  // table that looks live is the one failure this page must not have.
-  source.addEventListener("error", () => setLink("waiting", "reconnecting…"));
+  // EventSource reconnects on its own, but only from a stream that broke. An
+  // answer that was never a stream — the HTML error page a tunnel serves once
+  // its far end is gone — closes it for good, and the page would sit on
+  // "reconnecting…" for ever. So a closed source is reopened here, on a timer,
+  // because a stale table that looks live is the one failure this page must
+  // not have.
+  source.addEventListener("error", () => {
+    if (source.readyState !== EventSource.CLOSED) {
+      setLink("waiting", "reconnecting…");
+      return;
+    }
+    setLink("error", "cctop is unreachable");
+    setTimeout(connect, 5000);
+  });
   source.addEventListener("open", () => setLink("working", "live"));
 }
 
-fetch("/api/hosts" + QUERY)
-  .then((r) => r.ok ? r.json() : [])
+ask("/api/hosts" + QUERY)
+  .then((r) => r.json())
   .then((failed) => {
     const banners = document.getElementById("banners");
     for (const [host, why] of failed) {

@@ -430,6 +430,16 @@ impl Sink {
             }
             false => ("user", "message"),
         };
+        // The harness writes for a parser, not for a reader. What it says is
+        // worth keeping; the tags around it are not, and a turn that is only
+        // tags says nothing at all.
+        let text = match role {
+            "system" if kind == "message" => tidy_harness_text(&text),
+            _ => text,
+        };
+        if text.trim().is_empty() {
+            return;
+        }
         let mut turn = Turn::new(role, kind, ts);
         turn.set_text(&text);
         self.push(turn);
@@ -788,6 +798,68 @@ fn is_harness_text(text: &str) -> bool {
         || head.starts_with("<user-prompt-submit-hook>")
 }
 
+/// The text inside `<tag>…</tag>`, the first time it appears.
+fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let rest = &text[text.find(&open)? + open.len()..];
+    Some(&rest[..rest.find(&format!("</{tag}>"))?])
+}
+
+/// A harness turn as something to read.
+///
+/// Claude Code records a slash command as the three tags it parsed it into —
+/// `<command-name>`, `<command-message>`, `<command-args>` — and the output as
+/// a fourth. Shown raw, a `/clear` fills four lines with markup and buries the
+/// one token that matters. So it comes back out as the command someone typed,
+/// with whatever it printed beneath it.
+///
+/// Anything else the harness writes keeps its text and loses its wrapper: a
+/// reminder still reads as a reminder without the tag announcing it as one.
+fn tidy_harness_text(text: &str) -> String {
+    let out = tagged(text, "local-command-stdout").unwrap_or("").trim();
+    if let Some(name) = tagged(text, "command-name") {
+        let args = tagged(text, "command-args").unwrap_or("").trim();
+        let said = format!("{} {args}", name.trim());
+        return match out.is_empty() {
+            true => said.trim().to_string(),
+            false => format!("{}\n\n{out}", said.trim()),
+        };
+    }
+    if text.trim_start().starts_with("<local-command") {
+        return out.to_string();
+    }
+    // Every other block is a wrapper around prose. Dropping the tag lines is
+    // enough — the text between them was written to be read.
+    let stripped: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !(line.trim_start().starts_with('<') && line.trim_end().ends_with('>')))
+        .collect();
+    let stripped = stripped.join("\n");
+    let stripped = stripped.trim();
+    match stripped.is_empty() {
+        // A block written entirely on one line has no line to keep, so the
+        // tags come off it directly rather than leaving the turn empty.
+        true => strip_outer_tags(text.trim()).trim().to_string(),
+        false => stripped.to_string(),
+    }
+}
+
+/// `<tag>body</tag>` on a single line, reduced to `body`.
+fn strip_outer_tags(text: &str) -> &str {
+    let Some(open_end) = text.find('>') else {
+        return text;
+    };
+    if !text.starts_with('<') || !text.ends_with('>') {
+        return text;
+    }
+    let body = &text[open_end + 1..];
+    match body.rfind("</") {
+        Some(close) => &body[..close],
+        None => body,
+    }
+}
+
 fn item_is_meta(item: &Value) -> bool {
     item.get("isMeta").and_then(Value::as_bool) == Some(true)
 }
@@ -925,6 +997,48 @@ mod tests {
             r#"{"type":"user","timestamp":"t1","message":{"content":"<command-name>/clear</command-name>"}}"#,
         ]);
         assert_eq!(chat.turns[0].role, "system");
+    }
+
+    /// What the harness records for one `/loop 5m` is four tags. What it did
+    /// is one line, and that is what the page has room for.
+    #[test]
+    fn a_slash_command_reads_as_the_command_that_was_typed() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<command-name>/loop</command-name>\n<command-message>loop</command-message>\n<command-args>5m</command-args>\n<local-command-stdout>started</local-command-stdout>"}}"#,
+        ]);
+        assert_eq!(chat.turns[0].text, "/loop 5m\n\nstarted");
+    }
+
+    /// `/clear` prints nothing, so its turn is the command alone rather than
+    /// the command and an empty line where the output would have been.
+    #[test]
+    fn a_command_that_printed_nothing_is_just_the_command() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<command-name>/clear</command-name>\n<local-command-stdout></local-command-stdout>"}}"#,
+        ]);
+        assert_eq!(chat.turns[0].text, "/clear");
+    }
+
+    /// A reminder is prose in a wrapper. The prose survives; the wrapper does
+    /// not, and neither does a turn that was nothing but wrapper.
+    #[test]
+    fn a_reminder_keeps_its_words_and_loses_its_tags() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<system-reminder>\nthe file changed on disk\n</system-reminder>"}}"#,
+            r#"{"type":"user","timestamp":"t2","message":{"content":"<local-command-stdout></local-command-stdout>"}}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].text, "the file changed on disk");
+    }
+
+    /// The same block written on one line has no line the filter can keep, and
+    /// dropping it would lose the only thing it said.
+    #[test]
+    fn a_one_line_reminder_survives_the_same_way() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<system-reminder>read the file first</system-reminder>"}}"#,
+        ]);
+        assert_eq!(chat.turns[0].text, "read the file first");
     }
 
     /// Everything after the cap is dropped from the *front*, because a

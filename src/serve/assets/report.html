@@ -137,7 +137,36 @@
   .turn > .said-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
   .turn.user { background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .turn.user > .who { color: var(--accent); }
-  .turn.system > .said-text, .turn.reasoning > .said-text { color: var(--dim); font-size: 13px; }
+  .turn.system > .said-text, .turn.reasoning > .said-text,
+  .turn.system > .md, .turn.reasoning > .md { color: var(--dim); font-size: 13px; }
+
+  /* What an agent writes is markdown, so it is shown as markdown. Paragraphs
+     keep their own line breaks — a reply is written with them and reflowing it
+     changes what it says. */
+  .md { font-size: 14px; overflow-wrap: anywhere; }
+  .md > * { margin: 0 0 9px; }
+  .md > *:last-child { margin-bottom: 0; }
+  .md p { white-space: pre-wrap; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+    font-size: 1em; font-weight: 600; margin-top: 14px; line-height: 1.35;
+  }
+  .md h1 { font-size: 1.15em; }
+  .md h2 { font-size: 1.07em; }
+  .md ul, .md ol { padding-left: 21px; }
+  .md li { margin: 2px 0; }
+  .md li > .md { margin: 2px 0; }
+  .md code {
+    font-family: var(--mono); font-size: .87em; padding: 0 4px; border-radius: 4px;
+    background: var(--bg); border: 1px solid var(--line);
+  }
+  .md pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+    padding: 8px 10px; overflow-x: auto;
+  }
+  .md pre code { border: 0; background: none; padding: 0; white-space: pre; font-size: 12px; }
+  .md blockquote { border-left: 2px solid var(--line); padding-left: 11px; color: var(--dim); }
+  .md hr { border: 0; border-top: 1px solid var(--line); }
+  .md a { color: var(--accent); }
   .turn.compaction { text-align: center; color: var(--faint); font-size: 12px; }
   .turn .clip { font-size: 11px; color: var(--faint); margin-top: 4px; }
 
@@ -815,6 +844,116 @@ function toolNode(tool) {
 
 const WHO = { user: "you", assistant: "agent", system: "harness" };
 
+// --- markdown --------------------------------------------------------------
+
+// Enough markdown to read a reply by: headings, lists, quotes, rules, fenced
+// code, and the inline run of code, emphasis and links. It is built as nodes
+// rather than a string of HTML, because nothing in this page sets innerHTML
+// and a transcript — somebody else's text, including whatever a tool printed
+// into it — is the last place to start.
+
+const BLOCK = /^\s*(```|~~~|#{1,6}\s|>|[-*+]\s|\d+[.)]\s)/;
+const BULLET = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+const FENCE = /^\s*(```|~~~)/;
+
+// A link is only followed if it goes somewhere a browser should go. Anything
+// else — a `javascript:` href above all — comes back as the text it was
+// written as, which is both safe and honest about what was there.
+function linkNode(label, href, raw) {
+  if (!/^(https?:|mailto:)/i.test(href)) return document.createTextNode(raw || label);
+  const a = el("a", null, label);
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
+const INLINE = /`([^`]+)`|\*\*([\s\S]+?)\*\*|(?<![\w*])\*([^*\n]+)\*(?![\w*])|\[([^\]]*)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()\[\]]+)/g;
+
+function inlineInto(node, text) {
+  let at = 0;
+  let m;
+  INLINE.lastIndex = 0;
+  while ((m = INLINE.exec(text))) {
+    if (m.index > at) node.appendChild(document.createTextNode(text.slice(at, m.index)));
+    if (m[1] !== undefined) node.appendChild(el("code", null, m[1]));
+    else if (m[2] !== undefined) node.appendChild(el("strong", null, m[2]));
+    else if (m[3] !== undefined) node.appendChild(el("em", null, m[3]));
+    else if (m[4] !== undefined) node.appendChild(linkNode(m[4] || m[5], m[5], m[0]));
+    else node.appendChild(linkNode(m[6], m[6]));
+    at = INLINE.lastIndex;
+  }
+  if (at < text.length) node.appendChild(document.createTextNode(text.slice(at)));
+  return node;
+}
+
+function markdown(text) {
+  const root = el("div", "md");
+  const lines = String(text).split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (FENCE.test(line)) {
+      i++;
+      const body = [];
+      while (i < lines.length && !FENCE.test(lines[i])) body.push(lines[i++]);
+      i++;  // the closing fence, or the end of the text if it was never closed
+      const pre = el("pre");
+      pre.appendChild(el("code", null, body.join("\n")));
+      root.appendChild(pre);
+      continue;
+    }
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    if (heading) {
+      root.appendChild(inlineInto(el("h" + heading[1].length), heading[2].trim()));
+      i++;
+      continue;
+    }
+    if (/^\s*([-*_])\s*(\1\s*){2,}$/.test(line)) {
+      root.appendChild(el("hr"));
+      i++;
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      const body = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) body.push(lines[i++].replace(/^\s*>\s?/, ""));
+      const quote = el("blockquote");
+      quote.appendChild(markdown(body.join("\n")));
+      root.appendChild(quote);
+      continue;
+    }
+    if (BULLET.test(line)) {
+      // ponytail: a nested list renders flat. Depth is indentation, and
+      // guessing at it wrongly reads worse than one honest level.
+      const list = el(/^\s*\d/.test(line) ? "ol" : "ul");
+      while (i < lines.length && BULLET.test(lines[i])) {
+        const m = lines[i++].match(BULLET);
+        // A line under a bullet that is neither blank nor a bullet of its own
+        // belongs to the item above it — that is how a wrapped list item is
+        // written, and splitting it into a paragraph would break the list.
+        const said = [m[3]];
+        while (i < lines.length && lines[i].trim() && !BULLET.test(lines[i]) && !FENCE.test(lines[i])) {
+          said.push(lines[i++].trim());
+        }
+        list.appendChild(inlineInto(el("li"), said.join(" ")));
+      }
+      root.appendChild(list);
+      continue;
+    }
+    // The first line is taken whatever it looks like. Everything above has
+    // declined it, and a loop that can decline every branch and still not
+    // advance is a hung page.
+    const para = [lines[i++]];
+    while (i < lines.length && lines[i].trim() && !BLOCK.test(lines[i])) para.push(lines[i++]);
+    root.appendChild(inlineInto(el("p"), para.join("\n")));
+  }
+  return root;
+}
+
 function turnNode(turn) {
   const kind = turn.kind === "message" ? "" : " " + turn.kind;
   const node = el("div", "turn " + turn.role + kind);
@@ -826,7 +965,7 @@ function turnNode(turn) {
   who.appendChild(el("span", null, turn.kind === "reasoning" ? "thinking" : (WHO[turn.role] || turn.role)));
   if (turn.ts) who.appendChild(el("span", "faint", clock(turn.ts, true) || ""));
   node.appendChild(who);
-  if (turn.text) node.appendChild(el("div", "said-text", turn.text));
+  if (turn.text) node.appendChild(markdown(turn.text));
   if (turn.clipped) node.appendChild(el("div", "clip", "… cut for length; the whole of it is in the transcript"));
   for (const tool of turn.tools || []) node.appendChild(toolNode(tool));
   return node;
@@ -850,19 +989,64 @@ function conversation(chat) {
   return s;
 }
 
+// --- talking to the server -------------------------------------------------
+
+// What went wrong, in words worth showing. A cctop error is short and arrives
+// as text/plain; anything else in the body was written by something between
+// this page and the server — a tunnel whose far end has gone answers with a
+// whole HTML error page, and that page used to land in the pane verbatim.
+async function problem(response) {
+  const kind = (response.headers.get("content-type") || "").split(";")[0].trim();
+  const said = kind === "text/plain" ? (await response.text()).trim() : "";
+  if (said) return said.length > 400 ? said.slice(0, 400) + "…" : said;
+  if (response.status >= 502 && response.status <= 504) return "cctop is not answering. The link is up but nothing is behind it — the terminal it runs in may have stopped.";
+  if (response.status === 401 || response.status === 403) return "This link is no longer authorised. Open a fresh one from the terminal.";
+  return "The server answered " + response.status + (response.statusText ? " " + response.statusText : "") + ".";
+}
+
+// Every request the page makes. A dropped connection rejects the fetch itself
+// with nothing in it worth reading, so it is named here instead.
+async function ask(url, init) {
+  let response;
+  try {
+    response = await fetch(url, init);
+  } catch (e) {
+    throw new Error("cctop is unreachable — the connection dropped.");
+  }
+  if (!response.ok) throw new Error(await problem(response));
+  return response;
+}
+
+// A page whose server has gone says so once, at the top, and keeps everything
+// it had already read. The alternative — replacing a conversation with the
+// reason it could not be refreshed — throws away the part that was still true.
+function offline(why) {
+  const main = document.getElementById("main");
+  let banner = document.getElementById("offline");
+  if (!why) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = el("div", "banner");
+    banner.id = "offline";
+    main.prepend(banner);
+  }
+  banner.textContent = why + " Still trying.";
+}
+
 // --- acting ----------------------------------------------------------------
 
 // Every action is a POST with a JSON body. The token authorises it; the content
 // type is what stops a page on another origin from sending one — see the `http`
 // module for why that pairing carries the weight.
 async function act(verb, body) {
-  const response = await fetch("/api/act/" + verb + "/" + encodeURIComponent(ID) + QUERY, {
+  const response = await ask("/api/act/" + verb + "/" + encodeURIComponent(ID) + QUERY, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
   const text = (await response.text()).trim();
-  if (!response.ok) throw new Error(text || response.statusText);
   try { return JSON.parse(text); } catch (e) { return { message: text }; }
 }
 
@@ -1120,8 +1304,7 @@ async function refreshChat() {
   const pane = PANES.chat;
   if (!pane) return;
   try {
-    const response = await fetch("/api/chat/" + encodeURIComponent(ID) + QUERY);
-    if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+    const response = await ask("/api/chat/" + encodeURIComponent(ID) + QUERY);
     const chat = await response.json();
     const rebuilt = conversation(chat);
     // The composer is part of this pane and holds what someone is typing, so it
@@ -1129,84 +1312,93 @@ async function refreshChat() {
     const say = pane.querySelector("form.say");
     pane.replaceChildren(rebuilt);
     if (say) pane.appendChild(say);
+    offline(null);
   } catch (e) {
-    pane.replaceChildren(el("div", "empty", String(e.message || e)));
+    // A poll that fails when there is already a conversation on screen is a
+    // connection problem, not an empty session: keep what is there and say so.
+    if (pane.querySelector(".card")) offline(String(e.message || e));
+    else pane.replaceChildren(el("div", "empty", String(e.message || e)));
   }
 }
 
-fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
-  .then(async (response) => {
-    if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
-    return response.json();
-  })
-  .then(async (r) => {
-    document.title = "cctop — " + (r.title || r.project || r.session_id);
-    const main = document.getElementById("main");
-    main.replaceChildren();
-    main.appendChild(subject(r));
+// The page's one blocking read. It is wrapped rather than run bare because a
+// connection that drops during it leaves nothing on screen to recover from,
+// so it comes back on its own instead of asking someone to reload.
+function load() {
+  ask("/api/report/" + encodeURIComponent(ID) + QUERY)
+    .then((response) => response.json())
+    .then(async (r) => {
+      document.title = "cctop — " + (r.title || r.project || r.session_id);
+      const main = document.getElementById("main");
+      main.replaceChildren();
+      main.appendChild(subject(r));
 
-    // Which agents this machine has, and whether this run acts at all. Asked
-    // once: it is a property of the server, not of the session.
-    let agents = [];
-    if (CAN_ACT) {
-      try {
-        const response = await fetch("/api/agents" + QUERY);
-        if (response.ok) agents = (await response.json()).agents || [];
-      } catch (e) { /* the buttons that need it simply do not appear */ }
-    }
-    const bar = actionBar(r, agents);
-    if (bar) {
-      main.appendChild(bar);
-      const said = el("div", "said", "");
-      said.id = "said";
-      main.appendChild(said);
-    }
+      // Which agents this machine has, and whether this run acts at all. Asked
+      // once: it is a property of the server, not of the session.
+      let agents = [];
+      if (CAN_ACT) {
+        try {
+          agents = (await (await ask("/api/agents" + QUERY)).json()).agents || [];
+        } catch (e) { /* the buttons that need it simply do not appear */ }
+      }
+      const bar = actionBar(r, agents);
+      if (bar) {
+        main.appendChild(bar);
+        const said = el("div", "said", "");
+        said.id = "said";
+        main.appendChild(said);
+      }
 
-    const nav = el("nav", "views");
-    main.appendChild(nav);
-    if (r.error) main.appendChild(el("div", "banner", "This transcript could not be fully read: " + r.error));
+      const nav = el("nav", "views");
+      main.appendChild(nav);
+      if (r.error) main.appendChild(el("div", "banner", "This transcript could not be fully read: " + r.error));
 
-    for (const name of ["chat", "changes", "access", "report"]) {
-      const pane = el("div");
-      pane.hidden = true;
-      PANES[name] = pane;
-      main.appendChild(pane);
-    }
+      for (const name of ["chat", "changes", "access", "report"]) {
+        const pane = el("div");
+        pane.hidden = true;
+        PANES[name] = pane;
+        main.appendChild(pane);
+      }
 
-    // The report's own sections, split between the two views they belong to.
-    // Cost, failures and the window are a report; a diff and a file list are
-    // what changed. Nothing is rendered twice.
-    PANES.changes.replaceChildren(
-      ...[diffs, files].map((part) => part(r)).filter(Boolean)
-    );
-    PANES.report.replaceChildren(
-      tiles(r),
-      ...[failures, breakdown, windowChart, heaviest, spend, slowest, toolTable, callLog, subagents]
-        .map((part) => part(r))
-        .filter(Boolean)
-    );
+      // The report's own sections, split between the two views they belong to.
+      // Cost, failures and the window are a report; a diff and a file list are
+      // what changed. Nothing is rendered twice.
+      PANES.changes.replaceChildren(
+        ...[diffs, files].map((part) => part(r)).filter(Boolean)
+      );
+      PANES.report.replaceChildren(
+        tiles(r),
+        ...[failures, breakdown, windowChart, heaviest, spend, slowest, toolTable, callLog, subagents]
+          .map((part) => part(r))
+          .filter(Boolean)
+      );
 
-    const labels = {
-      chat: ["Conversation", ""],
-      changes: ["Changes", r.diffs ? r.diffs.length : 0],
-      access: ["Access", ""],
-      report: ["Report", ""],
-    };
-    for (const [name, [label, count]] of Object.entries(labels)) {
-      const button = el("button", null, label);
-      button.dataset.view = name;
-      button.setAttribute("aria-selected", "false");
-      if (count) button.appendChild(el("span", "n", count));
-      button.addEventListener("click", () => open_view(name, r));
-      nav.appendChild(button);
-    }
+      const labels = {
+        chat: ["Conversation", ""],
+        changes: ["Changes", r.diffs ? r.diffs.length : 0],
+        access: ["Access", ""],
+        report: ["Report", ""],
+      };
+      for (const [name, [label, count]] of Object.entries(labels)) {
+        const button = el("button", null, label);
+        button.dataset.view = name;
+        button.setAttribute("aria-selected", "false");
+        if (count) button.appendChild(el("span", "n", count));
+        button.addEventListener("click", () => open_view(name, r));
+        nav.appendChild(button);
+      }
 
-    const wanted = location.hash.replace(/^#/, "");
-    open_view(labels[wanted] ? wanted : "chat", r);
-  })
-  .catch((e) => {
-    document.getElementById("main").replaceChildren(el("div", "empty", String(e.message || e)));
-  });
+      const wanted = location.hash.replace(/^#/, "");
+      open_view(labels[wanted] ? wanted : "chat", r);
+    })
+    .catch((e) => {
+      document.getElementById("main").replaceChildren(
+        el("div", "empty", String(e.message || e) + " Trying again…")
+      );
+      setTimeout(load, 5000);
+    });
+}
+load();
 
 // Fetched on first sight rather than up front: a conversation and an access
 // reading are each another pass over the disk, and the report is already one.
@@ -1227,10 +1419,13 @@ async function open_view(name, r) {
     PANES.access.dataset.loaded = "1";
     PANES.access.replaceChildren(el("div", "empty", "Reading what it can reach…"));
     try {
-      const response = await fetch("/api/access/" + encodeURIComponent(ID) + QUERY);
-      if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+      const response = await ask("/api/access/" + encodeURIComponent(ID) + QUERY);
       PANES.access.replaceChildren(...accessView(await response.json()));
     } catch (e) {
+      // Read once and kept — but a read that failed is not a reading, so the
+      // next visit to this view asks again rather than showing the error for
+      // as long as the page is open.
+      delete PANES.access.dataset.loaded;
       PANES.access.replaceChildren(el("div", "empty", String(e.message || e)));
     }
   }
