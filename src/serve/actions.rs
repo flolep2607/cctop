@@ -138,14 +138,7 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     // difference between resuming and not: a session id under `~/.codex-work`
     // does not exist under `~/.codex`, so the resume would open a blank session
     // and report nothing wrong.
-    let argv = match session
-        .profile
-        .as_deref()
-        .and_then(|name| crate::config::profile_named(session.provider, name))
-    {
-        Some(profile) => crate::config::argv_under_profile(argv, profile),
-        None => argv,
-    };
+    let argv = under_profile(session, argv);
 
     // Named after the session, so resuming it twice reattaches to the agent
     // already doing it rather than starting a rival on one transcript — which no
@@ -172,6 +165,25 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     })
 }
 
+/// `argv` run under the account whose directory this session was read out of.
+///
+/// Resumed under the account the transcript lives in. For Codex this is the
+/// difference between resuming and not: a session id under `~/.codex-work` does
+/// not exist under `~/.codex`, so the resume would open a blank session and
+/// report nothing wrong.
+fn under_profile(session: &Session, argv: Vec<String>) -> Vec<String> {
+    match profile_of(session) {
+        Some(profile) => crate::config::argv_under_profile(argv, profile),
+        None => argv,
+    }
+}
+
+/// The profile a session was read out of, when it still exists.
+fn profile_of(session: &Session) -> Option<&'static crate::config::Profile> {
+    let name = session.profile.as_deref()?;
+    crate::config::profile_named(session.provider, name)
+}
+
 /// Write `session`'s brief and start `agent` on it, in the same directory.
 ///
 /// This is the cross-harness move: a resume puts the same harness back on the
@@ -188,6 +200,15 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
             400,
             format!("{agent} is not an agent cctop found on this machine"),
         ));
+    }
+    // Claude to Claude there is a better handoff than a summary: the receiving
+    // agent reads the same transcript format the sending one wrote, so it can be
+    // resumed onto a copy of the conversation itself. `handoff::fork` says what
+    // that costs and why it is still the right trade.
+    if agent == "claude"
+        && let Some(transcript) = handoff::forkable(session)
+    {
+        return forked(session, transcript);
     }
     let brief = handoff::build(session, data);
     let path = handoff::write(&brief)
@@ -223,6 +244,34 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
         message: format!(
             "Handed {} to {agent} — attach with `tmux attach -t {name}`",
             brief.summary()
+        ),
+        tmux: Some(name),
+    })
+}
+
+/// Copy this session's transcript and start a second Claude on the copy.
+///
+/// The two agents share everything said so far and nothing after it: the copy
+/// is what keeps this a handoff rather than two agents appending to one
+/// transcript, which is the thing [`resume`] refuses to do.
+fn forked(session: &Session, transcript: &std::path::Path) -> Result<Done, Failed> {
+    let profile = profile_of(session);
+    let config_dir = profile
+        .map(|p| p.dir.clone())
+        .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
+    let id = handoff::fork(transcript, &config_dir)
+        .map_err(|e| (503, format!("could not copy the transcript: {e}")))?;
+    let argv = under_profile(
+        session,
+        vec!["claude".into(), "--resume".into(), id.clone()],
+    );
+    // A fresh id, so unlike a resume there is nothing to be idempotent about:
+    // the copy has never been opened by anything.
+    let name = crate::tmux::free_name("claude");
+    launch(&argv, &name, session.work_dir().as_deref())?;
+    Ok(Done {
+        message: format!(
+            "Handed the conversation to a new claude — attach with `tmux attach -t {name}`"
         ),
         tmux: Some(name),
     })

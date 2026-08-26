@@ -341,6 +341,26 @@ is the intent, and that is what gets carried.
 Because it is built from the normalised session data rather than from any one
 transcript format, it works from and to all seven harnesses.
 
+### Claude to Claude, the conversation goes whole
+
+The brief exists because no harness can read another's transcripts. Between two
+Claudes that limit is not there, so handing a Claude session to `claude` copies
+the transcript instead: the file is written into the receiving account's
+`projects/` directory under a fresh session id, and the new agent is started with
+`claude --resume` on the copy. It opens knowing everything the first one knew,
+not everything a summary could carry.
+
+It is a copy, not a second agent on one transcript. The two diverge from the
+moment the fork is taken, and the session that was handed over is left exactly as
+it was found — still listed, still resumable, still the only writer of its own
+file. That is also what makes this different from `R`, which refuses to put a
+second agent on a transcript for precisely that reason.
+
+The cost is the one the brief was written to avoid: the whole window, tool output
+and all, replayed into a fresh one. That is the trade being made on purpose —
+everything is carried because everything can be. Hand the same session to any
+other agent and it gets the brief, which is the only form that agent can read.
+
 The same brief is available without the UI:
 
 ```bash

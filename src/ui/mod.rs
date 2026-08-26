@@ -827,6 +827,13 @@ pub struct App {
     /// because the agent that will receive it does not exist yet: `H` writes the
     /// brief and opens the launcher, and whichever agent is picked inherits it.
     pub pending_brief: Option<std::path::PathBuf>,
+    /// The transcript behind that brief, when the session it describes is one a
+    /// second Claude could be resumed onto directly.
+    ///
+    /// Held beside the brief rather than instead of it: which of the two is
+    /// used is not known until an agent has been picked, and every agent but
+    /// Claude still needs the brief. See [`crate::handoff::fork`].
+    pub pending_fork: Option<std::path::PathBuf>,
     /// A brief handed to an agent that is still starting up, as
     /// `(pid, line, not before)`.
     ///
@@ -993,6 +1000,7 @@ impl App {
             tmux_declined: false,
             tmux_installing: None,
             pending_brief: None,
+            pending_fork: None,
             handoff_send: None,
             hosted: None,
             needs_redraw: true,
@@ -2499,6 +2507,7 @@ impl App {
             }
         };
         self.pending_brief = Some(path);
+        self.pending_fork = crate::handoff::forkable(&session).map(std::path::Path::to_path_buf);
         // The receiving agent belongs in the directory the work is in, whatever
         // row the cursor moves to while the launcher is up.
         self.launch_prompt(LaunchInto::Tab);
@@ -2507,6 +2516,7 @@ impl App {
         // it to the next unrelated agent instead.
         if self.mode != Mode::Launch {
             self.pending_brief = None;
+            self.pending_fork = None;
             return;
         }
         self.set_status(format!(
@@ -2979,6 +2989,41 @@ impl App {
         crate::config::argv_under_profile(argv, profile)
     }
 
+    /// The argv that resumes a new agent onto a copy of the session being
+    /// handed over, when that is possible and `argv` is the agent that can read
+    /// it.
+    ///
+    /// The copy lands in the *receiving* account's directory, which is not
+    /// always the sending one's: handing a personal session to a work login has
+    /// to put the transcript where that login will look for it.
+    ///
+    /// A failure to copy is reported and answered with `None`, which puts the
+    /// launch back on the brief — the handoff still happens, with less of the
+    /// conversation in it.
+    fn fork_pending(&mut self, argv: &[String]) -> Option<Vec<String>> {
+        let transcript = self.pending_fork.clone()?;
+        if crate::handoff::command_of(argv) != Some("claude") {
+            return None;
+        }
+        let profile = self.chosen_profile(Provider::Claude);
+        let config_dir = profile
+            .map(|p| p.dir.clone())
+            .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
+        match crate::handoff::fork(&transcript, &config_dir) {
+            Ok(id) => {
+                let argv = vec!["claude".to_string(), "--resume".to_string(), id];
+                Some(match profile {
+                    Some(profile) => crate::config::argv_under_profile(argv, profile),
+                    None => argv,
+                })
+            }
+            Err(error) => {
+                self.set_status(format!("Could not copy the transcript: {error}"));
+                None
+            }
+        }
+    }
+
     /// What a still-running agent in the launcher is doing, if it has said.
     ///
     /// This is the whole reason the offer carries a pid. A list of tmux session
@@ -3217,10 +3262,20 @@ impl App {
             return;
         }
 
-        // A brief goes to an agent that is starting fresh. Reattaching lands in
-        // a conversation already under way, where a "read this and continue"
+        // A handoff goes to an agent that is starting fresh. Reattaching lands
+        // in a conversation already under way, where a "read this and continue"
         // line would interrupt whatever it is doing mid-turn.
-        let brief = match matches!(choice, tabs::Choice::Start(_)) {
+        let fresh = matches!(choice, tabs::Choice::Start(_));
+        // Claude to Claude the conversation itself is handed over rather than a
+        // summary of it, the receiving agent being resumed onto a copy of the
+        // transcript. Everything else gets the brief, which is the only form it
+        // can read.
+        let forked = fresh.then(|| self.fork_pending(&argv)).flatten();
+        let carrying_conversation = forked.is_some();
+        let argv = forked.unwrap_or(argv);
+        // Only where the fork did not happen: an agent that cannot read the
+        // transcript, or one whose copy could not be written.
+        let brief = match fresh && !carrying_conversation {
             true => self.pending_brief.clone(),
             false => None,
         };
@@ -3250,12 +3305,22 @@ impl App {
         };
         // The tab is named after the agent, not after the brief it was handed:
         // `Pane::launch` names it from the argv it was given, and that argv now
-        // ends in a paragraph.
+        // ends in a paragraph — or, for a fork, in the uuid of the copy, which
+        // is the half of a resume nobody reads.
         if opening.is_some() {
             pane.label = tabs::label_of(argv);
+        } else if carrying_conversation {
+            pane.label = "claude".to_string();
         }
         let label = pane.label.clone();
         let mut carried = "";
+        if carrying_conversation {
+            // Both are spent: the copy is what the agent is reading, and the
+            // brief that was written alongside it has no reader left.
+            self.pending_fork = None;
+            self.pending_brief = None;
+            carried = " with the conversation";
+        }
         if let Some(line) = line {
             self.pending_brief = None;
             match opening.is_some() {

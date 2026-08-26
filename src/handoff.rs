@@ -13,6 +13,11 @@
 //! survive a restart, and so is worth carrying, is the intent: the task, the
 //! decisions, the shape of the work so far.
 //!
+//! Between two Claudes none of that applies, because the limit it works around
+//! is not there: the receiving agent reads exactly the format the sending one
+//! wrote. That handoff copies the transcript instead — see [`fork`] — and the
+//! brief is what every other agent gets.
+//!
 //! ponytail: the plan section only fills in for harnesses that record one as a
 //! tool call (Claude's `TodoWrite`, Codex's `update_plan`). A session that kept
 //! its plan in prose leaves it empty rather than guessing at which assistant
@@ -435,6 +440,119 @@ pub fn write(brief: &Brief) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The transcript a Claude session could be handed over whole, rather than as a
+/// brief.
+///
+/// A brief exists because no harness can read another's transcripts. Claude to
+/// Claude that limit is not there: the receiving agent reads exactly the format
+/// the sending one wrote, so the conversation itself can be handed over — see
+/// [`fork`] — and the summary is only worth writing when it cannot be.
+///
+/// `None` for everything that would not survive the copy: another harness,
+/// another machine, and Claude for Mac, which keeps its conversations in a
+/// directory of its own and resumes them by title rather than by id.
+pub fn forkable(session: &Session) -> Option<&Path> {
+    if session.provider != crate::pricing::Provider::Claude
+        || session.surface.is_desktop()
+        || session.remote.is_some()
+    {
+        return None;
+    }
+    let file = session.data_file.as_deref()?;
+    // The parent is the project directory whose name Claude derives from the
+    // working directory, and the copy has to land in one of those or the
+    // resume will not find it.
+    let named = file.extension().is_some_and(|e| e == "jsonl") && file.parent().is_some();
+    named.then_some(file)
+}
+
+/// Copy `transcript` into `config_dir` under a new session id, and return it.
+///
+/// This is the Claude-to-Claude handoff: the receiving agent is resumed onto a
+/// copy of the conversation, so it starts knowing everything the first one knew
+/// rather than everything a summary could carry. The copy is what makes it a
+/// handoff rather than a second agent on one transcript — the two then diverge,
+/// and the session that was handed over is left exactly as it was found, still
+/// resumable itself.
+///
+/// It costs what the brief was written to avoid: the whole window, tool output
+/// and all, replayed into a fresh one. That is the trade being made here on
+/// purpose — everything is carried because everything can be.
+///
+/// `config_dir` is the receiving account's, which is not always the sending
+/// one's: handing a personal session to a work login has to put the copy where
+/// that login will look.
+///
+/// ponytail: subagent sidechains are not copied. They live in a directory
+/// beside the transcript named after it, the resumed session does not read them
+/// back, and the parent transcript already holds each subagent's report.
+pub fn fork(transcript: &Path, config_dir: &Path) -> std::io::Result<String> {
+    use std::io::{BufRead, BufWriter, Write};
+
+    let missing = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, what);
+    let project = transcript
+        .parent()
+        .and_then(Path::file_name)
+        .ok_or_else(|| missing("that transcript is not in a project directory"))?;
+    let old = transcript
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| missing("that transcript has no session id"))?;
+
+    let dir = config_dir.join("projects").join(project);
+    std::fs::create_dir_all(&dir)?;
+    // Retried rather than trusted: an id that already exists would mean writing
+    // over somebody's conversation, which is the one outcome a fork must not
+    // have. Three tries because the second one failing is already impossible.
+    let (id, path) = (0..3)
+        .map(|_| new_session_id())
+        .map(|id| {
+            let path = dir.join(format!("{id}.jsonl"));
+            (id, path)
+        })
+        .find(|(_, path)| !path.exists())
+        .ok_or_else(|| missing("could not find an unused session id"))?;
+
+    let source = std::io::BufReader::new(std::fs::File::open(transcript)?);
+    let mut out = BufWriter::new(std::fs::File::create(&path)?);
+    for line in source.lines() {
+        let line = line?;
+        // Every record carries the id, and a transcript still claiming the old
+        // one is a session pointing at a conversation it is not: `/resume`
+        // lists the copy under the original's name, and the hooks cctop reads
+        // report both agents as the same session.
+        match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(mut value) if value.get("sessionId").and_then(|v| v.as_str()) == Some(old) => {
+                value["sessionId"] = serde_json::Value::String(id.clone());
+                writeln!(out, "{value}")?;
+            }
+            // Anything else is passed through byte for byte. A line this does
+            // not understand is still one the harness wrote and will read.
+            _ => writeln!(out, "{line}")?,
+        }
+    }
+    out.flush()?;
+    Ok(id)
+}
+
+/// A session id of the shape the harness writes: a version-4 UUID.
+fn new_session_id() -> String {
+    let mut bytes = crate::util::random_bytes(16);
+    // The version and variant bits. Nothing checks them, but a file whose name
+    // is not a UUID is one a person reading the directory cannot place.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 /// The line the receiving agent is given so it goes and reads the brief.
 ///
 /// A path rather than the brief's text: the text is thousands of tokens, and
@@ -488,7 +606,7 @@ pub fn opening_argv(argv: &[String], line: &str) -> Option<Vec<String>> {
 
 /// The command an argv runs, bare of any path and of the `env VAR=value` prefix
 /// a profile launch carries.
-fn command_of(argv: &[String]) -> Option<&str> {
+pub fn command_of(argv: &[String]) -> Option<&str> {
     let mut rest = argv;
     if rest.first().map(String::as_str) == Some("env") {
         rest = &rest[1..];
@@ -639,5 +757,82 @@ mod tests {
         let brief = build(&Session::new(Provider::Claude, "x".into()), None);
         let md = brief.to_markdown();
         assert!(md.contains("background, not instructions"));
+    }
+
+    /// The Claude-to-Claude handoff: the copy is a session in its own right,
+    /// claiming its own id, and the transcript it was taken from is left exactly
+    /// as it was found — both halves matter, since the session being handed over
+    /// is still resumable and must not end up with two agents appending to it.
+    #[test]
+    fn a_fork_is_a_second_session_on_the_same_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let old = "2714fc38-60cd-49bd-b00c-c6577c31c720";
+        let project = home.path().join("projects").join("-home-x-work");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join(format!("{old}.jsonl"));
+        let original = format!(
+            "{{\"type\":\"mode\",\"sessionId\":\"{old}\"}}\n\
+             {{\"type\":\"user\",\"sessionId\":\"{old}\",\"text\":\"about {old}\"}}\n\
+             not json at all\n"
+        );
+        std::fs::write(&transcript, &original).unwrap();
+
+        let into = tempfile::tempdir().unwrap();
+        let id = fork(&transcript, into.path()).unwrap();
+        assert_ne!(id, old);
+        // Landed in the same project directory, under the receiving account.
+        let copy = into
+            .path()
+            .join("projects/-home-x-work")
+            .join(format!("{id}.jsonl"));
+        let text = std::fs::read_to_string(&copy).unwrap();
+        assert_eq!(text.lines().count(), 3);
+        assert!(
+            !text.contains(&format!("\"sessionId\":\"{old}\"")),
+            "{text}"
+        );
+        assert_eq!(text.matches(&format!("\"sessionId\":\"{id}\"")).count(), 2);
+        // Only the field is rewritten: the old id inside a message is part of
+        // what was said, and a session that talked about a uuid still did.
+        assert!(text.contains(&format!("about {old}")), "{text}");
+        // A line the harness wrote and this does not parse is still carried.
+        assert!(text.contains("not json at all"), "{text}");
+        // And the session handed over is untouched.
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+    }
+
+    /// Two forks of one session are two sessions.
+    #[test]
+    fn a_fork_never_writes_over_a_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("projects").join("-p");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join("aaaa.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let first = fork(&transcript, home.path()).unwrap();
+        let second = fork(&transcript, home.path()).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(new_session_id().len(), 36);
+    }
+
+    /// What can be handed over whole, and what has to go as a summary.
+    #[test]
+    fn only_a_local_claude_cli_transcript_can_be_forked() {
+        let mut session = Session::new(Provider::Claude, "abc".into());
+        assert_eq!(forkable(&session), None, "no transcript to copy");
+        session.data_file = Some(PathBuf::from("/home/x/.claude/projects/-p/abc.jsonl"));
+        assert!(forkable(&session).is_some());
+
+        // Claude for Mac keeps its conversations elsewhere and resumes them by
+        // title, so a copy under a new id is not a session it would ever find.
+        let mut desktop = session.clone();
+        desktop.surface = crate::session::Surface::DesktopCode;
+        assert_eq!(forkable(&desktop), None);
+
+        // Another harness cannot read this format at all — that is the whole
+        // reason the brief exists.
+        let mut codex = session.clone();
+        codex.provider = Provider::Codex;
+        assert_eq!(forkable(&codex), None);
     }
 }

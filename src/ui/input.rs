@@ -234,6 +234,7 @@ impl App {
             KeyCode::Esc => {
                 self.mode = Mode::List;
                 self.pending_brief = None;
+                self.pending_fork = None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.launch_cursor = (self.launch_cursor + n - 1) % n

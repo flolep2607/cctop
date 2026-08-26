@@ -517,57 +517,18 @@ fn announce(
     let _ = std::io::stderr().flush();
 }
 
-/// A token for this run, from the OS where it will give us one.
+/// A token for this run.
 ///
-/// `/dev/urandom` is the real source and the fallback is not as good: hashing
-/// the clock and the pid under [`std::hash::RandomState`], whose keys the
-/// standard library seeds from the OS once per process. That is enough to stop
-/// a token being guessed from across a network and is not enough to stop a
-/// local process that already knows when cctop started — which is why the
-/// default bind is loopback and this is defence in depth rather than the
-/// defence.
+/// See [`crate::util::random_bytes`] for where the entropy comes from and what
+/// it is worth: enough that a token cannot be guessed from across a network,
+/// which is why the default bind is loopback and this is defence in depth
+/// rather than the defence.
 fn new_token() -> String {
-    match read_random(TOKEN_BYTES) {
-        Some(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
-        None => hashed_token(),
-    }
+    crate::util::random_hex(TOKEN_BYTES)
 }
 
 /// Bytes of entropy behind a token, which is twice as many hex characters.
 const TOKEN_BYTES: usize = 16;
-
-/// The fallback, split out so it can be tested on the platform that uses it.
-///
-/// Windows has no `/dev/urandom` to read, so this is the whole of its token
-/// generation — and a test that only ever exercised the good path would say
-/// nothing about the platform that never takes it.
-fn hashed_token() -> String {
-    use std::hash::{BuildHasher, Hasher, RandomState};
-
-    let mut out = String::with_capacity(TOKEN_BYTES * 2);
-    for salt in 0..(TOKEN_BYTES as u64 / 8) {
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_i64(crate::util::now_ms());
-        hasher.write_u32(std::process::id());
-        hasher.write_u64(salt);
-        out.push_str(&format!("{:016x}", hasher.finish()));
-    }
-    out
-}
-
-/// Read `want` bytes from the system random device, if there is one.
-///
-/// A short read counts as a failure rather than as fewer bytes: half a token is
-/// not half as good, and silently shortening it is the kind of weakening nobody
-/// would find later.
-fn read_random(want: usize) -> Option<Vec<u8>> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open("/dev/urandom").ok()?;
-    let mut buf = vec![0u8; want];
-    file.read_exact(&mut buf).ok()?;
-    Some(buf)
-}
 
 /// Compare a presented token against the real one without leaking where they
 /// diverged.
@@ -1077,16 +1038,6 @@ mod tests {
         wrong.pop();
         wrong.push(if token.ends_with('a') { 'b' } else { 'a' });
         assert!(!token_matches(&token, &wrong));
-    }
-
-    /// The path Windows always takes, exercised on every platform.
-    #[test]
-    fn the_fallback_token_is_the_same_shape_as_the_real_one() {
-        let token = hashed_token();
-        assert_eq!(token.len(), TOKEN_BYTES * 2);
-        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(hashed_token(), hashed_token());
-        assert!(token_matches(&token, &token));
     }
 
     #[test]
