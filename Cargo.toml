@@ -12,7 +12,10 @@ readme = "README.md"
 build = "build.rs"
 keywords = ["tui", "monitoring", "claude", "codex", "htop"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.github", "/target"]
+# docs/harnesses is a mirror of seven other projects' documentation — 14 MB of
+# it, against a 10 MB crate limit. It is for people reading this repository,
+# not for people installing the binary.
+exclude = ["/.github", "/target", "/docs/harnesses"]
 
 # Only the pty shim and TIOCSTI injection need libc, both of which are unix-only.
 # It is already in the tree under sysinfo, so this adds no dependency.
