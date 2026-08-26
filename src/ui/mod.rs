@@ -2506,6 +2506,44 @@ impl App {
         self.tab = self.tab.min(self.tabs.len());
     }
 
+    /// Open the selected agent's terminal in a browser, via the multiplexer.
+    ///
+    /// Only reaches agents cctop handed to the multiplexer, which is the same
+    /// limit `a` has and for the same reason: an agent on cctop's own pty is on
+    /// no terminal a second viewer can be pointed at, so there is nothing for
+    /// `web-share -t` to name.
+    ///
+    /// The operator link goes to the clipboard and never to the screen. It
+    /// grants input to a live coding agent, and a status line is read by
+    /// whoever is behind you and survives into a screenshot; the clipboard is
+    /// where the user was going to put it anyway. The pairing code is shown,
+    /// since it is worth nothing without the link.
+    pub(super) fn share_selected(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let label = session.display_label().to_string();
+        let Some(pid) = session_root_pid(session) else {
+            self.set_status("Selected session has no local process");
+            return;
+        };
+        let Some(name) = crate::tmux::holding(pid) else {
+            self.set_status("Only an agent cctop put in a multiplexer can be shared");
+            return;
+        };
+        match crate::tmux::web_share(&name) {
+            Ok(share) => {
+                render::copy_to_clipboard(&share.operator);
+                let pin = match &share.pin {
+                    Some(pin) => format!(" · pin {pin}"),
+                    None => String::new(),
+                };
+                self.set_status(format!("Sharing {label} — operator link copied{pin}"));
+            }
+            Err(error) => self.set_status(format!("Could not share {label}: {error}")),
+        }
+    }
+
     /// Put the selected agent's own terminal on screen, in a tab of its own.
     ///
     /// Two ways in, because there are two ways an agent's terminal can belong to

@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// Prefix on every tmux session cctop creates.
 ///
@@ -26,14 +27,50 @@ use std::process::Command;
 /// never adopted, reattached to, or killed by anything here.
 const PREFIX: &str = "cctop";
 
-/// Whether tmux can be used at all.
+/// Which multiplexer binary cctop drives, `tmux` unless `CCTOP_MUX` says
+/// otherwise.
+///
+/// rmux reimplements tmux's command surface, so everything in this module —
+/// `new-session -A`, `set-option`, `list-panes -F`, `kill-session` — is spelled
+/// the same for either one and the binary name is the whole difference. Naming
+/// it here rather than at each call site is also what keeps that true: a second
+/// hard-coded `"tmux"` is a call that silently keeps talking to the other
+/// daemon.
+///
+/// Opt-in rather than "prefer rmux if installed", because the two keep separate
+/// daemons and separate sessions. Switching backends does not migrate anything:
+/// the agents running under the old one are still running, and cctop simply
+/// stops being able to see them. That is a fine thing to ask for and a terrible
+/// thing to do to someone on upgrade.
+///
+/// Read once. The env cannot change under a running process in any way worth
+/// answering, and this is called on paths that spawn a terminal.
+pub fn bin() -> &'static str {
+    static MUX: OnceLock<&'static str> = OnceLock::new();
+    MUX.get_or_init(|| pick(std::env::var("CCTOP_MUX").ok().as_deref()))
+}
+
+/// The name half of [`bin`], split out so both answers can be tested without an
+/// env var — which `bin` caches for the life of the process and so could only be
+/// exercised once.
+fn pick(value: Option<&str>) -> &'static str {
+    match value {
+        Some("rmux") => "rmux",
+        // Anything unrecognised is tmux rather than an error: this is read deep
+        // inside a launch, where the only way to report a typo would be to fail
+        // the launch over it.
+        _ => "tmux",
+    }
+}
+
+/// Whether the multiplexer can be used at all.
 ///
 /// Only that the binary exists: a server does not have to be running, since
 /// `new-session` starts one. This is checked per launch rather than cached —
 /// installing tmux while cctop runs should not require restarting it, and the
 /// cost is one `tmux -V` against a launch that spawns a terminal anyway.
 pub fn available() -> bool {
-    Command::new("tmux")
+    Command::new(bin())
         .arg("-V")
         .output()
         .is_ok_and(|out| out.status.success())
@@ -105,6 +142,14 @@ const MANAGERS: &[(&str, &str, &[&str], bool)] = &[
 /// Nothing here runs anything: it only decides what *would* be run, so the
 /// decision can be shown to the user before any of it happens.
 pub fn installer() -> Option<Install> {
+    // Every entry below installs tmux by name, so there is nothing honest to
+    // offer someone who asked for a different multiplexer. rmux ships through
+    // cargo, brew, winget, scoop, apt and dnf under its own instructions; cctop
+    // pointing a package manager at the wrong package is worse than saying
+    // nothing.
+    if bin() != "tmux" {
+        return None;
+    }
     let root = is_root();
     let (manager, _, commands, needs_root) = MANAGERS
         .iter()
@@ -155,7 +200,7 @@ fn is_root() -> bool {
 /// agent starts in its project, and an existing one is not moved.
 pub fn attach_or_create(argv: &[String], name: &str, cwd: Option<&Path>) -> Vec<String> {
     let mut out = vec![
-        "tmux".to_string(),
+        bin().to_string(),
         "new-session".to_string(),
         "-A".to_string(),
         "-s".to_string(),
@@ -210,7 +255,7 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
     // configured, so the placeholder has to outlive the two commands after it.
     // The day is only how long an unreachable failure would sit around.
     create.extend(["--", "sleep", "86400"]);
-    let Ok(out) = Command::new("tmux").args(&create).output() else {
+    let Ok(out) = Command::new(bin()).args(&create).output() else {
         return;
     };
     if !out.status.success() {
@@ -220,7 +265,7 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
 
     // One invocation for the three: `;` is tmux's own separator between
     // commands, which is why these need no shell to be read as three.
-    let _ = Command::new("tmux")
+    let _ = Command::new(bin())
         .args(["set-option", "-t", name, "history-limit", HISTORY_LINES])
         .args([";", "set-option", "-t", name, "mouse", "on"])
         .args([";", "set-option", "-t", name, "status", "off"])
@@ -234,7 +279,7 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
     }
     window.push("--");
     window.extend(argv.iter().map(String::as_str));
-    let made = Command::new("tmux")
+    let made = Command::new(bin())
         .args(&window)
         .output()
         .is_ok_and(|out| out.status.success());
@@ -247,7 +292,7 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
     }
     // Last, so the session is never briefly windowless — killing its only window
     // is killing the session, and with it the agent just put in the other one.
-    let _ = Command::new("tmux")
+    let _ = Command::new(bin())
         .args(["kill-window", "-t", &placeholder])
         .output();
 }
@@ -259,11 +304,97 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
 /// an empty session wearing its name.
 pub fn attach(name: &str) -> Vec<String> {
     vec![
-        "tmux".to_string(),
+        bin().to_string(),
         "attach-session".to_string(),
         "-t".to_string(),
         format!("={name}"),
     ]
+}
+
+/// One browser share of a multiplexer session.
+pub struct Share {
+    /// The link that can type into the agent. A shell credential, and named
+    /// that way so nothing here hands it out by accident.
+    pub operator: String,
+    /// The pairing code the browser asks for after the link, absent under
+    /// `--no-pin`. Useless without the link and useless on its own, which is why
+    /// it is safe to put on the status line while the link goes to the clipboard.
+    pub pin: Option<String>,
+}
+
+/// Open `name`'s terminal to a browser, if the multiplexer can do that at all.
+///
+/// tmux cannot, so this fails under it rather than guessing: browser sharing is
+/// rmux's, and the nearest tmux equivalent — tmate, ttyd, a reverse proxy — is a
+/// different program with a different trust model that cctop has no business
+/// substituting silently.
+///
+/// Run and parsed rather than handed to a pane, because `web-share` returns as
+/// soon as the daemon has the share: the links outlive the command, so a pane
+/// would draw them and exit. The cost is rmux's card UI, which only renders to a
+/// terminal — the QR code in it is worth having, and someone who wants it can
+/// run the same command in one.
+pub fn web_share(name: &str) -> Result<Share, String> {
+    web_share_with(bin(), name)
+}
+
+/// [`web_share`] against a named multiplexer, so a test can reach the rmux path
+/// without the process-wide cache in [`bin`].
+fn web_share_with(bin: &str, name: &str) -> Result<Share, String> {
+    let argv = web_share_argv(bin, name)
+        .ok_or_else(|| format!("{bin} cannot share a terminal to a browser"))?;
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .map_err(|error| format!("could not run {bin}: {error}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        // rmux's own message names the reason — no such session, web support
+        // compiled out — and any summary here would only lose it.
+        return Err(stderr.lines().last().unwrap_or("the share failed").into());
+    }
+    parse_share(&stdout, &stderr).ok_or_else(|| "the share reported no link".to_string())
+}
+
+/// The argv for [`web_share`], split out so both answers are reachable from a
+/// test without the process-wide cache in [`bin`].
+fn web_share_argv(bin: &str, name: &str) -> Option<Vec<String>> {
+    (bin == "rmux").then(|| {
+        vec![
+            bin.to_string(),
+            "web-share".to_string(),
+            "-t".to_string(),
+            name.to_string(),
+        ]
+    })
+}
+
+/// Pick the operator link and its pairing code out of what `web-share` printed.
+///
+/// The link is read from stderr, which is where rmux deliberately puts it: the
+/// spectator link goes to stdout, and reading the wrong stream would hand out
+/// input to a live shell believing it read-only. The two are the same shape, so
+/// the stream is the only thing telling them apart — it is not a detail to
+/// tidy into "first URL anywhere".
+///
+/// Within a stream the link is found by shape rather than by position, so a
+/// reworded label does not silently stop returning one.
+///
+/// ponytail: only the operator link is kept. The spectator link is parsed away
+/// because nothing asks for one yet; a read-only share wants its own key rather
+/// than a second thing on the same one.
+fn parse_share(stdout: &str, stderr: &str) -> Option<Share> {
+    Some(Share {
+        operator: stderr
+            .split_whitespace()
+            .find(|word| word.starts_with("https://"))
+            .map(str::to_string)?,
+        pin: stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("operator pin "))
+            .map(|pin| pin.trim().to_string()),
+    })
 }
 
 /// A tmux session name for a session being resumed.
@@ -331,7 +462,7 @@ fn sanitize(text: &str) -> String {
 
 /// Whether a tmux session by this name is alive.
 pub fn exists(name: &str) -> bool {
-    Command::new("tmux")
+    Command::new(bin())
         .args(["has-session", "-t", &format!("={name}")])
         .output()
         .is_ok_and(|out| out.status.success())
@@ -342,7 +473,7 @@ pub fn exists(name: &str) -> bool {
 /// The `=` prefix makes the target an exact name rather than a prefix match —
 /// without it, killing `cctop-claude` would also kill `cctop-claude-2`.
 pub fn kill(name: &str) -> Result<(), String> {
-    let out = Command::new("tmux")
+    let out = Command::new(bin())
         .args(["kill-session", "-t", &format!("={name}")])
         .output()
         .map_err(|e| format!("tmux: {e}"))?;
@@ -374,7 +505,7 @@ pub fn quiet(name: &str) {
     // session: =cctop-x"). Safe regardless, because tmux resolves an exact name
     // before it tries any prefix, and this is only ever called with the name of a
     // session just confirmed to exist.
-    let _ = Command::new("tmux")
+    let _ = Command::new(bin())
         .args(["set-option", "-t", name, "status", "off"])
         .output();
 }
@@ -398,7 +529,7 @@ pub fn quiet(name: &str) {
 /// it to scroll back to, under tmux or anywhere else.
 pub fn mouse(name: &str) {
     // Same reason as `quiet` for the bare name: `set-option` rejects `=`.
-    let _ = Command::new("tmux")
+    let _ = Command::new(bin())
         .args(["set-option", "-t", name, "mouse", "on"])
         .output();
 }
@@ -443,7 +574,7 @@ pub fn running() -> Vec<Running> {
     // One call for all of it. Every field below resolves in a pane's context —
     // tmux looks up the session a pane belongs to — so asking per session would
     // be a subprocess each for the same answer.
-    let Ok(out) = Command::new("tmux")
+    let Ok(out) = Command::new(bin())
         .args([
             "list-panes",
             "-a",
@@ -512,7 +643,7 @@ pub fn sessions() -> Vec<String> {
 /// Targeted rather than a scan of [`running`], because this is asked per pane
 /// and the answer for one session should not cost a listing of them all.
 pub fn agent_pid(name: &str) -> Option<u32> {
-    let out = Command::new("tmux")
+    let out = Command::new(bin())
         .args(["list-panes", "-t", &format!("={name}"), "-F", "#{pane_pid}"])
         .output()
         .ok()?;
@@ -557,6 +688,84 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_unrecognised_multiplexer_is_tmux() {
+        assert_eq!(pick(Some("rmux")), "rmux");
+        assert_eq!(pick(Some("zellij")), "tmux");
+        assert_eq!(pick(Some("")), "tmux");
+        assert_eq!(pick(None), "tmux");
+    }
+
+    #[test]
+    fn only_rmux_is_offered_a_browser_share() {
+        assert_eq!(web_share_argv("tmux", "cctop-claude-abc"), None);
+        assert_eq!(
+            web_share_argv("rmux", "cctop-claude-abc").unwrap(),
+            &["rmux", "web-share", "-t", "cctop-claude-abc"]
+        );
+    }
+
+    #[test]
+    fn the_operator_link_is_read_from_the_stream_rmux_puts_it_on() {
+        // Verbatim from `rmux 0.10.0 web-share -t …`, which splits the two
+        // links across the streams on purpose.
+        let stderr =
+            "rmux: operator URL (keep private):\nrmux:   https://share.rmux.io/#t=OPERATOR\n";
+        let stdout = concat!(
+            "spectator https://share.rmux.io/#t=SPECTATOR\n",
+            "operator URL emitted on stderr\n",
+            "share does not expire\n",
+            "operator pin 634138\n",
+            "spectator pin 988762\n",
+        );
+        let share = parse_share(stdout, stderr).expect("a link was printed");
+        assert_eq!(share.operator, "https://share.rmux.io/#t=OPERATOR");
+        assert_eq!(share.pin.as_deref(), Some("634138"));
+    }
+
+    /// The parse above is against captured output; this is against rmux. A
+    /// reworded label or a link moved between the streams would pass every unit
+    /// test here and hand out the wrong link in the field.
+    #[test]
+    fn a_real_rmux_session_comes_back_with_an_operator_link() {
+        if !Command::new("rmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
+            eprintln!("skipping: rmux not installed");
+            return;
+        }
+        let name = format!("cctop-share-{}", std::process::id());
+        let made = Command::new("rmux")
+            .args(["new-session", "-d", "-s", &name, "--", "sleep", "30"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        assert!(made, "rmux would not start a session to share");
+
+        let share = web_share_with("rmux", &name);
+        // Killing the session ends its share; `web-share -X` would also end any
+        // the user has open, which is not this test's to touch.
+        let _ = Command::new("rmux")
+            .args(["kill-session", "-t", &format!("={name}")])
+            .output();
+
+        let share = share.expect("rmux shared the session");
+        assert!(
+            share.operator.starts_with("https://"),
+            "not a link: {}",
+            share.operator
+        );
+    }
+
+    #[test]
+    fn a_share_with_no_operator_link_is_not_a_share() {
+        // `--spectator-only` prints a link, but not one this can return: reading
+        // stdout here would hand out input to a live agent.
+        let stdout = "spectator https://share.rmux.io/#t=SPECTATOR\n";
+        assert!(parse_share(stdout, "").is_none());
+    }
     use super::*;
 
     /// Whatever is offered has to be runnable as offered. An install the user
@@ -698,7 +907,7 @@ mod tests {
 
         for name in [&ours, &theirs] {
             assert!(
-                Command::new("tmux")
+                Command::new(bin())
                     .args([
                         "new-session",
                         "-d",
@@ -728,7 +937,7 @@ mod tests {
         // Quieting the session is best effort, but it has to actually land: the
         // status bar it removes is what made an idle pane look busy forever.
         quiet(&ours);
-        let status = Command::new("tmux")
+        let status = Command::new(bin())
             .args(["show-options", "-t", &ours, "status"])
             .output()
             .ok()
@@ -777,7 +986,7 @@ mod tests {
 
         prepare(&argv, &name, Some(&dir));
         let ask = |fmt: &str| {
-            Command::new("tmux")
+            Command::new(bin())
                 .args(["display-message", "-p", "-t", &name, fmt])
                 .output()
                 .ok()

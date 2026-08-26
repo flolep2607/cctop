@@ -117,6 +117,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Home / End", "Jump to first / last"),
         item("n / N", "Next / previous search match (wraps)"),
         item("b", "Jump to the session that rang last"),
+        item("W", "Share the agent's terminal to a browser (rmux)"),
         Line::default(),
         section("Panels"),
         item("←  →", "Move between bottom panels"),

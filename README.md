@@ -129,6 +129,7 @@ cctop --remove-alias  # remove the shell aliases cctop installs (--install-alias
 | `Home`, `End` | Jump to first / last |
 | `n`, `N` | Next / previous search match (wraps) |
 | `w` | Toggle notifications (see below) |
+| `W` | Share the agent's terminal to a browser (needs rmux, see below) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
 | `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
@@ -253,6 +254,36 @@ stop changing, is indistinguishable from an agent still at work.
 Without tmux installed, none of this applies and tabs behave as they always did:
 the agent runs on a pty cctop owns and goes when cctop goes. The fallback is
 silent — tmux is how this is better, not how it works.
+
+### Using rmux instead of tmux
+
+`CCTOP_MUX=rmux` points all of the above at [rmux](https://github.com/Helvesec/rmux)
+instead. It reimplements tmux's command surface, so nothing above changes —
+tabs still outlive cctop, `R` still reattaches, the status bar still goes off —
+and it adds two things tmux has no answer for: a native Windows backend, and
+browser sharing.
+
+It is opt-in rather than automatic, because the two keep separate daemons and
+separate sessions. Switching does not migrate anything: agents running under the
+old multiplexer keep running, cctop just stops being able to see them. Switch
+back and they are there again.
+
+**`W` shares the selected agent's terminal to a browser** (rmux only). cctop runs
+`rmux web-share -t <session>` and puts the operator link on your clipboard —
+open it on a phone and you are typing into that agent, over a connection the
+tunnel provider cannot read. The pairing code is printed on cctop's status line;
+the link never is, because it grants input to a live coding agent and a status
+line survives into a screenshot.
+
+For the QR code and the read-only spectator link, run `rmux web-share -t <session>`
+in a terminal yourself — it draws a card per role that only renders to a tty.
+`rmux web-share list` shows what is currently shared, and `rmux web-share off`
+ends all of it.
+
+If `CCTOP_MUX` names something cctop does not know, it uses tmux. And if rmux is
+named but not installed, the fallback is the same silent one as a missing tmux —
+cctop keeps the agent on its own pty, and does not offer to install a package it
+would be guessing the name of.
 
 ### Typing into a session
 
