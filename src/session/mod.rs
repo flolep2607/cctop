@@ -241,6 +241,22 @@ pub struct Session {
     /// Liveness inferred from a growing transcript when no per-session process
     /// exists (currently Cursor native agents).
     pub inferred_running: bool,
+    /// The session id this session's process was *started* with, which stops
+    /// being its own id the moment it is resumed.
+    ///
+    /// `claude --resume X` does not reopen X's transcript. It forks: a new file
+    /// under a new id, which records X as the id it was launched from. So the
+    /// only thing on the running process's command line is the id of a
+    /// transcript that is now finished, and matching a PID to the session whose
+    /// *name* it carries attributes the live agent to the dead conversation —
+    /// the running one then shows as stopped while a session nobody is in shows
+    /// as working. Matching on this instead follows the fork forward.
+    ///
+    /// Empty when the harness does not record one, which includes every
+    /// provider but Claude and Claude transcripts old enough to predate the
+    /// field. Callers fall back to [`session_id`](Self::session_id), which is
+    /// what this holds for a session that was never resumed.
+    pub launch_id: String,
     /// A transcript-derived state that refines the liveness dot.
     pub activity_state: ActivityState,
     /// How much this session asks before it acts, when its own hooks have said.
@@ -412,6 +428,7 @@ impl Session {
             last_tool: String::new(),
             process: None,
             inferred_running: false,
+            launch_id: String::new(),
             activity_state: ActivityState::Working,
             permission: None,
             recent_writes: Vec::new(),
@@ -427,6 +444,15 @@ impl Session {
     /// Stable identity used as a map key across refreshes.
     pub fn key(&self) -> String {
         format!("{}:{}", self.provider.as_str(), self.session_id)
+    }
+
+    /// The id a running process would name to mean this session: the one it was
+    /// launched with, or its own when it was never resumed from anything.
+    pub fn launched_as(&self) -> &str {
+        match self.launch_id.is_empty() {
+            true => &self.session_id,
+            false => &self.launch_id,
+        }
     }
 
     /// Share of this session's tool calls that failed, or `None` when the

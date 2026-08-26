@@ -422,6 +422,26 @@ impl Collector {
             });
         }
 
+        // Sessions by the id a process would name to reach them, most recently
+        // active first. A resume forks the transcript, so one id can lead to
+        // several sessions — the original and every session resumed from it —
+        // and the newest of those is the one the process is actually in.
+        let mut launched_index: HashMap<(crate::pricing::Provider, &str), Vec<&Session>> =
+            HashMap::new();
+        for s in sessions.iter() {
+            launched_index
+                .entry((s.provider, s.launched_as()))
+                .or_default()
+                .push(s);
+        }
+        for candidates in launched_index.values_mut() {
+            candidates.sort_by(|a, b| {
+                b.last_active
+                    .cmp(&a.last_active)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            });
+        }
+
         for snap in &candidates {
             let pid = snap.pid;
             if exclude_agent_process(&snap.name, &snap.tokens, &snap.args) {
@@ -457,7 +477,9 @@ impl Collector {
             }
 
             if let Some(uuid) = resume_uuid(&snap.tokens) {
-                claim_root(&mut roots, format!("{}:{}", provider.as_str(), uuid), pid);
+                let launched = launched_index.get(&(provider, uuid)).map(Vec::as_slice);
+                let key = resumed_key(launched, provider, uuid, &roots);
+                claim_root(&mut roots, key, pid);
                 continue;
             }
 
@@ -656,6 +678,39 @@ fn live_sessions_for_group<'a>(
     live
 }
 
+/// The session a `--resume <uuid>` process belongs to.
+///
+/// Not the session called `uuid`, which is the trap this exists to avoid. A
+/// resume does not reopen a transcript — it forks one: Claude Code writes a new
+/// file under a new id and records the id it was launched from. The command line
+/// therefore names a conversation that stopped the moment this process started,
+/// and reading it literally hands the live agent to the dead transcript. The
+/// running session then shows as stopped, its CPU and memory land on a row
+/// nobody is in, and a `resume` of the real session sees nothing running and
+/// offers to start a second agent on it.
+///
+/// So the answer is the newest unclaimed session that was *launched* as `uuid`
+/// — the id's own session until it is resumed, and its continuation after that.
+/// `candidates` must be ranked most-recently-active first.
+///
+/// `None` and an empty list both mean no transcript claims that id, which is a
+/// real state: a session under a config directory cctop is not reading, or one
+/// whose file has been deleted out from under a running agent. That keeps the
+/// id itself as the key, so the process still counts as one running thing.
+fn resumed_key(
+    candidates: Option<&[&Session]>,
+    provider: crate::pricing::Provider,
+    uuid: &str,
+    claimed: &HashMap<String, u32>,
+) -> String {
+    candidates
+        .unwrap_or_default()
+        .iter()
+        .find(|s| !claimed.contains_key(&s.key()))
+        .map(|s| s.key())
+        .unwrap_or_else(|| format!("{}:{uuid}", provider.as_str()))
+}
+
 fn claim_root(roots: &mut HashMap<String, u32>, key: String, pid: u32) {
     roots
         .entry(key)
@@ -772,6 +827,73 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["older"]
         );
+    }
+
+    /// A session that has never been resumed answers to its own id, which is
+    /// the case that already worked and must keep working.
+    #[test]
+    fn a_resume_of_a_fresh_session_claims_that_session() {
+        let s = session_at(UUID, "t0", "t1");
+        let key = resumed_key(
+            Some(&[&s]),
+            crate::pricing::Provider::Claude,
+            UUID,
+            &HashMap::new(),
+        );
+        assert_eq!(key, format!("claude:{UUID}"));
+    }
+
+    /// The bug this is here for. `claude --resume X` forks: the agent runs on a
+    /// new transcript that records X as where it came from, and X itself stops.
+    /// Attributing the process to X marks the conversation nobody is in as
+    /// working and the one being typed into as stopped.
+    #[test]
+    fn a_resume_claims_the_transcript_it_forked_into_not_the_one_it_names() {
+        let mut original = session_at(UUID, "t0", "t1");
+        original.launch_id = UUID.to_string();
+        let mut forked = session_at("forked", "t2", "t3");
+        forked.launch_id = UUID.to_string();
+
+        // Ranked most-recently-active first, as the caller guarantees.
+        let key = resumed_key(
+            Some(&[&forked, &original]),
+            crate::pricing::Provider::Claude,
+            UUID,
+            &HashMap::new(),
+        );
+        assert_eq!(key, "claude:forked");
+    }
+
+    /// Two agents can be resumed from one id. The second process takes the next
+    /// session down the ranking rather than piling onto the first one's.
+    #[test]
+    fn a_second_process_on_one_launch_id_takes_the_next_session() {
+        let mut original = session_at(UUID, "t0", "t1");
+        original.launch_id = UUID.to_string();
+        let mut forked = session_at("forked", "t2", "t3");
+        forked.launch_id = UUID.to_string();
+        let claimed = HashMap::from([("claude:forked".to_string(), 42)]);
+
+        let key = resumed_key(
+            Some(&[&forked, &original]),
+            crate::pricing::Provider::Claude,
+            UUID,
+            &claimed,
+        );
+        assert_eq!(key, format!("claude:{UUID}"));
+    }
+
+    /// A transcript cctop cannot see is still a process worth counting, so the
+    /// id stays the key and the caller's orphan path picks it up.
+    #[test]
+    fn a_resume_of_a_transcript_cctop_cannot_see_keeps_the_id() {
+        let key = resumed_key(
+            None,
+            crate::pricing::Provider::Claude,
+            UUID,
+            &HashMap::new(),
+        );
+        assert_eq!(key, format!("claude:{UUID}"));
     }
 
     #[test]
