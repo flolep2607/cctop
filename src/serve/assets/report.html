@@ -164,6 +164,18 @@
     padding: 8px 10px; overflow-x: auto;
   }
   .md pre code { border: 0; background: none; padding: 0; white-space: pre; font-size: 12px; }
+  /* The page's own tables are data grids, with faint uppercase headers and a
+     column set the report chose. A table an agent wrote is neither, so it
+     keeps the words it was given and scrolls rather than crushing a column. */
+  .md .scroll { overflow-x: auto; }
+  /* Sized to its contents, not to the pane: a two-column table stretched to
+     full width reads as a layout rather than a table. */
+  .md table { font-size: 13px; width: auto; max-width: 100%; }
+  .md th {
+    text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 600;
+    color: var(--ink); padding: 0 10px 7px; white-space: normal;
+  }
+  .md td { white-space: normal; }
   .md blockquote { border-left: 2px solid var(--line); padding-left: 11px; color: var(--dim); }
   .md hr { border: 0; border-top: 1px solid var(--line); }
   .md a { color: var(--accent); }
@@ -853,6 +865,9 @@ const WHO = { user: "you", assistant: "agent", system: "harness" };
 // into it — is the last place to start.
 
 const BLOCK = /^\s*(```|~~~|#{1,6}\s|>|[-*+]\s|\d+[.)]\s)/;
+// The second row of a table, which is the only thing that makes the first one
+// a table: dashes and optional colons, one run per column.
+const RULE_ROW = /^\s*\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?\|?\s*$/;
 const BULLET = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
 const FENCE = /^\s*(```|~~~)/;
 
@@ -885,6 +900,24 @@ function inlineInto(node, text) {
   }
   if (at < text.length) node.appendChild(document.createTextNode(text.slice(at)));
   return node;
+}
+
+// A table is recognised by its second line, so it is asked about by position
+// rather than by line — including from inside the paragraph loop, which would
+// otherwise swallow a header row as prose.
+function tableAt(lines, i) {
+  return i + 1 < lines.length && lines[i].includes("|") && RULE_ROW.test(lines[i + 1]);
+}
+
+// `| a | b |` → ["a", "b"]. The outer pipes are optional and an escaped one is
+// a pipe, not a cell wall.
+function cells(line) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.replace(/\\\|/g, "|").trim());
 }
 
 function markdown(text) {
@@ -926,6 +959,40 @@ function markdown(text) {
       root.appendChild(quote);
       continue;
     }
+    if (tableAt(lines, i)) {
+      const head = cells(line);
+      // `:---:` and `---:` are the alignments a writer can ask for, and the
+      // only part of the rule row worth keeping.
+      const align = cells(lines[i + 1]).map((rule) => {
+        if (/^:-+:$/.test(rule)) return "center";
+        if (/-+:$/.test(rule)) return "right";
+        return "";
+      });
+      i += 2;
+      const table = el("table");
+      const header = el("tr");
+      head.forEach((cell, n) => {
+        const th = inlineInto(el("th"), cell);
+        if (align[n]) th.style.textAlign = align[n];
+        header.appendChild(th);
+      });
+      table.appendChild(el("thead")).appendChild(header);
+      const body = el("tbody");
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        const row = el("tr");
+        cells(lines[i++]).forEach((cell, n) => {
+          const td = inlineInto(el("td"), cell);
+          if (align[n]) td.style.textAlign = align[n];
+          row.appendChild(td);
+        });
+        body.appendChild(row);
+      }
+      table.appendChild(body);
+      const scroll = el("div", "scroll");
+      scroll.appendChild(table);
+      root.appendChild(scroll);
+      continue;
+    }
     if (BULLET.test(line)) {
       // ponytail: a nested list renders flat. Depth is indentation, and
       // guessing at it wrongly reads worse than one honest level.
@@ -948,7 +1015,9 @@ function markdown(text) {
     // declined it, and a loop that can decline every branch and still not
     // advance is a hung page.
     const para = [lines[i++]];
-    while (i < lines.length && lines[i].trim() && !BLOCK.test(lines[i])) para.push(lines[i++]);
+    while (i < lines.length && lines[i].trim() && !BLOCK.test(lines[i]) && !tableAt(lines, i)) {
+      para.push(lines[i++]);
+    }
     root.appendChild(inlineInto(el("p"), para.join("\n")));
   }
   return root;
