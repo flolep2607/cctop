@@ -162,6 +162,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Tab / Shift+Tab", "Same, either direction"),
         item("1 – 9", "Jump to a panel directly"),
         item("Shift+↑ / ↓", "Scroll inside the active panel"),
+        item("Shift+Home / End", "Jump to the top / bottom of it"),
         item("[ / ]", "Move through the Tool Activity filter"),
         item("L", "Toggle the Tool Activity live filter"),
         item("v", "Toggle inline diffs for edits"),

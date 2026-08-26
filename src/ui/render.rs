@@ -788,11 +788,11 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     };
 
     let max_scroll = (lines.len() as u16).saturating_sub(target.height);
+    app.panel_max_scroll = max_scroll;
     // Tool Activity follows its tail unless the user has scrolled away.
     let scroll = if app.bottom_tab == 3 {
         app.tool_owners = std::mem::take(&mut tool_owners);
         layout.tool_log = Some((target.x, target.y, target.height));
-        app.tool_max_scroll = max_scroll;
         if app.tool_follow {
             app.tool_scroll = max_scroll;
         }
