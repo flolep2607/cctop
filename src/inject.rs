@@ -219,7 +219,7 @@ fn send(pane: &str, text: &str) -> Result<(), String> {
 /// `None` when tmux isn't installed or no server is running — both mean "this
 /// session isn't in a pane", which is the caller's only question.
 fn list_panes() -> Option<Vec<(u32, String)>> {
-    let out = Command::new("tmux")
+    let out = Command::new(crate::tmux::bin())
         .args(["list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"])
         .output()
         .ok()?;
@@ -238,7 +238,7 @@ fn list_panes() -> Option<Vec<(u32, String)>> {
 }
 
 fn tmux(args: &[&str]) -> Result<(), String> {
-    let out = Command::new("tmux")
+    let out = Command::new(crate::tmux::bin())
         .args(args)
         .output()
         .map_err(|e| format!("tmux: {e}"))?;
@@ -348,7 +348,7 @@ mod tests {
     /// Nothing smaller than a real tmux server tests either half.
     #[test]
     fn types_into_the_pane_holding_a_pid() {
-        if Command::new("tmux").arg("-V").output().is_err() {
+        if Command::new(crate::tmux::bin()).arg("-V").output().is_err() {
             eprintln!("skipping: tmux not installed");
             return;
         }
@@ -365,12 +365,12 @@ mod tests {
         // The name is fixed, so a run killed before its teardown leaves the
         // session behind and `new-session` then fails as a duplicate — for every
         // run after it, until someone thinks to look in tmux.
-        let _ = Command::new("tmux")
+        let _ = Command::new(crate::tmux::bin())
             .args(["kill-session", "-t", &format!("={session}")])
             .status();
         let script = format!("tee {} >/dev/null; :", out.display());
         assert!(
-            Command::new("tmux")
+            Command::new(crate::tmux::bin())
                 .args(["new-session", "-d", "-s", session, "sh", "-c", &script])
                 .status()
                 .unwrap()
@@ -406,7 +406,7 @@ mod tests {
             send(pane, "continue").unwrap();
             wait_for(|| std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty()))
         });
-        let _ = Command::new("tmux")
+        let _ = Command::new(crate::tmux::bin())
             .args(["kill-session", "-t", session])
             .status();
         let _ = std::fs::remove_file(&out);

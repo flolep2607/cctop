@@ -185,10 +185,12 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `Home`, `End` | Jump to first / last |
 | `n`, `N` | Next / previous search match (wraps) |
 | `w` | Toggle notifications (see below) |
+| `W` | Share the agent's terminal to a browser (needs rmux, see [Driving agents](driving-agents.md)) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
 | `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
+| `Shift+Home`/`End` | Jump to the top / bottom of that panel |
 | `f` | Follow mode: keep the selection centered |
 | `/` or `F3` | Filter sessions by text (see below) |
 | `F6`, `>`, `<` | Sort-by panel |

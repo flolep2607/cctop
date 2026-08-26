@@ -768,6 +768,9 @@ impl App {
             // `w` for the bell, not `n`: n/N is next/previous match everywhere
             // a search exists, and there were free letters to spend instead.
             KeyCode::Char('w') => self.toggle_notifications(),
+            // `W` next to it, since both are about an agent reaching you rather
+            // than you reaching it.
+            KeyCode::Char('W') => self.share_selected(),
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
                     format!("{:.2}", self.cost_floor)

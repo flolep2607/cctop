@@ -188,11 +188,13 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         section("Elsewhere"),
         item("A", "Open the agent this cctop launched"),
         item("w", "Bell + desktop alert when a session needs you"),
+        item("W", "Share the agent's terminal to a browser (rmux only)"),
         item("h  F8", "Agent integration: what reports to cctop"),
         item("r  F5", "Refresh now"),
         Line::default(),
         section("Environment"),
         item("CCTOP_THEME", "light / dark / auto (default: auto)"),
+        item("CCTOP_MUX", "rmux to run agents under rmux instead of tmux"),
         item("NO_COLOR", "Drop colour; shape and weight carry the state"),
         item(
             "CCTOP_COLUMNS_HIDE",

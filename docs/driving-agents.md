@@ -167,6 +167,43 @@ Without tmux installed, none of this applies and tabs behave as they always did:
 the agent runs on a pty cctop owns and goes when cctop goes. The fallback is
 silent — tmux is how this is better, not how it works.
 
+### Using rmux instead of tmux
+
+`CCTOP_MUX=rmux` points all of the above at
+[rmux](https://github.com/Helvesec/rmux) instead. It reimplements tmux's command
+surface, so nothing above changes — tabs still outlive cctop, `R` still
+reattaches, the status bar still goes off — and it adds two things tmux has no
+answer for: a native Windows backend, and browser sharing.
+
+It is opt-in rather than automatic, because the two keep separate daemons and
+separate sessions. Switching does not migrate anything: agents running under the
+old multiplexer keep running, cctop just stops being able to see them. Switch
+back and they are there again. An unrecognised `CCTOP_MUX` is tmux — the variable
+is read deep inside a launch, where reporting a typo would mean failing the
+launch over it — and if rmux is named but not installed, the fallback is the same
+silent one as a missing tmux. cctop does not offer to install it, because every
+package-manager entry it knows names tmux.
+
+**`W` shares the selected agent's terminal to a browser** (rmux only). cctop runs
+`rmux web-share -t <session>` and puts the operator link on your clipboard — open
+it on a phone and you are typing into that agent. The pairing code goes on
+cctop's status line; the link never does, because it grants input to a live
+coding agent and a status line survives into a screenshot.
+
+That link reaches the agent over whatever tunnel rmux is configured to use — a
+TryCloudflare quick tunnel, in the default setup — which means it is reachable
+from the internet by anyone holding it, and the tunnel provider carries the
+traffic. Treat it as a credential to a shell, share it the way you would share
+one, and end it when you are done: `rmux web-share list` shows what is currently
+shared and `rmux web-share off` ends all of it.
+
+For the QR code and the read-only spectator link, run
+`rmux web-share -t <session>` in a terminal yourself — it draws a card per role
+that only renders to a tty. cctop reads only the operator link, and reads it from
+stderr because that is the stream rmux puts it on; the spectator link goes to
+stdout, and the two are the same shape, so the stream is the only thing telling
+them apart.
+
 ### What cctop keeps, and what goes to the agent
 
 Panes cctop started are cctop's to end: closing one (`Alt+w`, or the agent
