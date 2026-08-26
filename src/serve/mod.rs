@@ -30,8 +30,9 @@
 //!
 //! # What guards the socket
 //!
-//! - **Loopback by default.** `--bind` is how it reaches the network, and it
-//!   says so on stderr when it does. Nobody exposes this by not reading a flag.
+//! - **Loopback by default.** `--bind` is how it reaches the network and
+//!   `--tunnel` is how it reaches the internet, and both say so on stderr when
+//!   they do. Nobody exposes this by not reading a flag.
 //! - **A token on every request**, generated per run, carried in the URL. The
 //!   URL is therefore the credential, which is what makes the link shareable
 //!   over whatever channel the user already trusts — and what makes `--no-token`
@@ -53,15 +54,19 @@
 //! exist. The connection cap is what makes the arithmetic safe rather than
 //! optimistic.
 //!
-//! ponytail: no TLS. A loopback socket does not want it, and terminating TLS
-//! for the LAN case means certificates cctop has no business managing — the
-//! answer there is the tunnel the user already has (ssh, Tailscale), which also
-//! authenticates rather than merely encrypting.
+//! ponytail: no TLS of its own. A loopback socket does not want it, and
+//! terminating TLS for the LAN case means certificates cctop has no business
+//! managing. `--tunnel` is the answer for reaching this from elsewhere — see
+//! [`tunnel`], which borrows Cloudflare's certificate and Cloudflare's edge, and
+//! is therefore encryption in transit rather than a private channel. For a LAN,
+//! the tunnel the user already has (ssh, Tailscale) is still better than
+//! anything here, because it authenticates rather than merely encrypting.
 
 mod actions;
 mod chat;
 mod http;
 mod report;
+mod tunnel;
 
 use crate::cli;
 use crate::fleet;
@@ -205,6 +210,10 @@ OPTIONS:
                    what authorises an action, this also turns actions off
   --no-actions     Serve the pages without the buttons: no prompts, no resuming,
                    no handing a session to another agent
+  --tunnel         Also reach the page from anywhere, over a trycloudflare quick
+                   tunnel. Needs nothing installed, lasts as long as this
+                   process, and puts the link on the public internet — so the
+                   token is what stands between it and your agents
   --plan <PLAN>    Billing plan for cost figures: retail, max, or included
                    [default: retail]
   --delay <SECS>   Seconds between refreshes [default: 2]
@@ -229,6 +238,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let mut port_given = false;
     let mut no_token = false;
     let mut no_actions = false;
+    let mut want_tunnel = false;
     let mut plan = Plan::Retail;
     let mut delay = Duration::from_secs(2);
     let mut hosts: Vec<String> = Vec::new();
@@ -254,6 +264,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
             }
             "--no-token" => no_token = true,
             "--no-actions" => no_actions = true,
+            "--tunnel" => want_tunnel = true,
             "--plan" => {
                 let given = value()?;
                 plan = Plan::parse(&given).ok_or_else(|| {
@@ -276,6 +287,9 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
 
     let listener = listen(&bind, port, port_given)?;
     let addr = listener.local_addr()?;
+    if let Some(why) = tunnel_objection(want_tunnel, addr.ip().is_loopback(), no_token) {
+        anyhow::bail!("{why}");
+    }
     let token = if no_token { String::new() } else { new_token() };
     // The token is the whole authorisation story for an action, so there are no
     // actions without one. `--no-token` is already documented as "every process
@@ -283,7 +297,15 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     // "and type at your agents" is a different sentence, and not one anybody
     // reads a flag expecting.
     let actions = !no_actions && !no_token;
-    announce(&addr, &bind, &token, no_token);
+    // Held until the process ends: dropping it unregisters from the edge, which
+    // is what makes a tunnel last exactly as long as the serve that asked for
+    // one. Started before the announcement so the printed link works when it is
+    // read, and before the accept loop because there is nothing to reach yet.
+    let tunnel = match want_tunnel {
+        true => Some(tunnel::start(addr.port())?),
+        false => None,
+    };
+    announce(&addr, &bind, &token, no_token, tunnel.as_ref());
     if !actions {
         eprintln!(
             "  actions are off{} — the page can read this machine's sessions and \
@@ -389,16 +411,78 @@ fn listen(bind: &str, port: u16, port_given: bool) -> anyhow::Result<TcpListener
     }
 }
 
+/// Why this `--tunnel` is refused, if it is.
+///
+/// Both refusals are combinations that read as one wish and mean another, and
+/// each is cheaper to say than to explain afterwards:
+///
+/// - **`--tunnel` with a token turned off.** The tunnel's whole job is to put
+///   the page somewhere anyone can reach; the token is then the only thing
+///   between the internet and a prompt box wired to a live agent. `--no-token`
+///   is defensible on loopback and indefensible here, so it is an error rather
+///   than a warning nobody scrolls back to.
+/// - **`--tunnel` with a non-loopback `--bind`.** The tunnel dials out from this
+///   machine, so it reaches a loopback listener perfectly well. Binding wider
+///   also publishes the page on the local network, which is a second decision
+///   and not the one that was asked for.
+///
+/// Split out from [`run`] because it is the whole of the policy and wants a test
+/// rather than a careful reading.
+fn tunnel_objection(want_tunnel: bool, loopback: bool, no_token: bool) -> Option<&'static str> {
+    if !want_tunnel {
+        return None;
+    }
+    if no_token {
+        return Some(
+            "--tunnel with --no-token would publish your sessions, and a prompt \
+             box for your agents, to anyone who finds the URL.\n\
+             Drop one of the two: the token is what makes the link a credential.",
+        );
+    }
+    if !loopback {
+        return Some(
+            "--tunnel does not need --bind: the tunnel connects out from this \
+             machine, so it reaches a loopback listener.\n\
+             Binding wider would put the page on your local network as well, \
+             which --tunnel is not asking for.",
+        );
+    }
+    None
+}
+
 /// Print where to point a browser, and say plainly when the page is reachable
 /// beyond this machine.
 ///
 /// On stderr, so `cctop serve > /dev/null` still tells someone what happened,
 /// and so the URL is not mistaken for output a script should parse.
-fn announce(addr: &SocketAddr, bind: &str, token: &str, no_token: bool) {
+///
+/// With a tunnel the public URL is printed first and the loopback one after it:
+/// the public one is what someone asked for and what goes to the phone, and the
+/// loopback one is still the right link from this machine. What follows both is
+/// the sentence that matters — that the first link is a way in, not a view.
+fn announce(
+    addr: &SocketAddr,
+    bind: &str,
+    token: &str,
+    no_token: bool,
+    tunnel: Option<&tunnel::Tunnel>,
+) {
     let query = match token.is_empty() {
         true => String::new(),
         false => format!("?t={token}"),
     };
+    if let Some(tunnel) = tunnel {
+        eprintln!("cctop: serving on {}/{query}", tunnel.url);
+        eprintln!("cctop: also on http://127.0.0.1:{}/{query}", addr.port());
+        eprintln!(
+            "cctop: that first link is on the public internet. Anyone who has it \
+             can read every session on this machine — and, unless --no-actions, \
+             type at your agents, which runs commands as you. Cloudflare carries \
+             the traffic and can read it. The tunnel ends when this process does."
+        );
+        let _ = std::io::stderr().flush();
+        return;
+    }
     // `0.0.0.0` and `::` mean "every interface", which is not a host anyone can
     // type. Printing one as though it were a link is how an address that cannot
     // work gets sent to somebody, so those say the port and leave the host to
@@ -1029,6 +1113,19 @@ mod tests {
         assert!(find(&rows, "ab").is_none());
         assert!(find(&rows, "").is_none());
         assert!(find(&rows, "nope").is_none());
+    }
+
+    #[test]
+    fn a_tunnel_refuses_the_two_combinations_that_undo_it() {
+        // A tunnel with no token is a public prompt box wired to a live agent.
+        assert!(tunnel_objection(true, true, true).is_some());
+        // A tunnel plus a wider bind is two exposures for one request.
+        assert!(tunnel_objection(true, false, false).is_some());
+        // And what it is actually for.
+        assert!(tunnel_objection(true, true, false).is_none());
+        // Without --tunnel neither of those is this function's business:
+        // --bind and --no-token are each documented on their own terms.
+        assert!(tunnel_objection(false, false, true).is_none());
     }
 
     #[test]

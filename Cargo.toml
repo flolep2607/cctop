@@ -34,6 +34,12 @@ anyhow = "1.0.104"
 mimalloc = "0.1"
 chrono = "0.4.45"
 clap = { version = "4.6.5", features = ["derive"] }
+# `cctop serve --tunnel` speaks the trycloudflare protocol itself — QUIC to the
+# edge — rather than shelling out to `cloudflared` and reading a URL off its
+# stderr, so a tunnel needs nothing installed and cctop stays one binary. tokio
+# comes with it: the tunnel's data path runs on a two-worker runtime inside this
+# process, and nothing else here is async.
+cloudflare-quick-tunnel = "0.3.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
@@ -48,6 +54,7 @@ serde_json = "1.0.151"
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 toml_edit = "0.25.13"
 tui-term = "0.3.4"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }

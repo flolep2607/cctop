@@ -73,8 +73,8 @@ where its money went. From there it can send a prompt to a live session,\n  \
 resume a dead one, or hand one to a different agent. It listens on 127.0.0.1\n  \
 with a per-run access token in the URL, which is the whole credential — so\n  \
 whoever holds the link can drive these agents. `--bind` is what puts it on the\n  \
-network and says so when it does; `--no-actions` serves the pages without the\n  \
-buttons.\n\n\
+network and `--tunnel` puts it on the internet, both saying so when they do;\n  \
+`--no-actions` serves the pages without the buttons.\n\n\
 SEARCHING\n  \
 `/` filters on what the table shows plus the full working directory and the\n  \
 branch; `Tab` in that prompt extends the search into the transcripts, which\n  \
