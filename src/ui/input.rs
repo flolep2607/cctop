@@ -438,10 +438,18 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         // Shift+Up/Down scrolls inside the active bottom panel, since the plain
-        // arrows are taken by list navigation and panel switching.
-        if shift && matches!(key.code, KeyCode::Up | KeyCode::Down) {
-            self.scroll_active_panel(if key.code == KeyCode::Up { -1 } else { 1 });
-            return;
+        // arrows are taken by list navigation and panel switching. Home and End
+        // join it under the same modifier for the same reason — unshifted they
+        // jump the session list — and the ends are asked for as a distance no
+        // panel can be longer than, since only the renderer knows the real one.
+        if shift {
+            match key.code {
+                KeyCode::Up => return self.scroll_active_panel(-1),
+                KeyCode::Down => return self.scroll_active_panel(1),
+                KeyCode::Home => return self.scroll_active_panel(i32::MIN),
+                KeyCode::End => return self.scroll_active_panel(i32::MAX),
+                _ => {}
+            }
         }
 
         match key.code {

@@ -604,9 +604,12 @@ pub struct App {
     /// feed, so following the tail is the useful default; scrolling up releases
     /// the pin, and scrolling back to the bottom restores it.
     pub tool_follow: bool,
-    /// Last computed maximum scroll for the tool log, recorded during draw so
-    /// the key handler knows where the bottom is.
-    pub tool_max_scroll: u16,
+    /// Last computed maximum scroll for whichever bottom panel was drawn,
+    /// recorded during draw because only the renderer knows how many lines the
+    /// panel produced and how tall it ended up. Without it a key handler can
+    /// clamp the top but not the bottom, and scrolling past the end banks
+    /// invisible offsets that then have to be scrolled back through.
+    pub panel_max_scroll: u16,
     pub tool_tab: usize,
     pub tool_live_only: bool,
     /// Show each edit's diff inline beneath its row.
@@ -796,7 +799,7 @@ impl App {
             subagent_scroll: 0,
             tool_scroll: 0,
             tool_follow: true,
-            tool_max_scroll: 0,
+            panel_max_scroll: 0,
             tool_tab: 0,
             tool_live_only: prefs.agent_live_filter,
             tool_show_diff: prefs.tool_show_diff,
@@ -1243,16 +1246,20 @@ impl App {
     }
 
     fn scroll_active_panel(&mut self, delta: i32) {
-        let bump = |v: &mut u16| *v = (*v as i32 + delta).max(0) as u16;
+        // Saturating, because the jumps to either end are i32::MIN and i32::MAX
+        // rather than a computed distance: the panel's length is the renderer's
+        // to know, and asking for more than there is costs nothing once both
+        // ends clamp.
+        let max = self.panel_max_scroll as i32;
+        let bump = |v: &mut u16| *v = (*v as i32).saturating_add(delta).clamp(0, max) as u16;
         match self.bottom_tab {
             0 => bump(&mut self.info_scroll),
             1 => {} // Performance is a fixed-size chart pair
             2 => bump(&mut self.proc_scroll),
             3 => {
-                let next = (self.tool_scroll as i32 + delta).clamp(0, self.tool_max_scroll as i32);
-                self.tool_scroll = next as u16;
+                bump(&mut self.tool_scroll);
                 // Re-pin once the user scrolls back down to the newest entry.
-                self.tool_follow = self.tool_scroll >= self.tool_max_scroll;
+                self.tool_follow = self.tool_scroll >= self.panel_max_scroll;
             }
             4 => bump(&mut self.subagent_scroll),
             5 => bump(&mut self.cost_scroll),
@@ -3987,6 +3994,28 @@ mod tests {
         app.bottom_tab = 0;
         app.cycle_tab(1);
         assert_eq!(app.bottom_tab, 3);
+    }
+
+    #[test]
+    fn shift_home_and_end_reach_both_ends_of_a_panel() {
+        let mut app = test_app();
+        app.bottom_tab = 0;
+        // What a draw would have left behind; nothing else knows the length.
+        app.panel_max_scroll = 40;
+
+        app.scroll_active_panel(i32::MAX);
+        assert_eq!(
+            app.info_scroll, 40,
+            "End stops at the last line, not past it"
+        );
+        app.scroll_active_panel(i32::MIN);
+        assert_eq!(app.info_scroll, 0);
+
+        // The clamp is the point: without it a scroll past the bottom banks an
+        // offset that takes as many presses to come back through.
+        app.scroll_active_panel(999);
+        app.scroll_active_panel(-1);
+        assert_eq!(app.info_scroll, 39);
     }
 
     #[test]
