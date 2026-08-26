@@ -87,10 +87,22 @@ pub fn profile_env(provider: Provider) -> Option<(&'static str, &'static Path)> 
 /// A provider with no such variable is returned unchanged: there is one
 /// directory, and pretending to select it would put an `env` prefix on every
 /// launch for nothing.
+///
+/// So is the profile the child would have used anyway, and that one is not a
+/// tidiness matter. `CLAUDE_CONFIG_DIR` does not only say where the transcripts
+/// are: with it set, Claude Code keeps its `.claude.json` — the login, the
+/// onboarding, the per-project trust — inside that directory instead of at
+/// `~/.claude.json`. Naming `~/.claude` explicitly therefore points it at a
+/// `~/.claude/.claude.json` that no ordinary install has, and the agent comes up
+/// asking which theme you would like, logged out, with no session to resume. So
+/// `R` on a Claude session did not resume it; it onboarded a stranger.
 pub fn argv_under_profile(argv: Vec<String>, profile: &Profile) -> Vec<String> {
-    let Some((var, _)) = profile_env(profile.provider) else {
+    let Some((var, inherited)) = profile_env(profile.provider) else {
         return argv;
     };
+    if profile.dir == inherited {
+        return argv;
+    }
     let mut out = vec![
         "env".to_string(),
         format!("{var}={}", profile.dir.display()),
@@ -1003,5 +1015,32 @@ mod tests {
             trailing_uuid(stem),
             Some("019f1075-3f22-7ad0-b496-73dcda6a7a25")
         );
+    }
+
+    /// Regression: `R` on an ordinary Claude session opened a fresh, logged-out
+    /// agent asking which theme to use. The session was stamped `default`, so
+    /// the resume ran `env CLAUDE_CONFIG_DIR=~/.claude claude --resume <id>` —
+    /// and Claude Code reads its `.claude.json` from inside that directory once
+    /// the variable is set, where an ordinary install has never written one.
+    #[test]
+    fn the_profile_a_launch_would_have_used_anyway_gets_no_prefix() {
+        let (var, inherited) = profile_env(Provider::Claude).unwrap();
+        let default = Profile {
+            provider: Provider::Claude,
+            name: "default".to_string(),
+            dir: inherited.to_path_buf(),
+        };
+        assert_eq!(
+            argv_under_profile(vec!["claude".to_string()], &default),
+            ["claude"]
+        );
+        // A directory the child would not have picked still has to be named.
+        let other = Profile {
+            dir: inherited.with_file_name(".claude-work"),
+            ..default
+        };
+        let argv = argv_under_profile(vec!["claude".to_string()], &other);
+        assert_eq!(argv[0], "env");
+        assert!(argv[1].starts_with(&format!("{var}=")), "{argv:?}");
     }
 }
