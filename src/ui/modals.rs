@@ -35,7 +35,16 @@ fn modal(
     lines: Vec<Line<'static>>,
     width: u16,
 ) -> (Rect, Rect) {
-    let height = lines.len() as u16 + 2;
+    // Wrapped rows, not lines: the paragraph below wraps, and a box sized to
+    // the line count is a box one line too short for every line that wrapped —
+    // which is how content ends up drawn through the bottom border instead of
+    // inside it.
+    let inner_width = width.saturating_sub(2).max(1);
+    let height = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(inner_width as usize) as u16)
+        .sum::<u16>()
+        + 2;
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
@@ -189,6 +198,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("A", "Open the agent this cctop launched"),
         item("w", "Bell + desktop alert when a session needs you"),
         item("W", "Share the agent's terminal to a browser"),
+        item(
+            "B",
+            "Serve this table to a browser, with or without a tunnel",
+        ),
         item("h  F8", "Agent integration: what reports to cctop"),
         item("r  F5", "Refresh now"),
         Line::default(),
@@ -381,6 +394,103 @@ pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Whether this cctop is serving its table to a browser, and on what.
+///
+/// The links are drawn as their origin and made clickable, rather than printed
+/// in full. A served link carries the token that opens it, so the full text is
+/// something to hand over deliberately — `y` puts it on the clipboard — and not
+/// something to leave on screen. It also does not fit: a tunnel hostname plus a
+/// token is most of a hundred columns.
+pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    match &app.serving {
+        None => {
+            lines.push(Line::from(Span::raw(
+                " Nothing is being served. The table can be a page,",
+            )));
+            lines.push(Line::from(Span::raw(" with cctop still running here.")));
+        }
+        Some(serving) => {
+            // A free function rather than a closure: it appends to `lines`,
+            // and a closure that captures it mutably shuts out every other push
+            // in this arm.
+            fn show(lines: &mut Vec<Line<'static>>, what: &str, url: &str) {
+                lines.push(Line::from(Span::styled(format!(" {what}"), theme::dim())));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", origin_of(url)),
+                    Style::default().fg(theme::colors().accent),
+                )));
+            }
+            show(&mut lines, "This machine", &serving.local);
+            match &serving.public {
+                None => {
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        " No tunnel — nothing off this machine can reach it.",
+                        theme::dim(),
+                    )));
+                }
+                Some(public) => {
+                    lines.push(Line::default());
+                    show(&mut lines, "The internet", public);
+                    lines.push(Line::default());
+                    // The one thing to understand before sending this to
+                    // anybody, said where the link is being looked at.
+                    lines.push(Line::from(Span::styled(
+                        " Anyone holding it reads every session here,",
+                        Style::default().fg(theme::colors().cost_mid),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        match serving.actions {
+                            true => " and can type at your agents. Cloudflare carries it.",
+                            false => " but cannot act. Cloudflare carries it.",
+                        },
+                        Style::default().fg(theme::colors().cost_mid),
+                    )));
+                }
+            }
+        }
+    }
+    if let Some(error) = &app.serve_error {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format!(" {}", crate::util::truncate(error, 58)),
+            Style::default().fg(theme::colors().cost_high),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        match app.serving.is_some() {
+            true => " o open · y copy · l local · t + tunnel · x stop",
+            false => " l this machine only · t also a public tunnel",
+        },
+        theme::dim(),
+    )));
+
+    // Sized to the longest line, so a tunnel hostname is one line and not two,
+    // and capped to the screen, where it wraps instead — into a box now tall
+    // enough for it.
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let width = widest
+        .saturating_add(3)
+        .clamp(56, area.width.saturating_sub(4).max(24));
+    modal(frame, area, "Serve this table to a browser", lines, width);
+}
+
+/// `http://127.0.0.1:7778/?t=abc` → `http://127.0.0.1:7778`.
+///
+/// What is worth reading on screen: where the link goes, without the token that
+/// opens it.
+fn origin_of(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let host = rest.split(['/', '?']).next().unwrap_or(rest);
+    match scheme.is_empty() {
+        true => host.to_string(),
+        false => format!("{scheme}://{host}"),
+    }
+}
+
 pub(super) fn draw_sortby(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = COLUMNS
         .iter()
@@ -553,7 +663,15 @@ pub(super) fn draw_row_menu(
         .map(|s| crate::util::truncate(s.display_label(), width.saturating_sub(4) as usize))
         .unwrap_or_default();
 
-    let height = lines.len() as u16 + 2;
+    // Wrapped rows, not lines. The paragraph below wraps, so a box sized to the
+    // line count is one row short for every line that wrapped — and the content
+    // that does not fit is drawn through the bottom border rather than clipped.
+    let inner_width = width.saturating_sub(2).max(1) as usize;
+    let height = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(inner_width) as u16)
+        .sum::<u16>()
+        + 2;
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()

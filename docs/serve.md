@@ -25,6 +25,41 @@ plainly: **whoever holds the link can drive the agents on this machine.** Hence
 the defaults — loopback, a token, and `--no-actions` to serve the pages without
 the buttons.
 
+## From inside cctop, with the table still there
+
+`cctop serve` takes over the terminal it runs in and draws nothing — which is
+the wrong shape when you want the page *and* the dashboard. **`B` in the TUI
+serves the same page while cctop keeps running.** `l` puts it on this machine,
+`t` also opens a tunnel, `o` opens it in your browser, `y` copies the link, and
+`x` stops it.
+
+```
+╭ Serve this table to a browser ─────────────────────────────╮
+│ This machine                                               │
+│  http://127.0.0.1:7778                                     │
+│                                                            │
+│ The internet                                               │
+│  https://supplemental-belt-spare-reflect.trycloudflare.com │
+│                                                            │
+│ Anyone holding it reads every session here,                │
+│ and can type at your agents. Cloudflare carries it.        │
+│                                                            │
+│ o open · y copy · l local · t + tunnel · x stop            │
+╰────────────────────────────────────────────────────────────╯
+```
+
+The panel shows each link as its origin and not in full, because the full link
+carries the token — a credential that would otherwise be sitting in every
+screenshot of the panel. `o` and `y` use the whole thing.
+
+It is the same server, reached differently, with one difference worth knowing:
+it does not scan for sessions. The dashboard already walks them several times a
+second, so the page is fed from the rows on screen — one pass over the disk
+instead of two, and no way for the page and the table beside it to disagree.
+
+Stopping it, or quitting cctop, revokes every link handed out. A tunnel lasts
+exactly as long as the cctop that opened it.
+
 ## Why you would want it
 
 The table's headline is *which session is waiting on you*, and that only pays off

@@ -112,6 +112,7 @@ impl App {
             Mode::TmuxInstall => {
                 self.rmux_install_answer(key.code == KeyCode::Char('y'));
             }
+            Mode::Serve => self.on_key_serve(key),
             Mode::QuitConfirm => self.on_key_quit(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
                 self.on_key_batch(key)
@@ -310,6 +311,37 @@ impl App {
                     key.code == KeyCode::Char('p'),
                 ),
                 None => self.set_status("The selected session has no project directory here"),
+            },
+            _ => {}
+        }
+    }
+
+    /// The browser panel's keys.
+    ///
+    /// `l` and `t` start rather than toggle, and both are offered while a
+    /// server is up: switching between them is a stop and a start, which is
+    /// what changing whether the page is on the internet actually is.
+    fn on_key_serve(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.mode = Mode::List,
+            KeyCode::Char('l') => self.start_serving(false),
+            KeyCode::Char('t') => self.start_serving(true),
+            KeyCode::Char('x') => self.stop_serving(),
+            KeyCode::Char('o') => match self.serving.as_ref().map(|s| s.best().to_string()) {
+                Some(link) => match crate::serve::open_in_browser(&link) {
+                    true => self.set_status("Opening the page in your browser"),
+                    false => self.set_status("No browser to open it with — y copies the link"),
+                },
+                None => self.set_status("Nothing is being served yet"),
+            },
+            KeyCode::Char('y') => match self.serving.as_ref().map(|s| s.best().to_string()) {
+                Some(link) => {
+                    crate::ui::render::copy_to_clipboard(&link);
+                    // The token is in the link, so this is a credential leaving
+                    // the process. Said plainly rather than a silent "copied".
+                    self.set_status("Link copied — it carries the token that opens it");
+                }
+                None => self.set_status("Nothing is being served yet"),
             },
             _ => {}
         }
@@ -772,6 +804,10 @@ impl App {
             // `W` next to it, since both are about an agent reaching you rather
             // than you reaching it.
             KeyCode::Char('W') => self.share_selected(),
+            // `B` for browser, beside the two keys that are also about reaching
+            // this machine from somewhere else. `W` puts one agent's terminal
+            // in a browser; this puts the whole table in one.
+            KeyCode::Char('B') => self.mode = Mode::Serve,
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
                     format!("{:.2}", self.cost_floor)

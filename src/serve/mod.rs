@@ -77,8 +77,8 @@ use crate::watch::Watch;
 use http::{EventStream, Request};
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -232,6 +232,250 @@ why the link carries a token and the default is loopback only.
 /// Flags are parsed here rather than in [`crate::cli::Args`] for the reason
 /// `doctor` and `attach` are: cctop takes no positionals, so clap answers a
 /// bare `serve` with a usage error before it can reach any of this.
+/// What a run of the server needs to know, however it was asked for.
+///
+/// The CLI fills this from flags and the dashboard fills it from a keypress,
+/// which is the point: one server, reached two ways, rather than a second
+/// implementation behind a key.
+pub struct Options {
+    pub bind: String,
+    pub port: u16,
+    /// Whether `port` was asked for. A port nobody chose steps past a busy one;
+    /// a port somebody chose is an error when it is taken, because silently
+    /// serving somewhere else is worse than saying so.
+    pub port_given: bool,
+    pub no_token: bool,
+    pub no_actions: bool,
+    pub tunnel: bool,
+    pub plan: Plan,
+    pub delay: Duration,
+    pub hosts: Vec<String>,
+    /// Whether the server scans for sessions itself.
+    ///
+    /// True for `cctop serve`, which is the only thing running. False for the
+    /// dashboard, which already walks every session five times a second and
+    /// would otherwise do it twice in one process — and worse, show a page that
+    /// disagrees with the table beside it. The dashboard feeds
+    /// [`Serving::publish`] instead.
+    pub scan: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            bind: "127.0.0.1".to_string(),
+            port: DEFAULT_PORT,
+            port_given: false,
+            no_token: false,
+            no_actions: false,
+            tunnel: false,
+            plan: Plan::Retail,
+            delay: Duration::from_secs(2),
+            hosts: Vec::new(),
+            scan: true,
+        }
+    }
+}
+
+/// A server that is up, and the links that reach it.
+///
+/// Dropping it revokes the tunnel and stops the accept loop, so a dashboard
+/// that stops serving stops being reachable — including from a link somebody
+/// has already opened.
+pub struct Serving {
+    /// The loopback link, always present.
+    pub local: String,
+    /// The public one, when a tunnel was asked for and registered.
+    pub public: Option<String>,
+    pub actions: bool,
+    shared: Arc<Shared>,
+    remotes: Arc<Mutex<Remotes>>,
+    plan: Plan,
+    version: Mutex<u64>,
+    /// Held so dropping this unregisters from Cloudflare's edge.
+    _tunnel: Option<tunnel::Tunnel>,
+    /// Cleared on drop; the accept loop reads it after every connection and
+    /// stops when it is false.
+    running: Arc<AtomicBool>,
+    port: u16,
+}
+
+impl Serving {
+    /// The link to hand somebody: the public one when there is one.
+    pub fn best(&self) -> &str {
+        self.public.as_deref().unwrap_or(&self.local)
+    }
+
+    /// Show the page these rows, replacing whatever it was showing.
+    ///
+    /// For a dashboard-hosted server, which has the rows already. Cheap enough
+    /// to call on every refresh: it costs one JSON encode of what the table is
+    /// already holding, and it is what wakes the event stream.
+    pub fn publish(&self, sessions: &[Session]) {
+        let Ok(mut version) = self.version.lock() else {
+            return;
+        };
+        publish(
+            &self.shared,
+            &self.remotes,
+            sessions,
+            self.plan,
+            &self.shared.store,
+            &mut version,
+        );
+    }
+}
+
+/// Hand `url` to whatever this desktop opens links with.
+///
+/// Best effort by design: there is no answer worth waiting for and plenty of
+/// machines with no browser to give it to — a headless box, an ssh session, a
+/// container. `false` means nothing was launched, which the caller says on the
+/// status line so the link can be copied instead.
+///
+/// Spawned and forgotten rather than waited on: `xdg-open` on some desktops
+/// does not return until the browser it started exits, and a dashboard frozen
+/// behind somebody's Firefox is not a trade worth making.
+pub fn open_in_browser(url: &str) -> bool {
+    let opener = match std::env::consts::OS {
+        "macos" => "open",
+        "windows" => "explorer",
+        // Every freedesktop environment, which is the whole of the rest that
+        // has a browser to open.
+        _ => "xdg-open",
+    };
+    std::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        // The accept loop is parked inside `accept`, so clearing the flag is not
+        // enough to end it — one connection of our own wakes it, it sees the
+        // flag, and returns. Loopback whatever the server is bound to: it is
+        // listening there too for any bind cctop allows, and a refused connect
+        // here costs a thread that ends when the process does.
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
+/// Bring the server up and hand back the links, without blocking.
+///
+/// Everything `cctop serve` does apart from printing and parking. The accept
+/// loop moves to a thread of its own so a dashboard can go on drawing, which is
+/// the whole reason this is split out of [`run`].
+pub fn start(options: Options) -> anyhow::Result<Serving> {
+    let listener = listen(&options.bind, options.port, options.port_given)?;
+    let addr = listener.local_addr()?;
+    if let Some(why) = tunnel_objection(options.tunnel, addr.ip().is_loopback(), options.no_token) {
+        anyhow::bail!("{why}");
+    }
+    let token = match options.no_token {
+        true => String::new(),
+        false => new_token(),
+    };
+    // The token is the whole authorisation story for an action, so there are no
+    // actions without one. `--no-token` is already documented as "every process
+    // and user on this machine can read your sessions"; letting that also mean
+    // "and type at your agents" is a different sentence, and not one anybody
+    // reads a flag expecting.
+    let actions = !options.no_actions && !options.no_token;
+    // Started before anything is announced, so the link works when it is read,
+    // and before the accept loop because there is nothing to reach yet.
+    let tunnel = match options.tunnel {
+        true => Some(tunnel::start(addr.port())?),
+        false => None,
+    };
+
+    let shared = Arc::new(Shared {
+        token: token.clone(),
+        actions,
+        plan: options.plan,
+        latest: Mutex::new(Arc::new(Snapshot {
+            version: 0,
+            json: "[]".to_string(),
+            sessions: Vec::new(),
+            host_errors: Vec::new(),
+        })),
+        updated: Condvar::new(),
+        store: crate::cache::Store::new(),
+    });
+
+    let remotes = Arc::new(Mutex::new(Remotes::default()));
+    for host in fleet::Host::collect(&options.hosts) {
+        spawn_host_poller(host, Arc::clone(&remotes));
+    }
+    if options.scan {
+        spawn_refresher(
+            Arc::clone(&shared),
+            Arc::clone(&remotes),
+            options.plan,
+            options.delay,
+        );
+    }
+
+    let query = match token.is_empty() {
+        true => String::new(),
+        false => format!("?t={token}"),
+    };
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
+        std::thread::Builder::new()
+            .name("cctop-serve-accept".into())
+            .spawn(move || accept_loop(listener, shared, running))?;
+    }
+
+    Ok(Serving {
+        local: format!("http://127.0.0.1:{}/{query}", addr.port()),
+        public: tunnel.as_ref().map(|t| format!("{}/{query}", t.url)),
+        actions,
+        shared,
+        remotes,
+        plan: options.plan,
+        version: Mutex::new(0),
+        _tunnel: tunnel,
+        running,
+        port: addr.port(),
+    })
+}
+
+/// Answer connections until `running` goes false.
+fn accept_loop(listener: TcpListener, shared: Arc<Shared>, running: Arc<AtomicBool>) {
+    let live = Arc::new(AtomicUsize::new(0));
+    for stream in listener.incoming() {
+        if !running.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(mut stream) = stream else { continue };
+
+        // Checked before the thread is spawned, so refusing a connection costs
+        // a response rather than a thread — which is the point of a cap.
+        if live.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+            http::respond_error(&mut stream, None, 503, "too many open connections");
+            continue;
+        }
+        let slot = Connection::take(&live);
+        let shared = Arc::clone(&shared);
+        // A spawn failure must not take the accept loop down with it: the
+        // machine is out of threads, which the next connection may not be. The
+        // slot is released either way — dropping the closure unspawned drops
+        // the guard inside it, and so does a handler that panics.
+        let _ = std::thread::Builder::new()
+            .name("cctop-serve".into())
+            .spawn(move || {
+                let _slot = slot;
+                serve_connection(&shared, &mut stream);
+            });
+    }
+}
+
 pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let mut bind = "127.0.0.1".to_string();
     let mut port = DEFAULT_PORT;
@@ -285,82 +529,27 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         }
     }
 
-    let listener = listen(&bind, port, port_given)?;
-    let addr = listener.local_addr()?;
-    if let Some(why) = tunnel_objection(want_tunnel, addr.ip().is_loopback(), no_token) {
-        anyhow::bail!("{why}");
-    }
-    let token = if no_token { String::new() } else { new_token() };
-    // The token is the whole authorisation story for an action, so there are no
-    // actions without one. `--no-token` is already documented as "every process
-    // and user on this machine can read your sessions"; letting that also mean
-    // "and type at your agents" is a different sentence, and not one anybody
-    // reads a flag expecting.
-    let actions = !no_actions && !no_token;
-    // Held until the process ends: dropping it unregisters from the edge, which
-    // is what makes a tunnel last exactly as long as the serve that asked for
-    // one. Started before the announcement so the printed link works when it is
-    // read, and before the accept loop because there is nothing to reach yet.
-    let tunnel = match want_tunnel {
-        true => Some(tunnel::start(addr.port())?),
-        false => None,
-    };
-    announce(&addr, &bind, &token, no_token, tunnel.as_ref());
-    if !actions {
-        eprintln!(
-            "  actions are off{} — the page can read this machine's sessions and \
-             nothing else",
-            match no_token {
-                true => " (no token, so nothing may act)",
-                false => "",
-            }
-        );
-    }
-
-    let shared = Arc::new(Shared {
-        token,
-        actions,
+    let serving = start(Options {
+        bind: bind.clone(),
+        port,
+        port_given,
+        no_token,
+        no_actions,
+        tunnel: want_tunnel,
         plan,
-        latest: Mutex::new(Arc::new(Snapshot {
-            version: 0,
-            json: "[]".to_string(),
-            sessions: Vec::new(),
-            host_errors: Vec::new(),
-        })),
-        updated: Condvar::new(),
-        store: crate::cache::Store::new(),
-    });
+        delay,
+        hosts,
+        // The only thing in this process, so it does its own walking.
+        scan: true,
+    })?;
+    announce(&serving, &bind, no_token);
 
-    let remotes = Arc::new(Mutex::new(Remotes::default()));
-    for host in fleet::Host::collect(&hosts) {
-        spawn_host_poller(host, Arc::clone(&remotes));
+    // Nothing left to do on this thread: the accept loop has its own. Parking
+    // rather than returning is what keeps the process — and with it the tunnel
+    // and every thread above — alive, since `serve` is the whole command.
+    loop {
+        std::thread::park();
     }
-    spawn_refresher(Arc::clone(&shared), Arc::clone(&remotes), plan, delay);
-
-    let live = Arc::new(AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-
-        // Checked before the thread is spawned, so refusing a connection costs
-        // a response rather than a thread — which is the point of a cap.
-        if live.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
-            http::respond_error(&mut stream, None, 503, "too many open connections");
-            continue;
-        }
-        let slot = Connection::take(&live);
-        let shared = Arc::clone(&shared);
-        // A spawn failure must not take the accept loop down with it: the
-        // machine is out of threads, which the next connection may not be. The
-        // slot is released either way — dropping the closure unspawned drops
-        // the guard inside it, and so does a handler that panics.
-        let _ = std::thread::Builder::new()
-            .name("cctop-serve".into())
-            .spawn(move || {
-                let _slot = slot;
-                serve_connection(&shared, &mut stream);
-            });
-    }
-    Ok(0)
 }
 
 /// One of [`MAX_CONNECTIONS`], released when the handler ends however it ends.
@@ -460,20 +649,10 @@ fn tunnel_objection(want_tunnel: bool, loopback: bool, no_token: bool) -> Option
 /// the public one is what someone asked for and what goes to the phone, and the
 /// loopback one is still the right link from this machine. What follows both is
 /// the sentence that matters — that the first link is a way in, not a view.
-fn announce(
-    addr: &SocketAddr,
-    bind: &str,
-    token: &str,
-    no_token: bool,
-    tunnel: Option<&tunnel::Tunnel>,
-) {
-    let query = match token.is_empty() {
-        true => String::new(),
-        false => format!("?t={token}"),
-    };
-    if let Some(tunnel) = tunnel {
-        eprintln!("cctop: serving on {}/{query}", tunnel.url);
-        eprintln!("cctop: also on http://127.0.0.1:{}/{query}", addr.port());
+fn announce(serving: &Serving, bind: &str, no_token: bool) {
+    if let Some(public) = &serving.public {
+        eprintln!("cctop: serving on {public}");
+        eprintln!("cctop: also on {}", serving.local);
         eprintln!(
             "cctop: that first link is on the public internet. Anyone who has it \
              can read every session on this machine — and, unless --no-actions, \
@@ -481,37 +660,19 @@ fn announce(
              the traffic and can read it. The tunnel ends when this process does."
         );
         let _ = std::io::stderr().flush();
-        return;
-    }
-    // `0.0.0.0` and `::` mean "every interface", which is not a host anyone can
-    // type. Printing one as though it were a link is how an address that cannot
-    // work gets sent to somebody, so those say the port and leave the host to
-    // the person who knows which of their interfaces they meant.
-    if addr.ip().is_unspecified() {
-        eprintln!(
-            "cctop: serving on every interface, port {} — open \
-             http://<this machine>:{}/{query}",
-            addr.port(),
-            addr.port()
-        );
     } else {
-        let host = match addr.ip().is_loopback() {
-            true => "127.0.0.1".to_string(),
-            false => bind.to_string(),
-        };
-        eprintln!("cctop: serving on http://{host}:{}/{query}", addr.port());
+        eprintln!("cctop: serving on {}", serving.local);
     }
-
-    if !addr.ip().is_loopback() {
+    if bind != "127.0.0.1" && serving.public.is_none() {
         eprintln!(
-            "cctop: this is reachable from your network — anyone who can reach \
-             that address can read every session on this machine."
+            "cctop: bound to {bind}, so this is on your network and not just this \
+             machine"
         );
     }
     if no_token {
         eprintln!(
-            "cctop: --no-token, so nothing is checked — every process and user \
-             on this machine can read your sessions too."
+            "cctop: no token — every process and user on this machine can read \
+             your sessions"
         );
     }
     let _ = std::io::stderr().flush();
@@ -593,7 +754,7 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
         let mut rows = loader.load(plan);
         let mut walked = Instant::now();
         let mut version = 0u64;
-        publish(&shared, &remotes, &rows, plan, &loader, &mut version);
+        publish(&shared, &remotes, &rows, plan, loader.store(), &mut version);
 
         loop {
             std::thread::sleep(delay);
@@ -612,7 +773,7 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
             } else {
                 loader.refresh_live(plan, &mut rows);
             }
-            publish(&shared, &remotes, &rows, plan, &loader, &mut version);
+            publish(&shared, &remotes, &rows, plan, loader.store(), &mut version);
         }
     });
 }
@@ -626,7 +787,7 @@ fn publish(
     remotes: &Mutex<Remotes>,
     local: &[Session],
     plan: Plan,
-    loader: &Loader,
+    store: &crate::cache::Store,
     version: &mut u64,
 ) {
     let (mut sessions, host_errors) = match remotes.lock() {
@@ -653,7 +814,7 @@ fn publish(
     // The same document `--json` prints and `--host` parses, from the same
     // builder: a browser being shown different figures than the terminal is a
     // bug nobody would think to look for. See [`cli::json_sessions`].
-    let document = cli::json_sessions(&sessions, plan, loader);
+    let document = cli::json_sessions(&sessions, plan, store);
     let json = serde_json::to_string(&document).unwrap_or_else(|_| "[]".to_string());
 
     *version += 1;

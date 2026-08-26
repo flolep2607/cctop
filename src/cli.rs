@@ -557,7 +557,11 @@ fn json_conflict(sessions: &[Session], c: &crate::collide::Collision) -> JsonCon
 /// the web dashboard, which streams it to a browser. Anything that is true of
 /// the printed JSON has to stay true of theirs, so there is one builder rather
 /// than three that drift.
-pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<JsonSession> {
+pub fn json_sessions(
+    sessions: &[Session],
+    plan: Plan,
+    store: &crate::cache::Store,
+) -> Vec<JsonSession> {
     let claude_account = crate::quota::claude_account();
     let codex_account = crate::quota::codex_account();
     let collisions = crate::collide::detect(sessions);
@@ -565,7 +569,7 @@ pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<J
     sessions
         .iter()
         .map(|s| {
-            let data = loader.store().session_data(s);
+            let data = store.session_data(s);
             let m = &data.metrics;
             let included = s.cost_available && plan.includes(s.provider);
             // The credentials read here are this user's. Another user's
@@ -667,7 +671,7 @@ pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<J
 }
 
 pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
-    let out = json_sessions(sessions, plan, loader);
+    let out = json_sessions(sessions, plan, loader.store());
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }

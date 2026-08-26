@@ -245,6 +245,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
         Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app),
         Mode::TmuxInstall => modals::draw_rmux_install(frame, area, app),
+        Mode::Serve => modals::draw_serve(frame, area, app),
         Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
         Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
         Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),

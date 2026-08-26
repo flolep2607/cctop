@@ -122,6 +122,9 @@ pub enum Mode {
     TmuxInstall,
     /// Typing a new name for a workspace tab, opened by right-clicking it.
     RenameTab,
+    /// The browser panel: whether this cctop is serving its table to one, on
+    /// what links, and whether they leave the machine.
+    Serve,
 }
 
 /// Everything [`App::open_tab`] needs beyond the command itself.
@@ -815,6 +818,23 @@ pub struct App {
     /// Not persisted — a decision about this machine belongs in whether rmux is
     /// installed on it, and cctop already reads that directly.
     pub rmux_declined: bool,
+    /// The server this cctop is running, when it is running one.
+    ///
+    /// `cctop serve` is the same server with nobody watching the terminal it
+    /// took over. Holding it here is what lets the table and the page be up at
+    /// once — and, because the dashboard already walks every session, what lets
+    /// the page be fed from the rows on screen rather than from a second scan
+    /// of the same disk.
+    ///
+    /// Dropping it revokes the tunnel and stops the listener, so quitting cctop
+    /// takes the page with it. That is the same bargain `serve` makes.
+    pub serving: Option<crate::serve::Serving>,
+    /// Why the last attempt to serve failed, kept for the panel to show.
+    ///
+    /// A port in use or a tunnel that would not register are both answers
+    /// somebody has to read, and a status line that has since been overwritten
+    /// by a refresh is not where they can read it.
+    pub serve_error: Option<String>,
     /// The quick tunnel a browser share is reached through, once one has been
     /// opened.
     ///
@@ -1009,6 +1029,8 @@ impl App {
             rmux_deferred: None,
             rmux_declined: false,
             rmux_installing: None,
+            serving: None,
+            serve_error: None,
             share_tunnel: None,
             pending_brief: None,
             pending_fork: None,
@@ -3564,6 +3586,65 @@ impl App {
         }
     }
 
+    /// Start serving the table to a browser, or say why not.
+    ///
+    /// `tunnel` is the difference between a link that works on this machine and
+    /// one that works from a phone. It is asked for per start rather than
+    /// toggled on a running server: registering with the edge is what mints the
+    /// hostname, so turning it on means a new link either way, and a flag that
+    /// silently invalidated the link somebody was holding would be worse than a
+    /// stop and a start they can see.
+    pub(super) fn start_serving(&mut self, tunnel: bool) {
+        self.serve_error = None;
+        let options = crate::serve::Options {
+            tunnel,
+            plan: self.plan,
+            // Fed from the rows this dashboard already has. Two loaders in one
+            // process would walk the same disk twice and, worse, could disagree
+            // — a page saying one thing while the table beside it says another
+            // is the bug nobody thinks to look for.
+            scan: false,
+            ..Default::default()
+        };
+        match crate::serve::start(options) {
+            Ok(serving) => {
+                // Something to look at immediately: the page's first request
+                // would otherwise find the empty snapshot it was built with and
+                // report a machine with no sessions on it.
+                serving.publish(&self.sessions);
+                let where_to = match serving.public.is_some() {
+                    true => "on the internet",
+                    false => "on this machine",
+                };
+                self.set_status(format!("Serving {where_to} — B for the link"));
+                self.serving = Some(serving);
+            }
+            Err(error) => {
+                let error = format!("{error}");
+                self.set_status(format!("Could not serve: {error}"));
+                self.serve_error = Some(error);
+            }
+        }
+    }
+
+    /// Stop serving, which un-mints every link handed out.
+    pub(super) fn stop_serving(&mut self) {
+        if self.serving.take().is_some() {
+            self.set_status("Stopped serving — the links no longer answer");
+        }
+    }
+
+    /// Show the page whatever the table is showing.
+    ///
+    /// Called wherever the rows change rather than on a timer of its own: the
+    /// page's event stream wakes on a new version, so this is also what makes a
+    /// browser update when the table does.
+    pub(super) fn feed_serving(&self) {
+        if let Some(serving) = &self.serving {
+            serving.publish(&self.sessions);
+        }
+    }
+
     /// The public origin a share's browser should dial, opening a tunnel for it
     /// the first time one is asked for.
     ///
@@ -4078,6 +4159,8 @@ fn event_loop(
 
     loop {
         // Drain everything the workers have produced.
+        // Whether any of it changed the table, which is also the question
+        // "does the page need telling" — see the feed below the loop.
         let mut annotated_rows_changed = false;
         // Only a refresh can move a session between busy and waiting, so the
         // notifier is fed here rather than once per loop iteration — that would
@@ -4243,6 +4326,13 @@ fn event_loop(
         }
         if rows_changed {
             app.check_bells();
+        }
+        // The page gets what the table has, and only when it changed. This is
+        // also what wakes a browser: its event stream is parked on the version
+        // this bumps, so a page updates when the table does rather than on a
+        // clock of its own.
+        if rows_changed || annotated_rows_changed {
+            app.feed_serving();
         }
 
         app.sync_panel_data();
@@ -4987,6 +5077,57 @@ mod tests {
     /// Regression: the launcher sized itself to its list and let `centered` clamp
     /// the result, so on a short terminal the rows past the bottom were dropped —
     /// and once the cursor walked into them, nothing on screen said what Enter
+    /// The browser panel shows where the page is, and does not show the token
+    /// that opens it.
+    ///
+    /// Both halves matter. A panel that cannot say where the page is has not
+    /// answered the question it was opened to answer; a panel that prints the
+    /// token puts a credential into every screenshot of it. The link is drawn
+    /// as its origin and the token lives in the clipboard and the escape.
+    #[test]
+    fn the_serve_panel_names_the_page_without_naming_its_token() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        let serving = crate::serve::start(crate::serve::Options {
+            // A port nobody asked for, so a busy one is stepped past rather
+            // than failing a test on whatever else is running here.
+            port_given: false,
+            ..Default::default()
+        })
+        .expect("a loopback server");
+        let token = serving
+            .local
+            .split_once("?t=")
+            .map(|(_, token)| token.to_string())
+            .expect("a tokenised link");
+        app.serving = Some(serving);
+        app.mode = Mode::Serve;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("backend");
+        let mut layout = render::Layout::default();
+        terminal
+            .draw(|frame| layout = render::draw(frame, &mut app))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            screen.contains("http://127.0.0.1:"),
+            "the panel never said where the page is:\n{screen}"
+        );
+        assert!(
+            !screen.contains(&token),
+            "the token was drawn on screen:\n{screen}"
+        );
+    }
+
     /// was about to start.
     #[test]
     fn the_launcher_keeps_its_cursor_on_screen() {
