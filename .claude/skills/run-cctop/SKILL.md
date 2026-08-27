@@ -1,10 +1,13 @@
 ---
 name: run-cctop
-description: Build, run, drive, and screenshot cctop — the terminal dashboard for AI coding agent sessions. Use when asked to start cctop, launch its TUI, take a screenshot of it, exercise a UI change, run its tests, or check the release gate.
+description: Build, run, drive, test and screenshot cctop — the terminal dashboard for AI coding agent sessions — including its browser interface (`cctop serve`, the session report, the conversation view). Use when asked to start cctop, launch its TUI, screenshot it, open or exercise its web pages, add or verify a feature, reproduce a rendering bug, run its tests, or check the release gate.
 ---
 
 cctop is a Rust TUI that watches *other* agents' sessions, so running it needs
 two things a clean machine lacks: sessions to show, and a terminal to draw in.
+Two drivers sit beside this file: **`driver.sh`** for the TUI and **`web.sh`**
+for the browser interface. Neither can see what the other tests.
+
 `.claude/skills/run-cctop/driver.sh` supplies both — it writes a throwaway
 `$HOME` full of fake transcripts and drives the TUI inside a private tmux
 server. That tmux is the driver's terminal, not cctop's backend — cctop hands
@@ -97,6 +100,66 @@ cargo run          # draws your real sessions; F10 quits
 Useless for an agent: it takes over the terminal and shows the operator's own
 sessions rather than anything a test controls.
 
+## Run (the browser side)
+
+`driver.sh` drives the TUI through tmux and **cannot see the web interface at
+all**. The dashboard page, the session report, the conversation view and the
+action routes are a second interface with its own bugs, and `web.sh` is its
+driver. Same fixture home, so it never serves the operator's real sessions.
+
+```bash
+.claude/skills/run-cctop/web.sh smoke      # serve, shoot three pages, tear down
+```
+
+Step by step:
+
+```bash
+web.sh chat                                 # give the fixture a conversation worth rendering
+web.sh serve                                # start it; prints the URL and waits for a row
+web.sh ids                                  # session ids, for building /session/<id>
+web.sh api /api/sessions                    # any JSON route, pretty-printed
+web.sh shot home /                          # screenshot + the text it rendered
+web.sh shot rep "/session/$ID"
+web.sh shot dead "/session/$ID" --dead       # every /api/** answers 502 HTML
+web.sh down
+```
+
+| command | what it does |
+|---|---|
+| `serve [--token\|--tunnel]` | `cctop serve` against the fixture; waits for the table to have a row, not just for the port to answer |
+| `chat` | appends turns to the fixture transcript covering markdown, a table, fenced code, a tool call, a slash command and a reminder — the bare fixture is two lines of plain text and exercises none of the view |
+| `shot <name> [path] [--dead]` | PNG **and** the rendered text into `$SHOTS`; exits non-zero on a JS exception |
+| `--dead` | answers every `/api/**` with a Cloudflare 502 page — what a trycloudflare tunnel serves once the cctop behind it is gone |
+| `ids` / `api` / `url` | the small things every recipe needs |
+
+**Read the `.txt`, not the `.png`.** A screenshot says something is there; the
+text says what, and it is what a transcript can carry.
+
+### Reaching the TUI's own server
+
+`B` in the TUI serves the same page without leaving the dashboard — so a change
+to the panel is `driver.sh keys B`, and a change to the *page* is `web.sh`.
+
+## Prefer a render test over a screenshot
+
+For anything drawn by the TUI — a modal, a panel, a column — a `TestBackend`
+render test is faster, deterministic, and says what is actually in the buffer.
+There are several in `src/ui/mod.rs`; the pattern is:
+
+```rust
+let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("backend");
+terminal.draw(|frame| layout = render::draw(frame, &mut app)).expect("draw");
+let screen: String = terminal.backend().buffer().content()
+    .iter().map(|cell| cell.symbol()).collect();
+assert!(screen.contains("…"));
+```
+
+This is not a preference. A modal bug that three rounds of `driver.sh shot`
+could not explain — escape sequences in a cell, and a box sized by line count
+while its paragraph wrapped — was obvious in the first buffer dump, because
+`capture-pane` shows what the *terminal* made of the output while the buffer
+shows what cctop put there.
+
 ## Test
 
 ```bash
@@ -112,6 +175,38 @@ cargo clippy --all-targets
 cargo test
 cargo publish --dry-run --allow-dirty
 ```
+
+## The multiplexer
+
+cctop drives **rmux**, not tmux (since 0.8 — `src/rmux.rs`). tmux still appears
+here because the *driver* uses it as a terminal to run cctop in; the two are
+unrelated, and cctop cannot see the driver's tmux server at all.
+
+- **Its tests share one machine-wide daemon.** `rmux::test_lock()` serialises
+  them, and a test that kills the last session must wait for it to be gone
+  before releasing the lock — killing the last one stops the server, and the
+  next test's `new-session` then reaches a socket mid-shutdown and fails. That
+  race is why an unrelated test goes red once in five runs.
+- **Check rmux's behaviour, don't infer it from tmux.** They differ in ways that
+  compile fine: `list-panes -t =NAME` is a parse error under rmux while every
+  other target takes the `=`, and a bare name prefix-matches. `rmux -L probe
+  new-session -d -s x -- sleep 60` on a private socket is a cheap way to ask.
+- **An rmux pane exports five env vars** — `RMUX`, `RMUX_PANE`, `TMUX`,
+  `TMUX_PANE`, `TMUX_PROGRAM` — and `new-session -A` refuses to nest under any
+  of them. `src/shim.rs` strips all five.
+- `docs/rmux/` mirrors rmux's own documentation; `docs/rmux/pull.sh` refreshes
+  it. Read it before guessing at a flag.
+
+## Editing hazards
+
+- **`cargo fmt` rewraps lines, so a scripted `str.replace` silently no-ops.**
+  Always assert the replacement happened. An edit that quietly did nothing sent
+  a whole debugging session after the wrong cause.
+- **Never run `cargo publish`**, dry-run included. Run the rest of the gate and
+  stop.
+- The branch may carry a `[patch.crates-io]` block pinning `rmux-sdk` and
+  `ratatui-rmux` to a fork. While it is there the crate cannot be published —
+  that is deliberate, and `verify / package` going red is the signal.
 
 ## Gotchas
 
