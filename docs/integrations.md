@@ -24,7 +24,7 @@ One install covers five agents, each asked in its own dialect:
 
 | Agent | Where it is written | What is written |
 |---|---|---|
-| **Claude Code** | `~/.claude/settings.json`, or `<project>/.claude/` | twelve hooks — `Stop`, `StopFailure`, `Notification`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `SessionStart`, `SessionEnd`, `PreCompact`, `SubagentStop` |
+| **Claude Code** | `~/.claude/settings.json`, or `<project>/.claude/` | twenty-one hooks — `Stop`, `StopFailure`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `PermissionDenied`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `Elicitation`, `ElicitationResult` |
 | **Gemini CLI** | `~/.gemini/settings.json`, or `<project>/.gemini/` | eight — `BeforeAgent`, `AfterAgent`, `BeforeTool`, `AfterTool`, `Notification`, `SessionStart`, `SessionEnd`, `PreCompress` |
 | **Cursor** | `~/.cursor/hooks.json`, or `<project>/.cursor/` | seven — `stop`, `beforeSubmitPrompt`, `beforeShellExecution`, `sessionStart`, `sessionEnd`, `preCompact`, `subagentStop` |
 | **Codex** | `~/.codex/hooks.json`, or `<project>/.codex/`, and `~/.codex/config.toml` | ten hooks — `Stop`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`, `SubagentStop` — and `notify = ["cctop", "hook", "codex"]` |
@@ -73,6 +73,26 @@ call in flight over a still screen as a permission prompt waiting for you.
 `PermissionRequest` is the same fact said properly: it fires the instant Claude
 Code asks, where the `Notification` for the same prompt is on a six-second
 timer and the tool-in-flight reading is a guess.
+
+Four of the newer ones each answer something no other event does.
+`Elicitation` is an MCP server asking *you* something mid-task: not a permission
+dialog, so `PermissionRequest` never fires, and the screen goes still exactly as
+it does for a slow tool — a session blocked on one used to read as idle.
+`UserPromptExpansion` covers the path `UserPromptSubmit` misses, where typing
+`/skillname` expands into a prompt without submitting one. `SubagentStart` pairs
+with the `SubagentStop` that was already there, so the Subagents panel learns of
+a subagent while it is running rather than only once it has ended. And
+`PermissionDenied` is the only trace auto mode leaves when it refuses a tool.
+
+Three of Claude Code's events are deliberately left out, and one of them matters:
+**`WorktreeCreate` replaces worktree creation rather than observing it.** Claude
+Code stops calling `git worktree` and takes the new path from the hook's stdout —
+and cctop's hook writes nothing to stdout, by construction, because a hook that
+prints is a hook that can derail the session it watches. Installing it would
+break `claude --worktree` and every subagent isolated in one. `MessageDisplay`
+fires several times per assistant message and reports only that output is
+happening, which `PostToolUse` and `Stop` already bracket. `FileChanged` never
+fires until something names a file to watch, and cctop cannot name them up front.
 
 If you installed before an event was added — `PostToolUseFailure`, or a whole
 agent — that install is short exactly those events, and cctop fills it in on

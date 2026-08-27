@@ -550,7 +550,30 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // way for a call to end — a grep that matched nothing, a test that
         // failed, a command that exited 1 — so leaving this out left a tool
         // call in flight for as long as the turn ran.
+        // `UserPromptExpansion` is the path `UserPromptSubmit` does not cover:
+        // typing `/skillname` expands into a prompt without submitting one, so
+        // a session driven entirely by slash commands never reported starting
+        // work at all.
+        //
+        // `PostToolBatch` fires once after every call in a batch has resolved,
+        // where `PostToolUse` fires once per call and concurrently. It is the
+        // moment the model is about to be asked again — the same "still going"
+        // fact, arrived at once instead of five times.
+        //
+        // `SubagentStart` pairs with the `SubagentStop` already here. Without
+        // it the Subagents panel learned of a subagent only when it ended,
+        // which is the half of its life nobody needs to watch.
+        //
+        // `ElicitationResult` closes out the `Elicitation` below: the answer
+        // has been given and the MCP call is moving again.
+        //
+        // `TaskCreated` and `TaskCompleted` are the agent's own plan changing
+        // under it. Neither is a state cctop draws differently, but both happen
+        // only while an agent is working, and both are moments a turn that
+        // looked stalled is demonstrably not.
         "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" | "SubagentStop"
+        | "UserPromptExpansion" | "PostToolBatch" | "SubagentStart"
+        | "ElicitationResult" | "TaskCreated" | "TaskCompleted"
         // Gemini CLI: a prompt submitted, and a tool call coming back.
         | "BeforeAgent" | "AfterTool"
         // OpenCode: the same, from the plugin.
@@ -577,16 +600,26 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // point cctop has usually already guessed it from a tool call held over
         // a still screen — a guess that is wrong for a tool that runs long and
         // silently. See [`Signal::Acting`].
-        "permission.asked" | "PermissionRequest" => Some(Signal::NeedsInput),
+        // An MCP server asking the user something mid-task, which is a held
+        // prompt of a kind cctop had no way to see: it is not a permission
+        // dialog, so `PermissionRequest` never fires, and the screen goes still
+        // the same way it does for a tool that runs long and quietly. A session
+        // blocked on one of these looked idle.
+        "permission.asked" | "PermissionRequest" | "Elicitation" => Some(Signal::NeedsInput),
+        // Auto mode refused a tool call. The turn continues — the model is told
+        // it may retry — so this is not the end of anything, but it is the one
+        // event that says a refusal happened at all. Without it the only trace
+        // is a tool that never ran.
+        "PermissionDenied" => Some(Signal::Busy),
         // Compaction is the one kind of work worth naming separately: the
         // context panel is about to lurch, and it is not the agent stalling.
         "PreCompact" | "PreCompress" | "preCompact" | "session.compacted" => {
             Some(Signal::Compacting)
         }
-        // And the other end of it, where the harness has one: compaction is
-        // over and the agent is moving again. Claude Code raises a
-        // `SessionStart` after compacting, which says the same thing, so only
-        // Codex needs this asked for.
+        // And the other end of it: compaction is over and the agent is moving
+        // again. Claude Code also raises a `SessionStart` after compacting,
+        // which says the same thing — but `SessionStart` is `Started`, and a
+        // session that has merely compacted is not one that has just begun.
         "PostCompact" => Some(Signal::Busy),
         "SessionStart" | "sessionStart" | "session.created" => Some(Signal::Started),
         "SessionEnd" | "sessionEnd" | "session.deleted" => Some(Signal::Ended),
@@ -751,19 +784,50 @@ fn parse(line: &str) -> Option<Event> {
 /// when the turn ends on an API error, so without it a rate-limited session is
 /// drawn as working until somebody types into it. `PermissionRequest` fires at
 /// most once per tool call, and only when Claude Code is actually about to ask.
+/// Three of Claude Code's events are deliberately *not* here, and the reasons
+/// are worth keeping because each looks like an omission:
+///
+/// `WorktreeCreate` does not observe worktree creation — it **replaces** it.
+/// Claude Code stops calling `git worktree` and takes the path from the hook's
+/// stdout instead, and "if the hook fails or produces no path, worktree
+/// creation fails with an error". This hook prints nothing to stdout by
+/// construction (see the module docs), so installing it would break
+/// `claude --worktree`, every subagent with `isolation: "worktree"`, and every
+/// backgrounded session Claude Code isolates. It is the one event on offer that
+/// could take a session down, which is the thing this module exists not to do.
+///
+/// `MessageDisplay` fires once per batch of streamed lines — several times per
+/// assistant message, far more often than anything else here — and says only
+/// that output is being produced, which `PostToolUse` and `Stop` already
+/// bracket. A fork every few lines of every message, for a fact cctop has.
+///
+/// `FileChanged` never fires unless something has named a file to watch: Claude
+/// Code starts the watcher only when a matcher or a `watchPaths` reply names
+/// one. cctop cannot name them up front, so installed alone it is inert — and
+/// making it useful means feeding `watchPaths`, which is a feature rather than
+/// a hook.
 const CLAUDE_EVENTS: &[&str] = &[
     "Stop",
     "StopFailure",
     "Notification",
     "UserPromptSubmit",
+    "UserPromptExpansion",
     "PreToolUse",
     "PermissionRequest",
+    "PermissionDenied",
     "PostToolUse",
     "PostToolUseFailure",
+    "PostToolBatch",
     "SessionStart",
     "SessionEnd",
     "PreCompact",
+    "PostCompact",
+    "SubagentStart",
     "SubagentStop",
+    "TaskCreated",
+    "TaskCompleted",
+    "Elicitation",
+    "ElicitationResult",
 ];
 
 /// The same list in Gemini CLI's vocabulary.
@@ -2106,6 +2170,39 @@ mod tests {
                 assert_eq!(*other, signal, "{event} means two things");
             }
             seen.push((event, signal));
+        }
+    }
+
+    /// An MCP server asking the user something is a held prompt cctop could not
+    /// otherwise see.
+    ///
+    /// It is not a permission dialog, so `PermissionRequest` never fires for
+    /// it, and the screen goes still exactly as it does for a tool running long
+    /// and quietly — so a session blocked on one read as idle. `Elicitation`
+    /// says it outright, and `ElicitationResult` is the answer arriving.
+    #[test]
+    fn an_mcp_elicitation_is_a_session_waiting_on_you() {
+        assert_eq!(signal_of("Elicitation", ""), Some(Signal::NeedsInput));
+        assert_eq!(signal_of("ElicitationResult", ""), Some(Signal::Busy));
+        assert!(CLAUDE_EVENTS.contains(&"Elicitation"));
+    }
+
+    /// Three events Claude Code offers are not asked for, and one of them would
+    /// break the session.
+    ///
+    /// `WorktreeCreate` replaces `git worktree` rather than observing it, and
+    /// takes the new worktree's path from the hook's stdout. This hook writes
+    /// nothing to stdout by construction, and a `WorktreeCreate` hook that
+    /// produces no path fails worktree creation outright — so installing it
+    /// would break `claude --worktree` and every `isolation: "worktree"`
+    /// subagent. The other two are declined for cost rather than danger.
+    #[test]
+    fn the_events_that_would_cost_more_than_they_say_are_not_installed() {
+        for event in ["WorktreeCreate", "MessageDisplay", "FileChanged"] {
+            assert!(
+                !CLAUDE_EVENTS.contains(&event),
+                "{event} is installed — see the note above CLAUDE_EVENTS for why                  it should not be"
+            );
         }
     }
 
