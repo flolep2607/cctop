@@ -86,6 +86,11 @@ impl Loader {
         }
     }
 
+    /// How the last walk matched processes to sessions. See `cctop why`.
+    pub fn attributions(&self) -> &[crate::proc::Attribution] {
+        self.collector.attributions()
+    }
+
     pub fn store(&self) -> &Store {
         self.store.get_or_init(Store::new)
     }

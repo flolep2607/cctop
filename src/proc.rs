@@ -68,6 +68,29 @@ pub struct Collector {
     /// Session key -> pid -> (entry, remaining linger ticks).
     ghosts: HashMap<String, HashMap<u32, (ProcEntry, u8)>>,
     orphans: HashMap<String, Orphan>,
+    /// Why each root was given to the session it was given to, newest collect
+    /// only. See [`Collector::attributions`].
+    attributions: Vec<Attribution>,
+}
+
+/// One process, and the rule that decided which session owns it.
+///
+/// Recorded where the decision is made rather than re-derived by whatever wants
+/// to explain it: a second copy of this reasoning is a second copy that can
+/// disagree with the first, and the whole value of an explanation is that it is
+/// the real one.
+#[derive(Debug, Clone)]
+pub struct Attribution {
+    pub pid: u32,
+    /// `provider:session_id`, or `provider:_pid_N` for a process no transcript
+    /// claims.
+    pub key: String,
+    /// The command line, as far as it is worth printing.
+    pub argv: String,
+    /// The rule: which of the four ways this process found its session.
+    pub rule: &'static str,
+    /// What the rule matched on — a uuid, a title, a directory.
+    pub matched: String,
 }
 
 impl Default for Collector {
@@ -286,11 +309,21 @@ impl Collector {
             sys: System::new(),
             ghosts: HashMap::new(),
             orphans: HashMap::new(),
+            attributions: Vec::new(),
         }
     }
 
     pub fn orphans(&self) -> &HashMap<String, Orphan> {
         &self.orphans
+    }
+
+    /// How the last [`collect`](Self::collect) matched processes to sessions.
+    ///
+    /// The answer to "why does cctop think this session is not running", which
+    /// is not a question any other output can answer: a row shows the verdict
+    /// and nothing about how it was reached. Read by `cctop why`.
+    pub fn attributions(&self) -> &[Attribution] {
+        &self.attributions
     }
 
     /// Aggregate CPU/memory per session, keyed by `provider:session_id`.
@@ -312,6 +345,10 @@ impl Collector {
                 .without_tasks(),
         );
         self.orphans.clear();
+        self.attributions.clear();
+        // Filled as the decisions below are made, and moved onto `self` at the
+        // end: `self` is borrowed immutably as `sys` for the length of this.
+        let mut found: Vec<Attribution> = Vec::new();
         let sys = &self.sys;
 
         // Every process contributes its place in the tree and its resource
@@ -472,13 +509,34 @@ impl Collector {
                 crate::pricing::Provider::OpenCode | crate::pricing::Provider::Pi
             ) && let Some(id) = session_value(&snap.tokens)
             {
-                claim_root(&mut roots, format!("{}:{id}", provider.as_str()), pid);
+                let key = format!("{}:{id}", provider.as_str());
+                found.push(Attribution {
+                    pid,
+                    key: key.clone(),
+                    argv: snap.args.clone(),
+                    rule: "--session <id> on the command line",
+                    matched: id.to_string(),
+                });
+                claim_root(&mut roots, key, pid);
                 continue;
             }
 
             if let Some(uuid) = resume_uuid(&snap.tokens) {
                 let launched = launched_index.get(&(provider, uuid)).map(Vec::as_slice);
                 let key = resumed_key(launched, provider, uuid, &roots);
+                // The subtle one, and the reason this record exists: the key is
+                // usually *not* the uuid on the command line. A resume forks.
+                let rule = match key.ends_with(uuid) {
+                    true => "--resume <id>, and that id's own transcript",
+                    false => "--resume <id>, forwarded to the transcript it forked into",
+                };
+                found.push(Attribution {
+                    pid,
+                    key: key.clone(),
+                    argv: snap.args.clone(),
+                    rule,
+                    matched: uuid.to_string(),
+                });
                 claim_root(&mut roots, key, pid);
                 continue;
             }
@@ -490,6 +548,13 @@ impl Collector {
                     .iter()
                     .find(|s| s.surface.is_desktop() && s.title.as_deref() == Some(title.as_str()))
             {
+                found.push(Attribution {
+                    pid,
+                    key: session.key(),
+                    argv: snap.args.clone(),
+                    rule: "Claude for Mac, matched by window title",
+                    matched: title.to_string(),
+                });
                 roots.entry(session.key()).or_insert(pid);
                 continue;
             }
@@ -560,6 +625,13 @@ impl Collector {
             {
                 let live = live_sessions_for_group(candidates, pids.len(), &roots);
                 for (pid, session) in pids.iter().zip(&live) {
+                    found.push(Attribution {
+                        pid: *pid,
+                        key: session.key(),
+                        argv: String::new(),
+                        rule: "no id on the command line; matched by working directory",
+                        matched: cwd.clone(),
+                    });
                     claim_root(&mut roots, session.key(), *pid);
                     claimed += 1;
                 }
@@ -571,6 +643,13 @@ impl Collector {
                     continue;
                 }
                 let key = format!("{}:_pid_{}", provider.as_str(), pid);
+                found.push(Attribution {
+                    pid,
+                    key: key.clone(),
+                    argv: String::new(),
+                    rule: "no transcript claims it; shown as a row of its own",
+                    matched: cwd.clone(),
+                });
                 claim_root(&mut roots, key.clone(), pid);
                 self.orphans.insert(
                     key,
@@ -619,6 +698,8 @@ impl Collector {
 
         // Drop linger state for sessions that are no longer running at all.
         self.ghosts.retain(|k, _| result.contains_key(k));
+        found.sort_by_key(|a| a.pid);
+        self.attributions = found;
         result
     }
 
@@ -881,6 +962,39 @@ mod tests {
             &claimed,
         );
         assert_eq!(key, format!("claude:{UUID}"));
+    }
+
+    /// The rule `cctop why` prints has to be the rule that ran, so it is worth
+    /// pinning that the forked case is spelled as the forked case. A resume
+    /// that silently reported "that id's own transcript" while forwarding the
+    /// process elsewhere would make the diagnostic lie in exactly the situation
+    /// it exists for.
+    #[test]
+    fn a_forwarded_resume_is_labelled_as_forwarded() {
+        let mut original = session_at(UUID, "t0", "t1");
+        original.launch_id = UUID.to_string();
+        let mut forked = session_at("forked", "t2", "t3");
+        forked.launch_id = UUID.to_string();
+
+        let key = resumed_key(
+            Some(&[&forked, &original]),
+            crate::pricing::Provider::Claude,
+            UUID,
+            &HashMap::new(),
+        );
+        // What `collect` branches on to choose the wording.
+        assert!(
+            !key.ends_with(UUID),
+            "a forwarded resume must not look like a direct one: {key}"
+        );
+
+        let direct = resumed_key(
+            Some(&[&original]),
+            crate::pricing::Provider::Claude,
+            UUID,
+            &HashMap::new(),
+        );
+        assert!(direct.ends_with(UUID), "a direct resume must look direct");
     }
 
     /// A transcript cctop cannot see is still a process worth counting, so the

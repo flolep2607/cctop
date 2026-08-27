@@ -34,6 +34,9 @@ flags. Handy on a phone for the sessions waiting on you.\n  \
 cctop doctor           Check this installation and say what is wrong with it:\n                         \
 where sessions are read from, pricing, hooks, and what\n                         \
 `s` can reach. --host also tests an ssh target.\n  \
+cctop why [ID]         Why a row says a session is running, or is not: every\n                         \
+agent process, the session it was matched to, and the\n                         \
+rule that matched it.\n  \
 cctop --trace          Time each stage of a run and write the totals to a file\n                         \
 on exit, to attach to a bug report about slowness.\n\n\
 Use --help for the full description.",

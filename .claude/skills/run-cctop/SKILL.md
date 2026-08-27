@@ -140,6 +140,44 @@ text says what, and it is what a transcript can carry.
 `B` in the TUI serves the same page without leaving the dashboard — so a change
 to the panel is `driver.sh keys B`, and a change to the *page* is `web.sh`.
 
+## Asking cctop what it decided
+
+```bash
+cctop why                 # every agent process, and the session it was matched to
+cctop why <session-id>    # that session: is it running, and what decided it
+cctop doctor              # where sessions are read from, and what is missing
+cctop -j                  # every row as JSON
+```
+
+`why` is the one that is not obvious. Every other output is a *verdict* — the
+table shows a dot, `-j` shows `"running": false` — and says nothing about how it
+was reached, so a row that is wrong is a row with nothing to argue with. `why`
+prints the reasoning: the pid, the session it was given to, and which of the
+four rules gave it (a `--resume` id, a `--session` id, a window title, or the
+working directory). The reason is recorded in `proc::collect` where the decision
+is made, so it cannot drift from the logic.
+
+The case it exists for: `claude --resume X` **forks**. The agent runs on a new
+transcript that records X as the id it came from, so the id on the command line
+belongs to a conversation that stopped. Reading it literally marks the dead
+conversation as working and the live one as stopped. `why` says
+`forwarded to the transcript it forked into` when that has happened.
+
+## Reading a transcript nobody documented
+
+```bash
+transcript.py fields <file>       # every key path, with counts and first line
+transcript.py find <file> <text>  # which key path holds that value
+transcript.py types <file>        # record types, and how many of each
+transcript.py diff <a> <b>        # what one file has that the other does not
+```
+
+Seven harnesses, none of which documents its JSONL, and the recurring question
+is always "which key holds this?". `fields` is how `session_id` was found — the
+field recording the id a resumed session was launched from, distinct from
+`sessionId`, and the whole reason a forked session can be matched to its
+process at all.
+
 ## Prefer a render test over a screenshot
 
 For anything drawn by the TUI — a modal, a panel, a column — a `TestBackend`
