@@ -21,8 +21,7 @@ use crate::session::{Session, SessionData};
 use columns::ColumnId;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event,
 };
 use ratatui::crossterm::execute;
 use spark::History;
@@ -3929,7 +3928,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
         restore_terminal();
         previous_hook(info);
     }));
-    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    let _ = execute!(std::io::stdout(), crossterm::style::Print(MOUSE_ON));
     // Bracketed paste, so a paste arrives as one `Event::Paste` instead of as
     // one `Event::Key` per character. Without it there is no way to tell a paste
     // from typing, and the newlines in a pasted message reach the agent as the
@@ -4037,6 +4036,27 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 
 /// Undo every terminal mode the TUI may have changed.
 ///
+/// Mouse tracking, asked for by hand rather than through crossterm's
+/// `EnableMouseCapture`.
+///
+/// The difference is `?1003h`, which crossterm turns on and this does not. That
+/// is *any-motion* tracking: the terminal reports a bare hover, one sequence per
+/// cell the pointer crosses, with no button held. cctop has never used one —
+/// `on_mouse` drops movement, and switching tabs on a hover would drag you out
+/// of the agent you are typing into — so the whole stream was noise.
+///
+/// Noise with a cost, though. A hover report is `\x1b[<35;79;14M`, and a reader
+/// that takes it across two reads loses the `\x1b[` and keeps the rest, which
+/// lands in whatever is being typed into as the literal text `<35;79;14M`. That
+/// needs a machine lagging enough to split a read mid-sequence and a pointer
+/// moving through it — which is exactly when it was reported. Presses, drags and
+/// the wheel are all still asked for, so nothing cctop reads is lost; there is
+/// simply no longer a report for every pixel of hover to be torn in half.
+///
+/// `?1000h` presses and releases, `?1002h` drags, `?1006h` the SGR encoding that
+/// can name a column past 223.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+
 /// `ratatui::restore` intentionally only disables raw mode and leaves the
 /// alternate screen; it does not restore cursor visibility. Keep this separate
 /// so regular exits, input errors, and panics all use the same cleanup path.
