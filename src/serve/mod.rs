@@ -64,6 +64,10 @@
 
 mod actions;
 mod chat;
+/// Routes that only exist in a build that asked for them. Not a default
+/// feature, so a released cctop contains none of this — see the module docs.
+#[cfg(feature = "debug")]
+mod debug;
 mod http;
 mod report;
 pub mod tunnel;
@@ -853,7 +857,20 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         );
     }
 
+    // Before the router, so an armed fault covers every API route rather than
+    // the handful somebody remembered to touch.
+    #[cfg(feature = "debug")]
+    if debug::intercept(stream, &request) {
+        return;
+    }
+
     let path = request.path.clone();
+    #[cfg(feature = "debug")]
+    if let Some(rest) = path.strip_prefix("/api/debug/")
+        && debug::route(shared, stream, &request, rest)
+    {
+        return;
+    }
     match path.as_str() {
         "/" => page(shared, stream, &request, DASHBOARD_HTML),
         "/api/sessions" => {

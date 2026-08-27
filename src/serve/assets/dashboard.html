@@ -319,6 +319,18 @@ async function problem(response) {
   return "the server answered " + response.status;
 }
 
+// The body as JSON, or a sentence saying why it is not. A 200 is not a promise
+// of JSON: a captive portal or a proxy answers with an HTML page and a good
+// status, and the parser's complaint about it is not something to show anyone.
+async function asJson(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error("whatever answered this page, it was not cctop");
+  }
+}
+
 // Every request the page makes. A dropped connection rejects the fetch itself
 // with nothing in it worth reading, so it is named here instead.
 async function ask(url, init) {
@@ -545,7 +557,7 @@ function connect() {
 }
 
 ask("/api/hosts" + QUERY)
-  .then((r) => r.json())
+  .then(asJson)
   .then((failed) => {
     const banners = document.getElementById("banners");
     for (const [host, why] of failed) {

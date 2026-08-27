@@ -132,6 +132,30 @@ web.sh down
 | `--dead` | answers every `/api/**` with a Cloudflare 502 page — what a trycloudflare tunnel serves once the cctop behind it is gone |
 | `ids` / `api` / `url` | the small things every recipe needs |
 
+### Making it fail on purpose
+
+```bash
+cargo build --features debug          # the routes below exist only in this build
+web.sh fault 502     # a tunnel whose far end has gone: HTML body, 502 status
+web.sh fault html    # a 200 that is not JSON — a captive portal, a proxy
+web.sh fault empty   # a 200 with no body
+web.sh fault slow    # a request that never arrives in time
+web.sh fault off
+web.sh state         # what the serving process is holding right now
+```
+
+`debug` is **not** a default feature, so a released cctop contains neither the
+routes nor the strings that name them — `strings target/debug/cctop | grep
+api/debug` is empty without it. That is the condition for having them: a debug
+surface in a shipped binary is one somebody else can reach, and the page's token
+is one link away from anyone the user shared it with.
+
+Faults apply to `/api/**` and not to the pages, so the page still loads and the
+fetch behind it is what breaks — which is the failure worth reproducing. This is
+how a 200-with-HTML was found showing `Unexpected token '<', "<html><bod"... is
+not valid JSON` to the reader: a status check is not enough on its own, because
+a proxy answers 200.
+
 **Read the `.txt`, not the `.png`.** A screenshot says something is there; the
 text says what, and it is what a transcript can carry.
 

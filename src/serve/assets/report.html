@@ -1073,6 +1073,26 @@ async function problem(response) {
   return "The server answered " + response.status + (response.statusText ? " " + response.statusText : "") + ".";
 }
 
+// The body as JSON, or a sentence saying why it is not.
+//
+// A 200 is not a promise of JSON. A captive portal, a proxy, or a tunnel that
+// has been repointed all answer with an HTML page and a perfectly good status,
+// and `response.json()` then throws a parser's complaint — `Unexpected token
+// '<', "<html><bod"... is not valid JSON` — which is machinery, shown to
+// somebody who wanted to read a conversation. The status is not enough on its
+// own; what came back has to be looked at.
+async function asJson(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(
+      "cctop answered with something that is not its own: whatever replied to " +
+        "this page, it was not the session it was asked about."
+    );
+  }
+}
+
 // Every request the page makes. A dropped connection rejects the fetch itself
 // with nothing in it worth reading, so it is named here instead.
 async function ask(url, init) {
@@ -1374,7 +1394,7 @@ async function refreshChat() {
   if (!pane) return;
   try {
     const response = await ask("/api/chat/" + encodeURIComponent(ID) + QUERY);
-    const chat = await response.json();
+    const chat = await asJson(response);
     const rebuilt = conversation(chat);
     // The composer is part of this pane and holds what someone is typing, so it
     // is moved across rather than rebuilt underneath them.
@@ -1395,7 +1415,7 @@ async function refreshChat() {
 // so it comes back on its own instead of asking someone to reload.
 function load() {
   ask("/api/report/" + encodeURIComponent(ID) + QUERY)
-    .then((response) => response.json())
+    .then(asJson)
     .then(async (r) => {
       document.title = "cctop — " + (r.title || r.project || r.session_id);
       const main = document.getElementById("main");
@@ -1407,7 +1427,7 @@ function load() {
       let agents = [];
       if (CAN_ACT) {
         try {
-          agents = (await (await ask("/api/agents" + QUERY)).json()).agents || [];
+          agents = (await asJson(await ask("/api/agents" + QUERY))).agents || [];
         } catch (e) { /* the buttons that need it simply do not appear */ }
       }
       const bar = actionBar(r, agents);
@@ -1489,7 +1509,7 @@ async function open_view(name, r) {
     PANES.access.replaceChildren(el("div", "empty", "Reading what it can reach…"));
     try {
       const response = await ask("/api/access/" + encodeURIComponent(ID) + QUERY);
-      PANES.access.replaceChildren(...accessView(await response.json()));
+      PANES.access.replaceChildren(...accessView(await asJson(response)));
     } catch (e) {
       // Read once and kept — but a read that failed is not a reading, so the
       // next visit to this view asks again rather than showing the error for

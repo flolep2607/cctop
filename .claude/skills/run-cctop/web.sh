@@ -127,6 +127,33 @@ cmd_shot() {
     python3 "$HERE/shot_web.py"
 }
 
+# Make the server fail on demand — needs `cargo build --features debug`.
+#
+#   web.sh fault 502     a tunnel whose far end has gone (HTML body, 502)
+#   web.sh fault html    a 200 that is not JSON: a captive portal, a proxy
+#   web.sh fault empty   a 200 with no body at all
+#   web.sh fault slow    a request that never arrives in time
+#   web.sh fault off
+#
+# Faults apply to `/api/**` and not to the pages, so the page under test still
+# loads and it is the fetch behind it that breaks — which is the failure worth
+# reproducing. `--dead` on `web.sh shot` does the 502 case in the browser
+# instead, and needs no special build.
+cmd_fault() {
+  local mode="${1:-off}"
+  local url; url="$(page_url /api/debug/fault)"
+  local sep="?"; case "$url" in *\?*) sep="&";; esac
+  local out; out="$(curl -s "$url$sep" -G --data-urlencode "mode=$mode")"
+  case "$out" in
+    *fault*) say "$out" ;;
+    *) die "no debug routes in this build — cargo build --features debug" ;;
+  esac
+}
+
+cmd_state() {
+  curl -s "$(page_url /api/debug/state)" | python3 -m json.tool
+}
+
 cmd_down() {
   if [ -f "$STATE.pid" ]; then
     kill "$(cat "$STATE.pid")" 2>/dev/null || true
@@ -166,6 +193,8 @@ case "${1:-}" in
   ids)   shift; cmd_ids "$@" ;;
   shot)  shift; cmd_shot "$@" ;;
   chat)  shift; cmd_chat "$@" ;;
+  fault) shift; cmd_fault "$@" ;;
+  state) shift; cmd_state "$@" ;;
   down)  shift; cmd_down "$@" ;;
   smoke) shift; cmd_smoke "$@" ;;
   url)   page_url "${2:-/}" ;;
@@ -173,5 +202,6 @@ case "${1:-}" in
      echo
      echo "usage: web.sh serve [--token|--tunnel] | api <path> | ids | url [path]"
      echo "       web.sh shot <name> [path] [--dead] | chat | smoke | down"
+     echo "       web.sh fault 502|html|empty|slow|off | state   (needs --features debug)"
      ;;
 esac

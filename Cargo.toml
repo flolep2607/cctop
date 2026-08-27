@@ -22,6 +22,13 @@ exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux"]
 
 # Only the pty shim and TIOCSTI injection need libc, both of which are unix-only.
 # It is already in the tree under sysinfo, so this adds no dependency.
+# Off by default and never enabled for a release: `debug` compiles in
+# `src/serve/debug.rs`, which can make the server fail on demand. Handy against
+# a fixture (`cargo run --features debug -- serve`), and not something to ship —
+# a build without it contains neither the routes nor the strings that name them.
+[features]
+debug = []
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 
