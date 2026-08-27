@@ -621,6 +621,36 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // which says the same thing — but `SessionStart` is `Started`, and a
         // session that has merely compacted is not one that has just begun.
         "PostCompact" => Some(Signal::Busy),
+        // A teammate in an agent team finishing its turn. The team's own
+        // `Stop`, one member at a time — and the moment a team stops being
+        // something to watch and starts being something to answer.
+        "TeammateIdle" => Some(Signal::Idle),
+        // Everything below happens only while a session is alive and doing
+        // something, and none of it is a state cctop draws differently. They
+        // are here because a turn can otherwise go minutes without an event:
+        // a long answer with no tool calls in it raises nothing at all between
+        // `UserPromptSubmit` and `Stop`, and a session with nothing to report
+        // is one whose liveness falls back to guessing at a still screen.
+        //
+        // `MessageDisplay` is the frequent one — once per batch of streamed
+        // lines, several times per message — and the only event that fires
+        // *during* an answer. It is display-only and cctop returns no
+        // `displayContent`, so what is on screen is untouched.
+        //
+        // `CwdChanged` and `DirectoryAdded` also move the ground under a row:
+        // the project a session is drawn against comes from its working
+        // directory, and an agent that `cd`s has been drawn in the wrong place
+        // until its next transcript write said otherwise.
+        //
+        // `FileChanged` fires only once something has named a file to watch,
+        // which cctop does not — so it is registered against the day something
+        // does, and costs nothing until then.
+        "MessageDisplay" | "InstructionsLoaded" | "CwdChanged" | "DirectoryAdded"
+        | "ConfigChange" | "FileChanged" | "WorktreeRemove" => Some(Signal::Busy),
+        // Claude Code fires this only under `--init-only`, `--init` or
+        // `--maintenance`, never on a normal start. A session that begins this
+        // way is still a session beginning.
+        "Setup" => Some(Signal::Started),
         "SessionStart" | "sessionStart" | "session.created" => Some(Signal::Started),
         "SessionEnd" | "sessionEnd" | "session.deleted" => Some(Signal::Ended),
         _ => None,
@@ -764,68 +794,68 @@ fn parse(line: &str) -> Option<Event> {
 // Installation
 // ---------------------------------------------------------------------------
 
-/// Events cctop asks Claude Code to tell it about.
+/// Events cctop asks Claude Code to tell it about: all of them but one.
 ///
-/// Deliberately still a small set: every hook fire costs the agent a process
-/// spawn, so an event cctop would only use to redraw something it can already
-/// see is not worth the fork. The `*ToolUse` pair is the frequent one; the rest
-/// fire a handful of times in a session and each answers a question the
-/// transcript cannot.
+/// This used to be a deliberately small set, on the grounds that every hook
+/// fire costs the agent a process spawn and an event cctop would only use to
+/// redraw something it can already see is not worth the fork. That reasoning
+/// was right about the fork and wrong about the cost of being conservative: a
+/// settings file that names only the events this version knows about is one
+/// that has to be rewritten every time cctop learns another, on every machine,
+/// by everybody. [`repair`] softens that — it tops an install up on the way up
+/// — but it can only add what *this* binary knows to ask for, so an agent
+/// already running still says nothing about the rest until it restarts.
 ///
-/// `PostToolUse` earns the second fork per tool call because it is the only
-/// event that follows an answered permission prompt — see [`signal_of`].
+/// So the settings file now says "tell cctop everything", and the binary
+/// decides what any of it means. Adding an event cctop acts on is a change to
+/// [`signal_of`] alone, and takes effect on the next fire rather than the next
+/// install.
 ///
-/// The three that close a state out cost almost nothing, because each is the
-/// case its partner does not cover. `PostToolUseFailure` fires *instead of*
-/// `PostToolUse` when a tool errors, which is the ordinary end of a failing
-/// grep or test run — without it a tool call that failed stays in flight
-/// forever, and a tool call in flight over a still screen is how cctop
-/// recognises a held permission prompt. `StopFailure` fires instead of `Stop`
-/// when the turn ends on an API error, so without it a rate-limited session is
-/// drawn as working until somebody types into it. `PermissionRequest` fires at
-/// most once per tool call, and only when Claude Code is actually about to ask.
-/// Three of Claude Code's events are deliberately *not* here, and the reasons
-/// are worth keeping because each looks like an omission:
+/// What that costs is real and worth naming: `MessageDisplay` fires once per
+/// batch of streamed lines, several times per assistant message, where the rest
+/// fire a handful of times in a session. It buys the one thing nothing else
+/// says — a long answer with no tool calls in it raises nothing at all between
+/// `UserPromptSubmit` and `Stop`, and a turn with no events is one whose
+/// liveness falls back to guessing at a still screen.
 ///
-/// `WorktreeCreate` does not observe worktree creation — it **replaces** it.
-/// Claude Code stops calling `git worktree` and takes the path from the hook's
-/// stdout instead, and "if the hook fails or produces no path, worktree
-/// creation fails with an error". This hook prints nothing to stdout by
-/// construction (see the module docs), so installing it would break
-/// `claude --worktree`, every subagent with `isolation: "worktree"`, and every
-/// backgrounded session Claude Code isolates. It is the one event on offer that
-/// could take a session down, which is the thing this module exists not to do.
-///
-/// `MessageDisplay` fires once per batch of streamed lines — several times per
-/// assistant message, far more often than anything else here — and says only
-/// that output is being produced, which `PostToolUse` and `Stop` already
-/// bracket. A fork every few lines of every message, for a fact cctop has.
-///
-/// `FileChanged` never fires unless something has named a file to watch: Claude
-/// Code starts the watcher only when a matcher or a `watchPaths` reply names
-/// one. cctop cannot name them up front, so installed alone it is inert — and
-/// making it useful means feeding `watchPaths`, which is a feature rather than
-/// a hook.
+/// `WorktreeCreate` is the single exception, and it is not about cost.
+/// It does not observe worktree creation — it **replaces** it. Claude Code
+/// stops calling `git worktree` and takes the path from the hook's stdout, and
+/// "if the hook fails or produces no path, worktree creation fails with an
+/// error". This hook writes nothing to stdout by construction (see the module
+/// docs), so installing it would break `claude --worktree`, every subagent with
+/// `isolation: "worktree"`, and every backgrounded session Claude Code isolates
+/// in one. It is the one event on offer that could take a session down, which
+/// is the thing this module exists not to do.
 const CLAUDE_EVENTS: &[&str] = &[
-    "Stop",
-    "StopFailure",
-    "Notification",
+    "Setup",
+    "SessionStart",
+    "InstructionsLoaded",
     "UserPromptSubmit",
     "UserPromptExpansion",
+    "MessageDisplay",
     "PreToolUse",
     "PermissionRequest",
     "PermissionDenied",
     "PostToolUse",
     "PostToolUseFailure",
     "PostToolBatch",
-    "SessionStart",
-    "SessionEnd",
-    "PreCompact",
-    "PostCompact",
+    "Notification",
     "SubagentStart",
     "SubagentStop",
     "TaskCreated",
     "TaskCompleted",
+    "Stop",
+    "StopFailure",
+    "TeammateIdle",
+    "ConfigChange",
+    "CwdChanged",
+    "DirectoryAdded",
+    "FileChanged",
+    "WorktreeRemove",
+    "PreCompact",
+    "PostCompact",
+    "SessionEnd",
     "Elicitation",
     "ElicitationResult",
 ];
@@ -2187,23 +2217,26 @@ mod tests {
         assert!(CLAUDE_EVENTS.contains(&"Elicitation"));
     }
 
-    /// Three events Claude Code offers are not asked for, and one of them would
-    /// break the session.
+    /// One event Claude Code offers is never asked for, because installing it
+    /// would break the session.
     ///
     /// `WorktreeCreate` replaces `git worktree` rather than observing it, and
     /// takes the new worktree's path from the hook's stdout. This hook writes
     /// nothing to stdout by construction, and a `WorktreeCreate` hook that
     /// produces no path fails worktree creation outright — so installing it
-    /// would break `claude --worktree` and every `isolation: "worktree"`
-    /// subagent. The other two are declined for cost rather than danger.
+    /// would break `claude --worktree`, every `isolation: "worktree"` subagent,
+    /// and every backgrounded session Claude Code isolates in one.
+    ///
+    /// Everything else Claude Code raises is registered, so that adding an
+    /// event cctop cares about is a change to [`signal_of`] and not to
+    /// everybody's settings file. This is the one that cannot join them.
     #[test]
-    fn the_events_that_would_cost_more_than_they_say_are_not_installed() {
-        for event in ["WorktreeCreate", "MessageDisplay", "FileChanged"] {
-            assert!(
-                !CLAUDE_EVENTS.contains(&event),
-                "{event} is installed — see the note above CLAUDE_EVENTS for why                  it should not be"
-            );
-        }
+    fn the_event_that_would_replace_git_is_never_installed() {
+        assert!(
+            !CLAUDE_EVENTS.contains(&"WorktreeCreate"),
+            "installing WorktreeCreate makes worktree creation fail — see the \
+             note above CLAUDE_EVENTS"
+        );
     }
 
     /// A permission prompt is the one exchange with no event of its own for the
