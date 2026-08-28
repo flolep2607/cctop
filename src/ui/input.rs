@@ -979,6 +979,36 @@ impl App {
         }
     }
 
+    /// A click on the footer's corner: open the page, or open a tunnel.
+    ///
+    /// The link opens the browser, as `o` does in the serve panel. The button
+    /// takes two clicks, and `armed` says which this is — the first only lights
+    /// the corner amber and changes what it says, because publishing every
+    /// session on this machine to the internet is not something a slipped
+    /// pointer should be able to do. The second is the one that registers with
+    /// Cloudflare's edge, which is a second of network cctop spends in front of
+    /// the person who asked for it.
+    pub(super) fn on_share_corner(&mut self, armed: bool) {
+        // Already dialling. The corner is spinning and says so; a click at it
+        // is impatience, not a second instruction.
+        if self.share_opening.is_some() {
+            return;
+        }
+        if let Some(link) = self.serving.as_ref().and_then(|s| s.public.clone()) {
+            match crate::serve::open_in_browser(&link) {
+                true => self.set_status("Opening the shared page in your browser"),
+                false => self.set_status("No browser to open it with — B then y copies the link"),
+            }
+            return;
+        }
+        if !armed {
+            self.share_arm = true;
+            self.set_status("Click again to put this table on the internet");
+            return;
+        }
+        self.start_serving(true);
+    }
+
     pub(super) fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
         // Anything the mouse actually does changes the screen, and unlike
         // `on_key` there is nothing downstream to rely on for the frame:
@@ -1070,6 +1100,24 @@ impl App {
         // the bar drags you out of the agent you are typing into.
         if self.on_mouse_workspace(ev, layout) {
             return;
+        }
+
+        // The footer's corner: the tunnel's link while there is one, and the
+        // button that opens one while there is not. cctop holds the terminal's
+        // mouse capture, so in most terminals a plain click on an OSC 8 link
+        // never reaches the terminal that would follow it — answering it here is
+        // what makes the link clickable without a modifier held down. Drawn over
+        // a tab as much as over the dashboard, so answered before either.
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) {
+            let on_corner = layout.share_corner_at(ev.column, ev.row);
+            // Arming is about the click being made now. A click anywhere else
+            // takes it back, which is what stops a forgotten first click from
+            // turning an unrelated one into a tunnel.
+            let armed = std::mem::replace(&mut self.share_arm, false);
+            if on_corner {
+                self.on_share_corner(armed);
+                return;
+            }
         }
 
         // Inside a tab the rest of the mouse is the agents'.

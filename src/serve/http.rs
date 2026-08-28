@@ -302,6 +302,11 @@ fn reason(status: u16) -> &'static str {
 /// matter beyond that: without them a page on another origin can frame this one
 /// and read what it renders, or talk a browser into sniffing a JSON response as
 /// something executable.
+///
+/// The session's terminal is a link out of this page and not a frame in it:
+/// rmux's browser terminal answers with `frame-ancestors 'none'`, so no policy
+/// written here could embed it. The policy therefore stays at `default-src
+/// 'none'` with nothing framed at all.
 fn common_headers(out: &mut String) {
     out.push_str(
         "X-Content-Type-Options: nosniff\r\n\

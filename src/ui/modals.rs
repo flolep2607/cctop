@@ -452,6 +452,15 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+    // Said in the panel as well as in the corner: `t` is pressed here, and a
+    // panel that answered a keypress with nothing would read as a dead key.
+    if let Some(opening) = &app.share_opening {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format!(" {} Opening a tunnel to trycloudflare…", opening.frame()),
+            Style::default().fg(theme::colors().cost_mid),
+        )));
+    }
     if let Some(error) = &app.serve_error {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(

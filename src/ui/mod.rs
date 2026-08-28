@@ -320,6 +320,25 @@ enum Response {
     },
 }
 
+/// A tunnel registration in flight, and when it started.
+///
+/// The instant is what the spinner is drawn from — a frame counter would have
+/// to be advanced by whoever happens to redraw, and the loop redraws on events
+/// that have nothing to do with this.
+pub struct Opening {
+    rx: Receiver<Result<crate::serve::Serving, String>>,
+    since: Instant,
+}
+
+impl Opening {
+    /// The spinner's current frame.
+    pub fn frame(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let i = self.since.elapsed().as_millis() / 100;
+        FRAMES[i as usize % FRAMES.len()]
+    }
+}
+
 /// Remembered scan results, keyed by session and query. `None` is a remembered
 /// *miss*, which is the answer worth caching most: a miss costs a full read of
 /// the transcript, a hit usually stops early.
@@ -828,22 +847,26 @@ pub struct App {
     /// Dropping it revokes the tunnel and stops the listener, so quitting cctop
     /// takes the page with it. That is the same bargain `serve` makes.
     pub serving: Option<crate::serve::Serving>,
+    /// A tunnel being registered on a thread of its own.
+    ///
+    /// Registering with Cloudflare's edge is a second or more of network, and
+    /// doing it on the UI thread stopped the dashboard dead: no frame, no
+    /// keyboard, and nothing on screen saying why. It runs beside the loop
+    /// instead, and the corner spins while it does.
+    pub share_opening: Option<Opening>,
+    /// Whether the footer's share button has been armed by a first click.
+    ///
+    /// The second click is what opens the tunnel. Not persisted and not carried
+    /// between clicks on anything else: arming is a promise about the click
+    /// happening now, and one left standing from ten minutes ago is exactly the
+    /// stray click it exists to prevent.
+    pub share_arm: bool,
     /// Why the last attempt to serve failed, kept for the panel to show.
     ///
     /// A port in use or a tunnel that would not register are both answers
     /// somebody has to read, and a status line that has since been overwritten
     /// by a refresh is not where they can read it.
     pub serve_error: Option<String>,
-    /// The quick tunnel a browser share is reached through, once one has been
-    /// opened.
-    ///
-    /// Held for the life of the run rather than per share: every share on this
-    /// machine goes to the same rmux daemon on the same loopback port, so one
-    /// tunnel serves all of them, and dropping it would revoke the links
-    /// already handed out. Started on the first `W` and never on startup —
-    /// registering with Cloudflare's edge is a second of network cctop has no
-    /// reason to spend on a run where nobody shares anything.
-    pub share_tunnel: Option<crate::serve::tunnel::Tunnel>,
     /// The pane running the install, while one is running.
     ///
     /// Watched for two endings: rmux appearing, which releases the deferred
@@ -1030,7 +1053,8 @@ impl App {
             rmux_installing: None,
             serving: None,
             serve_error: None,
-            share_tunnel: None,
+            share_opening: None,
+            share_arm: false,
             pending_brief: None,
             pending_fork: None,
             handoff_send: None,
@@ -3554,8 +3578,15 @@ impl App {
             self.set_status("Only an agent cctop put in a multiplexer can be shared");
             return;
         };
-        let reachable_at = self.share_route();
-        match crate::rmux::web_share(&name, reachable_at.as_deref()) {
+        // Tunnelled where the machine can be reached and this machine only
+        // where it cannot; the status line below says which came back. Pressing
+        // `W` twice reuses the first share rather than minting a second.
+        let mut reachable = false;
+        let share = crate::rmux::share_link(&name, false).map(|(share, tunnelled)| {
+            reachable = tunnelled;
+            share
+        });
+        match share {
             Ok(share) => {
                 // `web_share` refuses a share with no operator link, so this is
                 // the link or the error above it — never the spectator one.
@@ -3573,9 +3604,9 @@ impl App {
                 // whether its endpoint is a tunnel or this machine's loopback,
                 // and sending someone a link that cannot leave the building is
                 // a failure they discover instead of being told about.
-                let reach = match reachable_at {
-                    Some(_) => "",
-                    None => " · this machine only",
+                let reach = match reachable {
+                    true => "",
+                    false => " · this machine only",
                 };
                 self.set_status(format!(
                     "Sharing {label} — operator link copied{pin}{reach}"
@@ -3593,6 +3624,10 @@ impl App {
     /// hostname, so turning it on means a new link either way, and a flag that
     /// silently invalidated the link somebody was holding would be worse than a
     /// stop and a start they can see.
+    /// A tunnel is registered off the UI thread; a loopback listener is not.
+    /// Binding a socket is instant, and waiting a millisecond for it costs less
+    /// than a state the rest of the code has to know about. The edge is the slow
+    /// half — see [`Opening`].
     pub(super) fn start_serving(&mut self, tunnel: bool) {
         self.serve_error = None;
         let options = crate::serve::Options {
@@ -3605,6 +3640,26 @@ impl App {
             scan: false,
             ..Default::default()
         };
+        if tunnel {
+            // One at a time. A second click while the first is still dialling
+            // would register a second tunnel and throw the first away.
+            if self.share_opening.is_some() {
+                return;
+            }
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                // The receiver is gone if cctop quit while this was dialling,
+                // and the tunnel then drops here — which unregisters it, which
+                // is the right ending for a link nobody is holding.
+                let _ = tx.send(crate::serve::start(options).map_err(|e| format!("{e}")));
+            });
+            self.share_opening = Some(Opening {
+                rx,
+                since: Instant::now(),
+            });
+            self.set_status("Opening a tunnel to trycloudflare…");
+            return;
+        }
         match crate::serve::start(options) {
             Ok(serving) => {
                 // Something to look at immediately: the page's first request
@@ -3626,6 +3681,38 @@ impl App {
         }
     }
 
+    /// Take the tunnel from the thread opening one, if it has finished.
+    ///
+    /// Returns whether the screen has changed — which, while one is in flight,
+    /// is every tick: the spinner is the thing saying cctop has not hung.
+    pub(super) fn tick_share(&mut self) -> bool {
+        let Some(opening) = &self.share_opening else {
+            return false;
+        };
+        let done = match opening.rx.try_recv() {
+            Err(TryRecvError::Empty) => return true,
+            Ok(done) => done,
+            // The thread went without answering, which it has no path to do.
+            // Reported rather than left spinning for ever.
+            Err(TryRecvError::Disconnected) => Err("the tunnel gave no answer".to_string()),
+        };
+        self.share_opening = None;
+        match done {
+            Ok(serving) => {
+                // Something to look at immediately: the page's first request
+                // would otherwise find the empty snapshot it was built with.
+                serving.publish(&self.sessions);
+                self.set_status("On the internet — click the link, or B to copy it");
+                self.serving = Some(serving);
+            }
+            Err(error) => {
+                self.set_status(format!("Could not open a tunnel: {error}"));
+                self.serve_error = Some(error);
+            }
+        }
+        true
+    }
+
     /// Stop serving, which un-mints every link handed out.
     pub(super) fn stop_serving(&mut self) {
         if self.serving.take().is_some() {
@@ -3642,31 +3729,6 @@ impl App {
         if let Some(serving) = &self.serving {
             serving.publish(&self.sessions);
         }
-    }
-
-    /// The public origin a share's browser should dial, opening a tunnel for it
-    /// the first time one is asked for.
-    ///
-    /// `None` means the share stays on this machine, and is a real answer twice
-    /// over: rmux's daemon may not be up yet — in which case there is nothing
-    /// to point a tunnel at and no session to share either — and a tunnel can
-    /// fail to register. A link that only works from this machine is worth
-    /// more than no link, so neither of those stops the share; what they cost
-    /// is said on the status line by the caller.
-    ///
-    /// Blocking, for as long as it takes Cloudflare's edge to answer. That is a
-    /// visible pause on the first `W` of a run and nothing on the ones after —
-    /// the alternative, a thread and a poll, buys a second of responsiveness at
-    /// the price of a share that arrives after the keypress that asked for it.
-    fn share_route(&mut self) -> Option<String> {
-        if let Some(tunnel) = &self.share_tunnel {
-            return Some(tunnel.url.clone());
-        }
-        let port = crate::rmux::share_port()?;
-        let tunnel = crate::serve::tunnel::start(port).ok()?;
-        let url = tunnel.url.clone();
-        self.share_tunnel = Some(tunnel);
-        Some(url)
     }
 
     /// Put the selected agent's own terminal on screen, in a tab of its own.
@@ -4406,6 +4468,11 @@ fn event_loop(
         // event, so the loop is the only thing that can notice.
         app.tick_handoff();
 
+        // The same is true of a tunnel being registered: the answer arrives on
+        // a channel nothing polls but this, and until it does the corner has a
+        // spinner to turn.
+        app.needs_redraw |= app.tick_share();
+
         // A blinking tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only on
         // the half-cycle it actually flips, not on every poll.
@@ -4436,6 +4503,12 @@ fn event_loop(
         let idle_wait = match app.tab {
             0 => Duration::from_millis(200),
             _ => Duration::from_millis(16),
+        };
+        // A spinner that advances five times a second reads as a stutter. While
+        // one is turning the loop wakes at its frame rate instead.
+        let idle_wait = match app.share_opening.is_some() {
+            true => idle_wait.min(Duration::from_millis(100)),
+            false => idle_wait,
         };
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())

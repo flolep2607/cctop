@@ -533,6 +533,14 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         }
     }
 
+    // Said before the call and not inside it: registering with the edge takes a
+    // second or more, and `serve` has nothing else on screen to show for it.
+    // The dashboard, which calls the same code, has a spinner instead — see
+    // [`tunnel::start`] for why that one must not print.
+    if want_tunnel {
+        eprintln!("cctop: opening a trycloudflare tunnel…");
+        let _ = std::io::stderr().flush();
+    }
     let serving = start(Options {
         bind: bind.clone(),
         port,
@@ -994,6 +1002,14 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
             .unwrap_or_default()
             .to_string()
     };
+    // Answered before the others because it does not answer in their shape: a
+    // terminal is a link and a reach, not a sentence about what was done.
+    if verb == "terminal" {
+        return match actions::terminal(session) {
+            Ok(terminal) => json(stream, request, &terminal),
+            Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
+        };
+    }
     let outcome = match verb {
         "send" => actions::send(session, &field("text")),
         "resume" => actions::resume(session),

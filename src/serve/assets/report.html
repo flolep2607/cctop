@@ -97,6 +97,43 @@
   nav.views button[aria-selected="true"] { color: var(--panel); background: var(--accent); border-color: var(--accent); }
   nav.views button .n { font-family: var(--mono); font-size: 11px; opacity: .75; margin-left: 5px; }
 
+  /* --- the conversation, and the terminal beside it ---------------------- */
+
+  /* One column until the terminal is asked for, two after. The conversation
+     keeps the left because that is what the page is for; the terminal sticks
+     to the viewport, so scrolling a long transcript does not scroll the thing
+     you opened it to watch. */
+  .split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .split.with-term { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .termside { display: flex; flex-direction: column; min-width: 0;
+              position: sticky; top: 12px; }
+  /* `display` beats the `hidden` attribute, so closed has to be said in CSS —
+     without this the closed column keeps a screen's worth of height. */
+  .termside[hidden] { display: none; }
+  .termside .head { display: flex; align-items: center; gap: 10px; margin-bottom: 7px;
+                    font-size: 12px; color: var(--faint); }
+  .termside .head button {
+    font: inherit; font-size: 12px; margin-left: auto; padding: 3px 10px; border-radius: 99px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--dim); cursor: pointer;
+  }
+  .termside .head button:hover { color: var(--accent); border-color: var(--accent); }
+  .termcard { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .termcard .open {
+    font-size: 13px; padding: 6px 14px; border-radius: 7px; text-decoration: none;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
+  }
+  .termcard .why { font-size: 12px; color: var(--faint); }
+  .termcard .why.bad { color: var(--amber); }
+  .termside .note { font-size: 12px; color: var(--amber); margin-top: 7px; }
+  nav.views button.toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+
+  /* Two columns need a screen. On a phone the terminal goes under the
+     conversation at a readable height rather than into a 40-column strip. */
+  @media (max-width: 900px) {
+    .split.with-term { grid-template-columns: minmax(0, 1fr); }
+    .termside { position: static; }
+  }
+
   /* --- acting on the session -------------------------------------------- */
 
   .acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
@@ -1390,7 +1427,7 @@ function show(name) {
 }
 
 async function refreshChat() {
-  const pane = PANES.chat;
+  const pane = document.getElementById("talk");
   if (!pane) return;
   try {
     const response = await ask("/api/chat/" + encodeURIComponent(ID) + QUERY);
@@ -1449,6 +1486,19 @@ function load() {
         main.appendChild(pane);
       }
 
+      // The conversation is one column of the chat view rather than the whole
+      // of it, so the terminal can take the other without the poll below
+      // throwing the frame away every five seconds.
+      const split = el("div", "split");
+      split.id = "split";
+      const talk = el("div", "talk");
+      talk.id = "talk";
+      const side = el("aside", "termside");
+      side.id = "termside";
+      side.hidden = true;
+      split.append(talk, side);
+      PANES.chat.appendChild(split);
+
       // The report's own sections, split between the two views they belong to.
       // Cost, failures and the window are a report; a diff and a file list are
       // what changed. Nothing is rendered twice.
@@ -1477,6 +1527,11 @@ function load() {
         nav.appendChild(button);
       }
 
+      // Not a view: the point of the terminal is to be beside the conversation
+      // rather than instead of it, and a fifth button in the same row that
+      // switched views could only replace what it is meant to sit next to.
+      if (CAN_ACT) nav.appendChild(terminalButton());
+
       const wanted = location.hash.replace(/^#/, "");
       open_view(labels[wanted] ? wanted : "chat", r);
     })
@@ -1489,16 +1544,117 @@ function load() {
 }
 load();
 
+// --- the agent's own terminal -------------------------------------------
+
+// A toggle rather than a view, and only where this run can act at all: the link
+// it fetches types into a live agent, and a read-only cctop mints nothing.
+function terminalButton() {
+  const button = el("button", "toggle", "Terminal");
+  button.type = "button";
+  button.title = "Show this agent's own terminal beside the conversation";
+  button.setAttribute("aria-pressed", "false");
+  button.addEventListener("click", () => toggleTerminal(button));
+  return button;
+}
+
+// Closing removes the frame rather than hiding it. The frame holds a live
+// socket to the multiplexer, and one left open behind a `hidden` is a terminal
+// still attached to an agent nobody is watching.
+function closeTerminal(button) {
+  const side = document.getElementById("termside");
+  if (side) {
+    side.replaceChildren();
+    side.hidden = true;
+  }
+  const split = document.getElementById("split");
+  if (split) split.classList.remove("with-term");
+  button.setAttribute("aria-pressed", "false");
+}
+
+async function toggleTerminal(button) {
+  const side = document.getElementById("termside");
+  const split = document.getElementById("split");
+  if (!side || !split) return;
+  if (button.getAttribute("aria-pressed") === "true") return closeTerminal(button);
+
+  button.setAttribute("aria-pressed", "true");
+  button.disabled = true;
+  side.hidden = false;
+  split.classList.add("with-term");
+  side.replaceChildren(el("div", "empty", "Opening this agent's terminal…"));
+  try {
+    // Minted per opening, never cached: the link is a shell credential, and a
+    // page that kept one would be handing out the last reader's door.
+    const terminal = await act("terminal", {});
+    const head = el("div", "head");
+    head.appendChild(el("span", null, "This session's terminal"));
+    const close = el("button", null, "Close");
+    close.type = "button";
+    close.addEventListener("click", () => closeTerminal(button));
+    head.appendChild(close);
+
+    // A link and not a frame, because rmux's browser terminal refuses to be
+    // one: share.rmux.io sends `frame-ancestors 'none'`, so any page that
+    // embeds it gets an empty rectangle and a console error. A window of its
+    // own is the nearest thing to beside-the-conversation that a page is
+    // allowed to open — it floats over the desktop rather than hiding this one
+    // behind a tab, and it can be dragged next to it.
+    const card = el("div", "card pad termcard");
+    const open = el("a", "open", "Open the terminal");
+    open.href = terminal.url;
+    // Still a real link with a real href: a popup blocker, or a middle click,
+    // then does the ordinary thing rather than nothing at all. `noopener` is
+    // named in both places — the window must not get a handle on this page.
+    open.target = "_blank";
+    open.rel = "noopener";
+    open.addEventListener("click", (ev) => {
+      // Opened from inside the click, with no `await` in between, which is what
+      // keeps it a user gesture and out of the blocker.
+      const win = window.open(
+        terminal.url, "cctop-terminal",
+        "popup,noopener,width=1024,height=720,left=" +
+          Math.max(0, screen.availWidth - 1044) + ",top=60"
+      );
+      if (win) ev.preventDefault();
+    });
+    card.appendChild(open);
+    card.appendChild(el(
+      "div", "why",
+      "It opens in a window of its own, which you can put beside this one: " +
+      "rmux's terminal page refuses to be framed, so it cannot be drawn inside."
+    ));
+    card.appendChild(el(
+      "div", "why",
+      terminal.tunnelled
+        ? "It reaches this machine through rmux's own tunnel, so it works from wherever you are."
+        : "It is served from the machine cctop runs on, so it only opens from a browser on it."
+    ));
+    card.appendChild(el(
+      "div", "why bad",
+      "Whoever opens that link can type into this agent — it is a shell, not a prompt box."
+    ));
+    side.replaceChildren(head, card);
+  } catch (e) {
+    // Reported where every other failed action reports — under the buttons,
+    // at the top. Left in the column instead, the sentence would sit below a
+    // conversation long enough that nobody would ever see it.
+    closeTerminal(button);
+    report_said(String(e.message || e), false);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // Fetched on first sight rather than up front: a conversation and an access
 // reading are each another pass over the disk, and the report is already one.
 async function open_view(name, r) {
   show(name);
   if (name === "chat" && !PANES.chat.dataset.loaded) {
     PANES.chat.dataset.loaded = "1";
-    PANES.chat.replaceChildren(el("div", "empty", "Reading the conversation…"));
+    document.getElementById("talk").replaceChildren(el("div", "empty", "Reading the conversation…"));
     await refreshChat();
     const say = composer(r);
-    if (say) PANES.chat.appendChild(say);
+    if (say) document.getElementById("talk").appendChild(say);
     // A running session is still saying things, so its conversation follows
     // along. A finished one is finished, and polling it would be a request a
     // second for a file that will never change again.

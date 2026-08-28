@@ -17,6 +17,7 @@
 //! call as opening it, and the agent is found exactly where it was left —
 //! scrollback and all.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,18 +40,6 @@ const PREFIX: &str = "cctop";
 /// under a tmux server are still running and cctop simply stops being able to
 /// see them. `tmux attach -t cctop-…` reaches them, and nothing here kills one.
 pub const BIN: &str = "rmux";
-
-/// The loopback port rmux's web-share daemon answers on.
-///
-/// A daemon setting rather than a flag on a share, so cctop asks for it instead
-/// of assuming rmux's default. It is what a tunnel has to be pointed at for
-/// [`web_share`] to be reachable off this machine.
-///
-/// `None` when no daemon is running — in which case there is no session to
-/// share either — which is a reason to share locally rather than to fail.
-pub fn share_port() -> Option<u16> {
-    on_daemon(|rmux| async move { Ok(rmux.web_config().await?.port) }).ok()
-}
 
 /// Run one piece of SDK work against the local daemon and wait for it.
 ///
@@ -290,6 +279,7 @@ pub fn attach(name: &str) -> Vec<String> {
 }
 
 /// One browser share of a multiplexer session.
+#[derive(Clone)]
 pub struct Share {
     /// The link that can type into the agent. A shell credential, and named
     /// that way so nothing here hands it out by accident.
@@ -304,23 +294,41 @@ pub struct Share {
     pub pin: Option<String>,
 }
 
+/// The tunnel rmux raises for a share cctop hands out.
+///
+/// An account-less SSH tunnel, chosen over cctop's own quick tunnel after the
+/// quick tunnel was measured and found unable to carry the thing a share is
+/// made of. See [`web_share`] for the measurement.
+pub const SHARE_TUNNEL: &str = "localhost-run";
+
 /// Open `name`'s terminal to a browser, reachable from off this machine.
 ///
-/// `reachable_at` is the public origin a viewer's browser will dial — cctop's
-/// own quick tunnel, pointed at [`share_port`]. rmux puts it in the link's
-/// fragment as the endpoint to open a socket to, so the page it serves talks
-/// back through the tunnel to the daemon here. Without one, rmux mints a link
-/// whose endpoint is this machine's loopback: correct, and reachable only from
-/// a browser already on it.
+/// `tunnelled` asks rmux to raise a tunnel of its own — [`SHARE_TUNNEL`] — and
+/// put its origin in the link's fragment as the endpoint the browser opens a
+/// socket to. Without it the endpoint is this machine's loopback: correct, and
+/// reachable only from a browser already on it.
 ///
-/// `--tunnel-url` and not `--tunnel-provider`: rmux can raise a tunnel of its
-/// own through half a dozen providers, and cctop already holds one for the
-/// served page. Reusing it keeps a single way out of this machine — one origin
-/// to trust, one thing to close — instead of a second ingress with its own
-/// lifetime that nothing in cctop is watching. rmux ships six providers and
-/// deliberately not this one: a `trycloudflare.com` hostname "can take an
-/// unpredictable amount of time to become reachable" and carries no uptime
-/// guarantee, so upstream points anyone who wants one at exactly this door.
+/// # Why rmux's tunnel and not cctop's
+///
+/// cctop holds a quick tunnel of its own for the served page, and pointing the
+/// share at it with `--tunnel-url` looks like the tidier answer: one way out of
+/// this machine, one origin to trust, one thing to close. It was the answer
+/// here, and it does not work.
+///
+/// A share is a WebSocket. Through the quick tunnel the upgrade does not
+/// survive — rmux answers the request as a plain `GET /share`, which is a 404,
+/// and the browser sits on `Disconnected. Reconnecting…` for ever. Measured
+/// rather than reasoned about:
+///
+/// ```text
+/// loopback,          Upgrade: websocket → 101 Switching Protocols
+/// cctop quick tunnel, Upgrade: websocket → 404
+/// rmux localhost-run, Upgrade: websocket → 101
+/// ```
+///
+/// So the share gets an ingress that carries what it is made of, and cctop's
+/// tunnel keeps carrying the page, which is plain HTTP and an event stream.
+/// Two ways out of the machine, because one of them cannot do this job.
 ///
 /// The share itself is untouched by the route. rmux encrypts operator traffic
 /// end to end and pairs it with a PIN, so the tunnel carries ciphertext it
@@ -333,14 +341,104 @@ pub struct Share {
 /// the *stream* is the only thing telling them apart. Handing out input to a
 /// live coding agent should not rest on which file descriptor a line arrived
 /// on, and here it does not — the two links are separate fields.
-pub fn web_share(name: &str, reachable_at: Option<&str>) -> Result<Share, String> {
+fn web_share(name: &str, tunnelled: bool) -> Result<Share, String> {
+    share_with(name, tunnelled, false)
+}
+
+/// The share for `name`, minted on the first ask and reused after it.
+///
+/// Reused because a share is not free on either side. rmux keeps one per mint —
+/// `rmux web-share list` grows a row each time — and each tunnelled one is an
+/// SSH connection to a public relay that rate-limits per address, which is how
+/// a page reopened five times started coming back untunnelled. One share per
+/// session per cctop is also the honest number: it is one terminal, and every
+/// link minted for it opens the same one.
+///
+/// Keyed by whether it is the embedded flavour, because that is a different
+/// link and not a different terminal — see [`web_share_embedded`].
+///
+/// Tunnelled first, loopback second, and which one came back is the `bool`. A
+/// machine with no way out still has a terminal worth opening from the browser
+/// sitting on it, and a caller that cannot say which it got would be handing
+/// out a link that silently only works from one desk.
+///
+/// Held for the life of the process. If the session it belongs to ends, the
+/// share ends with it and the cached link stops answering — which is correct,
+/// since there is no terminal left for it to reach either.
+pub fn share_link(name: &str, embedded: bool) -> Result<(Share, bool), String> {
+    /// A share and whether its endpoint is reachable off this machine.
+    type Reachable = (Share, bool);
+    static CACHE: std::sync::Mutex<Option<HashMap<(String, bool), Reachable>>> =
+        std::sync::Mutex::new(None);
+    let key = (name.to_string(), embedded);
+    if let Ok(cache) = CACHE.lock()
+        && let Some(held) = cache.as_ref().and_then(|c| c.get(&key))
+    {
+        return Ok(held.clone());
+    }
+    let mint = |tunnelled| match embedded {
+        true => web_share_embedded(name, tunnelled),
+        false => web_share(name, tunnelled),
+    };
+    // The tunnel is the half that needs a network and a relay that will have
+    // it; the loopback share needs neither, so a failure to reach the world is
+    // not a failure to open a terminal.
+    let made = match mint(true) {
+        Ok(share) => (share, true),
+        Err(why) => (mint(false).map_err(|_| why)?, false),
+    };
+    if let Ok(mut cache) = CACHE.lock() {
+        cache
+            .get_or_insert_with(HashMap::new)
+            .insert(key, made.clone());
+    }
+    Ok(made)
+}
+
+/// The same share, minted to live inside cctop's own page.
+///
+/// Four differences, all of them because the frame is not a browser tab:
+///
+/// - **No navigation bar and no disclaimer toast.** rmux draws both for a link
+///   somebody was sent cold. Here the surrounding page is cctop's, the reader
+///   arrived through it, and a second chrome inside the frame is chrome twice.
+/// - **Operator only.** A spectator link nobody will ever use is a credential
+///   minted for nothing.
+/// - **No pairing code.** The PIN exists to protect a link that travelled on
+///   its own — over chat, over mail — from being opened by whoever ended up
+///   holding it. This one never travels: it is minted per request, behind the
+///   page's token, and delivered into a frame's `src`. Anyone who can reach
+///   that fetch can already mint another, so a PIN in the way of the reader
+///   would be friction guarding a door that is already open behind it.
+/// - **A dark palette**, which is the page's.
+///
+/// The tunnel is the one thing it does not change: an embedded share and a
+/// copied one both need an ingress that carries a WebSocket, for the reason
+/// [`web_share`] measures.
+///
+/// The consequence, stated once because it is the whole of the security model:
+/// **whoever holds the page link can type into this agent's terminal**, not
+/// merely prompt it. That is a shell, and it is why this is behind the same
+/// `--no-actions` switch as everything else that acts.
+fn web_share_embedded(name: &str, tunnelled: bool) -> Result<Share, String> {
+    share_with(name, tunnelled, true)
+}
+
+fn share_with(name: &str, tunnelled: bool, embedded: bool) -> Result<Share, String> {
     let name = name.to_string();
-    let reachable_at = reachable_at.map(str::to_string);
     on_daemon(move |rmux| async move {
         let session = rmux.session(rmux_sdk::SessionName::new(name)?).await?;
         let mut builder = session.share();
-        if let Some(origin) = reachable_at {
-            builder = builder.tunnel_url(origin);
+        if tunnelled {
+            builder = builder.tunnel_provider(SHARE_TUNNEL);
+        }
+        if embedded {
+            builder = builder
+                .operator_only()
+                .no_navbar()
+                .no_disclaimer()
+                .no_pin()
+                .dark_theme();
         }
         let handle = builder.await?;
         Ok(Share {
@@ -803,12 +901,12 @@ mod tests {
             "rmux would not start a session to share"
         );
 
-        // A tunnel origin that goes nowhere. rmux does not dial it — it writes
-        // it into the link as the endpoint a viewer's browser should open — so
-        // a fake one exercises the whole path without a real tunnel, and
-        // proves the origin reached the share rather than only the argv.
-        let share = web_share(&name, Some("https://example-tunnel.trycloudflare.com"));
-        let port = share_port();
+        // Untunnelled, so the test needs no network: raising the tunnel is
+        // rmux's half and dialling a provider from a unit test would be an SSH
+        // connection to somebody else's host on every `cargo test`. What is
+        // being checked here is the daemon's answer, which is the same either
+        // way — the endpoint is loopback instead of a hostname.
+        let share = web_share(&name, false);
         // Killing the session ends its share; `web-share -X` would also end any
         // the user has open, which is not this test's to touch.
         let _ = kill(&name);
@@ -823,19 +921,20 @@ mod tests {
         let share = share.expect("rmux shared the session");
         let operator = share.operator.expect("an operator link");
         assert!(operator.starts_with("https://"), "not a link: {operator}");
+        // Untunnelled, so the link carries no endpoint at all: rmux writes one
+        // into the fragment (`#e=wss://…`) only when there is somewhere off
+        // this machine to name, and the browser page falls back to the
+        // daemon's own loopback port when there is not.
+        assert!(!operator.contains("e="), "an endpoint appeared: {operator}");
         assert!(
-            operator.contains("example-tunnel.trycloudflare.com"),
-            "the tunnel origin never reached the link: {operator}"
+            operator.contains("#t="),
+            "no share token in the link: {operator}"
         );
         // The spectator link is minted alongside it and must not be what came
         // back: it is the same shape and grants a different thing.
         assert!(
             !operator.contains("spectator"),
             "that is not the operator link: {operator}"
-        );
-        assert!(
-            port.is_some_and(|port| port > 0),
-            "a running daemon reported no web-share port"
         );
     }
 

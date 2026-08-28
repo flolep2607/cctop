@@ -60,6 +60,20 @@ pub struct Done {
     pub rmux: Option<String>,
 }
 
+/// Where the page can reach this session's own terminal, and how far that reach
+/// goes.
+#[derive(Debug, Serialize)]
+pub struct Terminal {
+    /// The rmux operator link, for the page to frame. A shell credential: it is
+    /// never logged, never put on the status line, and never returned to a
+    /// request that did not carry the token.
+    pub url: String,
+    /// Whether that link travels through cctop's quick tunnel. `false` means it
+    /// resolves to this machine's loopback and works only in a browser already
+    /// on it — which the page says rather than showing an empty frame.
+    pub tunnelled: bool,
+}
+
 /// Every failure is a sentence and a status, because the page shows the sentence
 /// and the browser needs the status.
 pub type Failed = (u16, String);
@@ -330,6 +344,45 @@ fn local(session: &Session) -> Result<(), Failed> {
         )),
         None => Ok(()),
     }
+}
+
+/// Mint a link to this session's own terminal, for the page to frame.
+///
+/// Only reaches an agent cctop handed to the multiplexer — the same limit `a`
+/// and `W` have in the terminal, and for the same reason: an agent on cctop's
+/// own pty is on no terminal a second viewer can be pointed at.
+///
+/// One share per session, reused — see [`crate::rmux::share_link`]. A link
+/// minted afresh on every ask left a row in `rmux web-share list` per page
+/// reload and, because each tunnelled one dials a rate-limited public relay,
+/// eventually came back untunnelled. Reusing it also matches what is true:
+/// there is one terminal here, however many people are looking at the page.
+///
+/// rmux raises the tunnel — see [`crate::rmux::web_share`] for why cctop's own
+/// one cannot carry a share — and a machine with no way out falls back to a
+/// loopback link rather than to nothing. Which of the two it got is in the
+/// answer, because a link that only opens on the server's own desk is not a
+/// failure the reader can see.
+pub fn terminal(session: &Session) -> Result<Terminal, Failed> {
+    local(session)?;
+    let Some(pid) = session.root_pid() else {
+        return Err((
+            409,
+            "nothing is running this session — resume it first".into(),
+        ));
+    };
+    let Some(name) = crate::rmux::holding(pid) else {
+        return Err((
+            409,
+            "only an agent cctop put in a multiplexer has a terminal to show".into(),
+        ));
+    };
+    let (share, tunnelled) = crate::rmux::share_link(&name, true)
+        .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
+    let Some(url) = share.operator else {
+        return Err((409, "the share came back without an operator link".into()));
+    };
+    Ok(Terminal { url, tunnelled })
 }
 
 #[cfg(test)]

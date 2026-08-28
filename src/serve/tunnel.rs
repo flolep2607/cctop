@@ -50,6 +50,13 @@ pub struct Tunnel {
 /// Blocking, and deliberately so: there is nothing to serve over a tunnel that
 /// does not exist yet, and a URL printed before the edge has the registration is
 /// a link that 404s for whoever opens it first.
+///
+/// Silent, also deliberately. This is called with the dashboard on screen as
+/// often as from the command line, and a line written to stderr under a TUI is
+/// painted straight over it — `cctop: opening a trycloudflare tunnel…` sat
+/// across somebody's session list for exactly as long as the registration took.
+/// Whoever called says so on the surface they own: the command line prints it,
+/// and the dashboard spins.
 pub fn start(port: u16) -> anyhow::Result<Tunnel> {
     // Two workers, because the proxying happens here rather than in somebody
     // else's process: one accepts streams while the other is still writing a
@@ -58,8 +65,6 @@ pub fn start(port: u16) -> anyhow::Result<Tunnel> {
         .worker_threads(2)
         .enable_all()
         .build()?;
-    eprintln!("cctop: opening a trycloudflare tunnel…");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
     // ponytail: the crate's default HA connection count, untuned. It trades a
     // second QUIC connection for masking a single-POP reconnect, and the page
     // reports a gap of its own anyway.
