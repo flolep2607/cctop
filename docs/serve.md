@@ -24,10 +24,19 @@ because the person who could answer them is in a meeting. `cctop serve` puts the
 same fact on a surface you carry.
 
 Sessions that need a person are pulled out into their own block at the top of the
-page. The **Notify** button asks for browser notification permission and then
-fires one the moment a session *crosses into* waiting — not for the ones already
-sitting there when you opened the page, which would be a notification about
-nothing.
+page, and a **Needs you** view hides everything else. Sessions group by project,
+with idle projects collapsed once there are enough of them that a flat list
+would be a wall. The **Notify** button asks for browser notification permission and
+then fires one the moment a session *crosses into* waiting — not for the ones
+already sitting there when you opened the page, which would be a notification
+about nothing.
+
+On a keyboard: `/` focuses the filter, `j`/`k` (or the arrows) move, `Enter`
+opens the report, `Esc` clears filters. Filter, view, sort and age live in the
+URL hash, so they survive a trip into a report and back.
+
+A live session's last tool is on the row — "working · Bash" — so the page
+answers *what it is doing* without opening the report.
 
 ## The report
 
@@ -35,8 +44,10 @@ Click any row, or go straight to `/session/<id>` (any unambiguous prefix of the
 id works, so a link is short enough to paste into chat).
 
 The report is built from a full transcript read, which is why it happens for one
-session on request rather than for all of them on a timer. It answers three
-questions, in the order they are usually the answer:
+session on request rather than for all of them on a timer. A jump nav at the
+top skips to Failures, Changes, Context, Cost and Calls; the call log has its
+own filter. It answers three questions, in the order they are usually the
+answer:
 
 **What failed, repeatedly.** Failed tool calls are grouped by tool *and by the
 argument they were called with*. Eleven failures of `Bash` is a session having a

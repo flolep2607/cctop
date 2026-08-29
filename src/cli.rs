@@ -419,6 +419,11 @@ pub struct JsonSession {
     /// every user's homes and this one is not the reader's own.
     #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<String>,
+    /// Which `--host` this row was read from. Absent on local sessions, which
+    /// is almost every row; present it would otherwise look like the machine
+    /// the browser is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
     /// Which Claude profile — which `$CLAUDE_CONFIG_DIR` — the session was read
     /// out of. Absent for every other harness, none of which has the concept.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -460,6 +465,10 @@ pub struct JsonSession {
     /// none, which is the ordinary case.
     #[serde(skip_serializing_if = "Option::is_none")]
     conflict: Option<JsonConflict>,
+    /// Most recently invoked tool, when a live session has one. The name the
+    /// dashboard uses to answer "what is it doing" without opening the report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -609,6 +618,7 @@ pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<J
                 project: (!s.label_source.is_empty()).then(|| s.label_source.clone()),
                 title: s.title.clone(),
                 user: s.owner.clone(),
+                host: s.remote.as_ref().map(|r| r.host.clone()),
                 profile: s.profile.clone(),
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
@@ -663,6 +673,7 @@ pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<J
                 subagents: data.subagents.clone(),
                 context: s.context,
                 conflict: collisions.get(&s.key()).map(|c| json_conflict(sessions, c)),
+                last_tool: (!s.last_tool.is_empty()).then(|| s.last_tool.clone()),
                 error: data.error.clone(),
             }
         })
@@ -706,5 +717,26 @@ mod tests {
     fn clear_cache_flag_is_accepted() {
         let args = Args::try_parse_from(["cctop", "--clear-cache"]).expect("valid args");
         assert!(args.clear_cache);
+    }
+
+    /// The web dashboard answers "what is it doing" and "which machine" from
+    /// these two fields. They have to be omitted when empty: an older `--host`
+    /// peer must still parse, and a local session must not grow a blank host.
+    #[test]
+    fn json_names_the_last_tool_and_the_host_only_when_they_exist() {
+        let mut live = Session::new(Provider::Claude, "abc".into());
+        live.last_tool = "Bash".into();
+        live.remote = Some(crate::session::Remote {
+            host: "devbox".into(),
+            branch: None,
+        });
+        let local = Session::new(Provider::Codex, "def".into());
+        let loader = Loader::new();
+        let doc = serde_json::to_value(json_sessions(&[live, local], Plan::Retail, &loader))
+            .expect("serialises");
+        assert_eq!(doc[0]["last_tool"], "Bash");
+        assert_eq!(doc[0]["host"], "devbox");
+        assert!(doc[1].get("last_tool").is_none());
+        assert!(doc[1].get("host").is_none());
     }
 }

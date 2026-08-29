@@ -232,6 +232,9 @@ fn row(host: &str, v: &Value) -> Option<Session> {
         "error" => ActivityState::ApiError,
         _ => ActivityState::Working,
     };
+    // Absent on older remotes, and empty on a session that has not called a
+    // tool yet. Either way the row still has to arrive.
+    s.last_tool = text(v, "last_tool").to_string();
 
     // There is no local process, and nothing may go looking for one — but the
     // row still has to read as live and still has the far side's figures. The
@@ -410,6 +413,7 @@ mod tests {
             "tokens": {"input": 1000, "output": 200, "total": 1200},
             "tokens_per_min": 42.0,
             "activity": {"tool_count": 40, "tool_errors": 4, "compactions": 2},
+            "last_tool": "Bash",
             "context": {"used": 100000, "max": 200000},
             "conflict": {"level": "file", "peers": ["def"], "files": ["/srv/work/api/x.rs"]}
         }]"#;
@@ -429,6 +433,7 @@ mod tests {
         assert_eq!(s.error_rate(), Some(0.1));
         assert_eq!(s.compactions, 2);
         assert_eq!(s.conflict, Some(crate::collide::Overlap::File));
+        assert_eq!(s.last_tool, "Bash");
         assert_eq!(s.process.as_ref().map(|p| p.memory), Some(4096));
         // The buckets have to survive, or a remote machine's spend would reach
         // the lifetime total and none of the overview's windows.
@@ -453,6 +458,7 @@ mod tests {
         );
         assert_eq!(rows[0].session_id, "x");
         assert!(!rows[0].is_running());
+        assert!(rows[0].last_tool.is_empty());
         assert!(crate::ui::columns::branch_of(&rows[0]).is_none());
     }
 

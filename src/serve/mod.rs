@@ -858,6 +858,33 @@ mod tests {
         assert!(!COMMON_CSS.contains("</style>"));
     }
 
+    /// The dashboard script addresses these by id. A rename that drops one
+    /// ships a page whose filter, sort or notify button does nothing.
+    #[test]
+    fn the_dashboard_has_the_hooks_the_script_drives() {
+        for id in [
+            "filter",
+            "views",
+            "ages",
+            "sorts",
+            "group",
+            "bell",
+            "attention",
+            "list",
+            "stats",
+        ] {
+            assert!(
+                DASHBOARD_HTML.contains(&format!("id=\"{id}\"")),
+                "dashboard is missing #{id}"
+            );
+        }
+        assert!(DASHBOARD_HTML.contains("data-view=\"waiting\""));
+        assert!(DASHBOARD_HTML.contains("data-sort=\"recent\""));
+        assert!(REPORT_HTML.contains("id=\"back\""));
+        assert!(REPORT_HTML.contains("id=\"jump\""));
+        assert!(REPORT_HTML.contains("id=\"sec-log\"") || REPORT_HTML.contains("\"sec-log\""));
+    }
+
     #[test]
     fn a_token_is_safe_to_paste_into_a_url_unescaped() {
         // `page` builds the back-link by interpolation rather than by escaping.

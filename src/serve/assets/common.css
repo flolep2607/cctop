@@ -16,6 +16,8 @@
   --shadow: 0 1px 2px rgba(20, 18, 14, .06), 0 4px 14px rgba(20, 18, 14, .04);
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --sticky: 52px;
+  --tap: 40px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -43,7 +45,7 @@ body {
 }
 a { color: inherit; }
 h1, h2, h3 { font-weight: 600; letter-spacing: -.01em; margin: 0; }
-.wrap { max-width: 1180px; margin: 0 auto; padding: 18px 16px 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 14px 16px 72px; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .dim { color: var(--dim); }
 .faint { color: var(--faint); }
@@ -79,6 +81,7 @@ header.top h1 .v { color: var(--faint); font-weight: 400; font-size: 12px; margi
 }
 .pill.warn { color: var(--amber); border-color: var(--amber); }
 .pill.bad  { color: var(--red); border-color: var(--red); }
+.pill.ok   { color: var(--green); border-color: var(--green); }
 
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th {
@@ -93,4 +96,69 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
 .banner {
   padding: 9px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px;
   border: 1px solid var(--red); color: var(--red);
+}
+
+/* Keyboard hints. Hidden on a phone, where they cannot be pressed. */
+kbd {
+  display: inline-block; min-width: 1.4em; padding: 0 5px;
+  border: 1px solid var(--line); border-radius: 4px;
+  font: 11px/1.6 var(--mono); color: var(--faint); text-align: center;
+}
+.only-wide { display: none; }
+@media (min-width: 720px) {
+  .only-wide { display: inline; }
+}
+
+/* Skip link: visible on focus so a keyboard user can jump to what needs them
+   without tabbing through the chrome. Hidden until then so it is not a
+   permanent extra row on a phone. */
+.skip {
+  position: absolute; left: 12px; top: -40px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--accent); border-radius: 8px;
+  padding: 6px 10px; font-size: 13px; z-index: 20;
+}
+.skip:focus { top: 12px; }
+
+button, .seg button {
+  padding: 7px 11px; font: inherit; font-size: 13px; cursor: pointer;
+  background: var(--panel); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 8px;
+}
+button[aria-pressed=true], .seg button[aria-pressed=true] {
+  color: var(--accent); border-color: var(--accent);
+}
+button:focus-visible, input:focus-visible, a:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+input[type=search] {
+  width: 100%; padding: 9px 12px; font: inherit; font-size: 15px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+}
+input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.seg {
+  display: flex; gap: 0; border: 1px solid var(--line); border-radius: 8px;
+  overflow: hidden; background: var(--panel);
+}
+.seg button {
+  border: 0; border-radius: 0; border-right: 1px solid var(--line);
+  padding: 8px 12px; min-height: var(--tap); white-space: nowrap;
+}
+.seg button:last-child { border-right: 0; }
+
+.chip-row {
+  display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px; scrollbar-width: thin;
+}
+
+mark {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit; padding: 0 1px; border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }

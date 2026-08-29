@@ -5,9 +5,34 @@
   .back { font-size: 13px; color: var(--dim); text-decoration: none; }
   .back:hover { color: var(--accent); }
 
+  /* Sticky identity so cost, status and the jump nav survive a long report.
+     A 60vh call log used to bury the reason you opened the page. */
+  .mast {
+    position: sticky; top: 0; z-index: 8;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(10px);
+    margin: -14px -16px 14px; padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .mast .row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .jump {
+    display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    margin-top: 8px; scrollbar-width: thin;
+  }
+  .jump a {
+    flex: 0 0 auto; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); font-size: 12px; text-decoration: none; color: var(--dim);
+  }
+  .jump a:hover { color: var(--accent); border-color: var(--accent); }
+  section.block { scroll-margin-top: 96px; }
+
   .subject { margin-bottom: 18px; }
   .subject h2 { font-size: 20px; margin-bottom: 4px; }
   .subject .where { color: var(--dim); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .copy {
+    padding: 2px 8px; font-size: 11px; cursor: pointer;
+    background: none; color: var(--faint); border: 1px solid var(--line); border-radius: 6px;
+  }
 
   .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); margin-bottom: 22px; }
   .tile { padding: 12px 14px; }
@@ -81,14 +106,24 @@
   .log td { padding: 4px 10px; }
   .log tr.bad td { background: color-mix(in srgb, var(--red) 9%, transparent); }
   .log .when { color: var(--faint); white-space: nowrap; font-family: var(--mono); }
+  .log-filter { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .log-filter input { font-size: 13px; padding: 7px 10px; }
+  .copy {
+    padding: 2px 8px; font-size: 11px; cursor: pointer;
+    background: none; color: var(--faint); border: 1px solid var(--line); border-radius: 6px;
+  }
 </style>
 
 <div class="wrap">
-  <header class="top">
-    <a class="back" href="/__CCTOP_BACK__">← all sessions</a>
-    <div class="spacer"></div>
-    <span class="faint mono" style="font-size:12px">cctop __CCTOP_VERSION__</span>
-  </header>
+  <div class="mast">
+    <div class="row1">
+      <a class="back" id="back" href="/__CCTOP_BACK__">← all sessions</a>
+      <div class="spacer"></div>
+      <span id="mast-status" class="faint" style="font-size:13px"></span>
+      <span class="faint mono" style="font-size:12px">cctop __CCTOP_VERSION__</span>
+    </div>
+    <nav class="jump" id="jump" hidden></nav>
+  </div>
   <main id="main"><div class="empty">Reading the transcript…</div></main>
 </div>
 
@@ -142,8 +177,9 @@ const secs = (ms) => {
   return n + "ms";
 };
 
-const block = (heading, note) => {
+const block = (heading, note, id) => {
   const s = el("section", "block");
+  if (id) s.id = id;
   s.appendChild(el("h3", null, heading));
   if (note) s.appendChild(el("p", "note", note));
   return s;
@@ -181,6 +217,17 @@ function subject(r) {
   tag(when(r));
   if (r.plan !== "retail") tag("plan: " + r.plan);
   where.appendChild(el("span", "faint mono", r.session_id));
+  const copy = el("button", "copy", "Copy id");
+  copy.type = "button";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(r.session_id);
+      copy.textContent = "Copied";
+    } catch (e) {
+      copy.textContent = "Select the id";
+    }
+  });
+  where.appendChild(copy);
   box.appendChild(where);
   return box;
 }
@@ -235,7 +282,8 @@ function failures(r) {
     repeated ? "Repeated failures" : "Failed tool calls",
     repeated
       ? "Grouped by tool and by argument. A count above one is the same call retried — the agent paid for every attempt."
-      : "Grouped by tool and by argument. Nothing repeated, so these are one-offs rather than a loop."
+      : "Grouped by tool and by argument. Nothing repeated, so these are one-offs rather than a loop.",
+    "sec-failures"
   );
   const card = el("div", "card");
   for (const f of found) {
@@ -274,7 +322,8 @@ function breakdown(r) {
     (b.unaccounted >= 0
       ? "Unaccounted is thinking — stored stripped — plus the harness's per-turn reminders and estimation error."
       : "The estimate overshoots the measured window, which happens when the harness has dropped old tool results the transcript still holds.") +
-    (b.superseded ? " A compaction has since replaced this segment, so these describe the window before it." : "")
+    (b.superseded ? " A compaction has since replaced this segment, so these describe the window before it." : ""),
+    "sec-context"
   );
 
   const card = el("div", "card pad");
@@ -389,7 +438,7 @@ function spend(r) {
   const byModel = r.cost.by_model || [];
   const byHour = r.cost.by_hour || [];
   if (!byModel.length && !byHour.length) return null;
-  const s = block("What it cost");
+  const s = block("What it cost", null, "sec-cost");
   const card = el("div", "card");
 
   if (byHour.length > 1) {
@@ -559,7 +608,8 @@ function diffs(r) {
   const s = block(
     "What it changed",
     files.length + (files.length === 1 ? " file, " : " files, ") + total +
-      " changed lines. Most-changed first; click a file for its diff. Reconstructed from the patches the transcript recorded, so it is what the agent applied rather than what the file holds now."
+      " changed lines. Most-changed first; click a file for its diff. Reconstructed from the patches the transcript recorded, so it is what the agent applied rather than what the file holds now.",
+    "sec-changes"
   );
   const card = el("div", "card");
   for (const f of files) {
@@ -606,9 +656,16 @@ function callLog(r) {
   const note2 = calls.some((c) => c.origin)
     ? " A call a subagent made carries its name; the rest are the session's own."
     : "";
-  const s = block("Every tool call", note + note2);
+  const s = block("Every tool call", note + note2, "sec-log");
 
   const card = el("div", "card log");
+  const filterWrap = el("div", "log-filter");
+  const filter = el("input");
+  filter.type = "search";
+  filter.placeholder = "Filter calls by tool or argument…";
+  filter.setAttribute("aria-label", "Filter tool calls");
+  filterWrap.appendChild(filter);
+  card.appendChild(filterWrap);
   const table = el("table");
   const head = el("thead");
   const hrow = el("tr");
@@ -643,6 +700,13 @@ function callLog(r) {
   }
   table.appendChild(body);
   card.appendChild(table);
+  filter.addEventListener("input", () => {
+    const needle = filter.value.trim().toLowerCase();
+    for (const tr of body.children) {
+      const hay = tr.textContent.toLowerCase();
+      tr.hidden = needle && !hay.includes(needle);
+    }
+  });
   s.appendChild(card);
   return s;
 }
@@ -672,6 +736,34 @@ function subagents(r) {
 
 // --- load ------------------------------------------------------------------
 
+// The dashboard stores its filter in the hash. Bring it back on "all sessions"
+// so opening a report is not a one-way trip that throws away what you were looking at.
+try {
+  const saved = sessionStorage.getItem("cctop.view") || "";
+  if (saved) document.getElementById("back").href = "/" + QUERY + saved;
+} catch (e) { /* private mode */ }
+
+function fillJump(main) {
+  const nav = document.getElementById("jump");
+  const labels = [
+    ["sec-failures", "Failures"],
+    ["sec-changes", "Changes"],
+    ["sec-context", "Context"],
+    ["sec-cost", "Cost"],
+    ["sec-log", "Calls"],
+  ];
+  nav.replaceChildren();
+  let any = false;
+  for (const [id, label] of labels) {
+    if (!main.querySelector("#" + id)) continue;
+    const a = el("a", null, label);
+    a.href = "#" + id;
+    nav.appendChild(a);
+    any = true;
+  }
+  nav.hidden = !any;
+}
+
 fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
   .then(async (response) => {
     if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
@@ -679,6 +771,10 @@ fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
   })
   .then((r) => {
     document.title = "cctop — " + (r.title || r.project || r.session_id);
+    const mast = document.getElementById("mast-status");
+    const state = r.running ? r.state : "stopped";
+    const cost = r.cost.included ? "incl" : (r.cost.available ? money(r.cost.total) : "—");
+    mast.textContent = state + " · " + cost;
     const main = document.getElementById("main");
     main.replaceChildren();
     main.appendChild(subject(r));
@@ -696,6 +792,7 @@ fetch("/api/report/" + encodeURIComponent(ID) + QUERY)
       const node = part(r);
       if (node) main.appendChild(node);
     }
+    fillJump(main);
   })
   .catch((e) => {
     document.getElementById("main").replaceChildren(el("div", "empty", String(e.message || e)));

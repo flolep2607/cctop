@@ -2,28 +2,37 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <style>__CCTOP_CSS__
-  .totals { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; }
-  .totals b { font-family: var(--mono); font-weight: 600; }
-  .totals .k { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  /* Sticky so the search and the "needs you" count stay on screen while
+     scrolling a long history — the reason someone opened this on a phone. */
+  .mast {
+    position: sticky; top: 0; z-index: 8;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(10px);
+    margin: -14px -16px 12px; padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .mast .row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .mast h1 { font-size: 16px; }
+  .stats { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+  .stat {
+    display: inline-flex; align-items: baseline; gap: 5px;
+    padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); font-size: 13px; cursor: pointer;
+    color: inherit; text-decoration: none;
+  }
+  .stat b { font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
+  .stat.warn { border-color: var(--amber); color: var(--amber); }
+  .stat[aria-pressed=true] { border-color: var(--accent); color: var(--accent); }
 
-  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
-  input[type=search] {
-    flex: 1 1 200px; min-width: 0; padding: 7px 11px; font: inherit; font-size: 14px;
-    background: var(--panel); color: var(--ink);
-    border: 1px solid var(--line); border-radius: 8px;
+  .search-wrap { position: relative; margin: 10px 0 8px; }
+  .search-wrap kbd {
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+    pointer-events: none;
   }
-  input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  button {
-    padding: 7px 11px; font: inherit; font-size: 13px; cursor: pointer;
-    background: var(--panel); color: var(--dim);
-    border: 1px solid var(--line); border-radius: 8px;
-  }
-  button[aria-pressed=true] { color: var(--accent); border-color: var(--accent); }
-  select {
-    padding: 7px 9px; font: inherit; font-size: 13px; cursor: pointer;
-    background: var(--panel); color: var(--dim);
-    border: 1px solid var(--line); border-radius: 8px;
-  }
+  .search-wrap input { padding-right: 36px; }
+
+  .toolbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 
   /* Sessions waiting on a person get their own block at the top. The whole
      reason to look at this on a phone is to find them. */
@@ -31,22 +40,72 @@
   .attention h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
                   color: var(--amber); padding: 11px 14px 0; }
 
+  .group { margin-bottom: 12px; }
+  .group-h {
+    width: 100%; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    padding: 8px 4px; background: none; border: 0; border-radius: 0;
+    border-bottom: 1px solid var(--line); color: var(--ink); text-align: left;
+    font-size: 13px; font-weight: 600;
+  }
+  .group-h .n { color: var(--faint); font-weight: 400; font-size: 12px; margin-left: auto; }
+  .group-h .chev { color: var(--faint); font-weight: 400; }
+  .group.is-collapsed .rows { display: none; }
+  .group.is-collapsed .group-h .chev::before { content: "▸ "; }
+  .group:not(.is-collapsed) .group-h .chev::before { content: "▾ "; }
+
   .rows { display: block; }
+  .thead {
+    display: none; font-size: 11px; color: var(--faint); text-transform: uppercase;
+    letter-spacing: .06em; padding: 0 14px 6px; gap: 10px;
+  }
   .row {
-    display: grid; gap: 2px 10px; padding: 11px 14px; border-top: 1px solid var(--line);
-    grid-template-columns: 8px minmax(0, 1fr) auto;
+    display: grid; gap: 2px 10px; padding: 12px 14px; border-top: 1px solid var(--line);
+    grid-template-columns: 4px minmax(0, 1fr) auto;
     text-decoration: none; color: inherit; cursor: pointer;
+    min-height: var(--tap);
   }
   .row:first-of-type { border-top: 0; }
-  .row:hover, .row:focus-visible { background: color-mix(in srgb, var(--accent) 7%, transparent); }
-  .row .dot { margin-top: 7px; }
+  .row:hover, .row:focus-visible, .row.is-active {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .row.is-active { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .row .stripe { grid-row: 1 / span 3; border-radius: 2px; }
+  .row .stripe.working { background: var(--green); }
+  .row .stripe.waiting { background: var(--amber); }
+  .row .stripe.error { background: var(--red); }
+  .row .stripe.idle { background: var(--faint); }
   .row .name { min-width: 0; font-weight: 500; }
   .row .name .title { color: var(--dim); font-weight: 400; }
   .row .meta { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--faint); }
+  .row .doing { grid-column: 2; font-size: 12px; color: var(--dim); }
   .row .figures { grid-row: 1 / span 2; grid-column: 3; text-align: right; font-family: var(--mono);
                   font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
   .row .figures .sub { font-size: 11px; color: var(--faint); }
+  .row .when, .row .ctxcell { display: none; }
   .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status-label { text-transform: lowercase; }
+
+  /* Desktop: a real table, because a 1180px card list wastes the width the
+     terminal already uses as columns. */
+  @media (min-width: 860px) {
+    .thead.shown {
+      display: grid;
+      grid-template-columns: 4px minmax(0, 2.2fr) 140px 72px 80px 88px;
+      padding-left: 14px; padding-right: 14px;
+    }
+    .row {
+      grid-template-columns: 4px minmax(0, 2.2fr) 140px 72px 80px 88px;
+      align-items: center; gap: 0 10px;
+    }
+    .row .stripe { grid-row: 1 / span 1; }
+    .row .name { grid-column: 2; }
+    .row .doing { display: none; }
+    .row .meta { grid-column: 3; flex-wrap: nowrap; }
+    .row .when { display: block; grid-column: 4; font-size: 12px; color: var(--faint); font-family: var(--mono); }
+    .row .ctxcell { display: block; grid-column: 5; }
+    .row .figures { grid-column: 6; grid-row: auto; }
+    .row .age-inline, .row .ctx-inline { display: none; }
+  }
 
   /* The context bar, the one figure that is a proportion rather than a count. */
   .ctx { display: inline-block; width: 46px; height: 5px; border-radius: 3px;
@@ -57,44 +116,65 @@
 
   footer { margin-top: 20px; font-size: 12px; color: var(--faint);
            display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  .live { display: inline-flex; align-items: center; gap: 6px; }
+  .live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--faint); }
 </style>
 
+<a class="skip" href="#attention">Skip to sessions that need you</a>
+
 <div class="wrap">
-  <header class="top">
-    <h1>cctop<span class="v mono">__CCTOP_VERSION__</span></h1>
-    <div class="spacer"></div>
-    <div class="totals" id="totals"></div>
-  </header>
+  <div class="mast">
+    <div class="row1">
+      <h1>cctop<span class="v mono">__CCTOP_VERSION__</span></h1>
+      <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div class="search-wrap">
+      <input type="search" id="filter" placeholder="Filter on project, model, branch, title…" autocomplete="off" spellcheck="false" aria-label="Filter sessions">
+      <kbd class="only-wide">/</kbd>
+    </div>
+    <div class="toolbar">
+      <div class="chip-row" role="toolbar" aria-label="Views">
+        <div class="seg" id="views" role="radiogroup" aria-label="Which sessions">
+          <button type="button" data-view="all" aria-pressed="true">All</button>
+          <button type="button" data-view="waiting" aria-pressed="false">Needs you</button>
+          <button type="button" data-view="running" aria-pressed="false">Running</button>
+        </div>
+        <div class="seg" id="ages" role="radiogroup" aria-label="How recently active">
+          <button type="button" data-age="all" aria-pressed="true">Any time</button>
+          <button type="button" data-age="1h" aria-pressed="false">1h</button>
+          <button type="button" data-age="today" aria-pressed="false">Today</button>
+          <button type="button" data-age="7d" aria-pressed="false">7d</button>
+        </div>
+        <div class="seg" id="sorts" role="radiogroup" aria-label="Sort">
+          <button type="button" data-sort="recent" aria-pressed="true">Recent</button>
+          <button type="button" data-sort="cost" aria-pressed="false">Cost</button>
+          <button type="button" data-sort="tokens" aria-pressed="false">Tokens</button>
+          <button type="button" data-sort="context" aria-pressed="false">Context</button>
+        </div>
+        <button type="button" id="group" aria-pressed="true" title="Group sessions by project">By project</button>
+        <button type="button" id="bell" aria-pressed="false" title="Notify when a session starts waiting on you">Notify</button>
+      </div>
+      <div class="chip-row" id="harnesses" hidden></div>
+    </div>
+  </div>
 
   <div id="banners"></div>
-
-  <div class="controls">
-    <input type="search" id="filter" placeholder="Filter on project, model, branch, title…" autocomplete="off" spellcheck="false">
-    <button id="running" aria-pressed="false" title="Show only sessions with a live process">Running</button>
-    <button id="bell" aria-pressed="false" title="Notify when a session starts waiting on you">Notify</button>
-    <select id="sort" title="Order the table">
-      <option value="recent">Recent</option>
-      <option value="cost">Cost</option>
-      <option value="tokens">Tokens</option>
-      <option value="context">Context</option>
-    </select>
-  </div>
 
   <section class="card attention" id="attention" hidden>
     <h2 id="attention-heading"></h2>
     <div class="rows" id="attention-rows"></div>
   </section>
 
-  <section class="card">
-    <div class="rows" id="rows"></div>
-    <div class="empty" id="empty">Waiting for the first refresh…</div>
-  </section>
+  <div class="thead" id="thead" aria-hidden="true">
+    <span></span><span>Session</span><span>Model</span><span>Last</span><span>Context</span><span>Cost</span>
+  </div>
+  <div id="list"></div>
+  <div class="empty" id="empty">Waiting for the first refresh…</div>
 
   <footer>
-    <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
-    <span class="spacer"></span>
     <span id="counts"></span>
+    <span class="spacer"></span>
+    <span class="keys only-wide"><kbd>/</kbd> filter · <kbd>j</kbd> <kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>esc</kbd> clear</span>
   </footer>
 </div>
 
@@ -154,6 +234,11 @@ const rowCost = (s) => {
   return money(Number(s.cost.total));
 };
 
+const costNumber = (s) => {
+  if (s.cost.included || !s.cost.available) return 0;
+  return Number(s.cost.total) || 0;
+};
+
 // The home directory, so paths under it read as `~/…` the way they do in the
 // terminal. Substituted by the server rather than derived here, because a
 // browser cannot know it — and this page may be open on a different machine.
@@ -177,10 +262,17 @@ const shortModel = (model) => {
   return parts.length ? parts[parts.length - 1] : model;
 };
 
+const harnessOf = (s) => s.harness || s.provider || "";
+
 let sessions = [];
 let filter = "";
-let runningOnly = false;
+let view = "all";
 let sortBy = "recent";
+let groupOn = true;
+let age = "all";
+let harness = "";
+let cursor = -1;
+let shownRows = [];
 
 // How the table is ordered, by what the reader picked.
 //
@@ -194,27 +286,70 @@ let sortBy = "recent";
 // arrives in a different order does not silently change what "Recent" means.
 const ORDER = {
   recent: (a, b) => String(b.last_active).localeCompare(String(a.last_active)),
-  cost: (a, b) => (Number(b.cost.total) || 0) - (Number(a.cost.total) || 0),
+  cost: (a, b) => costNumber(b) - costNumber(a),
   tokens: (a, b) => (Number(b.tokens.total) || 0) - (Number(a.tokens.total) || 0),
   // A session whose harness reports no window sorts last rather than as zero:
   // "nothing is known" is not "the window is empty".
   context: (a, b) => share(b) - share(a),
 };
 const share = (s) => (s.context && s.context.max ? s.context.used / s.context.max : -1);
+const GROUP_ORDER = {
+  recent: (rows) => Math.max(...rows.map((s) => Date.parse(s.last_active) || 0)),
+  cost: (rows) => rows.reduce((n, s) => n + costNumber(s), 0),
+  tokens: (rows) => rows.reduce((n, s) => n + (Number(s.tokens.total) || 0), 0),
+  context: (rows) => Math.max(...rows.map(share)),
+};
 // What each session's state was last render, so a *transition* into waiting can
 // be told from a session that has been waiting since before the page opened.
 // Without it every refresh would re-notify about the same idle agent.
 let previousState = new Map();
 let firstRender = true;
+let received = false;
 
 const matches = (s, needle) => {
   if (!needle) return true;
   const hay = [
-    s.project, s.title, s.model, s.harness, s.branch, s.provider,
-    s.session_id, s.user, s.state,
+    s.project, s.title, s.model, s.harness, s.provider, s.branch,
+    s.session_id, s.user, s.host, s.state, s.last_tool,
   ].filter(Boolean).join(" ").toLowerCase();
   return needle.split(/\s+/).filter(Boolean).every((word) => hay.includes(word));
 };
+
+const withinAge = (s) => {
+  if (age === "all") return true;
+  const then = Date.parse(s.last_active);
+  if (!isFinite(then)) return false;
+  if (age === "1h") return Date.now() - then <= 3600 * 1000;
+  if (age === "7d") return Date.now() - then <= 7 * 86400 * 1000;
+  if (age === "today") {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return then >= start.getTime();
+  }
+  return true;
+};
+
+const needsYou = (s) => s.running && (s.state === "waiting" || s.state === "error");
+
+function fillText(node, text, needle) {
+  node.replaceChildren();
+  if (!needle || !text) {
+    node.textContent = text || "";
+    return;
+  }
+  const lower = text.toLowerCase();
+  const hit = needle.split(/\s+/).filter(Boolean).find((w) => lower.includes(w));
+  if (!hit) {
+    node.textContent = text;
+    return;
+  }
+  const at = lower.indexOf(hit);
+  if (at > 0) node.appendChild(document.createTextNode(text.slice(0, at)));
+  node.appendChild(el("mark", null, text.slice(at, at + hit.length)));
+  if (at + hit.length < text.length) {
+    node.appendChild(document.createTextNode(text.slice(at + hit.length)));
+  }
+}
 
 function contextBar(s) {
   const box = el("span", "ctx");
@@ -230,28 +365,62 @@ function contextBar(s) {
   return box;
 }
 
+function statusClass(s) {
+  return s.running || s.state === "error" ? s.state : "idle";
+}
+
+function statusLabel(s) {
+  if (!s.running) return s.state === "error" ? "ended on error" : "stopped";
+  if (s.state === "waiting") return "waiting";
+  if (s.state === "error") return "api error";
+  return "working";
+}
+
+function rowHref(s) {
+  return "/session/" + encodeURIComponent(s.session_id) + QUERY;
+}
+
 function rowFor(s) {
   const row = el("a", "row");
-  row.href = "/session/" + encodeURIComponent(s.session_id) + QUERY;
+  row.href = rowHref(s);
+  row.dataset.id = s.session_id;
   row.setAttribute("role", "listitem");
 
-  row.appendChild(el("span", "dot " + (s.running || s.state === "error" ? s.state : "idle")));
+  const stripe = el("span", "stripe " + statusClass(s));
+  stripe.title = statusLabel(s);
+  row.appendChild(stripe);
 
   const name = el("div", "name trunc");
-  name.appendChild(el("span", null, s.project ? shortPath(s.project) : s.session_id.slice(0, 8)));
+  const project = el("span");
+  fillText(project, s.project ? shortPath(s.project) : s.session_id.slice(0, 8), filter);
+  name.appendChild(project);
   if (s.title) {
-    name.appendChild(el("span", "title", " · " + s.title));
+    name.appendChild(el("span", "title", " · "));
+    const title = el("span", "title");
+    fillText(title, s.title, filter);
+    name.appendChild(title);
   }
   // The full path is worth having, but not worth the width. `title` is also
   // what a screen reader reads out, which is the same trade.
   if (s.project) name.title = s.project;
   row.appendChild(name);
 
+  const doing = el("div", "doing trunc");
+  const label = statusLabel(s);
+  doing.appendChild(el("span", "status-label", label));
+  if (s.running && s.state === "working" && s.last_tool) {
+    doing.appendChild(el("span", null, " · " + s.last_tool));
+  }
+  row.appendChild(doing);
+
   const meta = el("div", "meta");
   const tag = (text, cls) => { if (text) meta.appendChild(el("span", cls || null, text)); };
   tag(s.model ? shortModel(s.model) : s.provider);
   if (s.branch) tag(s.branch);
-  tag(ago(s.last_active) + " ago");
+  if (s.host) tag(s.host);
+  const ageText = ago(s.last_active);
+  if (ageText) tag(ageText + " ago", "age-inline");
+  if (s.running && s.state === "working" && s.last_tool) tag(s.last_tool, "only-wide");
   if (s.running && s.state === "waiting") tag("waiting on you", "pill warn");
   // "api error" in the present tense is a claim about now. For a stopped
   // session it is something that happened, and the row's last-active time is
@@ -269,9 +438,21 @@ function rowFor(s) {
   // and for every harness that has no such concept, so the tag appears exactly
   // where it distinguishes something.
   if (s.profile && s.profile !== "default") tag(s.profile);
-  const bar = contextBar(s);
-  if (bar) meta.appendChild(bar);
+  const inlineBar = contextBar(s);
+  if (inlineBar) {
+    inlineBar.classList.add("ctx-inline");
+    meta.appendChild(inlineBar);
+  }
   row.appendChild(meta);
+
+  const when = el("div", "when");
+  when.textContent = ago(s.last_active) ? ago(s.last_active) + " ago" : "";
+  row.appendChild(when);
+
+  const ctxcell = el("div", "ctxcell");
+  const bar = contextBar(s);
+  if (bar) ctxcell.appendChild(bar);
+  row.appendChild(ctxcell);
 
   const figures = el("div", "figures");
   figures.appendChild(el("div", null, rowCost(s)));
@@ -281,23 +462,112 @@ function rowFor(s) {
   return row;
 }
 
-function render() {
-  const shown = sessions
+function visibleSessions() {
+  return sessions
     .filter((s) => matches(s, filter))
-    .filter((s) => !runningOnly || s.running)
+    .filter(withinAge)
+    .filter((s) => !harness || harnessOf(s) === harness)
+    .filter((s) => {
+      if (view === "running") return s.running;
+      if (view === "waiting") return needsYou(s);
+      return true;
+    })
     .sort(ORDER[sortBy] || ORDER.recent);
+}
 
-  // Anything a person has to answer, first and on its own.
-  //
-  // Live sessions only. A session that hit an API error in May and has not run
-  // since is history, not a call to action — promoting it puts four dead rows
-  // above the one agent actually waiting, which is the opposite of what this
-  // block is for. The row keeps its red dot either way; that is the table
-  // saying what happened, which is a different claim from "answer me".
-  const wanting = shown.filter(
-    (s) => s.running && (s.state === "waiting" || s.state === "error"),
-  );
-  const rest = shown.filter((s) => !wanting.includes(s));
+function groupKey(s) {
+  return s.project || "(no project)";
+}
+
+function grouped(list) {
+  const map = new Map();
+  for (const s of list) {
+    const key = groupKey(s);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(s);
+  }
+  const score = GROUP_ORDER[sortBy] || GROUP_ORDER.recent;
+  return [...map.entries()].sort((a, b) => score(b[1]) - score(a[1]));
+}
+
+function renderHarnesses() {
+  const names = [...new Set(sessions.map(harnessOf).filter(Boolean))].sort();
+  const box = document.getElementById("harnesses");
+  box.replaceChildren();
+  if (names.length < 2) {
+    box.hidden = true;
+    if (harness) harness = "";
+    return;
+  }
+  box.hidden = false;
+  const all = el("button", null, "All harnesses");
+  all.setAttribute("aria-pressed", String(!harness));
+  all.addEventListener("click", () => { harness = ""; persist(); render(); });
+  box.appendChild(all);
+  for (const name of names) {
+    const b = el("button", null, name);
+    b.setAttribute("aria-pressed", String(harness === name));
+    b.addEventListener("click", () => {
+      harness = harness === name ? "" : name;
+      persist();
+      render();
+    });
+    box.appendChild(b);
+  }
+}
+
+function renderStats() {
+  const waiting = sessions.filter(needsYou).length;
+  const running = sessions.filter((s) => s.running).length;
+  const today = sessions.reduce((sum, s) => sum + (s.cost.today || 0), 0);
+  const hour = sessions.reduce((sum, s) => sum + (s.cost.this_hour || 0), 0);
+  const stats = document.getElementById("stats");
+  stats.replaceChildren();
+  const add = (value, label, cls, onClick) => {
+    const b = el("button", "stat" + (cls ? " " + cls : ""));
+    b.appendChild(el("b", null, value));
+    b.appendChild(el("span", "k", label));
+    if (onClick) b.addEventListener("click", onClick);
+    stats.appendChild(b);
+    return b;
+  };
+  if (waiting) {
+    const b = add(String(waiting), waiting === 1 ? "needs you" : "need you", "warn", () => {
+      view = "waiting";
+      persist();
+      render();
+    });
+    b.setAttribute("aria-pressed", String(view === "waiting"));
+  }
+  add(String(running), "running", "", () => {
+    view = "running";
+    persist();
+    render();
+  }).setAttribute("aria-pressed", String(view === "running"));
+  add(money(today), "today");
+  add(money(hour), "this hour");
+}
+
+function collapsedIdle(groups) {
+  // Collapse a project with no live work only when there are enough groups
+  // that leaving them all open is the wall of cards this page used to be.
+  // A search is the user looking for something: expand everything.
+  if (filter || groups.length < 4) return new Set();
+  const idle = new Set();
+  for (const [key, rows] of groups) {
+    if (!rows.some((s) => s.running)) idle.add(key);
+  }
+  return idle;
+}
+
+function render() {
+  const shown = visibleSessions();
+  shownRows = shown;
+
+  const wanting = view === "waiting"
+    ? shown
+    : shown.filter(needsYou);
+  const rest = view === "waiting" ? [] : shown.filter((s) => !needsYou(s));
 
   const attention = document.getElementById("attention");
   const attentionRows = document.getElementById("attention-rows");
@@ -306,27 +576,142 @@ function render() {
   document.getElementById("attention-heading").textContent =
     wanting.length === 1 ? "1 session needs you" : wanting.length + " sessions need you";
 
-  document.getElementById("rows").replaceChildren(...rest.map(rowFor));
+  const list = document.getElementById("list");
+  list.replaceChildren();
+  const thead = document.getElementById("thead");
+
+  if (view === "waiting") {
+    thead.classList.remove("shown");
+  } else if (groupOn && new Set(rest.map(groupKey)).size >= 2) {
+    thead.classList.remove("shown");
+    const groups = grouped(rest);
+    const collapsed = collapsedIdle(groups);
+    for (const [key, rows] of groups) {
+      const g = el("section", "group card");
+      if (collapsed.has(key)) g.classList.add("is-collapsed");
+      const h = el("button", "group-h");
+      h.type = "button";
+      h.appendChild(el("span", "chev"));
+      h.appendChild(el("span", "trunc", key === "(no project)" ? key : shortPath(key)));
+      const live = rows.filter((s) => s.running).length;
+      const note = el("span", "n");
+      const cost = rows.reduce((n, s) => n + costNumber(s), 0);
+      note.textContent =
+        rows.length + (rows.length === 1 ? " session" : " sessions") +
+        (live ? " · " + live + " running" : "") +
+        (cost ? " · " + money(cost) : "");
+      h.appendChild(note);
+      h.addEventListener("click", () => g.classList.toggle("is-collapsed"));
+      g.appendChild(h);
+      const rowsBox = el("div", "rows");
+      rowsBox.append(...rows.map(rowFor));
+      g.appendChild(rowsBox);
+      list.appendChild(g);
+    }
+  } else {
+    thead.classList.toggle("shown", rest.length > 0);
+    const box = el("section", "card");
+    const rowsBox = el("div", "rows");
+    rowsBox.append(...rest.map(rowFor));
+    box.appendChild(rowsBox);
+    if (rest.length) list.appendChild(box);
+  }
+
   const empty = document.getElementById("empty");
   empty.hidden = shown.length > 0;
-  if (shown.length === 0 && sessions.length > 0) empty.textContent = "Nothing matches that filter.";
+  if (!received) {
+    empty.textContent = "Waiting for the first refresh…";
+  } else if (sessions.length === 0) {
+    empty.textContent = "No agent sessions found. Run cctop doctor if that is a surprise.";
+  } else if (shown.length === 0) {
+    empty.textContent = "Nothing matches. Esc clears the filters.";
+  }
 
   const running = sessions.filter((s) => s.running).length;
   document.getElementById("counts").textContent =
     sessions.length + " sessions · " + running + " running" +
     (shown.length !== sessions.length ? " · " + shown.length + " shown" : "");
 
-  const totals = document.getElementById("totals");
-  const today = sessions.reduce((sum, s) => sum + (s.cost.today || 0), 0);
-  const hour = sessions.reduce((sum, s) => sum + (s.cost.this_hour || 0), 0);
-  totals.replaceChildren();
-  for (const [label, value] of [["today", money(today)], ["this hour", money(hour)]]) {
-    const box = el("span");
-    box.appendChild(el("b", null, value));
-    box.appendChild(document.createTextNode(" "));
-    box.appendChild(el("span", "k", label));
-    totals.appendChild(box);
+  renderStats();
+  renderHarnesses();
+  syncChrome();
+  paintCursor();
+}
+
+function syncChrome() {
+  for (const btn of document.querySelectorAll("#views [data-view]")) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.view === view));
   }
+  for (const btn of document.querySelectorAll("#ages [data-age]")) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.age === age));
+  }
+  for (const btn of document.querySelectorAll("#sorts [data-sort]")) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.sort === sortBy));
+  }
+  document.getElementById("group").setAttribute("aria-pressed", String(groupOn));
+}
+
+function allRowNodes() {
+  return [...document.querySelectorAll(".row")];
+}
+
+function paintCursor() {
+  const rows = allRowNodes();
+  if (!rows.length) { cursor = -1; return; }
+  if (cursor < 0) cursor = 0;
+  if (cursor >= rows.length) cursor = rows.length - 1;
+  rows.forEach((n, i) => n.classList.toggle("is-active", i === cursor));
+}
+
+function moveCursor(delta) {
+  const rows = allRowNodes();
+  if (!rows.length) return;
+  cursor = (cursor + delta + rows.length) % rows.length;
+  paintCursor();
+  rows[cursor].scrollIntoView({ block: "nearest" });
+}
+
+function openCursor() {
+  const rows = allRowNodes();
+  if (cursor >= 0 && rows[cursor]) {
+    persist();
+    location.href = rows[cursor].href;
+  }
+}
+
+// --- view state in the URL ------------------------------------------------
+//
+// The report is a different page, and the back-link there is just `/`. Hash
+// plus sessionStorage together mean a filter survives a round-trip without
+// being stuffed into the token query, which is already the credential.
+
+function persist() {
+  const q = new URLSearchParams();
+  if (filter) q.set("q", filter);
+  if (view !== "all") q.set("view", view);
+  if (sortBy !== "recent") q.set("sort", sortBy);
+  if (!groupOn) q.set("group", "0");
+  if (age !== "all") q.set("age", age);
+  if (harness) q.set("harness", harness);
+  const hash = q.toString() ? "#" + q.toString() : "";
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+  try { sessionStorage.setItem("cctop.view", hash); } catch (e) { /* private mode */ }
+}
+
+function restore() {
+  let raw = location.hash.startsWith("#") ? location.hash.slice(1) : "";
+  if (!raw) {
+    try { raw = (sessionStorage.getItem("cctop.view") || "").replace(/^#/, ""); } catch (e) { raw = ""; }
+  }
+  const q = new URLSearchParams(raw);
+  filter = (q.get("q") || "").toLowerCase();
+  view = q.get("view") || "all";
+  sortBy = q.get("sort") || "recent";
+  groupOn = q.get("group") !== "0";
+  age = q.get("age") || "all";
+  harness = q.get("harness") || "";
+  const box = document.getElementById("filter");
+  if (filter) box.value = filter;
 }
 
 // A desktop notification for the moment a session crosses into waiting — the
@@ -371,6 +756,7 @@ function apply(next) {
   previousState = new Map(next.map((s) => [s.session_id, s.state]));
   sessions = next;
   firstRender = false;
+  received = true;
   render();
 }
 
@@ -408,21 +794,67 @@ fetch("/api/hosts" + QUERY)
 
 document.getElementById("filter").addEventListener("input", (e) => {
   filter = e.target.value.trim().toLowerCase();
+  persist();
   render();
 });
-document.getElementById("sort").addEventListener("change", (e) => {
-  sortBy = e.target.value;
+document.getElementById("views").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-view]");
+  if (!btn) return;
+  view = btn.dataset.view;
+  persist();
   render();
 });
-document.getElementById("running").addEventListener("click", (e) => {
-  runningOnly = !runningOnly;
-  e.currentTarget.setAttribute("aria-pressed", String(runningOnly));
+document.getElementById("ages").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-age]");
+  if (!btn) return;
+  age = btn.dataset.age;
+  persist();
   render();
+});
+document.getElementById("sorts").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-sort]");
+  if (!btn) return;
+  sortBy = btn.dataset.sort;
+  persist();
+  render();
+});
+document.getElementById("group").addEventListener("click", () => {
+  groupOn = !groupOn;
+  persist();
+  render();
+});
+
+document.addEventListener("keydown", (e) => {
+  const typing = e.target.matches("input, textarea, select");
+  if (e.key === "/" && !typing) {
+    e.preventDefault();
+    document.getElementById("filter").focus();
+    document.getElementById("filter").select();
+    return;
+  }
+  if (e.key === "Escape") {
+    if (typing) { e.target.blur(); return; }
+    if (filter || view !== "all" || age !== "all" || harness) {
+      filter = "";
+      view = "all";
+      age = "all";
+      harness = "";
+      document.getElementById("filter").value = "";
+      persist();
+      render();
+    }
+    return;
+  }
+  if (typing) return;
+  if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); moveCursor(1); }
+  else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); moveCursor(-1); }
+  else if (e.key === "Enter") { e.preventDefault(); openCursor(); }
 });
 
 // Ages are relative and nothing else changes between snapshots, so a slow tick
 // keeps "4m ago" honest without waiting on the next refresh.
 setInterval(() => { if (sessions.length) render(); }, 15000);
 
+restore();
 connect();
 </script>
