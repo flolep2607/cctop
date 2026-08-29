@@ -872,6 +872,7 @@ mod tests {
             "attention",
             "list",
             "stats",
+            "more",
         ] {
             assert!(
                 DASHBOARD_HTML.contains(&format!("id=\"{id}\"")),

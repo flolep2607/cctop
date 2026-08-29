@@ -31,6 +31,10 @@ then fires one the moment a session *crosses into* waiting — not for the ones
 already sitting there when you opened the page, which would be a notification
 about nothing.
 
+On a phone the views stay on screen — All, Needs you, Running — and age, sort
+and notify sit behind **More**, so the filters are not a strip that clips in
+half.
+
 On a keyboard: `/` focuses the filter, `j`/`k` (or the arrows) move, `Enter`
 opens the report, `Esc` clears filters. Filter, view, sort and age live in the
 URL hash, so they survive a trip into a report and back.

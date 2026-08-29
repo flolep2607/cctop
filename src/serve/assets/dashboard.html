@@ -33,7 +33,14 @@
   }
   .search-wrap input { padding-right: 36px; }
 
-  .toolbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+  .toolbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .toolbar-primary { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+  /* Age, sort and notify sit behind More on a phone: packing every segmented
+     control into one nowrap strip is what clipped "Needs you" to a letter.
+     From 720px the toggle hides and the chips join the views row. */
+  #more { display: none; }
+  .more-body { display: contents; }
 
   /* Sessions waiting on a person get their own block at the top. The whole
      reason to look at this on a phone is to find them. */
@@ -43,13 +50,14 @@
 
   .group { margin-bottom: 12px; }
   .group-h {
-    width: 100%; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
-    padding: 8px 4px; background: none; border: 0; border-radius: 0;
+    width: 100%; display: flex; align-items: baseline; gap: 8px;
+    padding: 10px 14px; background: none; border: 0; border-radius: 0;
     border-bottom: 1px solid var(--line); color: var(--ink); text-align: left;
-    font-size: 13px; font-weight: 600;
+    font-size: 13px; font-weight: 600; min-height: var(--tap);
   }
-  .group-h .n { color: var(--faint); font-weight: 400; font-size: 12px; margin-left: auto; }
-  .group-h .chev { color: var(--faint); font-weight: 400; }
+  .group-h .trunc { min-width: 0; flex: 1 1 auto; }
+  .group-h .n { color: var(--faint); font-weight: 400; font-size: 12px; flex: 0 0 auto; }
+  .group-h .chev { color: var(--faint); font-weight: 400; flex: 0 0 auto; }
   .group.is-collapsed .rows { display: none; }
   .group.is-collapsed .group-h .chev::before { content: "▸ "; }
   .group:not(.is-collapsed) .group-h .chev::before { content: "▾ "; }
@@ -60,7 +68,7 @@
     letter-spacing: .06em; padding: 0 14px 6px; gap: 10px;
   }
   .row {
-    display: grid; gap: 2px 10px; padding: 12px 14px; border-top: 1px solid var(--line);
+    display: grid; gap: 2px 12px; padding: 12px 14px; border-top: 1px solid var(--line);
     grid-template-columns: 4px minmax(0, 1fr) auto;
     text-decoration: none; color: inherit; cursor: pointer;
     min-height: var(--tap);
@@ -70,19 +78,22 @@
     background: color-mix(in srgb, var(--accent) 7%, transparent);
   }
   .row.is-active { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .row .stripe { grid-row: 1 / span 3; border-radius: 2px; }
+  .row .stripe { grid-column: 1; grid-row: 1 / -1; border-radius: 2px; }
   .row .stripe.working { background: var(--green); }
   .row .stripe.waiting { background: var(--amber); }
   .row .stripe.error { background: var(--red); }
   .row .stripe.idle { background: var(--faint); }
   .row .name { min-width: 0; font-weight: 500; }
   .row .name .title { color: var(--dim); font-weight: 400; }
-  .row .meta { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--faint); }
+  .row .meta { grid-column: 2 / 4; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--faint); }
+  .row .meta:empty { display: none; }
   .row .doing { grid-column: 2; font-size: 12px; color: var(--dim); }
   .row .figures { grid-row: 1 / span 2; grid-column: 3; text-align: right; font-family: var(--mono);
                   font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
   .row .figures .sub { font-size: 11px; color: var(--faint); }
   .row .when, .row .ctxcell { display: none; }
+  .row .ctx-inline { grid-column: 2 / 4; display: block; padding-top: 6px; }
+  .row .ctx-inline .ctx { width: 100%; max-width: 140px; height: 6px; }
   .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .status-label { text-transform: lowercase; }
 
@@ -105,7 +116,37 @@
     .row .when { display: block; grid-column: 4; font-size: 12px; color: var(--faint); font-family: var(--mono); }
     .row .ctxcell { display: block; grid-column: 5; }
     .row .figures { grid-column: 6; grid-row: auto; }
-    .row .age-inline, .row .ctx-inline { display: none; }
+    .row .ctx-inline { display: none; }
+  }
+
+  /* Phone: one control per row, equally-sized, never a horizontally clipped
+     strip. Stats take their own line so they do not squeeze the title. */
+  @media (max-width: 719px) {
+    .stats {
+      flex: 1 1 100%; margin-left: 0;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    }
+    .stat { justify-content: center; min-width: 0; }
+    .search-wrap input { font-size: 16px; }
+    .toolbar-primary { flex-direction: column; align-items: stretch; }
+    #views { width: 100%; }
+    #views button, .more-body .seg button { flex: 1; }
+    .extras { display: flex; flex-wrap: wrap; gap: 6px; }
+    .extras #group { flex: 1 1 auto; }
+    #more { display: inline-flex; align-items: center; }
+    #more[aria-expanded=true], #more.is-set { color: var(--accent); border-color: var(--accent); }
+    .more-body {
+      display: none; flex-basis: 100%; flex-direction: column; gap: 8px; margin-top: 2px;
+    }
+    .extras.is-open .more-body { display: flex; }
+    .more-body .seg { width: 100%; }
+    .more-body #bell { align-self: start; }
+    .group .row .model-tag { display: none; }
+    .group .row .meta:not(:has(span:not(.model-tag))) { display: none; }
+  }
+
+  @media (min-width: 720px) {
+    .extras { display: contents; }
   }
 
   /* The context bar, the one figure that is a proportion rather than a count. */
@@ -134,26 +175,31 @@
       <kbd class="only-wide">/</kbd>
     </div>
     <div class="toolbar">
-      <div class="chip-row" role="toolbar" aria-label="Views">
+      <div class="toolbar-primary">
         <div class="seg" id="views" role="radiogroup" aria-label="Which sessions">
           <button type="button" data-view="all" aria-pressed="true">All</button>
           <button type="button" data-view="waiting" aria-pressed="false">Needs you</button>
           <button type="button" data-view="running" aria-pressed="false">Running</button>
         </div>
-        <div class="seg" id="ages" role="radiogroup" aria-label="How recently active">
-          <button type="button" data-age="all" aria-pressed="true">Any time</button>
-          <button type="button" data-age="1h" aria-pressed="false">1h</button>
-          <button type="button" data-age="today" aria-pressed="false">Today</button>
-          <button type="button" data-age="7d" aria-pressed="false">7d</button>
+        <div class="extras">
+          <button type="button" id="group" aria-pressed="true" title="Group sessions by project">By project</button>
+          <button type="button" id="more" aria-expanded="false" aria-controls="more-body" title="Age, sort, notify">More</button>
+          <div class="more-body" id="more-body">
+            <div class="seg" id="ages" role="radiogroup" aria-label="How recently active">
+              <button type="button" data-age="all" aria-pressed="true">Any time</button>
+              <button type="button" data-age="1h" aria-pressed="false">1h</button>
+              <button type="button" data-age="today" aria-pressed="false">Today</button>
+              <button type="button" data-age="7d" aria-pressed="false">7d</button>
+            </div>
+            <div class="seg" id="sorts" role="radiogroup" aria-label="Sort">
+              <button type="button" data-sort="recent" aria-pressed="true">Recent</button>
+              <button type="button" data-sort="cost" aria-pressed="false">Cost</button>
+              <button type="button" data-sort="tokens" aria-pressed="false">Tokens</button>
+              <button type="button" data-sort="context" aria-pressed="false">Context</button>
+            </div>
+            <button type="button" id="bell" aria-pressed="false" title="Notify when a session starts waiting on you">Notify</button>
+          </div>
         </div>
-        <div class="seg" id="sorts" role="radiogroup" aria-label="Sort">
-          <button type="button" data-sort="recent" aria-pressed="true">Recent</button>
-          <button type="button" data-sort="cost" aria-pressed="false">Cost</button>
-          <button type="button" data-sort="tokens" aria-pressed="false">Tokens</button>
-          <button type="button" data-sort="context" aria-pressed="false">Context</button>
-        </div>
-        <button type="button" id="group" aria-pressed="true" title="Group sessions by project">By project</button>
-        <button type="button" id="bell" aria-pressed="false" title="Notify when a session starts waiting on you">Notify</button>
       </div>
       <div class="chip-row" id="harnesses" hidden></div>
     </div>
@@ -415,6 +461,8 @@ function rowFor(s, grouped) {
   const doing = el("div", "doing trunc");
   const statusText = statusLabel(s);
   doing.appendChild(el("span", "status-label", statusText));
+  const ageText = ago(s.last_active);
+  if (ageText) doing.appendChild(el("span", null, " · " + ageText + " ago"));
   if (s.running && s.state === "working" && s.last_tool) {
     doing.appendChild(el("span", null, " · " + s.last_tool));
   }
@@ -422,11 +470,9 @@ function rowFor(s, grouped) {
 
   const meta = el("div", "meta");
   const tag = (text, cls) => { if (text) meta.appendChild(el("span", cls || null, text)); };
-  tag(s.model ? shortModel(s.model) : s.provider);
+  tag(s.model ? shortModel(s.model) : s.provider, "model-tag");
   if (s.branch) tag(s.branch);
   if (s.host) tag(s.host);
-  const ageText = ago(s.last_active);
-  if (ageText) tag(ageText + " ago", "age-inline");
   if (s.running && s.state === "working" && s.last_tool) tag(s.last_tool, "only-wide");
   if (s.running && s.state === "waiting") tag("waiting on you", "pill warn");
   // "api error" in the present tense is a claim about now. For a stopped
@@ -445,12 +491,14 @@ function rowFor(s, grouped) {
   // and for every harness that has no such concept, so the tag appears exactly
   // where it distinguishes something.
   if (s.profile && s.profile !== "default") tag(s.profile);
+  row.appendChild(meta);
+
   const inlineBar = contextBar(s);
   if (inlineBar) {
-    inlineBar.classList.add("ctx-inline");
-    meta.appendChild(inlineBar);
+    const wrap = el("div", "ctx-inline");
+    wrap.appendChild(inlineBar);
+    row.appendChild(wrap);
   }
-  row.appendChild(meta);
 
   const when = el("div", "when");
   when.textContent = ago(s.last_active) ? ago(s.last_active) + " ago" : "";
@@ -656,6 +704,8 @@ function syncChrome() {
     btn.setAttribute("aria-pressed", String(btn.dataset.sort === sortBy));
   }
   document.getElementById("group").setAttribute("aria-pressed", String(groupOn));
+  const more = document.getElementById("more");
+  more.classList.toggle("is-set", age !== "all" || sortBy !== "recent");
 }
 
 function allRowNodes() {
@@ -829,6 +879,11 @@ document.getElementById("group").addEventListener("click", () => {
   groupOn = !groupOn;
   persist();
   render();
+});
+document.getElementById("more").addEventListener("click", () => {
+  const extras = document.querySelector(".extras");
+  const open = extras.classList.toggle("is-open");
+  document.getElementById("more").setAttribute("aria-expanded", String(open));
 });
 
 document.addEventListener("keydown", (e) => {

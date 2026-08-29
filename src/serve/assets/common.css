@@ -141,19 +141,18 @@ input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1p
 
 .seg {
   display: flex; gap: 0; border: 1px solid var(--line); border-radius: 8px;
-  overflow: hidden; background: var(--panel);
+  overflow: hidden; background: var(--panel); min-width: 0;
 }
 .seg button {
   border: 0; border-radius: 0; border-right: 1px solid var(--line);
-  padding: 8px 12px; min-height: var(--tap); white-space: nowrap;
+  padding: 8px 12px; min-height: var(--tap); white-space: nowrap; min-width: 0;
 }
 .seg button:last-child { border-right: 0; }
 
-  .chip-row {
-    display: flex; gap: 6px; overflow-x: auto; flex-wrap: nowrap;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 2px; scrollbar-width: thin;
-  }
+.chip-row {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  padding-bottom: 2px;
+}
 
 mark {
   background: color-mix(in srgb, var(--accent) 28%, transparent);
