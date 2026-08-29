@@ -840,7 +840,9 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Escape") {
-    if (typing) { e.target.blur(); return; }
+    // Esc in the filter box has to clear, not merely blur: blurring first
+    // is what made the box look like it ignored the key the TUI uses to
+    // peel filters.
     if (filter || view !== "all" || age !== "all" || harness) {
       filter = "";
       view = "all";
@@ -850,6 +852,7 @@ document.addEventListener("keydown", (e) => {
       persist();
       render();
     }
+    if (typing) e.target.blur();
     return;
   }
   if (typing) return;
