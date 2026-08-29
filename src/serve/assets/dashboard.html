@@ -13,6 +13,7 @@
   }
   .mast .row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .mast h1 { font-size: 16px; }
+  .mast h1 .v { color: var(--faint); font-weight: 400; font-size: 12px; margin-left: 6px; }
   .stats { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
   .stat {
     display: inline-flex; align-items: baseline; gap: 5px;
@@ -380,7 +381,7 @@ function rowHref(s) {
   return "/session/" + encodeURIComponent(s.session_id) + QUERY;
 }
 
-function rowFor(s) {
+function rowFor(s, grouped) {
   const row = el("a", "row");
   row.href = rowHref(s);
   row.dataset.id = s.session_id;
@@ -392,9 +393,15 @@ function rowFor(s) {
 
   const name = el("div", "name trunc");
   const project = el("span");
-  fillText(project, s.project ? shortPath(s.project) : s.session_id.slice(0, 8), filter);
+  // Inside a project group the path is already the heading. Repeating it on
+  // every row is what made the old list unscannable; the title (or the model)
+  // is what distinguishes one session from the next.
+  const label = grouped
+    ? (s.title || (s.model ? shortModel(s.model) : s.session_id.slice(0, 8)))
+    : (s.project ? shortPath(s.project) : s.session_id.slice(0, 8));
+  fillText(project, label, filter);
   name.appendChild(project);
-  if (s.title) {
+  if (!grouped && s.title) {
     name.appendChild(el("span", "title", " · "));
     const title = el("span", "title");
     fillText(title, s.title, filter);
@@ -571,7 +578,7 @@ function render() {
 
   const attention = document.getElementById("attention");
   const attentionRows = document.getElementById("attention-rows");
-  attentionRows.replaceChildren(...wanting.map(rowFor));
+  attentionRows.replaceChildren(...wanting.map((s) => rowFor(s, false)));
   attention.hidden = wanting.length === 0;
   document.getElementById("attention-heading").textContent =
     wanting.length === 1 ? "1 session needs you" : wanting.length + " sessions need you";
@@ -604,7 +611,7 @@ function render() {
       h.addEventListener("click", () => g.classList.toggle("is-collapsed"));
       g.appendChild(h);
       const rowsBox = el("div", "rows");
-      rowsBox.append(...rows.map(rowFor));
+      rowsBox.append(...rows.map((s) => rowFor(s, true)));
       g.appendChild(rowsBox);
       list.appendChild(g);
     }
@@ -612,7 +619,7 @@ function render() {
     thead.classList.toggle("shown", rest.length > 0);
     const box = el("section", "card");
     const rowsBox = el("div", "rows");
-    rowsBox.append(...rest.map(rowFor));
+    rowsBox.append(...rest.map((s) => rowFor(s, false)));
     box.appendChild(rowsBox);
     if (rest.length) list.appendChild(box);
   }
