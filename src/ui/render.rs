@@ -162,11 +162,16 @@ pub(super) fn panel_block(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::colors().border))
+        .style(theme::canvas())
         .title(Span::styled(format!(" {title} "), theme::title()))
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     let mut area = frame.area();
+    // Light paints the page first so empty cells and Reset spans stay on the
+    // pale ground rather than punching through to a dark emulator. Dark is a
+    // no-op: canvas() is Default, and the original look is the terminal's.
+    frame.render_widget(Block::default().style(theme::canvas()), area);
     let mut layout = Layout::default();
 
     // The bar is always there, even with only the dashboard in it: the way to
@@ -638,7 +643,8 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::colors().border));
+        .border_style(Style::default().fg(theme::colors().border))
+        .style(theme::canvas());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
