@@ -413,8 +413,8 @@ function rowFor(s, grouped) {
   row.appendChild(name);
 
   const doing = el("div", "doing trunc");
-  const label = statusLabel(s);
-  doing.appendChild(el("span", "status-label", label));
+  const statusText = statusLabel(s);
+  doing.appendChild(el("span", "status-label", statusText));
   if (s.running && s.state === "working" && s.last_tool) {
     doing.appendChild(el("span", null, " · " + s.last_tool));
   }
