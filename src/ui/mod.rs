@@ -3702,6 +3702,19 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // leave the user's shell receiving mouse escape sequences or with no cursor.
     // Installed after `init` so it runs before ratatui's restore hook.
     let mut terminal = ratatui::init();
+    // Light mode has to own the terminal's default colours. A Reset cell
+    // (Clear, unstyled help text, a column with no hue of its own) otherwise
+    // punches through to whatever the emulator was — dark ink on a dark
+    // ground, which is how white mode used to look like nothing.
+    if theme::variant() == theme::Variant::Light {
+        let _ = execute!(
+            std::io::stdout(),
+            ratatui::crossterm::style::SetColors(ratatui::crossterm::style::Colors::new(
+                ratatui::crossterm::style::Color::Black,
+                ratatui::crossterm::style::Color::White,
+            )),
+        );
+    }
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
@@ -3826,6 +3839,7 @@ fn restore_terminal() {
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     let _ = execute!(std::io::stdout(), Show);
+    let _ = execute!(std::io::stdout(), ratatui::crossterm::style::ResetColor);
     ratatui::restore();
     // Send Show once more after leaving the alternate screen. Some terminals
     // scope cursor state to the active screen buffer.

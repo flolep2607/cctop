@@ -66,6 +66,11 @@ pub struct Palette {
     pub desktop_code: Color,
     pub desktop_cowork: Color,
 
+    /// The page itself. Dark leaves this `Reset` so the terminal's own ground
+    /// shows through — that is the look every previous release shipped. Light
+    /// paints a pale canvas, because dark ink on a dark emulator is just a
+    /// blank screen.
+    pub ground: Color,
     pub selected_bg: Color,
     /// Wash behind a tool call that reported an error. Dark enough to stay
     /// behind the row's own foreground colours rather than competing with them.
@@ -124,6 +129,7 @@ const DARK: Palette = Palette {
     grok: Color::Indexed(247),
     desktop_code: Color::Indexed(141),
     desktop_cowork: Color::Indexed(183),
+    ground: Color::Reset,
     selected_bg: Color::Indexed(236),
     failed_bg: Color::Indexed(52),
     header_bg: Color::Indexed(236),
@@ -169,7 +175,9 @@ const LIGHT: Palette = Palette {
     label: Color::Indexed(25),
     value: Color::Black,
     dim: Color::Indexed(243),
-    dimmer: Color::Indexed(249),
+    // 249 on white is a ghost. One step past `dim` is still secondary, and
+    // still a colour you can actually read.
+    dimmer: Color::Indexed(246),
     accent: Color::Indexed(25),
     on_accent: Color::White,
     filter_badge: Color::Indexed(23),
@@ -192,9 +200,12 @@ const LIGHT: Palette = Palette {
     grok: Color::Indexed(238),
     desktop_code: Color::Indexed(91),
     desktop_cowork: Color::Indexed(97),
-    selected_bg: Color::Indexed(253),
+    ground: Color::White,
+    // 253 on white is a wash you cannot find. 250 is the same kind of grey
+    // step the dark theme uses (236 against black), just mirrored.
+    selected_bg: Color::Indexed(250),
     failed_bg: Color::Indexed(224),
-    header_bg: Color::Indexed(253),
+    header_bg: Color::Indexed(250),
     marked_bg: Color::Indexed(225),
     dot_fresh: Color::Indexed(34),
     dot_warm: Color::Indexed(22),
@@ -259,6 +270,7 @@ const MONO: Palette = {
         grok: r,
         desktop_code: r,
         desktop_cowork: r,
+        ground: r,
         selected_bg: r,
         failed_bg: r,
         header_bg: r,
@@ -381,6 +393,16 @@ pub fn title() -> Style {
     Style::default()
         .fg(colors().panel_title)
         .add_modifier(Modifier::BOLD)
+}
+
+/// The page's own ground and default ink. Dark is a no-op, so a `Clear` or an
+/// unstyled span still shows the terminal; light is a pale fill, so the same
+/// span is black on white instead of dark-on-dark.
+pub fn canvas() -> Style {
+    match colors().ground {
+        Color::Reset => Style::default(),
+        bg => Style::default().bg(bg).fg(colors().value),
+    }
 }
 
 /// The highlighted row. A background wash normally, reverse video without
@@ -777,5 +799,33 @@ mod tests {
     fn gray_passes_through_on_dark() {
         assert_eq!(gray(240), Color::Indexed(240));
         assert_eq!(gray(120), Color::Indexed(120));
+    }
+
+    /// White ink on a pale wash is how the cursor used to vanish. The selected
+    /// style has to use the palette's ink, and the wash has to sit apart from
+    /// both that ink and the page.
+    #[test]
+    fn light_selection_is_not_white_on_white() {
+        assert_eq!(LIGHT.value, Color::Black);
+        assert_eq!(LIGHT.ground, Color::White);
+        assert_ne!(LIGHT.selected_bg, Color::White);
+        assert_ne!(LIGHT.selected_bg, LIGHT.ground);
+        assert_ne!(LIGHT.selected_bg, LIGHT.value);
+        assert_eq!(LIGHT.header_bg, LIGHT.selected_bg);
+    }
+
+    #[test]
+    fn selected_style_uses_palette_ink() {
+        let s = selected();
+        assert_eq!(s.fg, Some(colors().value));
+        assert_eq!(s.bg, Some(colors().selected_bg));
+    }
+
+    /// Dark must not start painting a ground. A Reset here is the whole point:
+    /// the original look is the terminal's, not ours.
+    #[test]
+    fn dark_leaves_the_terminal_ground_alone() {
+        assert_eq!(DARK.ground, Color::Reset);
+        assert_eq!(canvas().bg, None);
     }
 }
