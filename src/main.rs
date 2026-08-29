@@ -194,6 +194,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(profile) = &args.add_account {
+        return quota::add_account(profile);
+    }
+
     if args.clear_cache && cache::clear_session_cache()? {
         eprintln!("Cleared cctop session extraction cache.");
     }
