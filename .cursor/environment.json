@@ -1,0 +1,4 @@
+{
+  "name": "cctop",
+  "install": "rustup toolchain install stable --profile minimal --component clippy --component rustfmt && rustup default stable && cargo build --locked --all-targets"
+}
