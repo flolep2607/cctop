@@ -258,6 +258,14 @@ image in. No image bytes go near the pty. On the dashboard the same key opens
 the type-into box with the path in it, so a session you are not attached to can
 be sent one too.
 
+Inside a pane, `Ctrl+V` and the right button do it as well, but only when the
+clipboard actually holds a picture: with text on it, both behave exactly as
+they did — `Ctrl+V` goes to the agent and the right button is dropped. Two
+gestures rather than one because terminals disagree about which of them an
+application ever sees. Windows Terminal binds `Ctrl+V` to its own paste, so the
+agent is never told; it does forward the right button while pasting, and its
+paste of an image is nothing at all, so there is nothing to collide with.
+
 It needs something that can read the clipboard: `wl-clipboard` or `xclip` on
 Linux, `pngpaste` or the built-in `osascript` on macOS, and `powershell.exe` on
 Windows — which is also how it works under WSL, where the clipboard being read

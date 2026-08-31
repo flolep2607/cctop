@@ -90,6 +90,20 @@ impl App {
                 self.on_key_function(key);
                 return;
             }
+            // Ctrl+V with a picture on the clipboard, which is the gesture
+            // anyone reaches for before they reach for F9. Taken only when
+            // there is an image to take it for: with text on the clipboard the
+            // key goes to the agent untouched, as it always did.
+            //
+            // Many terminals never send it — Windows Terminal binds Ctrl+V to
+            // its own paste and the application sees nothing, which is why the
+            // right button below matters more there than this does.
+            if key.code == KeyCode::Char('v')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && self.image_gesture_into_pane()
+            {
+                return;
+            }
             if let Some(pane) = self.focused_pane() {
                 // The agent this key is going to, taken before the borrow ends:
                 // answering its question is the one thing no hook reports.
@@ -268,6 +282,44 @@ impl App {
         self.set_status(format!("Saved {path}"));
     }
 
+    /// The image paste as a gesture rather than as a key: pastes and returns
+    /// true when the clipboard holds an image, and says nothing at all when it
+    /// does not.
+    ///
+    /// Silence is the point. `F9` is pressed to paste an image and so reports
+    /// when there is none; `Ctrl+V` and the right button are pressed to paste
+    /// *whatever* is there, and a status line saying "no image on the
+    /// clipboard" every time someone pastes a line of text would be cctop
+    /// talking over the thing they were doing.
+    fn image_gesture_into_pane(&mut self) -> bool {
+        let Ok(path) = crate::clipboard::image_to_file() else {
+            return false;
+        };
+        self.needs_redraw = true;
+        let shown = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.send_to_focused_pane(&format!("{} ", path.display()));
+        self.set_status(format!("Pasted {shown}"));
+        true
+    }
+
+    /// Text typed at the focused pane's agent, with the bookkeeping a paste
+    /// carries: what is put in front of an agent answers whatever it asked.
+    fn send_to_focused_pane(&mut self, text: &str) {
+        let Some(pane) = self.focused_pane() else {
+            return;
+        };
+        let agent = pane.agent();
+        let alive = pane.view.send_paste(text);
+        self.mark_answered(agent);
+        if !alive {
+            self.close_pane();
+            self.set_status("The agent's terminal closed");
+        }
+    }
+
     /// F9 inside a pane: the image, then a space, typed at the agent.
     ///
     /// A space after it because the path is the start of a sentence, not the
@@ -277,18 +329,7 @@ impl App {
         let Some(path) = self.image_paste() else {
             return;
         };
-        let Some(pane) = self.focused_pane() else {
-            return;
-        };
-        // The same bookkeeping any other paste into a pane does: text put in
-        // front of an agent is an answer to whatever it asked.
-        let agent = pane.agent();
-        let alive = pane.view.send_paste(&format!("{path} "));
-        self.mark_answered(agent);
-        if !alive {
-            self.close_pane();
-            self.set_status("The agent's terminal closed");
-        }
+        self.send_to_focused_pane(&format!("{path} "));
     }
 
     /// The multiplexer keys, live everywhere including inside a pane. Returns
@@ -1292,6 +1333,18 @@ impl App {
             // own rmux sessions too; not sending the button is the fix that
             // stays inside cctop. No agent cctop hosts asks for right-click, so
             // nothing is lost by keeping it.
+            // The right button is dropped, as below — unless the clipboard
+            // holds an image, which is the one thing a right-click in a pane
+            // could not otherwise do. It is the gesture that works in the
+            // terminal where Ctrl+V does not: Windows Terminal keeps its own
+            // right-click paste *and* forwards the button, and its paste of an
+            // image is nothing at all, so there is nothing to collide with.
+            if ev.kind == MouseEventKind::Down(MouseButton::Right)
+                && layout.pane_at(ev.column, ev.row).is_some()
+                && self.image_gesture_into_pane()
+            {
+                return;
+            }
             let button = |b| match b {
                 MouseButton::Left => Some(crate::attach::MouseButton::Left),
                 MouseButton::Middle => Some(crate::attach::MouseButton::Middle),
