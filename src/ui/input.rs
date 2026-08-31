@@ -236,6 +236,38 @@ impl App {
         }
     }
 
+    /// F9 on the dashboard, where there is no composer to type into.
+    ///
+    /// The image is read first and the destination decided after, which is the
+    /// whole of what was wrong here to begin with: asking `send_prompt` first
+    /// meant a row with no local process refused the key with "no local process
+    /// to type into" — a true sentence about a question nobody asked, and no
+    /// clue that it was the image key that had just been pressed.
+    ///
+    /// With a session that can be typed into, the path goes into the box that
+    /// types for it, the field left open for the sentence that follows. With
+    /// none — a finished session, a subagent, a row on another machine — the
+    /// file has still been written and the status line names it in full, which
+    /// is the most that can be done with an image nobody is waiting for.
+    ///
+    /// Not copied to the clipboard, tempting as it is: the clipboard is where
+    /// the image just came from, and putting a path there would delete the
+    /// screenshot the next F9 was going to read. A key that destroys its own
+    /// input on the way past is worse than one that only reports.
+    fn paste_image_from_the_list(&mut self) {
+        let Some(path) = self.image_paste() else {
+            return;
+        };
+        self.send_prompt();
+        if self.mode == Mode::SendKeys {
+            self.send_input = format!("{path} ");
+            return;
+        }
+        // `send_prompt` will have said why it could not open, which is no
+        // longer the news.
+        self.set_status(format!("Saved {path}"));
+    }
+
     /// F9 inside a pane: the image, then a space, typed at the agent.
     ///
     /// A space after it because the path is the start of a sentence, not the
@@ -957,19 +989,7 @@ impl App {
             KeyCode::Enter if self.selected_session().is_some() => self.open_row_menu(),
             KeyCode::Char('d') => self.delete_selected(),
             KeyCode::Char('s') => self.send_prompt(),
-            // The same key as inside a pane, answering the same question from
-            // the other side of it: on the dashboard there is no composer to
-            // type into, so the path goes into the box that types for you, with
-            // the field left open for the sentence that follows it.
-            KeyCode::F(9) => {
-                self.send_prompt();
-                if self.mode == Mode::SendKeys {
-                    match self.image_paste() {
-                        Some(path) => self.send_input = format!("{path} "),
-                        None => self.mode = Mode::List,
-                    }
-                }
-            }
+            KeyCode::F(9) => self.paste_image_from_the_list(),
             KeyCode::Char('a') if self.on_subagent() => {
                 self.set_status("A subagent has no terminal of its own to attach to")
             }
