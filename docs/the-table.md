@@ -243,6 +243,13 @@ Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
 
+Right-click a row for its menu, the same menu `Enter` opens. The footer's key
+hints are buttons — clicking `? Help` opens the help, clicking `R Resume`
+resumes — and so are the `[y]` and `[n / Esc]` in every confirmation, where a
+click beside the dialog is also a cancel. `q Quit` is the one that takes two
+clicks: it is the only key on the footer with nothing behind it to ask again,
+and the first click says so in the status line.
+
 ### More than one account
 
 Claude Code and Codex both let one machine hold several logins — `$CLAUDE_CONFIG_DIR`

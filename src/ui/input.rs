@@ -1026,6 +1026,31 @@ impl App {
         self.start_serving(true);
     }
 
+    /// A click on a key written on screen — a footer hint, or the `[y]` in a
+    /// confirmation — answered by pressing that key.
+    ///
+    /// Going through `on_key` rather than calling the action is what keeps the
+    /// two in step: the hint says `R Resume`, and clicking it does whatever `R`
+    /// does in the state the app is actually in, including opening the
+    /// confirmation that `R` opens.
+    ///
+    /// `q` is the exception, and takes two clicks. It is the one key on the
+    /// footer whose action cannot be undone — there is no confirmation behind
+    /// it unless cctop is hosting an agent — so a slipped pointer must not end
+    /// the session, in the same way one must not put a tunnel on the internet.
+    fn on_hint_click(&mut self, key: KeyEvent, quit_armed: bool) {
+        if key.code == KeyCode::Char('q') && key.modifiers.is_empty() && !quit_armed {
+            self.quit_arm = true;
+            // Said in the footer's badges rather than with `set_status`, which
+            // draws over the hints — including the `q Quit` the second click has
+            // to land on. Arming that hid its own button was a button that could
+            // only ever be clicked once.
+            self.needs_redraw = true;
+            return;
+        }
+        self.on_key(key);
+    }
+
     pub(super) fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
         // Anything the mouse actually does changes the screen, and unlike
         // `on_key` there is nothing downstream to rely on for the frame:
@@ -1052,6 +1077,15 @@ impl App {
         // to drive.
         if self.mode != Mode::List && layout.modal_rect.is_some() {
             if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+                return;
+            }
+            // A `[y]` in a confirmation, answered by pressing what it says.
+            // Single-click, unlike the launcher's two: the dialog is itself the
+            // second step — a click got here by asking for something that
+            // stopped to ask, and asking twice about the same pointer teaches
+            // nothing.
+            if let Some(key) = layout.key_at(ev.column, ev.row) {
+                self.on_key(key);
                 return;
             }
             // The row menu answers a single click: unlike the launcher, every
@@ -1131,6 +1165,15 @@ impl App {
             // takes it back, which is what stops a forgotten first click from
             // turning an unrelated one into a tunnel.
             let armed = std::mem::replace(&mut self.share_arm, false);
+            // Same rule as the corner's: arming is about the click being made
+            // now, so any click that is not the second one on `q Quit` takes it
+            // back. A first click that quits on the next unrelated one would be
+            // worse than no button at all.
+            let quit_armed = std::mem::replace(&mut self.quit_arm, false);
+            if let Some(key) = layout.key_at(ev.column, ev.row) {
+                self.on_hint_click(key, quit_armed);
+                return;
+            }
             if on_corner {
                 self.on_share_corner(armed);
                 return;
@@ -1218,6 +1261,20 @@ impl App {
                     self.scroll_active_panel(-1);
                 } else {
                     self.move_selection(-1);
+                }
+            }
+            // Right-click a row for its menu, as the tab bar's right button
+            // renames a tab: the actions are already a click away once the menu
+            // is up, and reaching for Enter to open it was the one step in that
+            // path a mouse could not take.
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(row) = layout.row_at(ev.row) {
+                    let idx = self.scroll + row;
+                    if idx < self.visible.len() {
+                        self.selected = idx;
+                        self.ensure_available_tab();
+                        self.open_row_menu();
+                    }
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {

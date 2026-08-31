@@ -1,9 +1,11 @@
 //! Modal overlays: help, filters, and the confirmation dialogs.
 
 use super::columns::COLUMNS;
+use super::render::Layout;
 use super::theme;
 use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, tabs};
 use ratatui::Frame;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -194,6 +196,11 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+Shift+W", "The same, by a name that says so"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
+        section("Mouse"),
+        item("Right-click a row", "Its menu, as Enter opens it"),
+        item("Click a footer hint", "Presses that key (q asks twice)"),
+        item("Click [y] / [n]", "Answers a confirmation"),
+        Line::default(),
         section("Elsewhere"),
         item("A", "Open the agent this cctop launched"),
         item("w", "Bell + desktop alert when a session needs you"),
@@ -314,7 +321,7 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Resuming a session that is already running somewhere else.
-pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(session) = app.selected_session() else {
         return;
     };
@@ -344,13 +351,24 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App) {
             theme::value(),
         )),
         Line::default(),
-        Line::from(Span::styled(
-            " y to resume anyway · any other key to cancel",
-            theme::dim(),
-        )),
+        // The same two chips its siblings use, rather than the sentence this
+        // line used to be: they are what a pointer can be aimed at, and one
+        // dialog in the family phrasing it differently taught nobody anything.
+        Line::from(Span::styled(RESUME_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Resume a running session?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Resume a running session?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        RESUME_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
+
+const RESUME_KEYS: &str = " [y] resume anyway    [n / Esc] cancel";
 
 /// Offering to install rmux, which is what would have made the agent about to
 /// start outlive cctop.
@@ -1090,7 +1108,54 @@ pub(super) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Agent integration", lines, WIDTH);
 }
 
-pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {
+// ---------------------------------------------------------------------------
+// Confirmations
+// ---------------------------------------------------------------------------
+
+/// The key a chip stands for: `[y]` is `y`.
+fn ch(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+/// `[n / Esc]`, and `[any key]` on the dialogs that only have something to say.
+fn dismiss() -> KeyEvent {
+    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+}
+
+/// Claim a confirmation's rectangle and make the `[k]` chips on its last line
+/// clickable.
+///
+/// Both halves matter, and both were missing. Without the rectangle a click
+/// anywhere on a dialog fell straight through to the table underneath, moving
+/// the selection beneath a question about the row that was selected when it was
+/// asked. And the chips are written to be read as buttons — `[y] delete` is not
+/// prose — so a pointer aimed at one has to land somewhere, cctop holding the
+/// terminal's mouse capture.
+///
+/// `hint` is the text of that line and `row` its index among the lines, which
+/// is how the chips are located: they are found in the string that was drawn,
+/// rather than by counting columns a caller would have to keep in step with the
+/// wording.
+fn confirm_chips(
+    layout: &mut Layout,
+    outer: Rect,
+    inner: Rect,
+    row: u16,
+    hint: &str,
+    keys: &[(&str, KeyEvent)],
+) {
+    layout.modal_rect = Some(outer);
+    for (chip, key) in keys {
+        let Some(at) = hint.find(chip) else {
+            continue;
+        };
+        let x = inner.x + hint[..at].chars().count() as u16;
+        let width = chip.chars().count() as u16;
+        layout.key_hits.push((inner.y + row, x, x + width, *key));
+    }
+}
+
+pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -1106,15 +1171,23 @@ pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::colors().cost_mid),
         )),
         Line::default(),
-        Line::from(Span::styled(
-            "  [y] delete    [n / Esc] cancel",
-            theme::dim(),
-        )),
+        Line::from(Span::styled(DELETE_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Delete session?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Delete session?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DELETE_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
 
-pub(super) fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App) {
+const DELETE_KEYS: &str = "  [y] delete    [n / Esc] cancel";
+
+pub(super) fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -1127,12 +1200,24 @@ pub(super) fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::raw("  This session is still running.")),
         Line::from(Span::raw("  Stop the agent first, then delete it.")),
         Line::default(),
-        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Cannot delete", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Cannot delete", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DISMISS_KEYS,
+        &[("[any key]", dismiss())],
+    );
 }
 
-pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App) {
+/// The one chip on a dialog that has nothing to decide, only something to say.
+const DISMISS_KEYS: &str = "  [any key] dismiss";
+
+pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -1149,15 +1234,23 @@ pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from(Span::raw("  Unsaved work in the agent may be interrupted.")),
         Line::default(),
-        Line::from(Span::styled(
-            "  [y] terminate    [n / Esc] cancel",
-            theme::dim(),
-        )),
+        Line::from(Span::styled(KILL_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Terminate session?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Terminate session?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        KILL_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
 
-pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App) {
+const KILL_KEYS: &str = "  [y] terminate    [n / Esc] cancel";
+
+pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let label = match &app.hosted {
         Some((_, label)) => label.clone(),
         None => return,
@@ -1175,15 +1268,23 @@ pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from(Span::raw("  Exit the agent itself to leave it cleanly.")),
         Line::default(),
-        Line::from(Span::styled(
-            "  [y] quit anyway    [n / Esc] stay    [A] back to the agent",
-            theme::dim(),
-        )),
+        Line::from(Span::styled(QUIT_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Quit and stop the agent?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Quit and stop the agent?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        QUIT_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss()), ("[A]", ch('A'))],
+    );
 }
 
-pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App) {
+const QUIT_KEYS: &str = "  [y] quit anyway    [n / Esc] stay    [A] back to the agent";
+
+pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -1198,12 +1299,21 @@ pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from(Span::raw("  It may be running in a remote or shared host.")),
         Line::default(),
-        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Cannot terminate", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Cannot terminate", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DISMISS_KEYS,
+        &[("[any key]", dismiss())],
+    );
 }
 
-pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let ms = app.marked_sessions();
     let (verb, noun) = match app.batch {
         BatchKind::Delete => ("delete", "sessions"),
@@ -1237,14 +1347,27 @@ pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(theme::colors().cost_mid),
     )));
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        format!("  [y] {verb} all    [n / Esc] cancel"),
-        theme::dim(),
-    )));
-    modal(frame, area, &format!("{verb} all?"), lines, 62);
+    let hint = format!("  [y] {verb} all    [n / Esc] cancel");
+    lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, &format!("{verb} all?"), lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        &hint,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
 
-pub(super) fn draw_batch_blocked(frame: &mut Frame, area: Rect, app: &App, deleting: bool) {
+pub(super) fn draw_batch_blocked(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    deleting: bool,
+    layout: &mut Layout,
+) {
     let ms = app.marked_sessions();
     // First one that can't be processed, for the explanation.
     let (explain, name) = match app.batch {
@@ -1280,14 +1403,23 @@ pub(super) fn draw_batch_blocked(frame: &mut Frame, area: Rect, app: &App, delet
             theme::dim(),
         )),
         Line::default(),
-        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
     ];
+    let last = lines.len() as u16 - 1;
     let title = if deleting {
         "Cannot delete all"
     } else {
         "Cannot terminate all"
     };
-    modal(frame, area, title, lines, 62);
+    let (outer, inner) = modal(frame, area, title, lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DISMISS_KEYS,
+        &[("[any key]", dismiss())],
+    );
 }
 
 pub(super) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {

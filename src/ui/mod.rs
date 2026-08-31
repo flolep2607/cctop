@@ -698,6 +698,12 @@ pub struct App {
     /// into it. A paste that lands in the same instant as the click that
     /// opened the field is that echo, not a person, and is dropped.
     pub rename_opened_by_click: Option<Instant>,
+    /// Whether the footer's `q Quit` has been clicked once already.
+    ///
+    /// The share corner's `share_arm` for the other irreversible thing a
+    /// pointer can reach. Cleared by any other click, so it only ever spans one
+    /// deliberate pair.
+    pub quit_arm: bool,
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
     /// page by half a screen.
     pub list_height: u16,
@@ -998,6 +1004,7 @@ impl App {
             rename_tab: 0,
             rename_was: String::new(),
             rename_opened_by_click: None,
+            quit_arm: false,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
@@ -5195,6 +5202,138 @@ mod tests {
     /// The browser panel shows where the page is, and does not show the token
     /// that opens it.
     ///
+    /// A pointer can do everything the footer and the confirmations say.
+    ///
+    /// Three separate paths, one test, because they are one claim: cctop holds
+    /// the terminal's mouse capture, so anything drawn as a button has to be
+    /// answered here or the click is simply lost. The regions come out of a real
+    /// draw rather than being asserted at, since a hint's column is whatever the
+    /// footer's arithmetic made it.
+    #[test]
+    fn the_mouse_can_press_the_keys_that_are_drawn_on_screen() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (cols, rows) = (140u16, 30u16);
+        let draw = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+            let mut layout = render::Layout::default();
+            terminal
+                .draw(|frame| layout = render::draw(frame, app))
+                .expect("draw");
+            let screen: String = (0..rows)
+                .map(|y| {
+                    (0..cols)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (layout, screen)
+        };
+        // The column a piece of text starts at, on the row it was drawn on.
+        let at = |screen: &str, text: &str| -> (u16, u16) {
+            let (row, line) = screen
+                .lines()
+                .enumerate()
+                .find(|(_, l)| l.contains(text))
+                .unwrap_or_else(|| panic!("{text:?} was never drawn:\n{screen}"));
+            // Char columns, not byte offsets: the row is full of box-drawing
+            // characters, each three bytes wide, so a byte index is several
+            // columns to the right of where the text actually is.
+            let col = line
+                .char_indices()
+                .position(|(i, _)| line[i..].starts_with(text))
+                .expect("found above");
+            (col as u16, row as u16)
+        };
+        let click = |col, row| event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: event::KeyModifiers::NONE,
+        };
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, "proj")];
+        app.visible = vec![Row::Session(0)];
+        app.selected = 0;
+
+        // The footer's `?` opens the help it names.
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "? Help");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::Help, "clicking `? Help` did nothing");
+        app.on_key(key(KeyCode::Esc));
+
+        // `q Quit` takes two, like the share corner: the first says so.
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(!app.should_quit, "one click on `q Quit` quit cctop");
+        assert!(app.quit_arm);
+        // Said in the footer, beside the hint the second click has to land on —
+        // and the hint is still there to land on, which a status message drawn
+        // over the whole footer would have taken away. Redrawn every time, so
+        // the region a click is tested against is the one now on screen.
+        let (layout, screen) = draw(&mut app);
+        assert!(
+            screen.contains("click q again to quit"),
+            "the footer never asked:\n{screen}"
+        );
+        // Any other click takes the arming back, and the one after it is a
+        // first click again rather than the second of a pair.
+        app.on_mouse(click(0, layout.rows_start), &layout);
+        assert!(!app.quit_arm);
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(!app.should_quit);
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(app.should_quit, "two deliberate clicks did not quit");
+        app.should_quit = false;
+
+        // Right-clicking a row opens that row's menu, having selected it.
+        let (layout, _) = draw(&mut app);
+        app.on_mouse(
+            event::MouseEvent {
+                kind: event::MouseEventKind::Down(event::MouseButton::Right),
+                column: 4,
+                row: layout.rows_start,
+                modifiers: event::KeyModifiers::NONE,
+            },
+            &layout,
+        );
+        assert_eq!(app.mode, Mode::RowMenu, "right-click opened no menu");
+        assert_eq!(app.selected, 0);
+        app.on_key(key(KeyCode::Esc));
+
+        // A confirmation's `[n / Esc]` cancels it, and its `[y]` is the answer.
+        app.mode = Mode::DeleteConfirm;
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "[n / Esc]");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::List, "clicking cancel left the dialog up");
+        assert!(app.deleting.is_empty(), "cancel deleted the session");
+
+        app.mode = Mode::DeleteConfirm;
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "[y]");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::List);
+        assert!(!app.deleting.is_empty(), "clicking `[y]` deleted nothing");
+
+        // And a click beside the dialog is a cancel, not a click on the table
+        // it is drawn over: the selection used to move under the question.
+        app.deleting.clear();
+        app.mode = Mode::KillConfirm;
+        let (layout, _) = draw(&mut app);
+        app.on_mouse(click(1, 1), &layout);
+        assert_eq!(app.mode, Mode::List, "a click off the dialog was swallowed");
+    }
+
     /// Both halves matter. A panel that cannot say where the page is has not
     /// answered the question it was opened to answer; a panel that prints the
     /// token puts a credential into every screenshot of it. The link is drawn

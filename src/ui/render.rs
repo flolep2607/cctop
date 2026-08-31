@@ -11,6 +11,7 @@ use crate::session::Surface;
 use crate::util;
 use ratatui::Frame;
 use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::crossterm::event;
 use ratatui::layout::{Constraint, Layout as RLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -51,6 +52,15 @@ pub struct Layout {
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
     pub(super) tool_log: Option<(u16, u16, u16)>,
+    /// Every place a key is written on screen as its own label, and the key it
+    /// stands for: `(row, start_col, end_col, key)`.
+    ///
+    /// The footer's hints and a confirmation's `[y]` are drawn to be read as
+    /// buttons, and cctop holds the terminal's mouse capture — so a click on one
+    /// is answered here or nowhere, exactly as it is for the share corner. One
+    /// list rather than a field per surface, because the answer is always the
+    /// same: press the key that is written there.
+    pub(super) key_hits: Vec<(u16, u16, u16, event::KeyEvent)>,
     /// Where each pane of the open tab has its agent's screen, in pane order.
     ///
     /// The agent's screen, not the pane: the border is cctop's and the shim may
@@ -76,6 +86,14 @@ impl Layout {
             .iter()
             .find(|(a, b, _)| col >= *a && col < *b)
             .map(|(_, _, id)| *id)
+    }
+
+    /// The key written under the cursor, if a click there means pressing one.
+    pub fn key_at(&self, col: u16, row: u16) -> Option<event::KeyEvent> {
+        self.key_hits
+            .iter()
+            .find(|(r, a, b, _)| *r == row && col >= *a && col < *b)
+            .map(|(_, _, _, key)| *key)
     }
 
     /// Index of the tool-filter row under the cursor, if any.
@@ -213,7 +231,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             // dashboard, because a question asked on a screen you are not
             // looking at is indistinguishable from a key that did nothing —
             // and the keyboard is waiting on the answer either way.
-            Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
+            Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
             // A tab is renamed by right-clicking it, and the bar is on screen
             // inside a tab as much as over the dashboard.
             Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
@@ -250,17 +268,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Search => modals::draw_search(frame, area, app),
         Mode::SortBy => modals::draw_sortby(frame, area, app),
         Mode::AgeFilter => modals::draw_age_filter(frame, area, app),
-        Mode::DeleteConfirm => modals::draw_delete_confirm(frame, area, app),
-        Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app),
-        Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
-        Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app),
+        Mode::DeleteConfirm => modals::draw_delete_confirm(frame, area, app, &mut layout),
+        Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app, &mut layout),
+        Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app, &mut layout),
+        Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app, &mut layout),
         Mode::TmuxInstall => modals::draw_rmux_install(frame, area, app),
         Mode::Serve => modals::draw_serve(frame, area, app),
-        Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
-        Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
-        Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),
-        Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true),
-        Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
+        Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
+        Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app, &mut layout),
+        Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app, &mut layout),
+        Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true, &mut layout),
+        Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false, &mut layout),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
         Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
@@ -1395,6 +1413,41 @@ impl Hint {
     fn width(&self) -> usize {
         self.key.chars().count() + self.name.chars().count() + 2
     }
+
+    /// The keystroke this hint stands for, so a click on it can be answered by
+    /// pressing that key — one dispatch, and a hint cannot drift from what
+    /// clicking it does.
+    ///
+    /// `None` for the hints that name more than one key: `↑↓`, `Alt+←→` and
+    /// `Alt+v/s` are maps of a pair, and a click cannot say which half was
+    /// meant. They stay labels, which costs nothing — a mouse already moves the
+    /// selection by clicking a row and switches tab by clicking the bar.
+    fn event(&self) -> Option<event::KeyEvent> {
+        use event::{KeyCode, KeyModifiers as Mods};
+        let (code, mods) = match self.key {
+            "↑↓" | "Alt+←→" | "Alt+v/s" => return None,
+            "↵" => (KeyCode::Enter, Mods::NONE),
+            "Esc" => (KeyCode::Esc, Mods::NONE),
+            "Tab" => (KeyCode::Tab, Mods::NONE),
+            "Space" => (KeyCode::Char(' '), Mods::NONE),
+            "F1" => (KeyCode::F(1), Mods::NONE),
+            "F10" => (KeyCode::F(10), Mods::NONE),
+            "F12" => (KeyCode::F(12), Mods::NONE),
+            // `Alt+n` and friends. The letter is the last character, and the
+            // handler for these reads the modifier as well as the code.
+            alt if alt.starts_with("Alt+") => match alt.chars().next_back() {
+                Some(c) => (KeyCode::Char(c), Mods::ALT),
+                None => return None,
+            },
+            // Everything else is the single character it prints: `/`, `?`, `a`,
+            // `D`. Uppercase as written, which is what the list handler matches.
+            one => match (one.chars().next(), one.chars().count()) {
+                (Some(c), 1) => (KeyCode::Char(c), Mods::NONE),
+                _ => return None,
+            },
+        };
+        Some(event::KeyEvent::new(code, mods))
+    }
 }
 
 const fn hint(key: &'static str, name: &'static str) -> Hint {
@@ -1406,16 +1459,42 @@ const fn hint(key: &'static str, name: &'static str) -> Hint {
 /// Dropping from the tail rather than truncating mid-word is what makes the
 /// priority order mean anything: a half-drawn `Qu` teaches nobody that `q`
 /// quits, so the hint that cannot fit whole is simply not shown.
-fn fit_hints(hints: &[Hint], mut room: usize) -> Vec<Span<'static>> {
+fn fit_hints(hints: &[Hint], room: usize) -> Vec<Span<'static>> {
+    fit_hints_at(hints, room, None, 0, 0)
+}
+
+/// The hints as spans, recording where each clickable one landed.
+///
+/// `x` and `row` are where the first span will be drawn, so a hit region is in
+/// screen coordinates rather than in offsets a caller would have to add up
+/// again. Passing no `hits` draws without recording, which is what the tests
+/// and the width arithmetic want.
+fn fit_hints_at(
+    hints: &[Hint],
+    mut room: usize,
+    mut hits: Option<&mut Vec<(u16, u16, u16, event::KeyEvent)>>,
+    x: u16,
+    row: u16,
+) -> Vec<Span<'static>> {
     let key_style = theme::key_cap();
     let label_style = Style::default().fg(theme::colors().dim);
     let mut spans = Vec::new();
+    let mut at = x;
     for h in hints {
         let w = h.width();
         if w > room {
             break;
         }
         room -= w;
+        // The whole chip, key and label together: `↵ Actions` reads as one
+        // button, and a region that covered only the `↵` would miss most of
+        // what a pointer is aimed at.
+        if let Some(hits) = hits.as_deref_mut()
+            && let Some(key) = h.event()
+        {
+            hits.push((row, at, at + w as u16, key));
+        }
+        at += w as u16;
         spans.push(Span::styled(h.key, key_style));
         spans.push(Span::styled(format!(" {} ", h.name), label_style));
     }
@@ -1479,6 +1558,14 @@ fn list_hints(app: &App) -> Vec<Hint> {
 /// screen that is on show nowhere else.
 fn footer_badges(app: &App) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
+    // First, and in the colour the costly things use: it is a question waiting
+    // for an answer, and the answer is a second click on the hint beside it.
+    if app.quit_arm {
+        spans.push(Span::styled(
+            " click q again to quit ",
+            Style::default().fg(theme::colors().cost_high),
+        ));
+    }
     if let Some(age) = app.age_filter {
         spans.push(Span::styled(
             format!(" Age<{} ", age.short()),
@@ -1736,6 +1823,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
             ..area
         },
         app,
+        layout,
     );
     if reserved == 0 {
         return;
@@ -1774,7 +1862,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     layout.share_corner = Some((area.y, x, x + width as u16));
 }
 
-fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     if let Some((msg, _)) = &app.status {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1803,7 +1891,14 @@ fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App) {
     let floor = hints.iter().take(3).map(Hint::width).sum::<usize>();
     let room = total.saturating_sub(badge_w).max(floor.min(total));
 
-    let mut spans = fit_hints(&hints, room);
+    // Only while the dashboard is what the keys act on. A hint clicked with a
+    // modal up would be dispatched into that modal's handler — the `?` under a
+    // search box types a question mark into the query — and the footer is drawn
+    // beneath every modal, where it is a legend rather than a row of buttons.
+    let mut spans = match app.mode {
+        Mode::List => fit_hints_at(&hints, room, Some(&mut layout.key_hits), area.x, area.y),
+        _ => fit_hints(&hints, room),
+    };
     spans.extend(badges);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -2148,8 +2243,21 @@ mod tests {
             launch_rows: vec![(10, 0), (11, 1)],
             launch_cwd_rows: vec![(12, 0)],
             menu_rows: vec![(9, 0), (10, 1)],
+            key_hits: vec![(
+                24,
+                0,
+                10,
+                event::KeyEvent::new(event::KeyCode::Enter, event::KeyModifiers::NONE),
+            )],
             pane_rects: vec![Rect::new(1, 7, 40, 10)],
         };
+        // A key written on screen answers its own columns and nothing else.
+        assert_eq!(
+            layout.key_at(3, 24).map(|k| k.code),
+            Some(event::KeyCode::Enter)
+        );
+        assert!(layout.key_at(10, 24).is_none());
+        assert!(layout.key_at(3, 23).is_none());
         // A modal takes the clicks that land on it, and its rows resolve to the
         // choice on them — not to the table underneath, which shares those rows.
         // The share link answers only its own columns on its own row: the
