@@ -276,9 +276,19 @@ keeps it in `config.toml` under your config directory, readable only by you:
 token = "sk-ant-oat01-…"
 ```
 
-The name is the profile's, so `[accounts.work]` is the token for the account the
-PROFILE column calls `work`, and a token you put there wins over the credentials
-in that profile's directory — being explicit is the point of typing it in.
+The name is the account's. Where a `~/.claude-work` exists it is that profile's
+token, winning over the credentials in the directory — being explicit is the
+point of typing it in. Where no such directory exists, the token *is* the
+account: it gets its own column in the limits panel, and its sessions stay in
+the one `~/.claude` with everything else, sharing the history, the settings and
+the project trust rather than splitting them across a second directory. Start
+one with `CLAUDE_CODE_OAUTH_TOKEN` set and that is the subscription it spends.
+
+Such an account is not offered in the launcher's profile picker, and cctop's
+`R` never resumes under it: both work by putting the account in front of the
+command, and the only thing there is to put there is the token itself — which
+would be in every `ps` on the machine. Set the variable in the shell you launch
+from instead.
 `CLAUDE_CODE_OAUTH_TOKEN` wins over both, for the default profile only: Claude
 Code prefers that variable too, so a session started with it spends the account
 the variable names rather than the one the directory holds. One variable is one

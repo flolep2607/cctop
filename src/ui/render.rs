@@ -1250,14 +1250,14 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     // The harness travels alongside the label rather than being read back out
     // of it: `Codex (work)` is still Codex, and a hint chosen by comparing the
     // label told a Codex account to run `claude login`.
-    let mut accounts: Vec<(String, &'static str, &crate::quota::ProviderStatus)> = Vec::new();
+    let mut accounts: Vec<(String, &'static str, &crate::quota::ProfileQuota)> = Vec::new();
     for (harness, qs) in [("Claude", &app.quota.claude), ("Codex", &app.quota.codex)] {
         for (i, q) in qs.iter().enumerate() {
             let name = match i {
                 0 => harness.to_string(),
                 _ => format!("{harness} ({})", q.profile),
             };
-            accounts.push((name, harness, &q.status));
+            accounts.push((name, harness, q));
         }
     }
 
@@ -1273,7 +1273,8 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     .spacing(2)
     .split(inner);
 
-    for (i, (name, harness, status)) in accounts.iter().enumerate() {
+    for (i, (name, harness, account)) in accounts.iter().enumerate() {
+        let status = &account.status;
         let mut spans = vec![Span::styled(format!("{name} "), theme::label())];
         // Each failure mode gets its own message: an expired sign-in needs the
         // user to act, a rate-limit clears on its own, and "not signed in" is
@@ -1289,13 +1290,21 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled("API billing, no limits", theme::dim()));
             }
             crate::quota::ProviderStatus::Expired => {
-                let cmd = if *harness == "Codex" {
-                    "codex login"
-                } else {
-                    "claude login"
+                // A token account has no login to renew: its credentials are
+                // the line the user pasted into cctop's own config, and
+                // `claude login` would refresh a directory it does not use.
+                // The shorter wording goes with the longer command, because an
+                // account's whole message lives in one column of a shared line
+                // and a hint clipped mid-flag is not a hint.
+                let (said, cmd) = match (account.source, *harness) {
+                    (crate::config::AccountSource::Token, _) => {
+                        ("expired — ", "cctop --add-account")
+                    }
+                    (_, "Codex") => ("sign-in expired — ", "codex login"),
+                    _ => ("sign-in expired — ", "claude login"),
                 };
                 spans.push(Span::styled(
-                    "sign-in expired — ",
+                    said,
                     Style::default().fg(theme::colors().cost_mid),
                 ));
                 spans.push(Span::styled(cmd.to_string(), theme::value()));
@@ -2048,6 +2057,7 @@ mod tests {
         let quota = crate::quota::Quota {
             claude: vec![crate::quota::ProfileQuota {
                 profile: "default".into(),
+                source: crate::config::AccountSource::Directory,
                 status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
                     plan: None,
                     windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
@@ -2318,14 +2328,16 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let expired = |profile: &str| crate::quota::ProfileQuota {
+        let expired = |profile: &str, source| crate::quota::ProfileQuota {
             profile: profile.to_string(),
             status: crate::quota::ProviderStatus::Expired,
+            source,
         };
+        use crate::config::AccountSource::{Directory, Token};
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
-        app.quota.claude = vec![expired("default")];
-        app.quota.codex = vec![expired("default"), expired("work")];
+        app.quota.claude = vec![expired("default", Directory), expired("side", Token)];
+        app.quota.codex = vec![expired("default", Directory), expired("work", Directory)];
 
         let (cols, rows) = (200u16, 50u16);
         let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
@@ -2355,6 +2367,19 @@ mod tests {
         assert!(
             mine.contains("codex login") && !mine.contains("claude login"),
             "a Codex account was pointed at another harness's login: {mine:?}"
+        );
+
+        // And an account that is only a token is pointed at the command that
+        // replaces one: it has no directory for `claude login` to write to, so
+        // the ordinary hint would be a repair that changes nothing.
+        let line = screen
+            .lines()
+            .find(|l| l.contains("Claude (side)"))
+            .expect("the token account was not drawn");
+        let mine = &line[line.find("Claude (side)").expect("found above")..];
+        assert!(
+            mine.contains("cctop --add-account") && !mine.contains("claude login"),
+            "a token account was told to log in: {mine:?}"
         );
     }
 

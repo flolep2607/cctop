@@ -4185,11 +4185,12 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                 // is asked separately. They share one due time: the interval
                 // exists to be polite to the provider, and a machine with two
                 // logins is not entitled to twice the requests.
-                quota.claude = crate::config::profiles_for(Provider::Claude)
+                quota.claude = crate::config::accounts_for(Provider::Claude)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
                         profile: profile.name.clone(),
                         status: crate::quota::fetch_claude(profile),
+                        source: profile.source,
                     })
                     .collect();
                 // Paced by whichever account is most throttled, so backing off
@@ -4206,11 +4207,12 @@ fn spawn_quota_poller(tx: Sender<Response>) {
             if now >= codex_due {
                 // Per account for the same reason as Claude's, and sharing one
                 // due time for the same reason too.
-                quota.codex = crate::config::profiles_for(Provider::Codex)
+                quota.codex = crate::config::accounts_for(Provider::Codex)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
                         profile: profile.name.clone(),
                         status: crate::quota::fetch_codex(profile),
+                        source: profile.source,
                     })
                     .collect();
                 let delay = quota
@@ -4956,6 +4958,7 @@ mod tests {
                 provider,
                 name: "work".to_string(),
                 dir: std::path::PathBuf::from(dir),
+                source: crate::config::AccountSource::Directory,
             };
             crate::config::argv_under_profile(vec![command.to_string()], &profile)
         };
