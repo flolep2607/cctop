@@ -16,9 +16,17 @@ pub(super) const MAX_PATH_INPUT: usize = 512;
 /// transcript.
 pub(super) const TAB_NAME_MAX: usize = 64;
 
+/// How long after a right-click a paste still counts as that click's echo.
+///
+/// One frame's worth of slack: the terminal writes the click and the clipboard
+/// back to back, so anything this close arrived with the button, while a person
+/// reaching for Ctrl+Shift+V cannot be here yet.
+pub(super) const RIGHT_CLICK_PASTE: Duration = Duration::from_millis(250);
+
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use std::time::{Duration, Instant};
 
 /// The pasted text as a single line, within `room` more bytes — the budget being
 /// in bytes because the caps it enforces are the ones `on_key_send` and
@@ -169,6 +177,13 @@ impl App {
                 self.send_input.push_str(&flatten(text, room));
             }
             Mode::RenameTab => {
+                // The clipboard a right-click brought along with it, not a
+                // paste anyone asked for. See `rename_opened_by_click`.
+                if let Some(at) = self.rename_opened_by_click.take()
+                    && at.elapsed() < RIGHT_CLICK_PASTE
+                {
+                    return;
+                }
                 let room = TAB_NAME_MAX.saturating_sub(self.rename_input.chars().count());
                 self.rename_input.push_str(&flatten(text, room));
             }
@@ -616,6 +631,7 @@ impl App {
         self.rename_tab = tab;
         self.rename_was = target.title();
         self.rename_input.clear();
+        self.rename_opened_by_click = None;
         self.mode = Mode::RenameTab;
         self.needs_redraw = true;
     }
@@ -970,6 +986,7 @@ impl App {
                 {
                     Some(tab) => {
                         self.rename_prompt(tab);
+                        self.rename_opened_by_click = Some(Instant::now());
                         true
                     }
                     None => false,

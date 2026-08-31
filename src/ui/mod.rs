@@ -690,6 +690,14 @@ pub struct App {
     pub rename_input: String,
     pub rename_tab: usize,
     pub rename_was: String,
+    /// When a right-click opened the rename prompt.
+    ///
+    /// Terminals that paste on the right button — Windows Terminal does, and
+    /// keeps doing it while mouse capture is on — send the click *and* the
+    /// clipboard, so the prompt opens with somebody's last copy already typed
+    /// into it. A paste that lands in the same instant as the click that
+    /// opened the field is that echo, not a person, and is dropped.
+    pub rename_opened_by_click: Option<Instant>,
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
     /// page by half a screen.
     pub list_height: u16,
@@ -989,6 +997,7 @@ impl App {
             rename_input: String::new(),
             rename_tab: 0,
             rename_was: String::new(),
+            rename_opened_by_click: None,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
@@ -4847,6 +4856,16 @@ mod tests {
             app.tabs.iter().map(tabs::Tab::title).collect::<Vec<_>>(),
             ["a", "review"]
         );
+
+        // A terminal that pastes on the right button sends the clipboard along
+        // with the click. It is dropped, so the field opens empty; a paste that
+        // follows later is the person's own and lands.
+        app.on_mouse(click(16), &layout);
+        app.on_paste("whatever was on the clipboard");
+        assert_eq!(app.rename_input, "");
+        app.on_paste("deliberate");
+        assert_eq!(app.rename_input, "deliberate");
+        app.on_key(key(KeyCode::Esc));
 
         // The tab the right-click landed on has gone; the name goes nowhere
         // rather than onto whichever tab took its place.
