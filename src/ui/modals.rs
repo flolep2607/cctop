@@ -194,6 +194,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
+        item("F9", "Paste the clipboard's image as a file path"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
         section("Mouse"),
@@ -1480,7 +1481,10 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("█", Style::default().fg(theme::colors().accent)),
         ]),
         Line::default(),
-        Line::from(Span::styled(" Enter send   Esc cancel", theme::dim())),
+        Line::from(Span::styled(
+            " Enter send   F9 paste an image   Esc cancel",
+            theme::dim(),
+        )),
     ];
     modal(frame, area, "Send to session", lines, 64);
 }

@@ -211,6 +211,54 @@ impl App {
         }
     }
 
+    /// The clipboard's image written to a file, and its path — the form an
+    /// agent can actually read one in. Says why when there is nothing to paste.
+    ///
+    /// Every failure is reported in the status line rather than swallowed: a
+    /// key that silently does nothing is indistinguishable from one that is not
+    /// bound, and the two answers this can give — an empty clipboard, and a
+    /// machine with no helper installed — are things the user can act on.
+    fn image_paste(&mut self) -> Option<String> {
+        self.needs_redraw = true;
+        match crate::clipboard::image_to_file() {
+            Ok(path) => {
+                let shown = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.set_status(format!("Pasted {shown}"));
+                Some(path.display().to_string())
+            }
+            Err(why) => {
+                self.set_status(why.message());
+                None
+            }
+        }
+    }
+
+    /// F9 inside a pane: the image, then a space, typed at the agent.
+    ///
+    /// A space after it because the path is the start of a sentence, not the
+    /// whole of one — "what is wrong with this?" follows, and every harness
+    /// needs the path separated from it.
+    fn paste_image_into_pane(&mut self) {
+        let Some(path) = self.image_paste() else {
+            return;
+        };
+        let Some(pane) = self.focused_pane() else {
+            return;
+        };
+        // The same bookkeeping any other paste into a pane does: text put in
+        // front of an agent is an answer to whatever it asked.
+        let agent = pane.agent();
+        let alive = pane.view.send_paste(&format!("{path} "));
+        self.mark_answered(agent);
+        if !alive {
+            self.close_pane();
+            self.set_status("The agent's terminal closed");
+        }
+    }
+
     /// The multiplexer keys, live everywhere including inside a pane. Returns
     /// false for an Alt- combination that means nothing here, so it still
     /// reaches the agent.
@@ -505,6 +553,11 @@ impl App {
             // it would take you off the agent you are watching in order to
             // reload a table you were not looking at.
             KeyCode::F(10) | KeyCode::F(5) => self.on_key_list(key),
+            // The clipboard's image, as a path the agent can open. Stays in
+            // the pane: the image is for the agent being typed at, and pulling
+            // the dashboard forward would take the composer off screen at the
+            // moment something is being put into it.
+            KeyCode::F(9) => self.paste_image_into_pane(),
             // The keys the dashboard binds, on the dashboard.
             KeyCode::F(1) | KeyCode::F(3) | KeyCode::F(6) | KeyCode::F(7) | KeyCode::F(8) => {
                 self.show_tab(0);
@@ -581,6 +634,15 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.send_input.pop();
+            }
+            KeyCode::F(9) => {
+                if let Some(path) = self.image_paste() {
+                    let room = 500usize.saturating_sub(self.send_input.len());
+                    if path.len() < room {
+                        self.send_input.push_str(&path);
+                        self.send_input.push(' ');
+                    }
+                }
             }
             KeyCode::Char(c) if self.send_input.len() < 500 => self.send_input.push(c),
             _ => {}
@@ -895,6 +957,19 @@ impl App {
             KeyCode::Enter if self.selected_session().is_some() => self.open_row_menu(),
             KeyCode::Char('d') => self.delete_selected(),
             KeyCode::Char('s') => self.send_prompt(),
+            // The same key as inside a pane, answering the same question from
+            // the other side of it: on the dashboard there is no composer to
+            // type into, so the path goes into the box that types for you, with
+            // the field left open for the sentence that follows it.
+            KeyCode::F(9) => {
+                self.send_prompt();
+                if self.mode == Mode::SendKeys {
+                    match self.image_paste() {
+                        Some(path) => self.send_input = format!("{path} "),
+                        None => self.mode = Mode::List,
+                    }
+                }
+            }
             KeyCode::Char('a') if self.on_subagent() => {
                 self.set_status("A subagent has no terminal of its own to attach to")
             }

@@ -3,6 +3,7 @@ mod alias;
 mod attach;
 mod cache;
 mod cli;
+mod clipboard;
 mod collide;
 mod config;
 mod doctor;

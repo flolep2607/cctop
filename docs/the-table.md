@@ -229,11 +229,13 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+o` | Move focus to the next pane |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
+| `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
 
 Every function key is cctop's, inside a pane as much as on the dashboard: none
 of them is passed to the agent. `F10` (quit) and `F5` (refresh) act where you
-press them; `F12` returns to the dashboard; `F1`, `F3`, `F6`, `F7`, and `F8`
+press them; `F9` pastes into the pane you are in; `F12` returns to the
+dashboard; `F1`, `F3`, `F6`, `F7`, and `F8`
 bring the dashboard forward and then do what they do there, since a search box
 or a sort order over a pane would be drawn on a screen the agent is repainting.
 An unbound function key does nothing rather than reaching the agent as an escape
@@ -242,6 +244,29 @@ sequence.
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+### Pasting an image
+
+A terminal cannot carry one. A bracketed paste is text, so a screenshot copied
+with the system's own shortcut reaches an agent as nothing at all — which is
+why `Ctrl+V` in a pane appears to do nothing when the clipboard holds a picture.
+
+`F9` is the way in. It reads the image off the clipboard, writes it to
+`~/.cache/cctop/pastes/paste-<when>.png`, and types *the path* at the agent,
+followed by a space — the form every one of these harnesses already reads an
+image in. No image bytes go near the pty. On the dashboard the same key opens
+the type-into box with the path in it, so a session you are not attached to can
+be sent one too.
+
+It needs something that can read the clipboard: `wl-clipboard` or `xclip` on
+Linux, `pngpaste` or the built-in `osascript` on macOS, and `powershell.exe` on
+Windows — which is also how it works under WSL, where the clipboard being read
+is Windows'. cctop says which of the two things went wrong: an empty clipboard
+and a machine with no such tool need different answers.
+
+The images are kept, not cleaned up: the path is in a transcript by then, and a
+conversation resumed next week may read it again. The directory is yours to
+empty.
 
 Right-click a row for its menu, the same menu `Enter` opens. The footer's key
 hints are buttons — clicking `? Help` opens the help, clicking `R Resume`
