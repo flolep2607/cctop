@@ -1002,6 +1002,16 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
             .unwrap_or_default()
             .to_string()
     };
+    // Also out of shape, and also not about the session it names: an image is
+    // filed on this machine and the answer is where. The session id rides along
+    // so the route is the same shape as its neighbours — one place that checks
+    // the token, insists on a JSON POST, and refuses a read-only serve.
+    if verb == "image" {
+        return match actions::image(&field("data")) {
+            Ok(filed) => json(stream, request, &filed),
+            Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
+        };
+    }
     // Answered before the others because it does not answer in their shape: a
     // terminal is a link and a reach, not a sentence about what was done.
     if verb == "terminal" {

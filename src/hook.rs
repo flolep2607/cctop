@@ -332,6 +332,27 @@ impl Signal {
         matches!(self, Signal::Started | Signal::Ended)
     }
 
+    /// What this says about the row's state, where the transcript is blind.
+    ///
+    /// Only the two waiting states are answered. A working signal returns
+    /// `None` and leaves the transcript's reading alone, which is not
+    /// deference so much as division of labour: a transcript reads *working*
+    /// perfectly well — it is being written to — and it is the only one of the
+    /// two that can see an API error. What it cannot see is either way of
+    /// having stopped, because a held permission prompt and a finished turn are
+    /// both, on disk, just an agent that stopped writing.
+    pub fn activity(self) -> Option<crate::session::ActivityState> {
+        match self {
+            Signal::NeedsInput => Some(crate::session::ActivityState::Asking),
+            Signal::Idle => Some(crate::session::ActivityState::WaitingForInput),
+            Signal::Busy
+            | Signal::Acting
+            | Signal::Compacting
+            | Signal::Started
+            | Signal::Ended => None,
+        }
+    }
+
     /// A word for the STATE column and the hooks panel.
     pub fn label(self) -> &'static str {
         match self {

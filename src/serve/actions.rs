@@ -74,9 +74,42 @@ pub struct Terminal {
     pub tunnelled: bool,
 }
 
+/// Where an image the page sent was written, for the prompt to name.
+#[derive(Debug, Serialize)]
+pub struct Filed {
+    /// The absolute path on *this* machine — the one the agent runs on, which
+    /// is the whole point of the route: the image was on the reader's laptop
+    /// and the agent cannot open anything there.
+    pub path: String,
+}
+
 /// Every failure is a sentence and a status, because the page shows the sentence
 /// and the browser needs the status.
 pub type Failed = (u16, String);
+
+/// Write an image the page pasted, and give back the path to put in a prompt.
+///
+/// The one way an image reaches an agent on a machine you are only sshed into.
+/// A terminal carries text and nothing else, so the picture in your clipboard
+/// cannot cross that way — but a browser can read a real image off the
+/// clipboard, and this page is already talking to the machine the agent is on.
+/// So the bytes come over the connection cctop already has, land in a file
+/// here, and the agent is handed the path exactly as `F9` hands it one locally.
+///
+/// Reuses the terminal side's sniff rather than trusting the content type: what
+/// is written is a PNG or the request is refused, so nothing else can be
+/// deposited on the machine through a route whose name says "image".
+pub fn image(data: &str) -> Result<Filed, Failed> {
+    let Some(png) = crate::clipboard::png_from_paste(data) else {
+        return Err((400, "only a PNG can be pasted here".into()));
+    };
+    match crate::clipboard::write_png(&png) {
+        Ok(path) => Ok(Filed {
+            path: path.display().to_string(),
+        }),
+        Err(e) => Err((503, format!("could not write the image here: {e}"))),
+    }
+}
 
 fn done(message: impl Into<String>) -> Result<Done, Failed> {
     Ok(Done {
@@ -383,6 +416,38 @@ pub fn terminal(session: &Session) -> Result<Terminal, Failed> {
         return Err((409, "the share came back without an operator link".into()));
     };
     Ok(Terminal { url, tunnelled })
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    /// The page's route files a PNG and refuses everything else.
+    ///
+    /// The refusal matters more than the acceptance: this is a route that
+    /// writes a file on the machine the agents run on, so what it will write is
+    /// bounded by the same sniff the terminal side uses rather than by the
+    /// content type the sender claimed.
+    #[test]
+    fn only_a_png_is_filed() {
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+        let data = format!(
+            "data:image/png;base64,{}",
+            crate::util::b64_encode(png.as_slice())
+        );
+        let filed = image(&data).expect("a PNG was refused");
+        let path = std::path::PathBuf::from(&filed.path);
+        assert_eq!(std::fs::read(&path).ok().as_deref(), Some(png.as_slice()));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            image("data:image/png;base64,bm90IGEgcG5n").map(|f| f.path),
+            Err((400, "only a PNG can be pasted here".to_string())),
+            "a base64 payload that is not a PNG was filed"
+        );
+        assert!(image("what is wrong with this?").is_err());
+        assert!(image("").is_err());
+    }
 }
 
 #[cfg(test)]

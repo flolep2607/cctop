@@ -29,7 +29,8 @@ pub enum Surface {
     DesktopCowork,
 }
 
-/// What a live agent is doing, inferred from the newest transcript event.
+/// What a live agent is doing, inferred from the newest transcript event — or,
+/// for [`ActivityState::Asking`], reported by the agent's own hooks.
 ///
 /// This deliberately captures only states that have a clear user-facing
 /// meaning.  A missing or unrecognised event remains normal work rather than
@@ -38,7 +39,20 @@ pub enum Surface {
 pub enum ActivityState {
     #[default]
     Working,
+    /// The turn is over and the prompt is the user's. Nobody is blocked: the
+    /// agent has said what it had to say and will sit there indefinitely.
     WaitingForInput,
+    /// The agent is blocked on a question — a permission prompt, or an MCP
+    /// elicitation — and cannot proceed until it is answered.
+    ///
+    /// Told apart from [`ActivityState::WaitingForInput`] because the two are
+    /// worth different amounts of your attention, and a transcript cannot tell
+    /// them apart at all: a held permission prompt leaves no record, so the
+    /// newest thing written is a tool call in flight, which reads exactly like
+    /// an agent still working. Only the agent's own hooks say this outright —
+    /// see [`Signal::NeedsInput`](crate::hook::Signal::NeedsInput) and
+    /// [`App::apply_reports`](crate::ui::App::apply_reports).
+    Asking,
     ApiError,
 }
 

@@ -2189,16 +2189,22 @@ impl App {
         // was killed mid-turn will never send the event that would clear it.
         self.hooked.retain(|_, reported| reported.is_current());
         self.apply_finished_agents();
-        self.apply_permissions();
+        self.apply_reports();
         (changed, lifecycle)
     }
 
-    /// Stamp each session with the permission mode its own hooks reported.
+    /// Stamp each session with what its own hooks reported: the permission mode
+    /// it runs under, and whether it is blocked on a question.
     ///
     /// Also run after a walk, because the rows are rebuilt wholesale and a
     /// freshly discovered one has to pick up what was reported before it
     /// existed. `hooked` outlives the rows for exactly this reason.
-    fn apply_permissions(&mut self) {
+    ///
+    /// This is what puts a held permission prompt on a row at all. Everything
+    /// downstream of the row reads it for free — the STATE dot, the bell, the
+    /// web report, `--json`, and a fleet peer — rather than each of them being
+    /// handed the UI's map of live reports and asked to agree with the others.
+    pub(crate) fn apply_reports(&mut self) {
         if self.hooked.is_empty() {
             return;
         }
@@ -2210,6 +2216,14 @@ impl App {
                 // about it.
                 if reported.permission.is_some() {
                     session.permission = reported.permission;
+                }
+                // The report is only allowed to say the two things the
+                // transcript cannot — see
+                // [`Signal::activity`](crate::hook::Signal::activity) — so a
+                // stale-but-not-yet-expired working claim cannot talk a row out
+                // of an API error it is genuinely sitting in.
+                if let Some(state) = reported.signal.activity() {
+                    session.activity_state = state;
                 }
             }
         }
@@ -2389,8 +2403,13 @@ impl App {
             .find_map(|session| {
                 self.hooked_signal(&session.session_id).or({
                     match session.activity_state {
-                        crate::session::ActivityState::WaitingForInput => {
+                        // Both of the row's waiting states are a tab worth
+                        // colouring; which colour is the caller's business.
+                        crate::session::ActivityState::Asking => {
                             Some(crate::hook::Signal::NeedsInput)
+                        }
+                        crate::session::ActivityState::WaitingForInput => {
+                            Some(crate::hook::Signal::Idle)
                         }
                         _ => None,
                     }
@@ -4435,7 +4454,7 @@ fn event_loop(
             // reapplied to every batch of rows that replaces them. The same
             // goes for the permission mode, which no transcript records at all.
             app.apply_finished_agents();
-            app.apply_permissions();
+            app.apply_reports();
             // After the hooks, because a row's liveness is what decides whether
             // it can still race anyone, and cheap enough to redo wholesale:
             // it compares paths already in memory and reads no transcript.
@@ -5649,6 +5668,52 @@ mod tests {
         assert!(!app.codex_hooks_heard());
     }
 
+    /// A permission prompt leaves no trace in a transcript — the newest record
+    /// is a tool call in flight, which reads as ordinary work — so before the
+    /// hooks reached the row, an agent stopped dead waiting for you was drawn
+    /// exactly like an agent that was busy, and a finished turn was drawn like
+    /// both. Only the report can tell the three apart.
+    #[test]
+    fn a_row_learns_from_its_hooks_what_a_transcript_cannot_say() {
+        let event = |signal| crate::hook::Event {
+            session_id: "a".into(),
+            reported: crate::hook::Reported {
+                signal,
+                cwd: "/w/proj".into(),
+                permission: None,
+                at: std::time::Instant::now(),
+            },
+            finished_agent: None,
+        };
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "proj")];
+        // What the walk left behind: a tool call in flight.
+        app.sessions[0].activity_state = crate::session::ActivityState::Working;
+
+        app.apply_hooks(vec![event(crate::hook::Signal::NeedsInput)]);
+        assert_eq!(
+            app.sessions[0].activity_state,
+            crate::session::ActivityState::Asking
+        );
+
+        app.apply_hooks(vec![event(crate::hook::Signal::Idle)]);
+        assert_eq!(
+            app.sessions[0].activity_state,
+            crate::session::ActivityState::WaitingForInput,
+            "a finished turn is the quieter of the two waits"
+        );
+
+        // A working report leaves the row alone rather than overwriting it: the
+        // transcript reads work correctly and is the only one of the two that
+        // can see an API error.
+        app.sessions[0].activity_state = crate::session::ActivityState::ApiError;
+        app.apply_hooks(vec![event(crate::hook::Signal::Busy)]);
+        assert_eq!(
+            app.sessions[0].activity_state,
+            crate::session::ActivityState::ApiError
+        );
+    }
+
     /// The mode is reported by a live agent but drawn on a row rebuilt by every
     /// walk, so the two have to survive arriving in either order.
     #[test]
@@ -5671,7 +5736,7 @@ mod tests {
         app.sessions = vec![session("a", true, "proj")];
         assert_eq!(app.sessions[0].permission, None, "not stamped yet");
 
-        app.apply_permissions();
+        app.apply_reports();
         assert_eq!(
             app.sessions[0].permission,
             Some(crate::hook::Permission::Bypass),

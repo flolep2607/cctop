@@ -276,6 +276,9 @@ function rowFor(s) {
   if (s.branch) tag(s.branch);
   tag(ago(s.last_active) + " ago");
   if (s.running && s.state === "waiting") tag("waiting on you", "pill warn");
+  // Louder than "waiting on you", and deliberately so: that one is your move
+  // whenever you get to it, this one is an agent stopped mid-tool until you say.
+  if (s.running && s.state === "asking") tag("needs permission", "pill bad");
   // "api error" in the present tense is a claim about now. For a stopped
   // session it is something that happened, and the row's last-active time is
   // already saying when.
@@ -364,6 +367,52 @@ function answerBox(s) {
   form.appendChild(input);
   form.appendChild(send);
   form.appendChild(said);
+  // A picture pasted into the box, which is the one way an image reaches an
+  // agent on a machine you are only sshed into: a terminal carries text and
+  // never an image, but a browser reads a real one off the clipboard. The
+  // bytes go over this connection, land in a file on the agent's machine, and
+  // the box is filled with the path — which is how every one of these agents
+  // reads an image. Text pastes are left entirely alone.
+  input.addEventListener("paste", (event) => {
+    const items = Array.from(event.clipboardData?.items || []);
+    const picture = items.find((i) => i.type && i.type.startsWith("image/"));
+    if (!picture) return;
+    const file = picture.getAsFile();
+    if (!file) return;
+    event.preventDefault();
+    said.className = "said";
+    said.textContent = "filing the image…";
+    const reader = new FileReader();
+    reader.onerror = () => {
+      said.className = "said bad";
+      said.textContent = "could not read that image";
+    };
+    reader.onload = async () => {
+      try {
+        const response = await ask(
+          "/api/act/image/" + encodeURIComponent(s.session_id) + QUERY,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ data: String(reader.result) }),
+          },
+        );
+        const filed = await response.json();
+        // Appended rather than replacing: the sentence about the picture is
+        // usually already half typed by the time it is pasted.
+        const room = input.value && !input.value.endsWith(" ") ? " " : "";
+        input.value = input.value + room + filed.path + " ";
+        input.focus();
+        said.textContent = "image filed on that machine";
+      } catch (e) {
+        said.className = "said bad";
+        said.textContent = String(e.message || e);
+      }
+    };
+    // A data: URL, which is the spelling the server already recognises from
+    // the terminal side.
+    reader.readAsDataURL(file);
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const text = input.value.trim();
@@ -415,7 +464,9 @@ function render() {
   // block is for. The row keeps its red dot either way; that is the table
   // saying what happened, which is a different claim from "answer me".
   const wanting = shown.filter(
-    (s) => s.running && (s.state === "waiting" || s.state === "error"),
+    (s) =>
+      s.running &&
+      (s.state === "waiting" || s.state === "asking" || s.state === "error"),
   );
   const rest = shown.filter((s) => !wanting.includes(s));
 
@@ -506,6 +557,12 @@ function announce(next) {
   if (!notifying || firstRender) return;
   for (const s of next) {
     const was = previousState.get(s.session_id);
+    if (was && was !== "asking" && s.state === "asking") {
+      new Notification("Needs permission", {
+        body: (s.project || s.session_id.slice(0, 8)) + (s.title ? " · " + s.title : ""),
+        tag: s.session_id,
+      });
+    }
     if (was && was !== "waiting" && s.state === "waiting") {
       new Notification("Waiting on you", {
         body: (s.project || s.session_id.slice(0, 8)) + (s.title ? " · " + s.title : ""),

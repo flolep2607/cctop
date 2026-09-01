@@ -295,6 +295,7 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
         state: match session.activity_state {
             crate::session::ActivityState::Working => "working",
             crate::session::ActivityState::WaitingForInput => "waiting",
+            crate::session::ActivityState::Asking => "asking",
             crate::session::ActivityState::ApiError => "error",
         },
         plan: plan.as_str(),

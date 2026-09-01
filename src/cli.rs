@@ -605,6 +605,7 @@ pub fn json_sessions(
                 state: match s.activity_state {
                     crate::session::ActivityState::Working => "working",
                     crate::session::ActivityState::WaitingForInput => "waiting",
+                    crate::session::ActivityState::Asking => "asking",
                     crate::session::ActivityState::ApiError => "error",
                 },
                 surface: match s.surface {

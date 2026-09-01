@@ -286,8 +286,16 @@ None of the above can work there. The clipboard is on the machine you typed the
 `ssh` on, and nothing installed on the far side can reach it — so `F9` says so
 rather than telling you to install `xclip`.
 
-What crosses the connection is text, so send the image as text: cctop reads any
-paste that is a PNG in base64 — bare, or as a `data:image/png;base64,…` URI —
+The way that needs nothing of you is the browser. `cctop serve` on that machine
+puts the table on an HTTP port; reach it from your own machine — `ssh -L
+7788:127.0.0.1:7788 <host>`, or `--tunnel` — and paste the screenshot straight
+into the box that answers a waiting session. A browser can take a real image
+off the clipboard where a terminal cannot, so the bytes travel over the
+connection cctop already has, land in `pastes/` on the far machine, and the
+box fills with the path. Then write the sentence around it and send.
+
+The other way needs no browser. What crosses a terminal is text, so send the
+image as text: cctop reads any paste that is a PNG in base64 — bare, or as a `data:image/png;base64,…` URI —
 writes it to the same `pastes/` directory, and gives the agent the path. Every
 base64 PNG starts `iVBORw0KGgo`, which is what cctop recognises, so an ordinary
 paste is never mistaken for one.

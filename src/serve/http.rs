@@ -52,6 +52,18 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// under what a thread can be made to hold.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// The most an image posted to the paste route may be.
+///
+/// Its own limit because it is the one route whose body is not prose: a
+/// screenshot of a wide display is a megabyte or two of PNG, half again as
+/// much in base64, and the ordinary 64 KiB would refuse every one of them. Kept
+/// to a size a thread can hold without thinking about it, and applied only to
+/// this path — every other route keeps the small bound.
+const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+
+/// The path that carries images, and so the one that may be large.
+const IMAGE_PATH: &str = "/api/act/image/";
+
 /// How long a client has to finish sending its request line and headers.
 ///
 /// Deliberately short. A connection that has been accepted but has not asked
@@ -102,7 +114,7 @@ impl Request {
         // timeout would not save us — a slow trickle of bytes resets it. The
         // allowance covers a body as well, so the header half is bounded by
         // counting bytes as they are read rather than by the reader itself.
-        let mut reader = BufReader::new(stream.take((MAX_HEADER_BYTES + MAX_BODY_BYTES) as u64));
+        let mut reader = BufReader::new(stream.take((MAX_HEADER_BYTES + MAX_IMAGE_BYTES) as u64));
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() || line.is_empty() {
             return Err((400, "malformed request line"));
@@ -194,7 +206,11 @@ impl Request {
         let mut body = Vec::new();
         if method == "POST" {
             let want = length.ok_or((411, "a POST needs a Content-Length"))?;
-            if want > MAX_BODY_BYTES {
+            let cap = match path.starts_with(IMAGE_PATH) {
+                true => MAX_IMAGE_BYTES,
+                false => MAX_BODY_BYTES,
+            };
+            if want > cap {
                 return Err((413, "request body too large"));
             }
             body = vec![0u8; want];

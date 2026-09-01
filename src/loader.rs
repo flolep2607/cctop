@@ -290,7 +290,7 @@ impl Loader {
         s.activity_state = read.state;
         // The transcript is the baseline, and every Claude Code session has one
         // whether or not cctop's hooks are installed. A live agent's own report
-        // is fresher and outranks it, which `App::apply_permissions` applies on
+        // is fresher and outranks it, which `App::apply_reports` applies on
         // top of this.
         s.permission = read.permission;
         if s.is_running() {
