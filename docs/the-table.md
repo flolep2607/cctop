@@ -258,13 +258,17 @@ image in. No image bytes go near the pty. On the dashboard the same key opens
 the type-into box with the path in it, so a session you are not attached to can
 be sent one too.
 
-Inside a pane, `Ctrl+V` and the right button do it as well, but only when the
-clipboard actually holds a picture: with text on it, both behave exactly as
-they did — `Ctrl+V` goes to the agent and the right button is dropped. Two
-gestures rather than one because terminals disagree about which of them an
-application ever sees. Windows Terminal binds `Ctrl+V` to its own paste, so the
-agent is never told; it does forward the right button while pasting, and its
-paste of an image is nothing at all, so there is nothing to collide with.
+Inside a pane `Ctrl+V` does it too, but only when the clipboard actually holds
+a picture: with text on it the key goes to the agent untouched, as it always
+did. Whether it arrives at all is the terminal's decision — Windows Terminal
+binds `Ctrl+V` to its own paste and never tells the application, so there `F9`
+is the way in, or unbind it in the terminal's settings.
+
+The right button is deliberately not a third way. It was for a day: in Windows
+Terminal it *copies* when there is a selection and pastes only when there is
+none, so selecting some output and right-clicking to copy it pasted an image
+into the agent instead. cctop cannot see the terminal's selection, so it cannot
+tell the two apart.
 
 It needs something that can read the clipboard: `wl-clipboard` or `xclip` on
 Linux, `pngpaste` or the built-in `osascript` on macOS, and `powershell.exe` on

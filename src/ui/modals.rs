@@ -195,11 +195,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
         item("F9", "Paste the clipboard's image as a file path"),
-        item("Ctrl+V", "The same, when the clipboard holds a picture"),
-        item(
-            "Right-click",
-            "The same again, for terminals that eat Ctrl+V",
-        ),
+        item("Ctrl+V", "The same, in terminals that send it"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
         section("Mouse"),

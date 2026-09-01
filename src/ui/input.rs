@@ -95,9 +95,10 @@ impl App {
             // there is an image to take it for: with text on the clipboard the
             // key goes to the agent untouched, as it always did.
             //
-            // Many terminals never send it — Windows Terminal binds Ctrl+V to
-            // its own paste and the application sees nothing, which is why the
-            // right button below matters more there than this does.
+            // Not every terminal sends it: Windows Terminal binds Ctrl+V to
+            // its own paste and the application is never told, so there F9 is
+            // the only way in. Unbinding it in the terminal's settings gives
+            // this back.
             if key.code == KeyCode::Char('v')
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && self.image_gesture_into_pane()
@@ -287,10 +288,16 @@ impl App {
     /// does not.
     ///
     /// Silence is the point. `F9` is pressed to paste an image and so reports
-    /// when there is none; `Ctrl+V` and the right button are pressed to paste
-    /// *whatever* is there, and a status line saying "no image on the
-    /// clipboard" every time someone pastes a line of text would be cctop
-    /// talking over the thing they were doing.
+    /// when there is none; `Ctrl+V` is pressed to paste *whatever* is there,
+    /// and a status line saying "no image on the clipboard" every time someone
+    /// pastes a line of text would be cctop talking over the thing they were
+    /// doing.
+    ///
+    /// ponytail: the right button is not one of these, and was for a day. In
+    /// Windows Terminal it *copies* when there is a selection and pastes only
+    /// when there is not — so a user selecting output and right-clicking to
+    /// copy it got an image pasted into their agent instead. A gesture whose
+    /// meaning depends on a selection cctop cannot see is not one it can take.
     fn image_gesture_into_pane(&mut self) -> bool {
         let Ok(path) = crate::clipboard::image_to_file() else {
             return false;
@@ -1333,18 +1340,6 @@ impl App {
             // own rmux sessions too; not sending the button is the fix that
             // stays inside cctop. No agent cctop hosts asks for right-click, so
             // nothing is lost by keeping it.
-            // The right button is dropped, as below — unless the clipboard
-            // holds an image, which is the one thing a right-click in a pane
-            // could not otherwise do. It is the gesture that works in the
-            // terminal where Ctrl+V does not: Windows Terminal keeps its own
-            // right-click paste *and* forwards the button, and its paste of an
-            // image is nothing at all, so there is nothing to collide with.
-            if ev.kind == MouseEventKind::Down(MouseButton::Right)
-                && layout.pane_at(ev.column, ev.row).is_some()
-                && self.image_gesture_into_pane()
-            {
-                return;
-            }
             let button = |b| match b {
                 MouseButton::Left => Some(crate::attach::MouseButton::Left),
                 MouseButton::Middle => Some(crate::attach::MouseButton::Middle),
