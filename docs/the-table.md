@@ -273,7 +273,11 @@ tell the two apart.
 It needs something that can read the clipboard: `wl-clipboard` or `xclip` on
 Linux, `pngpaste` or the built-in `osascript` on macOS, and `powershell.exe` on
 Windows — which is also how it works under WSL, where the clipboard being read
-is Windows'. cctop says which of the two things went wrong: an empty clipboard
+is Windows'. Under WSL it is also looked for at
+`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`, because a
+session nobody logged into by hand — an ssh into the distribution, a cron job —
+has none of the Windows interop entries on its `PATH`, and the same machine
+would otherwise report having no way to read its own clipboard. cctop says which of the two things went wrong: an empty clipboard
 and a machine with no such tool need different answers.
 
 ### Pasting an image into a cctop you sshed to

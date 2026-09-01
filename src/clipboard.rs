@@ -257,7 +257,35 @@ const HELPERS: &[Helper] = &[
     },
 ];
 
+/// Where Windows keeps PowerShell, for the WSL sessions whose `PATH` does not
+/// carry the interop entries.
+///
+/// Which is any session nobody logged into interactively: an ssh into the WSL
+/// distribution, a cron job, a service. `powershell.exe` is on `PATH` in a
+/// terminal opened by hand and absent from one reached over ssh — the same
+/// machine, the same clipboard, and cctop reporting "no tool here can read an
+/// image clipboard" in the second case only. Both spellings, because the drive
+/// is mounted case-insensitively and either can be what exists.
+const WSL_POWERSHELL: &[&str] = &[
+    "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe",
+];
+
 impl Helper {
+    /// The command, then the places it might be when the name alone misses.
+    fn programs(&self) -> Vec<&'static str> {
+        let mut out = vec![self.command];
+        if self.command == "powershell.exe" {
+            out.extend(
+                WSL_POWERSHELL
+                    .iter()
+                    .filter(|p| Path::new(p).exists())
+                    .copied(),
+            );
+        }
+        out
+    }
+
     fn run(&self, dest: &Path) -> Attempt {
         let Some(path) = self.dest_for(dest) else {
             return Attempt::Missing;
@@ -267,12 +295,22 @@ impl Helper {
             .iter()
             .map(|arg| arg.replace("{}", &path))
             .collect();
-        let out = Command::new(self.command)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
-        let Ok(out) = out else {
+        // The first spelling of the command that is actually here. A helper
+        // that ran and found no image stops the search: the next spelling would
+        // be asking the same clipboard.
+        let mut out = None;
+        for program in self.programs() {
+            let attempt = Command::new(program)
+                .args(&args)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output();
+            if let Ok(done) = attempt {
+                out = Some(done);
+                break;
+            }
+        }
+        let Some(out) = out else {
             return Attempt::Missing;
         };
         match self.output {
@@ -297,7 +335,7 @@ impl Helper {
     /// is what `wslpath -w` prints. Without the translation the save fails on
     /// the one platform this helper exists for.
     fn dest_for(&self, dest: &Path) -> Option<String> {
-        if self.command != "powershell.exe" || cfg!(target_os = "windows") {
+        if self.command != "powershell.exe" || cfg!(windows) {
             return Some(dest.display().to_string());
         }
         let out = Command::new("wslpath")
