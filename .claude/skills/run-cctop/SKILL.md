@@ -277,13 +277,23 @@ unrelated, and cctop cannot see the driver's tmux server at all.
   `HOME=/tmp/x tmux new-session … cctop` silently gives cctop the real `$HOME` —
   it reads the operator's sessions and you never notice. Use `-e HOME=…`, as
   the driver does.
+- **The driver's own server is not invisible to cctop, despite being "tmux".**
+  rmux installs a shim so `tmux` *is* `rmux` (`which tmux` →
+  `…/rmux-shim-*/tmux` → `~/.cargo/bin/rmux`, the same binary), and this
+  driver's `tmux -L cctopdrv` is therefore an rmux server on a private socket.
+  A pane in it exports `RMUX`/`TMUX` naming that socket, so a cctop launched
+  there queries *it* for the `cctop-*` sessions: no tabs in the bar, and
+  `set-option` on a real session answering "can't find session". `up --spawn`
+  unsets all four variables for exactly this reason. Anything that tests tab
+  adoption, tab order, or the rmux options cctop writes has to go through
+  `--spawn` — or be tested against the real daemon in `src/rmux.rs`, as
+  `an_order_written_onto_a_session_survives_in_it` is.
 - **cctop adopts every cctop-owned `rmux` session on the machine as a tab.**
-  Since 0.8 cctop drives rmux and not tmux, so the driver's own tmux server is
-  invisible to it — but a real `cctop-*` rmux session belonging to the operator
-  is not, and it lands in tab 2 displayed and *typeable*: inside a pane only the
-  function keys stay cctop's, so a stray `Down` goes to that agent. The driver
-  still uses a private tmux socket (`tmux -L cctopdrv`) and sends F12 on
-  startup; if the machine has live `cctop-*` rmux sessions, expect them.
+  In `--spawn` mode the driver's own server is out of the way, but the
+  operator's real sessions are not: one lands in tab 2 displayed and
+  *typeable*, and inside a pane only the function keys stay cctop's, so a stray
+  `Down` goes to that agent. The driver sends F12 on startup for that reason.
+  If the machine has live `cctop-*` rmux sessions, expect them.
 - **The launcher cannot start an agent from inside a multiplexer.** cctop runs
   `rmux new-session -A`, which refuses to nest under a `$RMUX`/`$TMUX` it can
   see; the status line says `Started codex …` and no session appears. cctop's

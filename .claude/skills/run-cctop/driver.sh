@@ -97,10 +97,18 @@ cmd_up() {
   local launch=("$BIN")
   if [ "${1:-}" = "--spawn" ]; then
     # Let the launcher actually start agents: cctop refuses to nest a
-    # `tmux new-session` under a $TMUX it can see, so the wrapper drops it.
-    # The cost is that cctop then talks to the machine's *real* tmux server
+    # `new-session` under a $TMUX/$RMUX it can see, so the wrapper drops them.
+    # The cost is that cctop then talks to the machine's *real* rmux server
     # and adopts every cctop-owned session there as a tab.
-    printf '#!/bin/sh\nunset TMUX TMUX_PANE\nexec %s\n' "$BIN" > "$SHOTS/../nested.sh"
+    #
+    # All four, not just the TMUX pair. On a machine where `tmux` is the rmux
+    # shim — which is how rmux installs itself — this driver's own server is an
+    # rmux server on a private socket, and a pane in it carries RMUX naming
+    # that socket. A cctop that inherits it asks the *driver's* server for the
+    # cctop-* sessions, finds none, and draws a bar with no tabs; a
+    # `set-option` on a real session answers "can't find session". That looked
+    # for a while like a cctop bug and was this line.
+    printf '#!/bin/sh\nunset TMUX TMUX_PANE RMUX RMUX_PANE\nexec %s\n' "$BIN" > "$SHOTS/../nested.sh"
     chmod +x "$SHOTS/../nested.sh"
     launch=("$SHOTS/../nested.sh")
     say "spawn mode: real tmux server, real sessions will appear as tabs"
