@@ -1441,10 +1441,10 @@ impl Hint {
             "F12" => (KeyCode::F(12), Mods::NONE),
             // `Alt+n` and friends. The letter is the last character, and the
             // handler for these reads the modifier as well as the code.
-            alt if alt.starts_with("Alt+") => match alt.chars().next_back() {
-                Some(c) => (KeyCode::Char(c), Mods::ALT),
-                None => return None,
-            },
+            alt if alt.starts_with("Alt+") => {
+                let c = alt.chars().next_back()?;
+                (KeyCode::Char(c), Mods::ALT)
+            }
             // Everything else is the single character it prints: `/`, `?`, `a`,
             // `D`. Uppercase as written, which is what the list handler matches.
             one => match (one.chars().next(), one.chars().count()) {
