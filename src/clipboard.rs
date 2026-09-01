@@ -64,7 +64,10 @@ impl NoImage {
             // is sending the image as text, which is the one thing the
             // connection already carries.
             NoImage::NoTool if over_ssh() => {
-                "The clipboard is on the machine you sshed from — paste a PNG as base64                  instead (F1, Pasting an image)"
+                // One line, and short. A continued literal here once had the
+                // source's own indentation folded into it, and the status bar
+                // showed the message with a gap chewed out of the middle.
+                "The clipboard is on the machine you sshed from — F1 says how to get one here"
                     .to_string()
             }
             NoImage::NoTool => format!("No tool here can read an image clipboard — {}", HOW),
