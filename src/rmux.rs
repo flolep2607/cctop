@@ -988,44 +988,6 @@ mod tests {
         assert_eq!(names, ["oldest", "middle", "newest"]);
     }
 
-    /// The widget cctop draws an rmux-backed pane with takes cctop's own
-    /// buffer.
-    ///
-    /// This is the whole of what Helvesec/rmux#220 fixes, checked from the side
-    /// that cares. `ratatui-rmux` 0.10.0 on crates.io links ratatui 0.29 under
-    /// the `ratatui-core` name; cctop draws with 0.30, and against the
-    /// published crate this does not compile — `PaneWidget: Widget is not
-    /// satisfied`, for a `Buffer` spelled exactly like the one it wants. The
-    /// dependency therefore points at the branch carrying the fix, and this is
-    /// what would start failing if it were moved back before a release
-    /// carrying it exists.
-    #[test]
-    fn a_pane_snapshot_paints_into_the_buffer_cctop_draws_with() {
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-        use ratatui::widgets::Widget;
-        use ratatui_rmux::{PaneState, PaneWidget};
-        use rmux_sdk::{PaneAttributes, PaneCell, PaneColor, PaneCursor, PaneGlyph, PaneSnapshot};
-
-        let cell = |text: &str| PaneCell {
-            glyph: PaneGlyph::new(text, 1),
-            attributes: PaneAttributes::EMPTY,
-            foreground: PaneColor::Default,
-            background: PaneColor::Default,
-            underline: PaneColor::Default,
-        };
-        let snapshot = PaneSnapshot::new(2, 1, vec![cell("o"), cell("k")], PaneCursor::default())
-            .expect("a 2x1 snapshot of two cells");
-        let state = PaneState::from_snapshot(snapshot);
-
-        let area = Rect::new(0, 0, 2, 1);
-        let mut buffer = Buffer::empty(area);
-        PaneWidget::new(&state).render(area, &mut buffer);
-
-        assert_eq!(buffer.cell((0, 0)).expect("a cell").symbol(), "o");
-        assert_eq!(buffer.cell((1, 0)).expect("a cell").symbol(), "k");
-    }
-
     /// The share path, against a real daemon and through the same call the `W`
     /// key makes. There is nothing left to unit-test here: the operator link
     /// and its pairing code are fields on a typed handle rather than lines

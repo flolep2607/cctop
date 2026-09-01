@@ -281,7 +281,6 @@ dependencies = [
  "mimalloc",
  "notify",
  "ratatui",
- "ratatui-rmux",
  "rayon",
  "regex",
  "rmux-sdk",
@@ -2236,15 +2235,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ratatui-rmux"
-version = "0.10.0"
-source = "git+https://github.com/flolep2607/rmux?branch=ratatui-core-0.1#4ed1940b3223225d199265d7247d131f2ded353c"
-dependencies = [
- "ratatui-core",
- "rmux-sdk",
-]
-
-[[package]]
 name = "ratatui-termina"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2411,7 +2401,8 @@ dependencies = [
 [[package]]
 name = "rmux-ipc"
 version = "0.10.0"
-source = "git+https://github.com/flolep2607/rmux?branch=ratatui-core-0.1#4ed1940b3223225d199265d7247d131f2ded353c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31f63795a405962308478f28ae2551d8e3f73ac8827c6f838f7b8083085ba2a6"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -2426,7 +2417,8 @@ dependencies = [
 [[package]]
 name = "rmux-os"
 version = "0.10.0"
-source = "git+https://github.com/flolep2607/rmux?branch=ratatui-core-0.1#4ed1940b3223225d199265d7247d131f2ded353c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d7017db3e6cfb59857df098ece53d22e31bdf8cd10c63dadb50ae1a140e1ce2"
 dependencies = [
  "libc",
  "rmux-types",
@@ -2437,7 +2429,8 @@ dependencies = [
 [[package]]
 name = "rmux-proto"
 version = "0.10.0"
-source = "git+https://github.com/flolep2607/rmux?branch=ratatui-core-0.1#4ed1940b3223225d199265d7247d131f2ded353c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf07fafa60cc2b10f6630d400acb85b472dc1d981866c5396d21cc03f6176489"
 dependencies = [
  "bincode",
  "rmux-types",
@@ -2449,7 +2442,8 @@ dependencies = [
 [[package]]
 name = "rmux-sdk"
 version = "0.10.0"
-source = "git+https://github.com/flolep2607/rmux?branch=ratatui-core-0.1#4ed1940b3223225d199265d7247d131f2ded353c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0684ac39de5e707a3dfe6e21ef14299e9540097ed27d5de33300ab8eca50df3"
 dependencies = [
  "libc",
  "rmux-ipc",
@@ -2466,7 +2460,8 @@ dependencies = [
 [[package]]
 name = "rmux-types"
 version = "0.10.0"
-source = "git+https://github.com/flolep2607/rmux?branch=ratatui-core-0.1#4ed1940b3223225d199265d7247d131f2ded353c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c591db0342827ab26e271262d3ecad75c72b6299e865ee45b2a15d9db85f3db"
 dependencies = [
  "serde",
 ]

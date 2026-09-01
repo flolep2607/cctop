@@ -266,9 +266,11 @@ unrelated, and cctop cannot see the driver's tmux server at all.
   a whole debugging session after the wrong cause.
 - **Never run `cargo publish`**, dry-run included. Run the rest of the gate and
   stop.
-- The branch may carry a `[patch.crates-io]` block pinning `rmux-sdk` and
-  `ratatui-rmux` to a fork. While it is there the crate cannot be published —
-  that is deliberate, and `verify / package` going red is the signal.
+- There is no `[patch.crates-io]` block any more, and adding one back stops the
+  crate being publishable: `cargo publish` ignores a patch, so whatever it
+  papers over reaches an installer unpapered. `ratatui-rmux` was the reason
+  there used to be one and is no longer a dependency at all — see the note
+  beside `rmux-sdk` in `Cargo.toml` for what it did and when to want it back.
 
 ## Gotchas
 

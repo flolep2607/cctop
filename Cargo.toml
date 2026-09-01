@@ -66,35 +66,30 @@ tar = "0.4.46"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 toml_edit = "0.25.13"
-# The multiplexer, as an API rather than as a command line. `rmux-sdk` talks the
+# The multiplexer, as an API rather than as a command line: `rmux-sdk` talks the
 # daemon's typed IPC contract, which is where the operator link of a browser
-# share comes back as a field instead of as the stream a URL was printed on;
-# `ratatui-rmux` paints a pane snapshot from that daemon into a ratatui buffer.
-# Both are ordinary crates.io versions here — see `[patch.crates-io]` for why
-# they are not what actually gets built yet.
+# share comes back as a field instead of as the stream a URL was printed on.
+#
+# Its sibling `ratatui-rmux` is deliberately absent. It paints a pane snapshot
+# into a ratatui buffer, which cctop does not ask it to do — panes are drawn
+# from cctop's own vt100 parser through `tui-term` (see `render::draw_panes`),
+# and the crate's one appearance was a test asserting that its widget accepts
+# cctop's `Buffer`. That assertion failed against the published crate, because
+# 0.10.0 links ratatui 0.29 under the `ratatui-core` name while cctop draws with
+# 0.30, so the two `Buffer`s are different types with the same path. The fix is
+# Helvesec/rmux#220 — depend on the real `ratatui-core` — and carrying it as a
+# `[patch.crates-io]` on a fork blocked every release in the meantime, since
+# `cargo publish` ignores a patch and would have shipped a cctop that resolved
+# the unfixed crate and failed to build for whoever installed it.
+#
+# A guard for a use that does not exist is not worth a release that cannot
+# happen. When the widget is actually wanted — when a pane is painted from the
+# daemon's snapshot rather than from a parser of cctop's own — put back
+# `ratatui-rmux = "<the version carrying #220>"` and the test named
+# `a_pane_snapshot_paints_into_the_buffer_cctop_draws_with`, which is in this
+# repository's history at 3808d80.
 rmux-sdk = "0.10.0"
-ratatui-rmux = "0.10.0"
 tui-term = "0.3.4"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
-
-# ratatui-rmux 0.10.0 on crates.io links ratatui 0.29 under the `ratatui-core`
-# crate name, and cctop draws with 0.30. Its widget will not take cctop's
-# buffer: the two `Buffer`s are different types with the same path, so the error
-# names a trait that is visibly implemented on a type that is visibly right.
-# Helvesec/rmux#220 is the one-line fix — depend on the real `ratatui-core` —
-# and this points both crates at the branch carrying it.
-#
-# Both, and not just the one: `ratatui-rmux` depends on `rmux-sdk` by path, so
-# patching it alone puts *two* rmux-sdks in the graph and a `PaneSnapshot` built
-# from one is not the `PaneSnapshot` the other's widget accepts.
-#
-# ponytail: this blocks a release, deliberately and visibly. `cargo publish`
-# ignores a patch, so a published cctop would resolve the unfixed crates.io
-# crate and fail to build for whoever installed it — `verify / package` going
-# red here is the whole point. Delete this block when a version carrying the fix
-# is published; the dependency lines above are already the ones to keep.
-[patch.crates-io]
-rmux-sdk = { git = "https://github.com/flolep2607/rmux", branch = "ratatui-core-0.1" }
-ratatui-rmux = { git = "https://github.com/flolep2607/rmux", branch = "ratatui-core-0.1" }
