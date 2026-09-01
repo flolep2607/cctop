@@ -196,6 +196,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+Shift+W", "The same, by a name that says so"),
         item("F9", "Paste the clipboard's image as a file path"),
         item("Ctrl+V", "The same, in terminals that send it"),
+        item("over ssh", "Paste a PNG as base64 and cctop files it"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
         section("Mouse"),

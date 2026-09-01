@@ -166,6 +166,33 @@ impl App {
     pub(super) fn on_paste(&mut self, text: &str) {
         self.needs_redraw = true;
 
+        // An image that arrived as text, which is the only way one reaches a
+        // cctop running over ssh: the clipboard is on the machine the ssh was
+        // typed on, and no helper on this side can see it. What is pasted is a
+        // file here, and what the agent is given is its path — the same as F9,
+        // by a different road.
+        if let Some(png) = crate::clipboard::png_from_paste(text) {
+            match crate::clipboard::write_png(&png) {
+                Ok(path) => {
+                    let shown = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.set_status(format!("Pasted {shown}"));
+                    self.paste_text(&format!("{} ", path.display()));
+                }
+                // The paste is not put through as text on a failure: 100KB of
+                // base64 in front of an agent is worse than nothing having
+                // happened, and the status line says what did.
+                Err(e) => self.set_status(format!("Could not save the pasted image: {e}")),
+            }
+            return;
+        }
+        self.paste_text(text);
+    }
+
+    /// A paste, once it is known to be text.
+    fn paste_text(&mut self, text: &str) {
         if self.tab > 0 && self.mode == Mode::List {
             if let Some(pane) = self.focused_pane() {
                 // The same bookkeeping a keystroke does: text put in front of an

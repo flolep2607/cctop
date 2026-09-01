@@ -58,9 +58,29 @@ impl NoImage {
     pub fn message(&self) -> String {
         match self {
             NoImage::Clipboard => "No image on the clipboard".to_string(),
+            // Over ssh the advice to install a clipboard tool is worse than no
+            // advice: the clipboard is on the machine the ssh was typed on, and
+            // nothing installed on this one will ever see it. What works there
+            // is sending the image as text, which is the one thing the
+            // connection already carries.
+            NoImage::NoTool if over_ssh() => {
+                "The clipboard is on the machine you sshed from — paste a PNG as base64                  instead (F1, Pasting an image)"
+                    .to_string()
+            }
             NoImage::NoTool => format!("No tool here can read an image clipboard — {}", HOW),
         }
     }
+}
+
+/// Whether this cctop is being watched from another machine.
+///
+/// Any of the three: `SSH_TTY` is absent when the session has no terminal,
+/// `SSH_CLIENT` is dropped by some sshd builds, and a login shell may pass on
+/// only one of them.
+fn over_ssh() -> bool {
+    ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"]
+        .iter()
+        .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
 }
 
 /// What to install, per platform, named in the one message that needs it.
@@ -72,17 +92,12 @@ const HOW: &str = "powershell.exe was not found on PATH";
 const HOW: &str = "install wl-clipboard or xclip (WSL uses powershell.exe)";
 
 /// Write the clipboard's image to a new file and return its path.
-///
-/// The name carries the time rather than a counter: it is what the user sees in
-/// the agent's prompt and in the status line, and `paste-20260901-142233.png`
-/// says which screenshot it was while `paste-7.png` says nothing.
 pub fn image_to_file() -> Result<PathBuf, NoImage> {
     let dir = paste_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return Err(NoImage::NoTool);
     }
-    let name = format!("paste-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S"));
-    let dest = dir.join(name);
+    let dest = dir.join(new_name());
 
     let mut ran_something = false;
     for helper in HELPERS {
@@ -101,6 +116,51 @@ pub fn image_to_file() -> Result<PathBuf, NoImage> {
         true => Err(NoImage::Clipboard),
         false => Err(NoImage::NoTool),
     }
+}
+
+/// The PNG a paste is carrying, if it is carrying one.
+///
+/// The way an image reaches a cctop that cannot see the clipboard at all: over
+/// ssh, where the clipboard is on the machine you typed the `ssh` on and no
+/// helper on this side can ever reach it. Base64 is text, text is what a
+/// terminal pastes, so an image encoded on the near side arrives intact on the
+/// far one.
+///
+/// Two spellings are read: a `data:image/png;base64,…` URI, which is what a
+/// browser and most "copy as base64" tools produce, and the bare base64 of a
+/// PNG. The bare form is recognised by its first characters — every base64 PNG
+/// begins `iVBORw0KGgo`, being the encoding of the file's magic number — which
+/// is a strong enough sniff that ordinary pasted text can never be mistaken
+/// for one.
+pub fn png_from_paste(text: &str) -> Option<Vec<u8>> {
+    let trimmed = text.trim();
+    // Cheap rejections first: this is asked of every paste, including the
+    // hundred-line ones people put in front of an agent all day.
+    let body = match trimmed.strip_prefix("data:image/png;base64,") {
+        Some(rest) => rest,
+        None if trimmed.starts_with("iVBORw0KGgo") => trimmed,
+        None => return None,
+    };
+    let bytes = crate::util::b64_decode(body)?;
+    bytes.starts_with(PNG_MAGIC).then_some(bytes)
+}
+
+/// Write `png` where a pasted image goes, and give back the path.
+pub fn write_png(png: &[u8]) -> std::io::Result<PathBuf> {
+    let dir = paste_dir();
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join(new_name());
+    std::fs::write(&dest, png)?;
+    Ok(dest)
+}
+
+/// `paste-20260901-142233.png`.
+///
+/// The time rather than a counter: this is what the user sees in the agent's
+/// prompt and in the status line, and `paste-7.png` says nothing about which
+/// screenshot it was.
+fn new_name() -> String {
+    format!("paste-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S"))
 }
 
 /// What one helper did.

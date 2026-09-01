@@ -594,6 +594,30 @@ fn read_random(want: usize) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Round-trips, tolerates the line wrapping a pasted blob carries, and
+    /// refuses prose rather than decoding it into rubbish — which is what makes
+    /// it safe to sniff every paste for an image.
+    #[test]
+    fn base64_decodes_what_it_encodes_and_refuses_prose() {
+        for case in [
+            &b""[..],
+            b"a",
+            b"ab",
+            b"abc",
+            b"\x89PNG\r\n\x1a\n",
+            b"\x00\xff\x10",
+        ] {
+            let text = b64_encode(case);
+            assert_eq!(b64_decode(&text).as_deref(), Some(case), "{text}");
+        }
+        // Wrapped, as `base64` writes it at 76 columns and as a paste of one
+        // arrives.
+        let text = b64_encode(b"hello world!");
+        let wrapped = format!("{}\r\n{}", &text[..8], &text[8..]);
+        assert_eq!(b64_decode(&wrapped).as_deref(), Some(&b"hello world!"[..]));
+        assert_eq!(b64_decode("what is wrong with this?"), None);
+    }
     use super::*;
 
     #[test]

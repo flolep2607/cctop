@@ -276,6 +276,33 @@ Windows — which is also how it works under WSL, where the clipboard being read
 is Windows'. cctop says which of the two things went wrong: an empty clipboard
 and a machine with no such tool need different answers.
 
+### Pasting an image into a cctop you sshed to
+
+None of the above can work there. The clipboard is on the machine you typed the
+`ssh` on, and nothing installed on the far side can reach it — so `F9` says so
+rather than telling you to install `xclip`.
+
+What crosses the connection is text, so send the image as text: cctop reads any
+paste that is a PNG in base64 — bare, or as a `data:image/png;base64,…` URI —
+writes it to the same `pastes/` directory, and gives the agent the path. Every
+base64 PNG starts `iVBORw0KGgo`, which is what cctop recognises, so an ordinary
+paste is never mistaken for one.
+
+Encoding it is a one-liner where your clipboard is. In PowerShell, which is
+where you would be if you sshed from Windows:
+
+```powershell
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+$i=[Windows.Forms.Clipboard]::GetImage(); $m=New-Object IO.MemoryStream
+$i.Save($m,[Drawing.Imaging.ImageFormat]::Png)
+Set-Clipboard ([Convert]::ToBase64String($m.ToArray()))
+```
+
+That replaces the clipboard's image with its own base64, which then pastes into
+the agent as an image. On a Mac or a Linux desktop the same thing is
+`pngpaste - | base64 | pbcopy` and `wl-paste -t image/png | base64 -w0 |
+wl-copy`.
+
 The images are kept, not cleaned up: the path is in a transcript by then, and a
 conversation resumed next week may read it again. The directory is yours to
 empty.
