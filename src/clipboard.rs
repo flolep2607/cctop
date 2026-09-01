@@ -100,7 +100,9 @@ pub fn image_to_file() -> Result<PathBuf, NoImage> {
     if std::fs::create_dir_all(&dir).is_err() {
         return Err(NoImage::NoTool);
     }
-    let dest = dir.join(new_name());
+    let Ok(dest) = reserve(&dir) else {
+        return Err(NoImage::NoTool);
+    };
 
     let mut ran_something = false;
     for helper in HELPERS {
@@ -152,18 +154,49 @@ pub fn png_from_paste(text: &str) -> Option<Vec<u8>> {
 pub fn write_png(png: &[u8]) -> std::io::Result<PathBuf> {
     let dir = paste_dir();
     std::fs::create_dir_all(&dir)?;
-    let dest = dir.join(new_name());
+    let dest = reserve(&dir)?;
     std::fs::write(&dest, png)?;
     Ok(dest)
 }
 
-/// `paste-20260901-142233.png`.
+/// Claim a path in the pastes directory, creating the file so nobody else can
+/// claim it.
 ///
-/// The time rather than a counter: this is what the user sees in the agent's
-/// prompt and in the status line, and `paste-7.png` says nothing about which
-/// screenshot it was.
-fn new_name() -> String {
-    format!("paste-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S"))
+/// `paste-20260901-142233.png`, named for the time rather than a counter: this
+/// is what the reader sees in the agent's prompt and in the status line, and
+/// `paste-7.png` says nothing about which screenshot it was.
+///
+/// The name only resolves to a second, though, and several things can paste
+/// inside one: two cctops watching the same machine, a page and a terminal, or
+/// one person pressing F9 twice. Whoever wrote second used to overwrite the
+/// first — leaving the earlier agent holding a path to somebody else's picture,
+/// which is worse than a failure because it looks like it worked. So the name
+/// is claimed with `create_new`, which is atomic across processes, and a taken
+/// one becomes `-2`, `-3`, and so on.
+fn reserve(dir: &Path) -> std::io::Result<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    for n in 1..=99u32 {
+        let name = match n {
+            1 => format!("paste-{stamp}.png"),
+            n => format!("paste-{stamp}-{n}.png"),
+        };
+        let dest = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+        {
+            Ok(_) => return Ok(dest),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    // A hundred pastes in one second is not a person, and the alternative to
+    // giving up is a loop that never ends.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "too many images pasted in the same second",
+    ))
 }
 
 /// What one helper did.
@@ -403,6 +436,36 @@ mod tests {
             }
             Err(why) => panic!("nothing was pasted: {}", why.message()),
         }
+    }
+
+    /// Two images pasted in the same second are two files.
+    ///
+    /// The name resolves to a second, and more than one thing can paste inside
+    /// one — two cctops on the same machine, the page and a terminal, or a
+    /// finger on F9 twice. The second write used to land on the first, handing
+    /// an agent a path to somebody else's picture.
+    #[test]
+    fn a_second_paste_in_the_same_second_gets_its_own_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = reserve(dir.path()).expect("first");
+        let second = reserve(dir.path()).expect("second");
+        let third = reserve(dir.path()).expect("third");
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+        // Claimed, not merely named: the file is there, which is what stops
+        // another process choosing it a moment later.
+        for path in [&first, &second, &third] {
+            assert!(path.exists(), "{} was not claimed", path.display());
+        }
+        assert!(
+            second
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("-2."),
+            "the second name does not say which it is: {}",
+            second.display()
+        );
     }
 
     /// The destination reaches each helper in the spelling it can open, and
