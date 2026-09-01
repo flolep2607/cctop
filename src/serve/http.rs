@@ -1,8 +1,8 @@
 //! Just enough HTTP/1.1 to answer a browser, and no more.
 //!
-//! The surface cctop needs is four verbs' worth of nothing: `GET`, a path, a
-//! query string, and a body written back. No routing DSL, no middleware, no
-//! request bodies, no keep-alive negotiation, no compression. That is a few
+//! The surface cctop needs is three verbs' worth of nothing: `GET`, `HEAD`,
+//! `POST`, a path, a query string, and a body in each direction. No routing
+//! DSL, no middleware, no keep-alive negotiation, no compression. That is a few
 //! hundred lines here against a web framework and its transitive tree in
 //! `Cargo.toml` — the same bargain [`crate::mcp`] took with JSON-RPC, for the
 //! same reason: a monitoring tool people `cargo install` should not pull in a
@@ -17,8 +17,17 @@
 //!   that overruns it is answered `431` rather than grown into;
 //! - the socket carries a read *and* a write timeout, so a peer that stops
 //!   reading an SSE stream cannot pin the thread forever;
-//! - request bodies are not read at all. `GET` and `HEAD` are the only methods
-//!   that get past [`Request::parse`], so there is never a body to drain.
+//! - a request body is read only when the request line said `POST` and only up
+//!   to [`MAX_BODY_BYTES`], which is orders of magnitude more than the few
+//!   fields an action route takes and still nothing a peer can grow.
+//!
+//! An action route is a `POST` with a JSON body, and both halves of that are
+//! load-bearing rather than stylistic. A cross-origin form can be made to send
+//! a `GET` or a `POST` of form-encoded data without the page ever seeing the
+//! answer; it cannot set `Content-Type: application/json` without asking
+//! permission first, and this server answers no preflight. So the pairing is
+//! what stops a page in another tab from driving an agent on the strength of a
+//! token it cannot read — see [`Request::wants_json`].
 //!
 //! ponytail: HTTP/1.0-style connection-per-request. Keep-alive would save a
 //! handshake on a page that makes four requests and then holds one SSE stream
@@ -35,6 +44,25 @@ use std::time::Duration;
 /// this is generous to that and still small enough that a malicious peer
 /// buys nothing by filling it.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+
+/// The most request body that will be read before giving up.
+///
+/// An action body is a session id, a target and a line of prose. 64 KiB is
+/// room for a prompt someone pasted a stack trace into, and a hard stop well
+/// under what a thread can be made to hold.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// The most an image posted to the paste route may be.
+///
+/// Its own limit because it is the one route whose body is not prose: a
+/// screenshot of a wide display is a megabyte or two of PNG, half again as
+/// much in base64, and the ordinary 64 KiB would refuse every one of them. Kept
+/// to a size a thread can hold without thinking about it, and applied only to
+/// this path — every other route keeps the small bound.
+const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+
+/// The path that carries images, and so the one that may be large.
+const IMAGE_PATH: &str = "/api/act/image/";
 
 /// How long a client has to finish sending its request line and headers.
 ///
@@ -58,6 +86,14 @@ pub struct Request {
     /// with `/`; see [`Request::parse`] for what it refuses.
     pub path: String,
     pub query: HashMap<String, String>,
+    /// The `POST` body, empty for every other method.
+    pub body: Vec<u8>,
+    /// Whether the body announced itself as JSON.
+    ///
+    /// Kept as a flag rather than the whole header map because it is the only
+    /// header anything here routes on, and it is routed on for a security
+    /// reason rather than a parsing one — see the module docs.
+    json_content_type: bool,
 }
 
 impl Request {
@@ -75,8 +111,10 @@ impl Request {
 
         // `take` is the bound that matters. Without it a peer that never sends
         // a blank line grows the buffer until the process dies, and a read
-        // timeout would not save us — a slow trickle of bytes resets it.
-        let mut reader = BufReader::new(stream.take(MAX_HEADER_BYTES as u64));
+        // timeout would not save us — a slow trickle of bytes resets it. The
+        // allowance covers a body as well, so the header half is bounded by
+        // counting bytes as they are read rather than by the reader itself.
+        let mut reader = BufReader::new(stream.take((MAX_HEADER_BYTES + MAX_IMAGE_BYTES) as u64));
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() || line.is_empty() {
             return Err((400, "malformed request line"));
@@ -85,8 +123,8 @@ impl Request {
         let mut parts = line.split_whitespace();
         let method = parts.next().unwrap_or_default().to_string();
         let target = parts.next().unwrap_or_default();
-        if method != "GET" && method != "HEAD" {
-            return Err((405, "this server only answers GET"));
+        if method != "GET" && method != "HEAD" && method != "POST" {
+            return Err((405, "this server answers GET, HEAD and POST"));
         }
         if target.is_empty() {
             return Err((400, "malformed request line"));
@@ -114,17 +152,46 @@ impl Request {
             })
             .collect();
 
-        // Headers are read to the blank line and discarded. Nothing is routed
-        // on them — the token is a query parameter precisely so that a link is
-        // the whole credential — but they still have to leave the socket before
-        // the response is written, or a client that pipelines sees its next
-        // request answered with the tail of this one's headers.
+        // Headers are read to the blank line and mostly discarded: the token is
+        // a query parameter precisely so that a link is the whole credential.
+        // Two of them are kept, because a body cannot be read without knowing
+        // how long it is and must not be trusted without knowing what it claims
+        // to be. They all have to leave the socket either way, or a client that
+        // pipelines sees its next request answered with the tail of this one's
+        // headers.
+        let mut header_bytes = line.len();
+        let mut length: Option<usize> = None;
+        let mut json_content_type = false;
         loop {
             let mut header = String::new();
             match reader.read_line(&mut header) {
                 Ok(0) => break,
                 Ok(_) if header.trim().is_empty() => break,
-                Ok(_) => {}
+                Ok(n) => {
+                    header_bytes += n;
+                    if header_bytes > MAX_HEADER_BYTES {
+                        return Err((431, "request headers too large"));
+                    }
+                    let Some((name, value)) = header.split_once(':') else {
+                        continue;
+                    };
+                    let value = value.trim();
+                    if name.eq_ignore_ascii_case("content-length") {
+                        // A length that is not a number is not a length. Left
+                        // as `None` so the body reads as absent rather than as
+                        // whatever the digits before the junk happened to say.
+                        length = value.parse::<usize>().ok();
+                    } else if name.eq_ignore_ascii_case("content-type") {
+                        // `application/json; charset=utf-8` is the same claim as
+                        // `application/json`, and a browser sends either.
+                        json_content_type = value
+                            .split(';')
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .eq_ignore_ascii_case("application/json");
+                    }
+                }
                 // Hitting the `take` limit surfaces here, as does a header that
                 // is not UTF-8. Both are `431` rather than `400`: it is the
                 // size of the field, not the shape of it, that we objected to.
@@ -132,11 +199,52 @@ impl Request {
             }
         }
 
+        // Only for the method that has one. A `Content-Length` on a `GET` is
+        // either a mistake or an attempt at request smuggling, and reading the
+        // bytes it names would make this server agree with the wrong one of two
+        // hops about where the next request starts.
+        let mut body = Vec::new();
+        if method == "POST" {
+            let want = length.ok_or((411, "a POST needs a Content-Length"))?;
+            let cap = match path.starts_with(IMAGE_PATH) {
+                true => MAX_IMAGE_BYTES,
+                false => MAX_BODY_BYTES,
+            };
+            if want > cap {
+                return Err((413, "request body too large"));
+            }
+            body = vec![0u8; want];
+            if reader.read_exact(&mut body).is_err() {
+                return Err((400, "request body ended early"));
+            }
+        }
+
         Ok(Request {
             method,
             path,
             query,
+            body,
+            json_content_type,
         })
+    }
+
+    /// Whether this is a `POST` whose body announced itself as JSON.
+    ///
+    /// The one guard that a route taking an action checks before anything else.
+    /// See the module docs for why the content type is what makes a token in a
+    /// URL safe to act on.
+    pub fn wants_json(&self) -> bool {
+        self.method == "POST" && self.json_content_type
+    }
+
+    /// The body parsed as a JSON object, or why it could not be.
+    pub fn json(&self) -> Result<serde_json::Value, (u16, &'static str)> {
+        let value: serde_json::Value =
+            serde_json::from_slice(&self.body).map_err(|_| (400, "body is not JSON"))?;
+        match value.is_object() {
+            true => Ok(value),
+            false => Err((400, "body is not a JSON object")),
+        }
     }
 
     /// The `t` query parameter, which is where the access token lives.
@@ -190,6 +298,9 @@ fn reason(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        411 => "Length Required",
+        413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
         _ => "Error",
@@ -207,6 +318,11 @@ fn reason(status: u16) -> &'static str {
 /// matter beyond that: without them a page on another origin can frame this one
 /// and read what it renders, or talk a browser into sniffing a JSON response as
 /// something executable.
+///
+/// The session's terminal is a link out of this page and not a frame in it:
+/// rmux's browser terminal answers with `frame-ancestors 'none'`, so no policy
+/// written here could embed it. The policy therefore stays at `default-src
+/// 'none'` with nothing framed at all.
 fn common_headers(out: &mut String) {
     out.push_str(
         "X-Content-Type-Options: nosniff\r\n\
@@ -344,7 +460,7 @@ mod tests {
 
     #[test]
     fn every_status_the_router_sends_has_a_reason() {
-        for status in [200, 400, 403, 404, 405, 431, 503] {
+        for status in [200, 400, 403, 404, 405, 409, 411, 413, 431, 503] {
             assert_ne!(reason(status), "Error", "status {status} has no reason");
         }
     }

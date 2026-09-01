@@ -39,6 +39,9 @@ struct StaticParts {
     cwd: String,
     started_at: String,
     ai_title: Option<String>,
+    /// The id this session was *launched* with, which is not its own once it
+    /// has been resumed. See [`Session::launch_id`](crate::session::Session::launch_id).
+    launch_id: String,
 }
 
 static STATIC_CACHE: LazyLock<Mutex<HashMap<PathBuf, StaticParts>>> =
@@ -75,6 +78,14 @@ fn collect_static(transcript: &Path) -> StaticParts {
             && m != "<synthetic>"
         {
             parts.model = m.to_string();
+        }
+        // `sessionId` is this transcript's own id and `session_id` is the one
+        // on the command line that started it — the same thing until a resume,
+        // and the only record of the fork afterwards.
+        if parts.launch_id.is_empty()
+            && let Some(id) = item.get("session_id").and_then(Value::as_str)
+        {
+            parts.launch_id = id.to_string();
         }
         if item.get("type").and_then(Value::as_str) == Some("ai-title")
             && let Some(t) = item.get("aiTitle").and_then(Value::as_str)
@@ -138,6 +149,7 @@ fn summarize(transcript: &Path) -> Option<Session> {
     };
     s.model = statics.model;
     s.label_source = statics.cwd;
+    s.launch_id = statics.launch_id;
     s.data_file = Some(transcript.to_path_buf());
     s.title = custom_title.or(statics.ai_title);
     Some(s)
@@ -2187,6 +2199,54 @@ mod tests {
             CLAUDE_1M_CTX + 1
         );
         assert_eq!(resolve_ctx_max(None, 1, None), CLAUDE_DEFAULT_CTX);
+    }
+
+    /// A resumed session's transcript is a new file under a new id, and the id
+    /// it was launched from is recorded on every record but the first few. That
+    /// field is the only link back, and without it a running agent cannot be
+    /// matched to the conversation it is actually in.
+    #[test]
+    fn a_resumed_transcript_reports_the_id_it_was_launched_from() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("forked.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","timestamp":"t0","cwd":"/w","sessionId":"forked"}"#,
+                "
+",
+                r#"{"type":"assistant","timestamp":"t1","sessionId":"forked","session_id":"original","message":{"model":"claude-opus-5"}}"#,
+                "
+",
+            ),
+        )
+        .expect("write transcript");
+
+        let session = summarize(&path).expect("a transcript with a model");
+        assert_eq!(session.session_id, "forked");
+        assert_eq!(session.launch_id, "original");
+        assert_eq!(session.launched_as(), "original");
+    }
+
+    /// A session nobody resumed records itself, and one from a Claude Code old
+    /// enough to predate the field records nothing. Both answer to their own id.
+    #[test]
+    fn an_unresumed_transcript_answers_to_its_own_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("first.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"t0","cwd":"/w","message":{"model":"claude-opus-5"}}"#,
+                "
+",
+            ),
+        )
+        .expect("write transcript");
+
+        let session = summarize(&path).expect("a transcript with a model");
+        assert!(session.launch_id.is_empty());
+        assert_eq!(session.launched_as(), "first");
     }
 
     /// A single transcript entry can be hundreds of kilobytes — a big file read,

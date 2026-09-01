@@ -1,9 +1,11 @@
 //! Modal overlays: help, filters, and the confirmation dialogs.
 
 use super::columns::COLUMNS;
+use super::render::Layout;
 use super::theme;
-use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, session_root_pid, tabs};
+use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, tabs};
 use ratatui::Frame;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -35,7 +37,16 @@ fn modal(
     lines: Vec<Line<'static>>,
     width: u16,
 ) -> (Rect, Rect) {
-    let height = lines.len() as u16 + 2;
+    // Wrapped rows, not lines: the paragraph below wraps, and a box sized to
+    // the line count is a box one line too short for every line that wrapped —
+    // which is how content ends up drawn through the bottom border instead of
+    // inside it.
+    let inner_width = width.saturating_sub(2).max(1);
+    let height = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(inner_width as usize) as u16)
+        .sum::<u16>()
+        + 2;
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
@@ -170,6 +181,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Tab / Shift+Tab", "Same, either direction"),
         item("1 – 9", "Jump to a panel directly"),
         item("Shift+↑ / ↓", "Scroll inside the active panel"),
+        item("Shift+Home / End", "Jump to the top / bottom of it"),
         item("[ / ]", "Move through the Tool Activity filter"),
         item("L", "Toggle the Tool Activity live filter"),
         item("v", "Toggle inline diffs for edits"),
@@ -190,11 +202,42 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
+        item("F9", "Paste the clipboard's image as a file path"),
+        item("Ctrl+V", "The same, in terminals that send it"),
         item("F12", "Back to the dashboard, leaving it running"),
+        Line::default(),
+        section("Pasting an image"),
+        item("", "A terminal carries text, never a picture — so cctop"),
+        item("", "writes the image to a file and types its path, which"),
+        item("", "is how every one of these agents reads one."),
+        item("F9", "Does that with the clipboard of this machine"),
+        item(
+            "over ssh",
+            "That clipboard is on the machine you sshed from,",
+        ),
+        item("", "and nothing here can reach it. Easiest is the page:"),
+        item("", "`cctop serve` here, open it there, and paste the"),
+        item("", "image into the box that answers a session — a"),
+        item("", "browser can read one where a terminal cannot."),
+        item("", "Otherwise scp the file and type its path, or paste"),
+        item("", "the image as base64 text, which cctop also files:"),
+        item("", "  wl-paste -t image/png | base64 -w0 | wl-copy"),
+        item("", "  pngpaste - | base64 | pbcopy"),
+        item("", "  PowerShell: see docs/the-table.md"),
+        Line::default(),
+        section("Mouse"),
+        item("Right-click a row", "Its menu, as Enter opens it"),
+        item("Click a footer hint", "Presses that key (q asks twice)"),
+        item("Click [y] / [n]", "Answers a confirmation"),
         Line::default(),
         section("Elsewhere"),
         item("A", "Open the agent this cctop launched"),
         item("w", "Bell + desktop alert when a session needs you"),
+        item("W", "Share the agent's terminal to a browser"),
+        item(
+            "B",
+            "Serve this table to a browser, with or without a tunnel",
+        ),
         item("h  F8", "Agent integration: what reports to cctop"),
         item("r  F5", "Refresh now"),
         Line::default(),
@@ -307,7 +350,7 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Resuming a session that is already running somewhere else.
-pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(session) = app.selected_session() else {
         return;
     };
@@ -337,30 +380,40 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App) {
             theme::value(),
         )),
         Line::default(),
-        Line::from(Span::styled(
-            " y to resume anyway · any other key to cancel",
-            theme::dim(),
-        )),
+        // The same two chips its siblings use, rather than the sentence this
+        // line used to be: they are what a pointer can be aimed at, and one
+        // dialog in the family phrasing it differently taught nobody anything.
+        Line::from(Span::styled(RESUME_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Resume a running session?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Resume a running session?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        RESUME_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
 
-/// Offering to install tmux, which is what would have made the agent about to
+const RESUME_KEYS: &str = " [y] resume anyway    [n / Esc] cancel";
+
+/// Offering to install rmux, which is what would have made the agent about to
 /// start outlive cctop.
-pub(super) fn draw_tmux_install(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(install) = app.tmux_install.as_ref() else {
+pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(install) = app.rmux_install.as_ref() else {
         return;
     };
     let command = install.shown();
-    let sudo = command.starts_with("sudo ");
     let mut lines = vec![
         Line::from(Span::styled(
-            " tmux is not installed.",
+            " rmux is not installed.",
             Style::default().fg(theme::colors().cost_mid),
         )),
         Line::default(),
         Line::from(Span::raw(
-            " With it, agents run inside tmux and survive cctop",
+            " With it, agents run inside rmux and survive cctop",
         )),
         Line::from(Span::raw(
             " closing. Without it, quitting takes them with it.",
@@ -371,13 +424,6 @@ pub(super) fn draw_tmux_install(frame: &mut Frame, area: Rect, app: &App) {
             theme::value(),
         )),
     ];
-    if sudo {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            " Runs in a tab, so sudo can ask you for a password.",
-            theme::dim(),
-        )));
-    }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         " y to install · any other key to start without it",
@@ -389,10 +435,116 @@ pub(super) fn draw_tmux_install(frame: &mut Frame, area: Rect, app: &App) {
     modal(
         frame,
         area,
-        &format!("Install tmux with {}?", install.manager),
+        &format!("Install rmux with {}?", install.manager),
         lines,
         62,
     );
+}
+
+/// Whether this cctop is serving its table to a browser, and on what.
+///
+/// The links are drawn as their origin and made clickable, rather than printed
+/// in full. A served link carries the token that opens it, so the full text is
+/// something to hand over deliberately — `y` puts it on the clipboard — and not
+/// something to leave on screen. It also does not fit: a tunnel hostname plus a
+/// token is most of a hundred columns.
+pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    match &app.serving {
+        None => {
+            lines.push(Line::from(Span::raw(
+                " Nothing is being served. The table can be a page,",
+            )));
+            lines.push(Line::from(Span::raw(" with cctop still running here.")));
+        }
+        Some(serving) => {
+            // A free function rather than a closure: it appends to `lines`,
+            // and a closure that captures it mutably shuts out every other push
+            // in this arm.
+            fn show(lines: &mut Vec<Line<'static>>, what: &str, url: &str) {
+                lines.push(Line::from(Span::styled(format!(" {what}"), theme::dim())));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", origin_of(url)),
+                    Style::default().fg(theme::colors().accent),
+                )));
+            }
+            show(&mut lines, "This machine", &serving.local);
+            match &serving.public {
+                None => {
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        " No tunnel — nothing off this machine can reach it.",
+                        theme::dim(),
+                    )));
+                }
+                Some(public) => {
+                    lines.push(Line::default());
+                    show(&mut lines, "The internet", public);
+                    lines.push(Line::default());
+                    // The one thing to understand before sending this to
+                    // anybody, said where the link is being looked at.
+                    lines.push(Line::from(Span::styled(
+                        " Anyone holding it reads every session here,",
+                        Style::default().fg(theme::colors().cost_mid),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        match serving.actions {
+                            true => " and can type at your agents. Cloudflare carries it.",
+                            false => " but cannot act. Cloudflare carries it.",
+                        },
+                        Style::default().fg(theme::colors().cost_mid),
+                    )));
+                }
+            }
+        }
+    }
+    // Said in the panel as well as in the corner: `t` is pressed here, and a
+    // panel that answered a keypress with nothing would read as a dead key.
+    if let Some(opening) = &app.share_opening {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format!(" {} Opening a tunnel to trycloudflare…", opening.frame()),
+            Style::default().fg(theme::colors().cost_mid),
+        )));
+    }
+    if let Some(error) = &app.serve_error {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format!(" {}", crate::util::truncate(error, 58)),
+            Style::default().fg(theme::colors().cost_high),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        match app.serving.is_some() {
+            true => " o open · y copy · l local · t + tunnel · x stop",
+            false => " l this machine only · t also a public tunnel",
+        },
+        theme::dim(),
+    )));
+
+    // Sized to the longest line, so a tunnel hostname is one line and not two,
+    // and capped to the screen, where it wraps instead — into a box now tall
+    // enough for it.
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let width = widest
+        .saturating_add(3)
+        .clamp(56, area.width.saturating_sub(4).max(24));
+    modal(frame, area, "Serve this table to a browser", lines, width);
+}
+
+/// `http://127.0.0.1:7778/?t=abc` → `http://127.0.0.1:7778`.
+///
+/// What is worth reading on screen: where the link goes, without the token that
+/// opens it.
+fn origin_of(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let host = rest.split(['/', '?']).next().unwrap_or(rest);
+    match scheme.is_empty() {
+        true => host.to_string(),
+        false => format!("{scheme}://{host}"),
+    }
 }
 
 pub(super) fn draw_sortby(frame: &mut Frame, area: Rect, app: &App) {
@@ -564,7 +716,15 @@ pub(super) fn draw_row_menu(
         .map(|s| crate::util::truncate(s.display_label(), width.saturating_sub(4) as usize))
         .unwrap_or_default();
 
-    let height = lines.len() as u16 + 2;
+    // Wrapped rows, not lines. The paragraph below wraps, so a box sized to the
+    // line count is one row short for every line that wrapped — and the content
+    // that does not fit is drawn through the bottom border rather than clipped.
+    let inner_width = width.saturating_sub(2).max(1) as usize;
+    let height = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(inner_width) as u16)
+        .sum::<u16>()
+        + 2;
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
@@ -682,7 +842,7 @@ pub(super) fn draw_launch(
             false => String::new(),
         };
 
-        // The session's own title where cctop knows it. A resumed session's tmux
+        // The session's own title where cctop knows it. A resumed session's rmux
         // name carries the whole session id, which for Codex is a timestamp and a
         // uuid — two of those are identical for far more characters than this
         // column is wide, so the names alone would draw two rows that read the
@@ -970,7 +1130,54 @@ pub(super) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Agent integration", lines, WIDTH);
 }
 
-pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {
+// ---------------------------------------------------------------------------
+// Confirmations
+// ---------------------------------------------------------------------------
+
+/// The key a chip stands for: `[y]` is `y`.
+fn ch(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+/// `[n / Esc]`, and `[any key]` on the dialogs that only have something to say.
+fn dismiss() -> KeyEvent {
+    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+}
+
+/// Claim a confirmation's rectangle and make the `[k]` chips on its last line
+/// clickable.
+///
+/// Both halves matter, and both were missing. Without the rectangle a click
+/// anywhere on a dialog fell straight through to the table underneath, moving
+/// the selection beneath a question about the row that was selected when it was
+/// asked. And the chips are written to be read as buttons — `[y] delete` is not
+/// prose — so a pointer aimed at one has to land somewhere, cctop holding the
+/// terminal's mouse capture.
+///
+/// `hint` is the text of that line and `row` its index among the lines, which
+/// is how the chips are located: they are found in the string that was drawn,
+/// rather than by counting columns a caller would have to keep in step with the
+/// wording.
+fn confirm_chips(
+    layout: &mut Layout,
+    outer: Rect,
+    inner: Rect,
+    row: u16,
+    hint: &str,
+    keys: &[(&str, KeyEvent)],
+) {
+    layout.modal_rect = Some(outer);
+    for (chip, key) in keys {
+        let Some(at) = hint.find(chip) else {
+            continue;
+        };
+        let x = inner.x + hint[..at].chars().count() as u16;
+        let width = chip.chars().count() as u16;
+        layout.key_hits.push((inner.y + row, x, x + width, *key));
+    }
+}
+
+pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -986,15 +1193,23 @@ pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::colors().cost_mid),
         )),
         Line::default(),
-        Line::from(Span::styled(
-            "  [y] delete    [n / Esc] cancel",
-            theme::dim(),
-        )),
+        Line::from(Span::styled(DELETE_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Delete session?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Delete session?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DELETE_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
 
-pub(super) fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App) {
+const DELETE_KEYS: &str = "  [y] delete    [n / Esc] cancel";
+
+pub(super) fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -1007,12 +1222,24 @@ pub(super) fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::raw("  This session is still running.")),
         Line::from(Span::raw("  Stop the agent first, then delete it.")),
         Line::default(),
-        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Cannot delete", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Cannot delete", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DISMISS_KEYS,
+        &[("[any key]", dismiss())],
+    );
 }
 
-pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App) {
+/// The one chip on a dialog that has nothing to decide, only something to say.
+const DISMISS_KEYS: &str = "  [any key] dismiss";
+
+pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -1029,15 +1256,23 @@ pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from(Span::raw("  Unsaved work in the agent may be interrupted.")),
         Line::default(),
-        Line::from(Span::styled(
-            "  [y] terminate    [n / Esc] cancel",
-            theme::dim(),
-        )),
+        Line::from(Span::styled(KILL_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Terminate session?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Terminate session?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        KILL_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
 
-pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App) {
+const KILL_KEYS: &str = "  [y] terminate    [n / Esc] cancel";
+
+pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let label = match &app.hosted {
         Some((_, label)) => label.clone(),
         None => return,
@@ -1055,15 +1290,23 @@ pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from(Span::raw("  Exit the agent itself to leave it cleanly.")),
         Line::default(),
-        Line::from(Span::styled(
-            "  [y] quit anyway    [n / Esc] stay    [A] back to the agent",
-            theme::dim(),
-        )),
+        Line::from(Span::styled(QUIT_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Quit and stop the agent?", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Quit and stop the agent?", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        QUIT_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss()), ("[A]", ch('A'))],
+    );
 }
 
-pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App) {
+const QUIT_KEYS: &str = "  [y] quit anyway    [n / Esc] stay    [A] back to the agent";
+
+pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -1078,12 +1321,21 @@ pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from(Span::raw("  It may be running in a remote or shared host.")),
         Line::default(),
-        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
     ];
-    modal(frame, area, "Cannot terminate", lines, 62);
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Cannot terminate", lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DISMISS_KEYS,
+        &[("[any key]", dismiss())],
+    );
 }
 
-pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let ms = app.marked_sessions();
     let (verb, noun) = match app.batch {
         BatchKind::Delete => ("delete", "sessions"),
@@ -1117,14 +1369,27 @@ pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(theme::colors().cost_mid),
     )));
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        format!("  [y] {verb} all    [n / Esc] cancel"),
-        theme::dim(),
-    )));
-    modal(frame, area, &format!("{verb} all?"), lines, 62);
+    let hint = format!("  [y] {verb} all    [n / Esc] cancel");
+    lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, &format!("{verb} all?"), lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        &hint,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
 }
 
-pub(super) fn draw_batch_blocked(frame: &mut Frame, area: Rect, app: &App, deleting: bool) {
+pub(super) fn draw_batch_blocked(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    deleting: bool,
+    layout: &mut Layout,
+) {
     let ms = app.marked_sessions();
     // First one that can't be processed, for the explanation.
     let (explain, name) = match app.batch {
@@ -1134,7 +1399,7 @@ pub(super) fn draw_batch_blocked(frame: &mut Frame, area: Rect, app: &App, delet
         ),
         BatchKind::Kill => (
             "has no locally controllable process",
-            ms.iter().find(|s| session_root_pid(s).is_none()),
+            ms.iter().find(|s| s.root_pid().is_none()),
         ),
     };
     let lines = vec![
@@ -1160,14 +1425,23 @@ pub(super) fn draw_batch_blocked(frame: &mut Frame, area: Rect, app: &App, delet
             theme::dim(),
         )),
         Line::default(),
-        Line::from(Span::styled("  [any key] dismiss", theme::dim())),
+        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
     ];
+    let last = lines.len() as u16 - 1;
     let title = if deleting {
         "Cannot delete all"
     } else {
         "Cannot terminate all"
     };
-    modal(frame, area, title, lines, 62);
+    let (outer, inner) = modal(frame, area, title, lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DISMISS_KEYS,
+        &[("[any key]", dismiss())],
+    );
 }
 
 pub(super) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
@@ -1213,7 +1487,7 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
             theme::dim(),
         )),
         Line::from(Span::styled(
-            " Needs the agent under `cctop run`, tmux, or cctop as root.",
+            " Needs the agent under `cctop run`, rmux, or cctop as root.",
             theme::dim(),
         )),
         Line::default(),
@@ -1228,7 +1502,10 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("█", Style::default().fg(theme::colors().accent)),
         ]),
         Line::default(),
-        Line::from(Span::styled(" Enter send   Esc cancel", theme::dim())),
+        Line::from(Span::styled(
+            " Enter send   F9 paste an image   Esc cancel",
+            theme::dim(),
+        )),
     ];
     modal(frame, area, "Send to session", lines, 64);
 }

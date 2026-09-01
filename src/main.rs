@@ -1,7 +1,9 @@
+mod access;
 mod alias;
 mod attach;
 mod cache;
 mod cli;
+mod clipboard;
 mod collide;
 mod config;
 mod doctor;
@@ -22,15 +24,16 @@ mod shim;
 // The tabs and their agents are unix-only, but the code that opens them is not
 // cfg'd apart — so Windows gets the same surface with nothing behind it rather
 // than a cfg on every call site. See `shim_stub` for the bargain.
+mod rmux;
 #[cfg(not(unix))]
 #[path = "shim_stub.rs"]
 mod shim;
-mod tmux;
 mod trace;
 mod ui;
 mod update;
 mod util;
 mod watch;
+mod why;
 
 use clap::Parser;
 use std::io::IsTerminal;
@@ -92,6 +95,16 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("doctor") {
             std::process::exit(doctor::run(&argv[2..]));
+        }
+    }
+
+    // `cctop why` alongside `doctor`, and for the same reason: a bare word, and
+    // cctop has no positionals for clap to read one as. Every platform — "why
+    // does this row say that" is not a unix-only question.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("why") {
+            std::process::exit(why::run(&argv[2..]));
         }
     }
 

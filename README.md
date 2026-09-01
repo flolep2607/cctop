@@ -105,6 +105,10 @@ loopback by default. See [In a browser](docs/serve.md).
 - [Integrations](docs/integrations.md) — agent hooks, the MCP server, and `--host`
 - [Troubleshooting](docs/troubleshooting.md) — `cctop doctor` and the usual causes
 
+Two directories of other people's documentation, mirrored so a format change can
+be read against a copy that does not move: [the harnesses](docs/harnesses/) cctop
+reads, and [rmux](docs/rmux/), the multiplexer it hands agents to.
+
 ## Which agents it reads
 
 | Agent | Cost | Tokens | Context | Tools | Live process |

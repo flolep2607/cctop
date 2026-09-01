@@ -513,15 +513,15 @@ fn typing() -> Section {
                  this is what lets `s` and `a` reach a session",
             ),
         },
-        match crate::tmux::available() {
+        match crate::rmux::available() {
             true => ok(
-                "tmux",
+                "rmux",
                 "available; panes survive cctop and can be typed into",
             ),
             false => warn(
-                "tmux",
+                "rmux",
                 "not installed",
-                "optional: without it cctop's tabs die with cctop, and tmux-hosted \
+                "optional: without it cctop's tabs die with cctop, and rmux-hosted \
                  sessions cannot be typed into",
             ),
         },

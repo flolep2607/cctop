@@ -536,8 +536,88 @@ pub fn scan_tail_escalating<T>(path: &Path, mut scan: impl FnMut(&str) -> Option
     None
 }
 
+/// `want` bytes of entropy, from the OS where it will give us any.
+///
+/// `/dev/urandom` is the real source and the fallback is not as good: hashing
+/// the clock and the pid under [`std::hash::RandomState`], whose keys the
+/// standard library seeds from the OS once per process. That is enough to stop
+/// a value being guessed from across a network and is not enough to stop a
+/// local process that already knows when cctop started.
+///
+/// A short read counts as a failure rather than as fewer bytes: half of
+/// something random is not half as good, and silently shortening it is the kind
+/// of weakening nobody would find later.
+pub fn random_bytes(want: usize) -> Vec<u8> {
+    read_random(want).unwrap_or_else(|| hashed_bytes(want))
+}
+
+/// `bytes` bytes of entropy as hex, which is twice as many characters.
+pub fn random_hex(bytes: usize) -> String {
+    random_bytes(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The fallback, split out so it can be tested on the platform that uses it.
+///
+/// Windows has no `/dev/urandom` to read, so this is the whole of its entropy —
+/// and a test that only ever exercised the good path would say nothing about
+/// the platform that never takes it.
+fn hashed_bytes(want: usize) -> Vec<u8> {
+    use std::hash::{BuildHasher, Hasher, RandomState};
+
+    let mut out = Vec::with_capacity(want);
+    for salt in 0.. {
+        if out.len() >= want {
+            break;
+        }
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_i64(now_ms());
+        hasher.write_u32(std::process::id());
+        hasher.write_u64(salt);
+        out.extend_from_slice(&hasher.finish().to_ne_bytes());
+    }
+    out.truncate(want);
+    out
+}
+
+/// Read `want` bytes from the system random device, if there is one.
+fn read_random(want: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open("/dev/urandom").ok()?;
+    let mut buf = vec![0u8; want];
+    file.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// Round-trips, tolerates the line wrapping a pasted blob carries, and
+    /// refuses prose rather than decoding it into rubbish — which is what makes
+    /// it safe to sniff every paste for an image.
+    #[test]
+    fn base64_decodes_what_it_encodes_and_refuses_prose() {
+        for case in [
+            &b""[..],
+            b"a",
+            b"ab",
+            b"abc",
+            b"\x89PNG\r\n\x1a\n",
+            b"\x00\xff\x10",
+        ] {
+            let text = b64_encode(case);
+            assert_eq!(b64_decode(&text).as_deref(), Some(case), "{text}");
+        }
+        // Wrapped, as `base64` writes it at 76 columns and as a paste of one
+        // arrives.
+        let text = b64_encode(b"hello world!");
+        let wrapped = format!("{}\r\n{}", &text[..8], &text[8..]);
+        assert_eq!(b64_decode(&wrapped).as_deref(), Some(&b"hello world!"[..]));
+        assert_eq!(b64_decode("what is wrong with this?"), None);
+    }
     use super::*;
 
     #[test]
@@ -655,5 +735,17 @@ mod tests {
         assert_eq!(nice_max(0.0), 1.0);
         assert_eq!(nice_max(87.0), 100.0);
         assert_eq!(nice_max(230.0), 250.0);
+    }
+
+    /// The path Windows always takes, exercised on every platform.
+    #[test]
+    fn the_hashed_fallback_is_the_same_shape_as_the_real_thing() {
+        assert_eq!(hashed_bytes(16).len(), 16);
+        assert_eq!(hashed_bytes(3).len(), 3);
+        assert_ne!(hashed_bytes(16), hashed_bytes(16));
+        let hex = random_hex(16);
+        assert_eq!(hex.len(), 32);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(random_hex(16), random_hex(16));
     }
 }

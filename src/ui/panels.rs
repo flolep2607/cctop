@@ -1709,92 +1709,62 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
     lines
 }
 
-/// Skill names and descriptions read from each `SKILL.md` front matter.
+/// The skills in `dir`, drawn from the shared reader in [`crate::access`].
+///
+/// The reading is not here because the browser needs the same list, and two
+/// readers of one directory are two answers to one question — see that module.
 fn skill_list(dir: &Path) -> Vec<Line<'static>> {
     if !dir.is_dir() {
         return vec![missing(format!("No skills installed ({})", dir.display()))];
     }
-    let mut out = Vec::new();
-    for entry in crate::config::list_dir(dir) {
-        let skill_md = dir.join(&entry).join("SKILL.md");
-        let (mut name, mut desc) = (entry.clone(), String::new());
-        if let Some(text) = util::read_head(&skill_md, 4096) {
-            for line in text.lines().take(20) {
-                if let Some(v) = line.strip_prefix("name:") {
-                    name = v.trim().to_string();
-                } else if let Some(v) = line.strip_prefix("description:") {
-                    desc = v.trim().to_string();
-                }
-            }
-        }
-        let mut spans = vec![Span::styled(
-            name,
-            Style::default().fg(theme::colors().cost_low),
-        )];
-        if !desc.is_empty() {
-            spans.push(Span::raw("  "));
-            spans.push(dim(util::truncate(&desc, 80)));
-        }
-        out.push(Line::from(spans));
+    let skills = crate::access::skills(dir);
+    if skills.is_empty() {
+        return vec![missing("No skills installed".into())];
     }
-    if out.is_empty() {
-        out.push(missing("No skills installed".into()));
-    }
-    out
-}
-
-fn mcp_from_json(path: &Path, scope: &str) -> Vec<Line<'static>> {
-    let Some(text) = util::read_head(path, 64 * 1024) else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    // Project `.mcp.json` may hold the servers at the top level.
-    let servers = v.get("mcpServers").unwrap_or(&v);
-    let Some(map) = servers.as_object() else {
-        return Vec::new();
-    };
-    map.iter()
-        .filter(|(_, cfg)| cfg.is_object())
-        .map(|(name, cfg)| {
-            let mut spans = vec![
-                Span::styled(name.clone(), Style::default().fg(theme::colors().name_hue)),
-                Span::raw("  "),
-                dim(format!("({scope})")),
-            ];
-            if let Some(cmd) = cfg.get("command").and_then(|c| c.as_str()) {
+    skills
+        .into_iter()
+        .map(|skill| {
+            let mut spans = vec![Span::styled(
+                skill.name,
+                Style::default().fg(theme::colors().cost_low),
+            )];
+            if !skill.description.is_empty() {
                 spans.push(Span::raw("  "));
-                spans.push(dim(cmd.to_string()));
+                spans.push(dim(util::truncate(&skill.description, 80)));
             }
             Line::from(spans)
         })
         .collect()
 }
 
+/// MCP servers from a JSON config, as lines.
+fn mcp_from_json(path: &Path, scope: &'static str) -> Vec<Line<'static>> {
+    crate::access::mcp_from_json(path, scope)
+        .into_iter()
+        .map(mcp_line)
+        .collect()
+}
+
+/// MCP servers from Codex's `config.toml`, as lines.
 fn mcp_from_toml(path: &Path) -> Vec<Line<'static>> {
-    let Some(text) = util::read_head(path, 64 * 1024) else {
-        return vec![missing("No MCP servers configured".into())];
-    };
-    let out: Vec<Line<'static>> = text
-        .lines()
-        .filter_map(|l| {
-            l.trim()
-                .strip_prefix("[mcp_servers.")
-                .and_then(|r| r.strip_suffix(']'))
-                .map(|name| {
-                    Line::from(Span::styled(
-                        name.to_string(),
-                        Style::default().fg(theme::colors().name_hue),
-                    ))
-                })
-        })
-        .collect();
-    if out.is_empty() {
-        vec![missing("No MCP servers in config.toml".into())]
-    } else {
-        out
+    let servers = crate::access::mcp_from_toml(path);
+    if servers.is_empty() {
+        return vec![missing("No MCP servers in config.toml".into())];
     }
+    servers.into_iter().map(mcp_line).collect()
+}
+
+fn mcp_line(server: crate::access::McpServer) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(server.name, Style::default().fg(theme::colors().name_hue)),
+        Span::raw("  "),
+        dim(format!("({})", server.scope)),
+    ];
+    if let Some(command) = server.command {
+        spans.push(Span::raw("  "));
+        spans.push(dim(command));
+    }
+    Line::from(spans)
 }
 
 #[cfg(test)]

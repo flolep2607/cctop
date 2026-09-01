@@ -345,6 +345,9 @@ fn age_secs(s: &Session, now: &DateTime<Utc>) -> Option<i64> {
 pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
     match id {
         ColumnId::Status => match s.activity_state {
+            // A ring rather than a disc, so the one row that is actually
+            // blocking an agent is findable without relying on colour alone.
+            ActivityState::Asking => "◉".into(),
             ActivityState::WaitingForInput | ActivityState::ApiError => "●".into(),
             ActivityState::Working if s.is_running() => "●".into(),
             ActivityState::Working => "○".into(),

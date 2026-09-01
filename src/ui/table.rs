@@ -422,6 +422,10 @@ fn subagent_row(
 fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) -> Color {
     match id {
         ColumnId::Status => match s.activity_state {
+            // Three states, three colours, loudest first: an agent blocked on a
+            // question is the one costing you time, a finished turn is merely
+            // your move, and work in progress is calm.
+            crate::session::ActivityState::Asking => theme::colors().cost_high,
             crate::session::ActivityState::WaitingForInput => theme::colors().cost_mid,
             crate::session::ActivityState::ApiError => theme::colors().cost_high,
             crate::session::ActivityState::Working if s.is_running() => {

@@ -24,7 +24,7 @@ One install covers five agents, each asked in its own dialect:
 
 | Agent | Where it is written | What is written |
 |---|---|---|
-| **Claude Code** | `~/.claude/settings.json`, or `<project>/.claude/` | twelve hooks — `Stop`, `StopFailure`, `Notification`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `SessionStart`, `SessionEnd`, `PreCompact`, `SubagentStop` |
+| **Claude Code** | `~/.claude/settings.json`, or `<project>/.claude/` | every event it raises but one — thirty of them, from `SessionStart` to `SessionEnd`. The exception is `WorktreeCreate`; see below |
 | **Gemini CLI** | `~/.gemini/settings.json`, or `<project>/.gemini/` | eight — `BeforeAgent`, `AfterAgent`, `BeforeTool`, `AfterTool`, `Notification`, `SessionStart`, `SessionEnd`, `PreCompress` |
 | **Cursor** | `~/.cursor/hooks.json`, or `<project>/.cursor/` | seven — `stop`, `beforeSubmitPrompt`, `beforeShellExecution`, `sessionStart`, `sessionEnd`, `preCompact`, `subagentStop` |
 | **Codex** | `~/.codex/hooks.json`, or `<project>/.codex/`, and `~/.codex/config.toml` | ten hooks — `Stop`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`, `SubagentStop` — and `notify = ["cctop", "hook", "codex"]` |
@@ -73,6 +73,42 @@ call in flight over a still screen as a permission prompt waiting for you.
 `PermissionRequest` is the same fact said properly: it fires the instant Claude
 Code asks, where the `Notification` for the same prompt is on a six-second
 timer and the tool-in-flight reading is a guess.
+
+It fires when the prompt is *raised*, though, not when it is decided — and
+Claude Code's auto mode decides most of them itself, by asking a model, which
+takes a few seconds. So cctop holds a permission prompt for four seconds before
+it counts as a question: no bell, no blinking tab, no attention card. If the
+decision arrives first — `PermissionDenied`, or the tool simply running — the
+newer event replaces the held one and nobody is disturbed at all. If nothing
+answers, the prompt is yours after the four seconds. Nothing else is held:
+an MCP elicitation and a plain notification have no second opinion coming.
+
+cctop asks for all of them rather than a chosen few, so that teaching cctop
+about an event is a change to cctop and not to everybody's settings file. Most
+fire a handful of times in a session. `MessageDisplay` is the exception — once
+per batch of streamed lines, several times per message — and it buys the one
+thing nothing else says: a long answer with no tool calls in it raises nothing
+at all between `UserPromptSubmit` and `Stop`, so a turn spent writing was a turn
+cctop could only guess at from a screen that had stopped changing.
+
+Some are worth naming for what they fix. `Elicitation` is an MCP server asking
+*you* something mid-task: not a permission dialog, so `PermissionRequest` never
+fires, and a session blocked on one used to read as idle. `TeammateIdle` is an
+agent-team member finishing its turn — the team's `Stop`, one member at a time.
+`UserPromptExpansion` covers the path `UserPromptSubmit` misses, where typing
+`/skillname` expands into a prompt without submitting one. `CwdChanged` moves
+the ground under a row, since the project a session is drawn against comes from
+its working directory. And `PermissionDenied` is the only trace auto mode leaves
+when it refuses a call.
+
+**`WorktreeCreate` is the one cctop will not install**, and not because of cost.
+It does not observe worktree creation — it *replaces* it. Claude Code stops
+calling `git worktree` and takes the new path from the hook's stdout, and a hook
+that produces no path fails worktree creation with an error. cctop's hook writes
+nothing to stdout by construction, because a hook that prints is a hook that can
+derail the session it watches — so registering this one would break
+`claude --worktree` and every subagent isolated in a worktree. If you want cctop
+to know about worktrees, that needs a hook that actually creates one.
 
 If you installed before an event was added — `PostToolUseFailure`, or a whole
 agent — that install is short exactly those events, and cctop fills it in on

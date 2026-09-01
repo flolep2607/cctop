@@ -73,16 +73,21 @@ pub struct Quota {
 pub struct ProfileQuota {
     pub profile: String,
     pub status: ProviderStatus,
+    /// Carried so the panel can name the right repair for a sign-in that has
+    /// gone: `claude login` fixes a directory's credentials and does nothing at
+    /// all for a token in cctop's config, which only `--add-account` replaces.
+    pub source: config::AccountSource,
 }
 
 /// Every profile of `provider`'s, pending — so a panel can say it is checking
 /// rather than claiming an account has no limits before it has looked.
 fn pending_for(provider: crate::pricing::Provider) -> Vec<ProfileQuota> {
-    config::profiles_for(provider)
+    config::accounts_for(provider)
         .iter()
         .map(|p| ProfileQuota {
             profile: p.name.clone(),
             status: ProviderStatus::Pending,
+            source: p.source,
         })
         .collect()
 }
@@ -374,13 +379,15 @@ pub fn add_account(profile: &str) -> anyhow::Result<()> {
     if !is_api_key(token) && !token.starts_with("sk-ant-oat") {
         eprintln!("! That does not look like a `claude setup-token` token.");
     }
-    // A token is read as one profile's, and a profile is a directory holding
-    // credentials, so a name with no directory behind it has no row to appear
-    // in. Say so rather than leaving the token to be silently unread.
+    // A name with no `~/.claude-<name>` behind it is the ordinary case for a
+    // token, not a mistake: it is an account whose sessions live in the one
+    // `~/.claude` with everything else. Say which of the two happened, because
+    // it decides whether the account will ever label a row.
     if config::profile_named(crate::pricing::Provider::Claude, profile).is_none() {
         eprintln!(
-            "! No Claude profile is named '{profile}', so nothing polls this token yet.\n\
-             \x20 Profiles are the `~/.claude*` directories holding a `.credentials.json`."
+            "  No `~/.claude-{profile}` directory, so this is a token-only account: its\n\
+             \x20 limits get a column of their own, and its sessions stay in ~/.claude\n\
+             \x20 with the rest — start one with CLAUDE_CODE_OAUTH_TOKEN set to spend it."
         );
     }
     Ok(())
@@ -536,9 +543,14 @@ fn as_epoch_secs(v: Option<&Value>) -> Option<i64> {
 }
 
 pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
-    let is_default = config::profiles_for(crate::pricing::Provider::Claude)
-        .first()
-        .is_some_and(|first| first.dir == profile.dir);
+    // A token account shares the default directory but is not the default
+    // account: it was named precisely to be a second one, so the keychain and
+    // the environment variable — both of which hold exactly one account, the
+    // one the harness would use unasked — must not answer for it.
+    let is_default = profile.source == config::AccountSource::Directory
+        && config::profiles_for(crate::pricing::Provider::Claude)
+            .first()
+            .is_some_and(|first| first.dir == profile.dir);
     let token = match read_claude_credential_in(profile, is_default) {
         Credential::ApiKey => return ProviderStatus::ApiBilling,
         Credential::None => return ProviderStatus::NotSignedIn,
@@ -660,6 +672,7 @@ mod tests {
     fn each_profile_reports_its_own_limits() {
         let of = |profile: &str, pct: u32| ProfileQuota {
             profile: profile.to_string(),
+            source: config::AccountSource::Directory,
             status: ProviderStatus::Ok(ProviderQuota {
                 plan: None,
                 windows: vec![Window {

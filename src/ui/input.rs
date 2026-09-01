@@ -1,9 +1,7 @@
 //! Key and mouse handling: translate input events into state changes.
 
 use super::columns::COLUMNS;
-use super::{
-    AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render, session_root_pid,
-};
+use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render};
 /// Longest path the launcher's directory field accepts.
 ///
 /// Comfortably past any real working directory — Linux caps a path at 4096
@@ -14,13 +12,21 @@ pub(super) const MAX_PATH_INPUT: usize = 512;
 /// Longest name a tab will take.
 ///
 /// The bar truncates well before this, so a longer name is one nobody can read
-/// anyway; the cap is here so a paste cannot fill the tmux option with a
+/// anyway; the cap is here so a paste cannot fill the rmux option with a
 /// transcript.
 pub(super) const TAB_NAME_MAX: usize = 64;
+
+/// How long after a right-click a paste still counts as that click's echo.
+///
+/// One frame's worth of slack: the terminal writes the click and the clipboard
+/// back to back, so anything this close arrived with the button, while a person
+/// reaching for Ctrl+Shift+V cannot be here yet.
+pub(super) const RIGHT_CLICK_PASTE: Duration = Duration::from_millis(250);
 
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use std::time::{Duration, Instant};
 
 /// The pasted text as a single line, within `room` more bytes — the budget being
 /// in bytes because the caps it enforces are the ones `on_key_send` and
@@ -84,6 +90,21 @@ impl App {
                 self.on_key_function(key);
                 return;
             }
+            // Ctrl+V with a picture on the clipboard, which is the gesture
+            // anyone reaches for before they reach for F9. Taken only when
+            // there is an image to take it for: with text on the clipboard the
+            // key goes to the agent untouched, as it always did.
+            //
+            // Not every terminal sends it: Windows Terminal binds Ctrl+V to
+            // its own paste and the application is never told, so there F9 is
+            // the only way in. Unbinding it in the terminal's settings gives
+            // this back.
+            if key.code == KeyCode::Char('v')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && self.image_gesture_into_pane()
+            {
+                return;
+            }
             if let Some(pane) = self.focused_pane() {
                 // The agent this key is going to, taken before the borrow ends:
                 // answering its question is the one thing no hook reports.
@@ -112,8 +133,9 @@ impl App {
             Mode::KillConfirm => self.on_key_kill(key),
             Mode::ResumeConfirm => self.on_key_resume(key),
             Mode::TmuxInstall => {
-                self.tmux_install_answer(key.code == KeyCode::Char('y'));
+                self.rmux_install_answer(key.code == KeyCode::Char('y'));
             }
+            Mode::Serve => self.on_key_serve(key),
             Mode::QuitConfirm => self.on_key_quit(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
                 self.on_key_batch(key)
@@ -144,6 +166,33 @@ impl App {
     pub(super) fn on_paste(&mut self, text: &str) {
         self.needs_redraw = true;
 
+        // An image that arrived as text, which is the only way one reaches a
+        // cctop running over ssh: the clipboard is on the machine the ssh was
+        // typed on, and no helper on this side can see it. What is pasted is a
+        // file here, and what the agent is given is its path — the same as F9,
+        // by a different road.
+        if let Some(png) = crate::clipboard::png_from_paste(text) {
+            match crate::clipboard::write_png(&png) {
+                Ok(path) => {
+                    let shown = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.set_status(format!("Pasted {shown}"));
+                    self.paste_text(&format!("{} ", path.display()));
+                }
+                // The paste is not put through as text on a failure: 100KB of
+                // base64 in front of an agent is worse than nothing having
+                // happened, and the status line says what did.
+                Err(e) => self.set_status(format!("Could not save the pasted image: {e}")),
+            }
+            return;
+        }
+        self.paste_text(text);
+    }
+
+    /// A paste, once it is known to be text.
+    fn paste_text(&mut self, text: &str) {
         if self.tab > 0 && self.mode == Mode::List {
             if let Some(pane) = self.focused_pane() {
                 // The same bookkeeping a keystroke does: text put in front of an
@@ -170,6 +219,13 @@ impl App {
                 self.send_input.push_str(&flatten(text, room));
             }
             Mode::RenameTab => {
+                // The clipboard a right-click brought along with it, not a
+                // paste anyone asked for. See `rename_opened_by_click`.
+                if let Some(at) = self.rename_opened_by_click.take()
+                    && at.elapsed() < RIGHT_CLICK_PASTE
+                {
+                    return;
+                }
                 let room = TAB_NAME_MAX.saturating_sub(self.rename_input.chars().count());
                 self.rename_input.push_str(&flatten(text, room));
             }
@@ -197,6 +253,119 @@ impl App {
         }
     }
 
+    /// The clipboard's image written to a file, and its path — the form an
+    /// agent can actually read one in. Says why when there is nothing to paste.
+    ///
+    /// Every failure is reported in the status line rather than swallowed: a
+    /// key that silently does nothing is indistinguishable from one that is not
+    /// bound, and the two answers this can give — an empty clipboard, and a
+    /// machine with no helper installed — are things the user can act on.
+    fn image_paste(&mut self) -> Option<String> {
+        self.needs_redraw = true;
+        match crate::clipboard::image_to_file() {
+            Ok(path) => {
+                let shown = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.set_status(format!("Pasted {shown}"));
+                Some(path.display().to_string())
+            }
+            Err(why) => {
+                self.set_status(why.message());
+                None
+            }
+        }
+    }
+
+    /// F9 on the dashboard, where there is no composer to type into.
+    ///
+    /// The image is read first and the destination decided after, which is the
+    /// whole of what was wrong here to begin with: asking `send_prompt` first
+    /// meant a row with no local process refused the key with "no local process
+    /// to type into" — a true sentence about a question nobody asked, and no
+    /// clue that it was the image key that had just been pressed.
+    ///
+    /// With a session that can be typed into, the path goes into the box that
+    /// types for it, the field left open for the sentence that follows. With
+    /// none — a finished session, a subagent, a row on another machine — the
+    /// file has still been written and the status line names it in full, which
+    /// is the most that can be done with an image nobody is waiting for.
+    ///
+    /// Not copied to the clipboard, tempting as it is: the clipboard is where
+    /// the image just came from, and putting a path there would delete the
+    /// screenshot the next F9 was going to read. A key that destroys its own
+    /// input on the way past is worse than one that only reports.
+    fn paste_image_from_the_list(&mut self) {
+        let Some(path) = self.image_paste() else {
+            return;
+        };
+        self.send_prompt();
+        if self.mode == Mode::SendKeys {
+            self.send_input = format!("{path} ");
+            return;
+        }
+        // `send_prompt` will have said why it could not open, which is no
+        // longer the news.
+        self.set_status(format!("Saved {path}"));
+    }
+
+    /// The image paste as a gesture rather than as a key: pastes and returns
+    /// true when the clipboard holds an image, and says nothing at all when it
+    /// does not.
+    ///
+    /// Silence is the point. `F9` is pressed to paste an image and so reports
+    /// when there is none; `Ctrl+V` is pressed to paste *whatever* is there,
+    /// and a status line saying "no image on the clipboard" every time someone
+    /// pastes a line of text would be cctop talking over the thing they were
+    /// doing.
+    ///
+    /// ponytail: the right button is not one of these, and was for a day. In
+    /// Windows Terminal it *copies* when there is a selection and pastes only
+    /// when there is not — so a user selecting output and right-clicking to
+    /// copy it got an image pasted into their agent instead. A gesture whose
+    /// meaning depends on a selection cctop cannot see is not one it can take.
+    fn image_gesture_into_pane(&mut self) -> bool {
+        let Ok(path) = crate::clipboard::image_to_file() else {
+            return false;
+        };
+        self.needs_redraw = true;
+        let shown = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.send_to_focused_pane(&format!("{} ", path.display()));
+        self.set_status(format!("Pasted {shown}"));
+        true
+    }
+
+    /// Text typed at the focused pane's agent, with the bookkeeping a paste
+    /// carries: what is put in front of an agent answers whatever it asked.
+    fn send_to_focused_pane(&mut self, text: &str) {
+        let Some(pane) = self.focused_pane() else {
+            return;
+        };
+        let agent = pane.agent();
+        let alive = pane.view.send_paste(text);
+        self.mark_answered(agent);
+        if !alive {
+            self.close_pane();
+            self.set_status("The agent's terminal closed");
+        }
+    }
+
+    /// F9 inside a pane: the image, then a space, typed at the agent.
+    ///
+    /// A space after it because the path is the start of a sentence, not the
+    /// whole of one — "what is wrong with this?" follows, and every harness
+    /// needs the path separated from it.
+    fn paste_image_into_pane(&mut self) {
+        let Some(path) = self.image_paste() else {
+            return;
+        };
+        self.send_to_focused_pane(&format!("{path} "));
+    }
+
     /// The multiplexer keys, live everywhere including inside a pane. Returns
     /// false for an Alt- combination that means nothing here, so it still
     /// reaches the agent.
@@ -218,7 +387,7 @@ impl App {
                 None => return false,
             },
             KeyCode::Char('w') => self.close_pane(),
-            // Shifted, because it is the irreversible one: `w` on a tmux-backed
+            // Shifted, because it is the irreversible one: `w` on a rmux-backed
             // pane only detaches, and the key that ends the agent should not be
             // the same key with a slip of a finger.
             KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::SHIFT) => self.kill_pane(),
@@ -236,6 +405,7 @@ impl App {
             KeyCode::Esc => {
                 self.mode = Mode::List;
                 self.pending_brief = None;
+                self.pending_fork = None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.launch_cursor = (self.launch_cursor + n - 1) % n
@@ -311,6 +481,37 @@ impl App {
                     key.code == KeyCode::Char('p'),
                 ),
                 None => self.set_status("The selected session has no project directory here"),
+            },
+            _ => {}
+        }
+    }
+
+    /// The browser panel's keys.
+    ///
+    /// `l` and `t` start rather than toggle, and both are offered while a
+    /// server is up: switching between them is a stop and a start, which is
+    /// what changing whether the page is on the internet actually is.
+    fn on_key_serve(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.mode = Mode::List,
+            KeyCode::Char('l') => self.start_serving(false),
+            KeyCode::Char('t') => self.start_serving(true),
+            KeyCode::Char('x') => self.stop_serving(),
+            KeyCode::Char('o') => match self.serving.as_ref().map(|s| s.best().to_string()) {
+                Some(link) => match crate::serve::open_in_browser(&link) {
+                    true => self.set_status("Opening the page in your browser"),
+                    false => self.set_status("No browser to open it with — y copies the link"),
+                },
+                None => self.set_status("Nothing is being served yet"),
+            },
+            KeyCode::Char('y') => match self.serving.as_ref().map(|s| s.best().to_string()) {
+                Some(link) => {
+                    crate::ui::render::copy_to_clipboard(&link);
+                    // The token is in the link, so this is a credential leaving
+                    // the process. Said plainly rather than a silent "copied".
+                    self.set_status("Link copied — it carries the token that opens it");
+                }
+                None => self.set_status("Nothing is being served yet"),
             },
             _ => {}
         }
@@ -421,7 +622,7 @@ impl App {
 
     fn on_key_kill(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('y')
-            && let Some(pid) = self.selected_session().and_then(session_root_pid)
+            && let Some(pid) = self.selected_session().and_then(|s| s.root_pid())
             && let Some(session) = self.selected_session()
         {
             let _ = self.tx.send(Request::Terminate {
@@ -459,6 +660,11 @@ impl App {
             // it would take you off the agent you are watching in order to
             // reload a table you were not looking at.
             KeyCode::F(10) | KeyCode::F(5) => self.on_key_list(key),
+            // The clipboard's image, as a path the agent can open. Stays in
+            // the pane: the image is for the agent being typed at, and pulling
+            // the dashboard forward would take the composer off screen at the
+            // moment something is being put into it.
+            KeyCode::F(9) => self.paste_image_into_pane(),
             // The keys the dashboard binds, on the dashboard.
             KeyCode::F(1) | KeyCode::F(3) | KeyCode::F(6) | KeyCode::F(7) | KeyCode::F(8) => {
                 self.show_tab(0);
@@ -526,7 +732,7 @@ impl App {
             KeyCode::Enter => {
                 let text = self.send_input.clone();
                 if !text.is_empty()
-                    && let Some(pid) = self.selected_session().and_then(session_root_pid)
+                    && let Some(pid) = self.selected_session().and_then(|s| s.root_pid())
                 {
                     let _ = self.tx.send(Request::SendKeys { pid, text });
                     self.set_status("Sending…");
@@ -535,6 +741,15 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.send_input.pop();
+            }
+            KeyCode::F(9) => {
+                if let Some(path) = self.image_paste() {
+                    let room = 500usize.saturating_sub(self.send_input.len());
+                    if path.len() < room {
+                        self.send_input.push_str(&path);
+                        self.send_input.push(' ');
+                    }
+                }
             }
             KeyCode::Char(c) if self.send_input.len() < 500 => self.send_input.push(c),
             _ => {}
@@ -585,6 +800,7 @@ impl App {
         self.rename_tab = tab;
         self.rename_was = target.title();
         self.rename_input.clear();
+        self.rename_opened_by_click = None;
         self.mode = Mode::RenameTab;
         self.needs_redraw = true;
     }
@@ -693,7 +909,7 @@ impl App {
             return;
         }
         match self.selected_session() {
-            Some(s) if session_root_pid(s).is_some() => {
+            Some(s) if s.root_pid().is_some() => {
                 self.send_input = "continue".into();
                 self.mode = Mode::SendKeys;
             }
@@ -707,10 +923,18 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         // Shift+Up/Down scrolls inside the active bottom panel, since the plain
-        // arrows are taken by list navigation and panel switching.
-        if shift && matches!(key.code, KeyCode::Up | KeyCode::Down) {
-            self.scroll_active_panel(if key.code == KeyCode::Up { -1 } else { 1 });
-            return;
+        // arrows are taken by list navigation and panel switching. Home and End
+        // join it under the same modifier for the same reason — unshifted they
+        // jump the session list — and the ends are asked for as a distance no
+        // panel can be longer than, since only the renderer knows the real one.
+        if shift {
+            match key.code {
+                KeyCode::Up => return self.scroll_active_panel(-1),
+                KeyCode::Down => return self.scroll_active_panel(1),
+                KeyCode::Home => return self.scroll_active_panel(i32::MIN),
+                KeyCode::End => return self.scroll_active_panel(i32::MAX),
+                _ => {}
+            }
         }
 
         match key.code {
@@ -762,6 +986,13 @@ impl App {
             // `w` for the bell, not `n`: n/N is next/previous match everywhere
             // a search exists, and there were free letters to spend instead.
             KeyCode::Char('w') => self.toggle_notifications(),
+            // `W` next to it, since both are about an agent reaching you rather
+            // than you reaching it.
+            KeyCode::Char('W') => self.share_selected(),
+            // `B` for browser, beside the two keys that are also about reaching
+            // this machine from somewhere else. `W` puts one agent's terminal
+            // in a browser; this puts the whole table in one.
+            KeyCode::Char('B') => self.mode = Mode::Serve,
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
                     format!("{:.2}", self.cost_floor)
@@ -833,6 +1064,7 @@ impl App {
             KeyCode::Enter if self.selected_session().is_some() => self.open_row_menu(),
             KeyCode::Char('d') => self.delete_selected(),
             KeyCode::Char('s') => self.send_prompt(),
+            KeyCode::F(9) => self.paste_image_from_the_list(),
             KeyCode::Char('a') if self.on_subagent() => {
                 self.set_status("A subagent has no terminal of its own to attach to")
             }
@@ -911,7 +1143,16 @@ impl App {
                 }
                 true
             }
-            MouseEventKind::Up(MouseButton::Left) => self.drag_tab.take().is_some(),
+            // The end of a drag, and the moment its arrangement is worth
+            // writing down: `move_tab` has been called on every pointer
+            // movement between the press and here.
+            MouseEventKind::Up(MouseButton::Left) => match self.drag_tab.take() {
+                Some(_) => {
+                    self.save_tab_order();
+                    true
+                }
+                None => false,
+            },
             // Right-click renames. The bar is the only place cctop answers the
             // right button at all — inside a pane it is deliberately dropped
             // (see [`App::on_mouse`]) — so there is nothing here to compete
@@ -924,6 +1165,7 @@ impl App {
                 {
                     Some(tab) => {
                         self.rename_prompt(tab);
+                        self.rename_opened_by_click = Some(Instant::now());
                         true
                     }
                     None => false,
@@ -931,6 +1173,61 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// A click on the footer's corner: open the page, or open a tunnel.
+    ///
+    /// The link opens the browser, as `o` does in the serve panel. The button
+    /// takes two clicks, and `armed` says which this is — the first only lights
+    /// the corner amber and changes what it says, because publishing every
+    /// session on this machine to the internet is not something a slipped
+    /// pointer should be able to do. The second is the one that registers with
+    /// Cloudflare's edge, which is a second of network cctop spends in front of
+    /// the person who asked for it.
+    pub(super) fn on_share_corner(&mut self, armed: bool) {
+        // Already dialling. The corner is spinning and says so; a click at it
+        // is impatience, not a second instruction.
+        if self.share_opening.is_some() {
+            return;
+        }
+        if let Some(link) = self.serving.as_ref().and_then(|s| s.public.clone()) {
+            match crate::serve::open_in_browser(&link) {
+                true => self.set_status("Opening the shared page in your browser"),
+                false => self.set_status("No browser to open it with — B then y copies the link"),
+            }
+            return;
+        }
+        if !armed {
+            self.share_arm = true;
+            self.set_status("Click again to put this table on the internet");
+            return;
+        }
+        self.start_serving(true);
+    }
+
+    /// A click on a key written on screen — a footer hint, or the `[y]` in a
+    /// confirmation — answered by pressing that key.
+    ///
+    /// Going through `on_key` rather than calling the action is what keeps the
+    /// two in step: the hint says `R Resume`, and clicking it does whatever `R`
+    /// does in the state the app is actually in, including opening the
+    /// confirmation that `R` opens.
+    ///
+    /// `q` is the exception, and takes two clicks. It is the one key on the
+    /// footer whose action cannot be undone — there is no confirmation behind
+    /// it unless cctop is hosting an agent — so a slipped pointer must not end
+    /// the session, in the same way one must not put a tunnel on the internet.
+    fn on_hint_click(&mut self, key: KeyEvent, quit_armed: bool) {
+        if key.code == KeyCode::Char('q') && key.modifiers.is_empty() && !quit_armed {
+            self.quit_arm = true;
+            // Said in the footer's badges rather than with `set_status`, which
+            // draws over the hints — including the `q Quit` the second click has
+            // to land on. Arming that hid its own button was a button that could
+            // only ever be clicked once.
+            self.needs_redraw = true;
+            return;
+        }
+        self.on_key(key);
     }
 
     pub(super) fn on_mouse(&mut self, ev: event::MouseEvent, layout: &render::Layout) {
@@ -959,6 +1256,15 @@ impl App {
         // to drive.
         if self.mode != Mode::List && layout.modal_rect.is_some() {
             if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+                return;
+            }
+            // A `[y]` in a confirmation, answered by pressing what it says.
+            // Single-click, unlike the launcher's two: the dialog is itself the
+            // second step — a click got here by asking for something that
+            // stopped to ask, and asking twice about the same pointer teaches
+            // nothing.
+            if let Some(key) = layout.key_at(ev.column, ev.row) {
+                self.on_key(key);
                 return;
             }
             // The row menu answers a single click: unlike the launcher, every
@@ -1026,6 +1332,33 @@ impl App {
             return;
         }
 
+        // The footer's corner: the tunnel's link while there is one, and the
+        // button that opens one while there is not. cctop holds the terminal's
+        // mouse capture, so in most terminals a plain click on an OSC 8 link
+        // never reaches the terminal that would follow it — answering it here is
+        // what makes the link clickable without a modifier held down. Drawn over
+        // a tab as much as over the dashboard, so answered before either.
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) {
+            let on_corner = layout.share_corner_at(ev.column, ev.row);
+            // Arming is about the click being made now. A click anywhere else
+            // takes it back, which is what stops a forgotten first click from
+            // turning an unrelated one into a tunnel.
+            let armed = std::mem::replace(&mut self.share_arm, false);
+            // Same rule as the corner's: arming is about the click being made
+            // now, so any click that is not the second one on `q Quit` takes it
+            // back. A first click that quits on the next unrelated one would be
+            // worse than no button at all.
+            let quit_armed = std::mem::replace(&mut self.quit_arm, false);
+            if let Some(key) = layout.key_at(ev.column, ev.row) {
+                self.on_hint_click(key, quit_armed);
+                return;
+            }
+            if on_corner {
+                self.on_share_corner(armed);
+                return;
+            }
+        }
+
         // Inside a tab the rest of the mouse is the agents'.
         if self.tab > 0 {
             // Inside a pane the mouse is the agent's. Claude Code, opencode and
@@ -1034,13 +1367,13 @@ impl App {
             // and cctop holds the terminal's capture, so without forwarding the
             // click simply went nowhere.
             //
-            // The right button is the exception, and tmux is the reason. With
-            // `mouse` on — which cctop turns on so the wheel scrolls — tmux
+            // The right button is the exception, and rmux is the reason. With
+            // `mouse` on — which cctop turns on so the wheel scrolls — rmux
             // binds `MouseDown3Pane` to its own pane menu, so a right-click
-            // inside an agent opened a tmux popup whose entries split the pane
+            // inside an agent opened a rmux popup whose entries split the pane
             // in two. The binding lives in the server's `root` key table, not in
             // the session, so cctop cannot unbind it without changing the user's
-            // own tmux sessions too; not sending the button is the fix that
+            // own rmux sessions too; not sending the button is the fix that
             // stays inside cctop. No agent cctop hosts asks for right-click, so
             // nothing is lost by keeping it.
             let button = |b| match b {
@@ -1075,7 +1408,7 @@ impl App {
             }
             // The wheel is the agent's, wherever it is pointed — cctop keeps no
             // scrollback of its own, so a pane's history lives in the agent (or
-            // in the tmux around it) and only the agent can scroll it. The pane
+            // in the rmux around it) and only the agent can scroll it. The pane
             // under the pointer, not the focused one, because the wheel says
             // where it is aimed and stealing focus to answer it would move the
             // keyboard out from under someone mid-sentence.
@@ -1107,6 +1440,20 @@ impl App {
                     self.scroll_active_panel(-1);
                 } else {
                     self.move_selection(-1);
+                }
+            }
+            // Right-click a row for its menu, as the tab bar's right button
+            // renames a tab: the actions are already a click away once the menu
+            // is up, and reaching for Enter to open it was the one step in that
+            // path a mouse could not take.
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(row) = layout.row_at(ev.row) {
+                    let idx = self.scroll + row;
+                    if idx < self.visible.len() {
+                        self.selected = idx;
+                        self.ensure_available_tab();
+                        self.open_row_menu();
+                    }
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {

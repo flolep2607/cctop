@@ -86,6 +86,11 @@ impl Loader {
         }
     }
 
+    /// How the last walk matched processes to sessions. See `cctop why`.
+    pub fn attributions(&self) -> &[crate::proc::Attribution] {
+        self.collector.attributions()
+    }
+
     pub fn store(&self) -> &Store {
         self.store.get_or_init(Store::new)
     }
@@ -285,7 +290,7 @@ impl Loader {
         s.activity_state = read.state;
         // The transcript is the baseline, and every Claude Code session has one
         // whether or not cctop's hooks are installed. A live agent's own report
-        // is fresher and outranks it, which `App::apply_permissions` applies on
+        // is fresher and outranks it, which `App::apply_reports` applies on
         // top of this.
         s.permission = read.permission;
         if s.is_running() {
@@ -596,6 +601,26 @@ pub struct Stats {
     /// This calendar month's spend bucketed by day.
     pub monthly_daily: Vec<f64>,
     pub models: HashMap<String, usize>,
+    /// Today's spend per project label, largest first.
+    ///
+    /// Grouped by the abbreviated working directory rather than by session,
+    /// because the question the Overview answers is "where did today's money
+    /// go", and one piece of work is usually several sessions of it.
+    pub top_today: Vec<(String, f64)>,
+    /// Today's spend per model, largest first. Distinct from [`models`], which
+    /// counts sessions ever seen and so is dominated by whatever was in fashion
+    /// months ago.
+    ///
+    /// [`models`]: Self::models
+    pub models_today: Vec<(String, f64)>,
+}
+
+/// Largest first, ties broken by name so the Overview does not reshuffle two
+/// equal rows every frame.
+fn descending(map: HashMap<String, f64>) -> Vec<(String, f64)> {
+    let mut out: Vec<(String, f64)> = map.into_iter().filter(|(_, v)| *v > 0.0).collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
 }
 
 pub fn compute_stats(sessions: &[Session]) -> Stats {
@@ -616,6 +641,8 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         ..Default::default()
     };
     st.total = sessions.len();
+    let mut today_by_project: HashMap<String, f64> = HashMap::new();
+    let mut today_by_model: HashMap<String, f64> = HashMap::new();
 
     for s in sessions {
         match s.provider {
@@ -675,6 +702,14 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 }
                 if day.as_str() >= today_key.as_str() {
                     st.spend_today += amount;
+                    let project = match s.abbrev_label.is_empty() {
+                        true => "—",
+                        false => s.abbrev_label.as_str(),
+                    };
+                    *today_by_project.entry(project.to_string()).or_default() += amount;
+                    for (model, spend) in models {
+                        *today_by_model.entry(util::short_model(model)).or_default() += spend;
+                    }
                 }
                 if day.as_str() >= month_start_key.as_str()
                     && let Some(day_part) = day.get(8..10)
@@ -712,6 +747,8 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         + st.spend_pi
         + st.spend_windsurf;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
+    st.top_today = descending(today_by_project);
+    st.models_today = descending(today_by_model);
     // Summed per-core above; reported as a share of the machine.
     st.total_cpu /= *CORES;
     st

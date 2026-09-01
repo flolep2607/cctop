@@ -34,6 +34,9 @@ flags. Handy on a phone for the sessions waiting on you.\n  \
 cctop doctor           Check this installation and say what is wrong with it:\n                         \
 where sessions are read from, pricing, hooks, and what\n                         \
 `s` can reach. --host also tests an ssh target.\n  \
+cctop why [ID]         Why a row says a session is running, or is not: every\n                         \
+agent process, the session it was matched to, and the\n                         \
+rule that matched it.\n  \
 cctop --trace          Time each stage of a run and write the totals to a file\n                         \
 on exit, to attach to a bug report about slowness.\n\n\
 Use --help for the full description.",
@@ -68,10 +71,13 @@ needs nothing of cctop at the time the session ran, so it reaches the sessions\n
 started from anywhere — including ones that ended long ago.\n\n\
 IN A BROWSER\n  \
 `cctop serve` puts the same table on an HTTP port, streaming it over SSE, plus\n  \
-a per-session report — repeated tool failures, where the context window went,\n  \
-what each model cost. It listens on 127.0.0.1 with a per-run access token in\n  \
-the URL; `--bind` is what puts it on the network, and says so when it does.\n  \
-The page is read-only: it starts nothing and types at nothing.\n\n\
+a page per session: the conversation, what it edited, what it can reach, and\n  \
+where its money went. From there it can send a prompt to a live session,\n  \
+resume a dead one, or hand one to a different agent. It listens on 127.0.0.1\n  \
+with a per-run access token in the URL, which is the whole credential — so\n  \
+whoever holds the link can drive these agents. `--bind` is what puts it on the\n  \
+network and `--tunnel` puts it on the internet, both saying so when they do;\n  \
+`--no-actions` serves the pages without the buttons.\n\n\
 SEARCHING\n  \
 `/` filters on what the table shows plus the full working directory and the\n  \
 branch; `Tab` in that prompt extends the search into the transcripts, which\n  \
@@ -560,7 +566,11 @@ fn json_conflict(sessions: &[Session], c: &crate::collide::Collision) -> JsonCon
 /// the web dashboard, which streams it to a browser. Anything that is true of
 /// the printed JSON has to stay true of theirs, so there is one builder rather
 /// than three that drift.
-pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<JsonSession> {
+pub fn json_sessions(
+    sessions: &[Session],
+    plan: Plan,
+    store: &crate::cache::Store,
+) -> Vec<JsonSession> {
     let claude_account = crate::quota::claude_account();
     let codex_account = crate::quota::codex_account();
     let collisions = crate::collide::detect(sessions);
@@ -568,7 +578,7 @@ pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<J
     sessions
         .iter()
         .map(|s| {
-            let data = loader.store().session_data(s);
+            let data = store.session_data(s);
             let m = &data.metrics;
             let included = s.cost_available && plan.includes(s.provider);
             // The credentials read here are this user's. Another user's
@@ -595,6 +605,7 @@ pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<J
                 state: match s.activity_state {
                     crate::session::ActivityState::Working => "working",
                     crate::session::ActivityState::WaitingForInput => "waiting",
+                    crate::session::ActivityState::Asking => "asking",
                     crate::session::ActivityState::ApiError => "error",
                 },
                 surface: match s.surface {
@@ -670,7 +681,7 @@ pub fn json_sessions(sessions: &[Session], plan: Plan, loader: &Loader) -> Vec<J
 }
 
 pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
-    let out = json_sessions(sessions, plan, loader);
+    let out = json_sessions(sessions, plan, loader.store());
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }

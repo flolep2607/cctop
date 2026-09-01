@@ -77,8 +77,13 @@ pub fn sparkline(
             ));
             continue;
         }
+        // The bottom dot is reserved for "nothing happened here", so a sample
+        // that is merely small still stands up out of the baseline. With four
+        // levels there is no room for both a faithful scale and a distinct
+        // empty state, and a chart where an idle hour and a cheap one draw the
+        // same glyph is a chart nobody can read.
         let ratio = (v / hi).clamp(0.0, 1.0);
-        let filled = ((ratio * 4.0).round() as usize).clamp(1, 4);
+        let filled = ((ratio * 3.0).ceil() as usize).clamp(1, 3) + 1;
         let bits = LEFT_COL_BITS[..filled].iter().fold(0u16, |a, b| a | b);
         let style = if is_now {
             now_style
@@ -238,7 +243,17 @@ mod tests {
         let full = sparkline(&[100.0], 1, 100.0, Gradient::Cpu, None);
         let low = sparkline(&[10.0], 1, 100.0, Gradient::Cpu, None);
         assert_eq!(text(&full), braille(0x40 | 0x04 | 0x02 | 0x01).to_string());
-        assert_eq!(text(&low), braille(0x40).to_string());
+        assert_eq!(text(&low), braille(0x40 | 0x04).to_string());
+    }
+
+    /// The whole point of the reserved baseline: a bucket with a trace of spend
+    /// in it must not draw the same glyph as one with none.
+    #[test]
+    fn a_tiny_sample_is_still_distinguishable_from_nothing() {
+        let empty = sparkline(&[0.0], 1, 100.0, Gradient::Spend, None);
+        let trace = sparkline(&[0.000_1], 1, 100.0, Gradient::Spend, None);
+        assert_ne!(text(&empty), text(&trace));
+        assert_eq!(text(&empty), braille(0x40).to_string());
     }
 
     #[test]

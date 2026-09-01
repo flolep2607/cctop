@@ -69,6 +69,9 @@ header.top h1 .v { color: var(--faint); font-weight: 400; font-size: 12px; margi
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; display: inline-block; }
 .dot.working { background: var(--green); }
 .dot.waiting { background: var(--amber); }
+/* Blocked on a question, which is louder than a turn that merely ended: the
+   agent cannot go on until someone answers it. */
+.dot.asking  { background: var(--red); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 25%, transparent); }
 .dot.error   { background: var(--red); }
 .dot.idle    { background: var(--faint); }
 

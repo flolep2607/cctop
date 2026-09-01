@@ -21,8 +21,7 @@ use crate::session::{Session, SessionData};
 use columns::ColumnId;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event,
 };
 use ratatui::crossterm::execute;
 use spark::History;
@@ -105,7 +104,7 @@ pub enum Mode {
     BatchKillBlocked,
     /// Numeric input for the cost floor filter.
     CostFilter,
-    /// Text input typed into the selected session's tmux pane.
+    /// Text input typed into the selected session's rmux pane.
     SendKeys,
     /// Picking which agent a new tab or split should run.
     Launch,
@@ -118,10 +117,13 @@ pub enum Mode {
     /// The agent-integration panel: what is installed where, and whether the
     /// agents are actually reporting in.
     Hooks,
-    /// Offering to install tmux, a launch having found it missing.
+    /// Offering to install rmux, a launch having found it missing.
     TmuxInstall,
     /// Typing a new name for a workspace tab, opened by right-clicking it.
     RenameTab,
+    /// The browser panel: whether this cctop is serving its table to one, on
+    /// what links, and whether they leave the machine.
+    Serve,
 }
 
 /// Everything [`App::open_tab`] needs beyond the command itself.
@@ -159,7 +161,7 @@ struct NewTab<'a> {
 /// starts being its own paragraph.
 pub(super) const TAB_LABEL_CHARS: usize = 24;
 
-/// A launch that stopped to ask about tmux, and how to pick it up again.
+/// A launch that stopped to ask about rmux, and how to pick it up again.
 ///
 /// The launch is re-run from the top rather than resumed mid-way, because
 /// answering the question changes the first thing it decides — where the agent
@@ -316,6 +318,25 @@ enum Response {
         query: String,
         hits: HashMap<String, String>,
     },
+}
+
+/// A tunnel registration in flight, and when it started.
+///
+/// The instant is what the spinner is drawn from — a frame counter would have
+/// to be advanced by whoever happens to redraw, and the loop redraws on events
+/// that have nothing to do with this.
+pub struct Opening {
+    rx: Receiver<Result<crate::serve::Serving, String>>,
+    since: Instant,
+}
+
+impl Opening {
+    /// The spinner's current frame.
+    pub fn frame(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let i = self.since.elapsed().as_millis() / 100;
+        FRAMES[i as usize % FRAMES.len()]
+    }
 }
 
 /// Remembered scan results, keyed by session and query. `None` is a remembered
@@ -669,6 +690,20 @@ pub struct App {
     pub rename_input: String,
     pub rename_tab: usize,
     pub rename_was: String,
+    /// When a right-click opened the rename prompt.
+    ///
+    /// Terminals that paste on the right button — Windows Terminal does, and
+    /// keeps doing it while mouse capture is on — send the click *and* the
+    /// clipboard, so the prompt opens with somebody's last copy already typed
+    /// into it. A paste that lands in the same instant as the click that
+    /// opened the field is that echo, not a person, and is dropped.
+    pub rename_opened_by_click: Option<Instant>,
+    /// Whether the footer's `q Quit` has been clicked once already.
+    ///
+    /// The share corner's `share_arm` for the other irreversible thing a
+    /// pointer can reach. Cleared by any other click, so it only ever spans one
+    /// deliberate pair.
+    pub quit_arm: bool,
     /// Table viewport height (rows), recorded during draw so Ctrl+U/Ctrl+D can
     /// page by half a screen.
     pub list_height: u16,
@@ -699,9 +734,12 @@ pub struct App {
     /// feed, so following the tail is the useful default; scrolling up releases
     /// the pin, and scrolling back to the bottom restores it.
     pub tool_follow: bool,
-    /// Last computed maximum scroll for the tool log, recorded during draw so
-    /// the key handler knows where the bottom is.
-    pub tool_max_scroll: u16,
+    /// Last computed maximum scroll for whichever bottom panel was drawn,
+    /// recorded during draw because only the renderer knows how many lines the
+    /// panel produced and how tall it ended up. Without it a key handler can
+    /// clamp the top but not the bottom, and scrolling past the end banks
+    /// invisible offsets that then have to be scrolled back through.
+    pub panel_max_scroll: u16,
     pub tool_tab: usize,
     pub tool_live_only: bool,
     /// Show each edit's diff inline beneath its row.
@@ -756,7 +794,7 @@ pub struct App {
     /// `tabs`. Zero-length `tabs` is the ordinary case: the bar still shows the
     /// dashboard and its new-tab button, so the feature is findable.
     pub tab: usize,
-    /// When the tab bar was last reconciled against the tmux sessions on this
+    /// When the tab bar was last reconciled against the rmux sessions on this
     /// machine. See [`App::sync_shared_tabs`].
     shared_at: Option<Instant>,
     /// The tab being dragged along the bar, indexed as the bar is: `1..=len`,
@@ -789,7 +827,7 @@ pub struct App {
     /// A snapshot rather than a live look, for correctness before cost: the list
     /// includes agents that can finish while the modal is up, and a list that
     /// reshuffles under a cursor means Enter starts something other than the row
-    /// highlighted. It also keeps a `tmux` subprocess out of the draw loop.
+    /// highlighted. It also keeps a `rmux` subprocess out of the draw loop.
     pub launch_offer: Vec<tabs::Choice>,
     /// Where the launcher's pick will go.
     pub launch_into: LaunchInto,
@@ -800,30 +838,68 @@ pub struct App {
     /// Splits retain their tab's directory; a handoff deliberately overrides
     /// this with the source session's project.
     pub launch_cwd: Option<std::path::PathBuf>,
-    /// The install the tmux offer is currently showing, so the modal draws the
+    /// The install the rmux offer is currently showing, so the modal draws the
     /// command that will actually run rather than working it out again.
-    pub tmux_install: Option<crate::tmux::Install>,
-    /// The launch waiting on the tmux question, or on the install it started.
-    pub tmux_deferred: Option<Deferred>,
+    pub rmux_install: Option<crate::rmux::Install>,
+    /// The launch waiting on the rmux question, or on the install it started.
+    pub rmux_deferred: Option<Deferred>,
     /// Whether the offer has been turned down. One "no" holds for the run:
-    /// asking again on the next tab would make declining tmux cost more than
+    /// asking again on the next tab would make declining rmux cost more than
     /// accepting it, which is a way of not really offering a choice.
     ///
-    /// Not persisted — a decision about this machine belongs in whether tmux is
+    /// Not persisted — a decision about this machine belongs in whether rmux is
     /// installed on it, and cctop already reads that directly.
-    pub tmux_declined: bool,
+    pub rmux_declined: bool,
+    /// The server this cctop is running, when it is running one.
+    ///
+    /// `cctop serve` is the same server with nobody watching the terminal it
+    /// took over. Holding it here is what lets the table and the page be up at
+    /// once — and, because the dashboard already walks every session, what lets
+    /// the page be fed from the rows on screen rather than from a second scan
+    /// of the same disk.
+    ///
+    /// Dropping it revokes the tunnel and stops the listener, so quitting cctop
+    /// takes the page with it. That is the same bargain `serve` makes.
+    pub serving: Option<crate::serve::Serving>,
+    /// A tunnel being registered on a thread of its own.
+    ///
+    /// Registering with Cloudflare's edge is a second or more of network, and
+    /// doing it on the UI thread stopped the dashboard dead: no frame, no
+    /// keyboard, and nothing on screen saying why. It runs beside the loop
+    /// instead, and the corner spins while it does.
+    pub share_opening: Option<Opening>,
+    /// Whether the footer's share button has been armed by a first click.
+    ///
+    /// The second click is what opens the tunnel. Not persisted and not carried
+    /// between clicks on anything else: arming is a promise about the click
+    /// happening now, and one left standing from ten minutes ago is exactly the
+    /// stray click it exists to prevent.
+    pub share_arm: bool,
+    /// Why the last attempt to serve failed, kept for the panel to show.
+    ///
+    /// A port in use or a tunnel that would not register are both answers
+    /// somebody has to read, and a status line that has since been overwritten
+    /// by a refresh is not where they can read it.
+    pub serve_error: Option<String>,
     /// The pane running the install, while one is running.
     ///
-    /// Watched for two endings: tmux appearing, which releases the deferred
-    /// launch into a tmux-backed pane, and the pane going away without it,
+    /// Watched for two endings: rmux appearing, which releases the deferred
+    /// launch into a rmux-backed pane, and the pane going away without it,
     /// which means the install failed and the launch should stop waiting.
-    pub tmux_installing: Option<u32>,
+    pub rmux_installing: Option<u32>,
     /// A handoff brief waiting for the agent the launcher is about to start.
     ///
     /// Held across the launcher rather than typed at the moment `H` is pressed,
     /// because the agent that will receive it does not exist yet: `H` writes the
     /// brief and opens the launcher, and whichever agent is picked inherits it.
     pub pending_brief: Option<std::path::PathBuf>,
+    /// The transcript behind that brief, when the session it describes is one a
+    /// second Claude could be resumed onto directly.
+    ///
+    /// Held beside the brief rather than instead of it: which of the two is
+    /// used is not known until an agent has been picked, and every agent but
+    /// Claude still needs the brief. See [`crate::handoff::fork`].
+    pub pending_fork: Option<std::path::PathBuf>,
     /// A brief handed to an agent that is still starting up, as
     /// `(pid, line, not before)`.
     ///
@@ -927,6 +1003,8 @@ impl App {
             rename_input: String::new(),
             rename_tab: 0,
             rename_was: String::new(),
+            rename_opened_by_click: None,
+            quit_arm: false,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
@@ -943,7 +1021,7 @@ impl App {
             subagent_scroll: 0,
             tool_scroll: 0,
             tool_follow: true,
-            tool_max_scroll: 0,
+            panel_max_scroll: 0,
             tool_tab: 0,
             tool_live_only: prefs.agent_live_filter,
             tool_show_diff: prefs.tool_show_diff,
@@ -985,11 +1063,16 @@ impl App {
             launch_cwd_known: Vec::new(),
             launch_cwd_hits: Vec::new(),
             launch_cwd_pick: None,
-            tmux_install: None,
-            tmux_deferred: None,
-            tmux_declined: false,
-            tmux_installing: None,
+            rmux_install: None,
+            rmux_deferred: None,
+            rmux_declined: false,
+            rmux_installing: None,
+            serving: None,
+            serve_error: None,
+            share_opening: None,
+            share_arm: false,
             pending_brief: None,
+            pending_fork: None,
             handoff_send: None,
             hosted: None,
             needs_redraw: true,
@@ -1524,16 +1607,20 @@ impl App {
     }
 
     fn scroll_active_panel(&mut self, delta: i32) {
-        let bump = |v: &mut u16| *v = (*v as i32 + delta).max(0) as u16;
+        // Saturating, because the jumps to either end are i32::MIN and i32::MAX
+        // rather than a computed distance: the panel's length is the renderer's
+        // to know, and asking for more than there is costs nothing once both
+        // ends clamp.
+        let max = self.panel_max_scroll as i32;
+        let bump = |v: &mut u16| *v = (*v as i32).saturating_add(delta).clamp(0, max) as u16;
         match self.bottom_tab {
             0 => bump(&mut self.info_scroll),
             1 => {} // Performance is a fixed-size chart pair
             2 => bump(&mut self.proc_scroll),
             3 => {
-                let next = (self.tool_scroll as i32 + delta).clamp(0, self.tool_max_scroll as i32);
-                self.tool_scroll = next as u16;
+                bump(&mut self.tool_scroll);
                 // Re-pin once the user scrolls back down to the newest entry.
-                self.tool_follow = self.tool_scroll >= self.tool_max_scroll;
+                self.tool_follow = self.tool_scroll >= self.panel_max_scroll;
             }
             4 => bump(&mut self.subagent_scroll),
             5 => bump(&mut self.cost_scroll),
@@ -1766,7 +1853,7 @@ impl App {
             return;
         }
         match self.selected_session() {
-            Some(s) if session_root_pid(s).is_some() => self.mode = Mode::KillConfirm,
+            Some(s) if s.root_pid().is_some() => self.mode = Mode::KillConfirm,
             Some(s) if s.is_running() => self.mode = Mode::KillBlocked,
             Some(_) => self.set_status("Selected session is not running"),
             None => {}
@@ -1879,7 +1966,7 @@ impl App {
     fn batch_ok(&self, kind: BatchKind) -> bool {
         self.marked_sessions().iter().all(|s| match kind {
             BatchKind::Delete => !s.is_running(),
-            BatchKind::Kill => session_root_pid(s).is_some(),
+            BatchKind::Kill => s.root_pid().is_some(),
         })
     }
 
@@ -1933,7 +2020,7 @@ impl App {
                         failed += 1;
                     }
                 }
-                BatchKind::Kill => match session_root_pid(s) {
+                BatchKind::Kill => match s.root_pid() {
                     Some(pid) => {
                         self.tx
                             .send(Request::Terminate {
@@ -1968,6 +2055,26 @@ impl App {
                 }
             ),
         });
+    }
+
+    /// Promote every held permission prompt whose grace has expired, and say
+    /// whether any had.
+    ///
+    /// Auto mode's answer arrives as its own event and replaces the report, so
+    /// a prompt still sitting here when the grace runs out is one a person has
+    /// to answer. Cleared rather than re-tested every tick: once a prompt is
+    /// real it stays real, and leaving the flag up would have the whole table
+    /// recomputed on every pass of the loop for the rest of the session.
+    fn promote_matured_prompts(&mut self) -> bool {
+        let mut matured = false;
+        for reported in self.hooked.values_mut() {
+            if reported.provisional && reported.at.elapsed() >= crate::hook::PERMISSION_GRACE {
+                reported.provisional = false;
+                matured = true;
+            }
+        }
+        self.needs_redraw |= matured;
+        matured
     }
 
     /// Let the notifier see this refresh, and ring if anything crossed.
@@ -2035,10 +2142,10 @@ const MAX_KNOWN_DIRS: usize = 40;
 /// fast enough to catch the eye.
 const BLINK_MS: u128 = 600;
 
-/// How often the tab bar is reconciled against the tmux sessions on this
+/// How often the tab bar is reconciled against the rmux sessions on this
 /// machine, so a tab opened in one cctop shows up in the others.
 ///
-/// It costs a `tmux list-panes`, so it cannot ride the draw loop. Two seconds is
+/// It costs a `rmux list-panes`, so it cannot ride the draw loop. Two seconds is
 /// short enough that a tab opened next door is there before you have switched
 /// windows to look for it, and long enough that the subprocess is nothing.
 const SHARE_EVERY: Duration = Duration::from_secs(2);
@@ -2102,16 +2209,22 @@ impl App {
         // was killed mid-turn will never send the event that would clear it.
         self.hooked.retain(|_, reported| reported.is_current());
         self.apply_finished_agents();
-        self.apply_permissions();
+        self.apply_reports();
         (changed, lifecycle)
     }
 
-    /// Stamp each session with the permission mode its own hooks reported.
+    /// Stamp each session with what its own hooks reported: the permission mode
+    /// it runs under, and whether it is blocked on a question.
     ///
     /// Also run after a walk, because the rows are rebuilt wholesale and a
     /// freshly discovered one has to pick up what was reported before it
     /// existed. `hooked` outlives the rows for exactly this reason.
-    fn apply_permissions(&mut self) {
+    ///
+    /// This is what puts a held permission prompt on a row at all. Everything
+    /// downstream of the row reads it for free — the STATE dot, the bell, the
+    /// web report, `--json`, and a fleet peer — rather than each of them being
+    /// handed the UI's map of live reports and asked to agree with the others.
+    pub(crate) fn apply_reports(&mut self) {
         if self.hooked.is_empty() {
             return;
         }
@@ -2123,6 +2236,21 @@ impl App {
                 // about it.
                 if reported.permission.is_some() {
                     session.permission = reported.permission;
+                }
+                // The report is only allowed to say the two things the
+                // transcript cannot — see
+                // [`Signal::activity`](crate::hook::Signal::activity) — so a
+                // stale-but-not-yet-expired working claim cannot talk a row out
+                // of an API error it is genuinely sitting in.
+                // A permission prompt auto mode may still answer is not yet
+                // news: see
+                // [`Reported::is_settled`](crate::hook::Reported::is_settled).
+                // The row keeps whatever the transcript makes of it — which is
+                // "working", because that is what the agent is doing.
+                if reported.is_settled()
+                    && let Some(state) = reported.signal.activity()
+                {
+                    session.activity_state = state;
                 }
             }
         }
@@ -2270,7 +2398,8 @@ impl App {
         // arrives, and a session that has gone silent is precisely the one that
         // sends none — so between events the map still holds the stale claim.
         if let Some(reported) = self.hooked.get(session_id) {
-            return reported.is_current().then_some(reported.signal);
+            let show = reported.is_current() && reported.is_settled();
+            return show.then_some(reported.signal);
         }
         // Gemini CLI reports a full session id, but names the chat file it
         // writes — which is the only identity cctop's rows have, because
@@ -2281,7 +2410,7 @@ impl App {
         self.hooked
             .iter()
             .find(|(id, _)| id.starts_with(tail))
-            .filter(|(_, reported)| reported.is_current())
+            .filter(|(_, reported)| reported.is_current() && reported.is_settled())
             .map(|(_, reported)| reported.signal)
     }
 
@@ -2298,12 +2427,17 @@ impl App {
     fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
         self.sessions
             .iter()
-            .filter(|session| session_root_pid(session) == Some(pid))
+            .filter(|session| session.root_pid() == Some(pid))
             .find_map(|session| {
                 self.hooked_signal(&session.session_id).or({
                     match session.activity_state {
-                        crate::session::ActivityState::WaitingForInput => {
+                        // Both of the row's waiting states are a tab worth
+                        // colouring; which colour is the caller's business.
+                        crate::session::ActivityState::Asking => {
                             Some(crate::hook::Signal::NeedsInput)
+                        }
+                        crate::session::ActivityState::WaitingForInput => {
+                            Some(crate::hook::Signal::Idle)
                         }
                         _ => None,
                     }
@@ -2332,7 +2466,7 @@ impl App {
         let answered: Vec<String> = self
             .sessions
             .iter()
-            .filter(|session| session_root_pid(session) == Some(pid))
+            .filter(|session| session.root_pid() == Some(pid))
             .map(|session| session.session_id.clone())
             .collect();
         for id in answered {
@@ -2386,6 +2520,24 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Write the bar's arrangement onto the sessions, so it survives this cctop.
+    ///
+    /// Called when a rearrangement finishes rather than while one is happening:
+    /// a drag calls [`App::move_tab`] on every pointer movement, and a
+    /// `set-option` per tab per movement is a subprocess storm for an
+    /// arrangement that is still being decided.
+    ///
+    /// Every session of every tab, including both halves of a split, so a tab
+    /// with two agents in it comes back as one tab rather than as two in
+    /// whichever order they were started.
+    pub(super) fn save_tab_order(&self) {
+        for (at, tab) in self.tabs.iter().enumerate() {
+            for name in tab.sessions() {
+                crate::rmux::set_order(name, at);
+            }
+        }
+    }
+
     /// Move the tab on screen one place along the bar, for the keyboard.
     ///
     /// Clamped rather than wrapped, unlike [`App::cycle_workspace`]: wrapping is
@@ -2398,6 +2550,8 @@ impl App {
         };
         let to = (from as isize + delta).clamp(1, self.tabs.len() as isize) as usize;
         self.move_tab(from, to);
+        // One keystroke is one finished rearrangement, unlike a drag.
+        self.save_tab_order();
     }
 
     pub fn cycle_workspace(&mut self, delta: isize) {
@@ -2405,12 +2559,12 @@ impl App {
         self.go_to_tab((self.tab as isize + delta).rem_euclid(count) as usize);
     }
 
-    /// Move to `want`, taking the tmux client with you.
+    /// Move to `want`, taking the rmux client with you.
     ///
     /// This is what makes one set of tabs work across several cctops. Every tab
-    /// in the bar is a tmux session any of them can attach to, but only the one
+    /// in the bar is a rmux session any of them can attach to, but only the one
     /// you are looking at is worth holding a client on — several clients on one
-    /// window and tmux has to pick a size that suits none of them. So the client
+    /// window and rmux has to pick a size that suits none of them. So the client
     /// follows the view: the tab arrived at takes one, the tab left behind gives
     /// its up, and the agent in between never notices either.
     ///
@@ -2444,7 +2598,7 @@ impl App {
             self.set_status("Nothing to split — open a tab first");
             return;
         }
-        let offer = tabs::choices(&self.open_tmux());
+        let offer = tabs::choices(&self.open_rmux());
         if offer.is_empty() {
             self.set_status("No agent found in PATH, and $SHELL is not set");
             return;
@@ -2492,6 +2646,7 @@ impl App {
             }
         };
         self.pending_brief = Some(path);
+        self.pending_fork = crate::handoff::forkable(&session).map(std::path::Path::to_path_buf);
         // The receiving agent belongs in the directory the work is in, whatever
         // row the cursor moves to while the launcher is up.
         self.launch_prompt(LaunchInto::Tab);
@@ -2500,6 +2655,7 @@ impl App {
         // it to the next unrelated agent instead.
         if self.mode != Mode::Launch {
             self.pending_brief = None;
+            self.pending_fork = None;
             return;
         }
         self.set_status(format!(
@@ -2576,7 +2732,7 @@ impl App {
             .as_deref()
             .and_then(|name| crate::config::profile_named(session.provider, name));
         let argv = match profile {
-            Some(profile) => Self::under_profile(argv, profile),
+            Some(profile) => crate::config::argv_under_profile(argv, profile),
             None => argv,
         };
         // The transcript is full of paths relative to where the agent ran, so a
@@ -2593,14 +2749,14 @@ impl App {
         );
         // Named after the session, so resuming it a second time reattaches to
         // the agent already doing it rather than starting a rival.
-        let tmux = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let rmux = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
 
-        // Already on screen: switch to it. tmux would attach a second client to
+        // Already on screen: switch to it. rmux would attach a second client to
         // the same agent, which works but leaves two panes fighting over one
         // window's size for no reason.
         //
-        // Asked of `resumed` as well as of `tmux`, because without tmux
-        // installed every pane's `tmux` is `None` and the question would answer
+        // Asked of `resumed` as well as of `rmux`, because without rmux
+        // installed every pane's `rmux` is `None` and the question would answer
         // "no" every time — putting a second agent on one transcript, which is
         // the thing `ResumeConfirm` exists to warn about and which would happen
         // here with no warning at all, the session having already stopped.
@@ -2608,24 +2764,24 @@ impl App {
             // `sessions`, not just the panes: the tab may be one this cctop has
             // no client on — another cctop's, or one it detached from itself —
             // and resuming into a second agent is exactly what this guards.
-            tab.sessions().any(|name| name == tmux)
+            tab.sessions().any(|name| name == rmux)
                 || tab
                     .panes
                     .iter()
-                    .any(|p| p.resumed.as_deref() == Some(&tmux))
+                    .any(|p| p.resumed.as_deref() == Some(&rmux))
         }) {
             self.go_to_tab(at + 1);
             self.set_status(format!("Already open: {what}"));
             return;
         }
 
-        let Some(own) = self.own_preferring_tmux(Deferred::Resume, || tmux.clone()) else {
+        let Some(own) = self.own_preferring_rmux(Deferred::Resume, || rmux.clone()) else {
             return;
         };
         // Reattaching is not resuming: the agent was never gone, so saying
         // "resumed" would misdescribe what just happened.
         let verb = match &own {
-            tabs::Own::Tmux(name) if crate::tmux::exists(name) => "Reattached to",
+            tabs::Own::Tmux(name) if crate::rmux::exists(name) => "Reattached to",
             _ => "Resumed",
         };
         self.open_tab(
@@ -2635,63 +2791,63 @@ impl App {
                 what: &what,
                 own,
                 verb,
-                resumed: Some(tmux),
+                resumed: Some(rmux),
                 label: Some(label),
                 profile: profile.map(|p| p.name.clone()),
             },
         );
     }
 
-    /// Where the agent about to start should live, offering to install tmux if
-    /// that is the only reason it would not be tmux-backed.
+    /// Where the agent about to start should live, offering to install rmux if
+    /// that is the only reason it would not be rmux-backed.
     ///
     /// `None` means the question is on screen and the caller must stop. The
     /// launch is not held anywhere in the meantime — [`Deferred`] records only
     /// which of the two entry points to run again once there is an answer.
     ///
     /// The silent fallback is kept for every machine where the question cannot
-    /// be usefully asked — no package manager, or no way to reach root. tmux is
+    /// be usefully asked — no package manager, or no way to reach root. rmux is
     /// how this is *better*, not how it works, and such a machine gets exactly
     /// the behaviour cctop had before rather than a complaint about a program
     /// the user never asked for. The offer exists for the machine where the
     /// fallback would instead quietly cost the user a feature one keypress away.
-    fn own_preferring_tmux(
+    fn own_preferring_rmux(
         &mut self,
         deferred: Deferred,
         name: impl FnOnce() -> String,
     ) -> Option<tabs::Own> {
-        if crate::tmux::available() {
+        if crate::rmux::available() {
             return Some(tabs::Own::Tmux(name()));
         }
-        // Asked in this order so that installing tmux in another window still
+        // Asked in this order so that installing rmux in another window still
         // works: `available` above is the live check, and neither a previous
         // "no" nor a running install is consulted until it has said no.
-        if self.tmux_declined || self.tmux_installing.is_some() {
+        if self.rmux_declined || self.rmux_installing.is_some() {
             return Some(tabs::Own::Cctop);
         }
         // No package manager to offer means there is nothing to ask about, so
         // this is the plain fallback rather than a refusal: `?` here would
         // return `None`, which the caller reads as "the launch is waiting on an
         // answer" — and no answer would ever come, so the tab never opened.
-        let Some(install) = crate::tmux::installer() else {
+        let Some(install) = crate::rmux::installer() else {
             return Some(tabs::Own::Cctop);
         };
-        self.tmux_install = Some(install);
-        self.tmux_deferred = Some(deferred);
+        self.rmux_install = Some(install);
+        self.rmux_deferred = Some(deferred);
         self.mode = Mode::TmuxInstall;
         self.needs_redraw = true;
         None
     }
 
-    /// Answer the tmux offer: run the install in a pane, or give up on tmux for
+    /// Answer the rmux offer: run the install in a pane, or give up on rmux for
     /// this run and start the agent on cctop's own pty.
-    pub(super) fn tmux_install_answer(&mut self, install: bool) {
+    pub(super) fn rmux_install_answer(&mut self, install: bool) {
         self.mode = Mode::List;
-        let Some(offer) = self.tmux_install.take() else {
+        let Some(offer) = self.rmux_install.take() else {
             return;
         };
         if !install {
-            self.tmux_declined = true;
+            self.rmux_declined = true;
             self.run_deferred_launch();
             return;
         }
@@ -2701,14 +2857,14 @@ impl App {
         // failed install and a tab that closed for no stated reason.
         match tabs::Pane::launch(&offer.argv, None, tabs::Own::Cctop) {
             Ok(pane) => {
-                self.tmux_installing = Some(pane.pid);
+                self.rmux_installing = Some(pane.pid);
                 self.tabs.push(tabs::Tab::new(pane));
                 self.go_to_tab(self.tabs.len());
-                self.set_status(format!("Installing tmux with {}", offer.manager));
+                self.set_status(format!("Installing rmux with {}", offer.manager));
             }
             Err(error) => {
                 self.set_status(format!("Could not run the install: {error}"));
-                self.tmux_declined = true;
+                self.rmux_declined = true;
                 self.run_deferred_launch();
             }
         }
@@ -2718,17 +2874,17 @@ impl App {
     ///
     /// Called from the poll loop after panes are reaped, so "the pane is gone"
     /// is already true here rather than true one tick later.
-    pub(super) fn poll_tmux_install(&mut self) {
-        let Some(pid) = self.tmux_installing else {
+    pub(super) fn poll_rmux_install(&mut self) {
+        let Some(pid) = self.rmux_installing else {
             return;
         };
-        if crate::tmux::available() {
-            self.tmux_installing = None;
-            self.set_status("tmux installed");
+        if crate::rmux::available() {
+            self.rmux_installing = None;
+            self.set_status("rmux installed");
             self.run_deferred_launch();
             return;
         }
-        // The pane is gone and tmux is still not here: the install failed, or
+        // The pane is gone and rmux is still not here: the install failed, or
         // the user closed it. Either way the launch has waited long enough, and
         // it goes where it would have gone had nothing been offered.
         let open = self
@@ -2737,18 +2893,18 @@ impl App {
             .flat_map(|tab| tab.panes.iter())
             .any(|pane| pane.pid == pid);
         if !open {
-            self.tmux_installing = None;
-            self.tmux_declined = true;
-            if self.tmux_deferred.is_some() {
-                self.set_status("tmux was not installed — starting without it");
+            self.rmux_installing = None;
+            self.rmux_declined = true;
+            if self.rmux_deferred.is_some() {
+                self.set_status("rmux was not installed — starting without it");
             }
             self.run_deferred_launch();
         }
     }
 
-    /// Re-run whichever launch stopped to ask about tmux.
+    /// Re-run whichever launch stopped to ask about rmux.
     fn run_deferred_launch(&mut self) {
-        match self.tmux_deferred.take() {
+        match self.rmux_deferred.take() {
             Some(Deferred::Resume) => self.resume_now(),
             Some(Deferred::Launch) => self.launch_selected(),
             None => {}
@@ -2794,10 +2950,10 @@ impl App {
         self.set_status(format!("{verb} {what}{where_}{kept}"));
     }
 
-    /// Reconcile the tab bar against every cctop-owned tmux session on this
+    /// Reconcile the tab bar against every cctop-owned rmux session on this
     /// machine, so all the cctops running here show one set of tabs.
     ///
-    /// There is no protocol here and no state file, because tmux is already the
+    /// There is no protocol here and no state file, because rmux is already the
     /// shared registry: a tab *is* one of its sessions, the sessions outlive the
     /// cctop that started them, and any cctop can list them. Open a tab in one
     /// window and it appears in the others within [`SHARE_EVERY`]; end its agent
@@ -2816,7 +2972,7 @@ impl App {
             return;
         }
         self.shared_at = Some(Instant::now());
-        let running = crate::tmux::running();
+        let running = crate::rmux::running();
 
         let was = self.tab;
         let mut index = 0;
@@ -2826,11 +2982,11 @@ impl App {
             let gone = tab.shared.as_ref().is_some_and(|s| {
                 // Asked twice, because the listing failing wholesale and every
                 // session having ended look identical from here — an empty
-                // answer would otherwise empty the tab bar every time the tmux
+                // answer would otherwise empty the tab bar every time the rmux
                 // server was restarted. The second question only gets asked
                 // about a tab already on its way out, so it costs nothing per
                 // sweep.
-                !running.iter().any(|agent| agent.name == s.name) && !crate::tmux::exists(&s.name)
+                !running.iter().any(|agent| agent.name == s.name) && !crate::rmux::exists(&s.name)
             });
             if !gone {
                 return true;
@@ -2847,7 +3003,7 @@ impl App {
             self.land_after(was, &retired);
         }
 
-        // What tmux now says about the tabs already here. Activity above all:
+        // What rmux now says about the tabs already here. Activity above all:
         // it is how a tab nobody is attached to knows its agent has stopped, and
         // a reading taken once when the tab appeared would have it idle forever.
         for tab in &mut self.tabs {
@@ -2858,11 +3014,11 @@ impl App {
                 continue;
             };
             shared.activity = agent.activity;
-            // Both can arrive late: the pid in the moment before tmux has
+            // Both can arrive late: the pid in the moment before rmux has
             // spawned the command, the label when the cctop that owns the tab
             // has not written it yet.
             shared.pid = agent.pid.or(shared.pid);
-            // Kept rather than overwritten when tmux has nothing: the pane that
+            // Kept rather than overwritten when rmux has nothing: the pane that
             // launched this agent knew its account before the option landed on
             // the session, and a sweep in that window must not forget it.
             shared.profile = agent.profile.clone().or_else(|| shared.profile.take());
@@ -2871,9 +3027,10 @@ impl App {
             }
         }
 
-        let mine = self.open_tmux();
+        let mine = self.open_rmux();
         let mut arrived = false;
-        for agent in running.iter().rev() {
+        for agent in crate::rmux::in_tab_order_of(running.clone()) {
+            let agent = &agent;
             if mine.iter().any(|name| name == &agent.name) {
                 continue;
             }
@@ -2883,8 +3040,8 @@ impl App {
         self.needs_redraw |= !retired.is_empty() || arrived;
     }
 
-    /// The tmux sessions this cctop already has a pane onto.
-    pub fn open_tmux(&self) -> Vec<String> {
+    /// The rmux sessions this cctop already has a pane onto.
+    pub fn open_rmux(&self) -> Vec<String> {
         self.tabs
             .iter()
             .flat_map(tabs::Tab::sessions)
@@ -2960,8 +3117,8 @@ impl App {
     /// Put the chosen profile in front of the command that will read it.
     ///
     /// `env VAR=value cmd` rather than plumbing an environment through every
-    /// spawn path: the same argv is handed to tmux, to a pty cctop owns, and to
-    /// `tmux new-session`, and `env` is understood identically by all three.
+    /// spawn path: the same argv is handed to rmux, to a pty cctop owns, and to
+    /// `rmux new-session`, and `env` is understood identically by all three.
     /// [`tabs::label_of`] drops the prefix again so the tab is named after the
     /// agent rather than after how it was started.
     fn with_profile(&self, argv: Vec<String>) -> Vec<String> {
@@ -2969,45 +3126,67 @@ impl App {
         let Some(profile) = profile else {
             return argv;
         };
-        Self::under_profile(argv, profile)
+        crate::config::argv_under_profile(argv, profile)
     }
 
-    /// `argv`, prefixed with the environment that selects `profile`.
-    fn under_profile(argv: Vec<String>, profile: &crate::config::Profile) -> Vec<String> {
-        let Some((var, _)) = crate::config::profile_env(profile.provider) else {
-            return argv;
-        };
-        let mut out = vec![
-            "env".to_string(),
-            format!("{var}={}", profile.dir.display()),
-        ];
-        out.extend(argv);
-        out
+    /// The argv that resumes a new agent onto a copy of the session being
+    /// handed over, when that is possible and `argv` is the agent that can read
+    /// it.
+    ///
+    /// The copy lands in the *receiving* account's directory, which is not
+    /// always the sending one's: handing a personal session to a work login has
+    /// to put the transcript where that login will look for it.
+    ///
+    /// A failure to copy is reported and answered with `None`, which puts the
+    /// launch back on the brief — the handoff still happens, with less of the
+    /// conversation in it.
+    fn fork_pending(&mut self, argv: &[String]) -> Option<Vec<String>> {
+        let transcript = self.pending_fork.clone()?;
+        if crate::handoff::command_of(argv) != Some("claude") {
+            return None;
+        }
+        let profile = self.chosen_profile(Provider::Claude);
+        let config_dir = profile
+            .map(|p| p.dir.clone())
+            .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
+        match crate::handoff::fork(&transcript, &config_dir) {
+            Ok(id) => {
+                let argv = vec!["claude".to_string(), "--resume".to_string(), id];
+                Some(match profile {
+                    Some(profile) => crate::config::argv_under_profile(argv, profile),
+                    None => argv,
+                })
+            }
+            Err(error) => {
+                self.set_status(format!("Could not copy the transcript: {error}"));
+                None
+            }
+        }
     }
 
     /// What a still-running agent in the launcher is doing, if it has said.
     ///
-    /// This is the whole reason the offer carries a pid. A list of tmux session
+    /// This is the whole reason the offer carries a pid. A list of rmux session
     /// names says which agents exist; this says which one is stuck on a question
     /// and which finished ten minutes ago, from the same hooks the dashboard
     /// reads — so choosing which to go back to is a decision rather than a guess.
-    pub fn waiting_state(&self, agent: &crate::tmux::Running) -> Option<crate::hook::Signal> {
+    pub fn waiting_state(&self, agent: &crate::rmux::Running) -> Option<crate::hook::Signal> {
         self.pane_signal(agent.pid?)
     }
 
     /// What to call a still-running agent, when cctop can do better than its
-    /// tmux session name.
+    /// rmux session name.
     ///
     /// That name is an identity and not something written to be read: a resumed
     /// session's carries the whole session id, so it comes out as a timestamp
     /// and a uuid that no two rows differ in until well past the width of the
     /// column. The agent's pid finds its row, and the row already knows what the
     /// dashboard calls it — which is the name the user recognises.
-    pub fn waiting_label(&self, agent: &crate::tmux::Running) -> Option<String> {
+    pub fn waiting_label(&self, agent: &crate::rmux::Running) -> Option<String> {
         let pid = agent.pid?;
         self.sessions
             .iter()
-            .find(|session| session_root_pid(session) == Some(pid))
+            .find(|session| session.root_pid() == Some(pid))
             .map(|session| session.display_label().to_string())
     }
 
@@ -3202,8 +3381,8 @@ impl App {
             // `claude` tabs are two agents — so this takes the next free name
             // rather than a derived one.
             tabs::Choice::Start(argv) => {
-                let own = self.own_preferring_tmux(Deferred::Launch, || {
-                    crate::tmux::free_name(&tabs::label_of(argv))
+                let own = self.own_preferring_rmux(Deferred::Launch, || {
+                    crate::rmux::free_name(&tabs::label_of(argv))
                 });
                 // The offer went up instead. This runs again from the top when
                 // it is answered, and the launcher's snapshot is still here to
@@ -3217,16 +3396,26 @@ impl App {
         // at once — a tab that flickers and vanishes, where the truth is simply
         // that the agent ended while being looked at.
         if let tabs::Choice::Waiting(agent) = &choice
-            && !crate::tmux::exists(&agent.name)
+            && !crate::rmux::exists(&agent.name)
         {
             self.set_status(format!("{} has ended", choice.label()));
             return;
         }
 
-        // A brief goes to an agent that is starting fresh. Reattaching lands in
-        // a conversation already under way, where a "read this and continue"
+        // A handoff goes to an agent that is starting fresh. Reattaching lands
+        // in a conversation already under way, where a "read this and continue"
         // line would interrupt whatever it is doing mid-turn.
-        let brief = match matches!(choice, tabs::Choice::Start(_)) {
+        let fresh = matches!(choice, tabs::Choice::Start(_));
+        // Claude to Claude the conversation itself is handed over rather than a
+        // summary of it, the receiving agent being resumed onto a copy of the
+        // transcript. Everything else gets the brief, which is the only form it
+        // can read.
+        let forked = fresh.then(|| self.fork_pending(&argv)).flatten();
+        let carrying_conversation = forked.is_some();
+        let argv = forked.unwrap_or(argv);
+        // Only where the fork did not happen: an agent that cannot read the
+        // transcript, or one whose copy could not be written.
+        let brief = match fresh && !carrying_conversation {
             true => self.pending_brief.clone(),
             false => None,
         };
@@ -3249,19 +3438,29 @@ impl App {
         // environment variable, which nothing downstream can read back. A fresh
         // agent takes the account the launcher was showing; one being reattached
         // takes the one it was started under, which the sweep read back off its
-        // tmux session.
+        // rmux session.
         pane.profile = match &choice {
             tabs::Choice::Start(_) => self.launch_profile().map(|p| p.name.clone()),
             tabs::Choice::Waiting(agent) => agent.profile.clone(),
         };
         // The tab is named after the agent, not after the brief it was handed:
         // `Pane::launch` names it from the argv it was given, and that argv now
-        // ends in a paragraph.
+        // ends in a paragraph — or, for a fork, in the uuid of the copy, which
+        // is the half of a resume nobody reads.
         if opening.is_some() {
             pane.label = tabs::label_of(argv);
+        } else if carrying_conversation {
+            pane.label = "claude".to_string();
         }
         let label = pane.label.clone();
         let mut carried = "";
+        if carrying_conversation {
+            // Both are spent: the copy is what the agent is reading, and the
+            // brief that was written alongside it has no reader left.
+            self.pending_fork = None;
+            self.pending_brief = None;
+            carried = " with the conversation";
+        }
         if let Some(line) = line {
             self.pending_brief = None;
             match opening.is_some() {
@@ -3325,10 +3524,10 @@ impl App {
 
     /// Close the focused pane, ending the agent behind it.
     ///
-    /// Closing used to detach from a tmux-backed agent and leave it running,
+    /// Closing used to detach from a rmux-backed agent and leave it running,
     /// which meant the tab came back at the next launch and the only way to be
     /// rid of it was a second key. Closing a window is meant to be the end of
-    /// it, so this kills the tmux session outright — the same thing Alt+Shift+W
+    /// it, so this kills the rmux session outright — the same thing Alt+Shift+W
     /// does, which is now a synonym rather than the only way to stop an agent.
     ///
     /// The exception is a pane opened with `a`, which is a window onto somebody
@@ -3345,7 +3544,7 @@ impl App {
         if tab.detached()
             && let Some(shared) = tab.shared.take()
         {
-            let stopped = crate::tmux::kill(&shared.name);
+            let stopped = crate::rmux::kill(&shared.name);
             self.drop_empty_tabs();
             self.set_status(match stopped {
                 Err(error) => format!("Could not stop {}: {error}", shared.label),
@@ -3357,7 +3556,7 @@ impl App {
             return;
         }
         // Out of the tab first: for a cctop-owned pty, dropping the pane is the
-        // kill, and it must happen either way rather than only when tmux agrees.
+        // kill, and it must happen either way rather than only when rmux agrees.
         let pane = tab.panes.remove(tab.focus);
         tab.focus = tab.focus.min(tab.panes.len().saturating_sub(1));
         let label = pane.label.clone();
@@ -3426,7 +3625,7 @@ impl App {
     }
 
     /// The tab number to land on, kept separate from the move itself so the
-    /// arithmetic can be checked without a tmux server to attach to.
+    /// arithmetic can be checked without a rmux server to attach to.
     fn landing(was: usize, gone: &[usize], remaining: usize) -> usize {
         let before = gone.iter().filter(|&&i| i < was).count();
         match gone.contains(&was) {
@@ -3438,11 +3637,189 @@ impl App {
         }
     }
 
+    /// Open the selected agent's terminal in a browser, via the multiplexer.
+    ///
+    /// Only reaches agents cctop handed to the multiplexer, which is the same
+    /// limit `a` has and for the same reason: an agent on cctop's own pty is on
+    /// no terminal a second viewer can be pointed at, so there is nothing for
+    /// `web-share -t` to name.
+    ///
+    /// The operator link goes to the clipboard and never to the screen. It
+    /// grants input to a live coding agent, and a status line is read by
+    /// whoever is behind you and survives into a screenshot; the clipboard is
+    /// where the user was going to put it anyway. The pairing code is shown,
+    /// since it is worth nothing without the link.
+    pub(super) fn share_selected(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let label = session.display_label().to_string();
+        let Some(pid) = session.root_pid() else {
+            self.set_status("Selected session has no local process");
+            return;
+        };
+        let Some(name) = crate::rmux::holding(pid) else {
+            self.set_status("Only an agent cctop put in a multiplexer can be shared");
+            return;
+        };
+        // Tunnelled where the machine can be reached and this machine only
+        // where it cannot; the status line below says which came back. Pressing
+        // `W` twice reuses the first share rather than minting a second.
+        let mut reachable = false;
+        let share = crate::rmux::share_link(&name, false).map(|(share, tunnelled)| {
+            reachable = tunnelled;
+            share
+        });
+        match share {
+            Ok(share) => {
+                // `web_share` refuses a share with no operator link, so this is
+                // the link or the error above it — never the spectator one.
+                let Some(operator) = share.operator.as_deref() else {
+                    self.set_status(format!("Could not share {label}: no operator link"));
+                    return;
+                };
+                render::copy_to_clipboard(operator);
+                let pin = match &share.pin {
+                    Some(pin) => format!(" · pin {pin}"),
+                    None => String::new(),
+                };
+                // Where the link reaches from is the one thing about a share
+                // that is not on the link: an operator URL looks the same
+                // whether its endpoint is a tunnel or this machine's loopback,
+                // and sending someone a link that cannot leave the building is
+                // a failure they discover instead of being told about.
+                let reach = match reachable {
+                    true => "",
+                    false => " · this machine only",
+                };
+                self.set_status(format!(
+                    "Sharing {label} — operator link copied{pin}{reach}"
+                ));
+            }
+            Err(error) => self.set_status(format!("Could not share {label}: {error}")),
+        }
+    }
+
+    /// Start serving the table to a browser, or say why not.
+    ///
+    /// `tunnel` is the difference between a link that works on this machine and
+    /// one that works from a phone. It is asked for per start rather than
+    /// toggled on a running server: registering with the edge is what mints the
+    /// hostname, so turning it on means a new link either way, and a flag that
+    /// silently invalidated the link somebody was holding would be worse than a
+    /// stop and a start they can see.
+    /// A tunnel is registered off the UI thread; a loopback listener is not.
+    /// Binding a socket is instant, and waiting a millisecond for it costs less
+    /// than a state the rest of the code has to know about. The edge is the slow
+    /// half — see [`Opening`].
+    pub(super) fn start_serving(&mut self, tunnel: bool) {
+        self.serve_error = None;
+        let options = crate::serve::Options {
+            tunnel,
+            plan: self.plan,
+            // Fed from the rows this dashboard already has. Two loaders in one
+            // process would walk the same disk twice and, worse, could disagree
+            // — a page saying one thing while the table beside it says another
+            // is the bug nobody thinks to look for.
+            scan: false,
+            ..Default::default()
+        };
+        if tunnel {
+            // One at a time. A second click while the first is still dialling
+            // would register a second tunnel and throw the first away.
+            if self.share_opening.is_some() {
+                return;
+            }
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                // The receiver is gone if cctop quit while this was dialling,
+                // and the tunnel then drops here — which unregisters it, which
+                // is the right ending for a link nobody is holding.
+                let _ = tx.send(crate::serve::start(options).map_err(|e| format!("{e}")));
+            });
+            self.share_opening = Some(Opening {
+                rx,
+                since: Instant::now(),
+            });
+            self.set_status("Opening a tunnel to trycloudflare…");
+            return;
+        }
+        match crate::serve::start(options) {
+            Ok(serving) => {
+                // Something to look at immediately: the page's first request
+                // would otherwise find the empty snapshot it was built with and
+                // report a machine with no sessions on it.
+                serving.publish(&self.sessions);
+                let where_to = match serving.public.is_some() {
+                    true => "on the internet",
+                    false => "on this machine",
+                };
+                self.set_status(format!("Serving {where_to} — B for the link"));
+                self.serving = Some(serving);
+            }
+            Err(error) => {
+                let error = format!("{error}");
+                self.set_status(format!("Could not serve: {error}"));
+                self.serve_error = Some(error);
+            }
+        }
+    }
+
+    /// Take the tunnel from the thread opening one, if it has finished.
+    ///
+    /// Returns whether the screen has changed — which, while one is in flight,
+    /// is every tick: the spinner is the thing saying cctop has not hung.
+    pub(super) fn tick_share(&mut self) -> bool {
+        let Some(opening) = &self.share_opening else {
+            return false;
+        };
+        let done = match opening.rx.try_recv() {
+            Err(TryRecvError::Empty) => return true,
+            Ok(done) => done,
+            // The thread went without answering, which it has no path to do.
+            // Reported rather than left spinning for ever.
+            Err(TryRecvError::Disconnected) => Err("the tunnel gave no answer".to_string()),
+        };
+        self.share_opening = None;
+        match done {
+            Ok(serving) => {
+                // Something to look at immediately: the page's first request
+                // would otherwise find the empty snapshot it was built with.
+                serving.publish(&self.sessions);
+                self.set_status("On the internet — click the link, or B to copy it");
+                self.serving = Some(serving);
+            }
+            Err(error) => {
+                self.set_status(format!("Could not open a tunnel: {error}"));
+                self.serve_error = Some(error);
+            }
+        }
+        true
+    }
+
+    /// Stop serving, which un-mints every link handed out.
+    pub(super) fn stop_serving(&mut self) {
+        if self.serving.take().is_some() {
+            self.set_status("Stopped serving — the links no longer answer");
+        }
+    }
+
+    /// Show the page whatever the table is showing.
+    ///
+    /// Called wherever the rows change rather than on a timer of its own: the
+    /// page's event stream wakes on a new version, so this is also what makes a
+    /// browser update when the table does.
+    pub(super) fn feed_serving(&self) {
+        if let Some(serving) = &self.serving {
+            serving.publish(&self.sessions);
+        }
+    }
+
     /// Put the selected agent's own terminal on screen, in a tab of its own.
     ///
     /// Two ways in, because there are two ways an agent's terminal can belong to
     /// cctop. A shim holding a pty has a copy of the output to give away; an agent
-    /// handed to tmux has none, and is reached by becoming another of its clients
+    /// handed to rmux has none, and is reached by becoming another of its clients
     /// instead. Either way this only *looks* at the agent — closing the pane
     /// detaches from it and never ends it.
     pub(super) fn attach_selected(&mut self) {
@@ -3455,18 +3832,18 @@ impl App {
         // that `R` afterwards finds the agent already on screen instead of
         // starting a second one on one transcript — `a` and `R` reach the same
         // agent by different routes, and only this makes them agree.
-        let resumed = crate::tmux::name_for_session(session.provider.as_str(), &session.session_id);
-        let Some(pid) = session_root_pid(session) else {
+        let resumed = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let Some(pid) = session.root_pid() else {
             self.set_status("Selected session has no local process");
             return;
         };
         if self.open_view(pid, label.clone()) {
             return;
         }
-        // Started by cctop and then handed to tmux. Without this the message
+        // Started by cctop and then handed to rmux. Without this the message
         // below would say cctop did not start an agent cctop started, and send
         // the user to relaunch something that is already running.
-        if let Some(name) = crate::tmux::holding(pid) {
+        if let Some(name) = crate::rmux::holding(pid) {
             // A second client onto one session leaves the two panes arguing over
             // one window's size, so an agent already on screen is switched to.
             if let Some(at) = self
@@ -3489,7 +3866,7 @@ impl App {
                     // Already a bare agent name, so the command names it right.
                     label: None,
                     // Somebody else started it; its account is whatever they
-                    // chose, which the tmux session name does not record.
+                    // chose, which the rmux session name does not record.
                     profile: None,
                 },
             );
@@ -3514,23 +3891,25 @@ impl App {
         }
     }
 
-    /// Take up the tmux-backed agents already running on this machine — the ones
+    /// Take up the rmux-backed agents already running on this machine — the ones
     /// this cctop left alive on a previous exit, and the ones another cctop has
     /// open right now.
     ///
-    /// The tmux session is the durable workspace state: it preserves the agent,
+    /// The rmux session is the durable workspace state: it preserves the agent,
     /// its scrollback, and working directory. There is no difference worth
     /// drawing between a session left by a cctop that has quit and one another
     /// cctop is using, so this makes no attempt to: both are tabs, and both
     /// arrive detached. Only the one put on screen takes a client.
     ///
-    /// Oldest first, matching [`sync_shared_tabs`] — a cctop opened now and one
-    /// that watched these start must number their tabs the same way.
+    /// In the arrangement they were last left in, and oldest first among the
+    /// ones nobody has arranged — matching [`sync_shared_tabs`], because a
+    /// cctop opened now and one that watched these start must number their tabs
+    /// the same way.
     ///
     /// [`sync_shared_tabs`]: Self::sync_shared_tabs
     pub(super) fn restore_running_tabs(&mut self) {
-        for agent in crate::tmux::running().iter().rev() {
-            self.tabs.push(tabs::Tab::shared(agent));
+        for agent in crate::rmux::running_in_tab_order() {
+            self.tabs.push(tabs::Tab::shared(&agent));
         }
         if !self.tabs.is_empty() {
             self.go_to_tab(1);
@@ -3541,8 +3920,8 @@ impl App {
     /// than opening a second window onto one terminal.
     ///
     /// A pane is a match on either pid it has: the one cctop hosts, and — for a
-    /// tmux-backed pane, where that one is only the client — the agent's own.
-    /// Asking about the hosted pid alone missed every tmux-backed pane, so an
+    /// rmux-backed pane, where that one is only the client — the agent's own.
+    /// Asking about the hosted pid alone missed every rmux-backed pane, so an
     /// agent already on screen got a second window onto it.
     fn open_view(&mut self, pid: u32, label: String) -> bool {
         let shows = |pane: &tabs::Pane| pane.pid == pid || pane.agent() == pid;
@@ -3597,16 +3976,6 @@ fn contains_ascii_ci(haystack: &str, lowercase_needle: &str) -> bool {
     h.len() >= n.len()
         && h.windows(n.len())
             .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
-}
-
-/// PID of the currently live agent root, excluding briefly retained exits.
-fn session_root_pid(session: &Session) -> Option<u32> {
-    session
-        .process
-        .as_ref()?
-        .process_list
-        .iter()
-        .find_map(|process| (process.is_root && !process.ghost).then_some(process.pid))
 }
 
 /// The eight characters a Gemini chat file is named after, out of the row id
@@ -3682,7 +4051,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     }
     let _ = req_tx.send(Request::Refresh);
 
-    // Tabs backed by tmux outlive cctop. Reattach them before the first frame
+    // Tabs backed by rmux outlive cctop. Reattach them before the first frame
     // so reopening the dashboard restores the workspace rather than making the
     // user find and reopen every surviving agent through the launcher.
     app.restore_running_tabs();
@@ -3720,7 +4089,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
         restore_terminal();
         previous_hook(info);
     }));
-    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    let _ = execute!(std::io::stdout(), crossterm::style::Print(MOUSE_ON));
     // Bracketed paste, so a paste arrives as one `Event::Paste` instead of as
     // one `Event::Key` per character. Without it there is no way to tell a paste
     // from typing, and the newlines in a pasted message reach the agent as the
@@ -3782,19 +4151,19 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 
     // Before the terminal is restored, so the agent's hangup does not race the
     // screen being handed back. Clearing the tabs only ends the panes; a
-    // tmux-backed one is a client, and the agent behind it is left running —
+    // rmux-backed one is a client, and the agent behind it is left running —
     // which is the point, and so worth saying out loud on the way out.
-    let had_tabs = !app.open_tmux().is_empty();
+    let had_tabs = !app.open_rmux().is_empty();
     app.tabs.clear();
     drop(hosted);
 
-    // Asked after the clients are gone, and asked of tmux rather than of the
+    // Asked after the clients are gone, and asked of rmux rather than of the
     // tabs: an agent left running by an earlier cctop is just as reachable as
     // one from this run, and the line below is the only thing that tells anyone
     // they are there at all.
     let left_running = match had_tabs {
-        true => crate::tmux::sessions(),
-        // Nothing here ever touched tmux, so nothing here is owed an account of
+        true => crate::rmux::sessions(),
+        // Nothing here ever touched rmux, so nothing here is owed an account of
         // what is in it.
         false => Vec::new(),
     };
@@ -3805,7 +4174,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // rather than inside the alternate screen that is about to be torn down.
     if !left_running.is_empty() {
         println!(
-            "{} agent{} still running in tmux; `cctop` then `t` to get back to {}.",
+            "{} agent{} still running in rmux; `cctop` then `t` to get back to {}.",
             left_running.len(),
             if left_running.len() == 1 { "" } else { "s" },
             if left_running.len() == 1 {
@@ -3828,6 +4197,27 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 
 /// Undo every terminal mode the TUI may have changed.
 ///
+/// Mouse tracking, asked for by hand rather than through crossterm's
+/// `EnableMouseCapture`.
+///
+/// The difference is `?1003h`, which crossterm turns on and this does not. That
+/// is *any-motion* tracking: the terminal reports a bare hover, one sequence per
+/// cell the pointer crosses, with no button held. cctop has never used one —
+/// `on_mouse` drops movement, and switching tabs on a hover would drag you out
+/// of the agent you are typing into — so the whole stream was noise.
+///
+/// Noise with a cost, though. A hover report is `\x1b[<35;79;14M`, and a reader
+/// that takes it across two reads loses the `\x1b[` and keeps the rest, which
+/// lands in whatever is being typed into as the literal text `<35;79;14M`. That
+/// needs a machine lagging enough to split a read mid-sequence and a pointer
+/// moving through it — which is exactly when it was reported. Presses, drags and
+/// the wheel are all still asked for, so nothing cctop reads is lost; there is
+/// simply no longer a report for every pixel of hover to be torn in half.
+///
+/// `?1000h` presses and releases, `?1002h` drags, `?1006h` the SGR encoding that
+/// can name a column past 223.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+
 /// `ratatui::restore` intentionally only disables raw mode and leaves the
 /// alternate screen; it does not restore cursor visibility. Keep this separate
 /// so regular exits, input errors, and panics all use the same cleanup path.
@@ -3886,11 +4276,12 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                 // is asked separately. They share one due time: the interval
                 // exists to be polite to the provider, and a machine with two
                 // logins is not entitled to twice the requests.
-                quota.claude = crate::config::profiles_for(Provider::Claude)
+                quota.claude = crate::config::accounts_for(Provider::Claude)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
                         profile: profile.name.clone(),
                         status: crate::quota::fetch_claude(profile),
+                        source: profile.source,
                     })
                     .collect();
                 // Paced by whichever account is most throttled, so backing off
@@ -3907,11 +4298,12 @@ fn spawn_quota_poller(tx: Sender<Response>) {
             if now >= codex_due {
                 // Per account for the same reason as Claude's, and sharing one
                 // due time for the same reason too.
-                quota.codex = crate::config::profiles_for(Provider::Codex)
+                quota.codex = crate::config::accounts_for(Provider::Codex)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
                         profile: profile.name.clone(),
                         status: crate::quota::fetch_codex(profile),
+                        source: profile.source,
                     })
                     .collect();
                 let delay = quota
@@ -3951,6 +4343,8 @@ fn event_loop(
 
     loop {
         // Drain everything the workers have produced.
+        // Whether any of it changed the table, which is also the question
+        // "does the page need telling" — see the feed below the loop.
         let mut annotated_rows_changed = false;
         // Only a refresh can move a session between busy and waiting, so the
         // notifier is fed here rather than once per loop iteration — that would
@@ -4096,13 +4490,17 @@ fn event_loop(
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
+        // A permission prompt whose grace has run out is news, and nothing is
+        // going to send an event to say so — the event that would have spared
+        // us is the one that did not arrive.
+        rows_changed |= app.promote_matured_prompts();
         if annotated_rows_changed || rows_changed {
             // Extraction rebuilds each subagent from its transcript, which
             // cannot know what a hook already reported, so the hook's answer is
             // reapplied to every batch of rows that replaces them. The same
             // goes for the permission mode, which no transcript records at all.
             app.apply_finished_agents();
-            app.apply_permissions();
+            app.apply_reports();
             // After the hooks, because a row's liveness is what decides whether
             // it can still race anyone, and cheap enough to redo wholesale:
             // it compares paths already in memory and reads no transcript.
@@ -4116,6 +4514,13 @@ fn event_loop(
         }
         if rows_changed {
             app.check_bells();
+        }
+        // The page gets what the table has, and only when it changed. This is
+        // also what wakes a browser: its event stream is parked on the version
+        // this bumps, so a page updates when the table does rather than on a
+        // clock of its own.
+        if rows_changed || annotated_rows_changed {
+            app.feed_serving();
         }
 
         app.sync_panel_data();
@@ -4141,7 +4546,7 @@ fn event_loop(
         }
         // After the reap, so a finished install is seen as finished on the same
         // tick its pane goes away.
-        app.poll_tmux_install();
+        app.poll_rmux_install();
         // And after both, so a tab this cctop has just lost is not immediately
         // re-added by a listing taken before its session went.
         app.sync_shared_tabs();
@@ -4168,6 +4573,11 @@ fn event_loop(
         // A brief for a just-launched agent comes due on a timer rather than an
         // event, so the loop is the only thing that can notice.
         app.tick_handoff();
+
+        // The same is true of a tunnel being registered: the answer arrives on
+        // a channel nothing polls but this, and until it does the corner has a
+        // spinner to turn.
+        app.needs_redraw |= app.tick_share();
 
         // A blinking tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only on
@@ -4199,6 +4609,12 @@ fn event_loop(
         let idle_wait = match app.tab {
             0 => Duration::from_millis(200),
             _ => Duration::from_millis(16),
+        };
+        // A spinner that advances five times a second reads as a stutter. While
+        // one is turning the loop wakes at its frame rate instead.
+        let idle_wait = match app.share_opening.is_some() {
+            true => idle_wait.min(Duration::from_millis(100)),
+            false => idle_wait,
         };
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())
@@ -4345,7 +4761,7 @@ mod tests {
     #[test]
     fn a_dragged_tab_moves_without_moving_the_view() {
         let named = |name: &str| {
-            tabs::Tab::shared(&crate::tmux::Running {
+            tabs::Tab::shared(&crate::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -4353,6 +4769,7 @@ mod tests {
                 activity: None,
                 label: Some(name.to_string()),
                 profile: None,
+                order: None,
             })
         };
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
@@ -4399,7 +4816,7 @@ mod tests {
     #[test]
     fn dragging_a_tab_along_the_bar_reorders_it() {
         let named = |name: &str| {
-            tabs::Tab::shared(&crate::tmux::Running {
+            tabs::Tab::shared(&crate::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -4407,6 +4824,7 @@ mod tests {
                 activity: None,
                 label: Some(name.to_string()),
                 profile: None,
+                order: None,
             })
         };
         let layout = render::Layout {
@@ -4429,14 +4847,14 @@ mod tests {
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
 
         // Press on the first tab: it is picked up, and shown — where there is
-        // anything to show. These tabs are shared ones, which is to say tmux
+        // anything to show. These tabs are shared ones, which is to say rmux
         // sessions, and `go_to_tab` attaches before it switches: on a machine
-        // with no tmux the attach cannot succeed, and the documented outcome is
+        // with no rmux the attach cannot succeed, and the documented outcome is
         // to stay put and say why rather than to open a blank tab. Both are the
         // gesture working; only one of them is reachable on a given runner.
         app.on_mouse(at(press, 12), &layout);
         assert_eq!(app.drag_tab, Some(1), "the press did not pick the tab up");
-        match crate::tmux::available() {
+        match crate::rmux::available() {
             true => assert_eq!(app.tab, 1, "the press did not show the tab"),
             false => {
                 assert_eq!(app.tab, 0, "a tab that cannot be attached moved the view");
@@ -4452,7 +4870,7 @@ mod tests {
         // Carried to the third slot, one tab at a time as the pointer crosses
         // them, with the view following it. The view is what is under test from
         // here, so it starts where the press would have put it — which on a
-        // machine without tmux is somewhere the press could not reach.
+        // machine without rmux is somewhere the press could not reach.
         app.tab = 1;
         app.on_mouse(at(drag, 16), &layout);
         app.on_mouse(at(drag, 20), &layout);
@@ -4482,7 +4900,7 @@ mod tests {
     #[test]
     fn right_clicking_a_tab_renames_it() {
         let named = |name: &str| {
-            tabs::Tab::shared(&crate::tmux::Running {
+            tabs::Tab::shared(&crate::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -4490,6 +4908,7 @@ mod tests {
                 activity: None,
                 label: Some(name.to_string()),
                 profile: None,
+                order: None,
             })
         };
         let layout = render::Layout {
@@ -4537,6 +4956,16 @@ mod tests {
             app.tabs.iter().map(tabs::Tab::title).collect::<Vec<_>>(),
             ["a", "review"]
         );
+
+        // A terminal that pastes on the right button sends the clipboard along
+        // with the click. It is dropped, so the field opens empty; a paste that
+        // follows later is the person's own and lands.
+        app.on_mouse(click(16), &layout);
+        app.on_paste("whatever was on the clipboard");
+        assert_eq!(app.rename_input, "");
+        app.on_paste("deliberate");
+        assert_eq!(app.rename_input, "deliberate");
+        app.on_key(key(KeyCode::Esc));
 
         // The tab the right-click landed on has gone; the name goes nowhere
         // rather than onto whichever tab took its place.
@@ -4627,8 +5056,9 @@ mod tests {
                 provider,
                 name: "work".to_string(),
                 dir: std::path::PathBuf::from(dir),
+                source: crate::config::AccountSource::Directory,
             };
-            App::under_profile(vec![command.to_string()], &profile)
+            crate::config::argv_under_profile(vec![command.to_string()], &profile)
         };
         assert_eq!(
             under("/home/x/.codex-work", Provider::Codex, "codex"),
@@ -4792,7 +5222,7 @@ mod tests {
     #[test]
     fn a_shared_tab_can_be_closed_without_a_pane_to_close() {
         let mut app = test_app();
-        app.tabs.push(tabs::Tab::shared(&crate::tmux::Running {
+        app.tabs.push(tabs::Tab::shared(&crate::rmux::Running {
             name: "cctop-claude-nosuchsession".into(),
             pid: Some(4321),
             cwd: None,
@@ -4800,6 +5230,7 @@ mod tests {
             activity: None,
             label: Some("claude · Improve super cctop".into()),
             profile: None,
+            order: None,
         }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every
@@ -4819,8 +5250,8 @@ mod tests {
         assert!(status.contains("Improve super cctop"), "{status}");
     }
 
-    /// Regression: the "already open" guard asked only about `tmux`, which is
-    /// `None` on every pane when tmux is not installed — so `R` on a session
+    /// Regression: the "already open" guard asked only about `rmux`, which is
+    /// `None` on every pane when rmux is not installed — so `R` on a session
     /// already resumed in a tab started a second agent on the one transcript,
     /// and being stopped, it did so without even the confirmation.
     #[cfg(target_os = "linux")]
@@ -4829,9 +5260,9 @@ mod tests {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut pane = tabs::Pane::view_of(pid, "claude".into()).expect("attach");
         // What a resumed tab records regardless of who carries the agent. The
-        // pane has no tmux, standing in for a machine without it.
-        pane.resumed = Some(crate::tmux::name_for_session("claude", "abc"));
-        assert!(pane.tmux.is_none());
+        // pane has no rmux, standing in for a machine without it.
+        pane.resumed = Some(crate::rmux::name_for_session("claude", "abc"));
+        assert!(pane.rmux.is_none());
 
         let mut app = test_app();
         app.sessions
@@ -4860,6 +5291,189 @@ mod tests {
     /// Regression: the launcher sized itself to its list and let `centered` clamp
     /// the result, so on a short terminal the rows past the bottom were dropped —
     /// and once the cursor walked into them, nothing on screen said what Enter
+    /// The browser panel shows where the page is, and does not show the token
+    /// that opens it.
+    ///
+    /// A pointer can do everything the footer and the confirmations say.
+    ///
+    /// Three separate paths, one test, because they are one claim: cctop holds
+    /// the terminal's mouse capture, so anything drawn as a button has to be
+    /// answered here or the click is simply lost. The regions come out of a real
+    /// draw rather than being asserted at, since a hint's column is whatever the
+    /// footer's arithmetic made it.
+    #[test]
+    fn the_mouse_can_press_the_keys_that_are_drawn_on_screen() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (cols, rows) = (140u16, 30u16);
+        let draw = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+            let mut layout = render::Layout::default();
+            terminal
+                .draw(|frame| layout = render::draw(frame, app))
+                .expect("draw");
+            let screen: String = (0..rows)
+                .map(|y| {
+                    (0..cols)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (layout, screen)
+        };
+        // The column a piece of text starts at, on the row it was drawn on.
+        let at = |screen: &str, text: &str| -> (u16, u16) {
+            let (row, line) = screen
+                .lines()
+                .enumerate()
+                .find(|(_, l)| l.contains(text))
+                .unwrap_or_else(|| panic!("{text:?} was never drawn:\n{screen}"));
+            // Char columns, not byte offsets: the row is full of box-drawing
+            // characters, each three bytes wide, so a byte index is several
+            // columns to the right of where the text actually is.
+            let col = line
+                .char_indices()
+                .position(|(i, _)| line[i..].starts_with(text))
+                .expect("found above");
+            (col as u16, row as u16)
+        };
+        let click = |col, row| event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: event::KeyModifiers::NONE,
+        };
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, "proj")];
+        app.visible = vec![Row::Session(0)];
+        app.selected = 0;
+
+        // The footer's `?` opens the help it names.
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "? Help");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::Help, "clicking `? Help` did nothing");
+        app.on_key(key(KeyCode::Esc));
+
+        // `q Quit` takes two, like the share corner: the first says so.
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(!app.should_quit, "one click on `q Quit` quit cctop");
+        assert!(app.quit_arm);
+        // Said in the footer, beside the hint the second click has to land on —
+        // and the hint is still there to land on, which a status message drawn
+        // over the whole footer would have taken away. Redrawn every time, so
+        // the region a click is tested against is the one now on screen.
+        let (layout, screen) = draw(&mut app);
+        assert!(
+            screen.contains("click q again to quit"),
+            "the footer never asked:\n{screen}"
+        );
+        // Any other click takes the arming back, and the one after it is a
+        // first click again rather than the second of a pair.
+        app.on_mouse(click(0, layout.rows_start), &layout);
+        assert!(!app.quit_arm);
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(!app.should_quit);
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(app.should_quit, "two deliberate clicks did not quit");
+        app.should_quit = false;
+
+        // Right-clicking a row opens that row's menu, having selected it.
+        let (layout, _) = draw(&mut app);
+        app.on_mouse(
+            event::MouseEvent {
+                kind: event::MouseEventKind::Down(event::MouseButton::Right),
+                column: 4,
+                row: layout.rows_start,
+                modifiers: event::KeyModifiers::NONE,
+            },
+            &layout,
+        );
+        assert_eq!(app.mode, Mode::RowMenu, "right-click opened no menu");
+        assert_eq!(app.selected, 0);
+        app.on_key(key(KeyCode::Esc));
+
+        // A confirmation's `[n / Esc]` cancels it, and its `[y]` is the answer.
+        app.mode = Mode::DeleteConfirm;
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "[n / Esc]");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::List, "clicking cancel left the dialog up");
+        assert!(app.deleting.is_empty(), "cancel deleted the session");
+
+        app.mode = Mode::DeleteConfirm;
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "[y]");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::List);
+        assert!(!app.deleting.is_empty(), "clicking `[y]` deleted nothing");
+
+        // And a click beside the dialog is a cancel, not a click on the table
+        // it is drawn over: the selection used to move under the question.
+        app.deleting.clear();
+        app.mode = Mode::KillConfirm;
+        let (layout, _) = draw(&mut app);
+        app.on_mouse(click(1, 1), &layout);
+        assert_eq!(app.mode, Mode::List, "a click off the dialog was swallowed");
+    }
+
+    /// Both halves matter. A panel that cannot say where the page is has not
+    /// answered the question it was opened to answer; a panel that prints the
+    /// token puts a credential into every screenshot of it. The link is drawn
+    /// as its origin and the token lives in the clipboard and the escape.
+    #[test]
+    fn the_serve_panel_names_the_page_without_naming_its_token() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        let serving = crate::serve::start(crate::serve::Options {
+            // A port nobody asked for, so a busy one is stepped past rather
+            // than failing a test on whatever else is running here.
+            port_given: false,
+            ..Default::default()
+        })
+        .expect("a loopback server");
+        let token = serving
+            .local
+            .split_once("?t=")
+            .map(|(_, token)| token.to_string())
+            .expect("a tokenised link");
+        app.serving = Some(serving);
+        app.mode = Mode::Serve;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("backend");
+        let mut layout = render::Layout::default();
+        terminal
+            .draw(|frame| layout = render::draw(frame, &mut app))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            screen.contains("http://127.0.0.1:"),
+            "the panel never said where the page is:\n{screen}"
+        );
+        assert!(
+            !screen.contains(&token),
+            "the token was drawn on screen:\n{screen}"
+        );
+    }
+
     /// was about to start.
     #[test]
     fn the_launcher_keeps_its_cursor_on_screen() {
@@ -4975,13 +5589,13 @@ mod tests {
     }
 
     /// The three ways the ownership decision can go, since only one of them is
-    /// new: tmux present is unchanged, tmux absent and uninstallable is the old
-    /// silent fallback, and only tmux absent but installable stops to ask.
+    /// new: rmux present is unchanged, rmux absent and uninstallable is the old
+    /// silent fallback, and only rmux absent but installable stops to ask.
     #[test]
-    fn ownership_asks_only_when_tmux_could_actually_be_installed() {
+    fn ownership_asks_only_when_rmux_could_actually_be_installed() {
         let mut app = test_app();
-        let own = app.own_preferring_tmux(Deferred::Launch, || "cctop-x".into());
-        match (crate::tmux::available(), crate::tmux::installer()) {
+        let own = app.own_preferring_rmux(Deferred::Launch, || "cctop-x".into());
+        match (crate::rmux::available(), crate::rmux::installer()) {
             (true, _) => assert!(matches!(own, Some(tabs::Own::Tmux(_)))),
             (false, Some(_)) => {
                 assert!(own.is_none(), "the launch waits for the answer");
@@ -4996,49 +5610,49 @@ mod tests {
     #[test]
     fn a_declined_offer_is_not_made_again() {
         let mut app = test_app();
-        app.tmux_declined = true;
-        let own = app.own_preferring_tmux(Deferred::Launch, || "cctop-x".into());
+        app.rmux_declined = true;
+        let own = app.own_preferring_rmux(Deferred::Launch, || "cctop-x".into());
         assert!(own.is_some(), "the launch goes ahead without asking");
         assert_ne!(app.mode, Mode::TmuxInstall);
     }
 
     /// Declining still starts the agent — the offer interrupted a launch, and
-    /// saying no to tmux is not saying no to the agent.
+    /// saying no to rmux is not saying no to the agent.
     #[test]
     fn declining_the_offer_releases_the_launch() {
         let mut app = test_app();
         app.mode = Mode::TmuxInstall;
-        app.tmux_install = Some(crate::tmux::Install {
+        app.rmux_install = Some(crate::rmux::Install {
             manager: "apt",
-            argv: vec!["sh".into(), "-c".into(), "apt-get install -y tmux".into()],
+            argv: vec!["sh".into(), "-c".into(), "apt-get install -y rmux".into()],
         });
-        app.tmux_deferred = Some(Deferred::Launch);
+        app.rmux_deferred = Some(Deferred::Launch);
 
-        app.tmux_install_answer(false);
+        app.rmux_install_answer(false);
 
-        assert!(app.tmux_declined);
-        assert!(app.tmux_install.is_none());
+        assert!(app.rmux_declined);
+        assert!(app.rmux_install.is_none());
         assert!(
-            app.tmux_deferred.is_none(),
+            app.rmux_deferred.is_none(),
             "the launch was run, not dropped"
         );
         assert_eq!(app.mode, Mode::List);
     }
 
     /// The failure that would otherwise be invisible: an install that ends
-    /// without tmux — it errored, or the user closed the tab — leaves a launch
+    /// without rmux — it errored, or the user closed the tab — leaves a launch
     /// waiting on a pane that no longer exists.
     #[test]
-    fn an_install_that_ends_without_tmux_releases_the_launch() {
+    fn an_install_that_ends_without_rmux_releases_the_launch() {
         let mut app = test_app();
         // A pid no pane has, standing in for the install tab having gone.
-        app.tmux_installing = Some(u32::MAX);
-        app.tmux_deferred = Some(Deferred::Launch);
+        app.rmux_installing = Some(u32::MAX);
+        app.rmux_deferred = Some(Deferred::Launch);
 
-        app.poll_tmux_install();
+        app.poll_rmux_install();
 
-        assert!(app.tmux_installing.is_none());
-        assert!(app.tmux_deferred.is_none());
+        assert!(app.rmux_installing.is_none());
+        assert!(app.rmux_deferred.is_none());
     }
 
     /// Regression: these tests once read the developer's real prefs file, so a
@@ -5100,6 +5714,53 @@ mod tests {
         assert!(!app.codex_hooks_heard());
     }
 
+    /// A permission prompt leaves no trace in a transcript — the newest record
+    /// is a tool call in flight, which reads as ordinary work — so before the
+    /// hooks reached the row, an agent stopped dead waiting for you was drawn
+    /// exactly like an agent that was busy, and a finished turn was drawn like
+    /// both. Only the report can tell the three apart.
+    #[test]
+    fn a_row_learns_from_its_hooks_what_a_transcript_cannot_say() {
+        let event = |signal| crate::hook::Event {
+            session_id: "a".into(),
+            reported: crate::hook::Reported {
+                provisional: false,
+                signal,
+                cwd: "/w/proj".into(),
+                permission: None,
+                at: std::time::Instant::now(),
+            },
+            finished_agent: None,
+        };
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "proj")];
+        // What the walk left behind: a tool call in flight.
+        app.sessions[0].activity_state = crate::session::ActivityState::Working;
+
+        app.apply_hooks(vec![event(crate::hook::Signal::NeedsInput)]);
+        assert_eq!(
+            app.sessions[0].activity_state,
+            crate::session::ActivityState::Asking
+        );
+
+        app.apply_hooks(vec![event(crate::hook::Signal::Idle)]);
+        assert_eq!(
+            app.sessions[0].activity_state,
+            crate::session::ActivityState::WaitingForInput,
+            "a finished turn is the quieter of the two waits"
+        );
+
+        // A working report leaves the row alone rather than overwriting it: the
+        // transcript reads work correctly and is the only one of the two that
+        // can see an API error.
+        app.sessions[0].activity_state = crate::session::ActivityState::ApiError;
+        app.apply_hooks(vec![event(crate::hook::Signal::Busy)]);
+        assert_eq!(
+            app.sessions[0].activity_state,
+            crate::session::ActivityState::ApiError
+        );
+    }
+
     /// The mode is reported by a live agent but drawn on a row rebuilt by every
     /// walk, so the two have to survive arriving in either order.
     #[test]
@@ -5107,6 +5768,7 @@ mod tests {
         let reported = |mode: Option<crate::hook::Permission>| crate::hook::Event {
             session_id: "a".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: mode,
@@ -5122,7 +5784,7 @@ mod tests {
         app.sessions = vec![session("a", true, "proj")];
         assert_eq!(app.sessions[0].permission, None, "not stamped yet");
 
-        app.apply_permissions();
+        app.apply_reports();
         assert_eq!(
             app.sessions[0].permission,
             Some(crate::hook::Permission::Bypass),
@@ -5153,6 +5815,7 @@ mod tests {
         let event = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
             session_id: id.into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5208,6 +5871,7 @@ mod tests {
         let stale = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
             session_id: id.into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5246,6 +5910,7 @@ mod tests {
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "79709c93-1111-4111-8111-111111111111".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::Idle,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5296,6 +5961,7 @@ mod tests {
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5316,6 +5982,7 @@ mod tests {
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5328,6 +5995,59 @@ mod tests {
             app.hooked_signal("a"),
             Some(crate::hook::Signal::NeedsInput)
         );
+    }
+
+    /// A permission prompt is not put in front of anyone until auto mode has
+    /// had its few seconds to answer it.
+    ///
+    /// Claude Code's auto mode asks a model whether to allow a tool call, which
+    /// takes a moment; the hook fires when the prompt is raised, not when it is
+    /// decided. Ringing the bell there means ringing it for every auto-approved
+    /// call — the surest way to teach someone to ignore the bell.
+    #[test]
+    fn a_held_prompt_becomes_news_only_if_nothing_answers_it() {
+        use crate::hook::{Event, Reported, Signal};
+        use crate::session::ActivityState;
+
+        let raised = |signal: Signal, provisional: bool| Event {
+            session_id: "a".to_string(),
+            finished_agent: None,
+            reported: Reported {
+                signal,
+                cwd: String::new(),
+                permission: None,
+                at: std::time::Instant::now(),
+                provisional,
+            },
+        };
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "proj")];
+
+        // The prompt goes up. Nothing on the row says so yet.
+        app.apply_hooks(vec![raised(Signal::NeedsInput, true)]);
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Working);
+        assert_eq!(app.hooked_signal("a"), None, "the prompt was shown at once");
+
+        // Auto mode answers inside the grace: the row never reported it, and
+        // the newer event has replaced it, so nothing is left to mature.
+        app.apply_hooks(vec![raised(Signal::Busy, false)]);
+        assert!(!app.promote_matured_prompts());
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Working);
+
+        // A prompt nobody answered. Once its grace runs out it is a person's
+        // problem, and no event is coming to say so.
+        app.apply_hooks(vec![raised(Signal::NeedsInput, true)]);
+        let held = app.hooked.get_mut("a").expect("the report");
+        held.at = std::time::Instant::now()
+            - (crate::hook::PERMISSION_GRACE + std::time::Duration::from_secs(1));
+        assert!(app.promote_matured_prompts(), "the grace never ran out");
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Asking);
+        assert_eq!(app.hooked_signal("a"), Some(Signal::NeedsInput));
+
+        // And it is promoted once, not on every pass of the event loop.
+        assert!(!app.promote_matured_prompts());
     }
 
     fn session(id: &str, running: bool, label: &str) -> Session {
@@ -5834,7 +6554,7 @@ mod tests {
     }
 
     #[test]
-    fn session_root_pid_excludes_ghost_and_child_processes() {
+    fn the_root_pid_excludes_ghost_and_child_processes() {
         let mut session = session("a", true, "x");
         session.process.as_mut().unwrap().process_list = vec![
             crate::proc::ProcEntry {
@@ -5863,7 +6583,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(session_root_pid(&session), Some(3));
+        assert_eq!(session.root_pid(), Some(3));
     }
 
     #[test]
@@ -5877,6 +6597,28 @@ mod tests {
         app.bottom_tab = 0;
         app.cycle_tab(1);
         assert_eq!(app.bottom_tab, 3);
+    }
+
+    #[test]
+    fn shift_home_and_end_reach_both_ends_of_a_panel() {
+        let mut app = test_app();
+        app.bottom_tab = 0;
+        // What a draw would have left behind; nothing else knows the length.
+        app.panel_max_scroll = 40;
+
+        app.scroll_active_panel(i32::MAX);
+        assert_eq!(
+            app.info_scroll, 40,
+            "End stops at the last line, not past it"
+        );
+        app.scroll_active_panel(i32::MIN);
+        assert_eq!(app.info_scroll, 0);
+
+        // The clamp is the point: without it a scroll past the bottom banks an
+        // offset that takes as many presses to come back through.
+        app.scroll_active_panel(999);
+        app.scroll_active_panel(-1);
+        assert_eq!(app.info_scroll, 39);
     }
 
     #[test]

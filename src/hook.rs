@@ -332,6 +332,27 @@ impl Signal {
         matches!(self, Signal::Started | Signal::Ended)
     }
 
+    /// What this says about the row's state, where the transcript is blind.
+    ///
+    /// Only the two waiting states are answered. A working signal returns
+    /// `None` and leaves the transcript's reading alone, which is not
+    /// deference so much as division of labour: a transcript reads *working*
+    /// perfectly well — it is being written to — and it is the only one of the
+    /// two that can see an API error. What it cannot see is either way of
+    /// having stopped, because a held permission prompt and a finished turn are
+    /// both, on disk, just an agent that stopped writing.
+    pub fn activity(self) -> Option<crate::session::ActivityState> {
+        match self {
+            Signal::NeedsInput => Some(crate::session::ActivityState::Asking),
+            Signal::Idle => Some(crate::session::ActivityState::WaitingForInput),
+            Signal::Busy
+            | Signal::Acting
+            | Signal::Compacting
+            | Signal::Started
+            | Signal::Ended => None,
+        }
+    }
+
     /// A word for the STATE column and the hooks panel.
     pub fn label(self) -> &'static str {
         match self {
@@ -376,7 +397,27 @@ pub struct Reported {
     /// When it arrived, which is what bounds how long it is believed. See
     /// [`Reported::is_current`].
     pub at: std::time::Instant,
+    /// Whether this is a permission prompt that may yet answer itself.
+    ///
+    /// Claude Code's auto mode puts a permission request to a model before it
+    /// puts it to the person, and that takes a few seconds. The hook fires when
+    /// the request is raised, not when it is decided, so every auto-answered
+    /// tool call rang the bell, blinked the tab and lit the attention card for
+    /// a question nobody was ever going to be asked. Held back for
+    /// [`PERMISSION_GRACE`]; if the decision lands first — `PermissionDenied`,
+    /// or the tool simply running — the newer event replaces this one and it is
+    /// never shown at all. See [`Reported::is_settled`].
+    pub provisional: bool,
 }
+
+/// How long a permission prompt is given to answer itself before it is somebody
+/// else's problem.
+///
+/// Long enough for auto mode's round trip, short enough that a prompt which
+/// really is waiting for a person is not sat on. Wrong in one direction it
+/// costs a few seconds' notice; wrong in the other it cries wolf on every tool
+/// call, which is what teaches people to ignore the bell.
+pub const PERMISSION_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// How long "the agent is working" is believed with nothing said since.
 ///
@@ -402,6 +443,16 @@ impl Reported {
     /// is asking. Only [`Signal::is_working`] expires. See [`WORKING_TTL`].
     pub fn is_current(&self) -> bool {
         !self.signal.is_working() || self.at.elapsed() < WORKING_TTL
+    }
+
+    /// Whether this can be shown yet.
+    ///
+    /// Everything but a fresh permission prompt can: see [`provisional`], and
+    /// [`PERMISSION_GRACE`] for how long the exception lasts.
+    ///
+    /// [`provisional`]: Reported::provisional
+    pub fn is_settled(&self) -> bool {
+        !self.provisional || self.at.elapsed() >= PERMISSION_GRACE
     }
 }
 
@@ -550,7 +601,30 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // way for a call to end — a grep that matched nothing, a test that
         // failed, a command that exited 1 — so leaving this out left a tool
         // call in flight for as long as the turn ran.
+        // `UserPromptExpansion` is the path `UserPromptSubmit` does not cover:
+        // typing `/skillname` expands into a prompt without submitting one, so
+        // a session driven entirely by slash commands never reported starting
+        // work at all.
+        //
+        // `PostToolBatch` fires once after every call in a batch has resolved,
+        // where `PostToolUse` fires once per call and concurrently. It is the
+        // moment the model is about to be asked again — the same "still going"
+        // fact, arrived at once instead of five times.
+        //
+        // `SubagentStart` pairs with the `SubagentStop` already here. Without
+        // it the Subagents panel learned of a subagent only when it ended,
+        // which is the half of its life nobody needs to watch.
+        //
+        // `ElicitationResult` closes out the `Elicitation` below: the answer
+        // has been given and the MCP call is moving again.
+        //
+        // `TaskCreated` and `TaskCompleted` are the agent's own plan changing
+        // under it. Neither is a state cctop draws differently, but both happen
+        // only while an agent is working, and both are moments a turn that
+        // looked stalled is demonstrably not.
         "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" | "SubagentStop"
+        | "UserPromptExpansion" | "PostToolBatch" | "SubagentStart"
+        | "ElicitationResult" | "TaskCreated" | "TaskCompleted"
         // Gemini CLI: a prompt submitted, and a tool call coming back.
         | "BeforeAgent" | "AfterTool"
         // OpenCode: the same, from the plugin.
@@ -577,17 +651,57 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // point cctop has usually already guessed it from a tool call held over
         // a still screen — a guess that is wrong for a tool that runs long and
         // silently. See [`Signal::Acting`].
-        "permission.asked" | "PermissionRequest" => Some(Signal::NeedsInput),
+        // An MCP server asking the user something mid-task, which is a held
+        // prompt of a kind cctop had no way to see: it is not a permission
+        // dialog, so `PermissionRequest` never fires, and the screen goes still
+        // the same way it does for a tool that runs long and quietly. A session
+        // blocked on one of these looked idle.
+        "permission.asked" | "PermissionRequest" | "Elicitation" => Some(Signal::NeedsInput),
+        // Auto mode refused a tool call. The turn continues — the model is told
+        // it may retry — so this is not the end of anything, but it is the one
+        // event that says a refusal happened at all. Without it the only trace
+        // is a tool that never ran.
+        "PermissionDenied" => Some(Signal::Busy),
         // Compaction is the one kind of work worth naming separately: the
         // context panel is about to lurch, and it is not the agent stalling.
         "PreCompact" | "PreCompress" | "preCompact" | "session.compacted" => {
             Some(Signal::Compacting)
         }
-        // And the other end of it, where the harness has one: compaction is
-        // over and the agent is moving again. Claude Code raises a
-        // `SessionStart` after compacting, which says the same thing, so only
-        // Codex needs this asked for.
+        // And the other end of it: compaction is over and the agent is moving
+        // again. Claude Code also raises a `SessionStart` after compacting,
+        // which says the same thing — but `SessionStart` is `Started`, and a
+        // session that has merely compacted is not one that has just begun.
         "PostCompact" => Some(Signal::Busy),
+        // A teammate in an agent team finishing its turn. The team's own
+        // `Stop`, one member at a time — and the moment a team stops being
+        // something to watch and starts being something to answer.
+        "TeammateIdle" => Some(Signal::Idle),
+        // Everything below happens only while a session is alive and doing
+        // something, and none of it is a state cctop draws differently. They
+        // are here because a turn can otherwise go minutes without an event:
+        // a long answer with no tool calls in it raises nothing at all between
+        // `UserPromptSubmit` and `Stop`, and a session with nothing to report
+        // is one whose liveness falls back to guessing at a still screen.
+        //
+        // `MessageDisplay` is the frequent one — once per batch of streamed
+        // lines, several times per message — and the only event that fires
+        // *during* an answer. It is display-only and cctop returns no
+        // `displayContent`, so what is on screen is untouched.
+        //
+        // `CwdChanged` and `DirectoryAdded` also move the ground under a row:
+        // the project a session is drawn against comes from its working
+        // directory, and an agent that `cd`s has been drawn in the wrong place
+        // until its next transcript write said otherwise.
+        //
+        // `FileChanged` fires only once something has named a file to watch,
+        // which cctop does not — so it is registered against the day something
+        // does, and costs nothing until then.
+        "MessageDisplay" | "InstructionsLoaded" | "CwdChanged" | "DirectoryAdded"
+        | "ConfigChange" | "FileChanged" | "WorktreeRemove" => Some(Signal::Busy),
+        // Claude Code fires this only under `--init-only`, `--init` or
+        // `--maintenance`, never on a normal start. A session that begins this
+        // way is still a session beginning.
+        "Setup" => Some(Signal::Started),
         "SessionStart" | "sessionStart" | "session.created" => Some(Signal::Started),
         "SessionEnd" | "sessionEnd" | "session.deleted" => Some(Signal::Ended),
         _ => None,
@@ -706,6 +820,13 @@ fn parse(line: &str) -> Option<Event> {
         .filter(|id| !id.is_empty())
         .map(str::to_string),
         reported: Reported {
+            // The prompt that auto mode may answer on your behalf, and the only
+            // one worth holding: an MCP elicitation and a plain notification
+            // are questions for a person however long you wait.
+            provisional: matches!(
+                value.get("event").and_then(|v| v.as_str()),
+                Some("PermissionRequest" | "permission.asked")
+            ),
             signal: signal_of(
                 value.get("event")?.as_str()?,
                 value
@@ -731,39 +852,70 @@ fn parse(line: &str) -> Option<Event> {
 // Installation
 // ---------------------------------------------------------------------------
 
-/// Events cctop asks Claude Code to tell it about.
+/// Events cctop asks Claude Code to tell it about: all of them but one.
 ///
-/// Deliberately still a small set: every hook fire costs the agent a process
-/// spawn, so an event cctop would only use to redraw something it can already
-/// see is not worth the fork. The `*ToolUse` pair is the frequent one; the rest
-/// fire a handful of times in a session and each answers a question the
-/// transcript cannot.
+/// This used to be a deliberately small set, on the grounds that every hook
+/// fire costs the agent a process spawn and an event cctop would only use to
+/// redraw something it can already see is not worth the fork. That reasoning
+/// was right about the fork and wrong about the cost of being conservative: a
+/// settings file that names only the events this version knows about is one
+/// that has to be rewritten every time cctop learns another, on every machine,
+/// by everybody. [`repair`] softens that — it tops an install up on the way up
+/// — but it can only add what *this* binary knows to ask for, so an agent
+/// already running still says nothing about the rest until it restarts.
 ///
-/// `PostToolUse` earns the second fork per tool call because it is the only
-/// event that follows an answered permission prompt — see [`signal_of`].
+/// So the settings file now says "tell cctop everything", and the binary
+/// decides what any of it means. Adding an event cctop acts on is a change to
+/// [`signal_of`] alone, and takes effect on the next fire rather than the next
+/// install.
 ///
-/// The three that close a state out cost almost nothing, because each is the
-/// case its partner does not cover. `PostToolUseFailure` fires *instead of*
-/// `PostToolUse` when a tool errors, which is the ordinary end of a failing
-/// grep or test run — without it a tool call that failed stays in flight
-/// forever, and a tool call in flight over a still screen is how cctop
-/// recognises a held permission prompt. `StopFailure` fires instead of `Stop`
-/// when the turn ends on an API error, so without it a rate-limited session is
-/// drawn as working until somebody types into it. `PermissionRequest` fires at
-/// most once per tool call, and only when Claude Code is actually about to ask.
+/// What that costs is real and worth naming: `MessageDisplay` fires once per
+/// batch of streamed lines, several times per assistant message, where the rest
+/// fire a handful of times in a session. It buys the one thing nothing else
+/// says — a long answer with no tool calls in it raises nothing at all between
+/// `UserPromptSubmit` and `Stop`, and a turn with no events is one whose
+/// liveness falls back to guessing at a still screen.
+///
+/// `WorktreeCreate` is the single exception, and it is not about cost.
+/// It does not observe worktree creation — it **replaces** it. Claude Code
+/// stops calling `git worktree` and takes the path from the hook's stdout, and
+/// "if the hook fails or produces no path, worktree creation fails with an
+/// error". This hook writes nothing to stdout by construction (see the module
+/// docs), so installing it would break `claude --worktree`, every subagent with
+/// `isolation: "worktree"`, and every backgrounded session Claude Code isolates
+/// in one. It is the one event on offer that could take a session down, which
+/// is the thing this module exists not to do.
 const CLAUDE_EVENTS: &[&str] = &[
-    "Stop",
-    "StopFailure",
-    "Notification",
+    "Setup",
+    "SessionStart",
+    "InstructionsLoaded",
     "UserPromptSubmit",
+    "UserPromptExpansion",
+    "MessageDisplay",
     "PreToolUse",
     "PermissionRequest",
+    "PermissionDenied",
     "PostToolUse",
     "PostToolUseFailure",
-    "SessionStart",
-    "SessionEnd",
-    "PreCompact",
+    "PostToolBatch",
+    "Notification",
+    "SubagentStart",
     "SubagentStop",
+    "TaskCreated",
+    "TaskCompleted",
+    "Stop",
+    "StopFailure",
+    "TeammateIdle",
+    "ConfigChange",
+    "CwdChanged",
+    "DirectoryAdded",
+    "FileChanged",
+    "WorktreeRemove",
+    "PreCompact",
+    "PostCompact",
+    "SessionEnd",
+    "Elicitation",
+    "ElicitationResult",
 ];
 
 /// The same list in Gemini CLI's vocabulary.
@@ -2109,6 +2261,42 @@ mod tests {
         }
     }
 
+    /// An MCP server asking the user something is a held prompt cctop could not
+    /// otherwise see.
+    ///
+    /// It is not a permission dialog, so `PermissionRequest` never fires for
+    /// it, and the screen goes still exactly as it does for a tool running long
+    /// and quietly — so a session blocked on one read as idle. `Elicitation`
+    /// says it outright, and `ElicitationResult` is the answer arriving.
+    #[test]
+    fn an_mcp_elicitation_is_a_session_waiting_on_you() {
+        assert_eq!(signal_of("Elicitation", ""), Some(Signal::NeedsInput));
+        assert_eq!(signal_of("ElicitationResult", ""), Some(Signal::Busy));
+        assert!(CLAUDE_EVENTS.contains(&"Elicitation"));
+    }
+
+    /// One event Claude Code offers is never asked for, because installing it
+    /// would break the session.
+    ///
+    /// `WorktreeCreate` replaces `git worktree` rather than observing it, and
+    /// takes the new worktree's path from the hook's stdout. This hook writes
+    /// nothing to stdout by construction, and a `WorktreeCreate` hook that
+    /// produces no path fails worktree creation outright — so installing it
+    /// would break `claude --worktree`, every `isolation: "worktree"` subagent,
+    /// and every backgrounded session Claude Code isolates in one.
+    ///
+    /// Everything else Claude Code raises is registered, so that adding an
+    /// event cctop cares about is a change to [`signal_of`] and not to
+    /// everybody's settings file. This is the one that cannot join them.
+    #[test]
+    fn the_event_that_would_replace_git_is_never_installed() {
+        assert!(
+            !CLAUDE_EVENTS.contains(&"WorktreeCreate"),
+            "installing WorktreeCreate makes worktree creation fail — see the \
+             note above CLAUDE_EVENTS"
+        );
+    }
+
     /// A permission prompt is the one exchange with no event of its own for the
     /// *answer*, so the tool running afterwards has to carry that news.
     ///
@@ -2133,6 +2321,47 @@ mod tests {
                 "{event} has to be installed to arrive at all"
             );
         }
+    }
+
+    /// A permission prompt is held back; every other question is not.
+    ///
+    /// Claude Code's auto mode puts the request to a model first, which takes a
+    /// few seconds, so the hook fires for prompts nobody is ever asked. An
+    /// elicitation and a notification have no such second opinion coming and
+    /// are shown at once.
+    #[test]
+    fn a_permission_prompt_waits_and_the_other_questions_do_not() {
+        let of = |line: &str| parse(line).expect("a parseable event").reported;
+        let event = |name: &str| format!(r#"{{"session_id":"abc","event":"{name}","cwd":"/tmp"}}"#);
+
+        let asked = of(&event("PermissionRequest"));
+        assert_eq!(asked.signal, Signal::NeedsInput);
+        assert!(asked.provisional, "the prompt was not held");
+        assert!(
+            !asked.is_settled(),
+            "a prompt shown the instant it was raised"
+        );
+
+        // Held, not lost: it becomes real when the grace runs out with no
+        // answer having arrived.
+        let matured = Reported {
+            at: std::time::Instant::now() - (PERMISSION_GRACE + std::time::Duration::from_secs(1)),
+            ..asked
+        };
+        assert!(matured.is_settled(), "a prompt held past its grace");
+
+        for name in ["Elicitation", "Notification"] {
+            let other = of(&event(name));
+            assert!(
+                other.is_settled(),
+                "{name} was held back, and nothing is going to answer it for you"
+            );
+        }
+        // And the answer itself, which is what replaces a held prompt before
+        // anyone is told about it.
+        let denied = of(&event("PermissionDenied"));
+        assert_eq!(denied.signal, Signal::Busy);
+        assert!(denied.is_settled());
     }
 
     /// The states that stick, and the events that are the only thing that ends
@@ -2174,6 +2403,7 @@ mod tests {
     #[test]
     fn a_stale_claim_to_be_working_stops_being_believed() {
         let aged = |signal: Signal, ago: std::time::Duration| Reported {
+            provisional: false,
             signal,
             cwd: "/w".into(),
             permission: None,

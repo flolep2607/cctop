@@ -9,7 +9,7 @@
 //!
 //! 1. [`shim`](crate::shim) — cctop does, because the agent was started by
 //!    `cctop run`. Works anywhere, needs no privileges.
-//! 2. tmux — the server does, and `send-keys` asks it politely.
+//! 2. rmux — the server does, and `send-keys` asks it politely.
 //! 3. `TIOCSTI` — nobody has to: the kernel pushes a byte into the slave's own
 //!    input queue. Needs root for a foreign tty and `dev.tty.legacy_tiocsti=1`,
 //!    both off by default, and it's the one path that reaches sessions started
@@ -26,7 +26,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 /// some agents and ignored by others; `\r` is what the terminal would have sent.
 ///
 /// Gated with its users: both backends that write raw bytes to a pty are unix-only,
-/// and tmux submits with a named `Enter` key instead, so on Windows this is dead.
+/// and rmux submits with a named `Enter` key instead, so on Windows this is dead.
 #[cfg(unix)]
 const SUBMIT: char = '\r';
 
@@ -36,7 +36,7 @@ const SUBMIT: char = '\r';
 /// chunk as the text is not a keypress — it is the newline in the middle of a
 /// paste, which Claude Code keeps in the prompt instead of sending. Whether the
 /// two land in one read is a race, so `s` submitted sometimes and left the line
-/// sitting there other times. tmux never sees this because its Enter is a
+/// sitting there other times. rmux never sees this because its Enter is a
 /// second `send-keys` round trip; the paths that write bytes straight to the pty
 /// have to leave the gap themselves.
 ///
@@ -51,14 +51,14 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
 /// to this session, so a session under `cctop run` never falls through to the
 /// root-only path and the error the user sees names every option they have.
 pub fn send_line(pid: u32, text: &str) -> Result<(), String> {
-    for backend in [shim_send, tmux_send, tiocsti_send] {
+    for backend in [shim_send, rmux_send, tiocsti_send] {
         if let Some(result) = backend(pid, text) {
             return result;
         }
     }
     Err(format!(
         "no way to type into session {pid}: start the agent with `cctop run <agent>` \
-         or inside tmux, or run cctop as root with dev.tty.legacy_tiocsti=1"
+         or inside rmux, or run cctop as root with dev.tty.legacy_tiocsti=1"
     ))
 }
 
@@ -88,8 +88,8 @@ fn shim_send(_pid: u32, _text: &str) -> Option<Result<(), String>> {
     None
 }
 
-/// Ask tmux to type into the pane holding this agent.
-fn tmux_send(pid: u32, text: &str) -> Option<Result<(), String>> {
+/// Ask rmux to type into the pane holding this agent.
+fn rmux_send(pid: u32, text: &str) -> Option<Result<(), String>> {
     let pane = pane_for(pid)?;
     Some(send(&pane, text))
 }
@@ -157,9 +157,9 @@ fn tiocsti_send(_pid: u32, _text: &str) -> Option<Result<(), String>> {
 /// for a shell under a wrapper under a pane, short enough to never spin.
 const MAX_DEPTH: usize = 32;
 
-/// The tmux pane hosting `pid`, if it is in one.
+/// The rmux pane hosting `pid`, if it is in one.
 ///
-/// tmux reports each pane's own child — usually the shell the agent was launched
+/// rmux reports each pane's own child — usually the shell the agent was launched
 /// from, or the agent itself when it *is* the pane command — so the two meet by
 /// walking up from the agent.
 fn pane_for(pid: u32) -> Option<String> {
@@ -184,7 +184,7 @@ fn pane_in(panes: &[(u32, String)], pid: u32) -> Option<String> {
     // the developer was working in.
     //
     // A session cctop launched itself is reached by `shim_send` through its
-    // socket, and one launched into tmux belongs to the tmux server rather than
+    // socket, and one launched into rmux belongs to the rmux server rather than
     // to cctop, so neither legitimate case needs this walk to climb that far.
     let own = std::process::id();
 
@@ -210,16 +210,16 @@ fn send(pane: &str, text: &str) -> Result<(), String> {
     // `-l --` sends the text literally, so a message containing "Enter" or "C-c"
     // is typed rather than interpreted, and a leading dash isn't read as a flag.
     // The newline that submits it has to be a separate, non-literal key.
-    tmux(&["send-keys", "-t", pane, "-l", "--", text])?;
-    tmux(&["send-keys", "-t", pane, "Enter"])
+    rmux(&["send-keys", "-t", pane, "-l", "--", text])?;
+    rmux(&["send-keys", "-t", pane, "Enter"])
 }
 
 /// Every pane on the server as `(pane_pid, pane_id)`.
 ///
-/// `None` when tmux isn't installed or no server is running — both mean "this
+/// `None` when rmux isn't installed or no server is running — both mean "this
 /// session isn't in a pane", which is the caller's only question.
 fn list_panes() -> Option<Vec<(u32, String)>> {
-    let out = Command::new("tmux")
+    let out = Command::new(crate::rmux::BIN)
         .args(["list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"])
         .output()
         .ok()?;
@@ -237,17 +237,17 @@ fn list_panes() -> Option<Vec<(u32, String)>> {
     )
 }
 
-fn tmux(args: &[&str]) -> Result<(), String> {
-    let out = Command::new("tmux")
+fn rmux(args: &[&str]) -> Result<(), String> {
+    let out = Command::new(crate::rmux::BIN)
         .args(args)
         .output()
-        .map_err(|e| format!("tmux: {e}"))?;
+        .map_err(|e| format!("rmux: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
     let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
     Err(if err.is_empty() {
-        "tmux rejected the keys".into()
+        "rmux rejected the keys".into()
     } else {
         err
     })
@@ -345,16 +345,16 @@ mod tests {
 
     /// The whole feature is the round trip: find the pane holding a process we
     /// only know by PID, then have what we send arrive as that process's input.
-    /// Nothing smaller than a real tmux server tests either half.
+    /// Nothing smaller than a real rmux server tests either half.
     #[test]
     fn types_into_the_pane_holding_a_pid() {
-        if Command::new("tmux").arg("-V").output().is_err() {
-            eprintln!("skipping: tmux not installed");
+        if Command::new(crate::rmux::BIN).arg("-V").output().is_err() {
+            eprintln!("skipping: rmux not installed");
             return;
         }
         // Every test that drives the real server takes its turn — see
-        // [`tmux::test_lock`](crate::tmux::test_lock).
-        let _turn = crate::tmux::test_lock();
+        // [`rmux::test_lock`](crate::rmux::test_lock).
+        let _turn = crate::rmux::test_lock();
         let out = std::env::temp_dir().join("cctop-mux-test.txt");
         let _ = std::fs::remove_file(&out);
         // `tee` takes the path as an argument, so the reader is findable by
@@ -364,13 +364,13 @@ mod tests {
         let session = "cctop-mux-test";
         // The name is fixed, so a run killed before its teardown leaves the
         // session behind and `new-session` then fails as a duplicate — for every
-        // run after it, until someone thinks to look in tmux.
-        let _ = Command::new("tmux")
+        // run after it, until someone thinks to look in rmux.
+        let _ = Command::new(crate::rmux::BIN)
             .args(["kill-session", "-t", &format!("={session}")])
             .status();
         let script = format!("tee {} >/dev/null; :", out.display());
         assert!(
-            Command::new("tmux")
+            Command::new(crate::rmux::BIN)
                 .args(["new-session", "-d", "-s", session, "sh", "-c", &script])
                 .status()
                 .unwrap()
@@ -406,7 +406,7 @@ mod tests {
             send(pane, "continue").unwrap();
             wait_for(|| std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty()))
         });
-        let _ = Command::new("tmux")
+        let _ = Command::new(crate::rmux::BIN)
             .args(["kill-session", "-t", session])
             .status();
         let _ = std::fs::remove_file(&out);
@@ -418,7 +418,7 @@ mod tests {
         );
     }
 
-    /// tmux starts panes and flushes writes asynchronously; poll rather than
+    /// rmux starts panes and flushes writes asynchronously; poll rather than
     /// guess a sleep long enough for a loaded CI box.
     fn wait_for<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
         for _ in 0..50 {

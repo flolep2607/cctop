@@ -1,13 +1,17 @@
 ---
 name: run-cctop
-description: Build, run, drive, and screenshot cctop — the terminal dashboard for AI coding agent sessions. Use when asked to start cctop, launch its TUI, take a screenshot of it, exercise a UI change, run its tests, or check the release gate.
+description: Build, run, drive, test and screenshot cctop — the terminal dashboard for AI coding agent sessions — including its browser interface (`cctop serve`, the session report, the conversation view). Use when asked to start cctop, launch its TUI, screenshot it, open or exercise its web pages, add or verify a feature, reproduce a rendering bug, run its tests, or check the release gate.
 ---
 
 cctop is a Rust TUI that watches *other* agents' sessions, so running it needs
 two things a clean machine lacks: sessions to show, and a terminal to draw in.
+Two drivers sit beside this file: **`driver.sh`** for the TUI and **`web.sh`**
+for the browser interface. Neither can see what the other tests.
+
 `.claude/skills/run-cctop/driver.sh` supplies both — it writes a throwaway
 `$HOME` full of fake transcripts and drives the TUI inside a private tmux
-server. Start there; `cargo run` on its own draws an empty table.
+server. That tmux is the driver's terminal, not cctop's backend — cctop hands
+agents to rmux. Start there; `cargo run` on its own draws an empty table.
 
 Paths are relative to the repo root.
 
@@ -96,6 +100,128 @@ cargo run          # draws your real sessions; F10 quits
 Useless for an agent: it takes over the terminal and shows the operator's own
 sessions rather than anything a test controls.
 
+## Run (the browser side)
+
+`driver.sh` drives the TUI through tmux and **cannot see the web interface at
+all**. The dashboard page, the session report, the conversation view and the
+action routes are a second interface with its own bugs, and `web.sh` is its
+driver. Same fixture home, so it never serves the operator's real sessions.
+
+```bash
+.claude/skills/run-cctop/web.sh smoke      # serve, shoot three pages, tear down
+```
+
+Step by step:
+
+```bash
+web.sh chat                                 # give the fixture a conversation worth rendering
+web.sh serve                                # start it; prints the URL and waits for a row
+web.sh ids                                  # session ids, for building /session/<id>
+web.sh api /api/sessions                    # any JSON route, pretty-printed
+web.sh shot home /                          # screenshot + the text it rendered
+web.sh shot rep "/session/$ID"
+web.sh shot dead "/session/$ID" --dead       # every /api/** answers 502 HTML
+web.sh down
+```
+
+| command | what it does |
+|---|---|
+| `serve [--token\|--tunnel]` | `cctop serve` against the fixture; waits for the table to have a row, not just for the port to answer |
+| `chat` | appends turns to the fixture transcript covering markdown, a table, fenced code, a tool call, a slash command and a reminder — the bare fixture is two lines of plain text and exercises none of the view |
+| `shot <name> [path] [--dead]` | PNG **and** the rendered text into `$SHOTS`; exits non-zero on a JS exception |
+| `--dead` | answers every `/api/**` with a Cloudflare 502 page — what a trycloudflare tunnel serves once the cctop behind it is gone |
+| `ids` / `api` / `url` | the small things every recipe needs |
+
+### Making it fail on purpose
+
+```bash
+cargo build --features debug          # the routes below exist only in this build
+web.sh fault 502     # a tunnel whose far end has gone: HTML body, 502 status
+web.sh fault html    # a 200 that is not JSON — a captive portal, a proxy
+web.sh fault empty   # a 200 with no body
+web.sh fault slow    # a request that never arrives in time
+web.sh fault off
+web.sh state         # what the serving process is holding right now
+```
+
+`debug` is **not** a default feature, so a released cctop contains neither the
+routes nor the strings that name them — `strings target/debug/cctop | grep
+api/debug` is empty without it. That is the condition for having them: a debug
+surface in a shipped binary is one somebody else can reach, and the page's token
+is one link away from anyone the user shared it with.
+
+Faults apply to `/api/**` and not to the pages, so the page still loads and the
+fetch behind it is what breaks — which is the failure worth reproducing. This is
+how a 200-with-HTML was found showing `Unexpected token '<', "<html><bod"... is
+not valid JSON` to the reader: a status check is not enough on its own, because
+a proxy answers 200.
+
+**Read the `.txt`, not the `.png`.** A screenshot says something is there; the
+text says what, and it is what a transcript can carry.
+
+### Reaching the TUI's own server
+
+`B` in the TUI serves the same page without leaving the dashboard — so a change
+to the panel is `driver.sh keys B`, and a change to the *page* is `web.sh`.
+
+## Asking cctop what it decided
+
+```bash
+cctop why                 # every agent process, and the session it was matched to
+cctop why <session-id>    # that session: is it running, and what decided it
+cctop doctor              # where sessions are read from, and what is missing
+cctop -j                  # every row as JSON
+```
+
+`why` is the one that is not obvious. Every other output is a *verdict* — the
+table shows a dot, `-j` shows `"running": false` — and says nothing about how it
+was reached, so a row that is wrong is a row with nothing to argue with. `why`
+prints the reasoning: the pid, the session it was given to, and which of the
+four rules gave it (a `--resume` id, a `--session` id, a window title, or the
+working directory). The reason is recorded in `proc::collect` where the decision
+is made, so it cannot drift from the logic.
+
+The case it exists for: `claude --resume X` **forks**. The agent runs on a new
+transcript that records X as the id it came from, so the id on the command line
+belongs to a conversation that stopped. Reading it literally marks the dead
+conversation as working and the live one as stopped. `why` says
+`forwarded to the transcript it forked into` when that has happened.
+
+## Reading a transcript nobody documented
+
+```bash
+transcript.py fields <file>       # every key path, with counts and first line
+transcript.py find <file> <text>  # which key path holds that value
+transcript.py types <file>        # record types, and how many of each
+transcript.py diff <a> <b>        # what one file has that the other does not
+```
+
+Seven harnesses, none of which documents its JSONL, and the recurring question
+is always "which key holds this?". `fields` is how `session_id` was found — the
+field recording the id a resumed session was launched from, distinct from
+`sessionId`, and the whole reason a forked session can be matched to its
+process at all.
+
+## Prefer a render test over a screenshot
+
+For anything drawn by the TUI — a modal, a panel, a column — a `TestBackend`
+render test is faster, deterministic, and says what is actually in the buffer.
+There are several in `src/ui/mod.rs`; the pattern is:
+
+```rust
+let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("backend");
+terminal.draw(|frame| layout = render::draw(frame, &mut app)).expect("draw");
+let screen: String = terminal.backend().buffer().content()
+    .iter().map(|cell| cell.symbol()).collect();
+assert!(screen.contains("…"));
+```
+
+This is not a preference. A modal bug that three rounds of `driver.sh shot`
+could not explain — escape sequences in a cell, and a box sized by line count
+while its paragraph wrapped — was obvious in the first buffer dump, because
+`capture-pane` shows what the *terminal* made of the output while the buffer
+shows what cctop put there.
+
 ## Test
 
 ```bash
@@ -112,6 +238,40 @@ cargo test
 cargo publish --dry-run --allow-dirty
 ```
 
+## The multiplexer
+
+cctop drives **rmux**, not tmux (since 0.8 — `src/rmux.rs`). tmux still appears
+here because the *driver* uses it as a terminal to run cctop in; the two are
+unrelated, and cctop cannot see the driver's tmux server at all.
+
+- **Its tests share one machine-wide daemon.** `rmux::test_lock()` serialises
+  them, and a test that kills the last session must wait for it to be gone
+  before releasing the lock — killing the last one stops the server, and the
+  next test's `new-session` then reaches a socket mid-shutdown and fails. That
+  race is why an unrelated test goes red once in five runs.
+- **Check rmux's behaviour, don't infer it from tmux.** They differ in ways that
+  compile fine: `list-panes -t =NAME` is a parse error under rmux while every
+  other target takes the `=`, and a bare name prefix-matches. `rmux -L probe
+  new-session -d -s x -- sleep 60` on a private socket is a cheap way to ask.
+- **An rmux pane exports five env vars** — `RMUX`, `RMUX_PANE`, `TMUX`,
+  `TMUX_PANE`, `TMUX_PROGRAM` — and `new-session -A` refuses to nest under any
+  of them. `src/shim.rs` strips all five.
+- `docs/rmux/` mirrors rmux's own documentation; `docs/rmux/pull.sh` refreshes
+  it. Read it before guessing at a flag.
+
+## Editing hazards
+
+- **`cargo fmt` rewraps lines, so a scripted `str.replace` silently no-ops.**
+  Always assert the replacement happened. An edit that quietly did nothing sent
+  a whole debugging session after the wrong cause.
+- **Never run `cargo publish`**, dry-run included. Run the rest of the gate and
+  stop.
+- There is no `[patch.crates-io]` block any more, and adding one back stops the
+  crate being publishable: `cargo publish` ignores a patch, so whatever it
+  papers over reaches an installer unpapered. `ratatui-rmux` was the reason
+  there used to be one and is no longer a dependency at all — see the note
+  beside `rmux-sdk` in `Cargo.toml` for what it did and when to want it back.
+
 ## Gotchas
 
 - **`tmux new-session` does not pass your environment to the pane.** The pane
@@ -119,17 +279,30 @@ cargo publish --dry-run --allow-dirty
   `HOME=/tmp/x tmux new-session … cctop` silently gives cctop the real `$HOME` —
   it reads the operator's sessions and you never notice. Use `-e HOME=…`, as
   the driver does.
-- **cctop adopts every cctop-owned tmux session on the server as a tab.** Run
-  it on the default socket and tab 2 is somebody's live agent, displayed and
-  *typeable* — inside a pane only the function keys stay cctop's, so a stray
-  `Down` goes to that agent. The driver uses a private socket (`tmux -L
-  cctopdrv`) so cctop sees only its own server, and sends F12 on startup.
-- **The launcher cannot start an agent from inside tmux.** cctop runs `tmux
-  new-session -A`, which refuses to nest under a `$TMUX` it can see; the status
-  line says `Started codex …` and no session appears. `up --spawn` runs cctop
-  through a wrapper that unsets `TMUX`, which does work — at the price of the
-  bullet above, and any session it starts outlives the driver on the *default*
-  server.
+- **The driver's own server is not invisible to cctop, despite being "tmux".**
+  rmux installs a shim so `tmux` *is* `rmux` (`which tmux` →
+  `…/rmux-shim-*/tmux` → `~/.cargo/bin/rmux`, the same binary), and this
+  driver's `tmux -L cctopdrv` is therefore an rmux server on a private socket.
+  A pane in it exports `RMUX`/`TMUX` naming that socket, so a cctop launched
+  there queries *it* for the `cctop-*` sessions: no tabs in the bar, and
+  `set-option` on a real session answering "can't find session". `up --spawn`
+  unsets all four variables for exactly this reason. Anything that tests tab
+  adoption, tab order, or the rmux options cctop writes has to go through
+  `--spawn` — or be tested against the real daemon in `src/rmux.rs`, as
+  `an_order_written_onto_a_session_survives_in_it` is.
+- **cctop adopts every cctop-owned `rmux` session on the machine as a tab.**
+  In `--spawn` mode the driver's own server is out of the way, but the
+  operator's real sessions are not: one lands in tab 2 displayed and
+  *typeable*, and inside a pane only the function keys stay cctop's, so a stray
+  `Down` goes to that agent. The driver sends F12 on startup for that reason.
+  If the machine has live `cctop-*` rmux sessions, expect them.
+- **The launcher cannot start an agent from inside a multiplexer.** cctop runs
+  `rmux new-session -A`, which refuses to nest under a `$RMUX`/`$TMUX` it can
+  see; the status line says `Started codex …` and no session appears. cctop's
+  own pty shim strips both pairs plus `TMUX_PROGRAM`, so an agent it launches is
+  clean — what is not clean is a cctop the driver started *inside* tmux, which
+  is why `up --spawn` runs it through a wrapper that unsets `TMUX`. Any session
+  that wrapper starts outlives the driver, on the rmux daemon.
 - **`CI=1` skips the first-run prompt** that offers to write shell aliases into
   `~/.zshrc` and `~/.bashrc` (`src/main.rs:254`). Without it the app waits on
   stdin for `y`/`n` behind the alias question and never draws. Never run

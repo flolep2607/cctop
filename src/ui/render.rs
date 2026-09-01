@@ -10,6 +10,8 @@ use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
 use ratatui::Frame;
+use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::crossterm::event;
 use ratatui::layout::{Constraint, Layout as RLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -32,6 +34,10 @@ pub struct Layout {
     pub(super) workspace_spans: Vec<(u16, u16, usize)>,
     /// `(start_col, end_col)` of the bar's new-tab button.
     pub(super) workspace_new: Option<(u16, u16)>,
+    /// `(row, start_col, end_col)` of the footer's share corner, while it is
+    /// drawn. Recorded because cctop holds the terminal's mouse capture: the
+    /// click that would follow the link has to be answered here or nowhere.
+    pub(super) share_corner: Option<(u16, u16, u16)>,
     /// The rectangle a modal covers while one is up. A click inside it belongs
     /// to the modal, and a click outside it must not reach the dashboard the
     /// modal is sitting on top of.
@@ -46,6 +52,15 @@ pub struct Layout {
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
     pub(super) tool_log: Option<(u16, u16, u16)>,
+    /// Every place a key is written on screen as its own label, and the key it
+    /// stands for: `(row, start_col, end_col, key)`.
+    ///
+    /// The footer's hints and a confirmation's `[y]` are drawn to be read as
+    /// buttons, and cctop holds the terminal's mouse capture — so a click on one
+    /// is answered here or nowhere, exactly as it is for the share corner. One
+    /// list rather than a field per surface, because the answer is always the
+    /// same: press the key that is written there.
+    pub(super) key_hits: Vec<(u16, u16, u16, event::KeyEvent)>,
     /// Where each pane of the open tab has its agent's screen, in pane order.
     ///
     /// The agent's screen, not the pane: the border is cctop's and the shim may
@@ -71,6 +86,14 @@ impl Layout {
             .iter()
             .find(|(a, b, _)| col >= *a && col < *b)
             .map(|(_, _, id)| *id)
+    }
+
+    /// The key written under the cursor, if a click there means pressing one.
+    pub fn key_at(&self, col: u16, row: u16) -> Option<event::KeyEvent> {
+        self.key_hits
+            .iter()
+            .find(|(r, a, b, _)| *r == row && col >= *a && col < *b)
+            .map(|(_, _, _, key)| *key)
     }
 
     /// Index of the tool-filter row under the cursor, if any.
@@ -117,6 +140,11 @@ impl Layout {
     /// Whether the cursor is on the bar's new-tab button.
     pub fn workspace_new_at(&self, col: u16, row: u16) -> bool {
         matches!(self.workspace_new, Some((a, b)) if row == 0 && col >= a && col < b)
+    }
+
+    /// Whether the cursor is on the footer's share link.
+    pub fn share_corner_at(&self, col: u16, row: u16) -> bool {
+        matches!(self.share_corner, Some((y, a, b)) if row == y && col >= a && col < b)
     }
 
     /// Whether the cursor is inside the modal that is up, if one is.
@@ -200,7 +228,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         .split(area);
         draw_overview(frame, chunks[0], app);
         draw_panes(frame, chunks[1], app, &mut layout);
-        draw_footer(frame, chunks[2], app);
+        draw_footer(frame, chunks[2], app, &mut layout);
         match app.mode {
             Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
             // F10 is cctop's inside a pane, and when there is an agent to warn
@@ -208,7 +236,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             // dashboard, because a question asked on a screen you are not
             // looking at is indistinguishable from a key that did nothing —
             // and the keyboard is waiting on the answer either way.
-            Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
+            Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
             // A tab is renamed by right-clicking it, and the bar is on screen
             // inside a tab as much as over the dashboard.
             Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
@@ -238,23 +266,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     table::draw_table(frame, chunks[1], app, &mut layout);
     draw_bottom(frame, chunks[2], app, &mut layout);
     draw_limits(frame, chunks[3], app);
-    draw_footer(frame, chunks[4], app);
+    draw_footer(frame, chunks[4], app, &mut layout);
 
     match app.mode {
         Mode::Help => modals::draw_help(frame, area, app),
         Mode::Search => modals::draw_search(frame, area, app),
         Mode::SortBy => modals::draw_sortby(frame, area, app),
         Mode::AgeFilter => modals::draw_age_filter(frame, area, app),
-        Mode::DeleteConfirm => modals::draw_delete_confirm(frame, area, app),
-        Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app),
-        Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app),
-        Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app),
-        Mode::TmuxInstall => modals::draw_tmux_install(frame, area, app),
-        Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app),
-        Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app),
-        Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app),
-        Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true),
-        Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false),
+        Mode::DeleteConfirm => modals::draw_delete_confirm(frame, area, app, &mut layout),
+        Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app, &mut layout),
+        Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app, &mut layout),
+        Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app, &mut layout),
+        Mode::TmuxInstall => modals::draw_rmux_install(frame, area, app),
+        Mode::Serve => modals::draw_serve(frame, area, app),
+        Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
+        Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app, &mut layout),
+        Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app, &mut layout),
+        Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true, &mut layout),
+        Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false, &mut layout),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
         Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
@@ -479,7 +508,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         // Scrolled back, this pane is showing history rather than the agent, and
         // there is nothing on a still screen to say so — the agent may well be
         // working below it. Only cctop's own history says anything here: a pane
-        // scrolled inside tmux is in tmux's copy-mode, which draws its own.
+        // scrolled inside rmux is in rmux's copy-mode, which draws its own.
         let behind = pane.view.parser.screen().scrollback();
         if behind > 0 {
             block = block.title_bottom(
@@ -515,24 +544,127 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
 // Overview
 // ---------------------------------------------------------------------------
 
+/// The longest series the Overview charts: one calendar month, one dot a day.
+/// Every chart is drawn at this width or narrower and right-aligned into it, so
+/// the newest sample of each row sits in the same column.
+const SPARK_W: usize = 31;
+
+/// Content rows the panel has, below its border.
+const ROWS: usize = 4;
+
+/// Scale floors, in the unit of each series.
+///
+/// Auto-scaling makes a chart's own peak full height, which is right for a busy
+/// window and a lie for an idle one: a tenth of a cent an hour becomes a
+/// mountain range, and the Overview reads as frantic while nothing is running.
+/// Below these the chart scales to the floor instead, so an amount nobody would
+/// call spending draws as the flat line it is.
+/// Width of the right-hand machine column, and the least room the spend
+/// breakdown is worth drawing in.
+const MACHINE_W: usize = 42;
+const MIN_GRID_W: usize = 30;
+/// Target width of one project cell in the breakdown grid.
+const CELL_W: usize = 27;
+
+const RATE_FLOOR: f64 = 0.05; // $/min — $3 an hour
+const HOUR_FLOOR: f64 = 1.00; // $/hour
+const DAY_FLOOR: f64 = 10.00; // $/day
+
+/// A sparkline right-aligned into `width`, scaled to its own peak or `floor`,
+/// whichever is larger.
+///
+/// The lead is spaces rather than the baseline dots `sparkline` would pad with.
+/// A dot is a reading, and the hours of today that have not happened yet have
+/// not read zero — filling them made every quiet row an indistinguishable wall
+/// of dots, which is the whole reason this panel was unreadable.
+fn spark_spans(
+    values: &[f64],
+    width: usize,
+    floor: f64,
+    gradient: Gradient,
+    now: Option<usize>,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let drawn = width.min(values.len().max(1));
+    let peak = values.iter().cloned().fold(0.0f64, f64::max);
+    let mut spans = Vec::with_capacity(drawn + 1);
+    if width > drawn {
+        spans.push(Span::raw(" ".repeat(width - drawn)));
+    }
+    spans.extend(spark::sparkline(values, drawn, peak.max(floor) * 1.1, gradient, now).spans);
+    spans
+}
+
+/// `name  value` right-aligned into `width`, with the name truncated rather
+/// than the amount — the amount is why the row is on the list.
+fn ranked_row(name: &str, amount: f64, width: usize) -> Vec<Span<'static>> {
+    let money = util::adaptive_usd(amount);
+    let name_w = width.saturating_sub(money.chars().count() + 1);
+    // A cut name that still looks like a whole one names the wrong project.
+    let mut shown: String = match name.chars().count() > name_w && name_w > 0 {
+        true => name
+            .chars()
+            .take(name_w - 1)
+            .chain(std::iter::once('…'))
+            .collect(),
+        false => name.chars().take(name_w).collect(),
+    };
+    while shown.chars().count() < name_w {
+        shown.push(' ');
+    }
+    vec![
+        Span::styled(shown, theme::dim()),
+        Span::raw(" "),
+        Span::styled(money, Style::default().fg(theme::colors().cost_mid)),
+    ]
+}
+
 fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel_block("Overview");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Spend has three time-series rows, while the agent figures are naturally
-    // compact. Giving the charts the extra room makes a trend readable instead
-    // of a decorative strip, especially on laptop-width terminals.
-    let cols =
-        RLayout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(inner);
-    let (left, right) = (cols[0], cols[1]);
-
-    let realtime = app.stats.spend_per_min;
     let label_w = 11usize;
     let value_w = 12usize;
-    let chart_w = left.width.saturating_sub((label_w + value_w + 2) as u16) as usize;
+    let gutter = 2usize;
 
-    let row = |name: &str, amount: f64, series: &[f64], now_idx: Option<usize>| -> Line<'static> {
+    // The charts shrink before anything else, and the two right-hand columns
+    // drop off entirely rather than being squeezed into a width where a project
+    // name is three letters. A narrow terminal gets the spend rows, which is
+    // what the panel is for.
+    let spark_w = SPARK_W.min(
+        (inner.width as usize)
+            .saturating_sub(label_w + value_w + 1 + gutter)
+            .min(SPARK_W),
+    );
+    let left_w = (label_w + value_w + 1 + spark_w + gutter) as u16;
+    let rest = inner.width.saturating_sub(left_w) as usize;
+    // The machine's figures are a fixed width — they say the same thing on a
+    // 100-column terminal as on a 300-column one. Every column beyond that goes
+    // to the spend breakdown, which has more to say the more room it is given.
+    let (mid_w, right_w) = match rest {
+        r if r >= MACHINE_W + MIN_GRID_W => (r - MACHINE_W, MACHINE_W),
+        r if r >= 20 => (0, r),
+        _ => (0, 0),
+    };
+
+    let cols = RLayout::horizontal([
+        Constraint::Length(left_w),
+        Constraint::Length(mid_w as u16),
+        Constraint::Length(right_w as u16),
+    ])
+    .split(inner);
+
+    let now = chrono::Local::now();
+    let hour_idx = Some(chrono::Timelike::hour(&now) as usize);
+    let day_of_month = chrono::Datelike::day(&now) as usize;
+    let day_idx = Some(day_of_month - 1);
+    let rt_idx = app.global_spend.values().len().checked_sub(1);
+
+    // --- Spend -------------------------------------------------------------
+    let row = |name: &str, amount: f64, series: &[f64], floor: f64, now_idx: Option<usize>| {
         let mut spans = vec![
             Span::styled(format!("{name:<label_w$}"), theme::label()),
             Span::styled(
@@ -542,92 +674,192 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        spans.extend(spark::sparkline(series, chart_w, 0.0, Gradient::Spend, now_idx).spans);
+        spans.extend(spark_spans(
+            series,
+            spark_w,
+            floor,
+            Gradient::Spend,
+            now_idx,
+        ));
         Line::from(spans)
     };
 
-    let now = chrono::Local::now();
-    let hour_idx = Some(chrono::Timelike::hour(&now) as usize);
-    let day_idx = Some(chrono::Datelike::day(&now) as usize - 1);
-    let rt_idx = app.global_spend.values().len().checked_sub(1);
+    // A month-to-date average is the one number that says whether today was
+    // ordinary, and it is a division of two figures already on the panel.
+    let per_day = app.stats.spend_calendar_month / day_of_month as f64;
 
     let left_lines = vec![
-        row("Live rate", realtime, app.global_spend.values(), rt_idx),
+        row(
+            "Live rate",
+            app.stats.spend_per_min,
+            app.global_spend.values(),
+            RATE_FLOOR,
+            rt_idx,
+        ),
         row(
             "Today",
             app.stats.spend_today,
             &app.stats.daily_hourly,
+            HOUR_FLOOR,
             hour_idx,
         ),
         row(
             "This month",
             app.stats.spend_calendar_month,
             &app.stats.monthly_daily,
+            DAY_FLOOR,
             day_idx,
         ),
         // Every session ever recorded, across every provider. Deliberately without
         // a sparkline: the others chart a window that scrolls, and a running total
-        // only ever climbs, so a chart of it says nothing the number doesn't.
+        // only ever climbs, so a chart of it says nothing the number doesn't. The
+        // space goes to the month's daily average instead, which does.
         Line::from(vec![
             Span::styled(format!("{:<label_w$}", "All time"), theme::label()),
             Span::styled(
-                format!("{:>value_w$}", util::adaptive_usd(app.stats.spend_total)),
+                format!("{:>value_w$} ", util::adaptive_usd(app.stats.spend_total)),
                 Style::default()
                     .fg(theme::colors().cost_mid)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(
+                format!("{}/day this month", util::adaptive_usd(per_day)),
+                theme::dim(),
+            ),
         ]),
     ];
-    frame.render_widget(Paragraph::new(left_lines), left);
+    frame.render_widget(Paragraph::new(left_lines), cols[0]);
 
-    let mem_mb = app.stats.total_memory as f64 / (1024.0 * 1024.0);
-    let r_label_w = 10usize;
-    let r_value_w = 9usize;
-    let r_chart_w = right
-        .width
-        .saturating_sub((r_label_w + r_value_w + 2) as u16) as usize;
+    // --- Where today's money went ------------------------------------------
+    //
+    // The width that used to be filler is a ranking instead: today's spend by
+    // project, read down each sub-column and then across. Four rows is what the
+    // panel has, so a wider terminal buys more projects rather than more air.
+    if mid_w > 0 {
+        let head_w = 10usize;
+        let grid_w = mid_w.saturating_sub(head_w);
+        // Sub-columns sized near CELL_W rather than as many as will fit: two
+        // columns of forty put the project at one end of the row and its amount
+        // at the other, which is harder to read than three tighter ones.
+        let sub_cols = ((grid_w + CELL_W / 2) / CELL_W).max(1);
+        let cell_w = grid_w / sub_cols;
+        let capacity = sub_cols * ROWS;
 
-    let mut cpu_spans = vec![
-        Span::styled(format!("{:<r_label_w$}", "Agent CPU"), theme::label()),
-        Span::styled(
-            format!("{:>r_value_w$} ", format!("{:.1}%", app.stats.total_cpu)),
-            theme::value(),
-        ),
-    ];
-    cpu_spans.extend(
-        spark::sparkline(
+        let mut mid_lines: Vec<Line<'static>> = Vec::with_capacity(ROWS);
+        let top = &app.stats.top_today;
+
+        if top.is_empty() {
+            mid_lines.push(Line::from(vec![
+                Span::styled(format!("{:<head_w$}", "Top today"), theme::label()),
+                Span::styled("nothing spent yet today", theme::dim()),
+            ]));
+        } else {
+            let shown = capacity.min(top.len());
+            // The tail is one row saying how much was left out, never a silent
+            // truncation: a ranking you cannot tell is partial is a wrong total.
+            let hidden = top.len() - shown;
+            for r in 0..ROWS {
+                let head = match r {
+                    0 => format!("{:<head_w$}", "Top today"),
+                    _ => " ".repeat(head_w),
+                };
+                let mut spans = vec![Span::styled(head, theme::label())];
+                for c in 0..sub_cols {
+                    let i = c * ROWS + r;
+                    let last = i + 1 == shown;
+                    if i >= shown {
+                        break;
+                    }
+                    if hidden > 0 && last {
+                        let rest: f64 = top[i..].iter().map(|e| e.1).sum();
+                        spans.extend(ranked_row(
+                            &format!("+{} more", hidden + 1),
+                            rest,
+                            cell_w.saturating_sub(2),
+                        ));
+                    } else {
+                        spans.extend(ranked_row(&top[i].0, top[i].1, cell_w.saturating_sub(2)));
+                    }
+                    spans.push(Span::raw("  "));
+                }
+                mid_lines.push(Line::from(spans));
+            }
+        }
+        frame.render_widget(Paragraph::new(mid_lines), cols[1]);
+    }
+
+    // --- The machine --------------------------------------------------------
+    if right_w > 0 {
+        let r_label_w = 10usize;
+        let body_w = right_w.saturating_sub(r_label_w);
+        let stats = &app.stats;
+
+        let mut model_spans = vec![Span::styled(
+            format!("{:<r_label_w$}", "Models"),
+            theme::label(),
+        )];
+        let today: f64 = stats.models_today.iter().map(|m| m.1).sum();
+        if today <= 0.0 {
+            model_spans.push(Span::styled("idle today", theme::dim()));
+        } else {
+            // Percentages of today's spend, not a count of sessions ever seen:
+            // the mix that is costing money is the one worth naming.
+            for (i, (name, cost)) in stats.models_today.iter().take(3).enumerate() {
+                if i > 0 {
+                    model_spans.push(Span::styled(" · ", theme::dim()));
+                }
+                model_spans.push(Span::styled(name.clone(), theme::value()));
+                model_spans.push(Span::styled(
+                    format!(" {:.0}%", cost / today * 100.0),
+                    theme::dim(),
+                ));
+            }
+        }
+
+        let mem_mb = stats.total_memory as f64 / (1024.0 * 1024.0);
+        let cpu_text = format!("{:.1}%", stats.total_cpu);
+        let cpu_spark_w = body_w.saturating_sub(cpu_text.chars().count() + 2).min(20);
+
+        let mut cpu_spans = vec![
+            Span::styled(format!("{:<r_label_w$}", "Agent CPU"), theme::label()),
+            Span::styled(format!("{cpu_text:>6} "), theme::value()),
+        ];
+        cpu_spans.extend(spark_spans(
             app.global_cpu.values(),
-            r_chart_w,
+            cpu_spark_w,
             100.0,
             Gradient::Cpu,
             app.global_cpu.values().len().checked_sub(1),
-        )
-        .spans,
-    );
+        ));
 
-    let right_lines = vec![
-        Line::from(cpu_spans),
-        Line::from(vec![
-            Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
-            Span::styled(
-                format!("{:>r_value_w$}", format!("{mem_mb:.0} MB")),
-                theme::value(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(format!("{:<r_label_w$}", "Sessions"), theme::label()),
-            Span::styled(
-                format!("{:>r_value_w$}", app.stats.total.to_string()),
-                theme::value(),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("{} active", app.stats.running),
-                Style::default().fg(theme::colors().cost_low),
-            ),
-        ]),
-    ];
-    frame.render_widget(Paragraph::new(right_lines), right);
+        let right_lines = vec![
+            Line::from(model_spans),
+            Line::from(vec![
+                Span::styled(format!("{:<r_label_w$}", "Sessions"), theme::label()),
+                Span::styled(stats.total.to_string(), theme::value()),
+                Span::styled(" · ", theme::dim()),
+                Span::styled(
+                    format!("{} live", stats.running),
+                    Style::default().fg(theme::colors().cost_low),
+                ),
+                Span::styled(format!(" · {} in 24h", stats.active_24h), theme::dim()),
+            ]),
+            Line::from(cpu_spans),
+            Line::from(vec![
+                Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
+                Span::styled(format!("{mem_mb:.0} MB"), theme::value()),
+                Span::styled(
+                    format!(
+                        " · {} in / {} out",
+                        util::compact_tokens(stats.total_input),
+                        util::compact_tokens(stats.total_output)
+                    ),
+                    theme::dim(),
+                ),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(right_lines), cols[2]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -794,11 +1026,11 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     };
 
     let max_scroll = (lines.len() as u16).saturating_sub(target.height);
+    app.panel_max_scroll = max_scroll;
     // Tool Activity follows its tail unless the user has scrolled away.
     let scroll = if app.bottom_tab == 3 {
         app.tool_owners = std::mem::take(&mut tool_owners);
         layout.tool_log = Some((target.x, target.y, target.height));
-        app.tool_max_scroll = max_scroll;
         if app.tool_follow {
             app.tool_scroll = max_scroll;
         }
@@ -1042,14 +1274,14 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     // The harness travels alongside the label rather than being read back out
     // of it: `Codex (work)` is still Codex, and a hint chosen by comparing the
     // label told a Codex account to run `claude login`.
-    let mut accounts: Vec<(String, &'static str, &crate::quota::ProviderStatus)> = Vec::new();
+    let mut accounts: Vec<(String, &'static str, &crate::quota::ProfileQuota)> = Vec::new();
     for (harness, qs) in [("Claude", &app.quota.claude), ("Codex", &app.quota.codex)] {
         for (i, q) in qs.iter().enumerate() {
             let name = match i {
                 0 => harness.to_string(),
                 _ => format!("{harness} ({})", q.profile),
             };
-            accounts.push((name, harness, &q.status));
+            accounts.push((name, harness, q));
         }
     }
 
@@ -1065,7 +1297,8 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
     .spacing(2)
     .split(inner);
 
-    for (i, (name, harness, status)) in accounts.iter().enumerate() {
+    for (i, (name, harness, account)) in accounts.iter().enumerate() {
+        let status = &account.status;
         let mut spans = vec![Span::styled(format!("{name} "), theme::label())];
         // Each failure mode gets its own message: an expired sign-in needs the
         // user to act, a rate-limit clears on its own, and "not signed in" is
@@ -1081,13 +1314,21 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled("API billing, no limits", theme::dim()));
             }
             crate::quota::ProviderStatus::Expired => {
-                let cmd = if *harness == "Codex" {
-                    "codex login"
-                } else {
-                    "claude login"
+                // A token account has no login to renew: its credentials are
+                // the line the user pasted into cctop's own config, and
+                // `claude login` would refresh a directory it does not use.
+                // The shorter wording goes with the longer command, because an
+                // account's whole message lives in one column of a shared line
+                // and a hint clipped mid-flag is not a hint.
+                let (said, cmd) = match (account.source, *harness) {
+                    (crate::config::AccountSource::Token, _) => {
+                        ("expired — ", "cctop --add-account")
+                    }
+                    (_, "Codex") => ("sign-in expired — ", "codex login"),
+                    _ => ("sign-in expired — ", "claude login"),
                 };
                 spans.push(Span::styled(
-                    "sign-in expired — ",
+                    said,
                     Style::default().fg(theme::colors().cost_mid),
                 ));
                 spans.push(Span::styled(cmd.to_string(), theme::value()));
@@ -1178,6 +1419,41 @@ impl Hint {
     fn width(&self) -> usize {
         self.key.chars().count() + self.name.chars().count() + 2
     }
+
+    /// The keystroke this hint stands for, so a click on it can be answered by
+    /// pressing that key — one dispatch, and a hint cannot drift from what
+    /// clicking it does.
+    ///
+    /// `None` for the hints that name more than one key: `↑↓`, `Alt+←→` and
+    /// `Alt+v/s` are maps of a pair, and a click cannot say which half was
+    /// meant. They stay labels, which costs nothing — a mouse already moves the
+    /// selection by clicking a row and switches tab by clicking the bar.
+    fn event(&self) -> Option<event::KeyEvent> {
+        use event::{KeyCode, KeyModifiers as Mods};
+        let (code, mods) = match self.key {
+            "↑↓" | "Alt+←→" | "Alt+v/s" => return None,
+            "↵" => (KeyCode::Enter, Mods::NONE),
+            "Esc" => (KeyCode::Esc, Mods::NONE),
+            "Tab" => (KeyCode::Tab, Mods::NONE),
+            "Space" => (KeyCode::Char(' '), Mods::NONE),
+            "F1" => (KeyCode::F(1), Mods::NONE),
+            "F10" => (KeyCode::F(10), Mods::NONE),
+            "F12" => (KeyCode::F(12), Mods::NONE),
+            // `Alt+n` and friends. The letter is the last character, and the
+            // handler for these reads the modifier as well as the code.
+            alt if alt.starts_with("Alt+") => {
+                let c = alt.chars().next_back()?;
+                (KeyCode::Char(c), Mods::ALT)
+            }
+            // Everything else is the single character it prints: `/`, `?`, `a`,
+            // `D`. Uppercase as written, which is what the list handler matches.
+            one => match (one.chars().next(), one.chars().count()) {
+                (Some(c), 1) => (KeyCode::Char(c), Mods::NONE),
+                _ => return None,
+            },
+        };
+        Some(event::KeyEvent::new(code, mods))
+    }
 }
 
 const fn hint(key: &'static str, name: &'static str) -> Hint {
@@ -1189,16 +1465,42 @@ const fn hint(key: &'static str, name: &'static str) -> Hint {
 /// Dropping from the tail rather than truncating mid-word is what makes the
 /// priority order mean anything: a half-drawn `Qu` teaches nobody that `q`
 /// quits, so the hint that cannot fit whole is simply not shown.
-fn fit_hints(hints: &[Hint], mut room: usize) -> Vec<Span<'static>> {
+fn fit_hints(hints: &[Hint], room: usize) -> Vec<Span<'static>> {
+    fit_hints_at(hints, room, None, 0, 0)
+}
+
+/// The hints as spans, recording where each clickable one landed.
+///
+/// `x` and `row` are where the first span will be drawn, so a hit region is in
+/// screen coordinates rather than in offsets a caller would have to add up
+/// again. Passing no `hits` draws without recording, which is what the tests
+/// and the width arithmetic want.
+fn fit_hints_at(
+    hints: &[Hint],
+    mut room: usize,
+    mut hits: Option<&mut Vec<(u16, u16, u16, event::KeyEvent)>>,
+    x: u16,
+    row: u16,
+) -> Vec<Span<'static>> {
     let key_style = theme::key_cap();
     let label_style = Style::default().fg(theme::colors().dim);
     let mut spans = Vec::new();
+    let mut at = x;
     for h in hints {
         let w = h.width();
         if w > room {
             break;
         }
         room -= w;
+        // The whole chip, key and label together: `↵ Actions` reads as one
+        // button, and a region that covered only the `↵` would miss most of
+        // what a pointer is aimed at.
+        if let Some(hits) = hits.as_deref_mut()
+            && let Some(key) = h.event()
+        {
+            hits.push((row, at, at + w as u16, key));
+        }
+        at += w as u16;
         spans.push(Span::styled(h.key, key_style));
         spans.push(Span::styled(format!(" {} ", h.name), label_style));
     }
@@ -1215,6 +1517,7 @@ fn tab_hints() -> Vec<Hint> {
         hint("Alt+w", "Close"),
         hint("Alt+o", "Focus"),
         hint("F1", "Help"),
+        hint("F9", "Image"),
         hint("Alt+v/s", "Split"),
         hint("F10", "Quit"),
     ]
@@ -1262,6 +1565,14 @@ fn list_hints(app: &App) -> Vec<Hint> {
 /// screen that is on show nowhere else.
 fn footer_badges(app: &App) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
+    // First, and in the colour the costly things use: it is a question waiting
+    // for an answer, and the answer is a second click on the hint beside it.
+    if app.quit_arm {
+        spans.push(Span::styled(
+            " click q again to quit ",
+            Style::default().fg(theme::colors().cost_high),
+        ));
+    }
     if let Some(age) = app.age_filter {
         spans.push(Span::styled(
             format!(" Age<{} ", age.short()),
@@ -1344,7 +1655,221 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
     spans
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+/// What the footer's right-hand corner is showing.
+///
+/// The corner is one thing in two states, not two things: a tunnel that exists
+/// is a link, and a tunnel that does not is the button that would make one.
+/// Sharing this machine has never been reachable except through `B` and a
+/// second key, which is a feature nobody finds by using cctop.
+enum Corner {
+    /// A tunnel is up. The label is its host; the link behind it carries the
+    /// token, which is what opens the page.
+    Link(String, String),
+    /// No tunnel, and a click would open one — after a second click, because
+    /// the first only arms it. The label says which of the two it is asking
+    /// for.
+    Button(&'static str),
+    /// A tunnel is being registered. Cloudflare's edge takes a second or so to
+    /// answer, and a spinner is the difference between a wait and a hang.
+    Working(String),
+}
+
+impl Corner {
+    fn label(&self) -> &str {
+        match self {
+            Self::Link(label, _) => label,
+            Self::Button(label) => label,
+            Self::Working(label) => label,
+        }
+    }
+}
+
+/// The corner for the state this cctop is in.
+///
+/// The link is the tunnel's and not the loopback one: `127.0.0.1:7777` is
+/// something anyone can retype, while a quick tunnel's hostname is words
+/// Cloudflare picked and changes every run. That is the one worth a click.
+///
+/// The button is armed by its first click and fires on the second — the same
+/// two-step the launcher uses, and for a stronger reason: this one puts every
+/// session on this machine behind a URL on the internet, and a stray click is
+/// not consent to that. The armed label is where that is said, because it is
+/// the sentence being clicked through.
+fn share_corner(app: &App) -> Corner {
+    // Before the states below, because it outranks all of them: a tunnel being
+    // dialled is what the corner is doing, whatever it was showing before.
+    if let Some(opening) = &app.share_opening {
+        return Corner::Working(format!("{} opening a tunnel…", opening.frame()));
+    }
+    match app.serving.as_ref().and_then(|s| s.public.as_deref()) {
+        Some(url) => Corner::Link(link_label(url), url.to_string()),
+        None if app.share_arm => Corner::Button("⧉ publish to the internet?"),
+        // Serving already, just not off this machine: the click adds the tunnel
+        // to the server that is up rather than starting one.
+        None if app.serving.is_some() => Corner::Button("⧉ + tunnel"),
+        None => Corner::Button("⧉ share"),
+    }
+}
+
+/// Columns a share label may take before it is shortened.
+///
+/// A quick tunnel's hostname is four words and a domain —
+/// `tribute-resistance-resolved-moscow.trycloudflare.com` is a real one — which
+/// at full length took a quarter of a wide footer and half a narrow one, and
+/// pushed the key hints off the row it was borrowing.
+const LINK_MAX: usize = 30;
+
+/// `https://abc-def.trycloudflare.com/?t=secret` → `⧉ abc-def.trycloudflare.com`.
+///
+/// The host and not the query. The token is what opens the page, and the footer
+/// is on screen for the whole run — in front of whoever walks past it and in
+/// every screenshot that happens to have cctop in it. The link behind the label
+/// still carries the token, because a link without it opens nothing.
+///
+/// Shortened from the middle when the host is long, which keeps both ends that
+/// say something: the first words, which are what distinguishes one tunnel from
+/// another, and `trycloudflare.com`, which is what says where it goes.
+fn link_label(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let host = rest.split(['/', '?']).next().unwrap_or(rest);
+    format!("⧉ {}", shorten_host(host))
+}
+
+fn shorten_host(host: &str) -> String {
+    let chars: Vec<char> = host.chars().collect();
+    if chars.len() <= LINK_MAX {
+        return host.to_string();
+    }
+    // The tail is the domain, which is fixed and worth keeping whole; the head
+    // takes whatever the ellipsis leaves.
+    let tail = "trycloudflare.com";
+    let keep = match host.ends_with(tail) {
+        true => tail.chars().count(),
+        false => LINK_MAX / 2,
+    };
+    let head = LINK_MAX.saturating_sub(keep + 1);
+    let front: String = chars[..head].iter().collect();
+    let back: String = chars[chars.len() - keep..].iter().collect();
+    format!("{front}…{back}")
+}
+
+/// Columns the hints keep for themselves before the share link is offered any.
+///
+/// Enough for the first three, which is the same floor the badges respect: a
+/// footer that has given its width away to a link and cannot say how to quit
+/// has the priorities backwards.
+const LINK_MIN_HINTS: usize = 26;
+
+/// Draw `label` at `(x, y)` as an OSC 8 hyperlink to `url`.
+///
+/// A terminal that understands OSC 8 — Ghostty, kitty, WezTerm, iTerm2, VTE,
+/// Windows Terminal — makes the label itself clickable and shows the target on
+/// hover. One that does not swallows the sequence and prints the label. Either
+/// way the columns spent are the label's.
+///
+/// The whole link goes in **one** cell — opening sequence, label and closing
+/// sequence together — with [`CellDiffOption::ForcedWidth`] telling the diff how
+/// many columns that cell actually paints. That option is ratatui/ratatui#1605,
+/// and it is what lets an escape sequence live in a symbol at all: without it
+/// the diff measures the sequence as text and skips the columns after it.
+///
+/// One cell rather than two, because the pair has to be atomic. Split across the
+/// first and last column, a redraw that emitted a changed opening cell and left
+/// the unchanged closing one alone would leave the hyperlink *open*, and every
+/// cell written after it, anywhere on screen, would join the link.
+///
+/// The columns the label covers are then filled with its own characters, which
+/// the diff will never draw — `ForcedWidth` skips them for as long as the link
+/// is there. They are for the frame after it goes: the diff erases what the
+/// previous buffer said was on screen, and columns it believed were blank are
+/// columns it does not bother to erase.
+fn draw_hyperlink(buf: &mut Buffer, x: u16, y: u16, label: &str, url: &str, style: Style) {
+    // An ESC or a BEL inside the URL would end the sequence early and hand the
+    // remainder to the terminal as commands. Nothing here builds such a URL —
+    // it is Cloudflare's hostname and cctop's own token — which is exactly the
+    // kind of assumption that stops being true without anyone noticing.
+    let url: String = url.chars().filter(|c| !c.is_control()).collect();
+    // Every character of the label is one column wide (a host name and one
+    // glyph), so counting them is counting columns.
+    let Some(width) = std::num::NonZeroU16::new(label.chars().count() as u16) else {
+        return;
+    };
+    let Some(cell) = buf.cell_mut((x, y)) else {
+        return;
+    };
+    cell.set_symbol(&format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\"))
+        .set_style(style)
+        .set_diff_option(CellDiffOption::ForcedWidth(width));
+    for (i, ch) in label.chars().enumerate().skip(1) {
+        let mut utf8 = [0u8; 4];
+        if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
+            cell.set_symbol(ch.encode_utf8(&mut utf8)).set_style(style);
+        }
+    }
+}
+
+/// The footer, with the share link in its right-hand corner when one exists.
+///
+/// The link takes its columns before the hints and badges do, and is drawn after
+/// them, so nothing lands on top of a cell holding an escape sequence.
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    let corner = share_corner(app);
+    let width = corner.label().chars().count();
+    // Shown only with a footer's worth of keys still beside it. A column of gap
+    // as well, so the corner never abuts the last badge.
+    // Two columns of gap: one before it, so the corner never abuts the last
+    // badge, and one after, which is the margin below.
+    let reserved = match area.width as usize >= width + 2 + LINK_MIN_HINTS {
+        true => width as u16 + 2,
+        false => 0,
+    };
+    draw_footer_keys(
+        frame,
+        Rect {
+            width: area.width - reserved,
+            ..area
+        },
+        app,
+        layout,
+    );
+    if reserved == 0 {
+        return;
+    }
+    // One column short of the edge. The bottom-right cell is the one a terminal
+    // is least willing to paint — writing it can scroll the screen — and a
+    // label that ends there also reads as if it had been cut off.
+    let x = area.right() - width as u16 - 1;
+    match &corner {
+        Corner::Link(label, url) => draw_hyperlink(
+            frame.buffer_mut(),
+            x,
+            area.y,
+            label,
+            url,
+            Style::default().fg(theme::colors().accent),
+        ),
+        // Amber while armed: the next click is the one that publishes, and the
+        // colour cctop uses for "this wants reading" is the honest one for it.
+        Corner::Button(label) => {
+            let style = match app.share_arm {
+                true => Style::default().fg(theme::colors().cost_mid),
+                false => theme::dim(),
+            };
+            frame.buffer_mut().set_string(x, area.y, label, style);
+        }
+        Corner::Working(label) => {
+            frame.buffer_mut().set_string(
+                x,
+                area.y,
+                label,
+                Style::default().fg(theme::colors().cost_mid),
+            );
+        }
+    }
+    layout.share_corner = Some((area.y, x, x + width as u16));
+}
+
+fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     if let Some((msg, _)) = &app.status {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1373,7 +1898,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let floor = hints.iter().take(3).map(Hint::width).sum::<usize>();
     let room = total.saturating_sub(badge_w).max(floor.min(total));
 
-    let mut spans = fit_hints(&hints, room);
+    // Only while the dashboard is what the keys act on. A hint clicked with a
+    // modal up would be dispatched into that modal's handler — the `?` under a
+    // search box types a question mark into the query — and the footer is drawn
+    // beneath every modal, where it is a legend rather than a row of buttons.
+    let mut spans = match app.mode {
+        Mode::List => fit_hints_at(&hints, room, Some(&mut layout.key_hits), area.x, area.y),
+        _ => fit_hints(&hints, room),
+    };
     spans.extend(badges);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -1432,6 +1964,148 @@ mod tests {
         }
     }
 
+    /// The label is what is on screen and the token is not, but the link a
+    /// click follows still carries it.
+    #[test]
+    fn the_share_label_shows_the_host_and_the_link_keeps_the_token() {
+        let url = "https://few-words-here.trycloudflare.com/?t=secret";
+        assert_eq!(link_label(url), "⧉ few-words-he…trycloudflare.com");
+        // A short host is left alone; a long one keeps its first words and its
+        // domain, and never grows past the width the footer set aside.
+        assert_eq!(link_label("http://127.0.0.1:7777/?t=x"), "⧉ 127.0.0.1:7777");
+        let long = link_label("https://tribute-resistance-resolved-moscow.trycloudflare.com/?t=x");
+        assert!(long.starts_with("⧉ tribute"), "{long:?}");
+        assert!(long.ends_with("trycloudflare.com"), "{long:?}");
+        assert!(long.chars().count() <= LINK_MAX + 2, "{long:?}");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        draw_hyperlink(&mut buf, 2, 0, &link_label(url), url, Style::default());
+        let opening = buf.cell((2, 0)).unwrap();
+        assert!(opening.symbol().contains(url), "{:?}", opening.symbol());
+        assert!(opening.symbol().starts_with("\x1b]8;;"));
+        assert!(opening.symbol().ends_with("\x1b]8;;\x1b\\"));
+    }
+
+    /// One cell carries the escape sequences, and the columns it paints over
+    /// hold the plain label — so the diff spends nothing on them while the link
+    /// is up, and knows to erase them once it is gone.
+    #[test]
+    fn the_share_link_costs_one_cell_and_still_erases_cleanly() {
+        let url = "https://few-words-here.trycloudflare.com/?t=secret";
+        let label = link_label(url);
+
+        let mut linked = Buffer::empty(Rect::new(0, 0, 40, 1));
+        draw_hyperlink(&mut linked, 2, 0, &label, url, Style::default());
+        // The columns the label covers hold its characters, not its escapes.
+        assert_eq!(linked.cell((3, 0)).unwrap().symbol(), " ");
+        assert_eq!(linked.cell((4, 0)).unwrap().symbol(), "f");
+
+        // Drawing it twice writes nothing: the forced width keeps the covered
+        // columns out of the diff entirely.
+        let mut again = Buffer::empty(Rect::new(0, 0, 40, 1));
+        draw_hyperlink(&mut again, 2, 0, &label, url, Style::default());
+        assert!(linked.diff(&again).is_empty());
+
+        // And when the tunnel goes, every column it painted is erased rather
+        // than left holding half a hostname. The label's own blank column is
+        // the exception, and only because a blank is what would be drawn there.
+        let blank = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let erased: Vec<u16> = linked.diff(&blank).iter().map(|(x, _, _)| *x).collect();
+        for (i, ch) in label.chars().enumerate().filter(|(_, c)| *c != ' ') {
+            let x = 2 + i as u16;
+            assert!(
+                erased.contains(&x),
+                "{ch} at column {x} survived: {erased:?}"
+            );
+        }
+    }
+
+    /// The corner is drawn in the corner: last row, hard against the right
+    /// edge, and hit-testable where it was drawn.
+    #[test]
+    fn the_share_button_sits_in_the_bottom_right_corner() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let footer: String = (0..cols).map(|x| buffer[(x, rows - 1)].symbol()).collect();
+        assert!(
+            footer.ends_with("⧉ share "),
+            "the share button is not in the corner: {footer:?}"
+        );
+        // The keys it took the columns from are still there beside it.
+        assert!(footer.contains("Quit"), "{footer:?}");
+        let (row, a, b) = layout.share_corner.expect("no share hit region");
+        // One column short of the edge, and the hit region covers the label
+        // rather than the margin beside it.
+        assert_eq!((row, b), (rows - 1, cols - 1));
+        assert!(layout.share_corner_at(a, row));
+        assert!(layout.share_corner_at(b - 1, row));
+        assert!(!layout.share_corner_at(b, row));
+        assert!(!layout.share_corner_at(a - 1, row));
+    }
+
+    /// With no tunnel the corner is the button that would open one, and it
+    /// says so twice: the first click only arms it.
+    #[test]
+    fn the_share_corner_asks_before_it_publishes() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+
+        assert!(app.serving.is_none());
+        assert_eq!(share_corner(&app).label(), "⧉ share");
+
+        app.share_arm = true;
+        let armed = share_corner(&app);
+        assert_eq!(armed.label(), "⧉ publish to the internet?");
+        // Nothing to open yet, so the corner is a button and not a link: a
+        // click on it starts a tunnel rather than a browser.
+        assert!(matches!(armed, Corner::Button(_)));
+    }
+
+    /// While the edge is being dialled the corner spins, because the second
+    /// that takes used to be a second of a frozen dashboard.
+    #[test]
+    fn the_share_corner_spins_while_the_tunnel_is_being_opened() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        let (_done_tx, done_rx) = std::sync::mpsc::channel();
+        app.share_opening = Some(super::super::Opening {
+            rx: done_rx,
+            since: std::time::Instant::now(),
+        });
+
+        let label = share_corner(&app).label().to_string();
+        assert!(label.ends_with(" opening a tunnel…"), "{label:?}");
+        // A frame of the spinner leads it, and it is one column like the rest.
+        assert_eq!(
+            label.chars().count(),
+            " opening a tunnel…".chars().count() + 1
+        );
+
+        // And a click at it while it spins is impatience, not a second tunnel.
+        app.on_share_corner(true);
+        assert!(app.share_opening.is_some());
+        assert!(app.serving.is_none());
+    }
+
     /// A hint that does not fit whole is dropped, not cut: half a key cap
     /// teaches the wrong key.
     #[test]
@@ -1485,6 +2159,7 @@ mod tests {
         let quota = crate::quota::Quota {
             claude: vec![crate::quota::ProfileQuota {
                 profile: "default".into(),
+                source: crate::config::AccountSource::Directory,
                 status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
                     plan: None,
                     windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
@@ -1561,6 +2236,7 @@ mod tests {
         let layout = Layout {
             workspace_spans: vec![(0, 12, 0)],
             workspace_new: Some((12, 23)),
+            share_corner: Some((24, 50, 78)),
             header_row: 6,
             rows_start: 7,
             rows_end: 12,
@@ -1574,10 +2250,29 @@ mod tests {
             launch_rows: vec![(10, 0), (11, 1)],
             launch_cwd_rows: vec![(12, 0)],
             menu_rows: vec![(9, 0), (10, 1)],
+            key_hits: vec![(
+                24,
+                0,
+                10,
+                event::KeyEvent::new(event::KeyCode::Enter, event::KeyModifiers::NONE),
+            )],
             pane_rects: vec![Rect::new(1, 7, 40, 10)],
         };
+        // A key written on screen answers its own columns and nothing else.
+        assert_eq!(
+            layout.key_at(3, 24).map(|k| k.code),
+            Some(event::KeyCode::Enter)
+        );
+        assert!(layout.key_at(10, 24).is_none());
+        assert!(layout.key_at(3, 23).is_none());
         // A modal takes the clicks that land on it, and its rows resolve to the
         // choice on them — not to the table underneath, which shares those rows.
+        // The share link answers only its own columns on its own row: the
+        // footer is one row of a screen that is otherwise all clickable.
+        assert!(layout.share_corner_at(50, 24));
+        assert!(layout.share_corner_at(77, 24));
+        assert!(!layout.share_corner_at(78, 24));
+        assert!(!layout.share_corner_at(50, 23));
         assert_eq!(layout.launch_row_at(15, 11), Some(1));
         assert_eq!(layout.launch_row_at(15, 12), None);
         // Same row, but outside the modal: still not a choice.
@@ -1748,14 +2443,16 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let expired = |profile: &str| crate::quota::ProfileQuota {
+        let expired = |profile: &str, source| crate::quota::ProfileQuota {
             profile: profile.to_string(),
             status: crate::quota::ProviderStatus::Expired,
+            source,
         };
+        use crate::config::AccountSource::{Directory, Token};
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
-        app.quota.claude = vec![expired("default")];
-        app.quota.codex = vec![expired("default"), expired("work")];
+        app.quota.claude = vec![expired("default", Directory), expired("side", Token)];
+        app.quota.codex = vec![expired("default", Directory), expired("work", Directory)];
 
         let (cols, rows) = (200u16, 50u16);
         let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
@@ -1785,6 +2482,90 @@ mod tests {
         assert!(
             mine.contains("codex login") && !mine.contains("claude login"),
             "a Codex account was pointed at another harness's login: {mine:?}"
+        );
+
+        // And an account that is only a token is pointed at the command that
+        // replaces one: it has no directory for `claude login` to write to, so
+        // the ordinary hint would be a repair that changes nothing.
+        let line = screen
+            .lines()
+            .find(|l| l.contains("Claude (side)"))
+            .expect("the token account was not drawn");
+        let mine = &line[line.find("Claude (side)").expect("found above")..];
+        assert!(
+            mine.contains("cctop --add-account") && !mine.contains("claude login"),
+            "a token account was told to log in: {mine:?}"
+        );
+    }
+
+    /// The Overview earns its width or gives it up.
+    ///
+    /// It used to spend a wide terminal on a hundred columns of baseline dots
+    /// per row — a chart of nothing, drawn at the same size whether or not
+    /// there was anything to chart. The width now carries today's spend broken
+    /// down by project and by model, and on a terminal too narrow to hold that
+    /// the breakdown leaves rather than being squeezed into initials.
+    #[test]
+    fn the_overview_spends_its_width_on_a_breakdown_and_gives_it_back_when_narrow() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let overview = |cols: u16| -> Vec<String> {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+            app.stats.spend_today = 60.0;
+            app.stats.spend_calendar_month = 300.0;
+            app.stats.spend_total = 900.0;
+            app.stats.top_today = vec![
+                ("orchard".into(), 30.0),
+                ("beehive".into(), 20.0),
+                ("cellar".into(), 6.0),
+                ("attic".into(), 3.0),
+                ("shed".into(), 1.0),
+            ];
+            app.stats.models_today = vec![("opus-5".into(), 45.0), ("haiku-4-5".into(), 15.0)];
+
+            let rows = 30u16;
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..6)
+                .map(|y| (0..cols).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect()
+        };
+
+        let wide = overview(190).join("\n");
+        assert!(
+            wide.contains("Top today") && wide.contains("orchard") && wide.contains("shed"),
+            "the breakdown is missing from a wide Overview: {wide}"
+        );
+        // A ranking you cannot tell is partial is a wrong total, so the tail is
+        // named even when every entry happens to fit.
+        assert!(
+            wide.contains("opus-5") && wide.contains("75%"),
+            "today's model mix is not shown as a share of today: {wide}"
+        );
+        // The month's daily average is a division of two figures already on the
+        // panel, and the row it sits on has no chart to draw.
+        assert!(
+            wide.contains("/day this month"),
+            "the daily average is missing: {wide}"
+        );
+
+        let narrow = overview(72).join("\n");
+        assert!(
+            narrow.contains("Live rate") && narrow.contains("All time"),
+            "a narrow Overview lost the spend rows it exists for: {narrow}"
+        );
+        assert!(
+            !narrow.contains("Top today"),
+            "the breakdown was squeezed into a narrow Overview: {narrow}"
         );
     }
 

@@ -21,7 +21,7 @@ to be true, and tries them in this order:
 | The session runs… | How | Requirements |
 |---|---|---|
 | under `cctop run <agent>` | cctop owns the pty and typing goes through a unix socket | none; verified on Linux, unverified on macOS |
-| inside tmux | `tmux send-keys` into the pane holding the agent | tmux |
+| inside rmux | `rmux send-keys` into the pane holding the agent | rmux |
 | in a plain terminal | `TIOCSTI` pushes bytes into the tty's input queue | Linux, and cctop as root — `CAP_SYS_ADMIN` clears both of the kernel's gates. Without root it also needs `sysctl -w dev.tty.legacy_tiocsti=1` (off by default since 6.2) *and* cctop sharing the agent's controlling terminal, which in practice it doesn't |
 
 The first is the one worth adopting — no root, no multiplexer, and the session
@@ -49,7 +49,7 @@ usage error, so a typo doesn't silently try to run something.
 
 `cctop run` proxies your terminal byte-for-byte (including resizes) and exits
 with the agent's own exit code, so it is a transparent stand-in. Sessions started
-any other way still show up in cctop; they just can't be typed into unless tmux
+any other way still show up in cctop; they just can't be typed into unless rmux
 or the root path applies.
 
 ## Resuming a session
@@ -130,19 +130,19 @@ per-harness parsing and works for anything you open in a tab, shells included.
 
 ### Tabs outlive cctop
 
-When tmux is installed, every tab's agent runs inside a tmux session of its own
-and what cctop hosts is only the tmux client. Quitting cctop detaches — the
-agent does not notice and carries on. On the way out cctop says how many it left
-behind.
+When [rmux](https://github.com/Helvesec/rmux) is installed, every tab's agent
+runs inside an rmux session of its own and what cctop hosts is only the rmux
+client. Quitting cctop detaches — the agent does not notice and carries on. On
+the way out cctop says how many it left behind.
 
-Opening cctop again restores those tmux-backed tabs automatically, with their
+Opening cctop again restores those rmux-backed tabs automatically, with their
 scrollback intact. Closing a pane is the other thing entirely: `Alt+w` ends the
 agent, because a window you closed should stay closed rather than come back at
 the next launch. The launcher (`t`) still lists any running agents that are
 not already open, so you can attach to them on demand. `R` on a session's row
-does the same thing by another route — a resumed session's tmux session is named after it, so
-pressing `R` twice reattaches rather than starting a rival agent on one
-transcript.
+does the same thing by another route — a resumed session's rmux session is named
+after it, so pressing `R` twice reattaches rather than starting a rival agent on
+one transcript.
 
 Each of those agents is listed by what the dashboard calls it, the directory it
 is working in, and what it last reported through its hooks — `asking`, `working`,
@@ -152,25 +152,78 @@ another cctop; attaching a second client works, but the two then share one
 window's size.
 
 This is the same hook feed the dashboard uses, and it reaches these agents for
-the same reason: cctop looks up the process *inside* the tmux session rather than
-the client in front of it. So a tab whose agent is in tmux still blinks when that
+the same reason: cctop looks up the process *inside* the rmux session rather than
+the client in front of it. So a tab whose agent is in rmux still blinks when that
 agent asks a question, and still keeps quiet while it is only thinking. `a` on a
 session's row uses that lookup in reverse and opens the agent's own terminal,
-whether cctop is holding its pty or tmux is.
+whether cctop is holding its pty or rmux is.
 
 cctop turns the status bar off in the sessions it creates, and only in those. Its
 row is duplicate chrome inside a pane that already has a border and a footer, and
 its clock repaints on a timer — which, to anything watching for the screen to
 stop changing, is indistinguishable from an agent still at work.
 
-Without tmux installed, none of this applies and tabs behave as they always did:
-the agent runs on a pty cctop owns and goes when cctop goes. The fallback is
-silent — tmux is how this is better, not how it works.
+Without rmux installed, none of this applies and tabs behave as they always did:
+the agent runs on a pty cctop owns and goes when cctop goes. cctop offers to
+install rmux the first time a tab would have used it — `brew install rmux`,
+`cargo install rmux --locked`, or rmux.io's install script, whichever this
+machine can run — and one "no" holds for the run.
+
+#### Why rmux and not tmux
+
+cctop drove tmux until 0.8, and could be pointed at rmux with `CCTOP_MUX=rmux`.
+It now drives rmux only. rmux reimplements tmux's command surface, so everything
+above is the same set of commands it always was, and it answers two things tmux
+has no answer for: a native Windows backend, and browser sharing.
+
+The cost lands on upgrade, and is worth saying plainly: the two keep separate
+daemons and separate sessions. Agents still running under a tmux server are
+still running — nothing here kills one — but cctop stops being able to see them.
+`tmux attach -t cctop-<provider>-<id>` reaches them, and `tmux ls` lists them.
+
+### Sharing an agent to a browser
+
+**`W` shares the selected agent's terminal to a browser.** cctop runs
+`rmux web-share -t <session>` and puts the operator link on your clipboard — open
+it on a phone and you are typing into that agent. The pairing code goes on
+cctop's status line; the link never does, because it grants input to a live
+coding agent and a status line survives into a screenshot.
+
+The link reaches this machine over cctop's own TryCloudflare quick tunnel, the
+same kind `cctop serve --tunnel` opens, handed to rmux as `--tunnel-url` rather
+than letting it raise a second one through a provider of its own. One way out of
+the machine, opened on the first `W` of a run and closed when cctop exits. If
+the tunnel cannot be registered the share still happens and the status line says
+`this machine only` — a link that works from this browser is worth more than no
+link, and a link that silently reaches nothing is worth less than either.
+
+rmux ships six tunnel providers of its own and deliberately not this one: a
+`trycloudflare.com` hostname, [its docs say](../rmux/docs/web-share.md), "can
+take an unpredictable amount of time to become reachable" and carries no uptime
+guarantee — so it points anyone who wants one at `--tunnel-url`, which is the
+door cctop comes through. Expect a link to 502 for a moment after it is minted,
+and reach for a named tunnel or your own ingress for anything that has to stay
+up. rmux also cannot tell viewers apart by source IP once traffic arrives
+through a tunnel, so its per-viewer caps are not a control you have here.
+
+What the tunnel carries is not what `serve` puts through one. rmux encrypts the
+share end to end and pairs it with a PIN, so Cloudflare moves ciphertext it
+cannot read; the served page is ordinary HTTPS that Cloudflare terminates. Both
+are still a credential to a live coding agent: share the link the way you would
+share a shell, and end it when you are done — `rmux web-share list` shows what is
+currently shared and `rmux web-share off` ends all of it.
+
+For the QR code and the read-only spectator link, run
+`rmux web-share -t <session>` in a terminal yourself — it draws a card per role
+that only renders to a tty. cctop reads only the operator link, and reads it from
+stderr because that is the stream rmux puts it on; the spectator link goes to
+stdout, and the two are the same shape, so the stream is the only thing telling
+them apart.
 
 ### What cctop keeps, and what goes to the agent
 
 Panes cctop started are cctop's to end: closing one (`Alt+w`, or the agent
-exiting on its own) takes the agent with it, tmux session included. Quitting
+exiting on its own) takes the agent with it, rmux session included. Quitting
 cctop is the opposite and leaves them running. A pane opened onto someone
 else's session with `a` only stops watching.
 
@@ -190,16 +243,14 @@ difference exists only in a protocol invented to carry it. So it has to be
 asked for at both ends. cctop asks its own terminal for the disambiguating
 form on the way in, where the terminal says it can send one, and sends
 Shift+Enter on to the agent as `CSI 13;2u` — but only to an agent that turned
-a keyboard protocol on, or through a tmux that will drop it if the pane's
-program did not. A shell in a tab is never handed a sequence it would print as
-text.
+a keyboard protocol on, or through rmux, which rewrites it to a plain Enter
+when the pane's program did not. A shell in a tab is never handed a sequence it
+would print as text.
 
 Which agents ask, as of writing: Claude Code turns on both the kitty protocol
 and xterm's `modifyOtherKeys`, and Codex turns on kitty and explicitly turns
-`modifyOtherKeys` off. Older tmux understands only the xterm one, so a Codex
-pane needs tmux 3.4 or a pane cctop hosts itself. If your terminal has no
-extended keyboard protocol at all, nothing changes: `Ctrl+J` is the newline
-every agent also accepts.
+`modifyOtherKeys` off. If your terminal has no extended keyboard protocol at
+all, nothing changes: `Ctrl+J` is the newline every agent also accepts.
 
 ### The questions an agent asks the terminal
 
@@ -226,7 +277,7 @@ exits — cctop rings the terminal bell and raises a desktop notification. The
 setting is off by default and remembered between runs.
 
 Both are the terminal's own mechanisms, so nothing has to be installed. `BEL`
-is what tmux turns into a `monitor-bell` window flag; the desktop notification
+is what rmux turns into a window's bell flag; the desktop notification
 is OSC 9, which iTerm2, Ghostty, kitty, WezTerm and Windows Terminal raise as a
 real notification and everything else quietly ignores.
 
@@ -262,7 +313,7 @@ screen that stopped moving. An agent blocked on a permission prompt keeps its
 spinner turning and reports itself as working, so it used to be drawn as busy
 for as long as it sat there.
 
-The bell survives the whole stack — the agent rings, tmux passes it to its
+The bell survives the whole stack — the agent rings, rmux passes it to its
 client, the shim relays it, and the pane's parser keeps it instead of parsing it
 away. cctop does not pass it on to your own terminal: the bell is answered by
 looking at the pane, and a beep per agent per prompt is the alarm clock this
@@ -303,6 +354,26 @@ is the intent, and that is what gets carried.
 
 Because it is built from the normalised session data rather than from any one
 transcript format, it works from and to all seven harnesses.
+
+### Claude to Claude, the conversation goes whole
+
+The brief exists because no harness can read another's transcripts. Between two
+Claudes that limit is not there, so handing a Claude session to `claude` copies
+the transcript instead: the file is written into the receiving account's
+`projects/` directory under a fresh session id, and the new agent is started with
+`claude --resume` on the copy. It opens knowing everything the first one knew,
+not everything a summary could carry.
+
+It is a copy, not a second agent on one transcript. The two diverge from the
+moment the fork is taken, and the session that was handed over is left exactly as
+it was found — still listed, still resumable, still the only writer of its own
+file. That is also what makes this different from `R`, which refuses to put a
+second agent on a transcript for precisely that reason.
+
+The cost is the one the brief was written to avoid: the whole window, tool output
+and all, replayed into a fresh one. That is the trade being made on purpose —
+everything is carried because everything can be. Hand the same session to any
+other agent and it gets the brief, which is the only form that agent can read.
 
 The same brief is available without the UI:
 

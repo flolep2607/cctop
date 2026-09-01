@@ -44,6 +44,32 @@ pub struct Profile {
     /// else the suffix — `~/.claude-work` and `~/.codex-work` are both `work`.
     pub name: String,
     pub dir: PathBuf,
+    /// Whether there is a directory behind this account, or only a token.
+    pub source: AccountSource,
+}
+
+/// What cctop knows an account from.
+///
+/// Nearly always a directory. The other case exists because a second
+/// subscription does not have to mean a second `~/.claude-work`: Claude Code
+/// takes an account from `$CLAUDE_CODE_OAUTH_TOKEN` while still keeping its
+/// history, its settings and its project trust in the one `~/.claude` — so a
+/// user can switch which subscription they are spending without splitting the
+/// transcripts they resume from in two. cctop could not report such an account
+/// at all, because it had no directory to find it by. A token in cctop's own
+/// config names it instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSource {
+    /// A `~/.claude*` or `~/.codex*` directory holding the harness's
+    /// credentials. Its sessions are its own, and the launcher can start an
+    /// agent under it by pointing the harness's env var at the directory.
+    Directory,
+    /// A token in cctop's `config.toml` and nothing else. It contributes a
+    /// column to the limits panel and nothing more: it owns no transcripts to
+    /// label, and it is not offered as somewhere to launch, since the only way
+    /// to hand the token to a child would be to put it in an argv every
+    /// `ps` on the machine can read.
+    Token,
 }
 
 /// Every harness whose accounts cctop can tell apart, and how to recognise one:
@@ -75,6 +101,48 @@ pub fn profile_env(provider: Provider) -> Option<(&'static str, &'static Path)> 
         Provider::Codex => Some(("CODEX_HOME", CODEX_HOME.as_path())),
         _ => None,
     }
+}
+
+/// `argv` prefixed with the environment that points a harness at `profile`.
+///
+/// `env VAR=dir <argv>` rather than a variable set on the child process,
+/// because the argv is what gets handed to rmux — which runs it directly, with
+/// no shell to carry an environment for it — and what cctop later reads back
+/// off a running tab to say which account it was started under.
+///
+/// A provider with no such variable is returned unchanged: there is one
+/// directory, and pretending to select it would put an `env` prefix on every
+/// launch for nothing.
+///
+/// So is the profile the child would have used anyway, and that one is not a
+/// tidiness matter. `CLAUDE_CONFIG_DIR` does not only say where the transcripts
+/// are: with it set, Claude Code keeps its `.claude.json` — the login, the
+/// onboarding, the per-project trust — inside that directory instead of at
+/// `~/.claude.json`. Naming `~/.claude` explicitly therefore points it at a
+/// `~/.claude/.claude.json` that no ordinary install has, and the agent comes up
+/// asking which theme you would like, logged out, with no session to resume. So
+/// `R` on a Claude session did not resume it; it onboarded a stranger.
+pub fn argv_under_profile(argv: Vec<String>, profile: &Profile) -> Vec<String> {
+    // A token account names no directory of its own, and the token itself must
+    // not become an argument: `ps` and `/proc/<pid>/cmdline` are readable by
+    // every user on a Linux box. Such an account is not offered as a place to
+    // launch for that reason, and this is the backstop for it — the sessions
+    // run under the default directory, which is where they were anyway.
+    if profile.source == AccountSource::Token {
+        return argv;
+    }
+    let Some((var, inherited)) = profile_env(profile.provider) else {
+        return argv;
+    };
+    if profile.dir == inherited {
+        return argv;
+    }
+    let mut out = vec![
+        "env".to_string(),
+        format!("{var}={}", profile.dir.display()),
+    ];
+    out.extend(argv);
+    out
 }
 
 /// The name a profile directory goes by, given the prefix its harness uses.
@@ -112,6 +180,7 @@ pub fn profiles_in(home: &Path, provider: Provider) -> Vec<Profile> {
             provider,
             name: profile_name(&dir, prefix),
             dir,
+            source: AccountSource::Directory,
         })
         .collect();
     // The default first, so the picker opens on the one most people mean, then
@@ -135,6 +204,7 @@ pub static PROFILES: LazyLock<Vec<Profile>> = LazyLock::new(|| {
                     provider,
                     name: profile_name(named, prefix),
                     dir: named.to_path_buf(),
+                    source: AccountSource::Directory,
                 },
             );
         }
@@ -158,6 +228,83 @@ pub fn profile_named(provider: Provider, name: &str) -> Option<&'static Profile>
 /// This user's profiles for one harness, in the order the launcher offers them.
 pub fn profiles_for(provider: Provider) -> Vec<&'static Profile> {
     PROFILES.iter().filter(|p| p.provider == provider).collect()
+}
+
+/// Every account of `provider`'s the limits panel should report: the
+/// directories, then the accounts that exist only as a token in cctop's config.
+///
+/// The wider list of the two. [`profiles_for`] answers the questions that need
+/// a directory — where to walk for transcripts, which account a transcript came
+/// out of, where to launch — and a token account has no answer to any of them.
+/// Its subscription is real all the same, and reporting how much of it is left
+/// is the whole reason the token was typed in.
+///
+/// Read fresh rather than cached in a `LazyLock` like [`PROFILES`]: this is
+/// asked once per polling interval, on a file of a few lines, and the
+/// alternative is that an account added while cctop is running does not appear
+/// until it is restarted.
+pub fn accounts_for(provider: Provider) -> Vec<Profile> {
+    let mut out: Vec<Profile> = profiles_for(provider).into_iter().cloned().collect();
+    // Claude's alone: a token account is one `$CLAUDE_CODE_OAUTH_TOKEN` could
+    // have named, and Codex has no such variable to make the same promise.
+    if provider != Provider::Claude {
+        return out;
+    }
+    for name in token_account_names() {
+        // A name that is also a directory is that directory's account, not a
+        // second one — the token is read as its credentials (see
+        // `quota::read_claude_credential_in`) and one account is one column.
+        if out.iter().any(|p| p.name == name) {
+            continue;
+        }
+        out.push(Profile {
+            provider,
+            name,
+            // The default directory, because that is where such an account's
+            // sessions really are: the token changes which subscription is
+            // spent, not where Claude Code keeps its history.
+            dir: CLAUDE_CONFIG_DIR.clone(),
+            source: AccountSource::Token,
+        });
+    }
+    out
+}
+
+/// The names under `[accounts]` in cctop's config that carry a token.
+fn token_account_names() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(&*CONFIG_FILE) else {
+        return Vec::new();
+    };
+    account_names_in(&text)
+}
+
+/// The same, from the file's text — the half that is worth testing.
+fn account_names_in(text: &str) -> Vec<String> {
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    let Some(accounts) = doc.get("accounts").and_then(|a| a.as_table_like()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = accounts
+        .iter()
+        .filter(|(_, item)| {
+            // An empty token is a half-finished edit, and an account with none
+            // at all is a table someone opened and did not fill: neither can be
+            // polled, so neither earns a column that would only ever say
+            // "not signed in".
+            item.as_table_like()
+                .and_then(|t| t.get("token"))
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| !t.trim().is_empty())
+        })
+        .map(|(name, _)| name.to_string())
+        .collect();
+    // By name, as `profiles_in` sorts the directories: the limits panel draws a
+    // column per account in this order, and one that followed the layout of a
+    // hand-edited file would rearrange itself when the file was tidied.
+    out.sort();
+    out
 }
 
 /// cctop's own config, holding the account tokens a user added by hand.
@@ -925,6 +1072,49 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The `[accounts]` table names the token-only accounts, and only the ones
+    /// that could actually be polled: an empty token, or a table with none, is
+    /// a half-finished edit rather than a second subscription.
+    #[test]
+    fn token_accounts_are_the_named_ones_with_a_token() {
+        let text = "\
+            [accounts.work]\n\
+            token = \"sk-ant-oat01-w\"\n\
+            [accounts.blank]\n\
+            token = \"  \"\n\
+            [accounts.empty]\n\
+            [accounts.side]\n\
+            token = \"sk-ant-oat01-s\"\n";
+        assert_eq!(account_names_in(text), ["side", "work"]);
+        assert!(account_names_in("").is_empty());
+        assert!(account_names_in("not = toml [").is_empty());
+        assert!(account_names_in("accounts = 3").is_empty());
+    }
+
+    /// A token account launches under the directory it shares with everyone
+    /// else, and never carries its token into an argv — `ps` is world-readable.
+    #[test]
+    fn a_token_account_adds_no_env_prefix() {
+        let argv = vec!["claude".to_string()];
+        let token = Profile {
+            provider: Provider::Claude,
+            name: "work".into(),
+            dir: PathBuf::from("/home/x/.claude-work"),
+            source: AccountSource::Token,
+        };
+        assert_eq!(argv_under_profile(argv.clone(), &token), argv);
+
+        // The same directory as a real profile is prefixed as it always was.
+        let dir = Profile {
+            source: AccountSource::Directory,
+            ..token
+        };
+        assert_eq!(
+            argv_under_profile(argv, &dir),
+            ["env", "CLAUDE_CONFIG_DIR=/home/x/.claude-work", "claude"]
+        );
+    }
+
     /// A home with no readable profiles still gets the conventional location
     /// tried, or another user's sessions would vanish the moment cctop could
     /// not list their home.
@@ -992,5 +1182,33 @@ mod tests {
             trailing_uuid(stem),
             Some("019f1075-3f22-7ad0-b496-73dcda6a7a25")
         );
+    }
+
+    /// Regression: `R` on an ordinary Claude session opened a fresh, logged-out
+    /// agent asking which theme to use. The session was stamped `default`, so
+    /// the resume ran `env CLAUDE_CONFIG_DIR=~/.claude claude --resume <id>` —
+    /// and Claude Code reads its `.claude.json` from inside that directory once
+    /// the variable is set, where an ordinary install has never written one.
+    #[test]
+    fn the_profile_a_launch_would_have_used_anyway_gets_no_prefix() {
+        let (var, inherited) = profile_env(Provider::Claude).unwrap();
+        let default = Profile {
+            provider: Provider::Claude,
+            name: "default".to_string(),
+            dir: inherited.to_path_buf(),
+            source: AccountSource::Directory,
+        };
+        assert_eq!(
+            argv_under_profile(vec!["claude".to_string()], &default),
+            ["claude"]
+        );
+        // A directory the child would not have picked still has to be named.
+        let other = Profile {
+            dir: inherited.with_file_name(".claude-work"),
+            ..default
+        };
+        let argv = argv_under_profile(vec!["claude".to_string()], &other);
+        assert_eq!(argv[0], "env");
+        assert!(argv[1].starts_with(&format!("{var}=")), "{argv:?}");
     }
 }

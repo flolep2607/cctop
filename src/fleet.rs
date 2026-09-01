@@ -229,6 +229,7 @@ fn row(host: &str, v: &Value) -> Option<Session> {
     s.permission = crate::hook::Permission::parse(text(v, "permission"));
     s.activity_state = match text(v, "state") {
         "waiting" => ActivityState::WaitingForInput,
+        "asking" => ActivityState::Asking,
         "error" => ActivityState::ApiError,
         _ => ActivityState::Working,
     };

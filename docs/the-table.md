@@ -185,10 +185,12 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `Home`, `End` | Jump to first / last |
 | `n`, `N` | Next / previous search match (wraps) |
 | `w` | Toggle notifications (see below) |
+| `W` | Share the agent's terminal to a browser (needs rmux, see [Driving agents](driving-agents.md)) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
 | `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
+| `Shift+Home`/`End` | Jump to the top / bottom of that panel |
 | `f` | Follow mode: keep the selection centered |
 | `/` or `F3` | Filter sessions by text (see below) |
 | `F6`, `>`, `<` | Sort-by panel |
@@ -227,11 +229,13 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+o` | Move focus to the next pane |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
+| `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
 
 Every function key is cctop's, inside a pane as much as on the dashboard: none
 of them is passed to the agent. `F10` (quit) and `F5` (refresh) act where you
-press them; `F12` returns to the dashboard; `F1`, `F3`, `F6`, `F7`, and `F8`
+press them; `F9` pastes into the pane you are in; `F12` returns to the
+dashboard; `F1`, `F3`, `F6`, `F7`, and `F8`
 bring the dashboard forward and then do what they do there, since a search box
 or a sort order over a pane would be drawn on a screen the agent is repainting.
 An unbound function key does nothing rather than reaching the agent as an escape
@@ -240,6 +244,87 @@ sequence.
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+### Pasting an image
+
+A terminal cannot carry one. A bracketed paste is text, so a screenshot copied
+with the system's own shortcut reaches an agent as nothing at all — which is
+why `Ctrl+V` in a pane appears to do nothing when the clipboard holds a picture.
+
+`F9` is the way in. It reads the image off the clipboard, writes it to
+`~/.cache/cctop/pastes/paste-<when>.png`, and types *the path* at the agent,
+followed by a space — the form every one of these harnesses already reads an
+image in. No image bytes go near the pty. On the dashboard the same key opens
+the type-into box with the path in it, so a session you are not attached to can
+be sent one too.
+
+Inside a pane `Ctrl+V` does it too, but only when the clipboard actually holds
+a picture: with text on it the key goes to the agent untouched, as it always
+did. Whether it arrives at all is the terminal's decision — Windows Terminal
+binds `Ctrl+V` to its own paste and never tells the application, so there `F9`
+is the way in, or unbind it in the terminal's settings.
+
+The right button is deliberately not a third way. It was for a day: in Windows
+Terminal it *copies* when there is a selection and pastes only when there is
+none, so selecting some output and right-clicking to copy it pasted an image
+into the agent instead. cctop cannot see the terminal's selection, so it cannot
+tell the two apart.
+
+It needs something that can read the clipboard: `wl-clipboard` or `xclip` on
+Linux, `pngpaste` or the built-in `osascript` on macOS, and `powershell.exe` on
+Windows — which is also how it works under WSL, where the clipboard being read
+is Windows'. Under WSL it is also looked for at
+`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`, because a
+session nobody logged into by hand — an ssh into the distribution, a cron job —
+has none of the Windows interop entries on its `PATH`, and the same machine
+would otherwise report having no way to read its own clipboard. cctop says which of the two things went wrong: an empty clipboard
+and a machine with no such tool need different answers.
+
+### Pasting an image into a cctop you sshed to
+
+None of the above can work there. The clipboard is on the machine you typed the
+`ssh` on, and nothing installed on the far side can reach it — so `F9` says so
+rather than telling you to install `xclip`.
+
+The way that needs nothing of you is the browser. `cctop serve` on that machine
+puts the table on an HTTP port; reach it from your own machine — `ssh -L
+7788:127.0.0.1:7788 <host>`, or `--tunnel` — and paste the screenshot straight
+into the box that answers a waiting session. A browser can take a real image
+off the clipboard where a terminal cannot, so the bytes travel over the
+connection cctop already has, land in `pastes/` on the far machine, and the
+box fills with the path. Then write the sentence around it and send.
+
+The other way needs no browser. What crosses a terminal is text, so send the
+image as text: cctop reads any paste that is a PNG in base64 — bare, or as a `data:image/png;base64,…` URI —
+writes it to the same `pastes/` directory, and gives the agent the path. Every
+base64 PNG starts `iVBORw0KGgo`, which is what cctop recognises, so an ordinary
+paste is never mistaken for one.
+
+Encoding it is a one-liner where your clipboard is. In PowerShell, which is
+where you would be if you sshed from Windows:
+
+```powershell
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+$i=[Windows.Forms.Clipboard]::GetImage(); $m=New-Object IO.MemoryStream
+$i.Save($m,[Drawing.Imaging.ImageFormat]::Png)
+Set-Clipboard ([Convert]::ToBase64String($m.ToArray()))
+```
+
+That replaces the clipboard's image with its own base64, which then pastes into
+the agent as an image. On a Mac or a Linux desktop the same thing is
+`pngpaste - | base64 | pbcopy` and `wl-paste -t image/png | base64 -w0 |
+wl-copy`.
+
+The images are kept, not cleaned up: the path is in a transcript by then, and a
+conversation resumed next week may read it again. The directory is yours to
+empty.
+
+Right-click a row for its menu, the same menu `Enter` opens. The footer's key
+hints are buttons — clicking `? Help` opens the help, clicking `R Resume`
+resumes — and so are the `[y]` and `[n / Esc]` in every confirmation, where a
+click beside the dialog is also a cancel. `q Quit` is the one that takes two
+clicks: it is the only key on the footer with nothing behind it to ask again,
+and the first click says so in the status line.
 
 ### More than one account
 
@@ -274,15 +359,27 @@ keeps it in `config.toml` under your config directory, readable only by you:
 token = "sk-ant-oat01-…"
 ```
 
-The name is the profile's, so `[accounts.work]` is the token for the account the
-PROFILE column calls `work`, and a token you put there wins over the credentials
-in that profile's directory — being explicit is the point of typing it in.
+The name is the account's. Where a `~/.claude-work` exists it is that profile's
+token, winning over the credentials in the directory — being explicit is the
+point of typing it in. Where no such directory exists, the token *is* the
+account: it gets its own column in the limits panel, and its sessions stay in
+the one `~/.claude` with everything else, sharing the history, the settings and
+the project trust rather than splitting them across a second directory. Start
+one with `CLAUDE_CODE_OAUTH_TOKEN` set and that is the subscription it spends.
+
+Such an account is not offered in the launcher's profile picker, and cctop's
+`R` never resumes under it: both work by putting the account in front of the
+command, and the only thing there is to put there is the token itself — which
+would be in every `ps` on the machine. Set the variable in the shell you launch
+from instead.
 `CLAUDE_CODE_OAUTH_TOKEN` wins over both, for the default profile only: Claude
 Code prefers that variable too, so a session started with it spends the account
 the variable names rather than the one the directory holds. One variable is one
 value per machine, which is why it answers for one profile rather than being
 reported as every account's usage.
 
-In the tab bar, drag a tab to move it along the bar, and right-click one to
+In the tab bar, drag a tab to move it along the bar — the arrangement is
+written onto the rmux sessions, so it is still there after `F10` and in every
+other cctop on the machine — and right-click one to
 rename it: `3:claude-4` says nothing about what that agent is doing, and the
 name you give it follows the tab into every cctop on the machine.

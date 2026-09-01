@@ -9,12 +9,56 @@ cctop: serving on http://127.0.0.1:7777/?t=9f3ac1de…
 ```
 
 Open that link and you get the table cctop draws in the terminal, streamed live,
-plus something the terminal has no room for: a per-session report that says where
-an afternoon's money went.
+plus what the terminal has no room for: per session, the conversation itself,
+what it edited, what it can reach, and a report that says where an afternoon's
+money went.
 
-It is **read-only**. It starts nothing, stops nothing, resumes nothing and types
-at nothing. Driving agents stays in the TUI, where the thing being driven is on
-the same machine as the person driving it.
+**It can also answer an agent.** A page that tells you a session has been waiting
+twenty minutes and cannot do anything about it has shown you a problem and
+withheld the fix, so the page can send a prompt to a live session, resume a dead
+one, and hand one's work to a different harness. Nothing destructive: no route
+stops an agent, kills a process or deletes a transcript — those stay in the TUI,
+where the confirmation prompt is.
+
+The whole authorisation for that is the token in the URL, so it is worth stating
+plainly: **whoever holds the link can drive the agents on this machine.** Hence
+the defaults — loopback, a token, and `--no-actions` to serve the pages without
+the buttons.
+
+## From inside cctop, with the table still there
+
+`cctop serve` takes over the terminal it runs in and draws nothing — which is
+the wrong shape when you want the page *and* the dashboard. **`B` in the TUI
+serves the same page while cctop keeps running.** `l` puts it on this machine,
+`t` also opens a tunnel, `o` opens it in your browser, `y` copies the link, and
+`x` stops it.
+
+```
+╭ Serve this table to a browser ─────────────────────────────╮
+│ This machine                                               │
+│  http://127.0.0.1:7778                                     │
+│                                                            │
+│ The internet                                               │
+│  https://supplemental-belt-spare-reflect.trycloudflare.com │
+│                                                            │
+│ Anyone holding it reads every session here,                │
+│ and can type at your agents. Cloudflare carries it.        │
+│                                                            │
+│ o open · y copy · l local · t + tunnel · x stop            │
+╰────────────────────────────────────────────────────────────╯
+```
+
+The panel shows each link as its origin and not in full, because the full link
+carries the token — a credential that would otherwise be sitting in every
+screenshot of the panel. `o` and `y` use the whole thing.
+
+It is the same server, reached differently, with one difference worth knowing:
+it does not scan for sessions. The dashboard already walks them several times a
+second, so the page is fed from the rows on screen — one pass over the disk
+instead of two, and no way for the page and the table beside it to disagree.
+
+Stopping it, or quitting cctop, revokes every link handed out. A tunnel lasts
+exactly as long as the cctop that opened it.
 
 ## Why you would want it
 
@@ -67,6 +111,35 @@ ssh -L 7777:127.0.0.1:7777 devbox
 Now `http://127.0.0.1:7777` on the laptop is the devbox's cctop, authenticated by
 ssh, encrypted by ssh, and exposed to nobody.
 
+**Or a tunnel cctop opens for you**, when there is no ssh to hand and the phone
+is not on the same network:
+
+```bash
+cctop serve --tunnel
+```
+
+```
+cctop: opening a trycloudflare tunnel…
+cctop: serving on https://particular-words-here.trycloudflare.com/?t=9f3ac1de…
+cctop: also on http://127.0.0.1:7777/?t=9f3ac1de…
+cctop: that first link is on the public internet. Anyone who has it can read
+       every session on this machine — and, unless --no-actions, type at your
+       agents, which runs commands as you. Cloudflare carries the traffic and
+       can read it. The tunnel ends when this process does.
+```
+
+This needs nothing installed: cctop speaks the trycloudflare protocol itself
+rather than shelling out to `cloudflared`, and the tunnel's data path runs inside
+the cctop process, landing on the same loopback listener a local browser uses. So
+the token, the connection cap and the request deadlines all still apply — the
+tunnel adds a route in, not a second server.
+
+What it is not is a private channel. Cloudflare terminates the TLS, which is
+worth saying because the opposite is easy to assume of anything with an `https://`
+URL. The hostname is new every run, it stops existing when cctop does, and
+`--tunnel` refuses `--no-token` outright: a public URL with no token is a prompt
+box for your agents that anyone who finds it can use.
+
 **Or bind wider**, and understand what that means:
 
 ```bash
@@ -79,10 +152,12 @@ cctop: this is reachable from your network — anyone who can open that link can
        read every session on this machine.
 ```
 
-There is no TLS. A loopback socket does not want it, and terminating it for the
-LAN case means certificates cctop has no business managing — which is why the
-tunnel is the better answer, since it authenticates rather than merely
-encrypting.
+cctop terminates no TLS of its own on that socket. A loopback listener does not
+want it, and doing it for the LAN case means certificates cctop has no business
+managing — which is why an ssh tunnel is still the better answer here, since it
+authenticates rather than merely encrypting. `--tunnel` gets its `https://` by
+borrowing Cloudflare's certificate and Cloudflare's edge, which is a different
+trade, not a stronger one.
 
 ## The token
 
@@ -121,7 +196,9 @@ Run `cctop serve` there for that.
 |---|---|
 | `--bind <ADDR>` | Address to listen on. Default `127.0.0.1` |
 | `--port <PORT>` | Default `7777`. Without this flag a busy port is stepped past; with it, a busy port is an error |
-| `--no-token` | Serve with no access token |
+| `--no-token` | Serve with no access token. Also turns actions off — the token is what authorises one |
+| `--no-actions` | Serve the pages without the buttons: no prompts, no resuming, no handoff |
+| `--tunnel` | Also reach the page over a trycloudflare quick tunnel. Refuses `--no-token` and `--bind` |
 | `--plan <PLAN>` | `retail`, `max` or `included`, as elsewhere |
 | `--delay <SECS>` | Seconds between refreshes. Default `2` |
 | `--host <HOST>` | Also serve another machine's sessions. Repeatable |

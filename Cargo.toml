@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -12,10 +12,23 @@ readme = "README.md"
 build = "build.rs"
 keywords = ["tui", "monitoring", "claude", "codex", "htop"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.github", "/target"]
+# docs/harnesses is a mirror of seven other projects' documentation — 14 MB of
+# it, against a 10 MB crate limit. It is for people reading this repository,
+# not for people installing the binary.
+# /docs/harnesses is 14 MB of other people's documentation against a 10 MB
+# crate limit. /docs/rmux is a fifth of a megabyte and could ship, but it is a
+# mirror on the same terms and belongs on the same side of the line.
+exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux"]
 
 # Only the pty shim and TIOCSTI injection need libc, both of which are unix-only.
 # It is already in the tree under sysinfo, so this adds no dependency.
+# Off by default and never enabled for a release: `debug` compiles in
+# `src/serve/debug.rs`, which can make the server fail on demand. Handy against
+# a fixture (`cargo run --features debug -- serve`), and not something to ship —
+# a build without it contains neither the routes nor the strings that name them.
+[features]
+debug = []
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 
@@ -31,6 +44,12 @@ anyhow = "1.0.104"
 mimalloc = "0.1"
 chrono = "0.4.45"
 clap = { version = "4.6.5", features = ["derive"] }
+# `cctop serve --tunnel` speaks the trycloudflare protocol itself — QUIC to the
+# edge — rather than shelling out to `cloudflared` and reading a URL off its
+# stderr, so a tunnel needs nothing installed and cctop stays one binary. tokio
+# comes with it: the tunnel's data path runs on a two-worker runtime inside this
+# process, and nothing else here is async.
+cloudflare-quick-tunnel = "0.3.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
@@ -45,7 +64,31 @@ serde_json = "1.0.151"
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 toml_edit = "0.25.13"
+# The multiplexer, as an API rather than as a command line: `rmux-sdk` talks the
+# daemon's typed IPC contract, which is where the operator link of a browser
+# share comes back as a field instead of as the stream a URL was printed on.
+#
+# Its sibling `ratatui-rmux` is deliberately absent. It paints a pane snapshot
+# into a ratatui buffer, which cctop does not ask it to do — panes are drawn
+# from cctop's own vt100 parser through `tui-term` (see `render::draw_panes`),
+# and the crate's one appearance was a test asserting that its widget accepts
+# cctop's `Buffer`. That assertion failed against the published crate, because
+# 0.10.0 links ratatui 0.29 under the `ratatui-core` name while cctop draws with
+# 0.30, so the two `Buffer`s are different types with the same path. The fix is
+# Helvesec/rmux#220 — depend on the real `ratatui-core` — and carrying it as a
+# `[patch.crates-io]` on a fork blocked every release in the meantime, since
+# `cargo publish` ignores a patch and would have shipped a cctop that resolved
+# the unfixed crate and failed to build for whoever installed it.
+#
+# A guard for a use that does not exist is not worth a release that cannot
+# happen. When the widget is actually wanted — when a pane is painted from the
+# daemon's snapshot rather than from a parser of cctop's own — put back
+# `ratatui-rmux = "<the version carrying #220>"` and the test named
+# `a_pane_snapshot_paints_into_the_buffer_cctop_draws_with`, which is in this
+# repository's history at 3808d80.
+rmux-sdk = "0.10.0"
 tui-term = "0.3.4"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"

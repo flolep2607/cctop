@@ -2,7 +2,7 @@
 //!
 //! cctop is a monitor you look away from, so the one thing it owes you is a
 //! nudge when an agent stops working and starts waiting. Both channels are the
-//! terminal's own: `BEL`, which tmux turns into a `monitor-bell` window flag,
+//! terminal's own: `BEL`, which rmux turns into a `monitor-bell` window flag,
 //! and OSC 9, which iTerm2, Ghostty, kitty, WezTerm and Windows Terminal raise
 //! as a real desktop notification. Neither needs a daemon, a D-Bus connection,
 //! or a crate.
@@ -27,8 +27,12 @@ pub const MARK_FOR: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Busy,
-    /// The agent has explicitly asked the user something.
+    /// The turn is over and the prompt is the user's.
     Waiting,
+    /// The agent is blocked on a question and cannot go on until it is
+    /// answered. Rung for separately, because "your move" and "I am stuck" are
+    /// not the same news.
+    Asking,
     Stopped,
 }
 
@@ -37,6 +41,8 @@ enum State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     NeedsInput,
+    /// Blocked on a permission prompt or an elicitation.
+    Asking,
     Stopped,
 }
 
@@ -89,13 +95,17 @@ impl Notifier {
             let label = session.display_label().to_string();
             // Removing as we go leaves `watched` holding exactly the sessions
             // that were running last time and are not running now.
+            // Only out of `Busy`, so answering a permission prompt and having
+            // the turn end a moment later is one ring rather than two: the
+            // second crossing is `Asking` to `Waiting`, and it is the same turn
+            // you have already been told about.
             if let Some((State::Busy, _)) = self.watched.remove(&key)
-                && state == State::Waiting
+                && let Some(reason) = reason_for(state)
             {
                 crossed.push(Rang {
                     key: key.clone(),
                     label: label.clone(),
-                    reason: Reason::NeedsInput,
+                    reason,
                     at: Instant::now(),
                 });
             }
@@ -163,27 +173,43 @@ impl Notifier {
             rang.label,
             match rang.reason {
                 Reason::NeedsInput => "waiting for input",
+                Reason::Asking => "needs permission",
                 Reason::Stopped => "stopped",
             }
         ))
     }
 }
 
+/// Which crossings are worth a bell, and what to call them.
+fn reason_for(state: State) -> Option<Reason> {
+    match state {
+        State::Asking => Some(Reason::Asking),
+        State::Waiting => Some(Reason::NeedsInput),
+        State::Busy | State::Stopped => None,
+    }
+}
+
 /// The session's state as the bell sees it.
 ///
-/// ponytail: an agent that has simply finished its turn and is sitting at its
-/// prompt reads as `Working` here, because the transcript's last event looks the
-/// same whether the model answered or is still thinking — so the most common
-/// "needs you" moment does not ring. Ceiling accepted rather than guessed at: a
-/// quiet-timer on `last_active` would fire in the middle of every long reasoning
-/// turn. The real fix is the pty, not the transcript — the shim already owns it
-/// for `cctop run` sessions, and Claude Code rings its own BEL when it wants
-/// attention, so forwarding *that* is the upgrade path.
+/// Both waiting states arrive from the row, which is where a hook report has
+/// already been stamped — see
+/// [`App::apply_reports`](crate::ui::App::apply_reports). That matters most for
+/// the permission prompt: it is the moment an agent is most obviously blocked
+/// and the one a transcript cannot see at all, so before the hooks it read as
+/// ordinary work and never rang.
+///
+/// ponytail: with no hooks installed, an agent that has simply finished its
+/// turn still reads as `Working` here for the harnesses whose transcripts do
+/// not mark the end of one, so the ring is missed. Ceiling accepted rather than
+/// guessed at: a quiet-timer on `last_active` would fire in the middle of every
+/// long reasoning turn. `cctop hook --install` is the fix, and the doctor says
+/// so.
 fn state_of(session: &Session) -> State {
     if !session.is_running() {
         return State::Stopped;
     }
     match session.activity_state {
+        ActivityState::Asking => State::Asking,
         ActivityState::WaitingForInput => State::Waiting,
         // An API error is the agent's problem, not yet the user's: it retries,
         // and the red dot in the table is already saying so.
@@ -194,6 +220,7 @@ fn state_of(session: &Session) -> State {
 fn desktop_text(rang: &Rang, extra: usize) -> String {
     let what = match rang.reason {
         Reason::NeedsInput => "is waiting for input",
+        Reason::Asking => "needs permission",
         Reason::Stopped => "stopped",
     };
     let more = if extra > 0 {
@@ -248,6 +275,51 @@ mod tests {
             s.process = Some(crate::proc::ProcInfo::default());
         }
         s
+    }
+
+    /// The complaint this split exists for: before it, an agent holding a
+    /// permission prompt and an agent whose turn was simply over were the same
+    /// fact — the same colour on the row, and the same sentence in the bell.
+    #[test]
+    fn a_held_permission_prompt_is_not_a_finished_turn() {
+        let mut n = Notifier {
+            enabled: true,
+            ..Default::default()
+        };
+        n.observe(&[session("a", true, ActivityState::Working)]);
+        n.observe(&[session("a", true, ActivityState::Asking)]);
+        let rang = n.last.as_ref().expect("a blocked agent rings");
+        assert_eq!(rang.reason, Reason::Asking);
+        assert!(
+            desktop_text(rang, 0).contains("needs permission"),
+            "the bell says which kind of waiting it is: {}",
+            desktop_text(rang, 0)
+        );
+
+        // And the other kind still reads as the other kind.
+        let mut n = Notifier {
+            enabled: true,
+            ..Default::default()
+        };
+        n.observe(&[session("a", true, ActivityState::Working)]);
+        n.observe(&[session("a", true, ActivityState::WaitingForInput)]);
+        assert_eq!(n.last.as_ref().map(|r| r.reason), Some(Reason::NeedsInput));
+    }
+
+    /// Answering the prompt and having the turn end a moment later is one
+    /// event, not two: only a crossing out of `Busy` rings, so the second
+    /// transition is silent.
+    #[test]
+    fn answering_a_prompt_does_not_ring_again_when_the_turn_ends() {
+        let mut n = Notifier {
+            enabled: true,
+            ..Default::default()
+        };
+        n.observe(&[session("a", true, ActivityState::Working)]);
+        n.observe(&[session("a", true, ActivityState::Asking)]);
+        n.last = None;
+        n.observe(&[session("a", true, ActivityState::WaitingForInput)]);
+        assert!(n.last.is_none(), "the same turn, reported twice");
     }
 
     /// The whole point of the feature: one ring on the crossing, silence on
