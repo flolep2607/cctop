@@ -2057,6 +2057,26 @@ impl App {
         });
     }
 
+    /// Promote every held permission prompt whose grace has expired, and say
+    /// whether any had.
+    ///
+    /// Auto mode's answer arrives as its own event and replaces the report, so
+    /// a prompt still sitting here when the grace runs out is one a person has
+    /// to answer. Cleared rather than re-tested every tick: once a prompt is
+    /// real it stays real, and leaving the flag up would have the whole table
+    /// recomputed on every pass of the loop for the rest of the session.
+    fn promote_matured_prompts(&mut self) -> bool {
+        let mut matured = false;
+        for reported in self.hooked.values_mut() {
+            if reported.provisional && reported.at.elapsed() >= crate::hook::PERMISSION_GRACE {
+                reported.provisional = false;
+                matured = true;
+            }
+        }
+        self.needs_redraw |= matured;
+        matured
+    }
+
     /// Let the notifier see this refresh, and ring if anything crossed.
     ///
     /// Called from the event loop only when the rows actually moved. It has to
@@ -2222,7 +2242,14 @@ impl App {
                 // [`Signal::activity`](crate::hook::Signal::activity) — so a
                 // stale-but-not-yet-expired working claim cannot talk a row out
                 // of an API error it is genuinely sitting in.
-                if let Some(state) = reported.signal.activity() {
+                // A permission prompt auto mode may still answer is not yet
+                // news: see
+                // [`Reported::is_settled`](crate::hook::Reported::is_settled).
+                // The row keeps whatever the transcript makes of it — which is
+                // "working", because that is what the agent is doing.
+                if reported.is_settled()
+                    && let Some(state) = reported.signal.activity()
+                {
                     session.activity_state = state;
                 }
             }
@@ -2371,7 +2398,8 @@ impl App {
         // arrives, and a session that has gone silent is precisely the one that
         // sends none — so between events the map still holds the stale claim.
         if let Some(reported) = self.hooked.get(session_id) {
-            return reported.is_current().then_some(reported.signal);
+            let show = reported.is_current() && reported.is_settled();
+            return show.then_some(reported.signal);
         }
         // Gemini CLI reports a full session id, but names the chat file it
         // writes — which is the only identity cctop's rows have, because
@@ -2382,7 +2410,7 @@ impl App {
         self.hooked
             .iter()
             .find(|(id, _)| id.starts_with(tail))
-            .filter(|(_, reported)| reported.is_current())
+            .filter(|(_, reported)| reported.is_current() && reported.is_settled())
             .map(|(_, reported)| reported.signal)
     }
 
@@ -4448,6 +4476,10 @@ fn event_loop(
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
+        // A permission prompt whose grace has run out is news, and nothing is
+        // going to send an event to say so — the event that would have spared
+        // us is the one that did not arrive.
+        rows_changed |= app.promote_matured_prompts();
         if annotated_rows_changed || rows_changed {
             // Extraction rebuilds each subagent from its transcript, which
             // cannot know what a hook already reported, so the hook's answer is
@@ -5678,6 +5710,7 @@ mod tests {
         let event = |signal| crate::hook::Event {
             session_id: "a".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5721,6 +5754,7 @@ mod tests {
         let reported = |mode: Option<crate::hook::Permission>| crate::hook::Event {
             session_id: "a".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: mode,
@@ -5767,6 +5801,7 @@ mod tests {
         let event = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
             session_id: id.into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5822,6 +5857,7 @@ mod tests {
         let stale = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
             session_id: id.into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5860,6 +5896,7 @@ mod tests {
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "79709c93-1111-4111-8111-111111111111".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::Idle,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5910,6 +5947,7 @@ mod tests {
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5930,6 +5968,7 @@ mod tests {
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
             reported: crate::hook::Reported {
+                provisional: false,
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -5942,6 +5981,59 @@ mod tests {
             app.hooked_signal("a"),
             Some(crate::hook::Signal::NeedsInput)
         );
+    }
+
+    /// A permission prompt is not put in front of anyone until auto mode has
+    /// had its few seconds to answer it.
+    ///
+    /// Claude Code's auto mode asks a model whether to allow a tool call, which
+    /// takes a moment; the hook fires when the prompt is raised, not when it is
+    /// decided. Ringing the bell there means ringing it for every auto-approved
+    /// call — the surest way to teach someone to ignore the bell.
+    #[test]
+    fn a_held_prompt_becomes_news_only_if_nothing_answers_it() {
+        use crate::hook::{Event, Reported, Signal};
+        use crate::session::ActivityState;
+
+        let raised = |signal: Signal, provisional: bool| Event {
+            session_id: "a".to_string(),
+            finished_agent: None,
+            reported: Reported {
+                signal,
+                cwd: String::new(),
+                permission: None,
+                at: std::time::Instant::now(),
+                provisional,
+            },
+        };
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "proj")];
+
+        // The prompt goes up. Nothing on the row says so yet.
+        app.apply_hooks(vec![raised(Signal::NeedsInput, true)]);
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Working);
+        assert_eq!(app.hooked_signal("a"), None, "the prompt was shown at once");
+
+        // Auto mode answers inside the grace: the row never reported it, and
+        // the newer event has replaced it, so nothing is left to mature.
+        app.apply_hooks(vec![raised(Signal::Busy, false)]);
+        assert!(!app.promote_matured_prompts());
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Working);
+
+        // A prompt nobody answered. Once its grace runs out it is a person's
+        // problem, and no event is coming to say so.
+        app.apply_hooks(vec![raised(Signal::NeedsInput, true)]);
+        let held = app.hooked.get_mut("a").expect("the report");
+        held.at = std::time::Instant::now()
+            - (crate::hook::PERMISSION_GRACE + std::time::Duration::from_secs(1));
+        assert!(app.promote_matured_prompts(), "the grace never ran out");
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Asking);
+        assert_eq!(app.hooked_signal("a"), Some(Signal::NeedsInput));
+
+        // And it is promoted once, not on every pass of the event loop.
+        assert!(!app.promote_matured_prompts());
     }
 
     fn session(id: &str, running: bool, label: &str) -> Session {

@@ -74,6 +74,15 @@ call in flight over a still screen as a permission prompt waiting for you.
 Code asks, where the `Notification` for the same prompt is on a six-second
 timer and the tool-in-flight reading is a guess.
 
+It fires when the prompt is *raised*, though, not when it is decided — and
+Claude Code's auto mode decides most of them itself, by asking a model, which
+takes a few seconds. So cctop holds a permission prompt for four seconds before
+it counts as a question: no bell, no blinking tab, no attention card. If the
+decision arrives first — `PermissionDenied`, or the tool simply running — the
+newer event replaces the held one and nobody is disturbed at all. If nothing
+answers, the prompt is yours after the four seconds. Nothing else is held:
+an MCP elicitation and a plain notification have no second opinion coming.
+
 cctop asks for all of them rather than a chosen few, so that teaching cctop
 about an event is a change to cctop and not to everybody's settings file. Most
 fire a handful of times in a session. `MessageDisplay` is the exception — once

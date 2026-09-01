@@ -397,7 +397,27 @@ pub struct Reported {
     /// When it arrived, which is what bounds how long it is believed. See
     /// [`Reported::is_current`].
     pub at: std::time::Instant,
+    /// Whether this is a permission prompt that may yet answer itself.
+    ///
+    /// Claude Code's auto mode puts a permission request to a model before it
+    /// puts it to the person, and that takes a few seconds. The hook fires when
+    /// the request is raised, not when it is decided, so every auto-answered
+    /// tool call rang the bell, blinked the tab and lit the attention card for
+    /// a question nobody was ever going to be asked. Held back for
+    /// [`PERMISSION_GRACE`]; if the decision lands first — `PermissionDenied`,
+    /// or the tool simply running — the newer event replaces this one and it is
+    /// never shown at all. See [`Reported::is_settled`].
+    pub provisional: bool,
 }
+
+/// How long a permission prompt is given to answer itself before it is somebody
+/// else's problem.
+///
+/// Long enough for auto mode's round trip, short enough that a prompt which
+/// really is waiting for a person is not sat on. Wrong in one direction it
+/// costs a few seconds' notice; wrong in the other it cries wolf on every tool
+/// call, which is what teaches people to ignore the bell.
+pub const PERMISSION_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// How long "the agent is working" is believed with nothing said since.
 ///
@@ -423,6 +443,16 @@ impl Reported {
     /// is asking. Only [`Signal::is_working`] expires. See [`WORKING_TTL`].
     pub fn is_current(&self) -> bool {
         !self.signal.is_working() || self.at.elapsed() < WORKING_TTL
+    }
+
+    /// Whether this can be shown yet.
+    ///
+    /// Everything but a fresh permission prompt can: see [`provisional`], and
+    /// [`PERMISSION_GRACE`] for how long the exception lasts.
+    ///
+    /// [`provisional`]: Reported::provisional
+    pub fn is_settled(&self) -> bool {
+        !self.provisional || self.at.elapsed() >= PERMISSION_GRACE
     }
 }
 
@@ -790,6 +820,13 @@ fn parse(line: &str) -> Option<Event> {
         .filter(|id| !id.is_empty())
         .map(str::to_string),
         reported: Reported {
+            // The prompt that auto mode may answer on your behalf, and the only
+            // one worth holding: an MCP elicitation and a plain notification
+            // are questions for a person however long you wait.
+            provisional: matches!(
+                value.get("event").and_then(|v| v.as_str()),
+                Some("PermissionRequest" | "permission.asked")
+            ),
             signal: signal_of(
                 value.get("event")?.as_str()?,
                 value
@@ -2286,6 +2323,47 @@ mod tests {
         }
     }
 
+    /// A permission prompt is held back; every other question is not.
+    ///
+    /// Claude Code's auto mode puts the request to a model first, which takes a
+    /// few seconds, so the hook fires for prompts nobody is ever asked. An
+    /// elicitation and a notification have no such second opinion coming and
+    /// are shown at once.
+    #[test]
+    fn a_permission_prompt_waits_and_the_other_questions_do_not() {
+        let of = |line: &str| parse(line).expect("a parseable event").reported;
+        let event = |name: &str| format!(r#"{{"session_id":"abc","event":"{name}","cwd":"/tmp"}}"#);
+
+        let asked = of(&event("PermissionRequest"));
+        assert_eq!(asked.signal, Signal::NeedsInput);
+        assert!(asked.provisional, "the prompt was not held");
+        assert!(
+            !asked.is_settled(),
+            "a prompt shown the instant it was raised"
+        );
+
+        // Held, not lost: it becomes real when the grace runs out with no
+        // answer having arrived.
+        let matured = Reported {
+            at: std::time::Instant::now() - (PERMISSION_GRACE + std::time::Duration::from_secs(1)),
+            ..asked
+        };
+        assert!(matured.is_settled(), "a prompt held past its grace");
+
+        for name in ["Elicitation", "Notification"] {
+            let other = of(&event(name));
+            assert!(
+                other.is_settled(),
+                "{name} was held back, and nothing is going to answer it for you"
+            );
+        }
+        // And the answer itself, which is what replaces a held prompt before
+        // anyone is told about it.
+        let denied = of(&event("PermissionDenied"));
+        assert_eq!(denied.signal, Signal::Busy);
+        assert!(denied.is_settled());
+    }
+
     /// The states that stick, and the events that are the only thing that ends
     /// them.
     ///
@@ -2325,6 +2403,7 @@ mod tests {
     #[test]
     fn a_stale_claim_to_be_working_stops_being_believed() {
         let aged = |signal: Signal, ago: std::time::Duration| Reported {
+            provisional: false,
             signal,
             cwd: "/w".into(),
             permission: None,
