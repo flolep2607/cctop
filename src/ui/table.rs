@@ -382,10 +382,7 @@ fn subagent_row(
 ) -> Line<'static> {
     let running = matches!(sub.status, crate::session::SubagentStatus::Running);
     let base = if selected {
-        Style::default()
-            .bg(theme::colors().selected_bg)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
+        theme::selected()
     } else {
         Style::default().fg(theme::colors().dim)
     };
@@ -682,6 +679,37 @@ mod tests {
                 .sum::<usize>()
         };
         assert_eq!(width(&parent), width(&child));
+    }
+
+    /// The selected child used to hardcode white ink on the selection wash,
+    /// which on the light palette is white on near-white. It has to use the
+    /// same style a session row does.
+    #[test]
+    fn a_selected_subagent_uses_the_selection_style() {
+        let now = chrono::Utc::now();
+        let cols = all_columns();
+        let widths = column_widths(&cols, 200);
+        let sub = crate::session::Subagent {
+            agent_id: "sub-1".into(),
+            agent_type: "general-purpose".into(),
+            description: "Review performance".into(),
+            model: "claude-opus-5".into(),
+            started_at: None,
+            last_active: None,
+            duration_ms: 0,
+            status: crate::session::SubagentStatus::Done,
+            cost: 0.0,
+            tool_count: 0,
+            tool_use_id: None,
+            context: None,
+            ghost: false,
+        };
+        let child = subagent_row(&sub, &cols, &widths, true, true, &now);
+        let want = theme::selected();
+        // Column 0 is the status dot, which keeps its own colour. The next
+        // text cell is the one that used to be hardcoded white.
+        assert_eq!(child.spans[2].style.fg, want.fg);
+        assert_eq!(child.spans[2].style.bg, want.bg);
     }
 
     /// Highlighting marks the match and changes nothing else — a row that

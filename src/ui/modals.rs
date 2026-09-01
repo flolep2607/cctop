@@ -7,7 +7,7 @@ use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, tabs};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
@@ -52,10 +52,16 @@ fn modal(
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
         .title(Span::styled(format!(" {title} "), theme::title()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme::canvas()),
+        inner,
+    );
     (rect, inner)
 }
 
@@ -81,6 +87,7 @@ fn scrollable_modal(
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
         .title(Span::styled(format!(" {title} "), theme::title()));
 
     let inner_height = block.inner(rect).height;
@@ -102,7 +109,8 @@ fn scrollable_modal(
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
+            .scroll((scroll, 0))
+            .style(theme::canvas()),
         inner,
     );
     max_scroll
@@ -685,10 +693,7 @@ pub(super) fn draw_row_menu(
         let selected = i == app.menu_cursor && item.enabled();
         let style = match (item.enabled(), selected) {
             (false, _) => theme::dim(),
-            (true, true) => Style::default()
-                .bg(theme::colors().selected_bg)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            (true, true) => theme::selected(),
             (true, false) => Style::default(),
         };
         rows.push((lines.len(), i));
@@ -725,11 +730,12 @@ pub(super) fn draw_row_menu(
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
         .title(Span::styled(format!(" {subject} "), theme::title()))
         .title_bottom(Span::styled(" ↑↓ Enter · Esc ", theme::dim()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).style(theme::canvas()), inner);
 
     layout.modal_rect = Some(rect);
     layout.menu_rows = rows
@@ -789,10 +795,7 @@ pub(super) fn draw_launch(
         }
         let selected = i == app.launch_cursor;
         let style = if selected {
-            Style::default()
-                .bg(theme::colors().selected_bg)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
+            theme::selected()
         } else {
             Style::default()
         };
@@ -978,9 +981,7 @@ pub(super) fn draw_launch(
             Span::styled(
                 shown,
                 match selected {
-                    true => Style::default()
-                        .bg(theme::colors().selected_bg)
-                        .fg(Color::White),
+                    true => theme::selected(),
                     false => theme::dim(),
                 },
             ),
