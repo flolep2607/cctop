@@ -2473,6 +2473,24 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Write the bar's arrangement onto the sessions, so it survives this cctop.
+    ///
+    /// Called when a rearrangement finishes rather than while one is happening:
+    /// a drag calls [`App::move_tab`] on every pointer movement, and a
+    /// `set-option` per tab per movement is a subprocess storm for an
+    /// arrangement that is still being decided.
+    ///
+    /// Every session of every tab, including both halves of a split, so a tab
+    /// with two agents in it comes back as one tab rather than as two in
+    /// whichever order they were started.
+    pub(super) fn save_tab_order(&self) {
+        for (at, tab) in self.tabs.iter().enumerate() {
+            for name in tab.sessions() {
+                crate::rmux::set_order(name, at);
+            }
+        }
+    }
+
     /// Move the tab on screen one place along the bar, for the keyboard.
     ///
     /// Clamped rather than wrapped, unlike [`App::cycle_workspace`]: wrapping is
@@ -2485,6 +2503,8 @@ impl App {
         };
         let to = (from as isize + delta).clamp(1, self.tabs.len() as isize) as usize;
         self.move_tab(from, to);
+        // One keystroke is one finished rearrangement, unlike a drag.
+        self.save_tab_order();
     }
 
     pub fn cycle_workspace(&mut self, delta: isize) {
@@ -2962,7 +2982,8 @@ impl App {
 
         let mine = self.open_rmux();
         let mut arrived = false;
-        for agent in running.iter().rev() {
+        for agent in crate::rmux::in_tab_order_of(running.clone()) {
+            let agent = &agent;
             if mine.iter().any(|name| name == &agent.name) {
                 continue;
             }
@@ -3833,13 +3854,15 @@ impl App {
     /// cctop is using, so this makes no attempt to: both are tabs, and both
     /// arrive detached. Only the one put on screen takes a client.
     ///
-    /// Oldest first, matching [`sync_shared_tabs`] — a cctop opened now and one
-    /// that watched these start must number their tabs the same way.
+    /// In the arrangement they were last left in, and oldest first among the
+    /// ones nobody has arranged — matching [`sync_shared_tabs`], because a
+    /// cctop opened now and one that watched these start must number their tabs
+    /// the same way.
     ///
     /// [`sync_shared_tabs`]: Self::sync_shared_tabs
     pub(super) fn restore_running_tabs(&mut self) {
-        for agent in crate::rmux::running().iter().rev() {
-            self.tabs.push(tabs::Tab::shared(agent));
+        for agent in crate::rmux::running_in_tab_order() {
+            self.tabs.push(tabs::Tab::shared(&agent));
         }
         if !self.tabs.is_empty() {
             self.go_to_tab(1);
@@ -4681,6 +4704,7 @@ mod tests {
                 activity: None,
                 label: Some(name.to_string()),
                 profile: None,
+                order: None,
             })
         };
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
@@ -4735,6 +4759,7 @@ mod tests {
                 activity: None,
                 label: Some(name.to_string()),
                 profile: None,
+                order: None,
             })
         };
         let layout = render::Layout {
@@ -4818,6 +4843,7 @@ mod tests {
                 activity: None,
                 label: Some(name.to_string()),
                 profile: None,
+                order: None,
             })
         };
         let layout = render::Layout {
@@ -5139,6 +5165,7 @@ mod tests {
             activity: None,
             label: Some("claude · Improve super cctop".into()),
             profile: None,
+            order: None,
         }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every

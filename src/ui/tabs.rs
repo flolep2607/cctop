@@ -853,6 +853,7 @@ mod tests {
             activity: Some(now.saturating_sub(ago)),
             label: label.map(str::to_string),
             profile: None,
+            order: None,
         }
     }
 
@@ -1029,6 +1030,7 @@ mod tests {
             activity: None,
             label: None,
             profile: None,
+            order: None,
         })
     }
 

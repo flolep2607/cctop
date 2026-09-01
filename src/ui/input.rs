@@ -1143,7 +1143,16 @@ impl App {
                 }
                 true
             }
-            MouseEventKind::Up(MouseButton::Left) => self.drag_tab.take().is_some(),
+            // The end of a drag, and the moment its arrangement is worth
+            // writing down: `move_tab` has been called on every pointer
+            // movement between the press and here.
+            MouseEventKind::Up(MouseButton::Left) => match self.drag_tab.take() {
+                Some(_) => {
+                    self.save_tab_order();
+                    true
+                }
+                None => false,
+            },
             // Right-click renames. The bar is the only place cctop answers the
             // right button at all — inside a pane it is deliberately dropped
             // (see [`App::on_mouse`]) — so there is nothing here to compete

@@ -366,6 +366,8 @@ the variable names rather than the one the directory holds. One variable is one
 value per machine, which is why it answers for one profile rather than being
 reported as every account's usage.
 
-In the tab bar, drag a tab to move it along the bar, and right-click one to
+In the tab bar, drag a tab to move it along the bar — the arrangement is
+written onto the rmux sessions, so it is still there after `F10` and in every
+other cctop on the machine — and right-click one to
 rename it: `3:claude-4` says nothing about what that agent is doing, and the
 name you give it follows the tab into every cctop on the machine.

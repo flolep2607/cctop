@@ -611,6 +611,48 @@ pub fn set_profile(name: &str, profile: &str) {
         .output();
 }
 
+/// Record where this session's tab sits in the bar.
+///
+/// The third thing written onto the session rather than kept in this process,
+/// and for the reason the other two are: every cctop on the machine draws the
+/// same bar, and an arrangement one of them invented would otherwise last only
+/// as long as it did. A tab dragged to the front stayed there until the next
+/// F10 and then went back to being sorted by age, which is the arrangement
+/// nobody chose.
+///
+/// Best effort, like its neighbours: an order that failed to save is a bar in
+/// the old arrangement, not a broken one.
+pub fn set_order(name: &str, order: usize) {
+    let _ = Command::new(BIN)
+        .args(["set-option", "-t", name, "@cctop_order", &order.to_string()])
+        .output();
+}
+
+/// Every cctop-owned session, in the order their tabs were last left in.
+///
+/// [`running`] answers "which is newest", which is what the launcher wants.
+/// The tab bar wants "which is first", and those are different questions the
+/// moment anybody drags a tab.
+pub fn running_in_tab_order() -> Vec<Running> {
+    in_tab_order(running())
+}
+
+/// The ordering itself, given the sessions — the half worth testing.
+///
+/// Sessions nobody has arranged keep the order they had, which is oldest
+/// first: a bar that renumbered itself when an unarranged agent appeared would
+/// move tabs under someone typing into one. A stable sort is what leaves them
+/// alone.
+pub fn in_tab_order_of(newest_first: Vec<Running>) -> Vec<Running> {
+    in_tab_order(newest_first)
+}
+
+fn in_tab_order(newest_first: Vec<Running>) -> Vec<Running> {
+    let mut out: Vec<Running> = newest_first.into_iter().rev().collect();
+    out.sort_by_key(|s| s.order.unwrap_or(u64::MAX));
+    out
+}
+
 /// Let the wheel scroll one of cctop's own rmux sessions.
 ///
 /// Without this a rmux-backed pane cannot be scrolled at all. rmux is on the
@@ -683,6 +725,14 @@ pub struct Running {
     /// The account this agent was started under, when it was not the default
     /// one. Written onto the session by [`set_profile`], which says why.
     pub profile: Option<String>,
+    /// Where this session's tab was last dragged to, if anywhere.
+    ///
+    /// Written onto the session by [`set_order`] for the same reason the label
+    /// is: the session outlives every cctop, so it is the only place an
+    /// arrangement of tabs can live. Without it the bar was rebuilt from
+    /// creation times on every start, and a tab dragged to the front was back
+    /// where it began the next time cctop opened.
+    pub order: Option<u64>,
 }
 
 /// Every cctop-owned rmux session currently alive, newest first.
@@ -703,7 +753,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}",
         ])
         .output()
     else {
@@ -753,6 +803,7 @@ pub fn running() -> Vec<Running> {
         };
         let label = option();
         let profile = option();
+        let order = option().and_then(|v| v.parse::<u64>().ok());
         found.push((
             created,
             Running {
@@ -763,6 +814,7 @@ pub fn running() -> Vec<Running> {
                 activity,
                 label,
                 profile,
+                order,
             },
         ));
     }
@@ -840,6 +892,101 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The order written onto a session is the order read back off it.
+    ///
+    /// Against a real daemon, because that is the whole claim: the arrangement
+    /// has to outlive the process that made it, and only rmux can say whether
+    /// it did. The unit above tests the sorting; this tests that there is
+    /// anything to sort by.
+    #[test]
+    fn an_order_written_onto_a_session_survives_in_it() {
+        if !available() {
+            eprintln!("skipping: rmux not installed");
+            return;
+        }
+        let _turn = test_lock();
+        let ours = format!("cctop-order-{}", std::process::id());
+        let dir = std::env::temp_dir();
+        assert!(
+            Command::new(BIN)
+                .args([
+                    "new-session",
+                    "-d",
+                    "-s",
+                    &ours,
+                    "-c",
+                    &dir.to_string_lossy(),
+                    "--",
+                    "sh",
+                    "-c",
+                    "sleep 30",
+                ])
+                .status()
+                .is_ok_and(|s| s.success()),
+            "could not start {ours}"
+        );
+
+        let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
+        set_order(&ours, 3);
+        let after = wait_for(|| {
+            running()
+                .into_iter()
+                .find(|s| s.name == ours && s.order.is_some())
+        });
+        let _ = kill(&ours);
+
+        assert_eq!(before.map(|s| s.order), Some(None), "born with an order");
+        assert_eq!(
+            after.map(|s| s.order),
+            Some(Some(3)),
+            "the order did not come back off the session"
+        );
+    }
+
+    /// The bar's order comes from what was written on the sessions, and the
+    /// sessions nobody arranged keep the order they always had.
+    ///
+    /// The bug: the arrangement lived only in the running process, so a tab
+    /// dragged to the front was back among the others — sorted by age — the
+    /// next time cctop opened.
+    #[test]
+    fn arranged_tabs_lead_and_the_rest_stay_oldest_first() {
+        let at = |name: &str, order: Option<u64>| Running {
+            name: name.to_string(),
+            pid: None,
+            cwd: None,
+            attached: false,
+            activity: None,
+            label: None,
+            profile: None,
+            order,
+        };
+        // As `running` gives them: newest first.
+        let found = vec![
+            at("newest", None),
+            at("arranged-second", Some(1)),
+            at("middle", None),
+            at("arranged-first", Some(0)),
+            at("oldest", None),
+        ];
+        let names: Vec<String> = in_tab_order(found).into_iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            [
+                "arranged-first",
+                "arranged-second",
+                "oldest",
+                "middle",
+                "newest"
+            ]
+        );
+
+        // With nothing arranged it is exactly what it was before: oldest first.
+        let plain = vec![at("newest", None), at("middle", None), at("oldest", None)];
+        let names: Vec<String> = in_tab_order(plain).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["oldest", "middle", "newest"]);
+    }
 
     /// The widget cctop draws an rmux-backed pane with takes cctop's own
     /// buffer.
