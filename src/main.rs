@@ -7,6 +7,7 @@ mod clipboard;
 mod collide;
 mod config;
 mod doctor;
+mod fingerprint;
 mod fleet;
 mod handoff;
 mod hook;

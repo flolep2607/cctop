@@ -18,7 +18,9 @@ categories = ["command-line-utilities", "development-tools"]
 # /docs/harnesses is 14 MB of other people's documentation against a 10 MB
 # crate limit. /docs/rmux is a fifth of a megabyte and could ship, but it is a
 # mirror on the same terms and belongs on the same side of the line.
-exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux"]
+# /RnD is working notes — research, ideas and dead ends. It is for people
+# reading this repository, on the same terms as the mirrors above.
+exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD"]
 
 # Only the pty shim and TIOCSTI injection need libc, both of which are unix-only.
 # It is already in the tree under sysinfo, so this adds no dependency.
