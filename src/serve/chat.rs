@@ -80,7 +80,7 @@ const MAX_TOOLS_PER_TURN: usize = 64;
 const MAX_DIFF_LINES: usize = 200;
 
 /// One session's conversation, as much of it as is sent.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct Conversation {
     /// Whether this harness has a reader at all. False carries a `note` saying
     /// why, and is not an error: the rest of the report is still true.
@@ -95,7 +95,7 @@ pub struct Conversation {
 }
 
 /// One thing that was said, and what it caused.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Turn {
     /// `user`, `assistant`, or `system` for the harness speaking for itself.
     pub role: &'static str,
@@ -156,7 +156,7 @@ impl Turn {
 }
 
 /// One tool call, with whatever came back from it.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct ToolUse {
     /// The name as the transcript spelled it, with an MCP server's prefix made
     /// readable — `mcp__linear__list_issues` is `linear: list issues` on screen
@@ -789,13 +789,39 @@ fn push_text(out: &mut String, text: &str) {
 /// expansion of a slash command, a hook's output, the reminder blocks it
 /// injects — and showing those as something a person typed is the difference
 /// between a transcript someone recognises and one they do not.
+///
+/// The named prefixes stay because those blocks are also written on one line,
+/// where the shape below cannot see them. The shape is what catches the rest:
+/// the list of names was a list that had to be kept up to date and was not, and
+/// `<task-notification>` reached a handoff brief quoted as the user's own words
+/// because nothing had added it. A person opening a message with a bare tag and
+/// nothing else on the line is the rarer mistake to make.
 fn is_harness_text(text: &str) -> bool {
     let head = text.trim_start();
     head.starts_with("<command-name>")
         || head.starts_with("<local-command")
         || head.starts_with("<system-reminder>")
-        || head.starts_with("Caveat:")
         || head.starts_with("<user-prompt-submit-hook>")
+        || head.starts_with("Caveat:")
+        || opens_with_bare_tag(head)
+}
+
+/// Whether the first line is `<name>` and nothing else — the shape every
+/// injected block shares, and the shape prose does not.
+fn opens_with_bare_tag(text: &str) -> bool {
+    let Some(line) = text.lines().next().map(str::trim) else {
+        return false;
+    };
+    let Some(name) = line.strip_prefix('<').and_then(|l| l.strip_suffix('>')) else {
+        return false;
+    };
+    // No attributes and no closing tag on the same line: `<p>hi</p>` is
+    // somebody pasting markup, and `<b>` alone on a line is not a sentence.
+    !name.is_empty()
+        && !name.starts_with('/')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The text inside `<tag>…</tag>`, the first time it appears.
@@ -867,6 +893,32 @@ fn item_is_meta(item: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The named prefixes were a list that had to be kept up to date, and was
+    /// not: a `<task-notification>` reached a handoff brief quoted as the
+    /// user's own words. Every injected block shares a shape.
+    #[test]
+    fn a_block_the_harness_injected_is_not_something_a_person_said() {
+        assert!(is_harness_text(
+            "<system-reminder>\nbe careful\n</system-reminder>"
+        ));
+        assert!(is_harness_text(
+            "<task-notification>\n<task-id>abc</task-id>"
+        ));
+        assert!(is_harness_text("<user-prompt-submit-hook>\nhook said this"));
+        assert!(is_harness_text("<command-name>/clear</command-name>"));
+        assert!(is_harness_text("Caveat: the messages below were generated"));
+    }
+
+    /// Matching on shape must not swallow a person who happens to write markup.
+    #[test]
+    fn a_person_who_pastes_markup_is_still_a_person() {
+        assert!(!is_harness_text("<p>hello</p>"));
+        assert!(!is_harness_text("why does <div> break here?"));
+        assert!(!is_harness_text("<img src=\"x\">"));
+        assert!(!is_harness_text("</closing>"));
+        assert!(!is_harness_text("fix the parser"));
+    }
 
     fn sink_claude(lines: &[&str]) -> Conversation {
         let mut sink = Sink::default();
