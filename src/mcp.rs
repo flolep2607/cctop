@@ -389,7 +389,10 @@ fn get_session_context(
     };
 
     let data = loader.store().session_data(session);
-    Ok(crate::handoff::build(session, Some(&data)).to_markdown())
+    Ok(crate::handoff::rendered(&crate::handoff::build(
+        session,
+        Some(&data),
+    )))
 }
 
 fn search_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {

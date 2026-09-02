@@ -331,20 +331,44 @@ fn conversation(session: &Session) -> Option<chat::Conversation> {
 /// `message` only: a `compaction` is the harness summarising itself and a
 /// `reasoning` turn is never the user's, and neither is something anybody
 /// asked for.
-fn prompts(chat: &chat::Conversation) -> Vec<String> {
+///
+/// The first prompt is kept whatever else goes. It is the one that says what
+/// the session is *for* — everything after it refines a task already stated —
+/// and a cap that only kept recent prompts dropped it exactly when the session
+/// had run long enough for the brief to matter. The rest of the budget goes to
+/// the newest, because that is where the task stands now, and the gap between
+/// the two is marked rather than closed silently: prompts that read as
+/// consecutive but are not would have the receiving agent inferring a train of
+/// thought nobody had.
+fn prompts(chat: &chat::Conversation) -> Vec<Asked> {
     let all: Vec<&chat::Turn> = chat
         .turns
         .iter()
         .filter(|t| t.role == "user" && t.kind == "message")
         .filter(|t| !t.text.trim().is_empty())
         .collect();
-    // The newest kept, but shown in the order they were said: a brief that
-    // dropped the *recent* prompts to keep the opening one would carry the task
-    // as it was first described rather than as it currently stands.
-    all.iter()
-        .skip(all.len().saturating_sub(MAX_PROMPTS))
-        .map(|t| clip(&t.text, MAX_PROMPT_CHARS))
-        .collect()
+    let said = |t: &chat::Turn| Asked::Said(clip(&t.text, MAX_PROMPT_CHARS));
+    if all.len() <= MAX_PROMPTS {
+        return all.iter().map(|t| said(t)).collect();
+    }
+    // One slot of the cap goes to the opening prompt; the rest to the newest.
+    let tail = MAX_PROMPTS - 1;
+    let mut out = vec![said(all[0])];
+    out.push(Asked::Gap(all.len() - tail - 1));
+    out.extend(all.iter().skip(all.len() - tail).map(|t| said(t)));
+    out
+}
+
+/// A line of the prompt section: something the user said, or a count of what
+/// sits between two things they said.
+///
+/// The gap is its own variant rather than another string because the section
+/// quotes what it holds, and a note about the brief rendered as a quotation
+/// would read as one more thing the user asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asked {
+    Said(String),
+    Gap(usize),
 }
 
 /// The last thing the agent said, which is where the work stands.
@@ -476,12 +500,18 @@ impl Brief {
                 if i > 0 {
                     push(p, "\n");
                 }
-                push(p, &format!("{}\n", quote(ask)));
+                match ask {
+                    Asked::Said(text) => push(p, &format!("{}\n", quote(text))),
+                    // Outside the quotation, so it cannot be read as one more
+                    // thing that was asked for.
+                    Asked::Gap(1) => push(p, "*(one prompt here is not carried)*\n"),
+                    Asked::Gap(n) => push(p, &format!("*({n} prompts here are not carried)*\n")),
+                }
             }
             if let Some(earlier) = chat.map(|c| c.earlier).filter(|n| *n > 0) {
                 push(
                     p,
-                    &format!("\n{earlier} earlier turns came before these and are not carried.\n"),
+                    &format!("\n*({earlier} turns came before the ones read at all.)*\n"),
                 );
             }
         }
@@ -550,7 +580,7 @@ impl Brief {
         }
 
         if let Some(record) = record {
-            push(p, "\n## The conversation in full\n\n");
+            push(p, "\n## The conversation itself\n\n");
             push(
                 p,
                 &format!(
@@ -564,6 +594,10 @@ impl Brief {
                     record.display()
                 ),
             );
+            // Said here rather than left to the footer, because this is the
+            // section a receiving agent would otherwise treat as the complete
+            // account — and act on the absence of something it never held.
+            push(p, &format!("\n{}\n", self.record_bounds()));
         }
 
         push(
@@ -572,6 +606,38 @@ impl Brief {
              carries its most recent and most-touched entries, not all of them.\n",
         );
         out
+    }
+
+    /// What the record leaves out, said plainly.
+    ///
+    /// [`crate::serve::chat`] is bounded on both axes — it reads the newest
+    /// turns, and cuts a long message — so a long session's record begins
+    /// partway through and can hold clipped messages. A heading that called it
+    /// the conversation *in full* was wrong for exactly the sessions long
+    /// enough to need one.
+    fn record_bounds(&self) -> String {
+        let chat = match self.chat.as_ref() {
+            Some(chat) => chat,
+            None => return String::new(),
+        };
+        let clipped = chat.turns.iter().filter(|t| t.clipped).count();
+        let mut said = vec![match chat.turns.len() {
+            1 => "It holds one turn".to_string(),
+            n => format!("It holds {n} turns"),
+        }];
+        if chat.earlier > 0 {
+            said.push(format!(
+                "the {} turns before them were not read and are nowhere in this handoff",
+                chat.earlier
+            ));
+        }
+        if clipped > 0 {
+            said.push(match clipped {
+                1 => "one long message in it is cut short".to_string(),
+                n => format!("{n} long messages in it are cut short"),
+            });
+        }
+        format!("{}.", said.join("; "))
     }
 
     /// The conversation as JSONL: a header line, then one line per turn.
@@ -805,6 +871,24 @@ fn new_session_id() -> String {
     )
 }
 
+/// The brief as text, having left a record beside it where one could be
+/// written.
+///
+/// What [`crate::cli`] prints and what the MCP tool answers with. Both used to
+/// render the markdown alone, so a handoff taken from the command line or by an
+/// agent asking for one silently carried less than the same handoff taken in
+/// the TUI — the conversation was read, summarised, and then thrown away.
+///
+/// Writing can fail — a read-only cache, a full disk — and that is not a reason
+/// to withhold the brief. The text is what was asked for; the record is the
+/// extra, and its absence costs the caller a section it will not miss.
+pub fn rendered(brief: &Brief) -> String {
+    match write(brief).and_then(std::fs::read_to_string) {
+        Ok(text) => text,
+        Err(_) => brief.to_markdown(),
+    }
+}
+
 /// The line the receiving agent is given so it goes and reads the brief.
 ///
 /// A path rather than the brief's text: the text is thousands of tokens, and
@@ -983,12 +1067,41 @@ mod tests {
             .map(|i| turn("user", "message", &format!("prompt {i}")))
             .collect();
         let asked = prompts(&chat_of(many));
-        assert_eq!(asked.len(), MAX_PROMPTS);
-        assert_eq!(asked[0], "prompt 5");
+        // The opening prompt, a marker for what fell out, then the newest.
+        assert_eq!(asked.len(), MAX_PROMPTS + 1);
+        assert_eq!(asked[0], Asked::Said("prompt 0".into()));
+        assert_eq!(asked[1], Asked::Gap(5));
+        assert_eq!(asked[2], Asked::Said("prompt 6".into()));
         assert_eq!(
-            asked[MAX_PROMPTS - 1],
-            format!("prompt {}", MAX_PROMPTS + 4)
+            asked[asked.len() - 1],
+            Asked::Said(format!("prompt {}", MAX_PROMPTS + 4))
         );
+    }
+
+    /// The prompt that says what the session is *for* is the first one, and a
+    /// cap that only kept recent prompts dropped it exactly when the session
+    /// had run long enough for a brief to be worth taking.
+    #[test]
+    fn the_opening_prompt_survives_a_long_session() {
+        let mut turns = vec![turn("user", "message", "port the parser to the new API")];
+        turns.extend((0..50).map(|i| turn("user", "message", &format!("also {i}"))));
+        let asked = prompts(&chat_of(turns));
+        assert_eq!(
+            asked[0],
+            Asked::Said("port the parser to the new API".into())
+        );
+    }
+
+    /// The gap is not quoted: a note about the brief, rendered as one more
+    /// thing the user said, is a prompt the receiving agent never received.
+    #[test]
+    fn the_gap_between_prompts_is_not_quoted_as_one() {
+        let turns: Vec<chat::Turn> = (0..MAX_PROMPTS + 5)
+            .map(|i| turn("user", "message", &format!("prompt {i}")))
+            .collect();
+        let md = briefed(turns).to_markdown();
+        assert!(md.contains("*(5 prompts here are not carried)*"));
+        assert!(!md.contains("> *(5 prompts"));
     }
 
     /// A quoted instruction that ends cleanly reads as the whole instruction,
@@ -997,8 +1110,11 @@ mod tests {
     fn a_clipped_prompt_says_that_it_was_clipped() {
         let long = "x".repeat(MAX_PROMPT_CHARS + 100);
         let asked = prompts(&chat_of(vec![turn("user", "message", &long)]));
-        assert!(asked[0].ends_with('…'));
-        assert_eq!(asked[0].chars().count(), MAX_PROMPT_CHARS + 1);
+        let Asked::Said(text) = &asked[0] else {
+            panic!("a prompt, not a gap")
+        };
+        assert!(text.ends_with('…'));
+        assert_eq!(text.chars().count(), MAX_PROMPT_CHARS + 1);
     }
 
     /// Reasoning and compaction turns are the harness talking, not the user.
@@ -1010,8 +1126,8 @@ mod tests {
             turn("system", "compaction", "summary of earlier turns"),
             turn("assistant", "message", "the answer"),
         ]);
-        assert_eq!(prompts(&chat), vec!["the ask"]);
-        assert_eq!(closing(&chat), vec!["the answer"]);
+        assert_eq!(prompts(&chat), vec![Asked::Said("the ask".into())]);
+        assert_eq!(closing(&chat), vec!["the answer".to_string()]);
     }
 
     /// The record is a file, and a brief rendered without one — the MCP tool
@@ -1019,9 +1135,9 @@ mod tests {
     #[test]
     fn the_record_is_named_only_when_one_was_written() {
         let brief = briefed(vec![turn("user", "message", "the ask")]);
-        assert!(!brief.to_markdown().contains("The conversation in full"));
+        assert!(!brief.to_markdown().contains("The conversation itself"));
         let named = brief.to_markdown_with(Some(Path::new("/tmp/x.jsonl")));
-        assert!(named.contains("The conversation in full"));
+        assert!(named.contains("The conversation itself"));
         assert!(named.contains("/tmp/x.jsonl"));
     }
 
@@ -1104,7 +1220,41 @@ mod tests {
         let path = write_in(dir.path(), &brief).expect("second write");
         assert!(!dir.path().join("abc-123.jsonl").exists());
         let md = std::fs::read_to_string(&path).expect("read brief");
-        assert!(!md.contains("The conversation in full"));
+        assert!(!md.contains("The conversation itself"));
+    }
+
+    /// The record inherits the reader's bounds, so for a long session it is not
+    /// the whole conversation — and a heading that said it was would have the
+    /// receiving agent acting on the absence of something it never held.
+    #[test]
+    fn the_record_says_what_it_does_not_hold() {
+        let mut clipped = turn("assistant", "message", "a very long answer");
+        clipped.clipped = true;
+        let brief = Brief {
+            chat: Some(chat::Conversation {
+                supported: true,
+                turns: vec![turn("user", "message", "the ask"), clipped],
+                earlier: 312,
+                note: None,
+            }),
+            ..Brief::default()
+        };
+
+        let md = brief.to_markdown_with(Some(Path::new("/tmp/x.jsonl")));
+        assert!(!md.contains("in full"));
+        assert!(md.contains("It holds 2 turns"));
+        assert!(md.contains("312 turns before them were not read"));
+        assert!(md.contains("one long message in it is cut short"));
+    }
+
+    /// A conversation that fits says so by saying nothing about what is missing.
+    #[test]
+    fn a_whole_conversation_is_not_hedged() {
+        let brief = briefed(vec![turn("user", "message", "the ask")]);
+        let md = brief.to_markdown_with(Some(Path::new("/tmp/x.jsonl")));
+        assert!(md.contains("It holds one turn."));
+        assert!(!md.contains("were not read"));
+        assert!(!md.contains("cut short"));
     }
 
     /// Only the newest plan survives: earlier ones were superseded in place and
