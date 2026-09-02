@@ -2425,11 +2425,11 @@ impl App {
     /// panes and this runs once per frame, so a map would be state to keep
     /// correct in exchange for nothing measurable.
     fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
-        self.sessions
-            .iter()
-            .filter(|session| session.root_pid() == Some(pid))
-            .find_map(|session| {
-                self.hooked_signal(&session.session_id).or({
+        self.reported_by(pid).or_else(|| {
+            self.sessions
+                .iter()
+                .filter(|session| session.root_pid() == Some(pid))
+                .find_map(|session| {
                     match session.activity_state {
                         // Both of the row's waiting states are a tab worth
                         // colouring; which colour is the caller's business.
@@ -2442,7 +2442,69 @@ impl App {
                         _ => None,
                     }
                 })
+        })
+    }
+
+    /// What the agent running as `pid` last reported over its own hooks.
+    ///
+    /// The half of [`Self::pane_signal`] with no inference in it, split out
+    /// because it is the only half worth writing onto an rmux session: a
+    /// transcript reading is one every cctop on the machine can take for
+    /// itself, off the same files, so recording one would be publishing a guess
+    /// that the reader could already have made.
+    fn reported_by(&self, pid: u32) -> Option<crate::hook::Signal> {
+        self.sessions
+            .iter()
+            .filter(|session| session.root_pid() == Some(pid))
+            .find_map(|session| self.hooked_signal(&session.session_id))
+    }
+
+    /// Write what this cctop has heard onto the rmux sessions that carry it.
+    ///
+    /// The other direction of [`Shared::recorded`](tabs::Shared): every cctop
+    /// reads these, so somebody has to write them, and the one that heard the
+    /// event is the only one that can. It is not the hook that writes — see
+    /// [`rmux::set_state`](crate::rmux::set_state) for why the agent's deadline
+    /// must not pay for this.
+    ///
+    /// Driven off `running` rather than off the tabs, so a session no tab of
+    /// this cctop's stands for is still kept up to date: the row exists and its
+    /// hooks report here whether or not anybody has opened a tab on it.
+    ///
+    /// The write condition is the whole of the rate limiting, and it is just
+    /// "the session does not already say this". An unchanged state costs
+    /// nothing, which matters because the sweep runs every
+    /// [`SHARE_EVERY`] and a turn is mostly the same signal repeated. An
+    /// expired one reads as saying nothing, so a working claim this cctop still
+    /// believes is rewritten rather than allowed to lapse.
+    fn publish_states(&self, running: &[crate::rmux::Running]) {
+        for (name, signal) in self.states_to_publish(running, crate::rmux::now_secs()) {
+            crate::rmux::set_state(&name, signal);
+        }
+    }
+
+    /// Which sessions are out of date and what to say about them — the half of
+    /// [`Self::publish_states`] with the judgement in it, split out so it can be
+    /// tested without a daemon to write to.
+    fn states_to_publish(
+        &self,
+        running: &[crate::rmux::Running],
+        now: u64,
+    ) -> Vec<(String, crate::hook::Signal)> {
+        if self.hooked.is_empty() {
+            return Vec::new();
+        }
+        running
+            .iter()
+            .filter_map(|agent| {
+                let signal = agent.pid.and_then(|pid| self.reported_by(pid))?;
+                let recorded = agent
+                    .state
+                    .filter(|state| state.is_current(now))
+                    .map(|state| state.signal);
+                (recorded != Some(signal)).then(|| (agent.name.clone(), signal))
             })
+            .collect()
     }
 
     /// Note that you have just typed into the terminal of the agent running as
@@ -3026,6 +3088,8 @@ impl App {
                 shared.label = label.clone();
             }
         }
+
+        self.publish_states(&running);
 
         let mine = self.open_rmux();
         let mut arrived = false;
@@ -4770,6 +4834,7 @@ mod tests {
                 label: Some(name.to_string()),
                 profile: None,
                 order: None,
+                state: None,
             })
         };
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
@@ -4825,6 +4890,7 @@ mod tests {
                 label: Some(name.to_string()),
                 profile: None,
                 order: None,
+                state: None,
             })
         };
         let layout = render::Layout {
@@ -4909,6 +4975,7 @@ mod tests {
                 label: Some(name.to_string()),
                 profile: None,
                 order: None,
+                state: None,
             })
         };
         let layout = render::Layout {
@@ -5231,6 +5298,7 @@ mod tests {
             label: Some("claude · Improve super cctop".into()),
             profile: None,
             order: None,
+            state: None,
         }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every
@@ -5712,6 +5780,121 @@ mod tests {
         app.sessions[0].remote = None;
         app.sessions[0].provider = Provider::Claude;
         assert!(!app.codex_hooks_heard());
+    }
+
+    /// What gets written onto a session, and — mostly — what does not.
+    ///
+    /// The sweep runs every [`SHARE_EVERY`] and a turn is largely the same
+    /// signal repeated, so "the session already says this" has to be the common
+    /// answer. Each write is a process spawn and a round trip to the daemon;
+    /// doing one per sweep per tab would make the tab bar pay for the feature.
+    #[test]
+    fn a_session_is_only_written_to_when_it_is_out_of_date() {
+        let agent = |state| crate::rmux::Running {
+            name: "cctop-a".into(),
+            pid: Some(4321),
+            cwd: None,
+            attached: false,
+            activity: None,
+            label: None,
+            profile: None,
+            order: None,
+            state,
+        };
+        let now = 1_700_000_000;
+        let recorded = |signal, ago: u64| {
+            Some(crate::rmux::State {
+                signal,
+                at: now - ago,
+            })
+        };
+
+        let mut app = test_app();
+        let mut row = session("a", true, "proj");
+        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+            pid: 4321,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        app.sessions = vec![row];
+
+        // Nothing heard yet: nothing to say, whatever the session claims.
+        assert!(app.states_to_publish(&[agent(None)], now).is_empty());
+
+        app.apply_hooks(vec![crate::hook::Event {
+            session_id: "a".into(),
+            reported: crate::hook::Reported {
+                signal: crate::hook::Signal::NeedsInput,
+                cwd: "/w/proj".into(),
+                permission: None,
+                at: std::time::Instant::now(),
+                provisional: false,
+            },
+            finished_agent: None,
+        }]);
+
+        assert_eq!(
+            app.states_to_publish(&[agent(None)], now),
+            vec![("cctop-a".to_string(), crate::hook::Signal::NeedsInput)],
+            "a session saying nothing is told"
+        );
+        assert!(
+            app.states_to_publish(&[agent(recorded(crate::hook::Signal::NeedsInput, 30))], now)
+                .is_empty(),
+            "a session already saying it is left alone"
+        );
+        assert_eq!(
+            app.states_to_publish(&[agent(recorded(crate::hook::Signal::Busy, 30))], now)
+                .len(),
+            1,
+            "a session saying something else is corrected"
+        );
+        // A row whose pid nothing has reported for is not published from
+        // somebody else's report.
+        assert!(
+            app.states_to_publish(
+                &[crate::rmux::Running {
+                    pid: Some(9999),
+                    ..agent(None)
+                }],
+                now
+            )
+            .is_empty()
+        );
+
+        // An expired record reads as saying nothing, so a claim this cctop
+        // still believes is rewritten rather than left to lapse under it. This
+        // is the one case where the session and the report agree and a write
+        // happens anyway — without it, a long quiet turn would go dark at
+        // fifteen minutes for every cctop but this one.
+        app.apply_hooks(vec![crate::hook::Event {
+            session_id: "a".into(),
+            reported: crate::hook::Reported {
+                signal: crate::hook::Signal::Busy,
+                cwd: "/w/proj".into(),
+                permission: None,
+                at: std::time::Instant::now(),
+                provisional: false,
+            },
+            finished_agent: None,
+        }]);
+        assert!(
+            app.states_to_publish(&[agent(recorded(crate::hook::Signal::Busy, 30))], now)
+                .is_empty(),
+            "a fresh agreement needs no write"
+        );
+        assert_eq!(
+            app.states_to_publish(
+                &[agent(recorded(crate::hook::Signal::Busy, 3 * 3_600))],
+                now
+            )
+            .len(),
+            1,
+            "an agreement old enough to have lapsed is renewed"
+        );
     }
 
     /// A permission prompt leaves no trace in a transcript — the newest record

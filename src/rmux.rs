@@ -611,6 +611,86 @@ pub fn set_profile(name: &str, profile: &str) {
         .output();
 }
 
+/// What the agent in a session last reported about itself, recorded on the
+/// session by whichever cctop heard it say so.
+///
+/// The point of writing it down at all is that the hooks are delivered live,
+/// over a socket, to whoever happens to be listening — so a cctop that was not
+/// running when the event fired never learns it, and a cctop that restarts
+/// forgets everything it knew. The session outlives both, so it is the one
+/// place the answer can wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct State {
+    /// What was reported.
+    pub signal: crate::hook::Signal,
+    /// When, in unix seconds. Wall clock rather than an `Instant`, because the
+    /// process that wrote it is not the one that reads it.
+    pub at: u64,
+}
+
+impl State {
+    /// Whether this can still be true. The same rule a live report is held to —
+    /// see [`Signal::is_current_after`](crate::hook::Signal::is_current_after) —
+    /// measured against the clock the two processes share.
+    pub fn is_current(&self, now: u64) -> bool {
+        let elapsed = std::time::Duration::from_secs(now.saturating_sub(self.at));
+        self.signal.is_current_after(elapsed)
+    }
+
+    /// How the option is spelled: the signal's own word, then when it was
+    /// written. Both halves matter — a state with no time on it cannot be aged
+    /// out, and a stale `working` believed forever is what the age exists to
+    /// prevent.
+    fn encode(signal: crate::hook::Signal, at: u64) -> String {
+        format!("{}@{at}", signal.label())
+    }
+
+    fn decode(text: &str) -> Option<State> {
+        let (word, at) = text.rsplit_once('@')?;
+        Some(State {
+            signal: crate::hook::Signal::from_label(word)?,
+            at: at.parse().ok()?,
+        })
+    }
+}
+
+/// Wall-clock seconds, which is the only clock two cctops share.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Record on the session what its agent last reported about itself.
+///
+/// The fourth thing written onto the session rather than kept in this process,
+/// and the one with the shortest shelf life — but written for the reason the
+/// label, the profile and the order are: every cctop draws the same tab, and a
+/// fact only one of them heard is a tab that means two different things on two
+/// screens.
+///
+/// It is deliberately cctop that writes this and not `cctop hook`. The hook
+/// runs inside the agent's own process tree, many times a minute, under a
+/// deadline it must never miss — see the module docs in
+/// [`hook`](crate::hook) — and `rmux set-option` is a process spawn plus a
+/// round trip to the daemon. Doing it here costs the same information one
+/// subprocess per *change of state*, on cctop's time rather than the agent's.
+///
+/// Best effort, like its neighbours: a state that failed to save is a tab that
+/// falls back to guessing at its screen, which is where it was before.
+pub fn set_state(name: &str, signal: crate::hook::Signal) {
+    let _ = Command::new(BIN)
+        .args([
+            "set-option",
+            "-t",
+            &format!("={name}"),
+            "@cctop_state",
+            &State::encode(signal, now_secs()),
+        ])
+        .output();
+}
+
 /// Record where this session's tab sits in the bar.
 ///
 /// The third thing written onto the session rather than kept in this process,
@@ -725,6 +805,15 @@ pub struct Running {
     /// The account this agent was started under, when it was not the default
     /// one. Written onto the session by [`set_profile`], which says why.
     pub profile: Option<String>,
+    /// What this agent last reported about itself, when a cctop has heard it
+    /// and written it down. See [`set_state`], and [`State`] for why the
+    /// session is where it lives.
+    ///
+    /// This is the one field here that a cctop could also have worked out for
+    /// itself — but only if it was running at the time. Read back, it is what
+    /// lets a cctop opened just now draw a tab that has been holding a
+    /// permission prompt since before it started.
+    pub state: Option<State>,
     /// Where this session's tab was last dragged to, if anywhere.
     ///
     /// Written onto the session by [`set_order`] for the same reason the label
@@ -753,7 +842,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}",
         ])
         .output()
     else {
@@ -804,6 +893,9 @@ pub fn running() -> Vec<Running> {
         let label = option();
         let profile = option();
         let order = option().and_then(|v| v.parse::<u64>().ok());
+        // A word this cctop does not know, or a value some other tool wrote,
+        // reads as nothing reported rather than as a guess.
+        let state = option().as_deref().and_then(State::decode);
         found.push((
             created,
             Running {
@@ -815,6 +907,7 @@ pub fn running() -> Vec<Running> {
                 label,
                 profile,
                 order,
+                state,
             },
         ));
     }
@@ -893,6 +986,128 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
 
+    /// The option is one string in a tab-separated listing, so its spelling is
+    /// load-bearing in both directions: a word this cctop cannot read, or a
+    /// time it cannot parse, has to come back as "nothing reported" rather than
+    /// as the wrong state.
+    #[test]
+    fn a_state_survives_being_written_down_and_read_back() {
+        use crate::hook::Signal;
+        for signal in [
+            Signal::NeedsInput,
+            Signal::Idle,
+            Signal::Busy,
+            Signal::Acting,
+            Signal::Compacting,
+            Signal::Started,
+            Signal::Ended,
+        ] {
+            let text = State::encode(signal, 1_700_000_000);
+            assert_eq!(
+                State::decode(&text),
+                Some(State {
+                    signal,
+                    at: 1_700_000_000
+                }),
+                "{text} did not survive the round trip"
+            );
+        }
+
+        assert_eq!(State::decode(""), None, "an unset option says nothing");
+        assert_eq!(
+            State::decode("asking"),
+            None,
+            "a state with no time on it cannot be aged out, so it is not a state"
+        );
+        assert_eq!(
+            State::decode("dreaming@1700000000"),
+            None,
+            "a signal from a newer cctop is not guessed at"
+        );
+    }
+
+    /// The asymmetry that makes this safe to leave lying on a session: a
+    /// question outlives the cctop that heard it, a claim to be working does
+    /// not. Without it, an agent killed mid-tool would leave a session
+    /// asserting "working" at every cctop that ever opened afterwards.
+    #[test]
+    fn a_recorded_question_keeps_but_a_recorded_claim_to_be_working_lapses() {
+        let now = 1_700_000_000;
+        let hour_ago = |signal| State {
+            signal,
+            at: now - 3_600,
+        };
+        assert!(
+            hour_ago(crate::hook::Signal::NeedsInput).is_current(now),
+            "somebody back from lunch still has a prompt to answer"
+        );
+        assert!(hour_ago(crate::hook::Signal::Idle).is_current(now));
+        assert!(!hour_ago(crate::hook::Signal::Busy).is_current(now));
+        assert!(!hour_ago(crate::hook::Signal::Acting).is_current(now));
+        assert!(
+            State {
+                signal: crate::hook::Signal::Busy,
+                at: now - 60
+            }
+            .is_current(now),
+            "a turn a minute in is an ordinary turn"
+        );
+    }
+
+    /// The claim the whole feature rests on: the state outlives the cctop that
+    /// wrote it, because it is on the session and the session is not ours.
+    ///
+    /// Against a real daemon for the same reason the order test is — only rmux
+    /// can say whether the option survived a process that has since gone.
+    #[test]
+    fn a_state_written_onto_a_session_survives_in_it() {
+        if !available() {
+            eprintln!("skipping: rmux not installed");
+            return;
+        }
+        let _turn = test_lock();
+        let ours = format!("cctop-state-{}", std::process::id());
+        let dir = std::env::temp_dir();
+        assert!(
+            Command::new(BIN)
+                .args([
+                    "new-session",
+                    "-d",
+                    "-s",
+                    &ours,
+                    "-c",
+                    &dir.to_string_lossy(),
+                    "--",
+                    "sh",
+                    "-c",
+                    "sleep 30",
+                ])
+                .status()
+                .is_ok_and(|s| s.success()),
+            "could not start {ours}"
+        );
+
+        let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
+        set_state(&ours, crate::hook::Signal::NeedsInput);
+        let after = wait_for(|| {
+            running()
+                .into_iter()
+                .find(|s| s.name == ours && s.state.is_some())
+        });
+        let _ = kill(&ours);
+
+        assert_eq!(
+            before.map(|s| s.state),
+            Some(None),
+            "born reporting nothing about itself"
+        );
+        assert_eq!(
+            after.and_then(|s| s.state).map(|s| s.signal),
+            Some(crate::hook::Signal::NeedsInput),
+            "the held question did not come back off the session"
+        );
+    }
+
     /// The order written onto a session is the order read back off it.
     ///
     /// Against a real daemon, because that is the whole claim: the arrangement
@@ -961,6 +1176,7 @@ mod tests {
             label: None,
             profile: None,
             order,
+            state: None,
         };
         // As `running` gives them: newest first.
         let found = vec![

@@ -63,7 +63,9 @@
 //! anything here, because it authenticates rather than merely encrypting.
 
 mod actions;
-mod chat;
+/// The conversation reader. Public to the crate because a handoff brief
+/// carries what was said as well as what was done — see [`crate::handoff`].
+pub mod chat;
 /// Routes that only exist in a build that asked for them. Not a default
 /// feature, so a released cctop contains none of this — see the module docs.
 #[cfg(feature = "debug")]
