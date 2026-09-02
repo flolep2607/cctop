@@ -755,6 +755,58 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A session reached through two overlapping roots is one session. It used
+    /// to be two rows, and its cost was counted twice in every total on screen.
+    #[test]
+    fn a_session_discovered_twice_is_one_row() {
+        let at = |when: &str| {
+            let mut s = Session::new(Provider::Claude, "sid".into());
+            s.last_active = when.into();
+            s
+        };
+        let mut sessions = vec![at("2026-09-02T10:00:00Z"), at("2026-09-02T10:00:00Z")];
+        assert_eq!(dedup(&mut sessions), 1);
+        assert_eq!(sessions.len(), 1);
+
+        // Two providers may reuse an id without meaning the same session, so
+        // identity is the pair and not the id alone.
+        let mut across = vec![
+            Session::new(Provider::Claude, "sid".into()),
+            Session::new(Provider::Codex, "sid".into()),
+        ];
+        assert_eq!(dedup(&mut across), 0);
+        assert_eq!(across.len(), 2);
+    }
+
+    /// Which copy survives is not arbitrary: the Owner column is read to decide
+    /// whose session this is, and your own session labelled as somebody else's
+    /// is a worse answer than no label at all.
+    #[test]
+    fn the_copy_kept_is_this_users_own() {
+        let copy = |owner: Option<&str>, when: &str| {
+            let mut s = Session::new(Provider::Claude, "sid".into());
+            s.owner = owner.map(str::to_string);
+            s.last_active = when.into();
+            s
+        };
+
+        // Even when the other home's view of it looks fresher.
+        let mut sessions = vec![
+            copy(Some("alice"), "2026-09-02T12:00:00Z"),
+            copy(None, "2026-09-02T10:00:00Z"),
+        ];
+        assert_eq!(dedup(&mut sessions), 1);
+        assert_eq!(sessions[0].owner, None);
+
+        // Between two copies of somebody else's, the one still being written to.
+        let mut theirs = vec![
+            copy(Some("alice"), "2026-09-02T10:00:00Z"),
+            copy(Some("alice"), "2026-09-02T12:00:00Z"),
+        ];
+        assert_eq!(dedup(&mut theirs), 1);
+        assert_eq!(theirs[0].last_active, "2026-09-02T12:00:00Z");
+    }
+
     /// Each harness spells resuming differently, and the three that cannot be
     /// resumed from a shell must say so rather than producing a command that
     /// looks plausible and does nothing.
@@ -1477,7 +1529,11 @@ pub fn list_all() -> Vec<Session> {
             s.profile = crate::config::profile_for(file).map(str::to_string);
         }
     }
+    let duplicates = dedup(&mut sessions);
     sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    if duplicates > 0 {
+        crate::trace::fact("duplicate sessions dropped", duplicates.to_string());
+    }
     // Reported once per walk rather than accumulated, so the figure reads as
     // "this many sessions exist" rather than that times the number of walks.
     crate::trace::fact("sessions found", sessions.len().to_string());
@@ -1489,6 +1545,77 @@ pub fn list_all() -> Vec<Session> {
         ),
     );
     sessions
+}
+
+/// Drop sessions discovered more than once, keeping the best copy of each.
+///
+/// Discovery walks a list of roots per provider and concatenates the results,
+/// which assumes no two roots see the same transcript. They do. A profile
+/// directory nested inside the default one is walked by both; a home that
+/// appears at two paths — a bind mount, a symlink, `/home/x` also exported as
+/// `/export/home/x` — is scanned as two homes, because [`config::OTHER_HOMES`]
+/// dedups homes by path and a path is not an identity. Either way the same
+/// session arrives twice, and a duplicated row is not a cosmetic problem: its
+/// cost is added twice into the totals, and it is one of the sessions the `!`
+/// column would report as colliding with itself in its own checkout.
+///
+/// A session's identity is its provider and its id, which is what
+/// [`Session::key`] already builds — not its path, since the whole point is
+/// that one session has two of those.
+///
+/// Which copy to keep matters, because they are not interchangeable. This
+/// user's own home wins over another home's view of it: `owner` is what puts a
+/// name in the Owner column, and labelling your own session as somebody else's
+/// is worse than the reverse. Failing that the later `last_active` wins, on the
+/// grounds that a stale copy is a copy read through a path that stopped being
+/// written to.
+///
+/// Returns how many were dropped, which is worth a trace line: on a healthy
+/// machine it is zero, and any other number means two roots overlap.
+///
+/// ponytail: this catches a session discovered twice, not one harness mirroring
+/// another's transcript into its own directory. That would need matching on
+/// content rather than identity, and no harness cctop reads does it today.
+fn dedup(sessions: &mut Vec<Session>) -> usize {
+    let before = sessions.len();
+    let mut best: HashMap<String, usize> = HashMap::with_capacity(sessions.len());
+    let mut drop_index = vec![false; sessions.len()];
+
+    for i in 0..sessions.len() {
+        let key = sessions[i].key();
+        match best.get(&key).copied() {
+            None => {
+                best.insert(key, i);
+            }
+            Some(kept) => {
+                let (loser, winner) = match supersedes(&sessions[i], &sessions[kept]) {
+                    true => (kept, i),
+                    false => (i, kept),
+                };
+                drop_index[loser] = true;
+                best.insert(key, winner);
+            }
+        }
+    }
+
+    if before != best.len() {
+        let mut i = 0;
+        sessions.retain(|_| {
+            let keep = !drop_index[i];
+            i += 1;
+            keep
+        });
+    }
+    before - sessions.len()
+}
+
+/// Whether `a` is the copy to keep when `a` and `b` are the same session.
+fn supersedes(a: &Session, b: &Session) -> bool {
+    match (a.owner.is_none(), b.owner.is_none()) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => a.last_active > b.last_active,
+    }
 }
 
 /// The main transcript plus any subagent sidechain transcripts.
