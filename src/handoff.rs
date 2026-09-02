@@ -375,7 +375,7 @@ fn clip(text: &str, max: usize) -> String {
         .nth(max)
         .map(|(i, _)| i)
         .unwrap_or(text.len());
-    format!("{}…", &text[..end].trim_end())
+    format!("{}…", text[..end].trim_end())
 }
 
 /// Quote `text` as markdown, so a prompt that was itself markdown — a list, a
