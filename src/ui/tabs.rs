@@ -315,9 +315,31 @@ pub struct Shared {
     /// pane this becomes again reports the same limits it did before. See
     /// [`Pane::profile`].
     pub profile: Option<String>,
+    /// What the agent last reported about itself, as recorded on the rmux
+    /// session — see [`rmux::State`](crate::rmux::State).
+    ///
+    /// This is the agent's own word, and it outranks [`Shared::idle`] below,
+    /// which is only ever an inference from a clock. It is also the only thing
+    /// either of them can say about a session this cctop was not running for:
+    /// the live report went to whoever was listening at the time, and that was
+    /// nobody.
+    pub state: Option<crate::rmux::State>,
 }
 
 impl Shared {
+    /// What the rmux session records about its agent, if it is still true.
+    ///
+    /// Aged out by the same asymmetric rule a live report is — see
+    /// [`Signal::is_current_after`](crate::hook::Signal::is_current_after) — so
+    /// a session killed mid-turn stops claiming to be working, while one that
+    /// has been asking since yesterday still is.
+    fn recorded(&self) -> Option<crate::hook::Signal> {
+        let state = self.state?;
+        state
+            .is_current(crate::rmux::now_secs())
+            .then_some(state.signal)
+    }
+
     /// Whether the agent has gone quiet long enough to count as waiting for you.
     ///
     /// The same judgement [`Pane::idle`] makes, from rmux's record of the
@@ -388,6 +410,7 @@ impl Tab {
                 pid: agent.pid,
                 activity: agent.activity,
                 profile: agent.profile.clone(),
+                state: agent.state,
             }),
         }
     }
@@ -455,6 +478,7 @@ impl Tab {
             // is replacing was on screen a moment ago. The next sweep fills it.
             activity: None,
             profile: pane.profile.clone(),
+            state: None,
         });
         self.panes.clear();
         self.focus = 0;
@@ -550,7 +574,14 @@ impl Tab {
         // case that matters: an agent another cctop started, blocked on a
         // question, still blinks at you here.
         if let Some(shared) = &self.shared {
-            return match shared.pid.and_then(&known) {
+            // Three answers, in order of how directly they know. A live report
+            // is this cctop hearing the agent itself; the session's record is
+            // some *other* cctop having heard it, which is the only answer that
+            // survives this one restarting or having been closed at the time;
+            // and `idle()` below is nobody having heard anything, reading a
+            // clock instead.
+            let reported = shared.pid.and_then(&known).or_else(|| shared.recorded());
+            return match reported {
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // The held-prompt shape, read off rmux's record of the session
                 // instead of a screen. See the pane arm below for why a tool in
@@ -854,7 +885,62 @@ mod tests {
             label: label.map(str::to_string),
             profile: None,
             order: None,
+            state: None,
         }
+    }
+
+    /// The point of writing the state onto the session: a cctop that was not
+    /// running when the agent asked still finds the question waiting for it.
+    ///
+    /// `known` answers `None` throughout, which is what a fresh cctop knows —
+    /// the live event went over a socket to whoever was listening at the time,
+    /// and that was somebody else. Before the session carried it, the only
+    /// thing left to go on was the activity clock, and a held prompt over a
+    /// still screen reads there as merely idle.
+    #[test]
+    fn a_tab_finds_a_question_that_was_asked_before_this_cctop_started() {
+        let recorded = |signal, ago: u64| {
+            let mut agent = session("cctop-x", Some("claude"), 0);
+            agent.state = Some(crate::rmux::State {
+                signal,
+                at: crate::rmux::now_secs().saturating_sub(ago),
+            });
+            Tab::shared(&agent)
+        };
+        let unheard = &|_| None;
+
+        assert_eq!(
+            recorded(crate::hook::Signal::NeedsInput, 300).attention(false, unheard),
+            Some(Attention::NeedsInput),
+            "the session remembered what this cctop never heard"
+        );
+        assert_eq!(
+            recorded(crate::hook::Signal::Idle, 300).attention(false, unheard),
+            Some(Attention::Idle),
+            "and a finished turn is still the quieter of the two"
+        );
+        assert_eq!(
+            recorded(crate::hook::Signal::Busy, 5).attention(false, unheard),
+            None,
+            "an agent recorded as working is left alone"
+        );
+
+        // A working claim nobody has confirmed for hours is the shape a session
+        // killed mid-turn leaves behind. It lapses back to the screen-reading
+        // fallback rather than asserting itself forever — and this tab's clock
+        // says it last drew a moment ago, so that fallback is "not idle".
+        assert_eq!(
+            recorded(crate::hook::Signal::Busy, 3 * 3_600).attention(false, unheard),
+            None,
+        );
+
+        // A live report is fresher than anything written down, and wins.
+        let stale = recorded(crate::hook::Signal::NeedsInput, 300);
+        assert_eq!(
+            stale.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            None,
+            "this cctop heard the agent go back to work"
+        );
     }
 
     /// A pane whose agent rang, with everything else saying it is busy.
@@ -1031,6 +1117,7 @@ mod tests {
             label: None,
             profile: None,
             order: None,
+            state: None,
         })
     }
 

@@ -353,7 +353,8 @@ impl Signal {
         }
     }
 
-    /// A word for the STATE column and the hooks panel.
+    /// A word for the STATE column, the hooks panel, and the option a cctop
+    /// records on an rmux session. See [`Signal::from_label`].
     pub fn label(self) -> &'static str {
         match self {
             Signal::NeedsInput => "asking",
@@ -364,6 +365,49 @@ impl Signal {
             Signal::Started => "started",
             Signal::Ended => "ended",
         }
+    }
+
+    /// The inverse of [`Signal::label`], for a state read back off an rmux
+    /// session — see [`rmux::State`](crate::rmux::State).
+    ///
+    /// Words rather than numbers, so the option stays legible to anyone running
+    /// `rmux show-options` and so the two cctops on either side of it can be
+    /// different versions. A word this one does not know reads as nothing
+    /// reported, which falls back to the guess that was there before: a newer
+    /// cctop teaching an older one a signal it cannot draw should cost the
+    /// older one nothing.
+    pub fn from_label(word: &str) -> Option<Signal> {
+        match word {
+            "asking" => Some(Signal::NeedsInput),
+            "idle" => Some(Signal::Idle),
+            "working" => Some(Signal::Busy),
+            "acting" => Some(Signal::Acting),
+            "compacting" => Some(Signal::Compacting),
+            "started" => Some(Signal::Started),
+            "ended" => Some(Signal::Ended),
+            _ => None,
+        }
+    }
+
+    /// Whether a claim this old can still be true, nothing having been said
+    /// since.
+    ///
+    /// The asymmetry is the whole rule, and it is why this is not a plain
+    /// timeout: a finished turn and a held question stay true until the agent
+    /// says otherwise, so somebody away from their desk for an afternoon comes
+    /// back to the tab that is still asking. Only a *working* claim expires,
+    /// because the events that would have closed it — the tool returning, the
+    /// turn ending — are exactly the ones a killed session never sends.
+    ///
+    /// Taken as an elapsed duration rather than read off `self` so that a
+    /// report this process heard ([`Reported::is_current`], measuring an
+    /// `Instant`) and one recovered from an rmux session ([`rmux::State`],
+    /// measuring wall-clock seconds written by another process) are judged by
+    /// one rule rather than two that have to be kept in step.
+    ///
+    /// [`rmux::State`]: crate::rmux::State
+    pub fn is_current_after(self, elapsed: std::time::Duration) -> bool {
+        !self.is_working() || elapsed < WORKING_TTL
     }
 }
 
@@ -442,7 +486,7 @@ impl Reported {
     /// from their desk for an afternoon should still come back to the tab that
     /// is asking. Only [`Signal::is_working`] expires. See [`WORKING_TTL`].
     pub fn is_current(&self) -> bool {
-        !self.signal.is_working() || self.at.elapsed() < WORKING_TTL
+        self.signal.is_current_after(self.at.elapsed())
     }
 
     /// Whether this can be shown yet.
