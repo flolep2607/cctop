@@ -1,6 +1,7 @@
 //! Loading pipeline: discover sessions, extract data in parallel, annotate.
 
 use crate::cache::Store;
+use crate::fingerprint;
 use crate::pricing::{Plan, Provider};
 use crate::proc;
 use crate::session::{self, ContextUsage, Session, SessionData};
@@ -68,6 +69,16 @@ pub struct Loader {
     /// Activity state and last tool per session, so a walk re-reads only the
     /// transcripts that can still change.
     tail_cache: HashMap<String, (session::ActivityState, String)>,
+    /// The corpus reading the rows in `walked` were built from.
+    corpus: fingerprint::Snapshot,
+    /// The last full walk's rows, so a walk the corpus says nothing changed for
+    /// has something to serve instead of repeating itself.
+    ///
+    /// Held here rather than left to the caller because this is the only layer
+    /// that knows the reading they correspond to, and a caller passing back rows
+    /// from some other moment is precisely the mixture the fingerprint exists to
+    /// prevent.
+    walked: Option<Vec<Session>>,
 }
 
 impl Loader {
@@ -83,6 +94,8 @@ impl Loader {
             rates: HashMap::new(),
             context_cache: HashMap::new(),
             tail_cache: HashMap::new(),
+            corpus: fingerprint::Snapshot::default(),
+            walked: None,
         }
     }
 
@@ -129,6 +142,47 @@ impl Loader {
         A: Fn(&Session) + Sync,
     {
         let _span = crate::trace::span("walk");
+
+        // Nothing below this can produce a different table while the corpus is
+        // byte-for-byte what the last walk read, so ask that question first and
+        // in stat calls only. What it buys is discovery, every tail read and
+        // every extraction — four fifths of a warm walk on a hundred-session
+        // machine — and what it costs on a miss is one stat per file, which
+        // discovery was going to pay anyway.
+        //
+        // Read only once there is a previous walk to serve, because otherwise
+        // the answer cannot be used: `cctop --list`, `--json`, `mcp` and `why`
+        // walk exactly once and exit, and a reading taken for them would be pure
+        // cost. The TUI and `serve` pay it from their second walk onwards, which
+        // is the first one that could have been skipped.
+        let now = util::now_ms();
+        let corpus = self
+            .walked
+            .is_some()
+            .then(fingerprint::compute_corpus_fingerprint);
+        if let Some(corpus) = &corpus {
+            let verdict = self.corpus.decide(corpus, now);
+            crate::trace::fact("corpus", format!("{verdict:?}"));
+            if verdict != fingerprint::Verdict::Recompute
+                && let Some(rows) = &self.walked
+            {
+                let mut sessions = rows.clone();
+                // Processes are re-read even so. A corpus is unchanged by an
+                // agent *exiting* — the transcript it leaves behind is the file
+                // it had already written — and a monitor that went on showing a
+                // dead process as running would be worse than a slow one.
+                self.attach_processes(&mut sessions);
+                // That sweep can append a row for an agent whose transcript does
+                // not exist yet, and a row with no abbreviated label renders as a
+                // blank cell, so the labels are re-derived here as well.
+                self.abbreviate(&mut sessions);
+                on_discovered(&sessions);
+                self.update_rates(&mut sessions);
+                self.walked = Some(sessions.clone());
+                return sessions;
+            }
+        }
+
         let mut sessions = session::list_all();
 
         // Process state and labels are cheap enough to include in the first
@@ -137,10 +191,7 @@ impl Loader {
             let _span = crate::trace::span("walk.processes");
             self.attach_processes(&mut sessions);
         }
-        let labels: Vec<String> = sessions.iter().map(|s| s.label_source.clone()).collect();
-        for (s, label) in sessions.iter_mut().zip(util::abbreviate_paths(&labels)) {
-            s.abbrev_label = label;
-        }
+        self.abbreviate(&mut sessions);
         on_discovered(&sessions);
 
         self.attach_tail_state(&mut sessions, eager);
@@ -167,7 +218,25 @@ impl Loader {
 
         self.update_rates(&mut sessions);
 
+        // Recorded with the reading taken before the walk, not a fresh one: a
+        // transcript appended to while this ran is then a mismatch next time,
+        // which is what it should be.
+        if let Some(corpus) = &corpus {
+            self.corpus.recorded(corpus, now);
+        }
+        self.walked = Some(sessions.clone());
+
         sessions
+    }
+
+    /// Shorten every row's working directory against the others, so the labels
+    /// stay distinguishable. Derived from the whole set at once, which is why it
+    /// is a pass rather than a per-row field.
+    fn abbreviate(&self, sessions: &mut [Session]) {
+        let labels: Vec<String> = sessions.iter().map(|s| s.label_source.clone()).collect();
+        for (s, label) in sessions.iter_mut().zip(util::abbreviate_paths(&labels)) {
+            s.abbrev_label = label;
+        }
     }
 
     fn attach_processes(&mut self, sessions: &mut Vec<Session>) {
