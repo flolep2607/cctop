@@ -536,7 +536,9 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
     // carry, so this is one of the two callers that needs a real parse.
     let data = loader.store().session_data_fresh(session);
     let brief = crate::handoff::build(session, Some(&data));
-    print!("{}", brief.to_markdown());
+    // Printed *and* written: the record of the conversation is a file, and a
+    // brief that named one it had not left would send its reader looking.
+    print!("{}", crate::handoff::rendered(&brief));
     Ok(())
 }
 
