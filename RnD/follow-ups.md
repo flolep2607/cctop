@@ -127,3 +127,39 @@ which is the form that would help `--json` and `--list`. Deriving them is
 mechanical; whether the persisted snapshot is worth having is the open question,
 since the one-shot paths walk once and exit and nothing currently polls them in
 a loop.
+
+---
+
+## From cutting 0.10.0 and 0.11.0 (2026-09-02, 2026-09-03)
+
+### 9. Every release publishes its commit trailers as release notes
+
+`release.yml` takes the release notes from the `chore: release` commit's body
+with `git log --format=%b`, which includes **trailers**. Commits in this
+repository carry a `Co-Authored-By:` line, so it is published as the first thing
+a reader sees:
+
+```
+Two new commands, so a minor. `optimize` and `compare` are …
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+## What's Changed
+```
+
+It has happened on both releases cut so far and was corrected by hand each time
+with `gh release edit`. It will happen on every future release, because the
+trailer is required on the commit and the workflow does not distinguish a
+trailer from prose.
+
+`%b` has no "body without trailers" form. The fix is to drop the trailing block
+of `Key: value` lines after the last blank line — `git interpret-trailers
+--parse` identifies exactly that block, so the subtraction is available without
+a hand-rolled regex.
+
+The reason to fix it in the workflow rather than by hand: a note is fetched when
+somebody updates, not when the release is cut, so a bad one is only invisible if
+someone notices in time to edit it.
+
+**Severity:** cosmetic per release, certain to recur, and it is the first line
+of the only prose most users ever read about a version.
