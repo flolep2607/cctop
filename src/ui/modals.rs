@@ -238,6 +238,8 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "B",
             "Serve this table to a browser, with or without a tunnel",
         ),
+        item("o", "What was spent and not got back"),
+        item("c", "How each model did on the work you gave it"),
         item("h  F8", "Agent integration: what reports to cctop"),
         item("r  F5", "Refresh now"),
         Line::default(),
@@ -1556,6 +1558,61 @@ pub(super) fn draw_rename_tab(
 // ---------------------------------------------------------------------------
 // Clipboard
 // ---------------------------------------------------------------------------
+
+/// `optimize` or `compare`, drawn over the table.
+///
+/// The text arrives already laid out from [`crate::insight`], so this only has
+/// to frame and scroll it — the alternative was a second implementation of the
+/// same tables that could drift from the one the command prints.
+pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
+    let title = match app.insight_kind {
+        "optimize" => " optimize — what was spent and not got back ",
+        _ => " compare — models on the work you gave them ",
+    };
+
+    let body: Vec<Line> = match &app.insight {
+        // Said plainly rather than with a spinner: the wait is a full re-parse
+        // of every transcript, and how long that takes depends on the machine.
+        None => vec![
+            Line::default(),
+            Line::from(Span::styled(
+                "  Reading every transcript. This is the slow one.",
+                theme::value(),
+            )),
+        ],
+        Some(text) => text
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), theme::value())))
+            .collect(),
+    };
+
+    let width = area.width.saturating_sub(4).min(96);
+    let height = area.height.saturating_sub(4);
+    let box_area = centered(area, width, height);
+    frame.render_widget(Clear, box_area);
+
+    let footer = match app.insight.is_some() {
+        true => " ↑↓ scroll · o optimize · c compare · esc close ",
+        false => " esc close ",
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
+        .title(Span::styled(title, theme::title()))
+        .title_bottom(Span::styled(footer, theme::dim()));
+
+    // Clamped so scrolling cannot run off the end and leave an empty frame with
+    // no way to tell it is still open.
+    let visible = box_area.height.saturating_sub(2);
+    let max_scroll = (body.len() as u16).saturating_sub(visible);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(block)
+            .scroll((app.insight_scroll.min(max_scroll), 0)),
+        box_area,
+    );
+}
 
 #[cfg(test)]
 mod tests {
