@@ -18,7 +18,7 @@ use serde::Serialize;
                       cctop <agent> [args…]\n       \
                       cctop attach [pid]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
-                      cctop optimize | compare\n       \
+                      cctop optimize | compare | burn\n       \
                       cctop doctor",
     // Shown by `-h` as well as `--help`: the long description is the only place
     // that mentioned launching agents, and nobody reads `--help` to find out a
@@ -40,6 +40,9 @@ into generated directories, files fetched again, calls\n                        
 that failed and were paid for. Reads only.\n  \
 cctop compare          How each model did on the work you actually gave it —\n                         \
 one-shot rate, cost per file changed, cache hit.\n  \
+cctop burn             What your subscription windows were paid for and did\n                         \
+not use. A window is use-it-or-lose-it, and the\n                         \
+provider only ever reports the current figure.\n  \
 cctop why [ID]         Why a row says a session is running, or is not: every\n                         \
 agent process, the session it was matched to, and the\n                         \
 rule that matched it.\n  \
