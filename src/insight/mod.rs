@@ -123,8 +123,76 @@ const EDIT_TOOLS: [&str; 6] = [
 
 const READ_TOOLS: [&str; 4] = ["Read", "NotebookRead", "read_file", "View"];
 
+/// Whether a shell command writes to a file.
+///
+/// Without this an entire way of working is invisible. A session driven in
+/// "do it through Bash" mode edits with `sed -i`, a heredoc and a redirect, and
+/// never touches the Edit tool at all — 194 Bash calls, no edits, and cctop
+/// filed it as Testing and then reported it as a session that "spent over $0.50
+/// and edited no file". On this machine that mistake covered 19 sessions and
+/// $216 of ordinary work.
+///
+/// ponytail: this reads the command, not the filesystem, so it is a heuristic
+/// in both directions. A `python3 - <<PY` whose script calls `open(p, "w")`
+/// writes a file and is not detectable here — the write is inside the program,
+/// and the command line says only that python ran. Detail strings are also
+/// capped, so a redirect past the cap is not seen. Both make this an
+/// undercount, which is the safe direction: a missed write leaves a session
+/// looking quieter than it was, where a false one would accuse somebody of
+/// editing something they did not.
+fn bash_writes(command: &str) -> bool {
+    let cmd = command.to_ascii_lowercase();
+
+    // In-place editors and copiers, each anchored so `grep sed` in a filename
+    // cannot trigger one.
+    const WRITERS: [&str; 8] = [
+        "sed -i",
+        "sed --in-place",
+        "tee ",
+        "patch -p",
+        "install -m",
+        "mv ",
+        "cp ",
+        "rsync ",
+    ];
+    if WRITERS.iter().any(|w| {
+        cmd.split([';', '|', '&'])
+            .any(|part| part.trim_start().starts_with(w) || part.contains(&format!(" {w}")))
+    }) {
+        return true;
+    }
+
+    // A redirect into something that looks like a path. `2>&1`, `>&2` and
+    // `/dev/null` are the three that appear constantly and write nothing worth
+    // counting.
+    let bytes = cmd.as_bytes();
+    for (i, _) in cmd.match_indices('>') {
+        // Skip the `>` of `2>&1` and `->`, and the second `>` of `>>`.
+        if i > 0 && matches!(bytes[i - 1], b'>' | b'-' | b'=') {
+            continue;
+        }
+        let after = cmd[i..].trim_start_matches('>').trim_start();
+        if after.starts_with('&') || after.starts_with("/dev/null") || after.is_empty() {
+            continue;
+        }
+        // A target that names a file rather than a descriptor.
+        let target = after.split_whitespace().next().unwrap_or("");
+        if target.contains('/') || target.contains('.') {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_edit(tool: &str) -> bool {
     EDIT_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(tool))
+}
+
+/// The tool each harness runs shell commands through.
+fn is_shell(tool: &str) -> bool {
+    ["Bash", "shell", "run_terminal_cmd", "execute_command"]
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(tool))
 }
 
 fn is_read(tool: &str) -> bool {
@@ -149,7 +217,12 @@ pub struct Analysis {
     pub errors: u64,
     /// Whether `errors` is a measurement or a provider's silence.
     pub records_outcomes: bool,
+    /// Calls to a tool whose job is to write a file.
     pub edits: u64,
+    /// Shell calls that wrote a file — see [`bash_writes`]. Kept apart from
+    /// `edits` because only one of the two comes with a path, and the one-shot
+    /// rate needs the path.
+    pub bash_writes: u64,
     pub reads: u64,
     /// Distinct files edited, and how many of them took one contiguous attempt.
     pub files_edited: u64,
@@ -232,8 +305,13 @@ fn classify(data: &SessionData, timeline: &[(&str, &ToolDetail)]) -> Task {
             reads += 1;
         } else if tool.to_ascii_lowercase().contains("plan") {
             plan_calls += 1;
-        } else if tool.eq_ignore_ascii_case("Bash") || tool.eq_ignore_ascii_case("shell") {
-            let cmd = detail.d.to_ascii_lowercase();
+        } else if is_shell(tool) {
+            let command = detail.full.as_deref().unwrap_or(&detail.d);
+            // A shell that wrote a file is editing, whatever else it did.
+            if bash_writes(command) {
+                edits += 1;
+            }
+            let cmd = command.to_ascii_lowercase();
             if [
                 "pytest",
                 "vitest",
@@ -292,6 +370,16 @@ fn classify(data: &SessionData, timeline: &[(&str, &ToolDetail)]) -> Task {
     Task::General
 }
 
+impl Analysis {
+    /// Every write this session made, however it made it.
+    ///
+    /// The thing to ask before saying a session changed nothing. `edits` alone
+    /// answers that question wrongly for anyone working through the shell.
+    pub fn wrote(&self) -> u64 {
+        self.edits + self.bash_writes
+    }
+}
+
 /// Cached input and total input, which are spelled differently per harness.
 ///
 /// Adding every field together looks harmless and is not: Codex reports
@@ -332,6 +420,7 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         cache_read: cached,
         input_total: billed_in,
         edits: 0,
+        bash_writes: 0,
         reads: 0,
         files_edited: 0,
         files_one_shot: 0,
@@ -361,6 +450,13 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         if is_edit(tool) {
             out.edits += 1;
             edit_order.entry(path).or_default().push(i);
+        } else if is_shell(tool) {
+            // The full text when there is one: the short form is capped, and a
+            // redirect past the cap would go unseen.
+            let command = detail.full.as_deref().unwrap_or(path);
+            if bash_writes(command) {
+                out.bash_writes += 1;
+            }
         } else if is_read(tool) {
             out.reads += 1;
             let growth = detail.window_growth.unwrap_or(0);
@@ -650,6 +746,68 @@ mod tests {
         let only_running = vec![call("Bash", "cargo test", "01")];
         let data = data_of(&only_running);
         assert_eq!(classify(&data, &timeline(&data)), Task::Testing);
+    }
+
+    /// The bug this closes. A session driven entirely through the shell edits
+    /// with `sed -i`, a heredoc and a redirect and never touches the Edit tool.
+    /// cctop counted no edits, filed 194 Bash calls as Testing, and then
+    /// reported the session as having "spent over $0.50 and edited no file" —
+    /// 19 sessions and $216 of ordinary work on this machine.
+    #[test]
+    fn a_shell_that_writes_a_file_is_editing() {
+        for writing in [
+            "sed -i 's/a/b/' src/main.rs",
+            "cat > /tmp/x.py <<'EOF'",
+            "cargo build 2>&1 > build.log",
+            "echo hi >> notes.md",
+            "grep -r foo . | tee results.txt",
+            "mv old.rs new.rs",
+            "cp a.toml b.toml",
+        ] {
+            assert!(bash_writes(writing), "should count as a write: {writing}");
+        }
+
+        // The commands a session runs constantly and that write nothing worth
+        // counting. A false positive here accuses somebody of editing a file
+        // they only looked at.
+        for reading in [
+            "cargo test 2>&1 | tail -3",
+            "grep -n foo src/main.rs | head -20",
+            "ls -la >/dev/null 2>&1",
+            "awk '{print $1}' file | sort | uniq -c",
+            "git status --short",
+            "if [ $a > $b ]; then echo yes; fi",
+        ] {
+            assert!(
+                !bash_writes(reading),
+                "should not count as a write: {reading}"
+            );
+        }
+    }
+
+    /// A session that only ever wrote through the shell still edited, and the
+    /// two are counted in one place so nothing has to remember both.
+    #[test]
+    fn shell_writes_count_as_having_changed_something() {
+        let shell_only = analysed(
+            Provider::Claude,
+            &[
+                call("Bash", "sed -i 's/a/b/' src/main.rs", "01"),
+                call("Bash", "cargo test", "02"),
+            ],
+        );
+        assert_eq!(shell_only.edits, 0, "no edit tool was used");
+        assert_eq!(shell_only.bash_writes, 1);
+        assert_eq!(shell_only.wrote(), 1, "but something was written");
+        assert_eq!(
+            shell_only.task,
+            Task::Coding,
+            "and that makes it coding, not testing"
+        );
+
+        // The path-based figures stay honest: a shell write carries no file
+        // name, so it must not inflate the one-shot rate.
+        assert_eq!(shell_only.files_edited, 0);
     }
 
     /// A generated directory is no less generated on Windows.
