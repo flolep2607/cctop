@@ -213,3 +213,26 @@ tests:
 - **The A–F health grade.** A grade is a strong claim and wants more evidence
   behind it than six detectors.
 - **The browser surface.** `serve` does not carry either report yet.
+
+### A fourth thing it got wrong, found on first real use
+
+**An edit made through the shell was not an edit.** The detectors counted an
+edit only when an edit *tool* was used. A session driven in "do the work through
+Bash" mode never uses one, so 194 Bash calls and no Edit calls read as a session
+that changed nothing.
+
+It was not a rounding error. Those sessions were classified as Testing rather
+than Coding, and then reported under "spent over $0.50 and edited no file" —
+19 sessions and $216.85 of ordinary work, presented as something to look into.
+Sampling the sessions that produced it: 334 of their 3172 Bash calls write a
+file.
+
+Fixed by reading the command for a write. The same corpus now reports 6 sessions
+and $17.04 under that note, and Testing falls from 15 sessions to 4.
+
+The lesson worth keeping: **every detector here encodes an assumption about how
+people work, and the assumption is invisible until somebody works differently.**
+This one assumed the agent uses the tool built for the job. The next one will
+assume something else. Running a detector against a corpus of real sessions
+before shipping it catches this; reasoning about it does not, because the
+assumption is the thing you cannot see.

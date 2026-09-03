@@ -205,8 +205,8 @@ fn read_heavy(analyses: &[&Analysis]) -> Option<Finding> {
         .iter()
         .filter(|a| {
             !matches!(a.task, Task::Exploration | Task::Conversation)
-                && a.edits > 0
-                && a.reads >= a.edits * 10
+                && a.wrote() > 0
+                && a.reads >= a.wrote() * 10
         })
         .collect();
     if hit.is_empty() {
@@ -290,7 +290,7 @@ fn spent_without_editing(analyses: &[&Analysis]) -> Option<Finding> {
         .filter(|a| {
             a.cost_available
                 && a.cost >= 0.50
-                && a.edits == 0
+                && a.wrote() == 0
                 && !matches!(
                     a.task,
                     Task::Conversation | Task::Planning | Task::Exploration
@@ -565,6 +565,7 @@ mod tests {
             errors: 0,
             records_outcomes: true,
             edits,
+            bash_writes: 0,
             reads: 0,
             files_edited: edits,
             files_one_shot: edits,
