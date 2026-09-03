@@ -161,3 +161,55 @@ that survive.
 **The interpretation table** from the end of codeburn.md is a separate, smaller
 piece of work and does not depend on either command. It is probably the cheapest
 thing in this whole folder and should not wait behind them.
+
+---
+
+## What was built, 2026-09-03
+
+The first slice of both, shipped together. `src/insight/` — `mod.rs` for the
+shared analysis and classification, `optimize.rs`, `compare.rs` — plus `o` and
+`c` in the TUI and a page at `docs/optimize-and-compare.md`.
+
+**The architectural fact that shaped everything:** `metrics.tool_details` is
+deliberately never cached, being ~31 KB a session and 83% of a cache that has to
+be read in full before the first frame. Every detector here needs it. So both
+commands re-parse every transcript through `Store::session_data_fresh`, and are
+slow in a way the table is not — 1.6 s wall, 7 s CPU across 101 sessions. That
+is the right trade and it is written down in the module docs.
+
+The TUI overlay reuses the corpus fingerprint from #15: the worker's walk is
+warm, so opening a report from the table costs the fresh re-parse and nothing
+else. Both reports render to a `String` rather than printing, so the terminal
+and the overlay show the same words with one implementation of the layout.
+
+### Three things the design got wrong
+
+All three were found by running it against real data, and all three are now
+tests:
+
+1. **Cache accounting is not additive across harnesses.** Codex reports
+   `input_total` as the whole prompt with `cached_input` already inside it;
+   Claude reports `input` as the *uncached* remainder beside `cache_read`.
+   Summing every field put every Codex model's cache hit rate over 50% before it
+   had read anything. `input_split` is now per-provider.
+2. **Ranking testing above coding by call volume was wrong.** "A session that
+   edited and tested is testing if it tested more than it edited" filed 22 of 57
+   Claude sessions on this repository as Testing — a category that swallows the
+   work it was meant to distinguish. Testing now means running tests and
+   changing nothing, which is the only case where the two are actually distinct.
+3. **A `note` is not a saving.** Ranking findings by cost put the one
+   unactionable row at the top, and summing every finding into the headline
+   advertised $218 of ordinary work as recoverable. Notes are now ranked last,
+   labelled `observed` rather than `measured`, and excluded from the total. The
+   honest figure on this machine was $1.32.
+
+### Deliberately not built
+
+- **Config scanning** — bloated `CLAUDE.md`, unused MCP servers, ghost agents
+  and skills. These need a different source of truth from the transcripts.
+- **Auto-apply, undo, and the savings report.** Writing to somebody's
+  `~/.claude/` is a different commitment from reading it and should not land in
+  the same release as the detectors deciding what to write.
+- **The A–F health grade.** A grade is a strong claim and wants more evidence
+  behind it than six detectors.
+- **The browser surface.** `serve` does not carry either report yet.

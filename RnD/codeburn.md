@@ -24,14 +24,15 @@ preceded these; where the two disagree, this table is what happened.
 
 | | Idea | Verdict |
 |---|---|---|
-| #1 | `cctop optimize` — waste scanner | **Wanted.** Design in [optimize-and-compare.md](optimize-and-compare.md) |
-| #4 | `cctop compare` — models on your own work | **Wanted.** Same design note |
+| #1 | `cctop optimize` — waste scanner | **Built**, first slice. Six detectors, no config scanning, no auto-apply |
+| #4 | `cctop compare` — models on your own work | **Built**, first slice. Per model and per task, with the observational caveat printed |
 | #6 | `guard` — budget caps as hooks | **Rejected.** Not what cctop is for. It also wanted the one thing `src/hook.rs` is documented never to do |
 | #12 | Menu bar and tray clients | **Rejected.** cctop is used over ssh and inside WSL, where a tray is either invisible or on the wrong machine. The stable JSON contract underneath it survives on its own merits |
 | #13 | Their MCP surface | **Rejected.** cctop's four tools are already better. The pseudonymised project names are the only part worth revisiting, and not now |
 | #15–#18 | Corpus fingerprint, settle window, snapshot cache | **Built** in-process: `src/fingerprint.rs`, warm walk 90–158 ms → 12–14 ms. No persisted snapshot — see the note under #15 |
 | #21 | One dedup set across providers | **Built.** Real cause turned out to be double discovery, not harness mirroring — see the note under #21 |
 | #26 | cctop-authored notes per harness | **Built** as `docs/providers/`. Four findings fell out of it — [follow-ups.md](follow-ups.md) |
+| #5 | Task classification | **Built** as the prerequisite for both. Ten categories, tool-first |
 | — | Subscription burn | **New, and the most interesting thing here.** Not from codeburn at all — see [subscription-burn.md](subscription-burn.md) |
 
 Everything not listed is undecided.
