@@ -153,3 +153,52 @@ in the Limits pane, with the coverage caveat. That is the whole idea in its
 smallest honest form. Everything else — Codex, the five-hour window, the charts,
 the dollar ratio, the HTML report — is addition, and each piece is separately
 useful, so none of it needs to be designed now.
+
+---
+
+## What was built, 2026-09-03
+
+`src/burn.rs` — the sample log, window reconstruction, `cctop burn` and its
+`--json` — plus the figure on the Limits pane and `docs/subscription-burn.md`.
+
+The design held up. The sample log is the whole of the new state, everything
+else is derived from it, and the poller in `spawn_quota_poller` turned out to be
+exactly the right insertion point: it is the only place in cctop that every
+reading of every window passes through.
+
+### What changed from the design
+
+- **Averages exclude thinly-observed windows rather than caveating them.** The
+  design said to record coverage and let the display degrade. Recording it is
+  necessary but not sufficient: a window cctop barely saw reports a low peak and
+  therefore a *high* unused share, so averaging it in pushes the headline toward
+  "you used none of it" — the one direction that could talk somebody into
+  downgrading a plan they actually need. Below two thirds coverage a window is
+  dropped from the average and counted in a line that says how many were.
+- **Nothing is claimed from a single completed window.** One quiet week is a
+  quiet week. The Limits pane stays silent until there are two.
+- **The open window is not reported at all**, which the design did not say. Its
+  unused share is not forfeited yet.
+- **A `cctop burn` command as well as the pane figure.** The pane is one crowded
+  line per account and could not carry the history, the coverage or the caveat —
+  and those are the parts that make the number honest rather than merely
+  printed.
+- **Retention is measured against the newest sample, not the clock.** Found by a
+  test: against the clock, a log restored from a backup deletes itself on the
+  first write, and so does one read on a machine with a wrong clock — which is
+  the same machine whose `resets_at` arithmetic is already suspect.
+
+### The bug the render test caught
+
+The Limits pane keyed the burn log on the account's *display label* — `Claude`
+for the first account and `Claude (work)` for the rest — where the log knows
+accounts by profile. With one account named `default` the figure simply never
+appeared, and with two it would have appeared against the wrong one. A render
+test that asserted the text reached the buffer found it in one run; reading the
+code did not, because both sides looked like the account's name.
+
+### Still not built
+
+The charts over hours and days, the browser view, and the standalone HTML
+report. The log carries what all three need — every sample keeps its timestamp
+and its plan — and nothing reads it that way yet.

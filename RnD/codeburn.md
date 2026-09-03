@@ -33,7 +33,7 @@ preceded these; where the two disagree, this table is what happened.
 | #21 | One dedup set across providers | **Built.** Real cause turned out to be double discovery, not harness mirroring — see the note under #21 |
 | #26 | cctop-authored notes per harness | **Built** as `docs/providers/`. Four findings fell out of it — [follow-ups.md](follow-ups.md) |
 | #5 | Task classification | **Built** as the prerequisite for both. Ten categories, tool-first |
-| — | Subscription burn | **New, and the most interesting thing here.** Not from codeburn at all — see [subscription-burn.md](subscription-burn.md) |
+| — | Subscription burn | **Built** as `cctop burn` plus a Limits-pane figure. Not from codeburn at all — see [subscription-burn.md](subscription-burn.md) |
 
 Everything not listed is undecided.
 
