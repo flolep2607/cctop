@@ -117,6 +117,8 @@ pub enum Mode {
     /// The agent-integration panel: what is installed where, and whether the
     /// agents are actually reporting in.
     Hooks,
+    /// `cctop optimize` or `cctop compare`, drawn over the table.
+    Insight,
     /// Offering to install rmux, a launch having found it missing.
     TmuxInstall,
     /// Typing a new name for a workspace tab, opened by right-clicking it.
@@ -270,6 +272,12 @@ enum Request {
         pid: u32,
         text: String,
     },
+    /// Build an `optimize` or `compare` report. Slow — it re-parses every
+    /// transcript, because the tool calls it reasons about are never cached —
+    /// so it goes to the worker like any other walk.
+    Insight {
+        which: &'static str,
+    },
     /// Look for `query` inside every listed session's transcript.
     Scan {
         query: String,
@@ -318,6 +326,8 @@ enum Response {
         query: String,
         hits: HashMap<String, String>,
     },
+    /// A finished report, already laid out as text.
+    Insight(String),
 }
 
 /// A tunnel registration in flight, and when it started.
@@ -517,6 +527,27 @@ fn spawn_worker(
                 Request::SendKeys { pid, text } => {
                     let result = crate::inject::send_line(pid, &text);
                     if tx.send(Response::KeysSent { result }).is_err() {
+                        break;
+                    }
+                }
+                Request::Insight { which } => {
+                    // On the gentle pool: nobody is waiting on the table, and a
+                    // full re-parse would otherwise take every core away from
+                    // the session the user is watching.
+                    // Walked first, because the walk needs the loader mutably
+                    // and the analysis only needs its store. Warm, so this is
+                    // the cheap half.
+                    let sessions = loader.load(plan);
+                    let store = loader.store();
+                    let text = loader.gently(|| {
+                        let found = crate::insight::from_store(&sessions, store);
+                        let all: Vec<&crate::insight::Analysis> = found.iter().collect();
+                        match which {
+                            "optimize" => crate::insight::optimize::report(&all),
+                            _ => crate::insight::compare::report(&all),
+                        }
+                    });
+                    if tx.send(Response::Insight(text)).is_err() {
                         break;
                     }
                 }
@@ -816,6 +847,13 @@ pub struct App {
     /// reads three files off disk and scans a directory, which is nothing to do
     /// once and wasteful to do sixty times a second behind a closed panel.
     pub hooks: Option<crate::hook::Report>,
+    /// The open report, and how far it is scrolled. `None` while the worker is
+    /// still building it, which is what the overlay draws as "working".
+    pub insight: Option<String>,
+    pub insight_scroll: u16,
+    /// Which report was asked for, so the overlay can name itself before the
+    /// text arrives.
+    pub insight_kind: &'static str,
     /// The socket the agents push their events to. `None` only where there is
     /// none to be had — a non-unix build — in which case every estimate carries
     /// on exactly as it did before hooks existed.
@@ -943,6 +981,9 @@ impl App {
 
         App {
             sessions: Vec::new(),
+            insight: None,
+            insight_scroll: 0,
+            insight_kind: "optimize",
             loaded: false,
             visible: Vec::new(),
             finished_agents: std::collections::HashSet::new(),
@@ -4551,6 +4592,10 @@ fn event_loop(
                     rows_changed = true;
                 }
                 Ok(Response::Scanned { query, hits }) => app.scanned(query, hits),
+                Ok(Response::Insight(text)) => {
+                    app.insight = Some(text);
+                    app.insight_scroll = 0;
+                }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -4746,6 +4791,21 @@ fn event_loop(
     // Quit was pressed rather than the agent exiting, so there is no exit code
     // to inherit.
     Ok(0)
+}
+
+impl App {
+    /// Open `optimize` or `compare` over the table.
+    ///
+    /// The report is built on the worker and arrives later, so this opens the
+    /// overlay empty rather than blocking the render loop for the second or two
+    /// a full re-parse takes.
+    fn open_insight(&mut self, which: &'static str) {
+        self.insight = None;
+        self.insight_scroll = 0;
+        self.insight_kind = which;
+        self.mode = Mode::Insight;
+        let _ = self.tx.send(Request::Insight { which });
+    }
 }
 
 #[cfg(test)]
@@ -5540,6 +5600,52 @@ mod tests {
             !screen.contains(&token),
             "the token was drawn on screen:\n{screen}"
         );
+    }
+    /// The report overlay draws the text the command prints, and says so while
+    /// it is still being built — the wait is a full re-parse of every
+    /// transcript, and an empty box would read as a broken one.
+    #[test]
+    fn the_report_overlay_draws_its_text_and_says_when_it_is_working() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let screen_of = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    render::draw(frame, app);
+                })
+                .expect("draw");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        let mut app = test_app();
+        app.mode = Mode::Insight;
+        app.insight_kind = "optimize";
+        app.insight = None;
+        let waiting = screen_of(&mut app);
+        assert!(
+            waiting.contains("This is the slow one"),
+            "an empty overlay must explain itself: {waiting}"
+        );
+
+        app.insight = Some("  fix    something worth doing\n  habit  something else\n".into());
+        let drawn = screen_of(&mut app);
+        assert!(drawn.contains("something worth doing"), "{drawn}");
+        assert!(drawn.contains("esc close"), "the way out is on the frame");
+
+        // Scrolling past the end must not empty the frame: the clamp is what
+        // stops a held-down key from leaving a box with nothing in it and no
+        // sign it is still open.
+        app.insight_scroll = u16::MAX;
+        let scrolled = screen_of(&mut app);
+        assert!(scrolled.contains("something else"), "{scrolled}");
     }
 
     /// was about to start.

@@ -18,6 +18,7 @@ use serde::Serialize;
                       cctop <agent> [args…]\n       \
                       cctop attach [pid]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
+                      cctop optimize | compare\n       \
                       cctop doctor",
     // Shown by `-h` as well as `--help`: the long description is the only place
     // that mentioned launching agents, and nobody reads `--help` to find out a
@@ -34,6 +35,11 @@ flags. Handy on a phone for the sessions waiting on you.\n  \
 cctop doctor           Check this installation and say what is wrong with it:\n                         \
 where sessions are read from, pricing, hooks, and what\n                         \
 `s` can reach. --host also tests an ssh target.\n  \
+cctop optimize         What your sessions spent and did not get back: reads\n                         \
+into generated directories, files fetched again, calls\n                         \
+that failed and were paid for. Reads only.\n  \
+cctop compare          How each model did on the work you actually gave it —\n                         \
+one-shot rate, cost per file changed, cache hit.\n  \
 cctop why [ID]         Why a row says a session is running, or is not: every\n                         \
 agent process, the session it was matched to, and the\n                         \
 rule that matched it.\n  \

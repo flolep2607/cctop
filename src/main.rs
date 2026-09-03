@@ -12,6 +12,7 @@ mod fleet;
 mod handoff;
 mod hook;
 mod inject;
+mod insight;
 mod loader;
 mod mcp;
 mod notify;
@@ -106,6 +107,16 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("why") {
             std::process::exit(why::run(&argv[2..]));
+        }
+    }
+
+    // `cctop optimize` and `cctop compare` alongside `doctor`, for the same
+    // reason: both are bare words and cctop has no positionals for clap to read
+    // one as. Every platform — neither asks anything of the operating system.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if let Some(word @ ("optimize" | "compare")) = argv.get(1).map(String::as_str) {
+            std::process::exit(insight::run(word, &argv[2..]));
         }
     }
 

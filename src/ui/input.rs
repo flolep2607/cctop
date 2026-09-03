@@ -147,6 +147,7 @@ impl App {
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
             Mode::Hooks => self.on_key_hooks(key),
+            Mode::Insight => self.on_key_insight(key),
             Mode::Help => self.on_key_help(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
@@ -467,6 +468,37 @@ impl App {
     /// The integration panel. Every action rewrites somebody's settings file,
     /// so each is a distinct letter — there is no cursor to land on the wrong
     /// row and no Enter that does whatever was last highlighted.
+    /// Scroll the report, or close it. Nothing here can change a session: both
+    /// reports are read-only and the overlay is too.
+    fn on_key_insight(&mut self, key: KeyEvent) {
+        // Lines that fit on a normal terminal, used as the page step. The
+        // overlay does not know the frame height here, so a page is a sensible
+        // fixed jump rather than a wrong computed one.
+        const PAGE: u16 = 20;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b') => {
+                self.mode = Mode::List;
+                self.insight = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.insight_scroll = self.insight_scroll.saturating_add(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.insight_scroll = self.insight_scroll.saturating_sub(1)
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                self.insight_scroll = self.insight_scroll.saturating_add(PAGE)
+            }
+            KeyCode::PageUp => self.insight_scroll = self.insight_scroll.saturating_sub(PAGE),
+            KeyCode::Home => self.insight_scroll = 0,
+            // The other report, without going back to the table first: the two
+            // answer halves of the same question.
+            KeyCode::Char('o') => self.open_insight("optimize"),
+            KeyCode::Char('c') => self.open_insight("compare"),
+            _ => {}
+        }
+    }
+
     fn on_key_hooks(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
@@ -989,6 +1021,11 @@ impl App {
             // `W` next to it, since both are about an agent reaching you rather
             // than you reaching it.
             KeyCode::Char('W') => self.share_selected(),
+            // The two reports, on the letters they are named for. Both are
+            // read-only and both open over the table rather than replacing it,
+            // because the question they answer is about the rows underneath.
+            KeyCode::Char('o') => self.open_insight("optimize"),
+            KeyCode::Char('c') => self.open_insight("compare"),
             // `B` for browser, beside the two keys that are also about reaching
             // this machine from somewhere else. `W` puts one agent's terminal
             // in a browser; this puts the whole table in one.

@@ -292,6 +292,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
         Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
+        Mode::Insight => modals::draw_insight(frame, area, app),
         Mode::List => {}
     }
     layout
