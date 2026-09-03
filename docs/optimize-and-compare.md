@@ -92,6 +92,30 @@ A session that used several models is credited entirely to whichever cost the
 most. The transcript records which model billed a request, not which model asked
 for a given tool call.
 
+## What counts as editing
+
+An edit tool — `Edit`, `Write`, Codex's `apply_patch` — is the obvious case. The
+less obvious one is a shell command, and missing it was wrong in a way worth
+recording: a session driven in "do the work through Bash" mode edits with
+`sed -i`, a heredoc and a redirect and never touches an edit tool at all. cctop
+counted no edits, filed those sessions as Testing, and then reported them as
+having spent money and changed nothing.
+
+So a shell command is read for a write: an in-place editor, `tee`, a copy or a
+move, or a redirect whose target names a path rather than a descriptor —
+`2>&1`, `>&2` and `/dev/null` being the three that appear constantly and write
+nothing worth counting.
+
+This undercounts, deliberately. A `python3 - <<PY` whose script calls
+`open(p, "w")` writes a file that the command line cannot reveal. A missed write
+leaves a session looking quieter than it was; a false one would accuse somebody
+of editing a file they only read, and that is the worse mistake.
+
+One consequence to know about: a shell write carries no file name, so it counts
+toward *whether* a session changed anything but not toward the one-shot rate,
+which needs a path. `1-shot` and `$/file` therefore describe edit-tool work
+only.
+
 ## Where the numbers are floors
 
 The per-session tool history is capped, so a session that made more calls than
