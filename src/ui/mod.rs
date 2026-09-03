@@ -847,6 +847,10 @@ pub struct App {
     /// reads three files off disk and scans a directory, which is nothing to do
     /// once and wasteful to do sixty times a second behind a closed panel.
     pub hooks: Option<crate::hook::Report>,
+    /// Readings of each account's rate-limit windows, for the unused-allowance
+    /// figure on the Limits pane. Reloaded when a quota response arrives rather
+    /// than held by the poller, so the file has exactly one writer.
+    pub burn: crate::burn::Log,
     /// The open report, and how far it is scrolled. `None` while the worker is
     /// still building it, which is what the overlay draws as "working".
     pub insight: Option<String>,
@@ -981,6 +985,7 @@ impl App {
 
         App {
             sessions: Vec::new(),
+            burn: crate::burn::Log::load(),
             insight: None,
             insight_scroll: 0,
             insight_kind: "optimize",
@@ -4365,10 +4370,45 @@ fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
     });
 }
 
+/// Write every window of every account into the burn log.
+///
+/// Returns whether anything new was stored. Only `Ok` statuses carry windows;
+/// a signed-out or throttled account has nothing to record, and recording a
+/// zero for it would look exactly like an account that used none of its
+/// allowance.
+fn record_burn(log: &mut crate::burn::Log, quota: &Quota) -> bool {
+    let at = crate::util::now_ms() / 1000;
+    let mut stored = false;
+    for (provider, profiles) in [("claude", &quota.claude), ("codex", &quota.codex)] {
+        for profile in profiles {
+            let crate::quota::ProviderStatus::Ok(q) = &profile.status else {
+                continue;
+            };
+            for window in &q.windows {
+                stored |= log.record(
+                    crate::burn::key(provider, &profile.profile, window.label),
+                    crate::burn::Sample {
+                        at,
+                        pct: window.pct,
+                        resets_at: window.resets_at,
+                        plan: q.plan.clone(),
+                    },
+                );
+            }
+        }
+    }
+    stored
+}
+
 fn spawn_quota_poller(tx: Sender<Response>) {
     std::thread::spawn(move || {
         let mut quota = Quota::default();
         let (mut claude_due, mut codex_due) = (Instant::now(), Instant::now());
+        // Every reading of every window passes through here, which is the only
+        // place that is true — so it is where they get written down. A window
+        // that resets takes its own history with it, and nothing else in cctop
+        // sees a figure before that happens.
+        let mut burn = crate::burn::Log::load();
 
         loop {
             let now = Instant::now();
@@ -4423,6 +4463,12 @@ fn spawn_quota_poller(tx: Sender<Response>) {
 
             if changed {
                 quota.fetched = true;
+                // Only written when a reading actually said something new, so an
+                // idle account does not rewrite the file every five minutes for
+                // nothing.
+                if record_burn(&mut burn, &quota) {
+                    burn.save();
+                }
                 if tx.send(Response::Quota(Box::new(quota.clone()))).is_err() {
                     break;
                 }
@@ -4528,6 +4574,9 @@ fn event_loop(
                 }
                 Ok(Response::Quota(q)) => {
                     app.quota = *q;
+                    // The poller has just written whatever this reading added,
+                    // so this is the one moment the log is known to have moved.
+                    app.burn = crate::burn::Log::load();
                     app.needs_redraw = true;
                 }
                 Ok(Response::UpdateAvailable(version)) => {
@@ -5601,6 +5650,89 @@ mod tests {
             "the token was drawn on screen:\n{screen}"
         );
     }
+    /// The Limits pane answers "is there room to keep working". This adds the
+    /// other question nobody is shown — whether the plan was worth buying —
+    /// and it must stay quiet until it has enough windows to be worth saying.
+    #[test]
+    fn the_limits_pane_reports_unused_allowance_once_it_has_enough_windows() {
+        use crate::burn::{Log, Sample, key};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        app.quota = Quota {
+            fetched: true,
+            claude: vec![crate::quota::ProfileQuota {
+                profile: "default".into(),
+                source: crate::config::AccountSource::Directory,
+                status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                    plan: Some("max_20x".into()),
+                    windows: vec![crate::quota::Window {
+                        label: "7d",
+                        pct: 20,
+                        duration: Some(Duration::from_secs(7 * 24 * 3600)),
+                        resets_at: None,
+                    }],
+                    limit_reached: false,
+                }),
+            }],
+            codex: Vec::new(),
+        };
+
+        let screen_of = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    render::draw(frame, app);
+                })
+                .expect("draw");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        // One completed window is one quiet week, not a pattern, so nothing is
+        // claimed from it.
+        let mut log = Log::default();
+        let k = key("claude", "default", "7d");
+        let week = 7 * 24 * 3600;
+        let push = |log: &mut Log, w: i64, peak: u32| {
+            let start = 1_000_000 + w * week;
+            for i in 0..10 {
+                log.record(
+                    k.clone(),
+                    Sample {
+                        at: start + i * (week / 10),
+                        pct: (peak as i64 * (i + 1) / 10) as u32,
+                        resets_at: Some(start + week),
+                        plan: Some("max_20x".into()),
+                    },
+                );
+            }
+        };
+        push(&mut log, 0, 60);
+        push(&mut log, 1, 50); // opens the second window, completing the first
+        app.burn = log.clone();
+        assert!(
+            !screen_of(&mut app).contains("unused"),
+            "one completed window is not a pattern"
+        );
+
+        // A third window completes the second, and now there is something to
+        // say: 40% and 50% unused, averaging 45%.
+        push(&mut log, 2, 10);
+        app.burn = log;
+        let screen = screen_of(&mut app);
+        assert!(
+            screen.contains("~45% of 7d unused"),
+            "the unused share never reached the pane:\n{screen}"
+        );
+    }
+
     /// The report overlay draws the text the command prints, and says so while
     /// it is still being built — the wait is a full re-parse of every
     /// transcript, and an empty box would read as a broken one.

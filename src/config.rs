@@ -439,6 +439,10 @@ pub static COST_CACHE_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join(
 pub static PRICING_CACHE_FILE: LazyLock<PathBuf> =
     LazyLock::new(|| CACHE_DIR.join("litellm-pricing.json"));
 pub static UI_PREFS_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join("ui-prefs.json"));
+/// Readings of each account's rate-limit windows, kept because the provider
+/// reports only the current figure and a reset destroys the evidence. See
+/// [`crate::burn`].
+pub static BURN_LOG_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join("burn-log.json"));
 
 pub const LITELLM_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";

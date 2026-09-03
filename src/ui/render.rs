@@ -1393,6 +1393,28 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                         Style::default().fg(theme::colors().cost_high),
                     ));
                 }
+                // What previous windows of this account went to waste. The
+                // percentages beside it say whether there is room to keep
+                // working; this says whether the plan was worth buying, which
+                // is the question nobody is otherwise shown. Only the longest
+                // window is offered — a five-hour window resets too often for
+                // its unused share to mean anything about a subscription.
+                if let Some(longest) = q
+                    .windows
+                    .iter()
+                    .max_by_key(|w| w.duration.map(|d| d.as_secs()).unwrap_or(0))
+                    // Keyed on the profile, not the label above: the label is
+                    // "Claude" for the first account and "Claude (work)" for
+                    // the rest, and the log knows accounts by profile.
+                    && let Some(text) = crate::burn::suffix(
+                        &app.burn,
+                        harness.to_ascii_lowercase().as_str(),
+                        &account.profile,
+                        longest.label,
+                    )
+                {
+                    spans.push(Span::styled(format!("  {text}"), theme::dim()));
+                }
             }
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), cols[i]);

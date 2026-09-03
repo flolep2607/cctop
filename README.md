@@ -106,6 +106,7 @@ loopback by default. See [In a browser](docs/serve.md).
 
 - [Reading the table](docs/the-table.md) — every column, the status dot, filtering, and the full key list
 - [What it cost you for](docs/optimize-and-compare.md) — `cctop optimize` and `cctop compare`, and how honest each figure is
+- [What the subscription bought](docs/subscription-burn.md) — `cctop burn`, and why an unused allowance is a ceiling rather than a measurement
 - [Driving agents](docs/driving-agents.md) — typing into sessions, resuming, tabs and splits, notifications, handoff
 - [In a browser](docs/serve.md) — `cctop serve`, the session report, and reaching it from a phone
 - [The bottom panels](docs/panels.md) — Tool Activity and the context breakdown
