@@ -99,6 +99,31 @@ footer carries the `⚠` case only — agents share repositories all day and not
 has gone wrong yet, whereas two of them writing one file means an edit has
 already been lost or is about to be.
 
+Some files are exempt, on one rule: **nothing exempt is work that can be
+silently lost.** Being plain text is not the test — source code is plain text,
+and losing a line of it is why the warning exists.
+
+| | |
+|---|---|
+| prose | `.md` `.markdown` `.rst` `.adoc` `.org` `.txt` |
+| machine output | `.lock` `.sum` `.log`, plus `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` |
+
+Prose is what two agents are *supposed* to be writing at once — a changelog, a
+notes file, a memory index — edited by section rather than rewritten whole. A
+`⚠` that fires every time both of them append to `MEMORY.md` is one that gets
+read past, and it takes the `src/ui.rs` case with it.
+
+Machine output is nobody's handwriting. Two agents in one checkout both running
+`cargo add` or `npm install` write a lock file every time, and the fix for a bad
+one is to regenerate it; a real disagreement about a dependency surfaces in git,
+which announces it properly. npm and pnpm spell their lock files `.json` and
+`.yaml`, so those two are named outright — the extensions themselves stay
+contested, because two agents editing one `package.json` is exactly the case the
+warning is for.
+
+The exemption is per file, not per session: share a notes file and a source file
+and the source file is still reported.
+
 The unit of comparison is the **repository root**, not the working directory. A
 linked worktree carries its own `.git`, so two agents in two worktrees of one
 repository are editing two sets of files on disk and are not reported; two
@@ -106,7 +131,8 @@ agents started from different subdirectories of one checkout are. Comparing
 directories gets both of those backwards, and the second is the arrangement
 `git worktree` exists to provide.
 
-Three limits worth knowing. Only running sessions are compared — a session that
+Four limits worth knowing. Two agents rewriting one README whole *can* lose an
+edit, and the prose exemption above will not say so. Only running sessions are compared — a session that
 has stopped may well have left uncommitted work behind, but nothing it does from
 here can race anyone. Only the last 32 files each session wrote are watched, so
 a path it finished with an hour and forty edits ago is not treated as contested.

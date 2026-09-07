@@ -95,7 +95,7 @@ pub fn detect(sessions: &[Session]) -> Map {
                     .recent_writes
                     .iter()
                     .map(String::as_str)
-                    .filter(|p| mine.contains(p))
+                    .filter(|p| mine.contains(p) && contested(p))
                     .collect();
                 if common.is_empty() {
                     neighbours.push(other.key());
@@ -125,6 +125,49 @@ pub fn detect(sessions: &[Session]) -> Map {
     out
 }
 
+/// Extensions where a second writer is ordinary rather than a race.
+///
+/// Two groups, one rule: **nothing here is work that can be silently lost.**
+/// Being plain text is not the test — source code is plain text, and losing a
+/// line of it is the whole reason this warning exists.
+///
+/// *Prose* — the markups and `txt` — is what two agents are supposed to be
+/// writing at once. A changelog, a notes file, a memory index: edited by
+/// section rather than rewritten whole, and a clash is legible on sight.
+///
+/// *Machine output* — lock files, checksum lists, logs — is nobody's
+/// handwriting. Two agents in one checkout both running `cargo add` or
+/// `npm install` will write a lock file every single time, and the fix for a
+/// bad one is to regenerate it. A real disagreement about a dependency shows up
+/// in git, which announces it properly.
+///
+/// ponytail: it is an extension, not an analysis. Two agents rewriting one
+/// README whole *can* lose an edit, and this will not say so. That is the trade
+/// the warning is worth having at all — one that fires on every `MEMORY.md`
+/// write is one that gets read past, taking the `src/ui.rs` case with it.
+const UNCONTESTED_EXT: [&str; 9] = [
+    "md", "markdown", "rst", "adoc", "org", "txt", // prose
+    "lock", "sum", "log", // written by a tool, not a person
+];
+
+/// Lock files that spell themselves with an ordinary config extension.
+///
+/// `Cargo.lock`, `yarn.lock`, `poetry.lock` and `flake.lock` are caught by
+/// `lock` above; npm and pnpm use `.json` and `.yaml`, which are exactly the
+/// extensions that must *not* be exempt in general — two agents editing one
+/// `package.json` is the case the warning is for. So these are named outright.
+const UNCONTESTED_NAME: [&str; 3] = ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml"];
+
+/// Whether two agents writing `path` is worth reporting.
+fn contested(path: &str) -> bool {
+    let path = Path::new(path);
+    let matches = |part: Option<&std::ffi::OsStr>, list: &[&str]| {
+        part.and_then(|p| p.to_str())
+            .is_some_and(|p| list.contains(&p.to_ascii_lowercase().as_str()))
+    };
+    !matches(path.file_name(), &UNCONTESTED_NAME) && !matches(path.extension(), &UNCONTESTED_EXT)
+}
+
 /// Live sessions standing on the same ground as `dir`, each with whichever of
 /// `files` it has already written.
 ///
@@ -146,7 +189,9 @@ pub fn peers_of<'a>(
             let shared = s
                 .recent_writes
                 .iter()
-                .filter(|w| wanted.contains(*w))
+                // The same exemption `detect` makes, because this answers the
+                // same question for an agent that has no row yet.
+                .filter(|w| wanted.contains(*w) && contested(w))
                 .cloned()
                 .collect();
             (s, shared)
@@ -320,6 +365,94 @@ mod tests {
         let map = detect(&[a.clone(), b]);
         assert_eq!(map[&a.key()].level, Overlap::Directory);
         assert!(map[&a.key()].files.is_empty());
+    }
+
+    /// Prose is where two agents at once is the normal state of affairs. A
+    /// warning that fires every time both of them append to `MEMORY.md` is one
+    /// that gets read past, which costs the `src/ui.rs` case it exists for.
+    #[test]
+    fn two_agents_in_one_notes_file_are_not_a_collision() {
+        let fx = Fixture::new("prose");
+        let repo = fx.checkout("repo");
+        let notes = format!("{repo}/memory/MEMORY.md");
+
+        let a = live("a", &repo, &[&notes, &format!("{repo}/TODO.txt")]);
+        let b = live("b", &repo, &[&notes, &format!("{repo}/TODO.txt")]);
+        let map = detect(&[a.clone(), b.clone()]);
+
+        // Still in the same checkout, which is worth knowing — but the file
+        // callout, and the footer line it drives, are gone.
+        assert_eq!(map[&a.key()].level, Overlap::Directory);
+        assert!(map[&a.key()].files.is_empty());
+    }
+
+    /// A lock file is the one two agents in a checkout collide on by accident:
+    /// both run a package manager, neither wrote a line of it, and the fix for
+    /// a bad one is to regenerate it.
+    #[test]
+    fn a_lock_file_is_not_somebody_s_work() {
+        let fx = Fixture::new("locks");
+        let repo = fx.checkout("repo");
+        let locks: Vec<String> = [
+            "Cargo.lock",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "go.sum",
+            "build.log",
+        ]
+        .iter()
+        .map(|f| format!("{repo}/{f}"))
+        .collect();
+        let borrowed: Vec<&str> = locks.iter().map(String::as_str).collect();
+
+        let a = live("a", &repo, &borrowed);
+        let b = live("b", &repo, &borrowed);
+        assert_eq!(detect(&[a.clone(), b])[&a.key()].level, Overlap::Directory);
+    }
+
+    /// The config extensions the lock files borrow are not themselves exempt.
+    /// Two agents editing one `package.json` is the case the warning is for.
+    #[test]
+    fn a_lock_file_s_extension_does_not_exempt_its_neighbours() {
+        assert!(!contested("/repo/pnpm-lock.yaml"));
+        assert!(contested("/repo/package.json"));
+        assert!(contested("/repo/docker-compose.yaml"));
+        assert!(contested("/repo/Cargo.toml"));
+        assert!(contested("/repo/.env"));
+        assert!(contested("/repo/data.csv"));
+    }
+
+    /// And the exemption is per file, not per session: sharing a notes file
+    /// must not hide the source file shared alongside it.
+    #[test]
+    fn prose_alongside_code_still_reports_the_code() {
+        let fx = Fixture::new("prose-and-code");
+        let repo = fx.checkout("repo");
+        let code = format!("{repo}/src/ui.rs");
+        let notes = format!("{repo}/NOTES.md");
+
+        let a = live("a", &repo, &[&code, &notes]);
+        let b = live("b", &repo, &[&code, &notes]);
+        let hit = &detect(&[a.clone(), b])[&a.key()];
+
+        assert_eq!(hit.level, Overlap::File);
+        assert_eq!(hit.files, vec![normalise(&code, "/anywhere")]);
+    }
+
+    /// `check_conflicts` answers the same question for an agent with no row
+    /// yet, so it has to answer it the same way.
+    #[test]
+    fn the_agent_facing_answer_makes_the_same_exemption() {
+        let fx = Fixture::new("prose-peers");
+        let repo = fx.checkout("repo");
+        let notes = format!("{repo}/MEMORY.md");
+        let code = format!("{repo}/src/ui.rs");
+        let sessions = [live("a", &repo, &[&notes, &code])];
+
+        let asked = [notes.clone(), code.clone()];
+        let peers = peers_of(&sessions, &repo, &asked);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].1, vec![normalise(&code, "/anywhere")]);
     }
 
     #[test]
