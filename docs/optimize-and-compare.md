@@ -55,6 +55,29 @@ What it currently detects:
 Underneath, where the money went by kind of work: coding, debugging, testing,
 exploration, planning, delegation, git, build, conversation.
 
+**A finding has to be worth more than the time it takes to act on.** The report
+once opened with a `fix` worth $0.0071, ranked above a habit worth a dollar, and
+both figures were right. Neither was worth having: *a dollar is like a few
+minutes of my time*, and a fix is several minutes — read the row, find the
+settings file, edit it, check it did something. A list whose first row is a
+losing trade is a list people stop reading.
+
+So a finding must clear **$5, or 1% of what these sessions spent, whichever is
+larger**. The share matters because the absolute floor alone misjudges scale:
+$5 back is worth having on a corpus that spent $40 and invisible on one that
+spent $5,000, and only the second kind of user is drowning in findings.
+
+What falls below the bar is not silently dropped — it gets one line saying how
+many findings there were and what they came to, because a report that detected
+four things and printed none of them is indistinguishable from a broken
+detector. `--json` carries the same thing as `floor_usd` and `below_floor`, so
+a script can reach past the bar without reimplementing the detectors.
+
+A finding with no price on it is kept. Unpriced is not the same as small, and
+filtering on the number alone would drop the findings cctop knows least about
+while keeping the ones it has measured as trivial. When those are all that is
+left, the headline says so rather than claiming `$0.00 looks recoverable`.
+
 **The headline only counts what could actually be recovered.** A `note` records
 what a set of sessions *spent*, which is an observation and not a saving — an
 earlier version added them together and advertised $218 of ordinary work as

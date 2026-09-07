@@ -339,37 +339,89 @@ fn spent_without_editing(analyses: &[&Analysis]) -> Option<Finding> {
     })
 }
 
-/// Every finding, worst first.
-pub fn findings(analyses: &[&Analysis]) -> Vec<Finding> {
+/// The least a finding can be worth and still be worth acting on.
+///
+/// Not a guess at anyone's hourly rate — the figure came from the person the
+/// report was nagging: *a dollar is like a few minutes of my time*. A fix is
+/// several minutes — reading the row, finding the settings file, editing it,
+/// checking it did something. A finding that cannot beat that is asking the
+/// reader to lose money by taking its advice.
+const MINUTES_USD: f64 = 5.00;
+
+/// And the least it can be as a share of what was spent.
+///
+/// The absolute floor alone still misjudges scale. Five dollars is most of a
+/// small corpus and a rounding error on a four-figure one, and a report that
+/// leads with a rounding error is one nobody opens twice. One percent is the
+/// point where a saving is at least visible against the bill it came from.
+const MATERIAL_SHARE: f64 = 0.01;
+
+/// What a finding has to be worth, here, to earn a line.
+fn attention_floor(spend: f64) -> f64 {
+    (spend * MATERIAL_SHARE).max(MINUTES_USD)
+}
+
+/// True where a finding is worth the reader's attention.
+///
+/// A finding priced at zero is *unpriced*, not cheap — `shared_rereads` and
+/// `read_heavy` report a real pattern that cctop cannot put a number on, and
+/// dropping them here would silently delete the findings it knows least about
+/// rather than the ones it knows are small.
+fn worth_reading(f: &Finding, floor: f64) -> bool {
+    f.usd == 0.0 || f.usd >= floor
+}
+
+/// What the sessions in view actually paid, where that is known.
+fn spend(analyses: &[&Analysis]) -> f64 {
+    analyses
+        .iter()
+        .filter(|a| a.cost_available)
+        .map(|a| a.cost)
+        .sum()
+}
+
+/// The findings that cleared the bar, and the ones that did not.
+///
+/// The second half is not thrown away, because a report that quietly detected
+/// four things and printed none of them is indistinguishable from a broken
+/// detector. It gets one line saying what it came to, which is the whole
+/// argument for leaving it out.
+pub fn triage(analyses: &[&Analysis]) -> (Vec<Finding>, Vec<Finding>) {
     let live: Vec<&Analysis> = analyses
         .iter()
         .copied()
         .filter(|a| substantive(a))
         .collect();
-    let rate = usd_per_token(&live);
-    let mut out: Vec<Finding> = [
-        junk_reads(&live, rate),
-        rereads(&live, rate),
-        shared_rereads(&live),
-        read_heavy(&live),
-        failing_calls(&live),
-        spent_without_editing(&live),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let floor = attention_floor(spend(&live));
+    let mut all = detect(&live);
     // Class first, then cost. Ranking on cost alone put a `note` at the top,
     // and a note names money that was *spent*, not money that could be saved —
     // so the largest number in the list belonged to the one row nobody could
     // act on. Sorting by what a reader can do about it is the honest order.
-    out.sort_by(|a, b| {
+    all.sort_by(|a, b| {
         a.class.cmp(&b.class).then(
             b.usd
                 .partial_cmp(&a.usd)
                 .unwrap_or(std::cmp::Ordering::Equal),
         )
     });
-    out
+    all.into_iter().partition(|f| worth_reading(f, floor))
+}
+
+/// Everything the detectors found, before the bar is applied.
+fn detect(live: &[&Analysis]) -> Vec<Finding> {
+    let rate = usd_per_token(live);
+    [
+        junk_reads(live, rate),
+        rereads(live, rate),
+        shared_rereads(live),
+        read_heavy(live),
+        failing_calls(live),
+        spent_without_editing(live),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Where the session budget went, by kind of work.
@@ -406,7 +458,7 @@ pub fn report(analyses: &[&Analysis]) -> String {
         return "No sessions with recorded tool calls, so there is nothing to read.\n".into();
     }
 
-    let found = findings(analyses);
+    let (found, below) = triage(analyses);
     // Deliberately only the actionable classes. A `note` carries what a set of
     // sessions cost, which is an observation and not a saving; adding it here
     // would advertise a number nobody could ever recover.
@@ -418,10 +470,18 @@ pub fn report(analyses: &[&Analysis]) -> String {
     out.push('\n');
     let _ = writeln!(
         out,
-        "  {} sessions  ·  {}  ·  about {} looks recoverable",
+        "  {} sessions  ·  {}  ·  {}",
         live.len(),
         plural(found.len(), "finding"),
-        crate::util::adaptive_usd(recoverable)
+        match recoverable > 0.0 {
+            true => format!(
+                "about {} looks recoverable",
+                crate::util::adaptive_usd(recoverable)
+            ),
+            // Saying "$0.00 looks recoverable" reads as a broken sum rather
+            // than as what it is: findings whose cost cctop declined to invent.
+            false => "nothing here has a price on it".to_string(),
+        }
     );
     out.push('\n');
 
@@ -430,6 +490,22 @@ pub fn report(analyses: &[&Analysis]) -> String {
             out,
             "  Nothing worth reporting. That is a real answer, not an empty one."
         );
+        out.push('\n');
+    }
+    if !below.is_empty() {
+        let small: f64 = below.iter().map(|f| f.usd).sum();
+        let note = format!(
+            "{} came to {} between them, under the {} bar that {} of spend \
+             sets. Acting on them costs more time than they return.",
+            plural(below.len(), "smaller finding"),
+            crate::util::adaptive_usd(small),
+            crate::util::adaptive_usd(attention_floor(spend(&live))),
+            crate::util::adaptive_usd(spend(&live)),
+        );
+        for line in textwrap(&note, 72) {
+            let _ = writeln!(out, "  {line}");
+        }
+        out.push('\n');
     }
     for f in &found {
         let amount = match f.usd > 0.0 {
@@ -517,9 +593,16 @@ pub fn as_json(analyses: &[&Analysis]) -> String {
         .copied()
         .filter(|a| substantive(a))
         .collect();
-    let found = findings(analyses);
+    let (found, below) = triage(analyses);
     let doc = serde_json::json!({
         "sessions": live.len(),
+        // The bar and what it hid, so a script can reach past it rather than
+        // reimplement the detectors to find out what was there.
+        "floor_usd": attention_floor(spend(&live)),
+        "below_floor": {
+            "findings": below.len(),
+            "usd": below.iter().map(|f| f.usd).sum::<f64>(),
+        },
         "findings": found.iter().map(|f| serde_json::json!({
             "class": f.class.as_str(),
             "title": f.title,
@@ -590,7 +673,7 @@ mod tests {
             session(20.0, 0, Task::Coding),
         ];
         let refs: Vec<&Analysis> = sessions.iter().collect();
-        let found = findings(&refs);
+        let found = triage(&refs).0;
 
         let note = found
             .iter()
@@ -618,7 +701,7 @@ mod tests {
         sessions[0].junk_tokens = 8000;
         sessions[0].input_total = 100_000;
         let refs: Vec<&Analysis> = sessions.iter().collect();
-        let found = findings(&refs);
+        let found = triage(&refs).0;
 
         let classes: Vec<Class> = found.iter().map(|f| f.class).collect();
         let note_at = classes.iter().position(|c| *c == Class::Note);
@@ -627,7 +710,74 @@ mod tests {
         assert!(fix_at < note_at, "a fix comes before an observation");
     }
 
-    /// Exploration is supposed to read without writing, so it must not be
+    /// A saving too small to be worth acting on is worse than no finding: it
+    /// takes the top row, and it teaches the reader that the top row is not
+    /// worth reading. The one that prompted this was worth $0.0071, and the
+    /// dollar-scale ones that replaced it at the top were no better — "a
+    /// dollar is like a few minutes of my time".
+    #[test]
+    fn a_saving_worth_less_than_the_time_to_act_is_dropped() {
+        let mut cheap = session(2.00, 1, Task::Coding);
+        cheap.input_total = 1_000_000;
+        cheap.junk_reads = 5;
+        cheap.junk_tokens = 500_000; // a dollar of reads, on two dollars of spend
+        let refs = vec![&cheap];
+        let (kept, below) = triage(&refs);
+        assert!(
+            !kept
+                .iter()
+                .any(|f| f.title.contains("generated or vendored")),
+            "a fix worth a dollar loses against the minutes it takes"
+        );
+        assert_eq!(below.len(), 1, "but it is remembered, not discarded");
+    }
+
+    /// The bar has to move with the bill. Five dollars back is worth having on
+    /// a corpus that spent forty and invisible on one that spent five thousand,
+    /// and only the second kind of user is drowning in findings.
+    #[test]
+    fn the_bar_rises_with_what_the_corpus_spends() {
+        assert_eq!(attention_floor(40.0), MINUTES_USD);
+        assert_eq!(attention_floor(5_000.0), 50.0);
+
+        let big: Vec<Analysis> = (0..50)
+            .map(|_| {
+                let mut a = session(100.0, 1, Task::Coding);
+                a.input_total = 10_000_000;
+                a.junk_reads = 5;
+                a.junk_tokens = 80_000; // $40 across a corpus that spent $5000
+                a
+            })
+            .collect();
+        let refs: Vec<&Analysis> = big.iter().collect();
+        let (kept, below) = triage(&refs);
+        assert!(
+            !kept
+                .iter()
+                .any(|f| f.title.contains("generated or vendored")),
+            "$50 recovered out of $5000 spent is not what to lead with"
+        );
+        assert!(below.iter().any(|f| f.usd >= MINUTES_USD));
+    }
+
+    /// A report that detected four things and printed none of them looks
+    /// broken. What it left out gets a line, so the silence is legible.
+    #[test]
+    fn what_was_left_out_is_still_accounted_for() {
+        let mut cheap = session(2.00, 1, Task::Coding);
+        cheap.input_total = 1_000_000;
+        cheap.junk_reads = 5;
+        cheap.junk_tokens = 500_000;
+        let refs = vec![&cheap];
+        let text = report(&refs);
+        assert!(
+            text.contains("smaller finding"),
+            "the suppressed findings are named, not silently dropped:\n{text}"
+        );
+        assert!(!text.contains("$0.00 looks recoverable"));
+    }
+
+    /// Exploration is supposed to read without writing    /// Exploration is supposed to read without writing, so it must not be
     /// reported as a session that read too much.
     #[test]
     fn exploration_is_not_reported_as_reading_too_much() {
@@ -637,7 +787,8 @@ mod tests {
         explore.files_edited = 1;
         let refs = vec![&explore];
         assert!(
-            !findings(&refs)
+            !triage(&refs)
+                .0
                 .iter()
                 .any(|f| f.title.contains("ten times")),
             "exploring is what exploration is for"

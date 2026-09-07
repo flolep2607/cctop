@@ -120,6 +120,14 @@ when it has explicitly asked a question and is blocked on the answer. Amber wins
 when a tab has both. The tab you are on never blinks, since its focused pane is
 already in front of you.
 
+A tab holding the login shell rather than an agent is left alone. Both colours
+describe a turn, and a shell has no turns — it sits at its prompt drawing
+nothing, which is exactly the silence the green is read from, so a tab opened
+for `git diff` used to go green two seconds after the last keystroke and claim
+an agent was waiting in a tab that held none. The bell still gets through: a
+build that finishes with a `\a` is the thing in the pane asking for you
+outright, not cctop reading its pixels.
+
 The two are measured differently, because only one of them is in the transcript.
 The question is: an agent that calls an ask-the-user tool records it. "Finished
 its turn" is not — in a transcript, answering you and still thinking look the

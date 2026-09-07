@@ -84,6 +84,15 @@ pub struct Pane {
     /// retried without being retried every frame.
     asked_at: Option<Instant>,
     pub label: String,
+    /// Whether an agent is what this pane started.
+    ///
+    /// [`harnesses`] offers the login shell alongside the agents, and half of
+    /// what a second tab is for is `git diff` — so a pane is not necessarily an
+    /// agent, and everything `attention` infers from a still screen assumes it
+    /// is one. A shell sitting at its prompt has not *finished a turn*; it has
+    /// no turns. Without this it goes green two seconds after you stop typing,
+    /// which reads as an agent waiting for you in a tab where there is none.
+    is_agent: bool,
     pub view: crate::attach::Attach,
     /// When this pane's screen last changed, which is how idleness is told
     /// without asking the agent or its transcript anything.
@@ -235,6 +244,7 @@ impl Pane {
             // The agent's name, not the wrapper's: a tab reading `rmux
             // new-session -A -s cctop-claude-32cca860` names the plumbing.
             label: label_of(argv),
+            is_agent: starts_an_agent(argv),
             view,
             rmux,
             // Filled in by the caller that knows: launching is not resuming, and
@@ -262,6 +272,9 @@ impl Pane {
             agent: Some(pid),
             asked_at: None,
             label,
+            // `a` on a session row is the only way here, and a session row is
+            // an agent.
+            is_agent: true,
             view: crate::attach::attach(pid)?,
             drew_at: Instant::now(),
         })
@@ -611,6 +624,17 @@ impl Tab {
                 // Otherwise, before anything inferred: the agent rang. A harness
                 // rings when it is blocked on you — see [`Pane::rang`].
                 _ if pane.rang() => Some(Attention::NeedsInput),
+                // Everything below infers a turn from a screen or a hook, and a
+                // pane that is not an agent has no turns to infer. A shell left
+                // at its prompt is still by definition, so the quiet-means-idle
+                // fallback fires on every one of them: the tab goes green two
+                // seconds after you stop typing and reads as an agent waiting
+                // for you, in a tab holding no agent at all.
+                //
+                // Above rather than below the bell on purpose — a bell is the
+                // thing in the pane asking for you outright, and a long build
+                // that finishes with a `\a` means it as much as an agent does.
+                _ if !pane.is_agent => None,
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // A tool call that started, has not come back, and has stopped
                 // repainting is a permission prompt waiting on you. Claude Code
@@ -761,6 +785,23 @@ pub fn label_of(argv: &[String]) -> String {
         .map(|arg| arg.rsplit('/').next().unwrap_or(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Whether `argv` starts one of the agents cctop knows about.
+///
+/// Asked of the same list the aliases are built from, so a harness cctop can
+/// shim is one it will read a turn off — and anything else, the login shell
+/// included, is a terminal cctop is merely holding.
+fn starts_an_agent(argv: &[String]) -> bool {
+    // Through `label_of` so that `env FOO=1 claude` is still claude, which is
+    // exactly how the profile-carrying launches spell themselves.
+    let label = label_of(argv);
+    let Some(command) = label.split_whitespace().next() else {
+        return false;
+    };
+    crate::alias::AGENTS
+        .split_whitespace()
+        .any(|agent| agent == command)
 }
 
 #[cfg(test)]
@@ -943,9 +984,9 @@ mod tests {
         );
     }
 
-    /// A pane whose agent rang, with everything else saying it is busy.
-    fn ringing_tab(bell: &[u8]) -> Tab {
-        let mut pane = Pane {
+    /// A pane holding `label`, drawn `ago` seconds back.
+    fn pane(label: &str, is_agent: bool, ago: u64) -> Pane {
+        Pane {
             hosted: None,
             rmux: None,
             resumed: None,
@@ -953,12 +994,72 @@ mod tests {
             pid: 4321,
             agent: None,
             asked_at: None,
-            label: "claude".into(),
+            label: label.into(),
+            is_agent,
             view: crate::attach::Attach::for_test(),
-            drew_at: Instant::now(),
-        };
+            drew_at: Instant::now() - Duration::from_secs(ago),
+        }
+    }
+
+    /// A pane whose agent rang, with everything else saying it is busy.
+    fn ringing_tab(bell: &[u8]) -> Tab {
+        let mut pane = pane("claude", true, 0);
         pane.view.parser.process(bell);
         Tab::new(pane)
+    }
+
+    /// The launcher offers the login shell, and a shell has no turns to finish.
+    ///
+    /// Every inference in `attention` reads a still screen as an agent waiting
+    /// for you. A shell at its prompt is still by definition, so a tab opened
+    /// for `git diff` — or to run cctop in — went green two seconds after the
+    /// last keystroke and sat there claiming an agent wanted something.
+    #[test]
+    fn a_tab_that_is_not_an_agent_reports_no_turn() {
+        let unreported = &|_: u32| None;
+        assert_eq!(
+            Tab::new(pane("zsh", false, 5)).attention(false, unreported),
+            None,
+            "a quiet shell is a shell, not a finished turn"
+        );
+        assert_eq!(
+            Tab::new(pane("claude", true, 5)).attention(false, unreported),
+            Some(Attention::Idle),
+            "and the same silence from an agent still means what it did"
+        );
+
+        // Nor does the permission-prompt shape apply: a tool in flight over a
+        // still terminal is a question only where a terminal holds an agent.
+        assert_eq!(
+            Tab::new(pane("zsh", false, 5))
+                .attention(false, &|_| Some(crate::hook::Signal::Acting)),
+            None
+        );
+
+        // The bell survives, because that is the thing in the pane asking
+        // outright rather than cctop reading its pixels.
+        let mut rang = pane("zsh", false, 5);
+        rang.view.parser.process(b"\x07");
+        assert_eq!(
+            Tab::new(rang).attention(false, unreported),
+            Some(Attention::NeedsInput)
+        );
+    }
+
+    /// What counts as an agent is the list the aliases are built from, so a
+    /// harness cctop can shim is one it will read a turn off.
+    #[test]
+    fn an_agent_is_recognised_through_the_way_it_was_launched() {
+        let argv = |s: &str| -> Vec<String> { s.split(' ').map(str::to_string).collect() };
+        assert!(starts_an_agent(&argv("claude")));
+        assert!(starts_an_agent(&argv("claude --resume 4ebf1ab4")));
+        assert!(starts_an_agent(&argv("/usr/local/bin/codex")));
+        // How a launch under a named account spells itself.
+        assert!(starts_an_agent(&argv(
+            "env CLAUDE_CONFIG_DIR=/tmp/x claude"
+        )));
+        assert!(!starts_an_agent(&argv("/bin/zsh")));
+        assert!(!starts_an_agent(&argv("")));
     }
 
     /// The bell outranks every inference. A harness rings when it is blocked on
