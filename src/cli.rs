@@ -124,7 +124,11 @@ pub struct Args {
     #[arg(short, long, default_value = "retail", value_parser = parse_plan)]
     pub plan: Plan,
 
-    /// Refresh interval in seconds
+    /// Refresh interval in seconds. $CCTOP_SETTLE_MS is the other half of the
+    /// cadence: how long a transcript that was just written is left to finish
+    /// being written before the rows are rebuilt from it (default 2000). 0
+    /// rebuilds on every refresh, at the cost of doing it throughout a live
+    /// turn
     #[arg(short, long, default_value_t = 2.0, value_parser = parse_delay)]
     pub delay: f64,
 

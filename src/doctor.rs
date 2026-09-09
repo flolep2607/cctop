@@ -278,6 +278,8 @@ fn environment() -> Section {
         "CCTOP_HOMES",
         "CCTOP_HOSTS",
         "CCTOP_COLUMNS_HIDE",
+        "CCTOP_THEME",
+        "CCTOP_SETTLE_MS",
     ];
     let checks = VARS
         .iter()

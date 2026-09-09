@@ -6,7 +6,9 @@ Claude, Codex, and Gemini costs are **estimates**: tokens multiplied by publishe
 per-token rates, taken from built-in tables and falling back to the
 [LiteLLM](https://github.com/BerriAI/litellm) database (cached for 24 hours).
 OpenCode and Pi already persist provider-calculated costs, which cctop reads
-directly.
+directly — except where the figure is $0.00 against tokens that were spent,
+which is what both write for a provider they have no rates for rather than a
+model that was genuinely free; those turns are estimated like the rest.
 
 Gemini records a per-turn token breakdown but no cost. Its `cached` count is the
 part of the prompt served from context cache rather than an addition to it, so
