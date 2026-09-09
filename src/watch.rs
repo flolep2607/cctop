@@ -61,6 +61,7 @@ impl Watch {
             // Appends are deliberately ignored; see the module note.
             if let Ok(event) = res
                 && matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
+                && !event.paths.iter().all(|p| is_noise(p))
             {
                 flag.store(true, Ordering::Relaxed);
                 note(&noted, &event);
@@ -111,7 +112,7 @@ fn note(pending: &Mutex<HashMap<PathBuf, Instant>>, event: &notify::Event) {
     let Ok(mut pending) = pending.lock() else {
         return;
     };
-    for path in &event.paths {
+    for path in event.paths.iter().filter(|p| !is_noise(p)) {
         match event.kind {
             // Directories are containers; what gets summarized is the file that
             // lands inside one, which arrives as its own create.
@@ -127,7 +128,27 @@ fn note(pending: &Mutex<HashMap<PathBuf, Instant>>, event: &notify::Event) {
     }
 }
 
+/// Paths a create says nothing about.
+///
+/// Gemini's `tool-outputs/` sits inside the root that holds its chats and takes
+/// one file per tool call, so a recursive watch there fires throughout every
+/// turn — each event costing a walk that can only find the session it already
+/// has. Its own discovery and the fingerprint both skip that directory for the
+/// same reason, so the watch does too rather than paying for it.
+fn is_noise(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == "tool-outputs")
+}
+
 /// Every provider's session root that is present on this machine.
+///
+/// Windsurf is deliberately absent, and is the one provider the periodic walk
+/// alone covers. Its sessions live inside a per-workspace sqlite database that
+/// is rewritten in place, so a new conversation arrives as a *write* to a file
+/// that already exists — never the create this module listens for — while the
+/// journal and WAL files sqlite makes and unmakes on every commit would fire
+/// creates and removes continuously. Watching it would cost walks all day and
+/// still miss the event it was added for. The fingerprint, which reads writes
+/// rather than creates, does cover it.
 fn roots() -> Vec<PathBuf> {
     // Every home being scanned, so a session another user starts shows up as
     // promptly as one of this user's does.
@@ -136,6 +157,7 @@ fn roots() -> Vec<PathBuf> {
     roots.extend(crate::config::cursor_projects_roots());
     roots.extend(crate::config::pi_sessions_roots());
     roots.extend(crate::config::opencode_data_roots());
+    roots.extend(crate::config::gemini_chats_roots());
     roots.extend(crate::config::claude_mac_roots(
         &crate::config::CLAUDE_MAC_COWORK_ROOT,
         "local-agent-mode-sessions",
@@ -161,6 +183,7 @@ mod tests {
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res
                 && matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
+                && !event.paths.iter().all(|p| is_noise(p))
             {
                 flag.store(true, Ordering::Relaxed);
                 note(&noted, &event);
@@ -229,6 +252,35 @@ mod tests {
         assert!(
             !watch.awaiting_discovery(|_| false),
             "a discovered create must be forgotten, not re-armed"
+        );
+    }
+
+    /// Gemini's chat root is watched for the sake of new sessions, and the tool
+    /// output it writes beside them lands under the same tree — a file per tool
+    /// call, all turn long. If those earned walks, watching Gemini would cost
+    /// more than the discovery it accelerates.
+    #[test]
+    fn tool_output_does_not_earn_a_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalised for the same reason as the test above: the path the
+        // watcher reports is compared against one built here.
+        let root = dir.path().canonicalize().unwrap();
+        let watch = watch_dir(&root);
+        let noise = root.join("tool-outputs");
+        std::fs::create_dir(&noise).unwrap();
+        let chat = root.join("session-1.json");
+
+        std::fs::write(noise.join("call-1.json"), b"{}\n").unwrap();
+        // The chat that follows has to still get through, which also gives the
+        // watcher long enough to have delivered the noise had it been going to.
+        std::fs::write(&chat, b"{}\n").unwrap();
+        assert!(
+            eventually(|| watch.awaiting_discovery(|_| false)),
+            "a created chat was not remembered"
+        );
+        assert!(
+            !watch.awaiting_discovery(|path| path == chat),
+            "a tool output kept asking for walks"
         );
     }
 

@@ -180,9 +180,10 @@ pub fn compute_corpus_fingerprint() -> Corpus {
 
 /// Every provider's session root that is present on this machine.
 ///
-/// This is the same list [`crate::watch`] watches, plus the two providers it
-/// does not — Gemini and Windsurf. A root missing here is not a missed
-/// notification, as it is there, but a session whose changes the fingerprint
+/// This is the same list [`crate::watch`] watches, plus the one provider it
+/// does not — Windsurf, whose sessions arrive as writes into an existing
+/// database rather than as the creates a watch sees. A root missing here is not
+/// a missed notification, as it is there, but a session whose changes the fingerprint
 /// cannot see: the table would keep serving rows from before it was written.
 /// So the list errs wide, and so does the walk below.
 fn roots() -> Vec<PathBuf> {
