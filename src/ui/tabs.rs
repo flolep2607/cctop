@@ -359,7 +359,7 @@ impl Shared {
     /// session rather than from a screen — an unwatched tab has no screen. A
     /// second of slack on top of [`QUIET_IS_IDLE`], because rmux reports this to
     /// the second and the sweep that read it is already up to
-    /// [`SHARE_EVERY`](super::SHARE_EVERY) old: without it a busy agent flickers
+    /// [`SHARE_EVERY`](super::panes::SHARE_EVERY) old: without it a busy agent flickers
     /// idle between sweeps.
     fn idle(&self) -> bool {
         let Some(activity) = self.activity else {
@@ -827,7 +827,7 @@ mod tests {
         let label = format!(
             "{} · {}",
             argv[0],
-            crate::util::truncate("Improve super cctop", super::super::TAB_LABEL_CHARS)
+            crate::util::truncate("Improve super cctop", super::super::launch::TAB_LABEL_CHARS)
         );
         assert_eq!(label, "claude · Improve super cctop");
         assert!(!label.contains("4ebf1ab4"));

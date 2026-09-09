@@ -1,7 +1,8 @@
 //! Key and mouse handling: translate input events into state changes.
 
 use super::columns::COLUMNS;
-use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, PAGE, Request, render};
+use super::select::PAGE;
+use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, Request, render};
 /// Longest path the launcher's directory field accepts.
 ///
 /// Comfortably past any real working directory — Linux caps a path at 4096
@@ -1519,5 +1520,452 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pricing::{Plan, Provider};
+    use crate::ui::tests::{key, session, test_app};
+    use crate::ui::{Row, menu, panels};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::sync::mpsc::channel;
+    /// A paste on the dashboard is typing into whichever one-line box is open,
+    /// and the line breaks in it must not go in: none of these inputs can show a
+    /// second row or let you delete back onto one.
+    #[test]
+    fn a_paste_types_into_the_open_input_as_one_line() {
+        let mut app = test_app();
+
+        app.mode = Mode::Search;
+        app.on_paste("fix the\nlogin bug\r\n");
+        assert_eq!(app.search, "fix the login bug ");
+
+        app.mode = Mode::SendKeys;
+        app.send_input = "continue".into();
+        app.on_paste(" and\ttidy\x07 up");
+        assert_eq!(app.send_input, "continue and tidy up");
+
+        // The cost floor is a number, so a paste is filtered the way typing one
+        // is rather than flattened.
+        app.mode = Mode::CostFilter;
+        app.on_paste("$12.50 or so");
+        assert_eq!(app.cost_input, "12.50");
+    }
+
+    /// The caps the typed path enforces are the paste's too, and a paste with
+    /// nowhere to land does nothing rather than something surprising.
+    #[test]
+    fn a_paste_respects_the_caps_and_does_nothing_with_no_input_open() {
+        let mut app = test_app();
+
+        app.mode = Mode::SendKeys;
+        app.send_input = "x".repeat(495);
+        app.on_paste(&"y".repeat(50));
+        assert_eq!(app.send_input.len(), 500);
+
+        app.mode = Mode::CostFilter;
+        app.on_paste("123456789012345");
+        assert_eq!(app.cost_input, "123456789012");
+
+        // A modal is on screen, so there is no box to type into — and a paste
+        // must never stand in for the key one of these is waiting for.
+        app.mode = Mode::DeleteConfirm;
+        app.on_paste("y");
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        app.mode = Mode::List;
+        app.on_paste("q");
+        assert!(!app.should_quit);
+    }
+
+    /// Regression: a click on the launcher used to be answered twice — once by
+    /// the modal and once by the dashboard drawn under it — so picking an agent
+    /// also switched the bottom panel the modal happened to cover.
+    #[test]
+    fn a_click_on_a_modal_does_not_reach_what_it_covers() {
+        use ratatui::layout::Rect;
+
+        let mut app = test_app();
+        app.mode = Mode::Launch;
+        let layout = render::Layout {
+            modal_rect: Some(Rect::new(10, 8, 20, 6)),
+            launch_rows: vec![(9, 0), (10, 1)],
+            // The panel tabs sit on a row the modal is covering.
+            tab_row: 10,
+            tab_spans: vec![(10, 20, 3)],
+            ..Default::default()
+        };
+        let click = |col, row| crossterm::event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        app.on_mouse(click(15, 10), &layout);
+        assert_eq!(app.bottom_tab, 0, "the click went through to the panels");
+        assert_eq!(app.launch_cursor, 1, "the click did not pick a choice");
+        assert_eq!(app.mode, Mode::Launch, "the launcher closed on a pick");
+
+        // Off the modal dismisses it, and still does not reach the panels.
+        app.needs_redraw = false;
+        app.on_mouse(click(40, 10), &layout);
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(app.bottom_tab, 0);
+        // Regression: dismissing it asked for no frame, so the modal stayed
+        // drawn over a dashboard that was already taking the clicks again.
+        assert!(app.needs_redraw, "the dismissal never repainted");
+    }
+
+    /// Regression: the guard above was keyed on "any mode but List", which took
+    /// the mouse away from the search box too — an overlay a few lines tall over
+    /// a table still being scrolled and clicked while the query is typed. Only a
+    /// modal that recorded its rectangle can claim the mouse, because that
+    /// rectangle is the only way to tell its clicks from the ones underneath.
+    #[test]
+    fn the_search_box_leaves_the_table_its_mouse() {
+        let mut app = test_app();
+        for id in ["a", "b", "c"] {
+            app.sessions
+                .push(crate::session::Session::new(Provider::Claude, id.into()));
+        }
+        app.visible = vec![Row::Session(0), Row::Session(1), Row::Session(2)];
+        // What `draw_search` leaves behind: no rectangle, so no claim.
+        let layout = render::Layout {
+            rows_start: 7,
+            rows_end: 12,
+            // Below the table, or the wheel scrolls a panel instead of the list.
+            bottom_start: 14,
+            modal_rect: None,
+            ..Default::default()
+        };
+        let at = |kind, row| crossterm::event::MouseEvent {
+            kind,
+            column: 5,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        app.mode = Mode::Search;
+        app.on_mouse(at(event::MouseEventKind::ScrollDown, 9), &layout);
+        assert_eq!(app.selected, 1, "the wheel is dead while searching");
+        app.on_mouse(
+            at(event::MouseEventKind::Down(event::MouseButton::Left), 9),
+            &layout,
+        );
+        assert_eq!(app.selected, 2, "a click cannot reach the row it landed on");
+        assert_eq!(app.mode, Mode::Search, "the click closed the search box");
+    }
+
+    /// Regression: `launch_prompt` set the mode and nothing asked for a frame, so
+    /// clicking the bar's new-tab button — the one advertisement the feature has
+    /// — looked like a dead button until an unrelated event repainted.
+    #[test]
+    fn clicking_the_new_tab_button_paints_the_launcher() {
+        let mut app = test_app();
+        let layout = render::Layout {
+            workspace_new: Some((12, 23)),
+            ..Default::default()
+        };
+        app.needs_redraw = false;
+        app.on_mouse(
+            crossterm::event::MouseEvent {
+                kind: event::MouseEventKind::Down(event::MouseButton::Left),
+                column: 15,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &layout,
+        );
+        // The launcher opens only where there is something to launch, which on a
+        // machine with no agent and no $SHELL there is not — but either way the
+        // click has to have asked for the frame that says so.
+        assert!(app.needs_redraw, "the click asked for no frame");
+        assert!(matches!(app.mode, Mode::Launch | Mode::List));
+    }
+
+    /// Regression: the launcher sized itself to its list and let `centered` clamp
+    /// the result, so on a short terminal the rows past the bottom were dropped —
+    /// and once the cursor walked into them, nothing on screen said what Enter
+    /// The browser panel shows where the page is, and does not show the token
+    /// that opens it.
+    ///
+    /// A pointer can do everything the footer and the confirmations say.
+    ///
+    /// Three separate paths, one test, because they are one claim: cctop holds
+    /// the terminal's mouse capture, so anything drawn as a button has to be
+    /// answered here or the click is simply lost. The regions come out of a real
+    /// draw rather than being asserted at, since a hint's column is whatever the
+    /// footer's arithmetic made it.
+    #[test]
+    fn the_mouse_can_press_the_keys_that_are_drawn_on_screen() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (cols, rows) = (140u16, 30u16);
+        let draw = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+            let mut layout = render::Layout::default();
+            terminal
+                .draw(|frame| layout = render::draw(frame, app))
+                .expect("draw");
+            let screen: String = (0..rows)
+                .map(|y| {
+                    (0..cols)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (layout, screen)
+        };
+        // The column a piece of text starts at, on the row it was drawn on.
+        let at = |screen: &str, text: &str| -> (u16, u16) {
+            let (row, line) = screen
+                .lines()
+                .enumerate()
+                .find(|(_, l)| l.contains(text))
+                .unwrap_or_else(|| panic!("{text:?} was never drawn:\n{screen}"));
+            // Char columns, not byte offsets: the row is full of box-drawing
+            // characters, each three bytes wide, so a byte index is several
+            // columns to the right of where the text actually is.
+            let col = line
+                .char_indices()
+                .position(|(i, _)| line[i..].starts_with(text))
+                .expect("found above");
+            (col as u16, row as u16)
+        };
+        let click = |col, row| event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: event::KeyModifiers::NONE,
+        };
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, "proj")];
+        app.visible = vec![Row::Session(0)];
+        app.selected = 0;
+
+        // The footer's `?` opens the help it names.
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "? Help");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::Help, "clicking `? Help` did nothing");
+        app.on_key(key(KeyCode::Esc));
+
+        // `q Quit` takes two, like the share corner: the first says so.
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(!app.should_quit, "one click on `q Quit` quit cctop");
+        assert!(app.quit_arm);
+        // Said in the footer, beside the hint the second click has to land on —
+        // and the hint is still there to land on, which a status message drawn
+        // over the whole footer would have taken away. Redrawn every time, so
+        // the region a click is tested against is the one now on screen.
+        let (layout, screen) = draw(&mut app);
+        assert!(
+            screen.contains("click q again to quit"),
+            "the footer never asked:\n{screen}"
+        );
+        // Any other click takes the arming back, and the one after it is a
+        // first click again rather than the second of a pair.
+        app.on_mouse(click(0, layout.rows_start), &layout);
+        assert!(!app.quit_arm);
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(!app.should_quit);
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "q Quit");
+        app.on_mouse(click(col, row), &layout);
+        assert!(app.should_quit, "two deliberate clicks did not quit");
+        app.should_quit = false;
+
+        // Right-clicking a row opens that row's menu, having selected it.
+        let (layout, _) = draw(&mut app);
+        app.on_mouse(
+            event::MouseEvent {
+                kind: event::MouseEventKind::Down(event::MouseButton::Right),
+                column: 4,
+                row: layout.rows_start,
+                modifiers: event::KeyModifiers::NONE,
+            },
+            &layout,
+        );
+        assert_eq!(app.mode, Mode::RowMenu, "right-click opened no menu");
+        assert_eq!(app.selected, 0);
+        app.on_key(key(KeyCode::Esc));
+
+        // A confirmation's `[n / Esc]` cancels it, and its `[y]` is the answer.
+        app.mode = Mode::DeleteConfirm;
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "[n / Esc]");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::List, "clicking cancel left the dialog up");
+        assert!(app.deleting.is_empty(), "cancel deleted the session");
+
+        app.mode = Mode::DeleteConfirm;
+        let (layout, screen) = draw(&mut app);
+        let (col, row) = at(&screen, "[y]");
+        app.on_mouse(click(col, row), &layout);
+        assert_eq!(app.mode, Mode::List);
+        assert!(!app.deleting.is_empty(), "clicking `[y]` deleted nothing");
+
+        // And a click beside the dialog is a cancel, not a click on the table
+        // it is drawn over: the selection used to move under the question.
+        app.deleting.clear();
+        app.mode = Mode::KillConfirm;
+        let (layout, _) = draw(&mut app);
+        app.on_mouse(click(1, 1), &layout);
+        assert_eq!(app.mode, Mode::List, "a click off the dialog was swallowed");
+    }
+
+    #[test]
+    fn opening_the_menu_needs_a_row_and_lands_on_something_runnable() {
+        let mut app = App::new(Plan::Retail, channel().0);
+        // No rows: Enter must not open an empty box.
+        app.open_row_menu();
+        assert_eq!(app.mode, Mode::List);
+
+        app.sessions = vec![session("a", false, "/repo")];
+        app.refilter();
+        app.selected = 0;
+        app.open_row_menu();
+        assert_eq!(app.mode, Mode::RowMenu);
+        let items = menu::items(&app);
+        assert!(items[app.menu_cursor].enabled());
+    }
+
+    /// The whole point of the rebinding: a vim reflex moves the cursor and
+    /// cannot reach a live agent.
+    #[test]
+    fn k_moves_up_and_never_terminates() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "/x"), session("b", true, "/y")];
+        app.refilter();
+        app.selected = 1;
+
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.selected, 0, "k must move up like every modal here");
+        assert_eq!(app.mode, Mode::List, "k must not open a kill dialog");
+
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected, 1);
+
+        // Terminate still exists, behind a modifier. The fixture's process has
+        // no root PID, so it stops at the explanation rather than the confirm —
+        // either way, Ctrl+K is what reaches the terminate path at all.
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(app.mode, Mode::KillBlocked);
+    }
+
+    #[test]
+    fn f10_quits_from_an_agent_tab_instead_of_reaching_the_agent() {
+        let mut app = test_app();
+        app.tab = 1;
+
+        app.on_key(key(KeyCode::F(10)));
+
+        assert!(app.should_quit);
+    }
+
+    /// The footer inside a pane advertises the function keys, so none of them
+    /// may reach the agent — and the ones that open something have to bring the
+    /// dashboard with them, or they land on a screen the agent is repainting.
+    #[test]
+    fn function_keys_are_cctops_inside_a_pane_and_bring_the_dashboard_with_them() {
+        // Each key, and the dashboard state it must leave behind.
+        for (code, mode) in [
+            (KeyCode::F(1), Mode::Help),
+            (KeyCode::F(3), Mode::Search),
+            (KeyCode::F(6), Mode::SortBy),
+            (KeyCode::F(7), Mode::AgeFilter),
+        ] {
+            let mut app = test_app();
+            app.tab = 1;
+            app.on_key(key(code));
+            assert_eq!(app.tab, 0, "{code:?} left the dashboard behind");
+            assert_eq!(app.mode, mode, "{code:?} did not open its modal");
+        }
+
+        // F12 is the pane's own key and F5 acts on the walk, so neither takes
+        // you off the agent — F5 says so on the footer instead.
+        let mut app = test_app();
+        app.tab = 1;
+        app.on_key(key(KeyCode::F(5)));
+        assert_eq!(app.tab, 1, "refreshing must not leave the agent");
+        assert!(app.status.is_some(), "the refresh said nothing");
+        app.on_key(key(KeyCode::F(12)));
+        assert_eq!(app.tab, 0);
+
+        // An unbound one is swallowed rather than delivered as an escape
+        // sequence for the agent to print.
+        let mut app = test_app();
+        app.tab = 1;
+        app.on_key(key(KeyCode::F(2)));
+        assert_eq!(app.tab, 1);
+        assert_eq!(app.mode, Mode::List);
+    }
+
+    /// Regression: F10 in a pane with a launched agent asks before it quits, and
+    /// the question was drawn on the dashboard only — so from a pane the key
+    /// looked dead while the keyboard was in fact waiting for `y`.
+    #[test]
+    fn the_quit_question_is_drawn_over_the_pane_that_raised_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        app.tab = 1;
+        app.hosted = Some((1234, "claude".into()));
+
+        app.on_key(key(KeyCode::F(10)));
+        assert!(!app.should_quit, "an owned agent is worth a question");
+        assert_eq!(app.mode, Mode::QuitConfirm);
+
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        terminal
+            .draw(|frame| {
+                render::draw(frame, &mut app);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            text.contains("quit anyway"),
+            "the question is not on the pane's screen"
+        );
+
+        // And the answer still lands: the modal owns the keyboard, not the pane.
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(app.should_quit);
+    }
+
+    /// Panel keys are bounded by the tab list, not by a literal that drifts.
+    #[test]
+    fn number_keys_cover_every_panel_and_nothing_more() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "/x")];
+        app.refilter();
+        for (i, _) in panels::TABS.iter().enumerate() {
+            let digit = char::from_digit(i as u32 + 1, 10).unwrap();
+            app.on_key(key(KeyCode::Char(digit)));
+            assert_eq!(app.bottom_tab, i, "key {digit} must select panel {i}");
+        }
+        // One past the end changes nothing rather than selecting a phantom tab.
+        let past = char::from_digit(panels::TABS.len() as u32 + 1, 10).unwrap();
+        let before = app.bottom_tab;
+        app.on_key(key(KeyCode::Char(past)));
+        assert_eq!(app.bottom_tab, before);
     }
 }
