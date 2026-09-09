@@ -104,6 +104,12 @@ impl Loader {
         self.collector.attributions()
     }
 
+    /// Hand on what the agents' own hooks reported about where they run.
+    /// See [`Collector::set_hook_claims`](crate::proc::Collector::set_hook_claims).
+    pub fn set_hook_claims(&mut self, claims: std::collections::HashMap<String, Vec<u32>>) {
+        self.collector.set_hook_claims(claims);
+    }
+
     pub fn store(&self) -> &Store {
         self.store.get_or_init(Store::new)
     }

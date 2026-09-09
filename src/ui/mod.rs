@@ -468,6 +468,15 @@ pub struct App {
     /// absent entry is the ordinary case and means "fall back to the transcript"
     /// rather than "nothing is happening".
     pub hooked: HashMap<String, crate::hook::Reported>,
+    /// The process tree each session's hooks reported running under, keyed by
+    /// session id.
+    ///
+    /// Kept apart from `hooked` because it answers a different question and
+    /// changes on a different clock: `hooked` is what the agent is *doing* and
+    /// turns over constantly, while this is *where it is* and is written once
+    /// and then repeated. Only the changes go to the worker, which is what makes
+    /// storing it separately worth a field — see [`App::note_hook_pids`].
+    pub(super) hook_pids: HashMap<String, Vec<u32>>,
     /// The integration's state, as of the last time the panel was opened.
     ///
     /// Rebuilt on opening and after every action rather than every frame: it
@@ -724,6 +733,11 @@ impl App {
             shared_at: None,
             drag_tab: None,
             hooked: HashMap::new(),
+            // Loaded rather than started empty, because the row most likely to
+            // want a tab blinking is the one blocked on a question — and that
+            // is exactly the row that sends nothing until it is answered. See
+            // [`hook::load_claims`](crate::hook::load_claims).
+            hook_pids: crate::hook::load_claims(),
             hooks: None,
             listener: None,
             launch_cursor: 0,

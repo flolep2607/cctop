@@ -33,6 +33,11 @@ pub(super) enum Request {
     Insight {
         which: &'static str,
     },
+    /// What the agents' own hooks have said about which processes they run
+    /// under. Sent when it changes rather than with each walk: events arrive on
+    /// the agents' clock and walks on the UI's, and the worker is where the
+    /// [`Loader`] that needs it lives.
+    HookClaims(HashMap<String, Vec<u32>>),
     /// Look for `query` inside every listed session's transcript.
     Scan {
         query: String,
@@ -191,6 +196,9 @@ pub(super) fn spawn_worker(
                     {
                         break;
                     }
+                }
+                Request::HookClaims(claims) => {
+                    loader.set_hook_claims(claims);
                 }
                 Request::RefreshLive => {
                     if live_rows.is_empty() {

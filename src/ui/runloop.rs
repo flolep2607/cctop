@@ -95,6 +95,12 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     if crate::config::profile_count() <= 1 {
         app.hidden_columns.push(ColumnId::Profile);
     }
+    // Ahead of the first walk, so the first table already attributes processes
+    // by what the agents said rather than by the guess that stands in when
+    // nothing has.
+    if !app.hook_pids.is_empty() {
+        let _ = req_tx.send(Request::HookClaims(app.hook_pids.clone()));
+    }
     let _ = req_tx.send(Request::Refresh);
 
     // Tabs backed by rmux outlive cctop. Reattach them before the first frame

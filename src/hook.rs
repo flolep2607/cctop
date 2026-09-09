@@ -66,6 +66,53 @@ fn socket_dir() -> Option<PathBuf> {
         .map(|d| d.join("cctop").join("hooks.d"))
 }
 
+/// Where the process trees the agents reported are kept between runs.
+///
+/// Beside the sockets, and for the same reason they are there: the runtime
+/// directory is cleared when the machine reboots, and a pid outlives a cctop but
+/// never outlives a boot. Keeping the map anywhere more durable would mean
+/// deciding when a recorded pid stopped meaning what it said; keeping it here
+/// means the question cannot arise.
+fn claims_path() -> Option<PathBuf> {
+    socket_dir().map(|d| d.join("agents.json"))
+}
+
+/// Remember which processes each session reported running under.
+///
+/// Written whenever the map changes, which is rare: a session states its tree
+/// once and then repeats it. Written through a temporary file so a second cctop
+/// reading at the wrong moment sees the old map rather than half of the new one.
+pub fn save_claims(claims: &std::collections::HashMap<String, Vec<u32>>) {
+    let Some(path) = claims_path() else { return };
+    let Some(dir) = path.parent() else { return };
+    let _ = std::fs::create_dir_all(dir);
+    let Ok(json) = serde_json::to_vec(claims) else {
+        return;
+    };
+    // Nothing here is worth reporting: the map is an optimisation over waiting
+    // for the next hook event, and a cctop that cannot write it simply waits.
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// What the agents had reported when some cctop last heard from them.
+///
+/// The reason this is read at all: a session blocked on a question sends
+/// nothing until it is answered, so a cctop that started after the question was
+/// asked would have no claim for the one row most likely to want a tab
+/// blinking — until the person went and answered it, which is the moment the
+/// notice stops being useful. A pid whose process is gone, or is no longer that
+/// provider's agent, claims nothing when it is resolved, so a stale file costs
+/// nothing to carry.
+pub fn load_claims() -> std::collections::HashMap<String, Vec<u32>> {
+    claims_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 /// The addresses to deliver to, oldest name first.
 ///
 /// Sorted so delivery order is stable rather than whatever the directory
@@ -176,7 +223,7 @@ fn forward(args: &[String]) {
         }
     };
 
-    let Some(line) = envelope(&name, &payload) else {
+    let Some(line) = envelope(&name, &payload, &ancestry()) else {
         return;
     };
     deliver(&line);
@@ -220,6 +267,97 @@ fn deliver(line: &[u8]) {
 #[cfg(not(unix))]
 fn deliver(_line: &[u8]) {}
 
+/// How far up the process tree the hook looks for the agent that spawned it.
+///
+/// The answer is always near the bottom — a shell, sometimes a wrapper or a
+/// sandbox — and everything above it is the terminal, the multiplexer and init,
+/// which name no agent. Eight covers every harness measured and bounds what the
+/// walk can cost when the answer is not there at all.
+#[cfg(unix)]
+const MAX_ANCESTRY: usize = 8;
+
+/// The pids between this hook and init, nearest first.
+///
+/// This is the one fact only `cctop hook` can report, and it is worth the
+/// agent's microseconds because the alternative is a guess. An event names the
+/// session it is about; cctop's rows name the *process* they are about; nothing
+/// else on the machine knows both. An agent launched without `--resume` carries
+/// no session id on its command line, so cctop otherwise pairs a directory's
+/// processes against its transcripts by recency — which hands a pid to the
+/// wrong transcript as soon as two agents share a checkout, and puts the alert
+/// on the wrong tab. The hook is a child of the agent, so its own ancestry
+/// settles it.
+///
+/// The whole chain is sent rather than a guess at which link is the agent: the
+/// hook cannot tell (each harness stacks its own shells, wrappers and sandboxes
+/// in between), while cctop already knows which pids are agent processes and
+/// need only intersect the two.
+#[cfg(target_os = "linux")]
+fn ancestry() -> Vec<u32> {
+    // Read directly rather than through `sysinfo`, which was measured at 4.2ms
+    // against 152us for the identical chain. The hook spends the agent's
+    // deadline, so a 28x saving on a fact this small is worth the platform
+    // split below.
+    fn parent(pid: u32) -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // `comm` is parenthesised and may itself contain spaces and parens, so
+        // the fields after it are only countable from the last `)`.
+        stat.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    }
+    walk(std::process::id(), parent)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn ancestry() -> Vec<u32> {
+    // No `/proc` to read, so this pays for `sysinfo` — still one targeted
+    // refresh per level rather than a scan of the whole table.
+    let mut sys = sysinfo::System::new();
+    walk(std::process::id(), move |pid| {
+        let pid = sysinfo::Pid::from_u32(pid);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            false,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        sys.process(pid)?.parent().map(|p| p.as_u32())
+    })
+}
+
+/// Windows has no socket to deliver to, so nothing here is ever read.
+#[cfg(not(unix))]
+fn ancestry() -> Vec<u32> {
+    Vec::new()
+}
+
+/// Follow `parent` up from `pid`, stopping at init, at a cycle, or at
+/// [`MAX_ANCESTRY`].
+#[cfg(unix)]
+fn walk(pid: u32, mut parent: impl FnMut(u32) -> Option<u32>) -> Vec<u32> {
+    let mut chain = Vec::new();
+    let mut current = pid;
+    while chain.len() < MAX_ANCESTRY {
+        // A pid of 0 is the kernel's placeholder for "no parent recorded", and
+        // 1 is init, which is nobody's agent.
+        let Some(next) = parent(current).filter(|p| *p > 1) else {
+            break;
+        };
+        // A parent chain cannot really loop, but it is read from a table that
+        // changes underneath the walk, so an unbounded loop is not worth the
+        // risk of assuming it.
+        if chain.contains(&next) {
+            break;
+        }
+        chain.push(next);
+        current = next;
+    }
+    chain
+}
+
 /// Reduce whatever the agent sent to the few things cctop needs, on one line.
 ///
 /// Newlines inside the agent's JSON are what makes the framing need doing at
@@ -237,7 +375,7 @@ fn deliver(_line: &[u8]) {}
 /// Codex appears twice because it reports twice: its hook framework borrowed
 /// Claude Code's spelling wholesale, while the older `notify` program keeps its
 /// own.
-fn envelope(name: &str, payload: &[u8]) -> Option<Vec<u8>> {
+fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
     let body: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let field = |key: &str| body.get(key).and_then(|v| v.as_str()).unwrap_or_default();
     // The first of these keys the payload actually carries.
@@ -274,6 +412,11 @@ fn envelope(name: &str, payload: &[u8]) -> Option<Vec<u8>> {
         // carrying: nothing in a transcript says it, so a session running with
         // permissions turned off is otherwise indistinguishable from any other.
         "permission_mode": first(&["permission_mode", "permissionMode"]).unwrap_or_default(),
+        // The one fact the agent does not state and only this process can: see
+        // [`ancestry`]. Absent on Windows and on any harness whose hook cctop
+        // does not spawn, which the reader treats as "no claim" rather than as
+        // an empty one.
+        "pids": pids,
     });
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -415,6 +558,13 @@ impl Signal {
 #[derive(Debug, Clone)]
 pub struct Event {
     pub session_id: String,
+    /// The processes the hook that reported this ran under, nearest first.
+    ///
+    /// Empty from a harness whose hook is not `cctop hook`, and on Windows.
+    /// The agent's own pid is in here somewhere; which one it is, is a question
+    /// only the process table can answer — see
+    /// [`Collector::collect`](crate::proc::Collector::collect).
+    pub pids: Vec<u32>,
     /// What the agent last said about itself, and where it is working.
     pub reported: Reported,
     /// The subagent this event is about, when it is about one.
@@ -853,6 +1003,16 @@ fn parse(line: &str) -> Option<Event> {
     }
     Some(Event {
         session_id,
+        pids: value
+            .get("pids")
+            .and_then(|v| v.as_array())
+            .map(|pids| {
+                pids.iter()
+                    .filter_map(|p| p.as_u64())
+                    .map(|p| p as u32)
+                    .collect()
+            })
+            .unwrap_or_default(),
         // Claude Code names it `agent_id`, and cctop stores that subagent's
         // transcript as `agent-<agent_id>.jsonl`, so the two line up directly.
         finished_agent: matches!(
@@ -2133,6 +2293,54 @@ fn repair_in(scopes: &[Scope]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The chain stops where it stops being about an agent: init is nobody's
+    /// parent worth reporting, and a table read while it changes must not be
+    /// able to spin the walk forever.
+    #[test]
+    #[cfg(unix)]
+    fn the_ancestry_walk_stops_at_init_a_cycle_and_the_cap() {
+        let tree = |pid: u32| match pid {
+            10 => Some(9),
+            9 => Some(1),
+            _ => None,
+        };
+        assert_eq!(walk(10, tree), vec![9]);
+
+        let loops = |pid: u32| Some(if pid == 3 { 2 } else { 3 });
+        assert_eq!(walk(2, loops), vec![3, 2]);
+
+        // A chain with no end still costs a bounded number of reads.
+        let endless = |pid: u32| Some(pid + 1);
+        assert_eq!(walk(100, endless).len(), MAX_ANCESTRY);
+    }
+
+    /// The whole point of the field: the pids the hook walked survive the wire
+    /// and come back out of `parse` as the chain that was sent.
+    #[test]
+    fn the_process_tree_survives_the_wire() {
+        let raw = br#"{"session_id":"s","hook_event_name":"Stop","cwd":"/w"}"#;
+        let line = envelope("", raw, &[41, 42, 43]).expect("envelope");
+        let event = parse(std::str::from_utf8(&line).unwrap()).expect("parse");
+        assert_eq!(event.pids, vec![41, 42, 43]);
+    }
+
+    /// A harness whose hook is not `cctop hook` reports no tree at all, and an
+    /// empty claim must read as "no claim" rather than as an empty one.
+    #[test]
+    fn an_event_without_a_process_tree_claims_nothing() {
+        let raw = br#"{"session_id":"s","hook_event_name":"Stop"}"#;
+        let line = envelope("", raw, &[]).expect("envelope");
+        assert!(
+            parse(std::str::from_utf8(&line).unwrap())
+                .unwrap()
+                .pids
+                .is_empty()
+        );
+        // And one that never carried the field at all.
+        let event = parse(r#"{"session_id":"s","event":"Stop"}"#).expect("parse");
+        assert!(event.pids.is_empty());
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
@@ -2152,7 +2360,7 @@ mod tests {
     #[test]
     fn a_subagent_stop_names_the_subagent_that_finished() {
         let raw = br#"{"session_id":"parent-1","cwd":"/x","hook_event_name":"SubagentStop","agent_id":"ab3e95cbb4558bd90","agent_type":"general-purpose","last_assistant_message":"pineapple"}"#;
-        let line = envelope("", raw).expect("envelope");
+        let line = envelope("", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
 
         assert_eq!(
@@ -2172,7 +2380,7 @@ mod tests {
     fn only_a_subagent_stop_reports_a_finished_subagent() {
         for name in ["Stop", "PreToolUse", "Notification"] {
             let raw = format!(r#"{{"session_id":"s","hook_event_name":"{name}"}}"#);
-            let line = envelope("", raw.as_bytes()).expect("envelope");
+            let line = envelope("", raw.as_bytes(), &[]).expect("envelope");
             let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
             assert!(event.finished_agent.is_none(), "{name} named a subagent");
         }
@@ -2183,7 +2391,7 @@ mod tests {
     #[test]
     fn an_event_is_reduced_to_the_session_and_what_happened() {
         let raw = br#"{"session_id":"abc","cwd":"/x","hook_event_name":"Stop","extra":{"a":1}}"#;
-        let line = envelope("", raw).expect("envelope");
+        let line = envelope("", raw, &[]).expect("envelope");
         assert!(line.ends_with(b"\n"), "the wire is newline delimited");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.session_id, "abc");
@@ -2191,12 +2399,12 @@ mod tests {
         assert_eq!(event.reported.signal, Signal::Idle);
 
         // The argument wins, for a harness whose payload names events its way.
-        let line = envelope("Notification", raw).expect("envelope");
+        let line = envelope("Notification", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.reported.signal, Signal::NeedsInput);
 
         // Junk in, nothing out — never a panic, and never a bogus event.
-        assert!(envelope("Stop", b"not json").is_none());
+        assert!(envelope("Stop", b"not json", &[]).is_none());
         assert!(parse("not json").is_none());
         assert!(
             parse(r#"{"event":"Stop"}"#).is_none(),
@@ -2213,7 +2421,7 @@ mod tests {
     #[test]
     fn a_codex_turn_lands_in_the_same_bin_as_a_claude_stop() {
         let raw = br#"{"type":"agent-turn-complete","thread-id":"019fda22-5315-7580-84de-033e4f6835b5","turn-id":"019fda22-6995-7c40-bf6b-aaf54b274444","cwd":"/home/flo/cctop","client":"codex_exec","input-messages":["hi"],"last-assistant-message":"ok"}"#;
-        let line = envelope("", raw).expect("envelope");
+        let line = envelope("", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.session_id, "019fda22-5315-7580-84de-033e4f6835b5");
         assert_eq!(event.reported.cwd, "/home/flo/cctop");
@@ -2233,7 +2441,7 @@ mod tests {
         // loop rather than a `Stop`.
         let raw = br#"{"session_id":"a1b2c3d4-0000-4000-8000-00000000ffff","transcript_path":"/t.jsonl","cwd":"/home/flo/cctop","hook_event_name":"AfterAgent","timestamp":"2026-08-07T00:00:00Z","prompt":"hi","prompt_response":"ok","stop_hook_active":false}"#;
         let event = parse(
-            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+            std::str::from_utf8(&envelope("", raw, &[]).expect("envelope"))
                 .unwrap()
                 .trim(),
         )
@@ -2246,7 +2454,7 @@ mod tests {
         // first of its workspace roots.
         let raw = br#"{"conversation_id":"c8f2e1a0-1111-4111-8111-111111111111","session_id":"c8f2e1a0-1111-4111-8111-111111111111","hook_event_name":"stop","cursor_version":"2026.06.04","workspace_roots":["/home/flo/cctop"],"status":"completed"}"#;
         let event = parse(
-            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+            std::str::from_utf8(&envelope("", raw, &[]).expect("envelope"))
                 .unwrap()
                 .trim(),
         )
@@ -2262,7 +2470,7 @@ mod tests {
         // carry, and a subagent finishing — the id has to survive either way.
         let raw = br#"{"conversation_id":"c8f2e1a0-1111-4111-8111-111111111111","hook_event_name":"subagentStop","subagent_id":"sub-77","workspace_roots":["/w"]}"#;
         let event = parse(
-            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+            std::str::from_utf8(&envelope("", raw, &[]).expect("envelope"))
                 .unwrap()
                 .trim(),
         )
@@ -2275,7 +2483,7 @@ mod tests {
         let raw =
             br#"{"type":"session.idle","sessionID":"ses_8a7c","directory":"/home/flo/cctop"}"#;
         let event = parse(
-            std::str::from_utf8(&envelope("", raw).expect("envelope"))
+            std::str::from_utf8(&envelope("", raw, &[]).expect("envelope"))
                 .unwrap()
                 .trim(),
         )
@@ -2522,7 +2730,7 @@ mod tests {
     #[test]
     fn an_idle_nudge_arrives_as_a_finished_turn() {
         let raw = br#"{"session_id":"s-1","transcript_path":"/t.jsonl","cwd":"/w","hook_event_name":"Notification","message":"Claude is waiting for your input","title":"Claude Code","notification_type":"idle_prompt"}"#;
-        let line = envelope("Notification", raw).expect("envelope");
+        let line = envelope("Notification", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.reported.signal, Signal::Idle);
     }
@@ -2532,7 +2740,7 @@ mod tests {
     #[test]
     fn a_session_reports_how_much_it_asks_before_it_acts() {
         let raw = br#"{"session_id":"s-1","cwd":"/w","hook_event_name":"PreToolUse","permission_mode":"bypassPermissions","tool_name":"Bash"}"#;
-        let line = envelope("PreToolUse", raw).expect("envelope");
+        let line = envelope("PreToolUse", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.reported.permission, Some(Permission::Bypass));
         assert!(Permission::Bypass.is_unrestricted());
@@ -2558,7 +2766,7 @@ mod tests {
         // end: a future mode is at least as likely to be a looser one.
         assert_eq!(Permission::parse("somethingNew"), None);
         let raw = br#"{"session_id":"s-2","cwd":"/w","hook_event_name":"Stop"}"#;
-        let line = envelope("Stop", raw).expect("envelope");
+        let line = envelope("Stop", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.reported.permission, None, "silence is not a mode");
     }
@@ -2984,7 +3192,7 @@ mod tests {
         // And a Codex hook event needs nothing new to be understood: the payload
         // is Claude Code's, so the same reader takes it.
         let raw = br#"{"session_id":"thr_123","cwd":"/home/flo/cctop","hook_event_name":"PermissionRequest","model":"gpt-5.6","permission_mode":"default","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#;
-        let line = envelope("PermissionRequest", raw).expect("envelope");
+        let line = envelope("PermissionRequest", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.session_id, "thr_123");
         assert_eq!(event.reported.signal, Signal::NeedsInput);
@@ -3163,6 +3371,50 @@ mod tests {
         }
         assert!(mine(&got_a), "the first cctop missed the event");
         assert!(mine(&got_b), "the second cctop missed the event");
+    }
+
+    /// A restart is the case the file exists for: the map has to come back
+    /// whole, because the session it most matters for is the one that has gone
+    /// quiet waiting for an answer and will report nothing until it gets one.
+    #[test]
+    fn a_remembered_process_tree_survives_the_cctop_that_heard_it() {
+        let mut claims = std::collections::HashMap::new();
+        claims.insert("waiting".to_string(), vec![41, 42]);
+        save_claims(&claims);
+        assert_eq!(load_claims().get("waiting"), Some(&vec![41, 42]));
+
+        // And emptying it is a real state, not a failure to write: every
+        // session this cctop had heard from has since ended.
+        save_claims(&std::collections::HashMap::new());
+        assert!(load_claims().is_empty());
+    }
+
+    /// End to end on the real machine: the chain the walk reads is the chain a
+    /// listening cctop gets. Asserted against a live process tree rather than a
+    /// fixture, because the whole value of the field is that it describes one.
+    #[cfg(unix)]
+    #[test]
+    fn the_tree_a_hook_walks_is_the_tree_cctop_receives() {
+        let listener = Listener::start().expect("listener");
+        let walked = ancestry();
+        assert!(!walked.is_empty(), "this process has parents");
+
+        let payload = br#"{"session_id":"tree","hook_event_name":"Stop"}"#;
+        deliver(&envelope("", payload, &walked).expect("envelope"));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut got = Vec::new();
+        while std::time::Instant::now() < deadline
+            && !got.iter().any(|e: &Event| e.session_id == "tree")
+        {
+            got.extend(listener.drain());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let event = got
+            .iter()
+            .find(|e| e.session_id == "tree")
+            .expect("the event arrived");
+        assert_eq!(event.pids, walked);
     }
 
     /// A socket left behind by a cctop that died is cleaned up by whichever

@@ -110,6 +110,7 @@ impl App {
     pub(super) fn apply_hooks(&mut self, events: Vec<crate::hook::Event>) -> (bool, bool) {
         let changed = !events.is_empty();
         let mut lifecycle = false;
+        let mut moved = false;
         for event in events {
             lifecycle |= event.reported.signal.is_lifecycle();
             if let Some(agent) = event.finished_agent {
@@ -120,11 +121,21 @@ impl App {
                 // signal behind would have the row claim a state forever.
                 crate::hook::Signal::Ended => {
                     self.hooked.remove(&event.session_id);
+                    moved |= self.hook_pids.remove(&event.session_id).is_some();
                 }
                 _ => {
+                    if !event.pids.is_empty()
+                        && self.hook_pids.get(&event.session_id) != Some(&event.pids)
+                    {
+                        self.hook_pids.insert(event.session_id.clone(), event.pids);
+                        moved = true;
+                    }
                     self.hooked.insert(event.session_id, event.reported);
                 }
             }
+        }
+        if moved {
+            self.note_hook_pids();
         }
         // A working claim that nothing has confirmed for a quarter of an hour is
         // dropped rather than believed: see
@@ -132,9 +143,37 @@ impl App {
         // here because this is the only place the map grows, and a session that
         // was killed mid-turn will never send the event that would clear it.
         self.hooked.retain(|_, reported| reported.is_current());
+        // A chain outlives its usefulness exactly when the report it came with
+        // does, and a session that has been swept must stop claiming a pid —
+        // otherwise a reused pid would be handed to a session that is gone. A
+        // waiting session is never swept, which is the case this exists for.
+        let before = self.hook_pids.len();
+        self.hook_pids.retain(|id, _| self.hooked.contains_key(id));
+        if self.hook_pids.len() != before {
+            self.note_hook_pids();
+        }
         self.apply_finished_agents();
         self.apply_reports();
         (changed, lifecycle)
+    }
+
+    /// Tell the worker which processes the agents say they are running under.
+    ///
+    /// This is the only thing that binds a session to a *process* by something
+    /// an agent stated rather than something cctop inferred. Without it a plain
+    /// `claude` — which carries no session id on its command line — is paired
+    /// with a transcript by working directory and recency, so two agents in one
+    /// checkout swap rows whenever their activity order changes, and the alerts
+    /// follow the swap onto the wrong tab.
+    ///
+    /// Sent whole rather than incrementally: it is a handful of entries, and a
+    /// replacement cannot drift from what this cctop believes the way a stream
+    /// of deltas could.
+    fn note_hook_pids(&self) {
+        crate::hook::save_claims(&self.hook_pids);
+        let _ = self
+            .tx
+            .send(super::worker::Request::HookClaims(self.hook_pids.clone()));
     }
 
     /// Stamp each session with what its own hooks reported: the permission mode
@@ -435,6 +474,7 @@ mod tests {
 
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
@@ -481,6 +521,7 @@ mod tests {
         // fifteen minutes for every cctop but this one.
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 signal: crate::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
@@ -515,6 +556,7 @@ mod tests {
     fn a_row_learns_from_its_hooks_what_a_transcript_cannot_say() {
         let event = |signal| crate::hook::Event {
             session_id: "a".into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 provisional: false,
                 signal,
@@ -559,6 +601,7 @@ mod tests {
     fn the_permission_mode_survives_the_rows_being_rebuilt() {
         let reported = |mode: Option<crate::hook::Permission>| crate::hook::Event {
             session_id: "a".into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 provisional: false,
                 signal: crate::hook::Signal::Busy,
@@ -606,6 +649,7 @@ mod tests {
     fn a_reported_state_is_kept_until_the_session_ends() {
         let event = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
             session_id: id.into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 provisional: false,
                 signal,
@@ -662,6 +706,7 @@ mod tests {
     fn a_working_claim_nothing_confirms_is_dropped() {
         let stale = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
             session_id: id.into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 provisional: false,
                 signal,
@@ -701,6 +746,7 @@ mod tests {
         let mut app = test_app();
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "79709c93-1111-4111-8111-111111111111".into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 provisional: false,
                 signal: crate::hook::Signal::Idle,
@@ -752,6 +798,7 @@ mod tests {
 
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 provisional: false,
                 signal: crate::hook::Signal::NeedsInput,
@@ -773,6 +820,7 @@ mod tests {
         // A different agent's keys settle nothing here.
         app.apply_hooks(vec![crate::hook::Event {
             session_id: "a".into(),
+            pids: Vec::new(),
             reported: crate::hook::Reported {
                 provisional: false,
                 signal: crate::hook::Signal::NeedsInput,
@@ -803,6 +851,7 @@ mod tests {
 
         let raised = |signal: Signal, provisional: bool| Event {
             session_id: "a".to_string(),
+            pids: Vec::new(),
             finished_agent: None,
             reported: Reported {
                 signal,

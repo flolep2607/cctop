@@ -71,6 +71,9 @@ pub struct Collector {
     /// Why each root was given to the session it was given to, newest collect
     /// only. See [`Collector::attributions`].
     attributions: Vec<Attribution>,
+    /// Session id -> the process tree its own hook reported running under.
+    /// See [`Collector::set_hook_claims`].
+    claims: HashMap<String, Vec<u32>>,
 }
 
 /// One process, and the rule that decided which session owns it.
@@ -310,7 +313,19 @@ impl Collector {
             ghosts: HashMap::new(),
             orphans: HashMap::new(),
             attributions: Vec::new(),
+            claims: HashMap::new(),
         }
+    }
+
+    /// Record what each session's own hooks said about where they are running.
+    ///
+    /// Kept on the collector rather than passed to [`collect`](Self::collect)
+    /// because the two arrive on different clocks: hook events land whenever an
+    /// agent does something, and a walk happens when a walk happens. The map is
+    /// replaced wholesale, so a session that has gone quiet stops being claimed
+    /// when the UI drops it.
+    pub fn set_hook_claims(&mut self, claims: HashMap<String, Vec<u32>>) {
+        self.claims = claims;
     }
 
     pub fn orphans(&self) -> &HashMap<String, Orphan> {
@@ -479,30 +494,69 @@ impl Collector {
             });
         }
 
-        for snap in &candidates {
-            let pid = snap.pid;
+        // Which agent a candidate process is, if it is one at all. Hoisted out
+        // of the attribution loop because the hook claims below have to know it
+        // before the loop starts: a chain that reached a Claude process must not
+        // be allowed to claim it for a Codex session.
+        let provider_of = |snap: &Candidate| -> Option<crate::pricing::Provider> {
             if exclude_agent_process(&snap.name, &snap.tokens, &snap.args) {
-                continue;
+                return None;
             }
             let is_claude = is_claude_binary(&snap.name, &snap.tokens);
             let is_codex = is_codex_process(&snap.name, &snap.tokens)
-                && (snap.name != "bwrap" || current_ancestors.contains(&pid));
+                && (snap.name != "bwrap" || current_ancestors.contains(&snap.pid));
             let is_opencode = matches!(snap.name.as_str(), "opencode" | "opencode-cli")
                 || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "opencode"));
             let is_pi = snap.name == "pi"
                 || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "pi"));
-            if !is_claude && !is_codex && !is_opencode && !is_pi {
+            if is_opencode {
+                Some(crate::pricing::Provider::OpenCode)
+            } else if is_pi {
+                Some(crate::pricing::Provider::Pi)
+            } else if is_codex {
+                Some(crate::pricing::Provider::Codex)
+            } else if is_claude {
+                Some(crate::pricing::Provider::Claude)
+            } else {
+                None
+            }
+        };
+
+        // What each session's own hook said it is running under, resolved to one
+        // process. This is the only attribution an agent states rather than one
+        // cctop infers: `cctop hook` is spawned by the agent, so the chain it
+        // reported contains the agent's pid, and cctop need only recognise which
+        // link of it is an agent at all.
+        //
+        // Nearest link first, so an agent launched from inside another agent
+        // claims itself rather than its host. Newest session first, so a stale
+        // claim from a session that has since been resumed cannot outrank the
+        // live one when a pid is reused.
+        let agent_pids: HashMap<u32, crate::pricing::Provider> = candidates
+            .iter()
+            .filter_map(|c| provider_of(c).map(|p| (c.pid, p)))
+            .collect();
+        let hook_claimed = hook_claims(sessions, &self.claims, &agent_pids);
+
+        for snap in &candidates {
+            let pid = snap.pid;
+            let Some(provider) = provider_of(snap) else {
+                continue;
+            };
+
+            // Ahead of every rule below, all of which infer what this one was
+            // told.
+            if let Some((key, matched)) = hook_claimed.get(&pid) {
+                found.push(Attribution {
+                    pid,
+                    key: key.clone(),
+                    argv: snap.args.clone(),
+                    rule: "the agent's own hook, which runs as its child",
+                    matched: matched.clone(),
+                });
+                claim_root(&mut roots, key.clone(), pid);
                 continue;
             }
-            let provider = if is_opencode {
-                crate::pricing::Provider::OpenCode
-            } else if is_pi {
-                crate::pricing::Provider::Pi
-            } else if is_codex {
-                crate::pricing::Provider::Codex
-            } else {
-                crate::pricing::Provider::Claude
-            };
 
             if matches!(
                 provider,
@@ -542,7 +596,7 @@ impl Collector {
             }
 
             // Claude for Mac resumes by title rather than UUID.
-            if is_claude
+            if provider == crate::pricing::Provider::Claude
                 && let Some(title) = resume_title(&snap.tokens)
                 && let Some(session) = sessions
                     .iter()
@@ -759,6 +813,59 @@ fn live_sessions_for_group<'a>(
     live
 }
 
+/// Resolve each session's reported process tree to the one process that is its
+/// agent — the half of the hook rule with the judgement in it, split out so it
+/// can be tested without a process table.
+///
+/// Returns the pid each claim landed on, with the session it belongs to and the
+/// chain that said so, ready for [`Attribution`].
+///
+/// Two orderings carry the whole decision. The chain is searched *nearest
+/// first*, because it runs from the hook outwards and the first agent it meets
+/// is the one that spawned it — an agent launched from inside another agent
+/// must claim itself, not its host. Sessions are considered *newest first*, so
+/// that when a pid has been reused, or a session was resumed into a new
+/// transcript while the old one still holds a chain, the live session takes it.
+///
+/// The provider has to agree as well as the pid: a chain that reached a Claude
+/// process says nothing about a Codex session that happens to have reported the
+/// same tree.
+fn hook_claims(
+    sessions: &[Session],
+    claims: &HashMap<String, Vec<u32>>,
+    agent_pids: &HashMap<u32, crate::pricing::Provider>,
+) -> HashMap<u32, (String, String)> {
+    let mut claimants: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| claims.contains_key(&s.session_id))
+        .collect();
+    claimants.sort_by(|a, b| {
+        b.last_active
+            .cmp(&a.last_active)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+
+    let mut claimed: HashMap<u32, (String, String)> = HashMap::new();
+    for session in claimants {
+        let chain = &claims[&session.session_id];
+        let Some(pid) = chain
+            .iter()
+            .find(|pid| agent_pids.get(pid) == Some(&session.provider))
+        else {
+            continue;
+        };
+        let matched = chain
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" < ");
+        claimed
+            .entry(*pid)
+            .or_insert_with(|| (session.key(), matched));
+    }
+    claimed
+}
+
 /// The session a `--resume <uuid>` process belongs to.
 ///
 /// Not the session called `uuid`, which is the trap this exists to avoid. A
@@ -908,6 +1015,81 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["older"]
         );
+    }
+
+    /// The bug the hook rule exists for. Two agents in one checkout, neither
+    /// carrying a session id on its command line, used to be paired with their
+    /// transcripts by recency — so the alerts followed the ranking onto the
+    /// wrong tab. A chain each agent reported itself settles it outright.
+    #[test]
+    fn a_reported_process_tree_claims_its_own_agent() {
+        let a = session_at("a", "t0", "2026-08-05T15:00:00+00:00");
+        let b = session_at("b", "t0", "2026-08-05T09:00:00+00:00");
+        // `b`'s agent is pid 200 and `a`'s is 100, which is the pairing recency
+        // would have got backwards.
+        let claims = HashMap::from([
+            ("a".to_string(), vec![9001, 9000, 100, 7]),
+            ("b".to_string(), vec![9011, 9010, 200, 7]),
+        ]);
+        let agents = HashMap::from([
+            (100, crate::pricing::Provider::Claude),
+            (200, crate::pricing::Provider::Claude),
+        ]);
+
+        let claimed = hook_claims(&[a, b], &claims, &agents);
+        assert_eq!(claimed.get(&100).map(|c| c.0.as_str()), Some("claude:a"));
+        assert_eq!(claimed.get(&200).map(|c| c.0.as_str()), Some("claude:b"));
+        // The shells and the multiplexer above them are in the chain too, and
+        // none of them is an agent.
+        assert!(!claimed.contains_key(&9001));
+        assert!(!claimed.contains_key(&7));
+    }
+
+    /// An agent started from inside another agent's session is in its own
+    /// chain twice over. The nearer one is the one that spawned the hook.
+    #[test]
+    fn a_nested_agent_claims_itself_rather_than_its_host() {
+        let inner = session_at("inner", "t0", "t1");
+        let claims = HashMap::from([("inner".to_string(), vec![500, 300, 100])]);
+        let agents = HashMap::from([
+            (300, crate::pricing::Provider::Claude),
+            (100, crate::pricing::Provider::Claude),
+        ]);
+
+        let claimed = hook_claims(&[inner], &claims, &agents);
+        assert_eq!(
+            claimed.get(&300).map(|c| c.0.as_str()),
+            Some("claude:inner")
+        );
+        assert!(!claimed.contains_key(&100));
+    }
+
+    /// A pid is reused as freely as any other number, and a session that has
+    /// been resumed leaves its old chain behind. The live session takes it.
+    #[test]
+    fn the_newest_session_wins_a_contested_pid() {
+        let stale = session_at("stale", "t0", "2026-08-05T09:00:00+00:00");
+        let live = session_at("live", "t0", "2026-08-05T15:00:00+00:00");
+        let claims = HashMap::from([
+            ("stale".to_string(), vec![42, 100]),
+            ("live".to_string(), vec![42, 100]),
+        ]);
+        let agents = HashMap::from([(100, crate::pricing::Provider::Claude)]);
+
+        let claimed = hook_claims(&[stale, live], &claims, &agents);
+        assert_eq!(claimed.get(&100).map(|c| c.0.as_str()), Some("claude:live"));
+    }
+
+    /// A chain says which processes, not which agent. A Codex session that
+    /// reported a tree containing a Claude process claims nothing.
+    #[test]
+    fn a_claim_needs_the_provider_to_agree_as_well_as_the_pid() {
+        let mut codex = session_at("c", "t0", "t1");
+        codex.provider = crate::pricing::Provider::Codex;
+        let claims = HashMap::from([("c".to_string(), vec![100])]);
+        let agents = HashMap::from([(100, crate::pricing::Provider::Claude)]);
+
+        assert!(hook_claims(&[codex], &claims, &agents).is_empty());
     }
 
     /// A session that has never been resumed answers to its own id, which is
