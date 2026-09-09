@@ -968,6 +968,7 @@ mod tests {
             d: d.to_string(),
             ts: ts.to_string(),
             full: None,
+            paths: Vec::new(),
             id: None,
             dur_ms: None,
             tokens_in: 0,
