@@ -10,9 +10,6 @@
 //! to fit rather than shown cropped — see [`frame`] for why that needs a wire
 //! format, and [`shim`](crate::shim) for how the sizes of several watchers are
 //! reconciled into the one size a pty can have.
-//!
-//! Nothing here is platform-specific except the socket, so the parser and the
-//! key encoding compile everywhere; [`attach`] simply never succeeds off unix.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
@@ -234,11 +231,6 @@ pub mod frame {
 
 /// One thing the shim said, kept in order so a resize is applied to the parser
 /// before the redraw the agent sent in response to it.
-///
-/// [`Attach::pump`] reads these on every platform, but only [`read_event`]
-/// builds one and that is unix-only — there is no shim to hear from otherwise.
-/// The type still has to exist, because `pump` and the `Attach` it belongs to do.
-#[cfg_attr(not(unix), allow(dead_code))]
 enum Event {
     Output(Vec<u8>),
     Size(u16, u16),
@@ -646,7 +638,6 @@ pub enum MouseButton {
 ///
 /// `None` when this agent wasn't started by `cctop run` — the socket is the only
 /// way in, and there isn't one.
-#[cfg(unix)]
 pub fn attach(pid: u32) -> Option<Attach> {
     use std::io::Read;
 
@@ -722,17 +713,11 @@ pub fn attach(pid: u32) -> Option<Attach> {
 }
 
 /// Open an attach connection to the shim owning `pid`.
-#[cfg(unix)]
 fn connect(pid: u32) -> Option<std::os::unix::net::UnixStream> {
     let path = crate::shim::socket_path(pid)?;
     let mut stream = std::os::unix::net::UnixStream::connect(path).ok()?;
     stream.write_all(crate::shim::ATTACH_MAGIC).ok()?;
     Some(stream)
-}
-
-#[cfg(not(unix))]
-pub fn attach(_pid: u32) -> Option<Attach> {
-    None
 }
 
 /// `cctop attach [pid]` — put an agent on *this* terminal, with no cctop in the
@@ -742,7 +727,6 @@ pub fn attach(_pid: u32) -> Option<Attach> {
 /// connection wired straight to the real terminal, so the agent gets every key
 /// and every pixel. With no pid and exactly one session running, that one is
 /// taken; otherwise what is running is listed.
-#[cfg(unix)]
 pub fn run_terminal(args: &[String]) -> anyhow::Result<i32> {
     let sessions = crate::shim::sessions();
     let pid = match args {
@@ -761,7 +745,6 @@ pub fn run_terminal(args: &[String]) -> anyhow::Result<i32> {
     proxy(pid)
 }
 
-#[cfg(unix)]
 fn list_sessions(sessions: &[u32]) -> anyhow::Result<i32> {
     if sessions.is_empty() {
         eprintln!(
@@ -811,16 +794,13 @@ fn list_sessions(sessions: &[u32]) -> anyhow::Result<i32> {
 /// The detach key, matching the one the TUI uses. A function key because those
 /// are the ones an agent never wants: any Ctrl- combination worth pressing is
 /// one it might.
-#[cfg(unix)]
 const DETACH: &[u8] = b"\x1b[24~";
 
 /// Undo what the agent did to this terminal on its way out: leave the alternate
 /// screen, stop the mouse reporting a TUI turns on, show the cursor, drop any
 /// colour still in effect.
-#[cfg(unix)]
 const RESTORE: &[u8] = b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[0m";
 
-#[cfg(unix)]
 fn proxy(pid: u32) -> anyhow::Result<i32> {
     use std::io::{IsTerminal, Read};
 
@@ -927,10 +907,6 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
 
 /// The next frame that means something to a watcher. Unknown kinds are skipped
 /// so a newer shim can add one without this end having to understand it.
-///
-/// Every caller is unix-only, because every one of them is reading a shim's
-/// socket.
-#[cfg(unix)]
 fn read_event(decoder: &mut frame::Decoder) -> Option<Event> {
     loop {
         let (kind, payload) = decoder.next()?;
@@ -1274,7 +1250,6 @@ mod tests {
     /// the watcher that never sees the byte itself still knows it happened.
     /// Nothing smaller covers it — the bell has to survive the framing, the
     /// socket and the parser, and each of those is where it used to be lost.
-    #[cfg(unix)]
     #[test]
     fn a_bell_travels_from_a_real_pty_to_a_watcher() {
         let argv: Vec<String> = ["sh", "-c", "printf 'x\\a'; sleep 30"]

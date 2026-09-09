@@ -1,9 +1,9 @@
 //! OS process attribution: map running agent processes onto sessions.
 //!
-//! The Node original shelled out to `ps`, then `lsof` in PID chunks, then
-//! PowerShell on Windows, re-parsing text output twice a second. `sysinfo`
-//! exposes the same facts (parent, cmdline, cwd, start time, CPU, RSS) as typed
-//! data on every platform, so all of that goes away.
+//! The Node original shelled out to `ps`, then `lsof` in PID chunks,
+//! re-parsing text output twice a second. `sysinfo` exposes the same facts
+//! (parent, cmdline, cwd, start time, CPU, RSS) as typed data, so all of that
+//! goes away.
 
 use crate::session::Session;
 use crate::util;

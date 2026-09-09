@@ -27,8 +27,8 @@ concurrency:
 
 jobs:
   # Tagging is irreversible and publishing to crates.io cannot be undone, so the
-  # full test matrix has to pass before `prepare-release` creates the tag. CI
-  # runs these same checks independently; releasing must not depend on that run.
+  # full check has to pass before `prepare-release` creates the tag. CI runs
+  # these same checks independently; releasing must not depend on that run.
   verify:
     uses: ./.github/workflows/verify.yml
     with:
@@ -147,22 +147,15 @@ jobs:
   build:
     needs: [prepare-release, create-release]
     name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Statically linked, so it runs on any glibc/musl Linux.
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+        # cctop is Linux-only. Both targets are statically linked against musl,
+        # so one archive per architecture runs on any distro, glibc or not.
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v6
         with:

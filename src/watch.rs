@@ -229,11 +229,7 @@ mod tests {
     #[test]
     fn a_create_keeps_asking_until_it_is_discovered() {
         let dir = tempfile::tempdir().unwrap();
-        // Canonicalised because this is the one test that compares a path the
-        // watcher reported against one it built itself. On macOS the temp dir is
-        // `/var/folders/…`, a symlink to `/private/var/folders/…`, and FSEvents
-        // reports the target — so the two spellings would never match.
-        let root = dir.path().canonicalize().unwrap();
+        let root = dir.path().to_path_buf();
         let watch = watch_dir(&root);
         let transcript = root.join("new-session.jsonl");
 

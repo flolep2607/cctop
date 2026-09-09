@@ -436,7 +436,6 @@ mod tests {
 
     /// And the whole way through, on real panes: the view ends up on the
     /// neighbour's agent rather than on the dashboard.
-    #[cfg(target_os = "linux")]
     #[test]
     fn closing_a_pane_leaves_the_next_agent_on_screen() {
         let mut app = test_app();
@@ -695,7 +694,6 @@ mod tests {
     /// pane opened with `a` — a window onto an agent cctop never started — there
     /// is nothing to stop, so the window closes and the status says the agent
     /// was left alone rather than claiming a kill that never happened.
-    #[cfg(target_os = "linux")]
     #[test]
     fn closing_a_borrowed_pane_says_the_agent_was_left_running() {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));

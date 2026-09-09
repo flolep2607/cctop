@@ -260,22 +260,10 @@ fn collect(dir: &Path, out: &mut Vec<(String, u64, u64, u64, u64)>) {
 /// The filesystem's own name for a file, where it has one.
 ///
 /// `(device, inode)` distinguishes two files that trade paths in the same
-/// millisecond at the same size, which a path-and-stat pair cannot. Windows has
-/// no such pair through `std`, and the path is already hashed alongside this, so
-/// there it contributes nothing and the size and mtime carry the reading — a
-/// weaker key on that platform, deliberately, rather than a `cfg` that changes
-/// what the caller has to do.
+/// millisecond at the same size, which a path-and-stat pair cannot.
 fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        (meta.dev(), meta.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        (0, 0)
-    }
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
 }
 
 // FNV-1a, matching `build.rs`: a hash of a few thousand short byte strings

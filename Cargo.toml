@@ -3,7 +3,7 @@ name = "cctop"
 version = "0.12.0"
 edition = "2024"
 rust-version = "1.88"
-description = "An htop-like terminal monitor for AI coding agent sessions (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, Windsurf)"
+description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, Windsurf)"
 license = "MIT"
 repository = "https://github.com/flolep2607/cctop"
 homepage = "https://github.com/flolep2607/cctop"
@@ -22,17 +22,12 @@ categories = ["command-line-utilities", "development-tools"]
 # reading this repository, on the same terms as the mirrors above.
 exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD"]
 
-# Only the pty shim and TIOCSTI injection need libc, both of which are unix-only.
-# It is already in the tree under sysinfo, so this adds no dependency.
 # Off by default and never enabled for a release: `debug` compiles in
 # `src/serve/debug.rs`, which can make the server fail on demand. Handy against
 # a fixture (`cargo run --features debug -- serve`), and not something to ship —
 # a build without it contains neither the routes nor the strings that name them.
 [features]
 debug = []
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2.189"
 
 [profile.release]
 # A monitoring tool is launched often and lives in the terminal; a smaller,
@@ -43,6 +38,9 @@ strip = true
 
 [dependencies]
 anyhow = "1.0.104"
+# The pty shim and TIOCSTI injection need libc. It is already in the tree under
+# sysinfo, so this adds no dependency.
+libc = "0.2.189"
 mimalloc = "0.1"
 chrono = "0.4.45"
 clap = { version = "4.6.5", features = ["derive"] }
@@ -55,7 +53,7 @@ cloudflare-quick-tunnel = "0.3.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
-notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "8.2.0", default-features = false }
 ratatui = "0.30.2"
 rayon = "1.12.0"
 regex = "1.13.1"
@@ -94,4 +92,3 @@ rmux-sdk = "0.10.0"
 tui-term = "0.3.4"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

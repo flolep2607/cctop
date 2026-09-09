@@ -366,21 +366,15 @@ pub static GEMINI_CHATS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| GEMINI_HOME.j
 /// Windsurf keeps per-workspace editor state where its VS Code base does.
 ///
 /// `$WINDSURF_USER_DIR` overrides the whole `User` directory, which is what a
-/// portable install moves; without it, follow the platform convention.
+/// portable install moves; without it, the XDG config directory.
 pub static WINDSURF_USER_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     if let Some(dir) = std::env::var_os("WINDSURF_USER_DIR") {
         return PathBuf::from(dir);
     }
-    let base = if cfg!(target_os = "macos") {
-        HOME.join("Library").join("Application Support")
-    } else if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| HOME.join("AppData").join("Roaming"))
-    } else {
-        dirs::config_dir().unwrap_or_else(|| HOME.join(".config"))
-    };
-    base.join("Windsurf").join("User")
+    dirs::config_dir()
+        .unwrap_or_else(|| HOME.join(".config"))
+        .join("Windsurf")
+        .join("User")
 });
 
 pub static WINDSURF_WORKSPACE_STORAGE: LazyLock<PathBuf> =
@@ -544,15 +538,9 @@ fn named_homes() -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-#[cfg(unix)]
 fn running_as_root() -> bool {
     // SAFETY: geteuid reads process state and cannot fail.
     unsafe { libc::geteuid() == 0 }
-}
-
-#[cfg(not(unix))]
-fn running_as_root() -> bool {
-    false
 }
 
 /// Every home besides this user's that cctop reads sessions out of.
@@ -596,12 +584,11 @@ pub static OTHER_HOMES: LazyLock<Vec<OtherHome>> = LazyLock::new(|| {
 
 /// Lowest uid a login account gets, below which an entry is a service account.
 ///
-/// The convention the distributions set in `/etc/login.defs`; macOS starts its
-/// human accounts at 500. Reading `login.defs` to learn the local value would be
-/// more correct and would change nothing: no `daemon` or `www-data` has ever
-/// run a coding agent, and a site that lowered `UID_MIN` still keeps its
-/// service accounts below the default.
-const UID_MIN: u32 = if cfg!(target_os = "macos") { 500 } else { 1000 };
+/// The convention the distributions set in `/etc/login.defs`. Reading
+/// `login.defs` to learn the local value would be more correct and would change
+/// nothing: no `daemon` or `www-data` has ever run a coding agent, and a site
+/// that lowered `UID_MIN` still keeps its service accounts below the default.
+const UID_MIN: u32 = 1000;
 
 /// `(home, user)` for every `passwd` line belonging to a person.
 ///
@@ -705,22 +692,14 @@ pub fn gemini_chats_roots() -> Vec<PathBuf> {
     roots_across_homes(&GEMINI_CHATS_ROOT, |h| h.join(".gemini").join("tmp"))
 }
 
-/// The platform data directory *for another home*, which `dirs::data_dir` can
-/// only answer for the calling user.
+/// The data directory *for another home*, which `dirs::data_dir` can only
+/// answer for the calling user.
 fn data_dir_in(home: &Path) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library").join("Application Support")
-    } else {
-        home.join(".local").join("share")
-    }
+    home.join(".local").join("share")
 }
 
 fn config_dir_in(home: &Path) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library").join("Application Support")
-    } else {
-        home.join(".config")
-    }
+    home.join(".config")
 }
 
 pub fn opencode_data_roots() -> Vec<PathBuf> {

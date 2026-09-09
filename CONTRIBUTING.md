@@ -24,26 +24,16 @@ cargo test
 cargo publish --dry-run --allow-dirty   # what `verify / package` runs
 ```
 
-## Cross-platform is not optional
+## cctop is Linux-only
 
-`verify` builds on Linux, macOS **and** Windows, and all three gate a release.
-The traps, all of which have bitten:
+There is one platform, and it is Linux (including WSL). macOS and Windows were
+supported once and are not any more: `verify` builds and tests on Linux alone,
+and a release ships two statically linked musl archives, x86_64 and aarch64.
 
-- **Windows has no ptys or unix sockets.** `shim` is `#[cfg(unix)]` with
-  `shim_stub.rs` standing in. A stub may only carry what Windows actually
-  reaches — an item whose callers are all gated is dead code, which
-  `-D warnings` rejects. Adding a courtesy stub breaks the build.
-- **A `cfg`'d-out caller makes its callee dead code.** If every caller of a
-  function is `#[cfg(unix)]` or `#[cfg(target_os = "linux")]`, the function
-  needs the same gate.
-- **macOS resolves symlinks.** `tempfile::tempdir()` gives `/var/folders/…`;
-  FSEvents reports `/private/var/folders/…`. Canonicalise before comparing a
-  path the watcher reported against one you built.
-- **Windows filenames reject `|`, `:`, `*`, `?`.** A fixture using them needs
-  `#[cfg(unix)]`.
-- **Paths in tests.** A transcript written on Unix spells absolute paths with a
-  leading `/`, which `Path::is_absolute` calls false on Windows. Compare against
-  `std::path::MAIN_SEPARATOR` rather than hard-coding `/`.
+Write for Linux directly. A `#[cfg(unix)]` or `#[cfg(target_os = "linux")]`
+gate is noise around code that has no other target to be conditional against,
+and a stub standing in for a platform that is no longer built is dead code,
+which `-D warnings` rejects.
 
 ## `cctop hook` must never break the session it watches
 
@@ -53,9 +43,8 @@ feeds stderr back to the model. So it exits 0 always, writes nothing to stdout,
 and returns inside a deadline — by construction, not by care. See the module
 docs in `src/hook.rs`.
 
-This is why the `hook` dispatch in `main.rs` is not behind `#[cfg(unix)]`:
-`--install-hooks` writes the settings file on any platform, and a hook that fell
-through to clap would exit non-zero on every fire.
+A hook that fell through to clap would exit non-zero on every fire, so the
+`hook` dispatch in `main.rs` is never gated behind anything.
 
 ## Conventions
 
@@ -103,7 +92,7 @@ A few things that are less obvious from the code:
 
 Change the package `version` in `Cargo.toml` and push that commit to `main`.
 GitHub Actions derives the matching `v<version>` tag, creates the GitHub
-release, builds the platform archives, and publishes the crate. **The version
+release, builds the Linux archives, and publishes the crate. **The version
 bump is the release** — there is no separate confirmation step, and
 `cargo publish` to crates.io cannot be undone. Do not create a release tag by
 hand for a normal version bump.

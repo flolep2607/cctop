@@ -2,28 +2,31 @@
 
 [← back to the README](../README.md)
 
+cctop runs on Linux, including WSL. It reads Linux process tables and drives
+agents over ptys and unix sockets, and there is no macOS or Windows build.
+
 cctop is a single binary. It links no system libraries and needs no runtime, so
 "installing" it means putting one file on your `PATH`.
 
 ## Download a binary
 
-Grab the archive for your platform from the
+A release ships two archives, x86_64 and aarch64, both statically linked against
+musl — so either runs on any distro, glibc or not. Grab the one for your
+architecture from the
 [latest release](https://github.com/flolep2607/cctop/releases/latest) and put
 `cctop` somewhere on your `PATH`:
 
 ```bash
-# Linux x86_64 (static — works on any distro)
+# x86_64
 curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m755 cctop /usr/local/bin/cctop
 ```
 
 ```bash
-# macOS (Apple silicon; use x86_64-apple-darwin on Intel)
-curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-aarch64-apple-darwin.tar.gz | tar xz
+# aarch64
+curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-aarch64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m755 cctop /usr/local/bin/cctop
 ```
-
-On Windows, download `cctop-x86_64-pc-windows-msvc.zip` and extract `cctop.exe`.
 
 Every archive ships with a `.sha256` file next to it:
 
@@ -32,16 +35,10 @@ curl -fsSLO https://github.com/flolep2607/cctop/releases/latest/download/cctop-x
 sha256sum -c cctop-x86_64-unknown-linux-musl.tar.gz.sha256
 ```
 
-macOS will quarantine an unsigned download. If Gatekeeper blocks it:
-
-```bash
-xattr -d com.apple.quarantine /usr/local/bin/cctop
-```
-
 ## Staying up to date
 
 A downloaded binary has no package manager behind it, so `cctop --update`
-fetches the newest release for your platform and replaces the running
+fetches the newest release for your architecture and replaces the running
 executable in place:
 
 ```bash
@@ -95,8 +92,8 @@ rather than interrupting the one you are in.
 
 To start on the version you already have, pass `--no-auto-update`. To stop it
 happening at all, set `"auto_update": false` in `ui-prefs.json` under your cache
-directory (`~/.cache/cctop` on Linux, `~/Library/Caches/cctop` on macOS);
-`cctop --update` still works whenever you want it. `cctop claude` and the other
+directory (`~/.cache/cctop`); `cctop --update` still works whenever you want
+it. `cctop claude` and the other
 agent aliases skip it too — you are waiting on an agent, and a download between
 the command and the agent starting is not what you asked for.
 

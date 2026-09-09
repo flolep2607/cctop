@@ -213,32 +213,6 @@ fn read_claude_credential_in(profile: &config::Profile, is_default: bool) -> Cre
         return classify(&tok);
     }
 
-    // macOS keychain. Current builds use "Claude Code-credentials"; older ones
-    // used "Claude Code".
-    // Only for the profile Claude Code itself would use. The keychain holds one
-    // entry per machine, not one per config directory, so consulting it for a
-    // second profile would hand back the first profile's token — the exact
-    // confusion this function was parameterised to end.
-    #[cfg(target_os = "macos")]
-    for service in ["Claude Code-credentials", "Claude Code"]
-        .into_iter()
-        .filter(|_| is_default)
-    {
-        let out = std::process::Command::new("security")
-            .args(["find-generic-password", "-s", service, "-w"])
-            .output();
-        if let Ok(out) = out
-            && out.status.success()
-            && let Some(tok) = extract_claude_token(&String::from_utf8_lossy(&out.stdout))
-        {
-            return if is_api_key(&tok) {
-                Credential::ApiKey
-            } else {
-                Credential::OAuth(tok)
-            };
-        }
-    }
-
     // `~/.claude.json` is the account file Claude Code writes beside its config
     // directory, and there is only one of it — so it answers for the default
     // profile alone. A named profile has to prove itself from its own
@@ -393,20 +367,10 @@ pub fn add_account(profile: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Owner-only permissions, where the platform has them.
-///
-/// ponytail: Windows keeps whatever the profile directory grants, which is
-/// normally the user alone. Tightening a Windows ACL means a DACL dance for a
-/// file already outside other users' reach by default.
+/// Owner-only permissions: the file holds a token.
 fn restrict(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 fn read_codex_token_in(dir: &Path) -> Option<String> {

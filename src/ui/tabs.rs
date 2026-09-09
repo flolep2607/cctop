@@ -1248,7 +1248,6 @@ mod tests {
     /// under a pid nothing on this side would ever ask about. A tab that asked
     /// the wrong one would fall back to reading the screen for exactly the panes
     /// where the agent is talking.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_rmux_backed_tab_asks_about_the_agent_and_not_the_client() {
         // A pane standing in for a rmux client: what cctop hosts is one pid, and
@@ -1293,7 +1292,6 @@ mod tests {
     /// question must outrank a finished turn, and the tab you are looking at
     /// must stay quiet — blinking the title of the pane in front of you is
     /// noise, and it is the case that fires most often.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_tab_asks_for_attention_only_when_it_has_something_you_cannot_see() {
         let mut kids = Vec::new();
@@ -1353,7 +1351,6 @@ mod tests {
     /// leave gives up its client and keeps everything needed to take one back.
     /// Only a lone rmux-backed pane may do it — a pty cctop owns would be
     /// *ended* by this, and a split cannot be rebuilt from one session name.
-    #[cfg(target_os = "linux")]
     #[test]
     fn leaving_a_rmux_tab_gives_up_its_client_and_nothing_else() {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));

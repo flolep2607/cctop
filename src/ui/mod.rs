@@ -494,9 +494,9 @@ pub struct App {
     /// Which report was asked for, so the overlay can name itself before the
     /// text arrives.
     pub insight_kind: &'static str,
-    /// The socket the agents push their events to. `None` only where there is
-    /// none to be had — a non-unix build — in which case every estimate carries
-    /// on exactly as it did before hooks existed.
+    /// The socket the agents push their events to. `None` when one could not be
+    /// bound, in which case every estimate carries on exactly as it did before
+    /// hooks existed.
     pub listener: Option<crate::hook::Listener>,
     /// The command highlighted in the launcher.
     pub launch_cursor: usize,

@@ -297,8 +297,7 @@ into the agent instead. cctop cannot see the terminal's selection, so it cannot
 tell the two apart.
 
 It needs something that can read the clipboard: `wl-clipboard` or `xclip` on
-Linux, `pngpaste` or the built-in `osascript` on macOS, and `powershell.exe` on
-Windows — which is also how it works under WSL, where the clipboard being read
+a Linux desktop, and `powershell.exe` under WSL, where the clipboard being read
 is Windows'. Under WSL it is also looked for at
 `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`, because a
 session nobody logged into by hand — an ssh into the distribution, a cron job —

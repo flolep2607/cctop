@@ -17,21 +17,23 @@ A Rust rewrite of an earlier Node implementation.
 
 ## Install
 
+**cctop runs on Linux, including WSL.** It reads Linux process tables and drives
+agents over ptys and unix sockets; there is no macOS or Windows build.
+
 ```bash
 cargo install cctop
 ```
 
-Or grab a binary for your platform from the
-[latest release](https://github.com/flolep2607/cctop/releases/latest):
+Or grab a binary from the
+[latest release](https://github.com/flolep2607/cctop/releases/latest) —
+x86_64 and aarch64, both statically linked, so either runs on any distro:
 
 ```bash
-# Linux x86_64 (static — works on any distro)
 curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m755 cctop /usr/local/bin/cctop
 ```
 
-macOS, Windows, checksums and `cctop --update` are in
-[Installing cctop](docs/install.md).
+Checksums and `cctop --update` are in [Installing cctop](docs/install.md).
 
 ## Start here
 
@@ -130,8 +132,8 @@ reads, and [rmux](docs/rmux/), the multiplexer it hands agents to.
 | Cursor | ─ | ─ | ─ | ✓ | inferred |
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 
-Claude for Mac is read too. A `─` is a gap in what that harness records, not in
-cctop — the details are on the [cost page](docs/costs.md).
+A `─` is a gap in what that harness records, not in cctop — the details are on
+the [cost page](docs/costs.md).
 
 ## A note on cost figures
 

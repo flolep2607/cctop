@@ -92,8 +92,7 @@ thread_local! {
 
 /// Release this thread's cached connections.
 ///
-/// A cached connection keeps a handle on the database, and Windows refuses to
-/// delete a file that anything still has open — so a test that writes a
+/// A cached connection keeps a handle on the database, so a test that writes a
 /// scratch database, reads it, and then removes it has to say when it is done.
 /// Nothing in the program needs this: the only deletion cctop performs is
 /// [`delete`], which removes a *row* through its own connection.
@@ -697,7 +696,7 @@ mod tests {
         assert!(bash[1].failed, "status=error must be flagged");
         assert_eq!(data.metrics.tool_errors, 1);
 
-        // Windows will not delete a file this thread still has open.
+        // Release the handle this thread holds before removing the file.
         close_databases();
         std::fs::remove_file(path).unwrap();
     }
@@ -773,7 +772,7 @@ mod tests {
         assert_eq!(ctx.used, 3_000_000);
         assert_eq!(ctx.max, 200_000);
 
-        // Windows will not delete a file this thread still has open.
+        // Release the handle this thread holds before removing the file.
         close_databases();
         std::fs::remove_file(path).unwrap();
     }
@@ -824,7 +823,7 @@ mod tests {
         session.data_file = Some(path.clone());
         assert!(extract_context(&session).is_none());
 
-        // Windows will not delete a file this thread still has open.
+        // Release the handle this thread holds before removing the file.
         close_databases();
         std::fs::remove_file(path).unwrap();
     }
@@ -898,7 +897,7 @@ mod tests {
             extract_activity_state(&path, "ses_queue_full"),
             ActivityState::ApiError
         );
-        // Windows will not delete a file this thread still has open.
+        // Release the handle this thread holds before removing the file.
         close_databases();
         std::fs::remove_file(path).unwrap();
     }

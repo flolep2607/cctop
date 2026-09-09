@@ -230,11 +230,7 @@ fn forward(args: &[String]) {
 }
 
 /// Write one framed event to every cctop that will take it.
-#[cfg(unix)]
 fn deliver(line: &[u8]) {
-    // Both scoped here rather than at the top of the module: writing is what
-    // only the unix half does, and an import the Windows build cannot use is a
-    // warning, which CI treats as an error.
     use std::io::Write;
     use std::os::unix::net::UnixStream;
 
@@ -264,16 +260,12 @@ fn deliver(line: &[u8]) {
     }
 }
 
-#[cfg(not(unix))]
-fn deliver(_line: &[u8]) {}
-
 /// How far up the process tree the hook looks for the agent that spawned it.
 ///
 /// The answer is always near the bottom — a shell, sometimes a wrapper or a
 /// sandbox — and everything above it is the terminal, the multiplexer and init,
 /// which name no agent. Eight covers every harness measured and bounds what the
 /// walk can cost when the answer is not there at all.
-#[cfg(unix)]
 const MAX_ANCESTRY: usize = 8;
 
 /// The pids between this hook and init, nearest first.
@@ -292,12 +284,11 @@ const MAX_ANCESTRY: usize = 8;
 /// hook cannot tell (each harness stacks its own shells, wrappers and sandboxes
 /// in between), while cctop already knows which pids are agent processes and
 /// need only intersect the two.
-#[cfg(target_os = "linux")]
 fn ancestry() -> Vec<u32> {
     // Read directly rather than through `sysinfo`, which was measured at 4.2ms
     // against 152us for the identical chain. The hook spends the agent's
-    // deadline, so a 28x saving on a fact this small is worth the platform
-    // split below.
+    // deadline, so a 28x saving on a fact this small is worth reading `/proc`
+    // by hand.
     fn parent(pid: u32) -> Option<u32> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         // `comm` is parenthesised and may itself contain spaces and parens, so
@@ -312,31 +303,8 @@ fn ancestry() -> Vec<u32> {
     walk(std::process::id(), parent)
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn ancestry() -> Vec<u32> {
-    // No `/proc` to read, so this pays for `sysinfo` — still one targeted
-    // refresh per level rather than a scan of the whole table.
-    let mut sys = sysinfo::System::new();
-    walk(std::process::id(), move |pid| {
-        let pid = sysinfo::Pid::from_u32(pid);
-        sys.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[pid]),
-            false,
-            sysinfo::ProcessRefreshKind::nothing(),
-        );
-        sys.process(pid)?.parent().map(|p| p.as_u32())
-    })
-}
-
-/// Windows has no socket to deliver to, so nothing here is ever read.
-#[cfg(not(unix))]
-fn ancestry() -> Vec<u32> {
-    Vec::new()
-}
-
 /// Follow `parent` up from `pid`, stopping at init, at a cycle, or at
 /// [`MAX_ANCESTRY`].
-#[cfg(unix)]
 fn walk(pid: u32, mut parent: impl FnMut(u32) -> Option<u32>) -> Vec<u32> {
     let mut chain = Vec::new();
     let mut current = pid;
@@ -413,9 +381,9 @@ fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
         // permissions turned off is otherwise indistinguishable from any other.
         "permission_mode": first(&["permission_mode", "permissionMode"]).unwrap_or_default(),
         // The one fact the agent does not state and only this process can: see
-        // [`ancestry`]. Absent on Windows and on any harness whose hook cctop
-        // does not spawn, which the reader treats as "no claim" rather than as
-        // an empty one.
+        // [`ancestry`]. Absent from any harness whose hook cctop does not
+        // spawn, which the reader treats as "no claim" rather than as an empty
+        // one.
         "pids": pids,
     });
     let mut line = serde_json::to_vec(&event).ok()?;
@@ -560,7 +528,7 @@ pub struct Event {
     pub session_id: String,
     /// The processes the hook that reported this ran under, nearest first.
     ///
-    /// Empty from a harness whose hook is not `cctop hook`, and on Windows.
+    /// Empty from a harness whose hook is not `cctop hook`.
     /// The agent's own pid is in here somewhere; which one it is, is a question
     /// only the process table can answer — see
     /// [`Collector::collect`](crate::proc::Collector::collect).
@@ -926,7 +894,6 @@ impl Listener {
     ///
     /// Unlike the shared address this replaced, every cctop gets one: two
     /// windows open on the same machine both see the agents report in.
-    #[cfg(unix)]
     pub fn start() -> Option<Listener> {
         use std::os::unix::net::UnixListener;
 
@@ -970,11 +937,6 @@ impl Listener {
             }
         });
         Some(Listener { pending, path })
-    }
-
-    #[cfg(not(unix))]
-    pub fn start() -> Option<Listener> {
-        None
     }
 
     /// Everything that has arrived since the last call.
@@ -2297,7 +2259,6 @@ mod tests {
     /// parent worth reporting, and a table read while it changes must not be
     /// able to spin the walk forever.
     #[test]
-    #[cfg(unix)]
     fn the_ancestry_walk_stops_at_init_a_cycle_and_the_cap() {
         let tree = |pid: u32| match pid {
             10 => Some(9),
@@ -3255,7 +3216,6 @@ mod tests {
     /// only the write left the agent hanging indefinitely on every hook fire.
     /// Measured at over ten seconds before the deadline moved to cover the whole
     /// operation.
-    #[cfg(unix)]
     #[test]
     fn a_wedged_cctop_does_not_hold_the_agent_up() {
         use std::io::Write;
@@ -3334,7 +3294,6 @@ mod tests {
     /// With no cctop listening at all — the ordinary case, on every tool call of
     /// every session on a machine where cctop is closed — the hook still
     /// succeeds, silently and promptly.
-    #[cfg(unix)]
     #[test]
     fn the_hook_succeeds_when_nothing_is_listening() {
         let started = std::time::Instant::now();
@@ -3349,7 +3308,6 @@ mod tests {
     /// Two cctops on one machine both hear about the same event. Before this,
     /// one bound a shared address and the other was silently deaf for its whole
     /// run.
-    #[cfg(unix)]
     #[test]
     fn every_running_cctop_hears_the_same_event() {
         let a = Listener::start().expect("first listener");
@@ -3392,7 +3350,6 @@ mod tests {
     /// End to end on the real machine: the chain the walk reads is the chain a
     /// listening cctop gets. Asserted against a live process tree rather than a
     /// fixture, because the whole value of the field is that it describes one.
-    #[cfg(unix)]
     #[test]
     fn the_tree_a_hook_walks_is_the_tree_cctop_receives() {
         let listener = Listener::start().expect("listener");
@@ -3419,7 +3376,6 @@ mod tests {
 
     /// A socket left behind by a cctop that died is cleaned up by whichever
     /// hook next finds it dead, so the directory does not grow forever.
-    #[cfg(unix)]
     #[test]
     fn a_dead_address_is_cleaned_up_by_the_next_event() {
         let dir = socket_dir().expect("socket dir");

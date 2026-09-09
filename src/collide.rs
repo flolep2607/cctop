@@ -248,10 +248,8 @@ fn repo_root(start: &Path) -> Option<PathBuf> {
 pub fn normalise(path: &str, cwd: &str) -> String {
     use std::path::Component;
     let path = path.trim();
-    // `is_absolute` alone is false on Windows for a rooted path with no drive,
-    // which is how every transcript written on Unix spells one.
     let rooted = Path::new(path);
-    let joined = match rooted.is_absolute() || rooted.has_root() {
+    let joined = match rooted.is_absolute() {
         true => rooted.to_path_buf(),
         false => Path::new(cwd).join(path),
     };

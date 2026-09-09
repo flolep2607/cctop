@@ -20,7 +20,7 @@ to be true, and tries them in this order:
 
 | The session runs… | How | Requirements |
 |---|---|---|
-| under `cctop run <agent>` | cctop owns the pty and typing goes through a unix socket | none; verified on Linux, unverified on macOS |
+| under `cctop run <agent>` | cctop owns the pty and typing goes through a unix socket | none |
 | inside rmux | `rmux send-keys` into the pane holding the agent | rmux |
 | in a plain terminal | `TIOCSTI` pushes bytes into the tty's input queue | Linux, and cctop as root — `CAP_SYS_ADMIN` clears both of the kernel's gates. Without root it also needs `sysctl -w dev.tty.legacy_tiocsti=1` (off by default since 6.2) *and* cctop sharing the agent's controlling terminal, which in practice it doesn't |
 
@@ -181,8 +181,8 @@ machine can run — and one "no" holds for the run.
 
 cctop drove tmux until 0.8, and could be pointed at rmux with `CCTOP_MUX=rmux`.
 It now drives rmux only. rmux reimplements tmux's command surface, so everything
-above is the same set of commands it always was, and it answers two things tmux
-has no answer for: a native Windows backend, and browser sharing.
+above is the same set of commands it always was, and it answers something tmux
+has no answer for: browser sharing.
 
 The cost lands on upgrade, and is worth saying plainly: the two keep separate
 daemons and separate sessions. Agents still running under a tmux server are

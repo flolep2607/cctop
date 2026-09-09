@@ -17,15 +17,10 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # cctop is Linux-only: it reads process tables, ptys and unix sockets that
+  # only Linux gives it, so Linux is the one platform to build and test on.
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # cctop reads process tables and platform-specific session directories,
-        # so it needs to at least build and test on all three.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:

@@ -723,7 +723,6 @@ mod tests {
     /// `None` on every pane when rmux is not installed — so `R` on a session
     /// already resumed in a tab started a second agent on the one transcript,
     /// and being stopped, it did so without even the confirmation.
-    #[cfg(target_os = "linux")]
     #[test]
     fn resuming_a_session_already_in_a_tab_goes_to_that_tab() {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));

@@ -2374,10 +2374,6 @@ mod tests {
 
     /// A test agent that draws `text` once and then sits there, so anything on
     /// screen came from the replay and anything that moves came from a resize.
-    ///
-    /// Linux-only for the same reason as the shim's own tests — it needs a pty
-    /// child, which hangs on the macOS runner.
-    #[cfg(target_os = "linux")]
     fn test_pane(text: &str) -> (std::process::Child, u32, super::super::tabs::Pane) {
         let (child, pid) = crate::shim::test_session(
             &["sh", "-c", &format!("printf '{text}'; sleep 30")],
@@ -2392,7 +2388,6 @@ mod tests {
     /// Draw until every pane has been granted the size it asked for. The resize
     /// is requested while drawing and answered a round trip later, so drawing
     /// once is never enough.
-    #[cfg(target_os = "linux")]
     fn draw_until_sized(
         terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
         app: &mut App,
@@ -2658,7 +2653,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     fn screen(
         terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
         cols: u16,
@@ -2676,7 +2670,6 @@ mod tests {
 
     /// A tab keeps you inside cctop: the tab bar, the Overview and the footer
     /// stay, and the agent is resized into what is left rather than cropped.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_tab_resizes_its_agent_into_the_space_cctop_leaves_it() {
         use crate::cache::UiPrefs;
@@ -2740,7 +2733,6 @@ mod tests {
 
     /// A split gives each agent a real screen of its own, not two crops of one:
     /// both are resized to their half and both draw in it.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_split_sizes_both_agents_to_their_own_half() {
         use crate::cache::UiPrefs;
