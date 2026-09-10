@@ -343,14 +343,8 @@ impl Serving {
 /// does not return until the browser it started exits, and a dashboard frozen
 /// behind somebody's Firefox is not a trade worth making.
 pub fn open_in_browser(url: &str) -> bool {
-    let opener = match std::env::consts::OS {
-        "macos" => "open",
-        "windows" => "explorer",
-        // Every freedesktop environment, which is the whole of the rest that
-        // has a browser to open.
-        _ => "xdg-open",
-    };
-    std::process::Command::new(opener)
+    // `xdg-open` is what every freedesktop environment answers to.
+    std::process::Command::new("xdg-open")
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

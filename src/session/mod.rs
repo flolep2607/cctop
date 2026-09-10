@@ -375,15 +375,12 @@ pub const MAX_RECENT_WRITES: usize = 32;
 
 /// The paths a session wrote lately, newest first, as the transcript spelled
 /// them. The detail string an [`EDIT_TOOLS`] call records is the file it
-/// targeted.
+/// targeted, except for a patch, which records every file it touched in
+/// [`ToolDetail::paths`] — the display string names only the first.
 ///
 /// Run once per extraction so the tool history itself need never be persisted.
 /// Resolving these against the session's cwd stays in [`crate::loader`], which
 /// is the layer that knows the cwd.
-///
-/// ponytail: a Codex `apply_patch` touching several files summarises as
-/// `first.rs (+3 more)`, so only the first is recovered here. The remaining
-/// files go unwatched rather than being guessed at from a truncated string.
 ///
 /// ponytail: deduplicated as written rather than as resolved, so two spellings
 /// of one file both take a slot. Costs at most a slot or two of a 32-entry list
@@ -398,9 +395,12 @@ fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<Strin
 
     let mut seen = std::collections::HashSet::new();
     all.into_iter()
-        .map(|d| match d.d.split_once(" (+") {
-            Some((first, _)) => first.trim(),
-            None => d.d.trim(),
+        .flat_map(|d| {
+            if d.paths.is_empty() {
+                vec![d.d.trim()]
+            } else {
+                d.paths.iter().map(|p| p.trim()).collect()
+            }
         })
         .filter(|p| !p.is_empty())
         .filter(|p| seen.insert(p.to_string()))
@@ -1014,6 +1014,29 @@ mod tests {
         );
     }
 
+    /// A Codex patch holds several files behind one display string; every one
+    /// of them has to reach the row, since an unrecorded write is one the
+    /// collision warning cannot see.
+    #[test]
+    fn recent_writes_keeps_every_file_a_patch_touched() {
+        let patch = "*** Begin Patch\n*** Update File: a.rs\n+x\n*** Add File: b.rs\n+y\n*** Delete File: c.rs\n*** End Patch";
+        let mut data = SessionData::default();
+        let (short, full) =
+            extract::tool_detail("apply_patch", &serde_json::json!({"patch": patch}));
+        extract::push_tool_detail(
+            &mut data.metrics.tool_details,
+            "apply_patch",
+            short,
+            full,
+            "2026-01-01T00:00".into(),
+            None,
+            None,
+        );
+
+        data.finalize();
+        assert_eq!(data.recent_writes, ["a.rs", "b.rs", "c.rs"]);
+    }
+
     #[test]
     fn finalize_bounds_the_large_string_fields() {
         let mut data = SessionData::default();
@@ -1175,6 +1198,15 @@ pub struct ToolDetail {
     /// Full text for the clipboard, when it differs from `d`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full: Option<String>,
+    /// Every file this call wrote, when the call itself says.
+    ///
+    /// Only a patch fills this: `apply_patch` can touch several files while
+    /// displaying as `first.rs (+2 more)`, and [`distil_recent_writes`] needs
+    /// the ones that summary drops — a file nobody records as written is a file
+    /// the collision warning cannot see. Empty everywhere else, where the
+    /// display string already names the single file the call targeted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     /// `tool_use` id, used to match the call to its result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,

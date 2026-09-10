@@ -55,8 +55,8 @@ fn rc_files() -> Vec<PathBuf> {
 /// of their own: nothing to parse back out of `config.fish`, and removal is a
 /// deletion. `None` unless fish is configured on this machine.
 ///
-/// Fish keeps its config under `~/.config/fish` on every platform, including
-/// macOS — which is why this doesn't go through `dirs::config_dir`.
+/// Fish keeps its config under `~/.config/fish` rather than wherever
+/// `dirs::config_dir` points, which is why that is not consulted.
 fn fish_file() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) => PathBuf::from(dir),

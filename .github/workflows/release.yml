@@ -27,8 +27,8 @@ concurrency:
 
 jobs:
   # Tagging is irreversible and publishing to crates.io cannot be undone, so the
-  # full test matrix has to pass before `prepare-release` creates the tag. CI
-  # runs these same checks independently; releasing must not depend on that run.
+  # full check has to pass before `prepare-release` creates the tag. CI runs
+  # these same checks independently; releasing must not depend on that run.
   verify:
     uses: ./.github/workflows/verify.yml
     with:
@@ -103,6 +103,27 @@ jobs:
           body=""
           if [ -n "$sha" ]; then
             body="$(git log --format=%b -n 1 "$sha")"
+            # `%b` carries the commit's trailers, and every commit here has a
+            # `Co-Authored-By:` one — which was being published as the first
+            # thing an updater reads, and edited away by hand afterwards on
+            # every release so far. `--parse` names the trailer block git itself
+            # recognises, and only the attribution trailers at the end of it are
+            # dropped, so a closing paragraph that merely reads `Note: ...` is
+            # prose and stays.
+            trailers="$(printf '%s\n' "$body" | git interpret-trailers --parse)"
+            if [ -n "$trailers" ]; then
+              body="$(printf '%s\n' "$body" | awk -v n="$(printf '%s\n' "$trailers" | wc -l)" '
+                { line[NR] = $0 }
+                END {
+                  last = NR
+                  while (last > 0 && line[last] ~ /^[[:space:]]*$/) last--
+                  block = last - n
+                  known = "^(co-authored-by|signed-off-by|acked-by|reviewed-by|tested-by|reported-by|suggested-by|helped-by|cc|change-id|fixes|closes|refs)[ \t]*:"
+                  while (last > block && tolower(line[last]) ~ known) last--
+                  while (last > 0 && line[last] ~ /^[[:space:]]*$/) last--
+                  for (i = 1; i <= last; i++) print line[i]
+                }')"
+            fi
             echo "notes from $(git log --format='%h %s' -n 1 "$sha")"
           else
             echo "no release commit found; falling back to generated notes alone"
@@ -126,22 +147,15 @@ jobs:
   build:
     needs: [prepare-release, create-release]
     name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Statically linked, so it runs on any glibc/musl Linux.
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+        # cctop is Linux-only. Both targets are statically linked against musl,
+        # so one archive per architecture runs on any distro, glibc or not.
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v6
         with:

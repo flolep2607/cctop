@@ -20,16 +20,9 @@ mod notify;
 mod pricing;
 mod proc;
 mod quota;
+mod rmux;
 mod serve;
 mod session;
-#[cfg(unix)]
-mod shim;
-// The tabs and their agents are unix-only, but the code that opens them is not
-// cfg'd apart — so Windows gets the same surface with nothing behind it rather
-// than a cfg on every call site. See `shim_stub` for the bargain.
-mod rmux;
-#[cfg(not(unix))]
-#[path = "shim_stub.rs"]
 mod shim;
 mod trace;
 mod ui;
@@ -91,9 +84,6 @@ fn main() -> anyhow::Result<()> {
     // are: cctop takes no positionals, so clap would answer a bare word with a
     // usage error. Before the `is_command` check below, so a stray `doctor`
     // binary on PATH cannot shadow it.
-    //
-    // Every platform. The checks that are unix-only say so individually; the
-    // question "why can cctop not see my sessions" is not unix-only at all.
     {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("doctor") {
@@ -102,8 +92,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // `cctop why` alongside `doctor`, and for the same reason: a bare word, and
-    // cctop has no positionals for clap to read one as. Every platform — "why
-    // does this row say that" is not a unix-only question.
+    // cctop has no positionals for clap to read one as.
     {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("why") {
@@ -132,7 +121,6 @@ fn main() -> anyhow::Result<()> {
 
     // `cctop serve` is intercepted alongside `doctor`, and for the same reason:
     // it is a bare word, and cctop has no positionals for clap to read one as.
-    // Every platform — a socket and a browser are not unix-only.
     {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("serve") {
@@ -140,9 +128,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    #[cfg(unix)]
     let mut agent: Option<Vec<String>> = None;
-    #[cfg(unix)]
     {
         let argv: Vec<String> = std::env::args().collect();
         // `cctop attach` puts a running agent on this terminal directly, with no
@@ -160,15 +146,12 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    #[cfg(unix)]
     // Everything after the agent's name belongs to the agent, so clap must not
     // be shown it; the UI wrapped around it runs on its defaults.
     let args = match agent {
         Some(_) => cli::Args::parse_from(["cctop"]),
         None => cli::Args::parse(),
     };
-    #[cfg(not(unix))]
-    let args = cli::Args::parse();
 
     // Before anything else measurable happens, and in particular before the
     // caches are touched: a trace that starts after the slow part is no trace.
@@ -273,7 +256,6 @@ fn main() -> anyhow::Result<()> {
         // With no terminal there is no UI to wrap the agent in, but there is
         // still an agent to run: `claude` is aliased to this, and a pipeline or
         // a script must not be told to use --json instead.
-        #[cfg(unix)]
         if let Some(agent) = agent {
             std::process::exit(shim::run(&agent)?);
         }
@@ -286,10 +268,7 @@ fn main() -> anyhow::Result<()> {
     // excluded even when it hands us a TTY: nobody is there to answer. So is
     // `cctop <agent>`, where someone is waiting on an agent to start and
     // already has, for this run, exactly what the alias would have given them.
-    #[cfg(unix)]
     let launching_agent = agent.is_some();
-    #[cfg(not(unix))]
-    let launching_agent = false;
     let mut prefs = cache::UiPrefs::load();
     // Before the pricing fetch, the shim and the UI, because this is the one
     // moment a replacement is free: nothing is open yet, so the new binary can
@@ -316,10 +295,7 @@ fn main() -> anyhow::Result<()> {
 
     // Started before the UI so a failure to launch prints as an ordinary error
     // rather than from inside the alternate screen.
-    #[cfg(unix)]
     let hosted = agent.map(|agent| shim::host(&agent, None)).transpose()?;
-    #[cfg(not(unix))]
-    let hosted = None;
 
     let code = ui::run(&args, hosted)?;
     // After the UI is down, so the message is not painted over by the alternate

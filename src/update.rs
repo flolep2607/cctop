@@ -60,9 +60,6 @@ fn asset_target() -> Option<&'static str> {
     Some(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "x86_64-unknown-linux-musl",
         ("linux", "aarch64") => "aarch64-unknown-linux-musl",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
         _ => return None,
     })
 }
@@ -191,50 +188,24 @@ pub fn available_update() -> Option<String> {
 /// Only the executable is taken, and only by exact file name: an archive is
 /// attacker-controlled input in the general case, and honouring arbitrary paths
 /// inside one is how extraction escapes its destination directory.
-fn unpack(archive: &[u8], target: &str, into: &Path) -> Result<PathBuf> {
-    // Both the container format and the executable's name are properties of the
-    // archive's target, not of the host reading it. Deriving the name from
-    // `cfg!(windows)` instead made them disagree whenever the two differ.
-    let binary_name = if target.contains("windows") {
-        "cctop.exe"
-    } else {
-        "cctop"
-    };
+fn unpack(archive: &[u8], into: &Path) -> Result<PathBuf> {
+    let binary_name = "cctop";
     let out = into.join(binary_name);
 
-    if target.contains("windows") {
-        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
-            .context("release archive is not a valid zip")?;
-        for i in 0..zip.len() {
-            let mut entry = zip.by_index(i)?;
-            let is_binary = Path::new(entry.name())
-                .file_name()
-                .is_some_and(|n| n == binary_name);
-            if is_binary {
-                let mut file = std::fs::File::create(&out)?;
-                std::io::copy(&mut entry, &mut file)?;
-                return Ok(out);
-            }
-        }
-    } else {
-        let decoder = flate2::read::GzDecoder::new(archive);
-        let mut tar = tar::Archive::new(decoder);
-        for entry in tar
-            .entries()
-            .context("release archive is not a valid tar")?
-        {
-            let mut entry = entry?;
-            let is_binary = entry.path()?.file_name().is_some_and(|n| n == binary_name);
-            if is_binary {
-                let mut file = std::fs::File::create(&out)?;
-                std::io::copy(&mut entry, &mut file)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755))?;
-                }
-                return Ok(out);
-            }
+    let decoder = flate2::read::GzDecoder::new(archive);
+    let mut tar = tar::Archive::new(decoder);
+    for entry in tar
+        .entries()
+        .context("release archive is not a valid tar")?
+    {
+        let mut entry = entry?;
+        let is_binary = entry.path()?.file_name().is_some_and(|n| n == binary_name);
+        if is_binary {
+            let mut file = std::fs::File::create(&out)?;
+            std::io::copy(&mut entry, &mut file)?;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755))?;
+            return Ok(out);
         }
     }
     bail!("the release archive contains no {binary_name}")
@@ -503,9 +474,7 @@ fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
         .iter()
         // The checksum sidecars share the archive's prefix, so match on the
         // archive extensions rather than on the target alone.
-        .find(|a| {
-            a.name.contains(target) && (a.name.ends_with(".tar.gz") || a.name.ends_with(".zip"))
-        })
+        .find(|a| a.name.contains(target) && a.name.ends_with(".tar.gz"))
         .ok_or_else(|| anyhow!("release {latest} has no archive for {target}"))?;
 
     // Claim the staging directory before downloading: whether the new binary can
@@ -524,7 +493,7 @@ fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
         .read_to_end(&mut body)
         .context("could not read the release archive")?;
 
-    let new_binary = unpack(&body, target, staging.path())?;
+    let new_binary = unpack(&body, staging.path())?;
     self_replace::self_replace(&new_binary).context("could not replace the running executable")?;
 
     println!("Updated {current} -> {latest}.");
@@ -731,30 +700,15 @@ fn relaunch() {
         return;
     };
     let mut command = relaunch_command(exe, std::env::args_os().skip(1).collect());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Replaces this process outright, so there is no wrapper left holding a
-        // terminal that two programs then both believe they own.
-        let error = command.exec();
-        println!("Could not start the new version ({error}); continuing.");
-    }
-    #[cfg(not(unix))]
-    {
-        // No exec on Windows, so the old process stays as a parent and exits
-        // with whatever the new one reports.
-        match command.status() {
-            Ok(status) => std::process::exit(status.code().unwrap_or(0)),
-            Err(error) => println!("Could not start the new version ({error}); continuing."),
-        }
-    }
+    use std::os::unix::process::CommandExt;
+    // Replaces this process outright, so there is no wrapper left holding a
+    // terminal that two programs then both believe they own.
+    let error = command.exec();
+    println!("Could not start the new version ({error}); continuing.");
 }
 
-/// How to retry with the privileges this platform needs.
-#[cfg(unix)]
+/// How to retry with the privileges the replacement needs.
 const ELEVATE: &str = "re-run it as `sudo cctop --update`";
-#[cfg(not(unix))]
-const ELEVATE: &str = "re-run `cctop --update` from an elevated prompt";
 
 /// A scratch directory beside the running binary, to stage the replacement in.
 ///
@@ -902,15 +856,9 @@ fn recourse(root: bool, elevated: bool, sudo: bool, interactive: bool) -> Recour
 }
 
 /// Whether cctop is already running as root.
-#[cfg(unix)]
 fn is_root() -> bool {
     // Safe: geteuid reads a process property and cannot fail.
     unsafe { libc::geteuid() == 0 }
-}
-
-#[cfg(not(unix))]
-fn is_root() -> bool {
-    false
 }
 
 /// Whether this process was itself started through sudo.
@@ -1229,7 +1177,6 @@ mod tests {
     /// Regression: `~/.cargo/bin` reaches `PATH` through a symlink often enough
     /// that comparing the paths as written would call a cargo install a download
     /// and overwrite it.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_cargo_bin_is_still_cargo() {
         let home = tempfile::tempdir().unwrap();
@@ -1271,7 +1218,6 @@ mod tests {
     /// `PermissionDenied` — which is what routes it to [`elevate`] — and the
     /// message [`elevate`] falls back to when it has nothing to offer names both
     /// the directory and the command that would work.
-    #[cfg(unix)]
     #[test]
     fn an_unwritable_install_directory_names_the_fix() {
         use std::os::unix::fs::PermissionsExt;
@@ -1385,7 +1331,7 @@ mod tests {
         let archive = gz.finish().unwrap();
 
         let dir = tempfile::tempdir().unwrap();
-        let out = unpack(&archive, "x86_64-unknown-linux-musl", dir.path()).unwrap();
+        let out = unpack(&archive, dir.path()).unwrap();
 
         // Flat in the staging directory, ignoring the archive's own path.
         assert_eq!(out, dir.path().join("cctop"));
@@ -1408,6 +1354,6 @@ mod tests {
         let archive = gz.finish().unwrap();
 
         let dir = tempfile::tempdir().unwrap();
-        assert!(unpack(&archive, "x86_64-unknown-linux-musl", dir.path()).is_err());
+        assert!(unpack(&archive, dir.path()).is_err());
     }
 }

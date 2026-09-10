@@ -263,6 +263,21 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
             let full = (full_differs(&short, d)).then(|| d.to_string());
             return (short, full);
         }
+        // The patch is kept whole rather than dropped once summarised, matching
+        // what Codex's raw-argument path already hands to `push_tool_detail`:
+        // that is where the files a multi-file patch touched are recovered, and
+        // the summary names only the first of them.
+        "ApplyPatch" | "apply_patch" => {
+            let patch = input
+                .get("patch")
+                .or_else(|| input.get("input"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if patch.is_empty() {
+                return (String::new(), None);
+            }
+            return (parse_apply_patch(patch).0, Some(patch.to_string()));
+        }
         _ => {}
     }
 
@@ -280,12 +295,6 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
                 format!("{pattern} in {path}")
             }
         }
-        "ApplyPatch" | "apply_patch" => input
-            .get("patch")
-            .or_else(|| input.get("input"))
-            .and_then(Value::as_str)
-            .map(|patch| parse_apply_patch(patch).0)
-            .unwrap_or_default(),
         "ToolSearch" => MCP_UUID_PREFIX
             .replace_all(str_field(input, "query"), "")
             .into_owned(),
@@ -414,6 +423,31 @@ pub fn flatten_public(s: &str, limit: usize) -> String {
     flatten(s, limit)
 }
 
+/// The path named by a patch header line, or `None` for anything else.
+fn patch_file_marker(line: &str) -> Option<&str> {
+    line.strip_prefix("*** Update File: ")
+        .or_else(|| line.strip_prefix("*** Add File: "))
+        .or_else(|| line.strip_prefix("*** Delete File: "))
+        .map(str::trim)
+}
+
+/// Every file a Codex-style patch touches, in the order it names them.
+///
+/// Split out from [`parse_apply_patch`] because the two answer different
+/// questions: that one produces what the panel shows, which names one file and
+/// counts the rest, while collision detection needs the files themselves — the
+/// ones the summary drops are exactly the ones another agent could overwrite
+/// with nobody warned. Scanning only the header lines keeps this cheap enough
+/// to run on every recorded call.
+pub fn patch_files(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(patch_file_marker)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Summarise an `apply_patch` payload and count the lines it changes.
 ///
 /// Codex passes the patch as a raw string rather than JSON, so this reads the
@@ -422,12 +456,8 @@ pub fn parse_apply_patch(patch: &str) -> (String, super::Delta) {
     let mut files: Vec<String> = Vec::new();
     let mut delta = super::Delta::default();
     for line in patch.lines() {
-        if let Some(rest) = line
-            .strip_prefix("*** Update File: ")
-            .or_else(|| line.strip_prefix("*** Add File: "))
-            .or_else(|| line.strip_prefix("*** Delete File: "))
-        {
-            files.push(rest.trim().to_string());
+        if let Some(rest) = patch_file_marker(line) {
+            files.push(rest.to_string());
             continue;
         }
         if line.starts_with("***") || line.starts_with("@@") {
@@ -505,6 +535,13 @@ pub fn push_tool_detail(
     id: Option<String>,
     origin: Option<String>,
 ) {
+    // A patch is the one argument whose display string is lossy about *which*
+    // files were written, so the list is recovered here, at the one point every
+    // harness's calls pass through, rather than in each provider's parser.
+    let paths = match name {
+        "ApplyPatch" | "apply_patch" => full.as_deref().map(patch_files).unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let entry = details.entry(name.to_string()).or_default();
     entry.push(super::ToolDetail {
         d: if short.is_empty() {
@@ -514,6 +551,7 @@ pub fn push_tool_detail(
         },
         ts,
         full,
+        paths,
         id,
         origin,
         ..Default::default()
@@ -615,6 +653,28 @@ mod tests {
         let patch = "*** Update File: a.rs\n*** Add File: b.rs\n*** Delete File: c.rs\n";
         let (summary, _) = parse_apply_patch(patch);
         assert_eq!(summary, "a.rs (+2 more)");
+        // What the summary drops is still recoverable: the collision warning
+        // needs b.rs and c.rs, which no display string mentions.
+        assert_eq!(patch_files(patch), ["a.rs", "b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn apply_patch_records_every_file_it_touched() {
+        let patch =
+            "*** Begin Patch\n*** Update File: a.rs\n+x\n*** Add File: b.rs\n+y\n*** End Patch";
+        let mut map = std::collections::HashMap::new();
+        let (short, full) = tool_detail("apply_patch", &json!({ "patch": patch }));
+        push_tool_detail(
+            &mut map,
+            "apply_patch",
+            short,
+            full,
+            String::new(),
+            None,
+            None,
+        );
+        assert_eq!(map["apply_patch"][0].d, "a.rs (+1 more)");
+        assert_eq!(map["apply_patch"][0].paths, ["a.rs", "b.rs"]);
     }
 
     #[test]

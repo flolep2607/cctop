@@ -504,9 +504,8 @@ fn spawn_on_pty(
     let mut slave_fd = -1;
     // SAFETY: both fds are written by openpty and only read after it succeeds.
     //
-    // The trailing two arguments are `*mut` on Apple and `*const` on Linux, so
-    // they are passed as `*mut` and left to coerce; writing `*const` compiles
-    // only on Linux.
+    // The trailing two arguments are `*const`; a `*mut` coerces to one, which
+    // is what the null pointers below are written as.
     let rc = unsafe {
         libc::openpty(
             &mut master_fd,
@@ -579,12 +578,7 @@ fn spawn_on_pty(
 ///
 /// Here rather than in the tests that use it because everything it touches is
 /// private to this module, and one of those tests lives in the UI.
-///
-/// Linux-gated to match every caller. The tests that drive a real pty are all
-/// `cfg(target_os = "linux")` — timing and pty semantics differ enough on macOS
-/// to make them flaky there — so without the same gate this is a function with
-/// no callers on macOS, which `-D warnings` in CI rejects.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 pub(crate) fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u32) {
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
     let (child, master) = spawn_on_pty(&argv, None).expect("pty child");
@@ -797,8 +791,7 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
     }
 }
 
-// The whole module is Linux-only: see the note on the round-trip test below.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -810,7 +803,6 @@ mod tests {
     /// confusing "no current client" for `$RMUX` alone. A tab that silently
     /// never opens is what leaking one of these looks like.
     #[test]
-    #[cfg(unix)]
     fn a_hosted_agent_inherits_no_pane_of_its_own_parent() {
         let dir = tempfile::tempdir().expect("temp dir");
         let seen = dir.path().join("env.txt");
@@ -862,13 +854,6 @@ mod tests {
     /// The point of the shim is that a line handed to the socket arrives as the
     /// child's keyboard input. `run` itself can't be tested — it seizes the
     /// terminal — so this drives the same pty and the same listener.
-    ///
-    /// Linux-only, and not because the code is: this hung indefinitely on the
-    /// macOS CI runner, with the pty spawn the only unbounded call in it. The
-    /// likely cause is `pre_exec` deadlocking in the forked child, which that API
-    /// explicitly warns about, but it is unreproducible from a Linux host — so the
-    /// test is pinned to where its result means something rather than left to
-    /// stall every release. `cctop run` on macOS is unverified.
     #[test]
     fn a_line_sent_to_the_socket_becomes_the_childs_input() {
         let out = std::env::temp_dir().join("cctop-shim-test.txt");

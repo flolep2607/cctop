@@ -86,12 +86,7 @@ fn over_ssh() -> bool {
         .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
 }
 
-/// What to install, per platform, named in the one message that needs it.
-#[cfg(target_os = "macos")]
-const HOW: &str = "install pngpaste, or use a build of macOS with osascript";
-#[cfg(target_os = "windows")]
-const HOW: &str = "powershell.exe was not found on PATH";
-#[cfg(all(unix, not(target_os = "macos")))]
+/// What to install, named in the one message that needs it.
 const HOW: &str = "install wl-clipboard or xclip (WSL uses powershell.exe)";
 
 /// Write the clipboard's image to a new file and return its path.
@@ -226,16 +221,15 @@ enum Output {
 
 /// The helpers, in the order they are asked.
 ///
-/// Each platform's own first: a Linux desktop is answered by `wl-paste` or
-/// `xclip`, a Mac by `pngpaste` when it is installed and by `osascript` when it
-/// is not, and Windows — including a WSL cctop watching agents that run under
-/// it, which is where a Windows clipboard reaches a Linux process at all — by
-/// PowerShell. Absent commands are skipped, so the list is tried top to bottom
-/// on any machine and the order is only about which answer is preferred.
+/// The desktop's own first: a Linux desktop is answered by `wl-paste` or
+/// `xclip`, and a WSL cctop — watching agents that run under it, which is where
+/// a Windows clipboard reaches a Linux process at all — by PowerShell. Absent
+/// commands are skipped, so the list is tried top to bottom on any machine and
+/// the order is only about which answer is preferred.
 ///
-/// ponytail: PNG only. Every screenshot tool on every one of these platforms
-/// puts a PNG on the clipboard, and asking each helper for a second format
-/// would double the list to catch a case nobody has reported.
+/// ponytail: PNG only. Every screenshot tool puts a PNG on the clipboard, and
+/// asking each helper for a second format would double the list to catch a case
+/// nobody has reported.
 const HELPERS: &[Helper] = &[
     Helper {
         command: "wl-paste",
@@ -247,31 +241,7 @@ const HELPERS: &[Helper] = &[
         args: &["-selection", "clipboard", "-t", "image/png", "-o"],
         output: Output::Stdout,
     },
-    Helper {
-        command: "pngpaste",
-        args: &["-"],
-        output: Output::Stdout,
-    },
-    // AppleScript's clipboard, which every Mac has: `«class PNGf»` is the
-    // clipboard's PNG flavour, and the script writes it rather than printing
-    // it because osascript would mangle binary on stdout.
-    Helper {
-        command: "osascript",
-        args: &[
-            "-e",
-            "set f to open for access POSIX file \"{}\" with write permission",
-            "-e",
-            "try",
-            "-e",
-            "write (the clipboard as «class PNGf») to f",
-            "-e",
-            "end try",
-            "-e",
-            "close access f",
-        ],
-        output: Output::File,
-    },
-    // Windows, and WSL through it. `-STA` because the clipboard API refuses to
+    // Windows, reached through WSL. `-STA` because the clipboard API refuses to
     // answer a multi-threaded apartment, which is what a `-Command` process is
     // otherwise; without it this returns nothing on a clipboard that holds a
     // perfectly good screenshot.
@@ -365,10 +335,10 @@ impl Helper {
     ///
     /// A Windows program cannot open `/home/…`: under WSL the file lives on the
     /// Linux side and PowerShell reaches it through `\\wsl.localhost\…`, which
-    /// is what `wslpath -w` prints. Without the translation the save fails on
-    /// the one platform this helper exists for.
+    /// is what `wslpath -w` prints. Without the translation the save fails for
+    /// the one helper that needs it.
     fn dest_for(&self, dest: &Path) -> Option<String> {
-        if self.command != "powershell.exe" || cfg!(windows) {
+        if self.command != "powershell.exe" {
             return Some(dest.display().to_string());
         }
         let out = Command::new("wslpath")
@@ -468,18 +438,16 @@ mod tests {
         );
     }
 
-    /// The destination reaches each helper in the spelling it can open, and
-    /// every `{}` in the argument list is filled — a helper that was handed a
-    /// literal `{}` would write a file by that name and report success.
+    /// Every `{}` in a helper's argument list is filled — a helper that was
+    /// handed a literal `{}` would write a file by that name and report
+    /// success.
     #[test]
     fn the_destination_is_substituted_into_every_argument() {
         let script = HELPERS
             .iter()
-            .find(|h| h.command == "osascript")
-            .expect("the AppleScript helper");
-        let dest = Path::new("/tmp/paste-1.png");
-        let path = script.dest_for(dest).expect("a path for a local helper");
-        assert_eq!(path, "/tmp/paste-1.png");
+            .find(|h| h.command == "powershell.exe")
+            .expect("the PowerShell helper");
+        let path = "/tmp/paste-1.png".to_string();
 
         let filled: Vec<String> = script
             .args

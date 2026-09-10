@@ -559,11 +559,8 @@ pub fn random_hex(bytes: usize) -> String {
         .collect()
 }
 
-/// The fallback, split out so it can be tested on the platform that uses it.
-///
-/// Windows has no `/dev/urandom` to read, so this is the whole of its entropy —
-/// and a test that only ever exercised the good path would say nothing about
-/// the platform that never takes it.
+/// The fallback for a machine whose `/dev/urandom` could not be read, split out
+/// so it can be tested without breaking the real source.
 fn hashed_bytes(want: usize) -> Vec<u8> {
     use std::hash::{BuildHasher, Hasher, RandomState};
 
@@ -737,7 +734,7 @@ mod tests {
         assert_eq!(nice_max(230.0), 250.0);
     }
 
-    /// The path Windows always takes, exercised on every platform.
+    /// The fallback has to be the same shape as the source it stands in for.
     #[test]
     fn the_hashed_fallback_is_the_same_shape_as_the_real_thing() {
         assert_eq!(hashed_bytes(16).len(), 16);

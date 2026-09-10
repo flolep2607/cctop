@@ -278,6 +278,8 @@ fn environment() -> Section {
         "CCTOP_HOMES",
         "CCTOP_HOSTS",
         "CCTOP_COLUMNS_HIDE",
+        "CCTOP_THEME",
+        "CCTOP_SETTLE_MS",
     ];
     let checks = VARS
         .iter()
@@ -535,14 +537,7 @@ fn typing() -> Section {
     }
 }
 
-/// The `TIOCSTI` backend's availability, where the kernel has one at all.
-///
-/// Split into two functions returning an `Option` rather than a `#[cfg]`'d
-/// `push`, so the vector above is mutated on every platform. A `push` that only
-/// compiles on Linux leaves `let mut checks` unused elsewhere, which `-D
-/// warnings` rejects — the same trap as a `cfg`'d-out caller making its callee
-/// dead code, and it only shows up on the macOS and Windows runners.
-#[cfg(target_os = "linux")]
+/// The `TIOCSTI` backend's availability.
 fn tiocsti_check() -> Option<Check> {
     Some(match is_root() {
         true => ok(
@@ -555,13 +550,6 @@ fn tiocsti_check() -> Option<Check> {
              and not needed if the aliases above are installed",
         ),
     })
-}
-
-/// No `TIOCSTI` outside Linux, so there is nothing to report rather than a
-/// line saying a backend this platform never had is missing.
-#[cfg(not(target_os = "linux"))]
-fn tiocsti_check() -> Option<Check> {
-    None
 }
 
 /// Actually read every configured host.
@@ -671,7 +659,6 @@ fn alias_installed() -> bool {
     })
 }
 
-#[cfg(target_os = "linux")]
 fn is_root() -> bool {
     // SAFETY: `geteuid` reads a field of the calling process and cannot fail.
     unsafe { libc::geteuid() == 0 }

@@ -120,11 +120,6 @@ pub(super) fn complete(typed: &str, hits: &[PathBuf]) -> Option<String> {
             crate::util::tildify(&shared)
         }
     };
-    // Windows takes either separator, and the field is the user's own line: a
-    // Tab that answered `C:/src/a` with `C:\src\alpha` would respell the path
-    // it was completing, and the check below would never be true again — two
-    // spellings of one directory never compare equal, so Tab on a finished path
-    // would redraw it forever.
     let sep = std::path::MAIN_SEPARATOR;
     let filled = match sep != '/' && typed.contains('/') && !typed.contains(sep) {
         true => filled.replace(sep, "/"),
@@ -168,9 +163,6 @@ mod tests {
         }
         std::fs::write(root.path().join("afile"), "").expect("write");
 
-        // Spelled with `/` throughout, which Windows accepts as readily as its
-        // own separator: the assertions below are about what the field does
-        // with a path, not about which of the two the platform prefers.
         let base = root
             .path()
             .to_string_lossy()
@@ -206,13 +198,8 @@ mod tests {
         assert_eq!(complete(&format!("{base}/al"), &hits), None);
     }
 
-    /// Tab answers in the spelling it was asked in.
-    ///
-    /// On Windows this is the difference between a field that settles and one
-    /// that rewrites itself: `suggest` joins with `\`, the line was typed with
-    /// `/`, and a completion that swapped them would leave the two spellings
-    /// unequal forever — so Tab would keep "completing" a path that was already
-    /// finished. Elsewhere there is only one separator and this is a tautology.
+    /// Tab fills a path in and then leaves it alone: a completion that redrew a
+    /// path already finished would have Tab "completing" it forever.
     #[test]
     fn completing_keeps_the_separator_that_was_typed() {
         let root = tempfile::tempdir().expect("tempdir");

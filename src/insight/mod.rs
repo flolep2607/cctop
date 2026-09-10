@@ -810,7 +810,8 @@ mod tests {
         assert_eq!(shell_only.files_edited, 0);
     }
 
-    /// A generated directory is no less generated on Windows.
+    /// Either separator: a path in a transcript is spelled however the harness
+    /// that wrote it spelled it.
     #[test]
     fn junk_is_recognised_with_either_separator() {
         assert!(is_junk("node_modules/react/index.js"));

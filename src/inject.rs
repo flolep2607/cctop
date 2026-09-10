@@ -24,10 +24,6 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// What a real Enter key sends on a pty in raw mode. A `\n` is read as Enter by
 /// some agents and ignored by others; `\r` is what the terminal would have sent.
-///
-/// Gated with its users: both backends that write raw bytes to a pty are unix-only,
-/// and rmux submits with a named `Enter` key instead, so on Windows this is dead.
-#[cfg(unix)]
 const SUBMIT: char = '\r';
 
 /// Gap between the text and the Enter that submits it.
@@ -42,7 +38,6 @@ const SUBMIT: char = '\r';
 ///
 // ponytail: a fixed delay, tuned against Claude Code. If some agent still eats
 // the Enter, this is the number to raise.
-#[cfg(unix)]
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
 
 /// Type `text` into the terminal running the agent at `pid`, then submit it.
@@ -63,7 +58,6 @@ pub fn send_line(pid: u32, text: &str) -> Result<(), String> {
 }
 
 /// Hand the line to the `cctop run` shim that owns this agent's pty.
-#[cfg(unix)]
 fn shim_send(pid: u32, text: &str) -> Option<Result<(), String>> {
     let path = crate::shim::socket_path(pid)?;
     // A stale socket file from a crashed shim refuses connections, which is
@@ -74,18 +68,12 @@ fn shim_send(pid: u32, text: &str) -> Option<Result<(), String>> {
 
 /// Type `text`, let the agent take it in, then press Enter — see [`SETTLE`] for
 /// why those cannot be one write.
-#[cfg(unix)]
 fn write_then_submit(out: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
     out.write_all(text.as_bytes())?;
     out.flush()?;
     std::thread::sleep(SETTLE);
     out.write_all(&[SUBMIT as u8])?;
     out.flush()
-}
-
-#[cfg(not(unix))]
-fn shim_send(_pid: u32, _text: &str) -> Option<Result<(), String>> {
-    None
 }
 
 /// Ask rmux to type into the pane holding this agent.
@@ -100,7 +88,6 @@ fn rmux_send(pid: u32, text: &str) -> Option<Result<(), String>> {
 /// plain terminal. Both of its preconditions are off by default, so an applicable
 /// session with an unmet precondition returns the reason rather than falling
 /// through to a less specific error.
-#[cfg(target_os = "linux")]
 fn tiocsti_send(pid: u32, text: &str) -> Option<Result<(), String>> {
     use std::os::fd::AsRawFd;
 
@@ -146,11 +133,6 @@ fn tiocsti_send(pid: u32, text: &str) -> Option<Result<(), String>> {
     // burst, so the Enter needs its own moment or it reads as a paste.
     std::thread::sleep(SETTLE);
     Some(push(SUBMIT as u8))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn tiocsti_send(_pid: u32, _text: &str) -> Option<Result<(), String>> {
-    None
 }
 
 /// How far up the process tree to look for a pane before giving up. Deep enough
@@ -260,7 +242,6 @@ mod tests {
     /// The Enter must reach the agent as its own write. Appended to the text it
     /// can land in the same read, where a TUI takes it for the newline inside a
     /// paste and the line is typed but never sent — which is what `s` did.
-    #[cfg(unix)]
     #[test]
     fn the_submit_key_is_written_apart_from_the_line() {
         use std::io::Write;
@@ -296,7 +277,6 @@ mod tests {
     /// out of the pty, up through cargo and the shell, and typed "continue" into
     /// whatever the developer had on screen. Driven through a synthetic pane
     /// list, since reproducing it against the real server means doing it again.
-    #[cfg(unix)]
     #[test]
     fn the_walk_stops_before_it_reaches_cctops_own_terminal() {
         let mut child = Command::new("sleep")

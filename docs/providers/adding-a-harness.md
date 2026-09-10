@@ -123,11 +123,4 @@ almost all regressions — cached input not double-billed, a `$set` patch readin
 identically to the whole-file shape, a batched `exec` counting more than one
 call — and each names in its doc comment what went wrong.
 
-Two platform rules apply, and both have broken CI before: a fixture filename
-containing `|`, `:`, `*` or `?` needs `#[cfg(unix)]`, and a path from
-`tempfile::tempdir()` must be canonicalised before being compared against one a
-watcher reported, because macOS resolves symlinks. If your parser holds a file
-handle — as the SQLite ones do — give the tests a way to close it, or Windows
-will refuse to delete the fixture.
-
 Then run the gate the way CI does, from [CLAUDE.md](../../CLAUDE.md).
