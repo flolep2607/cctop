@@ -984,12 +984,16 @@ impl App {
             // `b` was a second name for PageUp; answering a bell is worth more
             // than a third way to scroll up, and PageUp and Ctrl+U both remain.
             KeyCode::Char('b') => self.jump_to_bell(),
-            KeyCode::Char('g') => {
+            // Home and End sit beside PgUp and PgDn on the keyboard and mean
+            // the same thing one step further, so they land here rather than
+            // only under Shift — which is where they were, next to a comment
+            // claiming the unshifted pair already did this.
+            KeyCode::Home | KeyCode::Char('g') => {
                 self.selected = 0;
                 self.ensure_available_tab();
                 self.needs_redraw = true;
             }
-            KeyCode::Char('G') => {
+            KeyCode::End | KeyCode::Char('G') => {
                 self.selected = self.visible.len().saturating_sub(1);
                 self.ensure_available_tab();
                 self.needs_redraw = true;
@@ -1623,6 +1627,31 @@ mod tests {
     /// a table still being scrolled and clicked while the query is typed. Only a
     /// modal that recorded its rectangle can claim the mouse, because that
     /// rectangle is the only way to tell its clicks from the ones underneath.
+    /// Home and End sit next to PgUp and PgDn and were the only pair of the
+    /// four that did nothing: the list bound `g`/`G` and, under Shift, the
+    /// panel scroll, but never the plain keys.
+    #[test]
+    fn home_and_end_jump_to_the_first_and_last_row() {
+        let mut app = test_app();
+        for id in ["a", "b", "c"] {
+            app.sessions
+                .push(crate::session::Session::new(Provider::Claude, id.into()));
+        }
+        app.visible = vec![Row::Session(0), Row::Session(1), Row::Session(2)];
+        app.selected = 1;
+
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.selected, 2);
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.selected, 0);
+
+        // Shift still belongs to the bottom panel, which is why the plain keys
+        // were free to mean this.
+        app.selected = 1;
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+        assert_eq!(app.selected, 1);
+    }
+
     #[test]
     fn the_search_box_leaves_the_table_its_mouse() {
         let mut app = test_app();

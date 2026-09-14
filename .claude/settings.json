@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '\"\\(now|todate) \\(.from_model // \"?\") -> \\(.to_model // \"?\") (\\(.source // \"?\")) \\(.cwd // \"?\")\"' >> \"$HOME/.claude/model-switches.log\" 2>/dev/null || true",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

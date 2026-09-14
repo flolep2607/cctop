@@ -141,7 +141,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("↑/k  ↓/j", "Move between sessions"),
         item("PgUp / PgDn", "Page through the list"),
         item("Ctrl+U / Ctrl+D", "Half a page up / down"),
-        item("g / G", "Jump to first / last"),
+        item("g / G  Home / End", "Jump to first / last"),
         item("n / N", "Next / previous search match (wraps)"),
         item("b", "Jump to the session that rang last"),
         item("f", "Follow mode: keep the selection centered"),
