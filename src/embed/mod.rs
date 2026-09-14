@@ -31,6 +31,8 @@
 //! toolchain to the release for an algorithm this small is a poor trade. The
 //! whole of inference is [`Model::embed`].
 
+pub mod index;
+
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
@@ -336,7 +338,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Where a real model lands if one has been fetched. Tests that need it are
@@ -349,7 +351,7 @@ mod tests {
 
     /// Build a tiny model on disk: a three-word vocabulary and a table whose
     /// rows are trivially checkable by hand.
-    fn tiny(dir: &Path, normalize: bool) {
+    pub(crate) fn tiny(dir: &Path, normalize: bool) {
         std::fs::create_dir_all(dir).expect("mkdir");
         std::fs::write(
             dir.join(CONFIG),
