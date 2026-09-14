@@ -89,6 +89,11 @@ toml_edit = "0.25.13"
 # `a_pane_snapshot_paints_into_the_buffer_cctop_draws_with`, which is in this
 # repository's history at 3808d80.
 rmux-sdk = "0.10.0"
+safetensors = "0.6"
+# Pure Rust, and deliberately without `onig`: oniguruma is C and `esaxx-rs` is
+# C++, and a C++ toolchain is the one dependency class the musl release does not
+# already carry. `fancy-regex` is the pure-Rust path through the same crate.
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 tui-term = "0.3.4"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"
