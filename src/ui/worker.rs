@@ -113,6 +113,10 @@ fn scan(
     needle: &str,
 ) -> HashMap<String, String> {
     use rayon::prelude::*;
+    // Parsed once rather than per session: every target is matched against the
+    // same terms, and splitting and folding them again for each would be the
+    // only allocation in the parallel hot path.
+    let query = crate::session::search::Query::parse(needle);
     let found: Vec<(&crate::session::search::Target, Option<String>)> = targets
         .par_iter()
         .map(|target| {
@@ -123,7 +127,7 @@ fn scan(
                 Some(remembered) => (target, remembered.clone()),
                 None => (
                     target,
-                    crate::session::search::find(target, needle).map(|hit| hit.snippet),
+                    crate::session::search::find_query(target, &query).map(|hit| hit.snippet),
                 ),
             }
         })
