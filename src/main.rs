@@ -164,6 +164,11 @@ fn main() -> anyhow::Result<()> {
         return update::run(false);
     }
 
+    if args.fetch_search_model {
+        embed::fetch::fetch()?;
+        return Ok(());
+    }
+
     if args.hooks_status {
         let cwd = std::env::current_dir().ok();
         for (line, problem) in hook::status(cwd.as_deref(), None).lines() {

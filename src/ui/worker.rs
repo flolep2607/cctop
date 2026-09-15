@@ -107,6 +107,122 @@ const MAX_SCAN_CACHE: usize = 20_000;
 /// Running sessions are never cached: their transcripts grow, so today's "not
 /// found" is not tomorrow's, and the one case where a stale answer is most
 /// visible is the session the user is watching right now.
+/// A query with this many words is a sentence rather than a keyword, and is
+/// asking a topical question even when the literal search found something.
+///
+/// Two words is `vast.ai nemotron` — a pair of names, which the literal tier is
+/// better at. Four is "where did I price out GPUs", which it cannot answer at
+/// all unless those words happen to be in the transcript.
+const TOPICAL_WORDS: usize = 4;
+
+/// How close a chunk has to be to count as being about the query.
+///
+/// Cosine over mean-pooled static vectors does not reach the high scores a
+/// contextual model would; on a real corpus a right answer sits around 0.35 to
+/// 0.5 and unrelated text around 0.05. This sits below the answers and well
+/// above the noise, and is a floor rather than a ranking — everything above it
+/// is still ordered by score.
+const TOPICAL_FLOOR: f32 = 0.22;
+
+/// Checked where it cannot drift from the value: a floor at or below the noise
+/// admits every session, and one at or above the answers admits none. Both
+/// bounds are from scoring a real corpus.
+const _: () = assert!(TOPICAL_FLOOR > 0.10 && TOPICAL_FLOOR < 0.35);
+
+/// At most this many sessions are added by the topical tier, so a vague query
+/// widens the table rather than replacing it with everything on the machine.
+const TOPICAL_LIMIT: usize = 10;
+
+/// Whether a query is worth going to the index for.
+///
+/// Two ways in, and they are different failures. An empty result means the
+/// words are not in any transcript, which is when "what was it about" is the
+/// only question left. A long query means it reads as a sentence rather than a
+/// keyword, and those ask a topical question even when some literal match did
+/// turn up — "where did I price out GPUs" matching a transcript that happens to
+/// contain "where" is not an answer.
+///
+/// A short query that already matched is left alone deliberately: the literal
+/// tier is the better answer for `vast.ai nemotron`, and widening it would add
+/// vaguer sessions underneath a precise hit.
+fn worth_widening(no_hits: bool, needle: &str) -> bool {
+    no_hits || needle.split_whitespace().count() >= TOPICAL_WORDS
+}
+
+/// The topical tier's state, built at most once per worker.
+#[derive(Default)]
+struct Topics {
+    model: Option<crate::embed::Model>,
+    index: Option<crate::embed::index::Index>,
+    /// Set once the model has been looked for and not found, so a machine
+    /// without one does not re-check the filesystem on every keystroke.
+    absent: bool,
+}
+
+/// Widen `hits` with sessions that are *about* the query rather than containing
+/// it.
+///
+/// Runs when the literal search found nothing, or when the query reads like a
+/// question rather than a keyword. Those are the two cases where "the words are
+/// not in the transcript" is the user's problem rather than their intent, and
+/// they are also the only cases worth the index: a two-word query that already
+/// matched is being answered well by the tier that answered it.
+///
+/// Anything missing — no model, no readable transcripts — leaves `hits` exactly
+/// as the literal search left them. The topical tier is an addition to the
+/// search, never a replacement for it, so it can be absent without the search
+/// being broken.
+fn topical(
+    topics: &mut Topics,
+    needle: &str,
+    targets: &[crate::session::search::Target],
+    hits: &mut HashMap<String, String>,
+) {
+    if !worth_widening(hits.is_empty(), needle) {
+        return;
+    }
+    if topics.absent {
+        return;
+    }
+    if topics.model.is_none() {
+        if !crate::embed::fetch::present() {
+            topics.absent = true;
+            return;
+        }
+        match crate::embed::Model::load(&crate::embed::fetch::model_dir()) {
+            Ok(m) => topics.model = Some(m),
+            Err(_) => {
+                // A model that will not load is the same as no model here: the
+                // search must keep working, and `--fetch-search-model` verifies
+                // the load, so this is the unusual case of a damaged cache.
+                topics.absent = true;
+                return;
+            }
+        }
+    }
+    let Some(model) = topics.model.as_ref() else {
+        return;
+    };
+
+    let index = topics.index.get_or_insert_with(|| {
+        crate::embed::index::Index::load(&crate::config::EMBEDDING_INDEX_FILE).unwrap_or_default()
+    });
+    if index.refresh(model, targets) > 0 {
+        // Best effort: an index that cannot be written is rebuilt next time,
+        // which costs a second, and is not worth failing a search over.
+        let _ = index.save(&crate::config::EMBEDDING_INDEX_FILE);
+    }
+
+    let query = model.embed(&crate::embed::topic_of(needle));
+    for (key, snippet, score) in index.search(&query, TOPICAL_FLOOR, TOPICAL_LIMIT) {
+        // A session the literal search already found keeps the snippet that
+        // shows the words it matched; that is the more precise answer, and
+        // overwriting it would replace evidence with a guess.
+        hits.entry(key)
+            .or_insert_with(|| format!("~{:.0}% {snippet}", score * 100.0));
+    }
+}
+
 fn scan(
     cache: &mut ScanCache,
     targets: &[crate::session::search::Target],
@@ -164,6 +280,9 @@ pub(super) fn spawn_worker(
         // What earlier transcript scans found, so refining a query re-reads only
         // what it has to. See `scan`.
         let mut scans: ScanCache = HashMap::new();
+        // The topical tier's model and index, loaded at most once and only if a
+        // query ever asks for them. See `topical`.
+        let mut topics = Topics::default();
         while let Ok(req) = rx.recv() {
             match req {
                 Request::Refresh => {
@@ -301,7 +420,8 @@ pub(super) fn spawn_worker(
                 }
                 Request::Scan { query, targets } => {
                     let needle = query.to_ascii_lowercase();
-                    let hits = loader.gently(|| scan(&mut scans, &targets, &needle));
+                    let mut hits = loader.gently(|| scan(&mut scans, &targets, &needle));
+                    loader.gently(|| topical(&mut topics, &needle, &targets, &mut hits));
                     if tx.send(Response::Scanned { query, hits }).is_err() {
                         break;
                     }
@@ -311,4 +431,31 @@ pub(super) fn spawn_worker(
         }
         loader.store().save();
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two doors into the topical tier, and the case that must stay shut.
+    #[test]
+    fn only_an_empty_or_sentence_like_query_reaches_the_index() {
+        // Nothing found: the index is the only thing left to ask.
+        assert!(worth_widening(true, "nemotron"));
+        assert!(worth_widening(true, "a"));
+
+        // Found something, and the query is a keyword: the literal tier already
+        // gave the better answer.
+        assert!(!worth_widening(false, "nemotron"));
+        assert!(!worth_widening(false, "vast.ai nemotron"));
+        assert!(!worth_widening(false, "musl static build"));
+
+        // Found something, but the query is a sentence: it is asking about a
+        // subject, and a stray match on "where" is not that.
+        assert!(worth_widening(false, "where did I price out GPUs"));
+        assert!(worth_widening(
+            false,
+            "the conversation about running a language model"
+        ));
+    }
 }

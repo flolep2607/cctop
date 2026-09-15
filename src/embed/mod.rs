@@ -31,6 +31,7 @@
 //! toolchain to the release for an algorithm this small is a poor trade. The
 //! whole of inference is [`Model::embed`].
 
+pub mod fetch;
 pub mod index;
 
 use anyhow::{Context, Result, anyhow};
@@ -116,8 +117,10 @@ impl Model {
 
         let data = table.data();
         let vectors: Vec<f32> = data
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         if vectors.len() != rows * dim {
             return Err(anyhow!(

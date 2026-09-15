@@ -26,7 +26,7 @@
 //! function words that a mean over tokens is otherwise dominated by.
 
 use super::{Model, cosine};
-use crate::session::Session;
+use crate::session::search::Target;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -219,7 +219,7 @@ impl Index {
     /// Sessions whose transcript is unchanged keep the vectors they already
     /// have; only what grew is embedded again. Returns how many chunks were
     /// computed, which is zero on the common path where nothing moved.
-    pub fn refresh(&mut self, model: &Model, sessions: &[Session]) -> usize {
+    pub fn refresh(&mut self, model: &Model, sessions: &[Target]) -> usize {
         self.dim = model.dim();
         let mut live: HashMap<String, Fingerprint> = HashMap::new();
         let mut embedded = 0;
@@ -231,7 +231,7 @@ impl Index {
             let Some(print) = Fingerprint::of(path) else {
                 continue;
             };
-            let key = session.key();
+            let key = session.key.clone();
             live.insert(key.clone(), print);
             if self.built_from.get(&key) == Some(&print) {
                 continue;
@@ -344,8 +344,10 @@ impl Index {
             let snippet = r.string()?;
             let bytes = r.take(dim.checked_mul(4)?)?;
             let vector = bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             chunks.push(Chunk {
                 key,
@@ -403,6 +405,7 @@ mod tests {
     use super::*;
     use crate::embed::tests::tiny;
     use crate::pricing::Provider;
+    use crate::session::Session;
     use std::path::PathBuf;
 
     fn temp(name: &str, body: &str) -> PathBuf {
@@ -529,15 +532,16 @@ mod tests {
         let mut session = Session::new(Provider::Claude, "s1".into());
         session.data_file = Some(path.clone());
 
+        let target = Target::of(&session);
         let mut index = Index::default();
-        let first = index.refresh(&model, std::slice::from_ref(&session));
+        let first = index.refresh(&model, std::slice::from_ref(&target));
         assert!(first > 0, "a new session must be embedded");
         assert_eq!(index.chunks.len(), first);
         assert!(index.chunks.iter().all(|c| c.key == session.key()));
         assert!(!index.chunks[0].snippet.is_empty());
 
         // Nothing moved, so nothing is recomputed.
-        assert_eq!(index.refresh(&model, std::slice::from_ref(&session)), 0);
+        assert_eq!(index.refresh(&model, std::slice::from_ref(&target)), 0);
         assert_eq!(index.chunks.len(), first);
 
         // The transcript grows: it is embedded again, and the stale vectors for
@@ -551,7 +555,7 @@ mod tests {
             .expect("write");
         drop(f);
         assert!(
-            index.refresh(&model, std::slice::from_ref(&session)) > 0,
+            index.refresh(&model, std::slice::from_ref(&target)) > 0,
             "growth re-embeds"
         );
         assert!(

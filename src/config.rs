@@ -433,6 +433,13 @@ pub static COST_CACHE_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join(
 pub static PRICING_CACHE_FILE: LazyLock<PathBuf> =
     LazyLock::new(|| CACHE_DIR.join("litellm-pricing.json"));
 pub static UI_PREFS_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join("ui-prefs.json"));
+/// Chunk vectors for the topical search, and the fingerprints they were built
+/// from. A cache in the full sense: deleting it costs the second it takes to
+/// build again.
+pub static EMBEDDING_INDEX_FILE: LazyLock<PathBuf> =
+    LazyLock::new(|| CACHE_DIR.join("embeddings.bin"));
+/// Where a fetched embedding model is unpacked.
+pub static EMBEDDING_MODEL_DIR: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join("models"));
 /// Readings of each account's rate-limit windows, kept because the provider
 /// reports only the current figure and a reset destroys the evidence. See
 /// [`crate::burn`].
