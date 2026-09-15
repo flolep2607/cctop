@@ -174,6 +174,12 @@ pub struct Args {
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub handoff: Option<String>,
 
+    /// Download the model the topical search needs (about 30 MB, once), then
+    /// exit. Until this is run, `/` searches transcripts literally and nothing
+    /// reaches the network
+    #[arg(long)]
+    pub fetch_search_model: bool,
+
     /// Serve the Model Context Protocol on stdin/stdout, so an agent can ask
     /// what the other agents on this machine are doing. Read-only
     #[arg(long)]

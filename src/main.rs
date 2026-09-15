@@ -8,6 +8,7 @@ mod clipboard;
 mod collide;
 mod config;
 mod doctor;
+mod embed;
 mod fingerprint;
 mod fleet;
 mod handoff;
@@ -161,6 +162,11 @@ fn main() -> anyhow::Result<()> {
 
     if args.update {
         return update::run(false);
+    }
+
+    if args.fetch_search_model {
+        embed::fetch::fetch()?;
+        return Ok(());
     }
 
     if args.hooks_status {
