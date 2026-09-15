@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, Windsurf)"
