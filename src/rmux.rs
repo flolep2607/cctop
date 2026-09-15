@@ -1068,24 +1068,7 @@ mod tests {
         let _turn = test_lock();
         let ours = format!("cctop-state-{}", std::process::id());
         let dir = std::env::temp_dir();
-        assert!(
-            Command::new(BIN)
-                .args([
-                    "new-session",
-                    "-d",
-                    "-s",
-                    &ours,
-                    "-c",
-                    &dir.to_string_lossy(),
-                    "--",
-                    "sh",
-                    "-c",
-                    "sleep 30",
-                ])
-                .status()
-                .is_ok_and(|s| s.success()),
-            "could not start {ours}"
-        );
+        start_session(&ours, Some(&dir), &["sh", "-c", "sleep 30"]);
 
         let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
         set_state(&ours, crate::hook::Signal::NeedsInput);
@@ -1094,7 +1077,7 @@ mod tests {
                 .into_iter()
                 .find(|s| s.name == ours && s.state.is_some())
         });
-        let _ = kill(&ours);
+        end_session(&ours);
 
         assert_eq!(
             before.map(|s| s.state),
@@ -1123,24 +1106,7 @@ mod tests {
         let _turn = test_lock();
         let ours = format!("cctop-order-{}", std::process::id());
         let dir = std::env::temp_dir();
-        assert!(
-            Command::new(BIN)
-                .args([
-                    "new-session",
-                    "-d",
-                    "-s",
-                    &ours,
-                    "-c",
-                    &dir.to_string_lossy(),
-                    "--",
-                    "sh",
-                    "-c",
-                    "sleep 30",
-                ])
-                .status()
-                .is_ok_and(|s| s.success()),
-            "could not start {ours}"
-        );
+        start_session(&ours, Some(&dir), &["sh", "-c", "sleep 30"]);
 
         let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
         set_order(&ours, 3);
@@ -1149,7 +1115,7 @@ mod tests {
                 .into_iter()
                 .find(|s| s.name == ours && s.order.is_some())
         });
-        let _ = kill(&ours);
+        end_session(&ours);
 
         assert_eq!(before.map(|s| s.order), Some(None), "born with an order");
         assert_eq!(
@@ -1218,13 +1184,7 @@ mod tests {
             return;
         }
         let name = format!("cctop-share-{}", std::process::id());
-        assert!(
-            Command::new(BIN)
-                .args(["new-session", "-d", "-s", &name, "--", "sleep", "30"])
-                .output()
-                .is_ok_and(|out| out.status.success()),
-            "rmux would not start a session to share"
-        );
+        start_session(&name, None, &["sleep", "30"]);
 
         // Untunnelled, so the test needs no network: raising the tunnel is
         // rmux's half and dialling a provider from a unit test would be an SSH
@@ -1234,14 +1194,7 @@ mod tests {
         let share = web_share(&name, false);
         // Killing the session ends its share; `web-share -X` would also end any
         // the user has open, which is not this test's to touch.
-        let _ = kill(&name);
-        // And wait for it to be gone before the lock is. Killing the last
-        // session stops the server, and a `new-session` that reaches the socket
-        // while it is on its way down fails outright — so releasing the lock
-        // the moment `kill` returns hands the next test a daemon mid-shutdown.
-        // That is the race [`test_lock`] exists for, and serialising the tests
-        // does not close it on its own.
-        wait_for(|| (!exists(&name)).then_some(()));
+        end_session(&name);
 
         let share = share.expect("rmux shared the session");
         let operator = share.operator.expect("an operator link");
@@ -1403,24 +1356,7 @@ mod tests {
         let dir = std::env::temp_dir();
 
         for name in [&ours, &theirs] {
-            assert!(
-                Command::new(BIN)
-                    .args([
-                        "new-session",
-                        "-d",
-                        "-s",
-                        name,
-                        "-c",
-                        &dir.to_string_lossy(),
-                        "--",
-                        "sh",
-                        "-c",
-                        "sleep 30",
-                    ])
-                    .status()
-                    .is_ok_and(|s| s.success()),
-                "could not start {name}"
-            );
+            start_session(name, Some(&dir), &["sh", "-c", "sleep 30"]);
         }
 
         let found = wait_for(|| running().into_iter().find(|s| s.name == ours));
@@ -1440,7 +1376,7 @@ mod tests {
             .ok()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
         for name in [&ours, &theirs] {
-            let _ = kill(name);
+            end_session(name);
         }
 
         let found = found.expect("the session cctop just created was not listed");
@@ -1486,22 +1422,7 @@ mod tests {
         let named = format!("cctop-probe-named-{}", std::process::id());
         let plain = format!("cctop-probe-plain-{}", std::process::id());
         for name in [&named, &plain] {
-            assert!(
-                Command::new("rmux")
-                    .args([
-                        "new-session",
-                        "-d",
-                        "-s",
-                        name,
-                        "--",
-                        "sh",
-                        "-c",
-                        "sleep 30"
-                    ])
-                    .status()
-                    .is_ok_and(|s| s.success()),
-                "could not start {name}"
-            );
+            start_session(name, None, &["sh", "-c", "sleep 30"]);
         }
         set_profile(&named, "work");
         // Deliberately no label on this one: the label field then reads back
@@ -1509,7 +1430,7 @@ mod tests {
         let found = wait_for(|| running().into_iter().find(|s| s.name == named));
         let bare = running().into_iter().find(|s| s.name == plain);
         for name in [&named, &plain] {
-            let _ = kill(name);
+            end_session(name);
         }
 
         let found = found.expect("the session cctop just created was not listed");
@@ -1534,7 +1455,18 @@ mod tests {
         let dir = std::env::temp_dir();
         let argv = vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
 
-        prepare(&argv, &name, Some(&dir));
+        // The one session here that cannot go through [`start_session`], since
+        // making it *is* what is under test — so the retry it would have given
+        // is spelled out. `prepare` is best effort by design and says nothing
+        // when the daemon it reached was shutting down; asking again is the
+        // same cure for the same race.
+        for _ in 0..20 {
+            prepare(&argv, &name, Some(&dir));
+            if exists(&name) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         let ask = |fmt: &str| {
             Command::new(BIN)
                 .args(["display-message", "-p", "-t", &name, fmt])
@@ -1546,7 +1478,7 @@ mod tests {
         let windows = ask("#{session_windows}");
         let mouse = ask("#{mouse}");
         let agent = agent_pid(&name);
-        let _ = kill(&name);
+        end_session(&name);
 
         assert_eq!(
             history.as_deref(),
@@ -1577,21 +1509,10 @@ mod tests {
         }
         let _turn = test_lock();
         let ours = format!("cctop-probe-busy-{}", std::process::id());
-        assert!(
-            Command::new("rmux")
-                .args([
-                    "new-session",
-                    "-d",
-                    "-s",
-                    &ours,
-                    "--",
-                    "sh",
-                    "-c",
-                    "while true; do date; sleep 0.2; done",
-                ])
-                .status()
-                .is_ok_and(|s| s.success()),
-            "could not start {ours}"
+        start_session(
+            &ours,
+            None,
+            &["sh", "-c", "while true; do date; sleep 0.2; done"],
         );
 
         let now = || {
@@ -1610,7 +1531,7 @@ mod tests {
             .into_iter()
             .find(|s| s.name == ours)
             .and_then(|s| s.activity);
-        let _ = kill(&ours);
+        end_session(&ours);
 
         let later = later.expect("the session stopped being listed");
         assert!(
@@ -1624,6 +1545,54 @@ mod tests {
             "reported {later}, now {}",
             now()
         );
+    }
+
+    /// Start a detached session for a test, waiting out a daemon that is still
+    /// shutting down.
+    ///
+    /// The backstop behind [`end_session`]. Even with every test waiting for
+    /// its own sessions to go, the server's exit is its own asynchronous thing:
+    /// `kill-session` answers before the socket is closed, so a `new-session`
+    /// aimed at it can still come back `Connection reset by peer` and fail a
+    /// test that has nothing to do with shutdown. There is nothing to wait
+    /// *for* here — the dying socket is replaced by the one the next
+    /// `new-session` starts — so the cure is to ask again. A call that is
+    /// wrong rather than early fails exactly as it did before, two seconds
+    /// later and carrying rmux's own complaint.
+    fn start_session(name: &str, cwd: Option<&Path>, command: &[&str]) {
+        let mut last = String::new();
+        for attempt in 0..20 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let mut rmux = Command::new(BIN);
+            rmux.args(["new-session", "-d", "-s", name]);
+            if let Some(dir) = cwd {
+                rmux.args(["-c", &dir.to_string_lossy()]);
+            }
+            rmux.arg("--").args(command);
+            match rmux.output() {
+                Ok(out) if out.status.success() => return,
+                Ok(out) => last = String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        panic!("could not start {name}: {last}");
+    }
+
+    /// End a session and wait for it to actually be gone.
+    ///
+    /// Killing the last session stops the server, and a `new-session` that
+    /// reaches the socket while it is on its way down fails outright — so a
+    /// test that released [`test_lock`] the moment `kill` returned would hand
+    /// the next one a daemon mid-shutdown. That is the race [`test_lock`]
+    /// exists for, and serialising the tests does not close it on its own.
+    ///
+    /// Every test that makes a session ends it through here, so no test's
+    /// teardown is the one that leaves the next a closing socket.
+    fn end_session(name: &str) {
+        let _ = kill(name);
+        wait_for(|| (!exists(name)).then_some(()));
     }
 
     /// rmux creates sessions and spawns their commands asynchronously, so poll
