@@ -93,13 +93,29 @@ jobs:
       # being thrown away.
       - id: notes
         name: Take the release commit's own prose as the notes
+        # Through the environment rather than interpolated into the script: a
+        # `${{ }}` expression is pasted in as text before bash parses the line,
+        # so a Cargo.toml version carrying shell syntax would be run rather than
+        # read. As a variable it is only ever data.
+        env:
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           # The tag lands on a merge commit whose message is GitHub's, so the
           # prose is in the `chore: release` commit underneath it. `--no-merges`
           # matters: a merge commit repeats the branch's subject in its own body,
           # so without it the newest match is the merge and the whole body is one
           # line reading "chore: release X.Y.Z".
-          sha="$(git log --no-merges --format=%H --grep='^chore: release' -n 1 HEAD || true)"
+          #
+          # The version is in the pattern because a search for any release commit
+          # walks past a release whose commit was titled differently and happily
+          # publishes the previous version's prose: v0.14.0, titled "Release
+          # 0.14.0", shipped v0.13.0's notes to everyone who updated. Matching
+          # this version alone turns that into a thinner note rather than a wrong
+          # one. Both ends are anchored and the dots escaped, so 0.1.0 is not
+          # answered by 0.1.0-beta or 10.1.0.
+          version="${RELEASE_TAG#v}"
+          pattern="^chore: release $(printf '%s' "$version" | sed 's/[.]/\\./g')\$"
+          sha="$(git log --no-merges --format=%H --grep="$pattern" -n 1 HEAD || true)"
           body=""
           if [ -n "$sha" ]; then
             body="$(git log --format=%b -n 1 "$sha")"
@@ -126,7 +142,10 @@ jobs:
             fi
             echo "notes from $(git log --format='%h %s' -n 1 "$sha")"
           else
-            echo "no release commit found; falling back to generated notes alone"
+            # A warning, not a failure: the tag is pushed by the time this
+            # runs, so exiting non-zero would leave a tag with no release at
+            # all — worse than a release carrying only the generated list.
+            echo "::warning::no commit titled 'chore: release $version' found; publishing the generated notes alone"
           fi
           {
             echo "body<<CCTOP_RELEASE_NOTES"
