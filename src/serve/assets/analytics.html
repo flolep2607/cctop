@@ -1,0 +1,927 @@
+<title>cctop — analytics</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<style>__CCTOP_CSS__
+  .back { font-size: 13px; color: var(--dim); text-decoration: none; }
+  .back:hover { color: var(--accent); }
+  #updated { font-size: 12px; }
+
+  .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); margin-bottom: 14px; }
+  .tile { padding: 12px 14px; }
+  .tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+  .tile .v { font-family: var(--mono); font-size: 21px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .tile .n { font-size: 11px; color: var(--faint); margin-top: 2px; }
+  .tile.warn .v { color: var(--amber); }
+  .tile.bad .v { color: var(--red); }
+
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+  select {
+    padding: 7px 9px; font: inherit; font-size: 13px; cursor: pointer;
+    background: var(--panel); color: var(--dim);
+    border: 1px solid var(--line); border-radius: 8px; max-width: 46vw;
+  }
+
+  section.block { margin-bottom: 26px; }
+  section.block > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+                       color: var(--faint); margin-bottom: 9px; }
+  section.block > .note { font-size: 12px; color: var(--faint); margin: -4px 0 9px; max-width: 62ch; }
+  .pad { padding: 12px 14px; }
+
+  svg { display: block; max-width: 100%; }
+  .axis { fill: var(--faint); font-size: 10px; font-family: var(--mono); }
+  .gridline { stroke: var(--line); stroke-width: 1; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 11px; font-size: 12px; }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 9px; }
+  .legend .amt { color: var(--faint); font-family: var(--mono); }
+
+  /* The week-by-hour grid: day labels down the left, hour labels across the
+     top, one cell per waking slot. Intensity is the accent at a strength, so
+     a cell's colour and its tooltip always agree about which is biggest. */
+  .heat { display: grid; grid-template-columns: 30px repeat(24, minmax(8px, 1fr));
+          gap: 2px; align-items: center; }
+  .heat .hl { font-size: 10px; color: var(--faint); font-family: var(--mono); }
+  .heat .hh { font-size: 9px; color: var(--faint); font-family: var(--mono); text-align: center; }
+  .heat .hc { aspect-ratio: 1; min-height: 10px; border-radius: 2px; }
+
+  /* Most-written files as a ranked bar list: the bar is the comparison, the
+     count is the figure, the path is what it was. */
+  .wr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(60px, 140px) auto;
+        gap: 10px; align-items: center; padding: 4px 0; }
+  .wr .wp { font-family: var(--mono); font-size: 12px; color: var(--dim);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wr .wb { height: 8px; border-radius: 4px; background: var(--bg); overflow: hidden; }
+  .wr .wb i { display: block; height: 100%; background: var(--accent); }
+  .wr .wn { font-family: var(--mono); font-size: 12px; color: var(--faint);
+            text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* The breakdown cards sit side by side where there is room and stack to one
+     column where there is not — a phone reads them top to bottom. */
+  .decks { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .decks h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+              color: var(--faint); margin: 0; padding: 11px 14px 3px; }
+  .decks table { font-size: 12.5px; }
+  .decks td { padding: 5px 10px; }
+  .decks .card { padding-bottom: 6px; }
+
+  footer { margin-top: 24px; font-size: 12px; color: var(--faint); display: grid; gap: 4px; }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <h1>cctop<span class="v mono">__CCTOP_VERSION__</span></h1>
+    <a class="back" id="back" href="/">← dashboard</a>
+    <div class="spacer"></div>
+    <span class="faint" id="updated">reading…</span>
+  </header>
+
+  <div id="banners"></div>
+
+  <div class="tiles" id="kpis"></div>
+
+  <div class="controls">
+    <select id="f-provider" title="Which agent harness"></select>
+    <select id="f-project" title="Which project"></select>
+    <select id="f-model" title="Which model"></select>
+    <select id="f-who" title="Whose sessions — user, account or machine"></select>
+    <select id="f-range" title="How far back">
+      <option value="24h">Last 24h</option>
+      <option value="7d">Last 7 days</option>
+      <option value="30d" selected>Last 30 days</option>
+      <option value="all">All time</option>
+    </select>
+  </div>
+
+  <main id="main"><div class="empty">Reading the sessions…</div></main>
+
+  <footer id="foot"></footer>
+</div>
+
+<script>
+"use strict";
+// analytics.html — the fleet as figures: what the sessions cost, when they
+// ran, and who, what and where they belong to. Every section reads the same
+// filtered set, so the page tells one story rather than six.
+//
+// All filtering is client-side on purpose. The whole fleet already arrives in
+// a single payload — a few hundred sessions of counters and per-day buckets —
+// so asking the server to re-answer every <select> change would add a route
+// for nothing.
+
+const TOKEN = "__CCTOP_TOKEN__";
+const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
+// Substituted on every page the server sends, whether or not that page can
+// act on a session. This one never does — it is kept for the contract, not
+// consulted.
+const CAN_ACT = "__CCTOP_ACTIONS__";
+// The operator's home, so written paths read `~/…` the way they do elsewhere
+// in cctop. Substituted because a browser cannot know it — the machine this
+// page is open on may not be the one cctop runs on.
+const HOME = "__CCTOP_HOME__";
+
+// Every string the payload carries — project names, paths, model names — goes
+// through textContent or this. None of it is trusted markup.
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+};
+const svg = (tag, attrs) => {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, String(v));
+  return node;
+};
+
+const money = (v) => {
+  const n = Number(v) || 0;
+  if (n === 0) return "$0";
+  if (n < 0.01) return "<$0.01";
+  return "$" + (n < 100 ? n.toFixed(2) : Math.round(n).toLocaleString());
+};
+const tokens = (v) => {
+  const n = Number(v) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "G";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(Math.round(n));
+};
+const count = (v) => (Number(v) || 0).toLocaleString();
+
+// --- time ------------------------------------------------------------------
+//
+// Bucket keys are local-time strings (`YYYY-MM-DD`, `YYYY-MM-DDTHH`) and the
+// RFC3339 timestamps are shown in the operator's own day. Both are handled as
+// local dates here, because a day boundary is where the reader's midnight is,
+// not where UTC's is.
+
+const pad2 = (n) => String(n).padStart(2, "0");
+const dayKey = (d) => d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+const hourKey = (d) => dayKey(d) + "T" + pad2(d.getHours());
+// A day key parsed as a local date — `new Date("2026-09-15")` would be UTC
+// midnight, which is the previous evening for anyone west of Greenwich.
+const parseDay = (day) => {
+  const p = String(day).split("-");
+  return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+};
+const dayLabel = (day) =>
+  parseDay(day).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const clock3 = (iso) => {
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return "";
+  const d = new Date(t);
+  return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+};
+// Every day key from `a` to `b` inclusive, as local dates.
+function daysBetween(a, b) {
+  const out = [];
+  const end = parseDay(b);
+  for (let d = parseDay(a); d <= end; d.setDate(d.getDate() + 1)) {
+    out.push(dayKey(d));
+    if (out.length > 400) break;  // a very old fleet still gets a finite chart
+  }
+  return out;
+}
+
+// --- reading the sessions ---------------------------------------------------
+
+// Whose session this is, in the order the data can answer it: the person,
+// then the login, then the machine, then nobody in particular.
+const who = (s) => s.user || s.account || s.host || "local";
+const projKey = (s) => s.project_name || s.project || "—";
+
+// The three claims the cost fields make, kept distinct: `cost_available` says
+// the provider records billable usage at all, `cost_included` says the plan
+// bundles it (any figure is the recorded retail equivalent, not money spent),
+// and a numeric `cost` is what was recorded. None may be rendered as another.
+const measurable = (s) => s.cost_available && !s.cost_included && typeof s.cost === "number";
+const hasRecorded = (s) => s.cost_available && typeof s.cost === "number";
+
+// A working directory under home reads as `~/…`; the whole path stays on the
+// element's title.
+const shortPath = (path) => {
+  const full = String(path);
+  if (HOME && full.startsWith(HOME + "/")) return "~" + full.slice(HOME.length);
+  if (HOME && full === HOME) return "~";
+  const parts = full.split("/").filter(Boolean);
+  return parts.length <= 2 ? full : "…/" + parts.slice(-2).join("/");
+};
+
+// --- talking to the server --------------------------------------------------
+
+// What went wrong, in words worth showing. A cctop error is short and arrives
+// as text/plain; anything else in the body was written by something between
+// this page and the server.
+async function problem(response) {
+  const kind = (response.headers.get("content-type") || "").split(";")[0].trim();
+  const said = kind === "text/plain" ? (await response.text()).trim() : "";
+  if (said) return said.length > 400 ? said.slice(0, 400) + "…" : said;
+  if (response.status >= 502 && response.status <= 504) return "cctop is not answering";
+  if (response.status === 401 || response.status === 403) return "this link is no longer authorised";
+  return "the server answered " + response.status;
+}
+
+// The body as JSON, or a sentence saying why it is not. A 200 is not a
+// promise of JSON — a proxy or a dead tunnel answers with an HTML page and a
+// good status, and the parser's complaint about that is not worth showing.
+async function asJson(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error("whatever answered this page, it was not cctop");
+  }
+}
+
+async function ask(url, init) {
+  let response;
+  try {
+    response = await fetch(url, init);
+  } catch (e) {
+    throw new Error("cctop is unreachable");
+  }
+  if (!response.ok) throw new Error(await problem(response));
+  return response;
+}
+
+// A page whose server has gone says so once, at the top, and keeps what it
+// already had on screen.
+function offline(why) {
+  const box = document.getElementById("banners");
+  let banner = document.getElementById("offline");
+  if (!why) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = el("div", "banner");
+    banner.id = "offline";
+    box.appendChild(banner);
+  }
+  banner.textContent = why + " Still trying.";
+}
+
+// --- the filtered set --------------------------------------------------------
+
+let DATA = null;
+const SEL = { provider: "", project: "", model: "", who: "", range: "30d" };
+const RANGES = { "24h": 864e5, "7d": 7 * 864e5, "30d": 30 * 864e5, all: Infinity };
+// The window the range select names, as the oldest bucket key each chart may
+// use. Empty when "all" is picked — a string compare against "" keeps every
+// key, which is the same test either way.
+let MIN_DAY = "";
+let MIN_HOUR = "";
+
+function computeRange() {
+  const ms = RANGES[SEL.range];
+  if (!isFinite(ms)) {
+    MIN_DAY = "";
+    MIN_HOUR = "";
+    return;
+  }
+  const d = new Date(Date.now() - ms);
+  MIN_DAY = dayKey(d);
+  MIN_HOUR = hourKey(d);
+}
+
+// A session belongs in a range if it was active inside it — it did something
+// in the window, or it began in the window. One with neither timestamp says
+// nothing about when, and claiming it was active would be a guess.
+function inRange(s, ms) {
+  if (!isFinite(ms)) return true;
+  const cut = Date.now() - ms;
+  const last = Date.parse(s.last_active || "");
+  const start = Date.parse(s.started || "");
+  return (isFinite(last) && last >= cut) || (isFinite(start) && start >= cut);
+}
+
+function filteredSessions() {
+  const ms = RANGES[SEL.range];
+  return (DATA.sessions || []).filter(
+    (s) =>
+      (!SEL.provider || s.provider === SEL.provider) &&
+      (!SEL.project || projKey(s) === SEL.project) &&
+      (!SEL.model || s.model === SEL.model || (s.models || []).includes(SEL.model)) &&
+      (!SEL.who || who(s) === SEL.who) &&
+      inRange(s, ms),
+  );
+}
+
+// The <select>s read the unfiltered fleet: filtering must not shrink the
+// choices that produced it. Options are rebuilt only when the set changes, so
+// an open dropdown is not yanked away every refresh.
+function fill(id, entries, allLabel, key) {
+  const select = document.getElementById(id);
+  const sig = JSON.stringify(entries);
+  if (select.dataset.sig === sig) {
+    if (!entries.some(([v]) => v === select.value)) select.value = "";
+    SEL[key] = select.value;
+    return;
+  }
+  const all = el("option", null, allLabel);
+  all.value = "";
+  select.replaceChildren(all);
+  for (const [value, label] of entries) {
+    const option = el("option", null, label);
+    option.value = value;
+    select.appendChild(option);
+  }
+  select.value = entries.some(([v]) => v === SEL[key]) ? SEL[key] : "";
+  SEL[key] = select.value;
+  select.dataset.sig = sig;
+}
+
+function populateFilters() {
+  const sessions = DATA.sessions || [];
+  const providers = new Map();
+  const projects = new Set();
+  const models = new Set();
+  const whos = new Set();
+  for (const s of sessions) {
+    if (s.provider) providers.set(s.provider, s.label || s.provider);
+    projects.add(projKey(s));
+    if (s.model) models.add(s.model);
+    for (const m of s.models || []) models.add(m);
+    whos.add(who(s));
+  }
+  fill("f-provider",
+    [...providers.entries()].sort((a, b) => a[1].localeCompare(b[1])),
+    "All providers", "provider");
+  fill("f-project",
+    [...projects].sort().map((p) => [p, p]),
+    "All projects", "project");
+  fill("f-model",
+    [...models].sort().map((m) => [m, m]),
+    "All models", "model");
+  fill("f-who",
+    [...whos].sort().map((w) => [w, w]),
+    "Who: all", "who");
+}
+
+// --- aggregation -------------------------------------------------------------
+
+// The chart domain: every day from the oldest the window allows to today, so
+// a gap reads as a gap rather than a missing bar. For "all", from the oldest
+// day any session records.
+function domain(presentDays) {
+  const today = dayKey(new Date());
+  let first = MIN_DAY || null;
+  for (const d of presentDays) if (!first || d < first) first = d;
+  if (!first || first > today) return [];
+  return daysBetween(first, today);
+}
+
+// A day → label → value map out of a per-session bucket field (`by_day`,
+// `tokens_by_day`), summing each day's inner model map. `names` totals per
+// label so the stack is ordered by which contributes most.
+function byDay(list, field) {
+  const days = new Map();
+  const names = new Map();
+  for (const s of list) {
+    const buckets = s[field] || {};
+    for (const [day, models] of Object.entries(buckets)) {
+      if (day < MIN_DAY) continue;
+      let row = days.get(day);
+      if (!row) days.set(day, (row = new Map()));
+      for (const v of Object.values(models || {})) {
+        const n = Number(v) || 0;
+        row.set(s.label, (row.get(s.label) || 0) + n);
+        names.set(s.label, (names.get(s.label) || 0) + n);
+      }
+    }
+  }
+  return { days, names };
+}
+
+// The provider colours. Six slots is more providers than any fleet has had;
+// a seventh reuses the first, which the legend still names correctly.
+const PALETTE = [
+  "var(--accent)", "var(--green)", "var(--amber)",
+  "var(--red)", "var(--dim)", "var(--faint)",
+];
+
+// --- charts ------------------------------------------------------------------
+
+const block = (heading, note) => {
+  const s = el("section", "block");
+  s.appendChild(el("h3", null, heading));
+  if (note) s.appendChild(el("p", "note", note));
+  return s;
+};
+
+const emptyCard = (text) => {
+  const card = el("div", "card");
+  card.appendChild(el("div", "empty", text));
+  return card;
+};
+
+// One stacked bar per day, one segment per series. The gridlines mark the
+// halves of the tallest day; the ends of the axis say which days they are.
+function stackedDays(days, series, fmt, aria) {
+  const W = 920, H = 210, PAD_L = 52, PAD_B = 30, PAD_T = 10, PAD_R = 8;
+  const totals = days.map((d) => series.reduce((a, x) => a + (x.byDay.get(d) || 0), 0));
+  const max = Math.max(...totals, 1e-9);
+  const y = (v) => PAD_T + (1 - v / max) * (H - PAD_T - PAD_B);
+
+  const chart = svg("svg", {
+    viewBox: `0 0 ${W} ${H}`, width: "100%", height: H,
+    role: "img", "aria-label": aria,
+  });
+  for (const frac of [0, 0.5, 1]) {
+    const yy = y(max * frac);
+    chart.appendChild(svg("line", { x1: PAD_L, y1: yy, x2: W - PAD_R, y2: yy, class: "gridline" }));
+    const label = svg("text", { x: PAD_L - 6, y: yy + 3, "text-anchor": "end", class: "axis" });
+    label.textContent = fmt(max * frac);
+    chart.appendChild(label);
+  }
+  const foot = (xPos, anchor, text) => {
+    const t = svg("text", { x: xPos, y: H - 8, "text-anchor": anchor, class: "axis" });
+    t.textContent = text;
+    chart.appendChild(t);
+  };
+  foot(PAD_L, "start", dayLabel(days[0]));
+  foot((PAD_L + W - PAD_R) / 2, "middle", days.length + (days.length === 1 ? " day" : " days"));
+  foot(W - PAD_R, "end", dayLabel(days[days.length - 1]));
+
+  const slot = (W - PAD_L - PAD_R) / days.length;
+  const bw = Math.max(1, Math.min(34, slot - Math.max(1, slot * 0.18)));
+  days.forEach((day, i) => {
+    let base = y(0);
+    const cx = PAD_L + i * slot + (slot - bw) / 2;
+    for (const ser of series) {
+      const v = ser.byDay.get(day) || 0;
+      if (v <= 0) continue;
+      const h = Math.max(0, y(0) - y(v));
+      const bar = svg("rect", {
+        x: cx.toFixed(1), y: (base - h).toFixed(1), width: bw.toFixed(1), height: h.toFixed(1),
+        fill: ser.color, rx: 1,
+      });
+      const tip = svg("title");
+      tip.textContent = dayLabel(day) + " · " + ser.name + " — " + fmt(v);
+      bar.appendChild(tip);
+      chart.appendChild(bar);
+      base -= h;
+    }
+  });
+  return chart;
+}
+
+function legendFor(series, fmt) {
+  const legend = el("div", "legend");
+  for (const ser of series) {
+    const total = [...ser.byDay.values()].reduce((a, v) => a + v, 0);
+    if (total <= 0) continue;
+    const item = el("div", "item");
+    const swatch = el("span", "swatch");
+    swatch.style.background = ser.color;
+    item.appendChild(swatch);
+    item.appendChild(el("span", null, ser.name));
+    item.appendChild(el("span", "amt", fmt(total)));
+    legend.appendChild(item);
+  }
+  return legend;
+}
+
+// What the filtered sessions cost per day, stacked by which agent spent it.
+// Sessions whose plan bundles the cost, or whose provider records none, are
+// not in this chart — a $0 drawn for them would be a claim the data does not
+// make, and the foot of the page says where they went instead.
+function spendChart(list) {
+  const src = list.filter((s) => s.cost_available && !s.cost_included);
+  const s = block(
+    "Spend per day",
+    "What the filtered sessions spent each day, stacked by agent. Bundled and unrecorded costs are not in it — the foot of the page says which."
+  );
+  if (!src.length) {
+    s.appendChild(emptyCard(
+      "No measured spend in this set — every session's cost is bundled by a plan or not recorded at all."));
+    return s;
+  }
+  const { days, names } = byDay(src, "by_day");
+  const span = domain(days.keys());
+  if (!span.length || !days.size) {
+    s.appendChild(emptyCard("No per-day cost buckets recorded in this range."));
+    return s;
+  }
+  const ordered = [...names.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
+  const row = (d) => days.get(d) || new Map();
+  const series = ordered.map((name, i) => ({
+    name, color: PALETTE[i % PALETTE.length],
+    // Only the days the axis shows, so the legend's totals agree with it.
+    byDay: new Map(span.map((d) => [d, row(d).get(name) || 0])),
+  }));
+  s.appendChild(chartBlockBody(span, series, money, "Spend per day, stacked by agent"));
+  return s;
+}
+
+function chartBlockBody(days, series, fmt, aria) {
+  const holder = el("div", "card pad scroll-x");
+  holder.appendChild(stackedDays(days, series, fmt, aria));
+  const legend = legendFor(series, fmt);
+  if (legend.childElementCount) holder.appendChild(legend);
+  return holder;
+}
+
+function tokensChart(list) {
+  const s = block(
+    "Tokens per day",
+    "Input, output and cache traffic together, stacked by agent. The axis is humanised — 12.4k is twelve thousand."
+  );
+  const { days, names } = byDay(list, "tokens_by_day");
+  const span = domain(days.keys());
+  if (!span.length || !days.size) {
+    s.appendChild(emptyCard("No per-day token buckets recorded in this range."));
+    return s;
+  }
+  const ordered = [...names.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
+  const row = (d) => days.get(d) || new Map();
+  const series = ordered.map((name, i) => ({
+    name, color: PALETTE[i % PALETTE.length],
+    byDay: new Map(span.map((d) => [d, row(d).get(name) || 0])),
+  }));
+  s.appendChild(chartBlockBody(span, series, tokens, "Tokens per day, stacked by agent"));
+  return s;
+}
+
+// How many sessions were alive on each day. A session counts on every day its
+// [started, last_active] span covers, not only the day it began — a session
+// still running on Tuesday was active on Tuesday.
+function sessionsChart(list) {
+  const s = block("Sessions active per day", "A session counts on every day it spans, not only the day it started.");
+  const today = dayKey(new Date());
+  const covered = new Map();
+  const present = [];
+  for (const sess of list) {
+    const a = Date.parse(sess.started || "");
+    const b = Date.parse(sess.last_active || "");
+    let from = isFinite(a) ? dayKey(new Date(a)) : (isFinite(b) ? dayKey(new Date(b)) : "");
+    let to = isFinite(b) ? dayKey(new Date(b)) : (sess.running ? today : from);
+    if (!from || !to) continue;
+    if (from > to) { const t = from; from = to; to = t; }
+    if (to > today) to = today;
+    for (const day of daysBetween(from, to)) {
+      if (day < MIN_DAY || day > today) continue;
+      covered.set(day, (covered.get(day) || 0) + 1);
+      present.push(day);
+    }
+  }
+  const span = MIN_DAY ? domain([MIN_DAY]) : domain(present);
+  if (!span.length) {
+    s.appendChild(emptyCard("No session has a timestamp inside this range."));
+    return s;
+  }
+  const series = [{ name: "sessions", color: "var(--accent)", byDay: covered }];
+  s.appendChild(chartBlockBody(span, series, (v) => String(Math.round(v)),
+    "Sessions active per day"));
+  return s;
+}
+
+// The week-by-hour grid. Tokens are the metric wherever any session records
+// them, because every provider counts tokens; only when nothing does is the
+// map drawn from per-hour costs instead, and the heading says so — "activity
+// heat" and "spend heat" are different claims and are labelled as different.
+const DOWS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function heatSection(list) {
+  const gather = (field, src) => {
+    const cells = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    for (const s of src) {
+      for (const [key, models] of Object.entries(s[field] || {})) {
+        if (key < MIN_HOUR) continue;
+        const h = Number(key.slice(11, 13));
+        if (!(h >= 0 && h < 24)) continue;
+        const dow = (parseDay(key.slice(0, 10)).getDay() + 6) % 7;
+        cells[dow][h] += Object.values(models || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+      }
+    }
+    return cells;
+  };
+
+  let metric = "tokens";
+  let cells = gather("tokens_by_hour", list);
+  let max = Math.max(...cells.flat());
+  if (max <= 0) {
+    // The fallback reads recorded cost, so it keeps to sessions that record
+    // any — a provider with no cost data has nothing to put in a spend map.
+    metric = "spend";
+    cells = gather("by_hour", list.filter((s) => s.cost_available));
+    max = Math.max(...cells.flat());
+  }
+  const fmt = metric === "tokens" ? (v) => tokens(v) + " tok" : money;
+  const s = block(
+    metric === "tokens" ? "Activity heat" : "Spend heat",
+    metric === "tokens"
+      ? "Tokens recorded in each hour of the week — when the fleet works, not how much of it."
+      : "No per-hour token data in this set, so this shows recorded spend per hour of the week instead."
+  );
+  if (max <= 0) {
+    s.appendChild(emptyCard("No per-hour activity recorded in this range."));
+    return s;
+  }
+
+  const grid = el("div", "heat");
+  grid.appendChild(el("span", "hh", ""));
+  for (let h = 0; h < 24; h++) {
+    grid.appendChild(el("span", "hh", h % 6 === 0 ? String(h) : ""));
+  }
+  cells.forEach((row, dow) => {
+    grid.appendChild(el("span", "hl", DOWS[dow]));
+    row.forEach((v, h) => {
+      const cell = el("div", "hc");
+      cell.style.background = v > 0
+        ? "color-mix(in srgb, var(--accent) " + Math.max(6, Math.round((v / max) * 100)) + "%, transparent)"
+        : "var(--bg)";
+      cell.title = DOWS[dow] + " " + pad2(h) + ":00 — " + fmt(v);
+      grid.appendChild(cell);
+    });
+  });
+  const card = el("div", "card pad scroll-x");
+  card.appendChild(grid);
+  s.appendChild(card);
+  return s;
+}
+
+// The files sessions say they wrote, counted across the fleet. Each session's
+// `writes` is a bounded recent list, so this answers "what is being edited
+// lately" — not an all-time record, and the note says so.
+function filesSection(list) {
+  const counts = new Map();
+  for (const s of list) {
+    for (const w of s.writes || []) counts.set(w, (counts.get(w) || 0) + 1);
+  }
+  const top = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 15);
+  const s = block(
+    "Most-written files",
+    "Recent writes across the filtered sessions — each keeps a bounded list, so this is what they still remember writing, not an all-time record."
+  );
+  if (!top.length) {
+    s.appendChild(emptyCard("No session in this set has recorded a written file."));
+    return s;
+  }
+  const max = top[0][1];
+  const card = el("div", "card pad");
+  for (const [path, n] of top) {
+    const row = el("div", "wr");
+    const p = el("span", "wp", shortPath(path));
+    p.title = path;
+    const bar = el("span", "wb");
+    const fill = el("i");
+    fill.style.width = ((n / max) * 100).toFixed(1) + "%";
+    bar.appendChild(fill);
+    row.appendChild(p);
+    row.appendChild(bar);
+    row.appendChild(el("span", "wn", "×" + n));
+    card.appendChild(row);
+  }
+  s.appendChild(card);
+  return s;
+}
+
+// --- breakdowns ---------------------------------------------------------------
+
+// Sessions grouped under one key, with the figures the row shows. `spend`
+// sums every recorded figure — bundled ones included, because they are the
+// recorded retail equivalent and the foot of the page says which they are.
+function groups(list, key) {
+  const map = new Map();
+  for (const s of list) {
+    const k = key(s);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(s);
+  }
+  return [...map.entries()]
+    .map(([name, ss]) => ({
+      name, sessions: ss,
+      spend: ss.reduce((a, s) => a + (hasRecorded(s) ? s.cost : 0), 0),
+      anyCost: ss.some(hasRecorded),
+      tokens: ss.reduce((a, s) => a + (Number(s.tokens && s.tokens.total) || 0), 0),
+      tools: ss.reduce((a, s) => a + (Number(s.tools) || 0), 0),
+      running: ss.filter((s) => s.running).length,
+    }))
+    .sort((a, b) => b.spend - a.spend || b.tokens - a.tokens);
+}
+
+function deck(heading, cols, rows) {
+  const card = el("div", "card");
+  card.appendChild(el("h4", null, heading));
+  if (!rows.length) {
+    card.appendChild(el("div", "empty", "Nothing in this set."));
+    return card;
+  }
+  const scroll = el("div", "scroll-x");
+  const table = el("table");
+  const head = el("tr");
+  for (const [label, cls] of cols) head.appendChild(el("th", cls, label));
+  table.appendChild(head);
+  for (const cells of rows) {
+    const tr = el("tr");
+    for (const [value, cls, title] of cells) {
+      const td = el("td", cls, value);
+      if (title) td.title = title;
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  scroll.appendChild(table);
+  card.appendChild(scroll);
+  return card;
+}
+
+const spendCell = (g) => (g.anyCost ? money(g.spend) : "—");
+
+function breakdowns(list) {
+  const s = block("Breakdowns");
+  const decks = el("div", "decks");
+
+  decks.appendChild(deck(
+    "By who",
+    [["Who", ""], ["Sessions", "num"], ["Spend", "num"], ["Tokens", "num"], ["Tools", "num"], ["Running", "num"]],
+    groups(list, who).map((g) => [
+      [g.name, ""], [g.sessions.length, "num"], [spendCell(g), "num"],
+      [tokens(g.tokens), "num"], [count(g.tools), "num"],
+      [g.running ? String(g.running) : "—", "num"],
+    ])
+  ));
+
+  decks.appendChild(deck(
+    "By provider",
+    [["Provider", ""], ["Sessions", "num"], ["Spend", "num"], ["Tokens", "num"], ["Tools", "num"], ["Running", "num"]],
+    groups(list, (s) => s.label || s.provider || "—").map((g) => [
+      [g.name, ""], [g.sessions.length, "num"], [spendCell(g), "num"],
+      [tokens(g.tokens), "num"], [count(g.tools), "num"],
+      [g.running ? String(g.running) : "—", "num"],
+    ])
+  ));
+
+  decks.appendChild(deck(
+    "By model",
+    [["Model", ""], ["Sessions", "num"], ["Spend", "num"], ["Tokens", "num"]],
+    groups(list, (s) => s.model || "—").map((g) => [
+      [g.name, "mono"], [g.sessions.length, "num"], [spendCell(g), "num"],
+      [tokens(g.tokens), "num"],
+    ])
+  ));
+
+  decks.appendChild(deck(
+    "By project",
+    [["Project", ""], ["Sessions", "num"], ["Spend", "num"], ["Tokens", "num"], ["Tools", "num"]],
+    groups(list, projKey).map((g) => [
+      [g.name, "", g.sessions[0] && g.sessions[0].project],
+      [g.sessions.length, "num"], [spendCell(g), "num"],
+      [tokens(g.tokens), "num"], [count(g.tools), "num"],
+    ])
+  ));
+
+  s.appendChild(decks);
+  return s;
+}
+
+// --- the top strip -------------------------------------------------------------
+
+function kpis(list) {
+  const grid = document.getElementById("kpis");
+  const add = (k, v, note, cls) => {
+    const t = el("div", "card tile" + (cls ? " " + cls : ""));
+    t.appendChild(el("div", "k", k));
+    t.appendChild(el("div", "v", v));
+    if (note) t.appendChild(el("div", "n", note));
+    grid.appendChild(t);
+  };
+  grid.replaceChildren();
+
+  // "Spend" is money actually spent: bundled sessions record a retail
+  // equivalent, which is a different claim and is named as a note rather than
+  // added to the figure.
+  const spent = list.reduce((a, s) => a + (measurable(s) ? s.cost : 0), 0);
+  const bundled = list.reduce(
+    (a, s) => a + (s.cost_available && s.cost_included && typeof s.cost === "number" ? s.cost : 0), 0);
+  const anySpent = list.some(measurable);
+  add("Spend", anySpent ? money(spent) : "—",
+    bundled > 0 ? "+" + money(bundled) + " bundled by a plan" : (anySpent ? null : "nothing measured"));
+
+  add("Sessions", count(list.length));
+  const running = list.filter((s) => s.running).length;
+  add("Running now", count(running));
+  add("Tokens", tokens(list.reduce((a, s) => a + (Number(s.tokens && s.tokens.total) || 0), 0)));
+  add("Tool calls", count(list.reduce((a, s) => a + (Number(s.tools) || 0), 0)));
+
+  // tool_errors is null where a harness records none, which is not the same
+  // claim as zero. The figure sums the sessions that say, and the note counts
+  // how many that is.
+  const reporting = list.filter((s) => typeof s.tool_errors === "number");
+  if (reporting.length) {
+    const errs = reporting.reduce((a, s) => a + s.tool_errors, 0);
+    const calls = reporting.reduce((a, s) => a + (Number(s.tools) || 0), 0);
+    const rate = calls ? errs / calls : 0;
+    add("Tool errors", count(errs),
+      reporting.length < list.length ? "of the sessions that record them" : null,
+      rate >= 0.25 ? "bad" : rate >= 0.1 ? "warn" : null);
+  }
+}
+
+// --- the foot -----------------------------------------------------------------
+
+// Where the figures cannot speak for themselves, the page says so plainly:
+// which agents' costs a plan bundles (so the number is a retail equivalent,
+// not spend), and which record no cost data at all (so they contribute tokens
+// and activity, never a figure).
+function footnotes(list) {
+  const foot = document.getElementById("foot");
+  const lines = [];
+
+  const bundled = [...new Set(list.filter((s) => s.cost_included).map((s) => s.label || s.provider))];
+  if (bundled.length) {
+    lines.push(
+      "Spend for " + bundled.join(" and ") + " is bundled in the " +
+      (DATA.plan ? DATA.plan + " " : "") + "plan; figures shown are the recorded retail equivalent."
+    );
+  }
+
+  const byProvider = new Map();
+  for (const s of list) {
+    const k = s.label || s.provider || "—";
+    if (!byProvider.has(k)) byProvider.set(k, []);
+    byProvider.get(k).push(s);
+  }
+  const silent = [...byProvider.entries()]
+    .filter(([, ss]) => ss.every((s) => !s.cost_available))
+    .map(([k]) => k);
+  if (silent.length) {
+    lines.push(
+      silent.join(" and ") + (silent.length === 1 ? " records" : " record") +
+      " no cost data — its sessions contribute tokens and activity only."
+    );
+  }
+
+  foot.replaceChildren(...lines.map((l) => el("div", null, l)));
+}
+
+// --- render -------------------------------------------------------------------
+
+function renderAll() {
+  if (!DATA) return;
+  computeRange();
+  const list = filteredSessions();
+  kpis(list);
+
+  const main = document.getElementById("main");
+  if (!list.length) {
+    const empty = (DATA.sessions || []).length
+      ? "No sessions match that filter and range."
+      : "No sessions yet — when cctop has seen some, this page reads them.";
+    main.replaceChildren(el("div", "empty", empty));
+    footnotes(list);
+    return;
+  }
+  main.replaceChildren(
+    ...[spendChart, tokensChart, sessionsChart, heatSection, filesSection, breakdowns]
+      .map((f) => f(list))
+      .filter(Boolean)
+  );
+  footnotes(list);
+}
+
+// --- load ---------------------------------------------------------------------
+
+async function refresh() {
+  try {
+    const response = await ask("/api/analytics" + QUERY);
+    DATA = await asJson(response);
+    if (!Array.isArray(DATA.sessions)) DATA.sessions = [];
+    populateFilters();
+    renderAll();
+    // "generated" is when the snapshot was built; if it does not parse, when
+    // this page got it is still a true statement about the figures.
+    document.getElementById("updated").textContent =
+      "updated " + (clock3(DATA.generated) || clock3(new Date().toISOString()));
+    offline(null);
+  } catch (e) {
+    offline(String(e.message || e));
+    if (!DATA) {
+      document.getElementById("main").replaceChildren(
+        el("div", "empty", String(e.message || e) + " Trying again…")
+      );
+    }
+  }
+}
+
+// The back link carries the same credential this page was fetched with, or it
+// lands on a 403.
+document.getElementById("back").href = "/" + QUERY;
+
+for (const [id, key] of [
+  ["f-provider", "provider"], ["f-project", "project"],
+  ["f-model", "model"], ["f-who", "who"], ["f-range", "range"],
+]) {
+  document.getElementById(id).addEventListener("change", (e) => {
+    SEL[key] = e.target.value;
+    renderAll();
+  });
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>

@@ -157,26 +157,47 @@ pub fn extract(path: &Path) -> SessionData {
                 continue;
             }
 
+            let ts = step
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+
             if let Some(model) = step.get("model_name").and_then(Value::as_str) {
                 if !models_seen.iter().any(|m| m == model) {
                     models_seen.push(model.to_string());
                 }
                 let entry = per_model.entry(model.to_string()).or_default();
                 if let Some(m) = step.get("metrics") {
-                    entry.input += m.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-                    entry.output += m
+                    let prompt = m.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let completion = m
                         .get("completion_tokens")
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
-                    entry.cache_read += m.get("cached_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let cached = m.get("cached_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    entry.input += prompt;
+                    entry.output += completion;
+                    entry.cache_read += cached;
+                    // A step with a timestamp and its own token counts is all a
+                    // bucket needs; a step missing either contributes nothing
+                    // rather than an invented figure.
+                    if let Some(dt) = util::parse_ts(&ts) {
+                        let billed = prompt + completion + cached;
+                        *data
+                            .tokens_by_day
+                            .entry(util::local_date_key(&dt))
+                            .or_default()
+                            .entry(model.to_string())
+                            .or_insert(0) += billed;
+                        *data
+                            .tokens_by_hour
+                            .entry(util::local_hour_key(&dt))
+                            .or_default()
+                            .entry(model.to_string())
+                            .or_insert(0) += billed;
+                    }
                 }
             }
-
-            let ts = step
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
 
             let Some(calls) = step.get("tool_calls").and_then(Value::as_array) else {
                 continue;
@@ -503,6 +524,23 @@ mod tests {
         let breakdown = &data.model_breakdown[0];
         assert_eq!(breakdown.tokens.input, 220);
         assert_eq!(breakdown.tokens.output, 30);
+        // Every agent step carries both a timestamp and its own metrics, so
+        // the token buckets fill: 160 + 200 billed across the two steps,
+        // wherever the local day boundary happens to fall.
+        assert_eq!(
+            data.tokens_by_day
+                .values()
+                .flat_map(|m| m.values())
+                .sum::<u64>(),
+            360
+        );
+        assert_eq!(
+            data.tokens_by_hour
+                .values()
+                .flat_map(|m| m.values())
+                .sum::<u64>(),
+            360
+        );
     }
 
     #[test]

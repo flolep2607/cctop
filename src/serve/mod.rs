@@ -6,8 +6,9 @@
 //! This is the same data on a surface they have with them: a page that streams
 //! the rows over SSE, a per-session report that answers the question the live
 //! table cannot — where an afternoon's money went — the conversation itself,
-//! what the session has edited, what it is allowed to reach, and a prompt box
-//! for answering the agent that was waiting.
+//! what the session has edited, what it is allowed to reach, a prompt box
+//! for answering the agent that was waiting, and an analytics page for the
+//! questions no single row answers: when the fleet works, and on what.
 //!
 //! # It can act, and that is a decision with a cost
 //!
@@ -63,6 +64,9 @@
 //! anything here, because it authenticates rather than merely encrypting.
 
 mod actions;
+/// Cross-session aggregation behind `/api/analytics` — the data the
+/// analytics page charts, built from the snapshot plus cached extractions.
+mod analytics;
 /// The conversation reader. Public to the crate because a handoff brief
 /// carries what was said as well as what was done — see [`crate::handoff`].
 pub mod chat;
@@ -140,6 +144,7 @@ const NO_SUCH_SESSION: &str = "no session with that id, or the prefix matches mo
 /// content policy that forbids loading anything at all.
 const DASHBOARD_HTML: &str = include_str!("assets/dashboard.html");
 const REPORT_HTML: &str = include_str!("assets/report.html");
+const ANALYTICS_HTML: &str = include_str!("assets/analytics.html");
 
 /// The stylesheet both pages share, substituted into each at send time.
 ///
@@ -899,6 +904,16 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             );
         }
         "/api/events" => events(shared, stream, &request),
+        "/analytics" => page(shared, stream, &request, ANALYTICS_HTML),
+        // The whole fleet's history in one document — the analytics page
+        // filters and charts it client-side, so this one read-only route is
+        // all the server owes it. Untrimmed buckets are affordable here
+        // because the page fetches on its own cadence, not every refresh.
+        "/api/analytics" => {
+            let snapshot = current(shared);
+            let built = analytics::build(&snapshot.sessions, shared.plan, &shared.store);
+            json(stream, &request, &built);
+        }
         // What can be handed a session's work, and whether this run will act at
         // all. The page asks once and hides the controls it cannot use, rather
         // than offering buttons that answer 404.
@@ -1284,7 +1299,7 @@ mod tests {
         // If an asset is edited and the placeholder goes with it, the page ships
         // with no token and fails at the first fetch — in the browser, where
         // nothing here would have noticed.
-        for html in [DASHBOARD_HTML, REPORT_HTML] {
+        for html in [DASHBOARD_HTML, REPORT_HTML, ANALYTICS_HTML] {
             assert!(html.contains("\"__CCTOP_TOKEN__\""));
             assert!(html.contains("__CCTOP_CSS__"));
             assert!(html.contains("__CCTOP_VERSION__"));

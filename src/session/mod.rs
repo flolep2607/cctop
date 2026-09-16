@@ -1360,6 +1360,19 @@ pub struct SessionData {
     pub costs_by_day: HashMap<String, HashMap<String, f64>>,
     /// `YYYY-MM-DDTHH` -> model -> USD.
     pub costs_by_hour: HashMap<String, HashMap<String, f64>>,
+    /// `YYYY-MM-DD` -> model -> tokens billed that day: every input kind plus
+    /// output, the same quantities [`Tokens::all_input`] and `output` total.
+    ///
+    /// Parallel to `costs_by_day` because the cost maps cannot answer for a
+    /// session whose dollars were never recorded — a bundled plan, an unpriced
+    /// model, a provider that records no rates — while the tokens were burned
+    /// either way. Providers with no per-event usage timestamp (Cursor,
+    /// Windsurf) leave both maps empty.
+    #[serde(default)]
+    pub tokens_by_day: HashMap<String, HashMap<String, u64>>,
+    /// `YYYY-MM-DDTHH` -> same, bucketed by local hour.
+    #[serde(default)]
+    pub tokens_by_hour: HashMap<String, HashMap<String, u64>>,
     pub metrics: Metrics,
     /// Claude only: what the live context window is filled with. Absent for
     /// providers whose transcripts don't report per-request usage.

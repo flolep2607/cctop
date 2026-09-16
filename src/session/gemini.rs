@@ -239,6 +239,23 @@ pub fn extract(path: &Path) -> SessionData {
                     .or_default()
                     .entry(model.clone())
                     .or_insert(0.0) += costs.total;
+                // All input kinds plus output — and thinking, which Gemini
+                // bills as output. `total` is not reused because it folds in
+                // the unbilled `tool` bucket.
+                let billed =
+                    tokens.input + tokens.cached_input + tokens.output + tokens.reasoning_output;
+                *data
+                    .tokens_by_day
+                    .entry(util::local_date_key(&dt))
+                    .or_default()
+                    .entry(model.clone())
+                    .or_insert(0) += billed;
+                *data
+                    .tokens_by_hour
+                    .entry(util::local_hour_key(&dt))
+                    .or_default()
+                    .entry(model.clone())
+                    .or_insert(0) += billed;
             }
         }
 
@@ -354,6 +371,15 @@ mod tests {
         assert_eq!(data.tokens.total, 9175);
         // `all_input` must rebuild the prompt Gemini reported, not double it.
         assert_eq!(data.tokens.all_input(), 8678);
+        // The day's token bucket counts thinking as billed output but not the
+        // unbilled `tool` bucket inside `total`: 678 + 8000 + 133 + 364.
+        assert_eq!(
+            data.tokens_by_day
+                .values()
+                .flat_map(|m| m.values())
+                .sum::<u64>(),
+            9175
+        );
 
         assert_eq!(data.metrics.tool_count, 2);
         assert_eq!(data.metrics.tools.get("read_file"), Some(&1));

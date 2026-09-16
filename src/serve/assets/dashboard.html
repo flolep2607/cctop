@@ -113,6 +113,7 @@
 
   <footer>
     <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
+    <a id="analytics-link" href="/analytics">analytics</a>
     <span class="spacer"></span>
     <span id="counts"></span>
   </footer>
@@ -588,6 +589,9 @@ function setLink(state, text) {
   link.className = "dot " + state;
   linkText.textContent = text;
 }
+
+// The analytics page needs the same credential in its URL or it lands on 403.
+document.getElementById("analytics-link").href = "/analytics" + QUERY;
 
 let source;
 function connect() {
