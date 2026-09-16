@@ -501,6 +501,7 @@ impl Store {
             crate::pricing::Provider::Claude => "extract.claude",
             crate::pricing::Provider::Codex => "extract.codex",
             crate::pricing::Provider::Cursor => "extract.cursor",
+            crate::pricing::Provider::Devin => "extract.devin",
             crate::pricing::Provider::Gemini => "extract.gemini",
             crate::pricing::Provider::OpenCode => "extract.opencode",
             crate::pricing::Provider::Pi => "extract.pi",
@@ -523,6 +524,7 @@ impl Store {
             crate::pricing::Provider::Claude => crate::session::claude::extract(file),
             crate::pricing::Provider::Codex => crate::session::codex::extract(file),
             crate::pricing::Provider::Cursor => crate::session::cursor::extract(file),
+            crate::pricing::Provider::Devin => crate::session::devin::extract(file),
             crate::pricing::Provider::OpenCode => {
                 crate::session::opencode::extract(file, &session.session_id)
             }
@@ -792,7 +794,7 @@ mod tests {
         let sources = hashed_sources();
         let names: Vec<&str> = sources.iter().map(|(p, _)| p.as_str()).collect();
         for provider in [
-            "claude", "codex", "cursor", "gemini", "opencode", "pi", "windsurf",
+            "claude", "codex", "cursor", "devin", "gemini", "opencode", "pi", "windsurf",
         ] {
             let expected = format!("src/session/{provider}.rs");
             assert!(names.contains(&expected.as_str()), "{expected} not hashed");

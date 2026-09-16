@@ -514,6 +514,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
         Provider::Claude => "tails.claude",
         Provider::Codex => "tails.codex",
         Provider::Cursor => "tails.cursor",
+        Provider::Devin => "tails.devin",
         Provider::Gemini => "tails.gemini",
         Provider::OpenCode => "tails.opencode",
         Provider::Pi => "tails.pi",
@@ -529,6 +530,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
             Provider::Claude => session::claude::extract_last_tool(s),
             Provider::Codex => session::codex::extract_last_tool(s),
             Provider::Cursor | Provider::Gemini | Provider::Windsurf => String::new(),
+            Provider::Devin => session::devin::extract_last_tool(s),
             Provider::OpenCode => session::opencode::extract_last_tool(s),
             Provider::Pi => session::pi::extract_last_tool(s),
         },
@@ -539,6 +541,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
             match s.provider {
                 Provider::Claude => session::claude::extract_context(s),
                 Provider::Codex => session::codex::extract_context(s),
+                Provider::Devin => session::devin::extract_context(s),
                 Provider::OpenCode => session::opencode::extract_context(s),
                 Provider::Cursor | Provider::Gemini | Provider::Pi | Provider::Windsurf => None,
             }
@@ -616,6 +619,7 @@ fn harness_from_process(session: &Session, command: &str) -> &'static str {
             Provider::Claude => "ClaudeCode",
             Provider::Codex => "Codex",
             Provider::Cursor => "Cursor",
+            Provider::Devin => "Devin",
             Provider::Gemini => "Gemini",
             Provider::OpenCode => "OpenCode",
             Provider::Pi => "Pi",
@@ -634,6 +638,7 @@ pub struct Stats {
     pub total_claude: usize,
     pub total_codex: usize,
     pub total_cursor: usize,
+    pub total_devin: usize,
     pub total_gemini: usize,
     pub total_opencode: usize,
     pub total_pi: usize,
@@ -656,6 +661,7 @@ pub struct Stats {
     pub spend_claude: f64,
     pub spend_codex: f64,
     pub spend_cursor: f64,
+    pub spend_devin: f64,
     pub spend_gemini: f64,
     pub spend_opencode: f64,
     pub spend_pi: f64,
@@ -724,6 +730,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             Provider::Claude => st.total_claude += 1,
             Provider::Codex => st.total_codex += 1,
             Provider::Cursor => st.total_cursor += 1,
+            Provider::Devin => st.total_devin += 1,
             Provider::Gemini => st.total_gemini += 1,
             Provider::OpenCode => st.total_opencode += 1,
             Provider::Pi => st.total_pi += 1,
@@ -757,6 +764,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 Provider::Claude => st.spend_claude += cost,
                 Provider::Codex => st.spend_codex += cost,
                 Provider::Cursor => st.spend_cursor += cost,
+                Provider::Devin => st.spend_devin += cost,
                 Provider::Gemini => st.spend_gemini += cost,
                 Provider::OpenCode => st.spend_opencode += cost,
                 Provider::Pi => st.spend_pi += cost,
@@ -817,6 +825,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
     st.spend_total = st.spend_claude
         + st.spend_codex
         + st.spend_cursor
+        + st.spend_devin
         + st.spend_gemini
         + st.spend_opencode
         + st.spend_pi

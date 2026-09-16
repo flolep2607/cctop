@@ -3,6 +3,7 @@
 pub mod claude;
 pub mod codex;
 pub mod cursor;
+pub mod devin;
 pub mod extract;
 pub mod gemini;
 pub mod opencode;
@@ -69,6 +70,7 @@ impl Surface {
             (_, Provider::Claude) => "Claude",
             (_, Provider::Codex) => "Codex",
             (_, Provider::Cursor) => "Cursor",
+            (_, Provider::Devin) => "Devin",
             (_, Provider::Gemini) => "Gemini",
             (_, Provider::OpenCode) => "OpenCode",
             (_, Provider::Pi) => "Pi",
@@ -499,7 +501,9 @@ impl Session {
             Provider::Codex => vec!["codex", "resume", &self.session_id],
             Provider::OpenCode => vec!["opencode", "--session", &self.session_id],
             Provider::Pi => vec!["pi", "--session", &self.session_id],
-            Provider::Cursor | Provider::Gemini | Provider::Windsurf => return None,
+            Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Windsurf => {
+                return None;
+            }
         };
         Some(argv.into_iter().map(str::to_string).collect())
     }
@@ -577,6 +581,12 @@ pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Perm
             opencode::extract_activity_state(file, &session.session_id),
             None,
         );
+    }
+    // Devin's transcript is one JSON document, not a line-delimited log — the
+    // per-line tail walk below would never parse a record out of it. The
+    // conversation's newest node in the database says the same thing faster.
+    if session.provider == crate::pricing::Provider::Devin {
+        return devin::live_state(&session.session_id);
     }
     let Some(text) = crate::util::read_tail(file, 65_536) else {
         return (ActivityState::Working, None);
@@ -733,8 +743,11 @@ fn is_waiting_for_input_event(
         }
         // OpenCode keeps no transcript to tail, and Windsurf's conversation blob
         // is one SQLite value rewritten wholesale rather than a growing log, so
-        // neither has a "newest event" this walk could read.
-        crate::pricing::Provider::OpenCode | crate::pricing::Provider::Windsurf => false,
+        // neither has a "newest event" this walk could read. Devin never gets
+        // here — live_state hands it to its own database read first.
+        crate::pricing::Provider::OpenCode
+        | crate::pricing::Provider::Devin
+        | crate::pricing::Provider::Windsurf => false,
     }
 }
 
@@ -1521,25 +1534,29 @@ impl SessionData {
 /// All sessions from every known provider and surface, newest first.
 pub fn list_all() -> Vec<Session> {
     let _span = crate::trace::span("discover");
-    let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, windsurf)))) = rayon::join(
-        || rayon::join(codex::list_sessions, claude::list_sessions),
-        || {
-            rayon::join(
-                || rayon::join(opencode::list_sessions, pi::list_sessions),
-                || {
-                    rayon::join(cursor::list_sessions, || {
-                        rayon::join(gemini::list_sessions, windsurf::list_sessions)
-                    })
-                },
-            )
-        },
-    );
+    let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, (windsurf, devin))))) =
+        rayon::join(
+            || rayon::join(codex::list_sessions, claude::list_sessions),
+            || {
+                rayon::join(
+                    || rayon::join(opencode::list_sessions, pi::list_sessions),
+                    || {
+                        rayon::join(cursor::list_sessions, || {
+                            rayon::join(gemini::list_sessions, || {
+                                rayon::join(windsurf::list_sessions, devin::list_sessions)
+                            })
+                        })
+                    },
+                )
+            },
+        );
     codex.extend(claude);
     codex.extend(opencode);
     codex.extend(pi);
     codex.extend(cursor);
     codex.extend(gemini);
     codex.extend(windsurf);
+    codex.extend(devin);
     let mut sessions = codex;
     // Whose row this is, decided once here rather than in seven discovery
     // functions: the transcript's path already says it, and every provider
@@ -1679,7 +1696,7 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
             .map(|p| crate::config::file_mtime_ms(p))
             .max()
             .unwrap_or(0),
-        Provider::Codex | Provider::Cursor | Provider::Gemini | Provider::Pi => {
+        Provider::Codex | Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Pi => {
             crate::config::file_mtime_ms(f)
         }
         // Every OpenCode session shares one WAL-backed database, as every

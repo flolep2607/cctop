@@ -377,7 +377,7 @@ pub fn find_query(session: &Target, query: &Query) -> Option<Hit> {
                 }
             }
         }
-        Provider::Codex | Provider::Cursor | Provider::Gemini | Provider::Pi => {
+        Provider::Codex | Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Pi => {
             scan_file(file, &mut progress);
         }
         // One database holds every session, so scanning the file would report a
