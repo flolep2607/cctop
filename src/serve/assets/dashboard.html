@@ -1,10 +1,31 @@
 <title>cctop</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<!-- theme-color follows the dark --bg, the scheme a phone is most likely to
+     be showing this page in; favicon and manifest are plain same-origin
+     routes, so they carry no token of their own. -->
+<meta name="theme-color" content="#16151a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
 <style>__CCTOP_CSS__
   .totals { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; }
   .totals b { font-family: var(--mono); font-weight: 600; }
   .totals .k { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+
+  /* How much of each provider's subscription window is already gone — the
+     same question the spend totals answer, asked of the plan rather than the
+     card. A server without the route leaves it empty, and empty collapses to
+     nothing rather than holding a blank line open. */
+  .quota {
+    flex-basis: 100%; display: flex; gap: 4px 14px; flex-wrap: wrap;
+    align-items: center; font-size: 11px; color: var(--faint);
+  }
+  .quota:empty { display: none; }
+  .quota .qp { display: inline-flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .quota .qwho { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .quota .qw { white-space: nowrap; }
+  .quota .qw b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600; color: var(--dim); }
+  .quota .ctx { width: 28px; height: 4px; }
 
   .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
   input[type=search] {
@@ -43,6 +64,10 @@
   .row .name { min-width: 0; font-weight: 500; }
   .row .name .title { color: var(--dim); font-weight: 400; }
   .row .meta { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--faint); }
+  /* The transcript line a search matched, quoted under the row's own metadata
+     on a line of its own — the row matched nothing visible, so this is the
+     only place that says why it is on screen at all. */
+  .row .meta .snip { flex: 1 1 100%; min-width: 0; }
   .row .figures { grid-row: 1 / span 2; grid-column: 3; text-align: right; font-family: var(--mono);
                   font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
   .row .figures .sub { font-size: 11px; color: var(--faint); }
@@ -70,6 +95,14 @@
     border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
   }
   form.say button:disabled { opacity: .5; cursor: default; }
+  /* The one-word replies. Quieter than Send — bordered rather than filled —
+     because they answer for you, and the filled button stays the deliberate
+     act. */
+  form.say .chip {
+    font: inherit; font-size: 12px; padding: 0 10px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--dim);
+    flex: 0 0 auto;
+  }
   form.say .said { font-size: 12px; align-self: center; color: var(--faint); }
   form.say .said.bad { color: var(--red); }
   .ctx i.hot { background: var(--amber); }
@@ -85,6 +118,7 @@
     <h1>cctop<span class="v mono">__CCTOP_VERSION__</span></h1>
     <div class="spacer"></div>
     <div class="totals" id="totals"></div>
+    <div class="quota" id="quota"></div>
   </header>
 
   <div id="banners"></div>
@@ -115,6 +149,8 @@
     <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
     <span class="spacer"></span>
     <span id="counts"></span>
+    <a id="insight-optimize" href="/insight/optimize">optimize</a>
+    <a id="insight-compare" href="/insight/compare">compare</a>
   </footer>
 </div>
 
@@ -125,6 +161,19 @@ const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
 // Whether this run serves the routes that act on a session. Substituted by the
 // server, so the answer box is never drawn for a page that could not send it.
 const CAN_ACT = "__CCTOP_ACTIONS__";
+
+// The token reaches the script embedded in the page, so once it is running the
+// `?t=` in the address bar is only a credential sitting in history, in
+// screenshots, and in any link copied without thinking. Drop it as soon as the
+// page is up. Some embedded contexts refuse replaceState — then the URL stays
+// as it arrived, which is the most that can be done there anyway.
+try {
+  const here = new URL(location.href);
+  if (here.searchParams.has("t")) {
+    here.searchParams.delete("t");
+    history.replaceState(null, "", here.pathname + here.search + here.hash);
+  }
+} catch (e) {}
 
 // Every string from a transcript — titles, branches, paths, model names — is
 // written through textContent or this. None of it is trusted markup, and a
@@ -161,6 +210,16 @@ const ago = (iso) => {
   if (secs < 3600) return Math.floor(secs / 60) + "m";
   if (secs < 86400) return Math.floor(secs / 3600) + "h";
   return Math.floor(secs / 86400) + "d";
+};
+
+// A reset timestamp as a wall-clock time — "resets 14:05" is read at a glance,
+// where "in 40m" asks the reader to do the sum against a clock they may not be
+// looking at.
+const hhmm = (secs) => {
+  if (!secs) return "";
+  const d = new Date(Number(secs) * 1000);
+  if (!isFinite(d.getTime())) return "";
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 };
 
 // The cost a row shows. `total` arrives as a six-decimal string — the JSON
@@ -204,6 +263,12 @@ let sessions = [];
 let filter = "";
 let runningOnly = false;
 let sortBy = "recent";
+// Transcript-search hits, kept with the query that produced them. The gate
+// `searchFor === filter` wherever they are read means a stale answer — or one
+// for a query the box no longer holds — shows nothing.
+let searchFor = "";
+let searchHits = new Map();
+let searchTimer = 0;
 
 // How the table is ordered, by what the reader picked.
 //
@@ -297,6 +362,12 @@ function rowFor(s) {
   if (s.profile && s.profile !== "default") tag(s.profile);
   const bar = contextBar(s);
   if (bar) meta.appendChild(bar);
+  // A transcript-search hit, quoted last and on its own line. It shows for a
+  // session the metadata filter matched too — the snippet says what the
+  // transcript holds, which the metadata never could.
+  if (searchFor === filter && searchHits.has(s.session_id)) {
+    meta.appendChild(el("span", "snip trunc", "“" + searchHits.get(s.session_id) + "”"));
+  }
   row.appendChild(meta);
 
   const figures = el("div", "figures");
@@ -364,6 +435,45 @@ function answerBox(s) {
   const send = el("button", null, "Send");
   send.type = "submit";
   const said = el("span", "said", "");
+  // The one POST, shared by the typed answer and the one-tap chips below: a
+  // chip is the Send button with the word already chosen — same route, same
+  // disabled-while-in-flight, same error line.
+  const post = async (text, button) => {
+    button.disabled = true;
+    said.className = "said";
+    said.textContent = "…";
+    try {
+      await ask(
+        "/api/act/send/" + encodeURIComponent(s.session_id) + QUERY,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      );
+      said.textContent = "sent";
+      return true;
+    } catch (e) {
+      said.className = "said bad";
+      said.textContent = String(e.message || e);
+      return false;
+    } finally {
+      button.disabled = false;
+    }
+  };
+  // The commonest answers to a waiting agent are single words, and one tap on
+  // a phone beats typing any of them. Only the states with an obvious word
+  // get chips — anything else is a real answer and wants the box.
+  const QUICK = {
+    asking: [["Yes", "yes"], ["No", "no"]],
+    waiting: [["Continue", "continue"]],
+  };
+  for (const [label, text] of QUICK[s.state] || []) {
+    const chip = el("button", "chip", label);
+    chip.type = "button";
+    chip.addEventListener("click", () => { post(text, chip); });
+    form.appendChild(chip);
+  }
   form.appendChild(input);
   form.appendChild(send);
   form.appendChild(said);
@@ -417,26 +527,7 @@ function answerBox(s) {
     event.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    send.disabled = true;
-    said.className = "said";
-    said.textContent = "…";
-    try {
-      await ask(
-        "/api/act/send/" + encodeURIComponent(s.session_id) + QUERY,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
-        },
-      );
-      input.value = "";
-      said.textContent = "sent";
-    } catch (e) {
-      said.className = "said bad";
-      said.textContent = String(e.message || e);
-    } finally {
-      send.disabled = false;
-    }
+    if (await post(text, send)) input.value = "";
   });
   return form;
 }
@@ -452,7 +543,10 @@ function wantingNode(s) {
 
 function render() {
   const shown = sessions
-    .filter((s) => matches(s, filter))
+    // A session whose metadata matches nothing still belongs when the
+    // transcript search says the words are inside it — the snippet is how the
+    // row explains itself.
+    .filter((s) => matches(s, filter) || (searchFor === filter && searchHits.has(s.session_id)))
     .filter((s) => !runningOnly || s.running)
     .sort(ORDER[sortBy] || ORDER.recent);
 
@@ -580,6 +674,103 @@ function apply(next) {
   render();
 }
 
+// --- subscription windows --------------------------------------------------
+
+// The other half of "can I afford to let this run": not what the sessions
+// spent, but how much of each provider's window is already gone. It moves in
+// minutes rather than milliseconds, so it polls on its own slow clock instead
+// of riding the session stream — and a server old enough to lack the route
+// leaves the strip empty, which the CSS folds away entirely.
+function renderQuota(data) {
+  const out = [];
+  for (const provider of Object.keys(data || {})) {
+    for (const entry of data[provider] || []) {
+      // The provider name plus the profile when there is more than the one —
+      // the same distinction the session rows make.
+      const who = provider + (entry.profile && entry.profile !== "default" ? "·" + entry.profile : "");
+      if (entry.status === "ok") {
+        const box = el("span", "qp");
+        box.appendChild(el("span", "qwho", who));
+        for (const w of entry.windows || []) {
+          const item = el("span", "qw");
+          const pct = Math.max(0, Math.min(100, Number(w.pct) || 0));
+          item.appendChild(el("span", null, w.label + " "));
+          item.appendChild(el("b", null, Math.round(pct) + "%"));
+          const bar = el("span", "ctx");
+          const fill = el("i");
+          fill.style.width = pct.toFixed(1) + "%";
+          // The context bar's thresholds, reused: a window nearly spent reads
+          // exactly like a context nearly full.
+          if (w.limit_reached || pct >= 90) fill.className = "full";
+          else if (pct >= 70) fill.className = "hot";
+          bar.appendChild(fill);
+          item.appendChild(document.createTextNode(" "));
+          item.appendChild(bar);
+          const at = hhmm(w.resets_at);
+          if (at) item.title = w.label + " resets " + at;
+          box.appendChild(item);
+        }
+        out.push(box);
+      } else {
+        // A status earns a mention only when it asks something of the reader:
+        // "sign in again" and "wait until" can be acted on, while a billing
+        // state or a provider that never answered is just noise in a header.
+        const resets = (entry.windows || []).map((w) => w.resets_at).find(Boolean);
+        const note =
+          entry.status === "expired" ? "sign-in expired" :
+          entry.status === "not_signed_in" ? "not signed in" :
+          entry.status === "rate_limited" ? "rate-limited" + (resets ? " until " + hhmm(resets) : "") :
+          "";
+        if (!note) continue;
+        const box = el("span", null, who + ": " + note);
+        if (entry.detail) box.title = entry.detail;
+        out.push(box);
+      }
+    }
+  }
+  document.getElementById("quota").replaceChildren(...out);
+}
+
+async function pollQuota() {
+  try {
+    renderQuota(await ask("/api/quota" + QUERY).then(asJson));
+  } catch (e) {
+    // A failed poll leaves whatever was last shown. The strip answers a
+    // nice-to-have question; it never earns a banner.
+  }
+}
+pollQuota();
+setInterval(pollQuota, 60000);
+
+// --- transcript search -------------------------------------------------------
+
+// Rides next to the metadata filter, never in place of it: a query of a few
+// characters asks the server which transcripts mention it, and a session whose
+// row matched nothing visible still shows, quoting the line that did. Any
+// failure just means no extra rows — the filter keeps working against a server
+// that has no search route at all.
+async function transcriptSearch(q) {
+  let data;
+  try {
+    data = await ask(
+      "/api/search?q=" + encodeURIComponent(q) + (TOKEN ? "&t=" + encodeURIComponent(TOKEN) : ""),
+    ).then(asJson);
+  } catch (e) {
+    return;
+  }
+  // The box may have moved on while the request was in flight; hits for a
+  // query it no longer holds would surface rows that match nothing.
+  if (q !== filter) return;
+  searchFor = q;
+  searchHits = new Map();
+  for (const hit of data.hits || []) {
+    if (hit && hit.session_id && hit.snippet && !searchHits.has(hit.session_id)) {
+      searchHits.set(hit.session_id, String(hit.snippet));
+    }
+  }
+  render();
+}
+
 // --- the live connection ---------------------------------------------------
 
 const link = document.getElementById("link");
@@ -625,6 +816,14 @@ ask("/api/hosts" + QUERY)
 
 document.getElementById("filter").addEventListener("input", (e) => {
   filter = e.target.value.trim().toLowerCase();
+  // The metadata filter answers instantly; the transcript is asked only once
+  // typing pauses, and only for a query long enough to mean something. A box
+  // back under three characters just stops showing hits — the cached ones are
+  // gated on the query anyway, so nothing needs clearing.
+  clearTimeout(searchTimer);
+  if (filter.length >= 3 && filter !== searchFor) {
+    searchTimer = setTimeout(() => transcriptSearch(filter), 400);
+  }
   render();
 });
 document.getElementById("sort").addEventListener("change", (e) => {
@@ -640,6 +839,12 @@ document.getElementById("running").addEventListener("click", (e) => {
 // Ages are relative and nothing else changes between snapshots, so a slow tick
 // keeps "4m ago" honest without waiting on the next refresh.
 setInterval(() => { if (sessions.length) render(); }, 15000);
+
+// The plain-text reports the server renders on request. The token goes in the
+// href because the address bar may no longer be holding it.
+for (const [id, path] of [["insight-optimize", "/insight/optimize"], ["insight-compare", "/insight/compare"]]) {
+  document.getElementById(id).href = path + QUERY;
+}
 
 connect();
 </script>
