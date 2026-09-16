@@ -1,6 +1,10 @@
 <title>cctop — session report</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<!-- The dark --bg: a page watched in a dark terminal's browser should not
+     flash a light chrome around it. -->
+<meta name="theme-color" content="#16151a">
 <style>__CCTOP_CSS__
   .back { font-size: 13px; color: var(--dim); text-decoration: none; }
   .back:hover { color: var(--accent); }
@@ -8,6 +12,11 @@
   .subject { margin-bottom: 18px; }
   .subject h2 { font-size: 20px; margin-bottom: 4px; }
   .subject .where { color: var(--dim); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+  /* The green end of the pill range. common.css carries warn and bad because
+     the dashboard's live state is a dot and only the problems are pills; here
+     the state itself is a pill, so "working" needs a colour too. */
+  .pill.ok { color: var(--green); border-color: var(--green); }
 
   .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); margin-bottom: 22px; }
   .tile { padding: 12px 14px; }
@@ -96,6 +105,9 @@
   nav.views button:hover { color: var(--ink); }
   nav.views button[aria-selected="true"] { color: var(--panel); background: var(--accent); border-color: var(--accent); }
   nav.views button .n { font-family: var(--mono); font-size: 11px; opacity: .75; margin-left: 5px; }
+  /* Copy reads what is already on the page rather than switching it, so it is
+     not a view — pushed to the far end to keep the four views at the left. */
+  nav.views button.copymd { margin-left: auto; }
 
   /* --- the conversation, and the terminal beside it ---------------------- */
 
@@ -162,6 +174,18 @@
     border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
   }
   form.say button:disabled { opacity: .5; cursor: default; }
+
+  /* "New activity" floats rather than sitting in the flow: it is about the
+     scroll position, not the transcript. Fixed above the composer — bottom
+     78px clears its ~60px of height and 10px of offset — and centred so it
+     reads as the page's pill, not a turn's. */
+  .more {
+    position: fixed; left: 50%; bottom: 78px; transform: translateX(-50%); z-index: 5;
+    font: inherit; font-size: 12px; padding: 5px 14px; border-radius: 99px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--dim);
+    box-shadow: var(--shadow); cursor: pointer;
+  }
+  .more:hover { color: var(--accent); border-color: var(--accent); }
 
   /* --- the conversation -------------------------------------------------- */
 
@@ -354,7 +378,14 @@ function subject(r) {
   const box = el("div", "subject");
   box.appendChild(el("h2", null, r.title || r.project || r.session_id));
   const where = el("div", "where");
-  where.appendChild(el("span", "dot " + (r.running ? r.state : "idle")));
+  // The dot and the live pill are rewritten from the event stream after this,
+  // so they carry ids rather than being composed here and forgotten.
+  const dot = el("span", "dot " + (r.running ? r.state : "idle"));
+  dot.id = "live-dot";
+  where.appendChild(dot);
+  const pill = el("span");
+  pill.id = "live-pill";
+  where.appendChild(pill);
   const tag = (t) => { if (t) where.appendChild(el("span", null, t)); };
   tag(r.project);
   tag(r.branch);
@@ -1179,11 +1210,104 @@ async function act(verb, body) {
 // What an action said, in the one place the page says such things. Kept on
 // screen rather than flashed: the message that matters most — a tmux session to
 // attach to — is one somebody has to copy.
+//
+// The generation counts every write, so a flash's timeout can tell whether the
+// message still on screen is the one it wrote — clearing unconditionally would
+// erase an action's answer that landed in between.
+let saidGen = 0;
 function report_said(text, ok) {
+  saidGen++;
   const node = document.getElementById("said");
   if (!node) return;
   node.className = "said " + (ok ? "ok" : "bad");
   node.textContent = text;
+}
+
+// The transient kind, for "copied" and its failures: a note that stayed would
+// read as a state rather than a reply.
+function saidFlash(text, ok) {
+  report_said(text, ok);
+  const gen = saidGen;
+  setTimeout(() => { if (gen === saidGen) report_said("", true); }, 2600);
+}
+
+// The report as something to paste, not to look at: the figures a person
+// summarising the session would type, in the order the page leads with them.
+function reportMarkdown(r) {
+  const out = [];
+  out.push("# " + (r.title || r.project || r.session_id));
+  const meta = [r.project, r.branch, r.model || r.provider].filter(Boolean).join(" · ");
+  if (meta) out.push(meta);
+  out.push("");
+  // "incl" and "—" are different claims, as on the tiles: one says the plan
+  // bundles this, the other that nothing billable was recorded.
+  const cost = r.cost.included ? "included in the plan"
+    : (r.cost.available ? money(r.cost.total) : "not recorded");
+  out.push("- Cost: " + cost);
+  out.push("- Tokens: " + tokens(r.tokens.total || (r.tokens.input + r.tokens.output)) +
+           " (" + tokens(r.tokens.input) + " in · " + tokens(r.tokens.output) + " out)");
+  if (r.context && r.context.max) {
+    out.push("- Context: " + Math.round(r.context.percent_to_compact) + "% of the window" +
+             " (" + tokens(r.context.used) + " of " + tokens(r.context.max) + ")" +
+             (r.context.compactions ? ", " + r.context.compactions + " compactions" : ""));
+  }
+  if (r.duration) out.push("- Duration: " + r.duration + (r.running ? ", still running" : ""));
+  if (r.activity && r.activity.error_rate !== null && r.activity.error_rate !== undefined) {
+    out.push("- Tool errors: " + Math.round(r.activity.error_rate * 100) + "%" +
+             " (" + (r.activity.tool_errors || 0) + " of " + (r.activity.tool_count || 0) + ")");
+  }
+  // ×1 is the absence of a loop, not a finding — the repeated ones are the
+  // part worth pasting.
+  const loops = (r.activity.failures || []).filter((f) => f.count > 1);
+  if (loops.length) {
+    out.push("", "## Repeated failures");
+    for (const f of loops.slice(0, 6)) {
+      // One line, capped: a detail can be a whole command's worth of output.
+      let detail = String(f.detail || "").split("\n")[0];
+      if (detail.length > 120) detail = detail.slice(0, 117) + "…";
+      out.push("- ×" + f.count + " `" + f.tool + "`" + (detail ? " — `" + detail + "`" : ""));
+    }
+  }
+  if (r.files && r.files.length) {
+    out.push("", "## Files it wrote");
+    for (const f of r.files) out.push("- " + f);
+  }
+  return out.join("\n");
+}
+
+// navigator.clipboard only answers in a secure context; the textarea detour is
+// what a plain http page falls back to. Off-screen rather than hidden, because
+// a display:none textarea does not select.
+async function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (e) { /* refused — try the detour */ }
+  }
+  const ta = el("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("the browser refused");
+  } finally {
+    ta.remove();
+  }
+}
+
+function copyButton() {
+  const button = el("button", "copymd", "Copy markdown");
+  button.type = "button";
+  button.title = "Copy this report as a markdown summary";
+  button.addEventListener("click", () => {
+    if (!REPORT) return;
+    copyText(reportMarkdown(REPORT))
+      .then(() => saidFlash("Copied — this report as markdown", true))
+      .catch((e) => saidFlash("Copy failed: " + String((e && e.message) || e), false));
+  });
+  return button;
 }
 
 async function run(button, verb, body, verb_label) {
@@ -1417,6 +1541,18 @@ function accessView(a) {
 // that, which is why these are panes rather than pages.
 const PANES = {};
 let CHAT_TIMER = null;
+// What the events stream last said about this session, or null until the
+// first event or the report itself answers — whichever lands first.
+let LIVE = null;
+// The session's real id once the report has answered. The URL carries any
+// unambiguous prefix, so until then matching has to accept one.
+let SESSION = ID;
+// The loaded report, kept for the markdown copy.
+let REPORT = null;
+// What the conversation looked like at the last build — see chatSig.
+let CHAT_SIG = null;
+// The "new activity" pill, built on first use.
+let MORE = null;
 
 function show(name) {
   for (const [key, pane] of Object.entries(PANES)) pane.hidden = key !== name;
@@ -1426,18 +1562,89 @@ function show(name) {
   location.hash = name;
 }
 
+function startChatPoll() {
+  if (!CHAT_TIMER) CHAT_TIMER = setInterval(refreshChat, 5000);
+}
+function stopChatPoll() {
+  if (CHAT_TIMER) { clearInterval(CHAT_TIMER); CHAT_TIMER = null; }
+}
+
+// Whether a poll brought anything worth redrawing, without stringifying a
+// conversation that can run to thousands of turns. What changes while a
+// session is live is the count, and the tail: the last turn grows and its
+// last tool resolves, everything before them is already written.
+function chatSig(chat) {
+  const turns = chat.turns || [];
+  const last = turns[turns.length - 1] || {};
+  const tools = last.tools || [];
+  const lastTool = tools[tools.length - 1] || {};
+  const result = lastTool.result;
+  return [turns.length, chat.earlier || 0, last.kind || "", last.ts || "",
+          (last.text || "").length, tools.length,
+          result === undefined || result === null ? -1 : String(result).length]
+    .join(":");
+}
+
+// "Following" means within a short scroll of the end: close enough that the
+// reader is clearly watching the tail rather than reading something above it.
+const nearBottom = () =>
+  window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
+
+// The floating "new activity" pill. Kept inside the chat pane rather than on
+// the page so it hides with the view — a note about the conversation has no
+// business floating over the report.
+function moreActivity(on) {
+  if (!MORE) {
+    MORE = el("button", "more", "new activity ↓");
+    MORE.type = "button";
+    MORE.addEventListener("click", () => {
+      window.scrollTo(0, document.documentElement.scrollHeight);
+      moreActivity(false);
+    });
+    PANES.chat.appendChild(MORE);
+  }
+  MORE.hidden = !on;
+}
+
+// Reaching the bottom is the reader saying they are caught up — the pill's
+// own dismissal, and it has to work for a scroll wheel as much as the click.
+window.addEventListener("scroll", () => {
+  if (MORE && !MORE.hidden && nearBottom()) moreActivity(false);
+}, { passive: true });
+
 async function refreshChat() {
   const pane = document.getElementById("talk");
   if (!pane) return;
   try {
     const response = await ask("/api/chat/" + encodeURIComponent(ID) + QUERY);
     const chat = await asJson(response);
+    const sig = chatSig(chat);
+    if (sig === CHAT_SIG) {
+      // A poll that changed nothing must not redraw: every rebuild closes the
+      // <details> a reader has open under them.
+      offline(null);
+      return;
+    }
+    const first = CHAT_SIG === null;
+    const wasNear = nearBottom();
+    CHAT_SIG = sig;
     const rebuilt = conversation(chat);
     // The composer is part of this pane and holds what someone is typing, so it
     // is moved across rather than rebuilt underneath them.
     const say = pane.querySelector("form.say");
     pane.replaceChildren(rebuilt);
     if (say) pane.appendChild(say);
+    if (wasNear) {
+      // Pinned to the tail: a rebuild must not scroll the newest turn out from
+      // under someone watching it arrive.
+      window.scrollTo(0, document.documentElement.scrollHeight);
+      moreActivity(false);
+    } else if (!first) {
+      // Scrolled up on purpose: say there is more rather than taking the page
+      // somewhere nobody asked it to go. The first fill is exempt — it is the
+      // whole conversation arriving, not new activity.
+      moreActivity(true);
+    }
     offline(null);
   } catch (e) {
     // A poll that fails when there is already a conversation on screen is a
@@ -1445,6 +1652,81 @@ async function refreshChat() {
     if (pane.querySelector(".card")) offline(String(e.message || e));
     else pane.replaceChildren(el("div", "empty", String(e.message || e)));
   }
+}
+
+// --- live state ------------------------------------------------------------
+
+// What the session is doing now, drawn the way the dashboard's rows draw it —
+// the same dot, the same pill words. "working" is a pill here and not a colour
+// alone because this header has no other sign the page is still live.
+function liveState(s) {
+  const dot = document.getElementById("live-dot");
+  if (dot) dot.className = "dot " + (s.running || s.state === "error" ? s.state : "idle");
+  const holder = document.getElementById("live-pill");
+  if (!holder) return;
+  holder.replaceChildren();
+  let text = null, cls = "pill";
+  if (s.running && s.state === "working") { text = "working"; cls = "pill ok"; }
+  else if (s.running && s.state === "waiting") { text = "waiting on you"; cls = "pill warn"; }
+  // Louder than "waiting on you", deliberately: that one is your move whenever
+  // you get to it, this one is an agent stopped mid-tool until you say.
+  else if (s.running && s.state === "asking") { text = "needs permission"; cls = "pill bad"; }
+  // Present tense is a claim about now; for a stopped session the error is
+  // something that happened, and the "ago" beside it already says when.
+  else if (s.state === "error") { text = s.running ? "api error" : "ended on an api error"; cls = "pill bad"; }
+  if (text) holder.appendChild(el("span", cls, text));
+}
+
+// The composer was drawn from the report's once-read `running`; the stream is
+// the truth after that, so a session that stops stops looking answerable and
+// one that starts becomes answerable without a reload.
+function liveComposer(s) {
+  const form = document.getElementById("say");
+  if (!form) return;
+  const input = form.querySelector("input");
+  const send = form.querySelector("button");
+  input.disabled = !s.running;
+  send.disabled = !s.running;
+  input.placeholder = s.running
+    ? "Answer this session…"
+    : "Nothing is running this session — resume it first";
+}
+
+// One entry of the array every `sessions` event carries.
+function applyLive(list) {
+  const s = list.find((row) => row.session_id === SESSION) ||
+            list.find((row) => row.session_id.startsWith(SESSION));
+  if (!s) return;
+  const was = LIVE;
+  LIVE = { running: !!s.running, state: s.state };
+  liveState(s);
+  liveComposer(s);
+  // The poll follows the stream rather than the report's once-read `running`:
+  // a session that starts after the page opened gets followed, and one that
+  // stops stops costing a transcript read every five seconds. The read on the
+  // transition is because the final turns can postdate the last poll — they
+  // land here rather than asking anyone to reload.
+  const loaded = !!(PANES.chat && PANES.chat.dataset.loaded);
+  if (s.running && loaded) startChatPoll();
+  if (!s.running) {
+    stopChatPoll();
+    if (loaded && was && was.running) refreshChat();
+  }
+}
+
+// The subscription is the dashboard's: one `sessions` event per refresh.
+// EventSource reconnects on its own, but only from a stream that broke — an
+// answer that was never a stream (the 502 page a tunnel serves once its far
+// end is gone) closes it for good, so a closed source is reopened on a timer.
+let source;
+function connect() {
+  source = new EventSource("/api/events" + QUERY);
+  source.addEventListener("sessions", (event) => {
+    try { applyLive(JSON.parse(event.data)); } catch (e) { /* a bad event is skipped, not fatal */ }
+  });
+  source.addEventListener("error", () => {
+    if (source.readyState === EventSource.CLOSED) setTimeout(connect, 5000);
+  });
 }
 
 // The page's one blocking read. It is wrapped rather than run bare because a
@@ -1455,9 +1737,21 @@ function load() {
     .then(asJson)
     .then(async (r) => {
       document.title = "cctop — " + (r.title || r.project || r.session_id);
+      // The token has done its job: the page carries it in TOKEN for every
+      // request it will ever make, so it need not keep sitting in the address
+      // bar and in every screenshot of it.
+      try {
+        history.replaceState(null, "", location.pathname + location.hash);
+      } catch (e) { /* a context that forbids it keeps the URL it opened with */ }
       const main = document.getElementById("main");
       main.replaceChildren();
       main.appendChild(subject(r));
+      REPORT = r;
+      SESSION = r.session_id;
+      // The report's own reading is the state until the stream says otherwise —
+      // unless the stream already has, which is the fresher of the two.
+      if (!LIVE) LIVE = { running: !!r.running, state: r.state };
+      liveState(LIVE);
 
       // Which agents this machine has, and whether this run acts at all. Asked
       // once: it is a property of the server, not of the session.
@@ -1468,12 +1762,13 @@ function load() {
         } catch (e) { /* the buttons that need it simply do not appear */ }
       }
       const bar = actionBar(r, agents);
-      if (bar) {
-        main.appendChild(bar);
-        const said = el("div", "said", "");
-        said.id = "said";
-        main.appendChild(said);
-      }
+      if (bar) main.appendChild(bar);
+      // The one place the page reports what it did — an action's answer or the
+      // copy note. Always there rather than only when this run can act, because
+      // "copied" wants the same home.
+      const said = el("div", "said", "");
+      said.id = "said";
+      main.appendChild(said);
 
       const nav = el("nav", "views");
       main.appendChild(nav);
@@ -1531,6 +1826,7 @@ function load() {
       // rather than instead of it, and a fifth button in the same row that
       // switched views could only replace what it is meant to sit next to.
       if (CAN_ACT) nav.appendChild(terminalButton());
+      nav.appendChild(copyButton());
 
       const wanted = location.hash.replace(/^#/, "");
       open_view(labels[wanted] ? wanted : "chat", r);
@@ -1543,6 +1839,7 @@ function load() {
     });
 }
 load();
+connect();
 
 // --- the agent's own terminal -------------------------------------------
 
@@ -1655,10 +1952,14 @@ async function open_view(name, r) {
     await refreshChat();
     const say = composer(r);
     if (say) document.getElementById("talk").appendChild(say);
+    // Drawn from the report's `running`, corrected by the stream if it already
+    // knows better — a session that started or stopped since the page loaded.
+    if (LIVE) liveComposer(LIVE);
     // A running session is still saying things, so its conversation follows
-    // along. A finished one is finished, and polling it would be a request a
-    // second for a file that will never change again.
-    if (r.running && !CHAT_TIMER) CHAT_TIMER = setInterval(refreshChat, 5000);
+    // along. Which it is, the stream says — not the once-read report: a session
+    // that stopped since the page opened would otherwise be polled forever,
+    // and one that started would never be.
+    if (LIVE ? LIVE.running : r.running) startChatPoll();
   }
   if (name === "access" && !PANES.access.dataset.loaded) {
     PANES.access.dataset.loaded = "1";
