@@ -142,7 +142,7 @@ impl App {
                 // Something to look at immediately: the page's first request
                 // would otherwise find the empty snapshot it was built with and
                 // report a machine with no sessions on it.
-                serving.publish(&self.sessions);
+                serving.publish_with_quota(&self.sessions, &self.quota);
                 let where_to = match serving.public.is_some() {
                     true => "on the internet",
                     false => "on this machine",
@@ -178,7 +178,7 @@ impl App {
             Ok(serving) => {
                 // Something to look at immediately: the page's first request
                 // would otherwise find the empty snapshot it was built with.
-                serving.publish(&self.sessions);
+                serving.publish_with_quota(&self.sessions, &self.quota);
                 self.set_status("On the internet — click the link, or B to copy it");
                 self.serving = Some(serving);
             }
@@ -204,7 +204,7 @@ impl App {
     /// browser update when the table does.
     pub(super) fn feed_serving(&self) {
         if let Some(serving) = &self.serving {
-            serving.publish(&self.sessions);
+            serving.publish_with_quota(&self.sessions, &self.quota);
         }
     }
 }
@@ -227,6 +227,9 @@ mod tests {
             // A port nobody asked for, so a busy one is stepped past rather
             // than failing a test on whatever else is running here.
             port_given: false,
+            // The panel is what is under test; scanning would walk the disk
+            // and poll the quota endpoints for a serve nobody opens.
+            scan: false,
             ..Default::default()
         })
         .expect("a loopback server");

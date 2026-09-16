@@ -323,6 +323,12 @@ fn reason(status: u16) -> &'static str {
 /// rmux's browser terminal answers with `frame-ancestors 'none'`, so no policy
 /// written here could embed it. The policy therefore stays at `default-src
 /// 'none'` with nothing framed at all.
+///
+/// Two same-origin exceptions carry the installable-page furniture: `img-src
+/// 'self'` for `/favicon.svg`, and `manifest-src 'self'` for
+/// `/manifest.webmanifest`, which `default-src` does not cover. `data:` stays
+/// for images a transcript paste renders inline. Neither opens anything off
+/// this server.
 fn common_headers(out: &mut String) {
     out.push_str(
         "X-Content-Type-Options: nosniff\r\n\
@@ -330,7 +336,8 @@ fn common_headers(out: &mut String) {
          Content-Security-Policy: default-src 'none'; \
          style-src 'unsafe-inline'; \
          script-src 'unsafe-inline'; \
-         img-src data:; \
+         img-src 'self' data:; \
+         manifest-src 'self'; \
          connect-src 'self'; \
          base-uri 'none'; \
          form-action 'none'; \
@@ -472,5 +479,10 @@ mod tests {
         assert!(headers.contains("default-src 'none'"));
         assert!(headers.contains("frame-ancestors 'none'"));
         assert!(headers.contains("nosniff"));
+        // The two exceptions are the installable-page furniture, both pinned
+        // to this origin: the favicon is an image and the manifest answers to
+        // no other directive.
+        assert!(headers.contains("img-src 'self'"));
+        assert!(headers.contains("manifest-src 'self'"));
     }
 }
