@@ -24,6 +24,10 @@
 //! asked for; none of those can be produced on demand by a correct server, and
 //! reproducing them used to mean a headless browser rewriting responses, or
 //! unplugging something and being quick. Now it is a `curl`.
+//!
+//! **Live event log** — `/api/debug/log?level=io` turns `CCTOP_LOG` on for the
+//! running server, which is the one process the variable cannot reach after
+//! the fact. `GET` alone reports the level and the file it writes.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -124,6 +128,8 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                 "tokenless": shared.token.is_empty(),
                 "plan": format!("{:?}", shared.plan),
                 "fault": fault_name(FAULT.load(Ordering::Relaxed)),
+                "log": crate::elog::level_name(crate::elog::level()),
+                "log_file": crate::elog::path().display().to_string(),
             });
             json(stream, request, &body);
             true
@@ -177,6 +183,34 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                 stream,
                 request,
                 &serde_json::json!({ "fault": fault_name(armed) }),
+            );
+            true
+        }
+        // Turn the event log on for a process that was not started with it —
+        // a serve that has been running all afternoon is exactly the one whose
+        // next five minutes are worth recording.
+        "log" => {
+            if let Some(word) = request.query.get("level") {
+                match crate::elog::parse_level(word) {
+                    Some(level) => crate::elog::set(level),
+                    None => {
+                        http::respond_error(
+                            stream,
+                            Some(request),
+                            400,
+                            "level must be one of: off, events, io",
+                        );
+                        return true;
+                    }
+                }
+            }
+            json(
+                stream,
+                request,
+                &serde_json::json!({
+                    "log": crate::elog::level_name(crate::elog::level()),
+                    "file": crate::elog::path().display().to_string(),
+                }),
             );
             true
         }

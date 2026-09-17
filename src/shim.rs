@@ -37,6 +37,11 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     }
     let (mut child, master) = spawn_on_pty(argv, None)?;
     let pid = child.id();
+    crate::elog::event(
+        "shim",
+        "spawn",
+        serde_json::json!({ "mode": "run", "pid": pid, "cmd": argv.join(" ") }),
+    );
 
     // Bind before entering raw mode: a failure here should print normally.
     let listener = listen(pid)?;
@@ -68,6 +73,14 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     std::thread::spawn(move || serve(listener, control, fan));
 
     let status = child.wait();
+    crate::elog::event(
+        "shim",
+        "exit",
+        serde_json::json!({
+            "pid": pid,
+            "code": status.as_ref().ok().and_then(|s| s.code()),
+        }),
+    );
     if raw {
         let _ = crossterm::terminal::disable_raw_mode();
     }
@@ -130,6 +143,11 @@ pub fn host(argv: &[String], cwd: Option<&std::path::Path>) -> anyhow::Result<Ho
     }
     let (child, master) = spawn_on_pty(argv, cwd)?;
     let pid = child.id();
+    crate::elog::event(
+        "shim",
+        "spawn",
+        serde_json::json!({ "mode": "host", "pid": pid, "cmd": argv.join(" ") }),
+    );
     let listener = listen(pid)?;
     let socket = socket_path(pid);
 
@@ -299,6 +317,16 @@ impl Fanout {
         // replay. Buffer per subscriber if that ever proves too twitchy.
         self.subs
             .retain(|sub| sub.tx.try_send(frame.clone()).is_ok());
+        crate::elog::bytes(
+            "pty",
+            "out",
+            "out",
+            chunk,
+            serde_json::json!({
+                "subs": self.subs.len(),
+                "dropped": before - self.subs.len(),
+            }),
+        );
         // A watcher that went away may have been the one holding the pty small.
         if self.subs.len() != before {
             self.fit();
@@ -344,6 +372,11 @@ impl Fanout {
             return;
         }
         self.applied = (cols, rows);
+        crate::elog::event(
+            "pty",
+            "size",
+            serde_json::json!({ "cols": cols, "rows": rows, "subs": self.subs.len() }),
+        );
         let ws = winsize(cols, rows);
         // SAFETY: `master` is a live pty master and `ws` outlives the call.
         unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) };
@@ -404,6 +437,7 @@ fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
         }
         let Some((id, decoder)) = watcher.as_mut() else {
             // An injector: everything it sends is meant for the keyboard.
+            crate::elog::bytes("pty", "inject", "in", bytes, serde_json::json!({}));
             if !bytes.is_empty() && (master.write_all(bytes).is_err() || master.flush().is_err()) {
                 break;
             }
@@ -412,13 +446,27 @@ fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
         decoder.push(bytes);
         while let Some((kind, payload)) = decoder.next() {
             let delivered = match kind {
-                frame::KEYS => master
-                    .write_all(&payload)
-                    .and_then(|()| master.flush())
-                    .is_ok(),
+                frame::KEYS => {
+                    crate::elog::bytes(
+                        "pty",
+                        "keys",
+                        "in",
+                        &payload,
+                        serde_json::json!({ "sub": *id }),
+                    );
+                    master
+                        .write_all(&payload)
+                        .and_then(|()| master.flush())
+                        .is_ok()
+                }
                 frame::RESIZE => {
-                    if let Some(size) = frame::parse_size(&payload) {
-                        locked(&fan).set_sub_size(*id, size);
+                    if let Some((cols, rows)) = frame::parse_size(&payload) {
+                        crate::elog::event(
+                            "pty",
+                            "resize",
+                            serde_json::json!({ "sub": *id, "cols": cols, "rows": rows }),
+                        );
+                        locked(&fan).set_sub_size(*id, (cols, rows));
                     }
                     true
                 }
@@ -436,6 +484,7 @@ fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
     // this watcher may be the one keeping the pty small, and the window the
     // agent runs in should come back the moment it detaches.
     if let Some((id, _)) = watcher {
+        crate::elog::event("pty", "unwatch", serde_json::json!({ "sub": id }));
         locked(&fan).remove(id);
     }
 }
@@ -469,6 +518,11 @@ fn subscribe(stream: &UnixStream, fan: &Arc<Mutex<Fanout>>) -> Option<u64> {
             tx,
             size: (0, 0),
         });
+        crate::elog::event(
+            "pty",
+            "watch",
+            serde_json::json!({ "sub": id, "subs": fan.subs.len() }),
+        );
         id
     };
     std::thread::spawn(move || {
@@ -668,7 +722,18 @@ impl Answers {
         let mut seen = std::mem::take(&mut self.tail);
         seen.extend_from_slice(chunk);
         for (query, answer) in Self::table() {
-            for _ in 0..strike(&mut seen, query) {
+            let found = strike(&mut seen, query);
+            if found > 0 {
+                crate::elog::event(
+                    "pty",
+                    "answer",
+                    serde_json::json!({
+                        "query": String::from_utf8_lossy(query).escape_default().to_string(),
+                        "n": found,
+                    }),
+                );
+            }
+            for _ in 0..found {
                 let _ = reply.write_all(answer.as_bytes());
             }
         }
@@ -767,6 +832,13 @@ fn pump_input(mut master: File) {
         // Everything goes through whole except bare-motion mouse reports —
         // see `attach::strip_hover_reports`.
         let bytes = crate::attach::strip_hover_reports(&buf[..n], &mut tail);
+        crate::elog::bytes(
+            "pty",
+            "stdin",
+            "in",
+            &bytes,
+            serde_json::json!({ "dropped": n - bytes.len() }),
+        );
         if !bytes.is_empty() && master.write_all(&bytes).is_err() {
             break;
         }

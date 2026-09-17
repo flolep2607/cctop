@@ -540,6 +540,17 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         true => String::new(),
         false => format!("?t={token}"),
     };
+    crate::elog::event(
+        "serve",
+        "listen",
+        serde_json::json!({
+            "addr": addr.to_string(),
+            "token": !token.is_empty(),
+            "actions": actions,
+            "tunnel": options.tunnel,
+            "notify": shared.notify.is_some(),
+        }),
+    );
     let running = Arc::new(AtomicBool::new(true));
     {
         let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
@@ -1064,6 +1075,16 @@ fn publish(
         sessions,
         host_errors,
     });
+    crate::elog::event(
+        "scan",
+        "snapshot",
+        serde_json::json!({
+            "version": snapshot.version,
+            "sessions": snapshot.sessions.len(),
+            "running": snapshot.sessions.iter().filter(|s| s.is_running()).count(),
+            "remote_hosts": snapshot.host_errors.len(),
+        }),
+    );
     // The crossing is read off the pair of snapshots as they meet, which is the
     // one place both feeds — this server's own refresher and the dashboard's —
     // pass through. A webhook asked for here therefore covers both.
@@ -1129,6 +1150,11 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // return HTML. Either minted token opens the door; which one it was
     // decides what lies behind it.
     let Some(access) = access_for(shared, request.token()) else {
+        crate::elog::event(
+            "http",
+            "request",
+            serde_json::json!({"method": request.method, "path": request.path, "access": "denied"}),
+        );
         return http::respond_error(
             stream,
             Some(&request),
@@ -1136,6 +1162,18 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             "missing or wrong access token — open the link cctop printed",
         );
     };
+    crate::elog::event(
+        "http",
+        "request",
+        serde_json::json!({
+            "method": request.method,
+            "path": request.path,
+            "access": match access {
+                Access::Full => "full",
+                Access::ReadOnly => "readonly",
+            },
+        }),
+    );
 
     // Before the router, so an armed fault covers every API route rather than
     // the handful somebody remembered to touch.
@@ -1532,21 +1570,24 @@ fn events(shared: &Shared, stream: &mut TcpStream, _request: &Request) {
     let Ok(mut sse) = EventStream::open(stream) else {
         return;
     };
+    crate::elog::event("sse", "open", serde_json::json!({}));
 
     let mut sent = 0u64;
-    loop {
+    // Which write lost the client is the difference between "browser closed"
+    // and "network went" — the reason is kept rather than collapsed.
+    let by = loop {
         // The wait is what makes an idle stream free: no polling, and one
         // wakeup per refresh rather than one per connection per tick.
         let snapshot = {
             let Ok(latest) = shared.latest.lock() else {
-                return;
+                break "lock";
             };
             let (latest, _) = match shared
                 .updated
                 .wait_timeout_while(latest, SSE_KEEPALIVE, |s| s.version <= sent)
             {
                 Ok(pair) => pair,
-                Err(_) => return,
+                Err(_) => break "wait",
             };
             Arc::clone(&latest)
         };
@@ -1556,16 +1597,21 @@ fn events(shared: &Shared, stream: &mut TcpStream, _request: &Request) {
         // quietly went away, since a write is the only thing that can.
         if snapshot.version <= sent {
             if sse.keepalive().is_err() {
-                return;
+                break "keepalive";
             }
             continue;
         }
 
         if sse.send("sessions", &snapshot.json).is_err() {
-            return;
+            break "send";
         }
         sent = snapshot.version;
-    }
+    };
+    crate::elog::event(
+        "sse",
+        "close",
+        serde_json::json!({ "by": by, "sent": sent }),
+    );
 }
 
 /// Build and send one session's report.

@@ -520,6 +520,21 @@ impl Attach {
     }
 
     fn send(&mut self, bytes: &[u8]) -> bool {
+        // `bytes` is one whole frame: kind byte, four length bytes, payload.
+        // Split it back out for the log rather than trusting the caller's say.
+        if crate::elog::level() >= crate::elog::Level::Events {
+            let (kind, payload) = match bytes.len() {
+                n if n >= 5 => (bytes[0] as char, &bytes[5..]),
+                _ => ('?', bytes),
+            };
+            crate::elog::bytes(
+                "attach",
+                "send",
+                "out",
+                payload,
+                serde_json::json!({ "frame": kind.to_string() }),
+            );
+        }
         self.input
             .write_all(bytes)
             .and_then(|()| self.input.flush())
@@ -977,6 +992,7 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
                 // Verbatim except bare-motion mouse reports, which this end
                 // has no business forwarding — see `strip_hover_reports`.
                 let body = strip_hover_reports(&buf[..n], &mut tail);
+                crate::elog::bytes("attach", "stdin", "in", &body, serde_json::json!({}));
                 if !body.is_empty()
                     && input
                         .write_all(&frame::encode(frame::KEYS, &body))
@@ -1024,10 +1040,11 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
         // Size frames say nothing this terminal has to act on: the agent draws
         // within what it was given and the rest of the window stays blank.
         while let Some((kind, payload)) = decoder.next() {
-            if kind == frame::OUTPUT
-                && (stdout.write_all(&payload).is_err() || stdout.flush().is_err())
-            {
-                break 'session;
+            if kind == frame::OUTPUT {
+                crate::elog::bytes("attach", "out", "out", &payload, serde_json::json!({}));
+                if stdout.write_all(&payload).is_err() || stdout.flush().is_err() {
+                    break 'session;
+                }
             }
         }
     }

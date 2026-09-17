@@ -482,6 +482,11 @@ fn event_loop(
                     app.merge_remotes();
                     app.push_history();
                     app.refilter();
+                    crate::elog::event(
+                        "scan",
+                        "refresh",
+                        serde_json::json!({"sessions": app.sessions.len(), "kind": "full"}),
+                    );
                     refresh_in_flight = false;
                     annotated_rows_changed = false;
                     rows_changed = true;
@@ -504,6 +509,11 @@ fn event_loop(
                     app.loaded = true;
                     app.push_history();
                     app.refilter();
+                    crate::elog::event(
+                        "scan",
+                        "refresh",
+                        serde_json::json!({"sessions": app.sessions.len(), "kind": "live"}),
+                    );
                     refresh_in_flight = false;
                     rows_changed = true;
                 }
@@ -721,7 +731,9 @@ fn event_loop(
             .unwrap_or(Duration::ZERO)
             .min(idle_wait);
         if event::poll(wait)? {
-            match event::read()? {
+            let event = event::read()?;
+            crate::elog::tui(&event);
+            match event {
                 Event::Key(key) => app.on_key(key),
                 Event::Paste(text) => app.on_paste(&text),
                 Event::Mouse(m) => app.on_mouse(m, &layout),

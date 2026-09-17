@@ -113,6 +113,14 @@ fn note(pending: &Mutex<HashMap<PathBuf, Instant>>, event: &notify::Event) {
         return;
     };
     for path in event.paths.iter().filter(|p| !is_noise(p)) {
+        crate::elog::event(
+            "watch",
+            match event.kind {
+                EventKind::Create(_) => "create",
+                _ => "remove",
+            },
+            serde_json::json!({ "path": path.display().to_string() }),
+        );
         match event.kind {
             // Directories are containers; what gets summarized is the file that
             // lands inside one, which arrives as its own create.

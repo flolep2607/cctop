@@ -94,6 +94,9 @@ pub struct Request {
     /// header anything here routes on, and it is routed on for a security
     /// reason rather than a parsing one — see the module docs.
     json_content_type: bool,
+    /// When the request finished parsing, so a response can say how long the
+    /// answer took without every route threading a clock through.
+    pub received: std::time::Instant,
 }
 
 impl Request {
@@ -225,6 +228,7 @@ impl Request {
             query,
             body,
             json_content_type,
+            received: std::time::Instant::now(),
         })
     }
 
@@ -379,6 +383,21 @@ pub fn respond(
     }
     let _ = stream.write_all(&buf);
     let _ = stream.flush();
+
+    crate::elog::event(
+        "http",
+        "response",
+        match request {
+            Some(r) => serde_json::json!({
+                "method": r.method,
+                "path": r.path,
+                "status": status,
+                "bytes": body.len(),
+                "ms": r.received.elapsed().as_millis() as u64,
+            }),
+            None => serde_json::json!({ "status": status, "bytes": body.len() }),
+        },
+    );
 }
 
 /// Send a plain-text error, the shape every refusal in the router takes.
@@ -429,8 +448,19 @@ impl<'a> EventStream<'a> {
             frame.push('\n');
         }
         frame.push('\n');
-        self.stream.write_all(frame.as_bytes())?;
-        self.stream.flush()
+        // Both halves logged: a client that went away mid-stream is the
+        // failure this stream exists to survive, and the send that failed is
+        // the only record of when it happened.
+        let sent = self
+            .stream
+            .write_all(frame.as_bytes())
+            .and_then(|()| self.stream.flush());
+        crate::elog::event(
+            "sse",
+            "send",
+            serde_json::json!({ "event": event, "bytes": frame.len(), "ok": sent.is_ok() }),
+        );
+        sent
     }
 
     /// Send a comment, which SSE ignores and every hop in between does not.

@@ -126,6 +126,7 @@ impl Webhook {
         .to_string();
         let target = self.target.clone();
         let warned = Arc::clone(&self.warned);
+        let session_id = session.session_id.clone();
         std::thread::spawn(move || {
             // `build()` yields the Config; the Agent is made from it, as in
             // `quota::agent`.
@@ -137,6 +138,16 @@ impl Webhook {
                 .post(&target)
                 .header("Content-Type", "application/json")
                 .send(body.as_str());
+            crate::elog::event(
+                "notify",
+                "post",
+                serde_json::json!({
+                    "event": event,
+                    "session": session_id,
+                    "ok": sent.is_ok(),
+                    "status": sent.as_ref().map(|r| r.status().as_u16()).unwrap_or(0),
+                }),
+            );
             if let Err(why) = sent
                 && !warned.swap(true, Ordering::Relaxed)
             {
