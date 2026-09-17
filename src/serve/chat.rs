@@ -678,10 +678,13 @@ impl Sink {
             }
             Some("agent") => self.devin_agent(step, ts, statuses),
             Some("system") => {
-                // `sysprompt` and `rules` steps are the prompt being assembled —
-                // the system prompt and the rule files injected into it, the
-                // same on every session. The rest are the harness talking
-                // mid-run: environment info, a backgrounded subagent finishing.
+                // Most `system` steps are the prompt being assembled — the
+                // `sysprompt` and `rules` telemetry sources say so directly, and
+                // the rest are context blocks re-injected at each turn:
+                // `<available_skills>`, `<system_info>`, loose chunks of the
+                // prompt. What is worth a turn is an *event* — a tagged block
+                // reporting that something happened, like a backgrounded
+                // subagent finishing or the user editing a file mid-run.
                 match step
                     .pointer("/extra/telemetry/source")
                     .and_then(Value::as_str)
@@ -692,8 +695,18 @@ impl Sink {
                 let Some(text) = step.get("message").and_then(Value::as_str) else {
                     return;
                 };
-                if text.trim().is_empty() {
-                    return;
+                match text
+                    .trim_start()
+                    .strip_prefix('<')
+                    .and_then(|r| r.split(['>', ' ', '\n', '\t', '/']).next())
+                {
+                    Some(tag)
+                        if !tag.is_empty()
+                            && tag
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                            && !matches!(tag, "available_skills" | "system_info") => {}
+                    _ => return,
                 }
                 let mut turn = Turn::new("system", "message", ts);
                 turn.set_text(text);
@@ -1517,16 +1530,19 @@ mod tests {
         assert_eq!(tool.diff, vec!["-old", "-lines", "+new", "+also"]);
     }
 
-    /// The system prompt and the rule files are steps too, but they are the
-    /// prompt being assembled, not the conversation. A step the harness
-    /// actually injected mid-run — a backgrounded subagent finishing — is.
+    /// The system prompt, the rule files and the context blocks re-injected at
+    /// every turn are all steps too, but they are the prompt being assembled,
+    /// not the conversation. A step the harness injected mid-run — a
+    /// backgrounded subagent finishing, the user editing a file — is one.
     #[test]
     fn devin_prompt_assembly_is_not_a_turn() {
         let chat = sink_devin(
             &[
                 r#"{"step_id":1,"source":"system","timestamp":"t1","message":"You are Devin…","extra":{"telemetry":{"source":"sysprompt"}}}"#,
                 r#"{"step_id":2,"source":"system","timestamp":"t2","message":"<rules>…</rules>","extra":{"telemetry":{"source":"rules"}}}"#,
-                r#"{"step_id":3,"source":"system","timestamp":"t3","message":"<subagent_completion_notification>done</subagent_completion_notification>","extra":{"telemetry":{"source":"system"}}}"#,
+                r#"{"step_id":3,"source":"system","timestamp":"t3","message":"<available_skills>…</available_skills>","extra":{"telemetry":{"source":"system"}}}"#,
+                r#"{"step_id":4,"source":"system","timestamp":"t4","message":"You are powered by SWE-2 High.","extra":{"telemetry":{"source":"system"}}}"#,
+                r#"{"step_id":5,"source":"system","timestamp":"t5","message":"<subagent_completion_notification>done</subagent_completion_notification>","extra":{"telemetry":{"source":"system"}}}"#,
             ],
             &HashMap::new(),
         );

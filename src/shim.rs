@@ -759,8 +759,15 @@ fn color_reply(which: u16) -> String {
 fn pump_input(mut master: File) {
     let mut stdin = std::io::stdin();
     let mut buf = [0u8; 1024];
+    let mut tail = Vec::new();
     while let Ok(n) = stdin.read(&mut buf) {
-        if n == 0 || master.write_all(&buf[..n]).is_err() {
+        if n == 0 {
+            break;
+        }
+        // Everything goes through whole except bare-motion mouse reports —
+        // see `attach::strip_hover_reports`.
+        let bytes = crate::attach::strip_hover_reports(&buf[..n], &mut tail);
+        if !bytes.is_empty() && master.write_all(&bytes).is_err() {
             break;
         }
     }
