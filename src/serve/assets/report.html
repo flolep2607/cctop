@@ -138,6 +138,7 @@
   .termcard .why.bad { color: var(--amber); }
   .termside .note { font-size: 12px; color: var(--amber); margin-top: 7px; }
   nav.views button.toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+  nav.views button:disabled { color: var(--faint); cursor: default; }
 
   /* Two columns need a screen. On a phone the terminal goes under the
      conversation at a readable height rather than into a 40-column strip. */
@@ -1828,7 +1829,16 @@ function load() {
       // Not a view: the point of the terminal is to be beside the conversation
       // rather than instead of it, and a fifth button in the same row that
       // switched views could only replace what it is meant to sit next to.
-      if (CAN_ACT) nav.appendChild(terminalButton());
+      // Disabled rather than clickable when the report already knows there is
+      // no terminal to reach — a 409 is a worse way to learn that.
+      if (CAN_ACT) {
+        const term = terminalButton();
+        if (!r.terminal) {
+          term.disabled = true;
+          term.title = "Nothing to show — the agent is not running in a multiplexer cctop can reach";
+        }
+        nav.appendChild(term);
+      }
       nav.appendChild(copyButton());
 
       const wanted = location.hash.replace(/^#/, "");

@@ -111,6 +111,10 @@ pub struct Report {
     /// business knowing this codebase's rounding rules.
     pub duration: String,
     pub running: bool,
+    /// Whether the page's Terminal toggle has anything to reach — a running,
+    /// local, multiplexer-held agent. Computed with the report rather than
+    /// left for the click to learn from a 409.
+    pub terminal: bool,
     pub state: &'static str,
     pub plan: &'static str,
     /// Set when extraction failed. The rest of the document still renders, with
@@ -292,6 +296,11 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
         last_active: session.last_active.clone(),
         duration: util::session_duration(&session.started_at, &session.last_active),
         running: session.is_running(),
+        // The same reach `actions::terminal` checks on click: a remote row's
+        // pid belongs to another machine, and an agent not in the multiplexer
+        // is on no terminal a second viewer can be pointed at.
+        terminal: session.remote.is_none()
+            && session.root_pid().and_then(crate::rmux::holding).is_some(),
         state: match session.activity_state {
             crate::session::ActivityState::Working => "working",
             crate::session::ActivityState::WaitingForInput => "waiting",
