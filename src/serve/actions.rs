@@ -212,6 +212,43 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     })
 }
 
+/// Start `agent` fresh, in `cwd` — the browser's `n`.
+///
+/// The agent has to be one cctop knows, for the same reason `handoff` says: a
+/// string that reaches `Command::new` from a socket is a remote shell with
+/// extra steps. The directory is the one free choice the request gets, and it
+/// has to name a directory that exists — anywhere else the agent would launch
+/// into, the terminal's launcher already knows about.
+pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
+    if !agents().iter().any(|known| known == agent) {
+        return Err((
+            400,
+            format!("{agent} is not an agent cctop found on this machine"),
+        ));
+    }
+    let dir = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(cwd) => {
+            let path = std::path::PathBuf::from(crate::util::untildify(cwd));
+            match path.is_dir() {
+                true => Some(path),
+                false => {
+                    return Err((400, format!("{cwd} is not a directory on this machine")));
+                }
+            }
+        }
+        // Home rather than wherever `cctop serve` was started: a new agent with
+        // no stated directory belongs where the user's files are, not where
+        // this server happened to be launched.
+        None => Some(crate::config::HOME.clone()),
+    };
+    let name = crate::rmux::free_name(agent);
+    launch(&[agent.to_string()], &name, dir.as_deref())?;
+    Ok(Done {
+        message: format!("Started {agent} — attach with `rmux attach -t {name}`"),
+        rmux: Some(name),
+    })
+}
+
 /// `argv` run under the account whose directory this session was read out of.
 ///
 /// Resumed under the account the transcript lives in. For Codex this is the

@@ -45,6 +45,16 @@
     background: var(--panel); color: var(--dim);
     border: 1px solid var(--line); border-radius: 8px;
   }
+  /* Starting a fresh agent from the page — the launcher the terminal has on
+     `n`, carried to the one place a phone can reach. */
+  form.launch { display: flex; gap: 8px; align-items: center; margin: 0; }
+  form.launch[hidden] { display: none; }
+  form.launch input[type=text] {
+    width: 180px; padding: 7px 11px; font: inherit; font-size: 14px;
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  form.launch .said { font-size: 12px; }
 
   /* Sessions waiting on a person get their own block at the top. The whole
      reason to look at this on a phone is to find them. */
@@ -133,6 +143,12 @@
       <option value="tokens">Tokens</option>
       <option value="context">Context</option>
     </select>
+    <form id="launch" class="launch" hidden>
+      <select id="launch-agent" title="Which agent to start"></select>
+      <input id="launch-cwd" type="text" placeholder="directory — default ~" autocomplete="off" spellcheck="false">
+      <button type="submit" title="Start the agent, in the multiplexer">Start</button>
+      <span id="launch-said" class="said"></span>
+    </form>
   </div>
 
   <section class="card attention" id="attention" hidden>
@@ -821,6 +837,45 @@ ask("/api/hosts" + QUERY)
     }
   })
   .catch(() => {});
+
+// The launcher, offered only where this run can act — a read-only link or a
+// --no-actions serve has nothing behind the button, so it is never drawn.
+if (CAN_ACT) {
+  ask("/api/agents" + QUERY)
+    .then(asJson)
+    .then((r) => {
+      const known = r.agents || [];
+      if (!r.actions || !known.length) return;
+      const form = document.getElementById("launch");
+      const pick = document.getElementById("launch-agent");
+      const cwd = document.getElementById("launch-cwd");
+      const said = document.getElementById("launch-said");
+      const go = form.querySelector("button");
+      for (const agent of known) pick.appendChild(el("option", null, agent));
+      form.hidden = false;
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        go.disabled = true;
+        said.className = "said";
+        said.textContent = "…";
+        try {
+          const response = await ask("/api/launch" + QUERY, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ agent: pick.value, cwd: cwd.value.trim() }),
+          });
+          const done = await asJson(response);
+          said.textContent = done.message || "started";
+        } catch (e) {
+          said.className = "said bad";
+          said.textContent = String(e.message || e);
+        } finally {
+          go.disabled = false;
+        }
+      });
+    })
+    .catch(() => {});
+}
 
 document.getElementById("filter").addEventListener("input", (e) => {
   filter = e.target.value.trim().toLowerCase();

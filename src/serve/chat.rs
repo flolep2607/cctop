@@ -758,7 +758,9 @@ impl Sink {
                 full,
                 ..ToolUse::default()
             };
-            if let Some(delta) = devin_delta(&args) {
+            if matches!(name, "edit" | "write")
+                && let Some(delta) = extract::edit_delta(&args)
+            {
                 tool.added = delta.added;
                 tool.removed = delta.removed;
                 tool.diff = delta.hunks.into_iter().take(MAX_DIFF_LINES).collect();
@@ -803,30 +805,6 @@ fn claude_delta(item: &Value) -> Option<Delta> {
             if delta.hunks.len() < MAX_DIFF_LINES {
                 delta.hunks.push(line.to_string());
             }
-        }
-    }
-    (delta.added > 0 || delta.removed > 0).then_some(delta)
-}
-
-/// The patch a Devin `edit` applied, from its arguments.
-///
-/// Claude writes the applied patch onto the result (`structuredPatch`); ATIF
-/// records only `old_string`/`new_string`, so the diff shown is the literal
-/// before and after rather than a minimal hunk.
-fn devin_delta(args: &Value) -> Option<Delta> {
-    let old = args.get("old_string").and_then(Value::as_str)?;
-    let new = args.get("new_string").and_then(Value::as_str)?;
-    let mut delta = Delta::default();
-    for line in old.lines() {
-        delta.removed += 1;
-        if delta.hunks.len() < MAX_DIFF_LINES {
-            delta.hunks.push(format!("-{line}"));
-        }
-    }
-    for line in new.lines() {
-        delta.added += 1;
-        if delta.hunks.len() < MAX_DIFF_LINES {
-            delta.hunks.push(format!("+{line}"));
         }
     }
     (delta.added > 0 || delta.removed > 0).then_some(delta)

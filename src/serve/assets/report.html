@@ -1362,6 +1362,9 @@ function actionBar(r, agents) {
 // The prompt box. One line, because that is what a pty submit is: the server
 // refuses a newline rather than sending half a paragraph, so the box will not
 // pretend to take one.
+//
+// While the session is stopped the box doubles as the resume button — "resume
+// it first" asked of a dead input is a chore, a button that does it is not.
 function composer(r) {
   if (!CAN_ACT) return null;
   const form = el("form", "say");
@@ -1370,25 +1373,28 @@ function composer(r) {
   input.type = "text";
   input.maxLength = 4000;
   input.autocomplete = "off";
-  input.placeholder = r.running ? "Answer this session…" : "Nothing is running this session — resume it first";
-  input.disabled = !r.running;
-  const send = el("button", null, "Send");
+  const send = el("button");
   send.type = "submit";
-  send.disabled = !r.running;
+  composerMode(input, send, !!r.running);
   form.appendChild(input);
   form.appendChild(send);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const text = input.value.trim();
-    if (!text) return;
     send.disabled = true;
     try {
-      const done = await act("send", { text });
-      report_said(done.message || "Sent", true);
-      input.value = "";
-      // The turn takes a moment to reach the transcript, so the refresh is
-      // deliberately late rather than immediate-and-empty.
-      setTimeout(refreshChat, 1200);
+      if (send.dataset.mode === "resume") {
+        const done = await act("resume", {});
+        report_said(done.message || "Resumed", true);
+      } else {
+        const text = input.value.trim();
+        if (!text) return;
+        const done = await act("send", { text });
+        report_said(done.message || "Sent", true);
+        input.value = "";
+        // The turn takes a moment to reach the transcript, so the refresh is
+        // deliberately late rather than immediate-and-empty.
+        setTimeout(refreshChat, 1200);
+      }
     } catch (e) {
       report_said(String(e.message || e), false);
     } finally {
@@ -1397,6 +1403,21 @@ function composer(r) {
     }
   });
   return form;
+}
+
+// Which of the two jobs the composer's button is doing right now — answering a
+// live agent, or putting a stopped one back. Shared by the load-time draw and
+// the stream, so a session that starts under you becomes answerable without a
+// reload.
+function composerMode(input, send, running) {
+  input.disabled = !running;
+  input.placeholder = running
+    ? "Answer this session…"
+    : "Nothing is running this session";
+  send.dataset.mode = running ? "send" : "resume";
+  send.textContent = running ? "Send" : "Resume";
+  send.disabled = false;
+  send.title = running ? "" : "Start this session's harness back up on this transcript";
 }
 
 // --- what it can reach -----------------------------------------------------
@@ -1687,13 +1708,7 @@ function liveState(s) {
 function liveComposer(s) {
   const form = document.getElementById("say");
   if (!form) return;
-  const input = form.querySelector("input");
-  const send = form.querySelector("button");
-  input.disabled = !s.running;
-  send.disabled = !s.running;
-  input.placeholder = s.running
-    ? "Answer this session…"
-    : "Nothing is running this session — resume it first";
+  composerMode(form.querySelector("input"), form.querySelector("button"), !!s.running);
 }
 
 // One entry of the array every `sessions` event carries.

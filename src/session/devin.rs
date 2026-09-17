@@ -240,6 +240,19 @@ pub fn extract(path: &Path) -> SessionData {
                     call_id.clone(),
                     None,
                 );
+                // The diff an edit made lives in its arguments — ATIF keeps no
+                // structuredPatch — and the report's Changes view is built from
+                // deltas, so it is attached here rather than on display.
+                if matches!(name, "edit" | "write")
+                    && let Some(delta) = super::extract::edit_delta(&input)
+                    && let Some(detail) = data
+                        .metrics
+                        .tool_details
+                        .get_mut(name)
+                        .and_then(|details| details.last_mut())
+                {
+                    detail.delta = Some(delta);
+                }
                 *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
                 data.metrics.tool_count += 1;
 

@@ -1234,6 +1234,23 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 body.to_string().as_bytes(),
             );
         }
+        // Not under /api/act/<id>/ — a launch names no session because there is
+        // none yet. The guards are the shared ones: same link, same flag, same
+        // insistence on a JSON POST.
+        "/api/launch" => {
+            let Some(body) = may_act(shared, stream, &request, access) else {
+                return;
+            };
+            let agent = body
+                .get("agent")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let cwd = body.get("cwd").and_then(serde_json::Value::as_str);
+            match actions::launch_agent(agent, cwd) {
+                Ok(done) => json(stream, &request, &done),
+                Err((status, why)) => http::respond_error(stream, Some(&request), status, &why),
+            }
+        }
         _ if path.starts_with("/session/") => page(shared, stream, &request, REPORT_HTML, access),
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
@@ -1313,40 +1330,62 @@ fn api_access(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &s
     json(stream, request, &crate::access::build(session, Some(&data)));
 }
 
-/// Do something to a session: `/api/act/<verb>/<id>`.
-///
-/// One route for the three verbs rather than three, because the guards in front
-/// of them are the whole security surface and they are identical — a route added
-/// later that forgets one of them is the bug this shape prevents.
-fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &str, access: Access) {
+/// The guards every acting route shares, answered here once: a read-only link,
+/// a `--no-actions` serve, and a request that is not a JSON POST each get their
+/// own answer rather than a generic refusal. Returns the parsed body when the
+/// request may act — a route that forgets to go through this is the bug the
+/// shared shape exists to prevent.
+fn may_act(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    access: Access,
+) -> Option<serde_json::Value> {
     // Before every other guard, because it is not one: this is the link doing
     // what it was minted to do, and the answer names that rather than leaning
     // on a flag the read-only page never had.
     if access == Access::ReadOnly {
-        return http::respond_error(stream, Some(request), 403, "this link is read-only");
+        http::respond_error(stream, Some(request), 403, "this link is read-only");
+        return None;
     }
     if !shared.actions {
-        return http::respond_error(
+        http::respond_error(
             stream,
             Some(request),
             403,
             "this cctop serve is read-only — restart it without --no-actions, \
              and with a token, to act on a session",
         );
+        return None;
     }
     // A `POST` with a JSON body, both of which are load-bearing: see the
     // module docs in `http` for why a form on another origin cannot be one.
     if !request.wants_json() {
-        return http::respond_error(
+        http::respond_error(
             stream,
             Some(request),
             405,
             "an action is a POST with a JSON body",
         );
+        return None;
     }
-    let body = match request.json() {
-        Ok(body) => body,
-        Err((status, why)) => return http::respond_error(stream, Some(request), status, why),
+    match request.json() {
+        Ok(body) => Some(body),
+        Err((status, why)) => {
+            http::respond_error(stream, Some(request), status, why);
+            None
+        }
+    }
+}
+
+/// Do something to a session: `/api/act/<verb>/<id>`.
+///
+/// One route for the three verbs rather than three, because the guards in front
+/// of them are the whole security surface and they are identical — a route added
+/// later that forgets one of them is the bug this shape prevents.
+fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &str, access: Access) {
+    let Some(body) = may_act(shared, stream, request, access) else {
+        return;
     };
     let Some((verb, id)) = rest.split_once('/') else {
         return http::respond_error(stream, Some(request), 404, "no such action");
