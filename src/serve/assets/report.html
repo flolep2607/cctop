@@ -187,10 +187,18 @@
     box-shadow: var(--shadow); cursor: pointer;
   }
   .more:hover { color: var(--accent); border-color: var(--accent); }
+  .earlier { display: block; width: 100%; padding: 10px 14px; border: 0;
+             border-bottom: 1px solid var(--line); border-radius: 0;
+             color: var(--faint); font-size: 12px; text-align: left; }
+  .earlier:hover { color: var(--accent); }
 
   /* --- the conversation -------------------------------------------------- */
 
-  .turn { border-top: 1px solid var(--line); padding: 12px 14px; }
+  .turn { border-top: 1px solid var(--line); padding: 12px 14px;
+          /* Offscreen turns skip layout and paint — the browser's own lazy
+             pass, so a long conversation is cheap even before the chunking
+             below keeps its DOM small. */
+          content-visibility: auto; contain-intrinsic-size: auto 140px; }
   .turn:first-child { border-top: 0; }
   .turn > .who {
     display: flex; gap: 8px; align-items: baseline; font-size: 11px;
@@ -1119,13 +1127,34 @@ function conversation(chat) {
     return s;
   }
   const card = el("div", "card");
-  if (chat.earlier) {
-    card.appendChild(el("div", "turn faint", chat.earlier + " earlier turns are in the transcript and not shown"));
+  const turns = chat.turns || [];
+  // Drawing every turn at once is what makes a big session stall — each is a
+  // markdown pass plus its tool rows. The tail is what is live, so it is
+  // drawn and the rest is a click per chunk away.
+  const hidden = Math.max(0, turns.length - chatShown);
+  const earlier = (chat.earlier || 0) + hidden;
+  if (earlier) {
+    if (hidden) {
+      const more = el("button", "earlier",
+        "show " + Math.min(CHAT_CHUNK, hidden) + " earlier turns — " + earlier + " in all not drawn");
+      more.type = "button";
+      more.addEventListener("click", () => {
+        chatShown += CHAT_CHUNK;
+        // The reveal lands above the fold, so the view is held on the same
+        // turn rather than jumping to wherever the new top put it.
+        const before = document.documentElement.scrollHeight;
+        drawChat(LAST_CHAT);
+        window.scrollTo(0, window.scrollY + document.documentElement.scrollHeight - before);
+      });
+      card.appendChild(more);
+    } else {
+      card.appendChild(el("div", "turn faint", earlier + " earlier turns are in the transcript and not shown"));
+    }
   }
-  if (!chat.turns.length) {
+  if (!turns.length) {
     card.appendChild(el("div", "empty", "Nothing has been said in this session yet."));
   }
-  for (const turn of chat.turns) card.appendChild(turnNode(turn));
+  for (const turn of turns.slice(-chatShown)) card.appendChild(turnNode(turn));
   s.appendChild(card);
   return s;
 }
@@ -1576,6 +1605,13 @@ let SESSION = ID;
 let REPORT = null;
 // What the conversation looked like at the last build — see chatSig.
 let CHAT_SIG = null;
+// The conversation itself, so "show earlier" expands without a fetch.
+let LAST_CHAT = null;
+// How much of a long conversation is drawn: the newest CHAT_CHUNK turns, one
+// chunk more per click. The tail is the part that is live; drawing all of a
+// 200-turn session is the stall, not the poll.
+const CHAT_CHUNK = 120;
+let chatShown = CHAT_CHUNK;
 // The "new activity" pill, built on first use.
 let MORE = null;
 
@@ -1637,6 +1673,17 @@ window.addEventListener("scroll", () => {
   if (MORE && !MORE.hidden && nearBottom()) moreActivity(false);
 }, { passive: true });
 
+// The redraw, shared by the poll and by the "show earlier" button — which
+// needs no fetch because the conversation it expands is the one already held.
+function drawChat(chat) {
+  const pane = document.getElementById("talk");
+  const say = pane.querySelector("form.say");
+  pane.replaceChildren(conversation(chat));
+  // The composer is part of this pane and holds what someone is typing, so it
+  // is moved across rather than rebuilt underneath them.
+  if (say) pane.appendChild(say);
+}
+
 async function refreshChat() {
   const pane = document.getElementById("talk");
   if (!pane) return;
@@ -1653,12 +1700,8 @@ async function refreshChat() {
     const first = CHAT_SIG === null;
     const wasNear = nearBottom();
     CHAT_SIG = sig;
-    const rebuilt = conversation(chat);
-    // The composer is part of this pane and holds what someone is typing, so it
-    // is moved across rather than rebuilt underneath them.
-    const say = pane.querySelector("form.say");
-    pane.replaceChildren(rebuilt);
-    if (say) pane.appendChild(say);
+    LAST_CHAT = chat;
+    drawChat(chat);
     if (wasNear) {
       // Pinned to the tail: a rebuild must not scroll the newest turn out from
       // under someone watching it arrive.
