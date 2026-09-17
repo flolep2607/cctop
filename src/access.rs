@@ -292,6 +292,12 @@ fn layout(session: &Session, root: &Path) -> Layout {
             configs.push((crate::config::GEMINI_HOME.join("settings.json"), "user"));
             skills = Some(crate::config::GEMINI_HOME.join("skills"));
         }
+        Provider::Devin => {
+            instructions.push((crate::config::DEVIN_CLI_DIR.join("AGENTS.md"), "user"));
+            instructions.extend(project("AGENTS.md"));
+            configs.push((crate::config::DEVIN_CLI_DIR.join("config.toml"), "user"));
+            skills = Some(crate::config::DEVIN_CLI_DIR.join("skills"));
+        }
         Provider::Cursor => {
             instructions.extend(project(".cursorrules"));
             note = Some(
@@ -395,6 +401,12 @@ fn mcp_servers(session: &Session, root: &Path) -> Vec<McpServer> {
         Provider::OpenCode => {
             out.extend(mcp_from_json(
                 &crate::config::OPENCODE_CONFIG_DIR.join("opencode.json"),
+                "user",
+            ));
+        }
+        Provider::Devin => {
+            out.extend(mcp_from_json(
+                &crate::config::DEVIN_CLI_DIR.join("config.toml"),
                 "user",
             ));
         }
@@ -504,7 +516,10 @@ fn harness_for(provider: Provider) -> Option<hook::Harness> {
         Provider::Cursor => Some(hook::Harness::Cursor),
         Provider::Gemini => Some(hook::Harness::Gemini),
         Provider::OpenCode => Some(hook::Harness::OpenCode),
-        Provider::Pi | Provider::Windsurf => None,
+        // Devin has its own hooks.v1.json, but `cctop hook` does not speak its
+        // event dialect yet — registering it would install hooks that decode
+        // nothing, which is worse than installing none.
+        Provider::Devin | Provider::Pi | Provider::Windsurf => None,
     }
 }
 

@@ -408,8 +408,23 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
                     .costs_by_hour
                     .entry(util::local_hour_key(&dt))
                     .or_default()
-                    .entry(model)
+                    .entry(model.clone())
                     .or_insert(0.0) += costs.total;
+                // Reasoning is already inside `output` here — billing it again
+                // would double-count, the same rule `FallbackRates` applies.
+                let billed = tokens.all_input() + tokens.output;
+                *data
+                    .tokens_by_day
+                    .entry(util::local_date_key(&dt))
+                    .or_default()
+                    .entry(model.clone())
+                    .or_insert(0) += billed;
+                *data
+                    .tokens_by_hour
+                    .entry(util::local_hour_key(&dt))
+                    .or_default()
+                    .entry(model)
+                    .or_insert(0) += billed;
             }
         }
     }

@@ -147,6 +147,7 @@
 
   <footer>
     <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
+    <a id="analytics-link" href="/analytics">analytics</a>
     <span class="spacer"></span>
     <span id="counts"></span>
     <a id="insight-optimize" href="/insight/optimize">optimize</a>
@@ -337,7 +338,11 @@ function rowFor(s) {
 
   const meta = el("div", "meta");
   const tag = (text, cls) => { if (text) meta.appendChild(el("span", cls || null, text)); };
-  tag(s.model ? shortModel(s.model) : s.provider);
+  // Harness first, then the model: on a machine running several agents the
+  // model alone does not say who ran the session — `opus-5` under claude and
+  // under a devin row are different sessions.
+  tag(s.provider);
+  if (s.model) tag(shortModel(s.model));
   if (s.branch) tag(s.branch);
   tag(ago(s.last_active) + " ago");
   if (s.running && s.state === "waiting") tag("waiting on you", "pill warn");
@@ -779,6 +784,9 @@ function setLink(state, text) {
   link.className = "dot " + state;
   linkText.textContent = text;
 }
+
+// The analytics page needs the same credential in its URL or it lands on 403.
+document.getElementById("analytics-link").href = "/analytics" + QUERY;
 
 let source;
 function connect() {

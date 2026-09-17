@@ -457,6 +457,10 @@ struct Extractor {
     costs_by_model: HashMap<String, Costs>,
     costs_by_day: HashMap<String, HashMap<String, f64>>,
     costs_by_hour: HashMap<String, HashMap<String, f64>>,
+    /// Same buckets as the cost maps, in tokens: a bundled plan or an unpriced
+    /// model empties the dollar figures but not the usage underneath them.
+    tokens_by_day: HashMap<String, HashMap<String, u64>>,
+    tokens_by_hour: HashMap<String, HashMap<String, u64>>,
     models: HashMap<String, u64>,
     last_model: String,
     last_main_model: String,
@@ -578,6 +582,21 @@ impl Extractor {
                 .or_default()
                 .entry(model.to_string())
                 .or_insert(0.0) += call_cost;
+            // Everything this request was billed for, whatever the plan priced
+            // it at.
+            let billed = inp + cache_r + out + cw5m + cw1h;
+            *self
+                .tokens_by_day
+                .entry(util::local_date_key(&dt))
+                .or_default()
+                .entry(model.to_string())
+                .or_insert(0) += billed;
+            *self
+                .tokens_by_hour
+                .entry(util::local_hour_key(&dt))
+                .or_default()
+                .entry(model.to_string())
+                .or_insert(0) += billed;
         }
 
         if !is_main && let Some(stats) = self.sub_stats.get_mut(file) {
@@ -1193,6 +1212,8 @@ pub fn extract(transcript: &Path) -> SessionData {
         costs,
         costs_by_day: ext.costs_by_day,
         costs_by_hour: ext.costs_by_hour,
+        tokens_by_day: ext.tokens_by_day,
+        tokens_by_hour: ext.tokens_by_hour,
         metrics: ext.metrics,
         context_breakdown,
         context_series: ext.ctx_series,

@@ -390,7 +390,10 @@ function subject(r) {
   tag(r.project);
   tag(r.branch);
   if (r.profile && r.profile !== "default") tag("profile: " + r.profile);
-  tag(r.model || r.provider);
+  // Harness and model are separate facts — the dashboard's rows tag both, so
+  // the header does too.
+  tag(r.provider);
+  if (r.model) tag(r.model);
   // When, not just how long. A duration on its own answers "was this a long
   // session" and nothing else — the reader who opened this because something
   // happened this morning needs to know whether they are looking at it.

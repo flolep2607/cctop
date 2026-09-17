@@ -356,6 +356,8 @@ pub(super) fn spawn_worker(
                             .map_err(|error| error.to_string()),
                         Provider::Cursor => crate::session::cursor::delete(&session)
                             .map_err(|error| error.to_string()),
+                        Provider::Devin => crate::session::devin::delete(&session)
+                            .map_err(|error| error.to_string()),
                         Provider::Gemini => crate::session::gemini::delete(&session)
                             .map_err(|error| error.to_string()),
                         Provider::OpenCode => crate::session::opencode::delete(&session)

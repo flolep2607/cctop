@@ -698,6 +698,19 @@ pub fn extract(path: &Path) -> SessionData {
             .collect()
     };
 
+    // The token maps are the same buckets priced at nothing: `input` already
+    // counts the cached portion, so everything billed is input plus output.
+    let finalize_tokens = |raw: &HashMap<String, RawBucket>| {
+        raw.iter()
+            .map(|(key, b)| {
+                (
+                    key.clone(),
+                    HashMap::from([(model.clone(), b.input + b.output)]),
+                )
+            })
+            .collect::<HashMap<String, HashMap<String, u64>>>()
+    };
+
     SessionData {
         last_model: model.clone(),
         reasoning_effort,
@@ -710,6 +723,10 @@ pub fn extract(path: &Path) -> SessionData {
         }],
         tokens: totals,
         costs: Costs { total, ..costs },
+        // Read for the token maps first: the cost closures take the buckets by
+        // value, so the shared borrow has to happen before the moves.
+        tokens_by_day: finalize_tokens(&by_day),
+        tokens_by_hour: finalize_tokens(&by_hour),
         costs_by_day: finalize(by_day),
         costs_by_hour: finalize(by_hour),
         metrics,

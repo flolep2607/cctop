@@ -469,7 +469,7 @@ impl Plan {
     pub fn includes(&self, provider: Provider) -> bool {
         matches!(
             (self, provider),
-            (Plan::Included, _) | (Plan::Max, Provider::Claude)
+            (Plan::Included, _) | (Plan::Max, Provider::Claude) | (Plan::Max, Provider::Devin)
         )
     }
 }
@@ -479,6 +479,7 @@ pub enum Provider {
     Claude,
     Codex,
     Cursor,
+    Devin,
     Gemini,
     OpenCode,
     Pi,
@@ -495,7 +496,11 @@ impl Provider {
     /// record neither.
     pub fn records_tool_outcomes(&self) -> bool {
         match self {
-            Provider::Claude | Provider::Codex | Provider::Gemini | Provider::OpenCode => true,
+            Provider::Claude
+            | Provider::Codex
+            | Provider::Devin
+            | Provider::Gemini
+            | Provider::OpenCode => true,
             Provider::Cursor | Provider::Pi | Provider::Windsurf => false,
         }
     }
@@ -505,6 +510,7 @@ impl Provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
             Provider::Cursor => "cursor",
+            Provider::Devin => "devin",
             Provider::Gemini => "gemini",
             Provider::OpenCode => "opencode",
             Provider::Pi => "pi",

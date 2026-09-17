@@ -37,6 +37,7 @@ fn provider_search_paths() -> Vec<(&'static str, String)> {
         ),
         ("Codex", config::CODEX_SESSIONS_ROOT.display().to_string()),
         ("Cursor", config::CURSOR_PROJECTS_ROOT.display().to_string()),
+        ("Devin", config::DEVIN_TRANSCRIPTS_DIR.display().to_string()),
         (
             "Gemini CLI",
             config::GEMINI_CHATS_ROOT.display().to_string(),
@@ -604,6 +605,7 @@ mod tests {
             Provider::Claude,
             Provider::Codex,
             Provider::Cursor,
+            Provider::Devin,
             Provider::Gemini,
             Provider::OpenCode,
             Provider::Pi,
