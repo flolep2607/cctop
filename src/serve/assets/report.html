@@ -56,6 +56,8 @@
 
   .files { columns: 2 260px; column-gap: 22px; font-family: var(--mono); font-size: 12px; }
   .files div { break-inside: avoid; color: var(--dim); padding: 1px 0; overflow-wrap: anywhere; }
+  .files .plus { color: var(--green); }
+  .files .minus { color: var(--red); }
 
   /* One file's edits. <details> rather than scripted toggling: it opens with
      no JavaScript, it is keyboard-reachable, and the browser already knows
@@ -191,6 +193,10 @@
              border-bottom: 1px solid var(--line); border-radius: 0;
              color: var(--faint); font-size: 12px; text-align: left; }
   .earlier:hover { color: var(--accent); }
+  /* The "N new" jump rides on the earlier button's shape but speaks in the
+     accent: it points at what arrived since the last visit, which is a
+     finding rather than a chore. */
+  .earlier.jumpnew { color: var(--accent); }
 
   /* The chat pane's own controls. They sit above #split rather than inside
      #talk because the poll rebuilds #talk every five seconds — a control in
@@ -284,6 +290,20 @@
   .turn.hit { box-shadow: inset 3px 0 0 var(--accent); }
   .turn.current { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
+  /* The keyboard selection — j/k marks a turn the way the dashboard's j/k
+     marks a row. A thin frame rather than the find marks' edge or current's
+     wash, so the three can be told apart on one turn. */
+  .turn.sel { box-shadow: inset 0 0 0 1px var(--accent); }
+
+  /* Newer than the stored "seen" seq: a small accent dot on the header line.
+     A compaction has no header, so it takes a quiet edge instead. */
+  .turn.new > .who::after {
+    content: ""; align-self: center; flex: 0 0 auto;
+    width: 6px; height: 6px; margin-left: 2px;
+    border-radius: 50%; background: var(--accent);
+  }
+  .turn.new.compaction { box-shadow: inset 2px 0 0 var(--accent); }
+
   /* A tool call inside a turn: collapsed to one line, opened for the result. */
   details.tool { margin-top: 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
   details.tool > summary {
@@ -327,6 +347,33 @@
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .chip { font-size: 12px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); }
   .chip .n { font-family: var(--mono); color: var(--faint); margin-left: 5px; }
+
+  /* Compact is a choice about the conversation's rhythm — tighter turns,
+     smaller markdown, tools that tuck in. It hangs off #talk so the choice
+     survives the poll's rebuild, which only replaces what is inside it. */
+  .talk[data-density="compact"] .turn { padding: 7px 14px; }
+  .talk[data-density="compact"] .turn > .who { margin-bottom: 3px; }
+  .talk[data-density="compact"] .turn > .said-text,
+  .talk[data-density="compact"] .md { font-size: 13px; }
+  .talk[data-density="compact"] .md > * { margin-bottom: 5px; }
+  .talk[data-density="compact"] details.tool { margin-top: 4px; }
+
+  /* --- a phone -------------------------------------------------------------
+     The view pills get a scroll lane instead of wrapping into a stack of
+     rows; the conversation keeps the full width; the find box and the
+     composer stay usable — 16px inputs because a phone zooms the page on
+     anything smaller. */
+  @media (max-width: 700px) {
+    .wrap { padding: 14px 10px 56px; }
+    nav.views { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+    nav.views button { white-space: nowrap; }
+    .subject h2 { font-size: 18px; }
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .files { columns: 1; }
+    .turn { padding: 10px 10px; }
+    .chattools input, form.say input { font-size: 16px; }
+    form.say { bottom: 6px; }
+  }
 </style>
 <!-- The stored light/dark choice has to land on <html> before the first
      paint, so it runs here rather than down with the page's own script. -->
@@ -350,6 +397,11 @@ const ID = decodeURIComponent(location.pathname.replace(/^\/session\//, ""));
 // the server rather than discovered, so the controls are never drawn for a run
 // that would refuse them.
 const CAN_ACT = "__CCTOP_ACTIONS__";
+
+// A "?find=" on the opening URL seeds the conversation's find box — the
+// dashboard's global search links here with one. Read now: the token scrub
+// in load() rewrites the address bar before the chat view exists to use it.
+let findSeed = new URLSearchParams(location.search).get("find") || "";
 
 // The light/dark/system switch, at the header's right end. The inlined
 // theme.js defines window.themeToggle when the page is served; a copy opened
@@ -764,10 +816,20 @@ function toolTable(r) {
 
 function files(r) {
   if (!r.files || !r.files.length) return null;
-  const s = block("Files it wrote", "Most recent first.");
+  const s = block("Files it wrote", "Most recent first. Line counts where the transcript kept the edits.");
   const card = el("div", "card pad");
   const list = el("div", "files");
-  for (const f of r.files) list.appendChild(el("div", null, f));
+  const stats = new Map(diffFiles(r).map((d) => [d.file, d]));
+  for (const f of r.files) {
+    const row = el("div");
+    row.appendChild(document.createTextNode(f));
+    const d = stats.get(f);
+    if (d && (d.added || d.removed)) {
+      row.appendChild(el("span", "plus", " +" + (d.added || 0)));
+      row.appendChild(el("span", "minus", " −" + (d.removed || 0)));
+    }
+    list.appendChild(row);
+  }
   card.appendChild(list);
   s.appendChild(card);
   return s;
@@ -820,10 +882,40 @@ function heaviest(r) {
   return s;
 }
 
+// r.diffs as one entry per file. That is what the server sends; the merge is
+// repeated here so neither changes-view part depends on how the data arrived.
+// The line counts come from the transcript's own tally — where an entry
+// carries none they are counted back out of the hunk lines, which is the sum
+// they were taken from.
+function diffFiles(r) {
+  const byFile = new Map();
+  for (const f of r.diffs || []) {
+    let got = byFile.get(f.file);
+    if (!got) {
+      got = { file: f.file, added: 0, removed: 0, edits: 0, hunks: [], truncated: false };
+      byFile.set(f.file, got);
+    }
+    got.added += f.added || 0;
+    got.removed += f.removed || 0;
+    got.edits += f.edits || 1;
+    got.hunks.push(...(f.hunks || []));
+    got.truncated = got.truncated || !!f.truncated;
+  }
+  const files = [...byFile.values()];
+  for (const f of files) {
+    if (f.added || f.removed || !f.hunks.length) continue;
+    for (const line of f.hunks) {
+      if (line.startsWith("+") && !line.startsWith("+++")) f.added++;
+      else if (line.startsWith("-") && !line.startsWith("---")) f.removed++;
+    }
+  }
+  return files;
+}
+
 // What the session actually changed. A list of file names says it touched
 // something; this says what it did to it.
 function diffs(r) {
-  const files = r.diffs || [];
+  const files = diffFiles(r);
   if (!files.length) return null;
   const total = files.reduce((a, f) => a + f.added + f.removed, 0);
   const s = block(
@@ -1193,6 +1285,20 @@ function conversation(chat) {
     more.addEventListener("click", () => showEarlier(more));
     card.appendChild(more);
   }
+  // The seen line as this visit found it. null is a first visit — nothing is
+  // marked "new" against a baseline that did not exist.
+  const base = seenSeq();
+  if (base !== null && turns.length && turns[turns.length - 1].seq > base) {
+    const fresh = turns.filter((t) => t.seq > base).length;
+    // Unfetched earlier turns may hold unread ones too; the count owns up to
+    // only covering what has been fetched.
+    const jump = el("button", "earlier jumpnew",
+      fresh + (earlierCount() > base ? "+" : "") + " new — jump to the first");
+    jump.type = "button";
+    jump.title = "Scroll to the first turn since this page last recorded a visit";
+    jump.addEventListener("click", () => gotoTurn(base + 1));
+    card.appendChild(jump);
+  }
   if (!turns.length) {
     card.appendChild(el("div", "empty", "Nothing has been said in this session yet."));
   }
@@ -1200,7 +1306,11 @@ function conversation(chat) {
   // first drawn position — so a "#chat/turn-N" link names the same turn
   // however the fetched window slides.
   turns.forEach((turn, i) => {
-    if (i >= hidden) card.appendChild(turnNode(turn, turn.seq));
+    if (i >= hidden) {
+      const node = turnNode(turn, turn.seq);
+      if (base !== null && turn.seq > base) node.classList.add("new");
+      card.appendChild(node);
+    }
   });
   s.appendChild(card);
   return s;
@@ -1723,6 +1833,58 @@ let seekHits = [];
 let seekAt = -1;
 let toolsOpen = false;
 
+// Compact or comfortable, kept across visits under its own key. The choice
+// rides on #talk as data-density so it survives the poll's rebuild of what
+// is inside it.
+let density = "comfortable";
+try {
+  if (localStorage.getItem("cctop-density") === "compact") density = "compact";
+} catch (e) { /* no store, no memory — comfortable it is */ }
+
+function applyDensity() {
+  const talk = document.getElementById("talk");
+  if (talk) talk.dataset.density = density;
+}
+
+// localStorage["cctop-seen"] is the visit ledger shared with the dashboard:
+// {<session id>: {"seq": N, "at": ms}} — the newest turn seq the session was
+// last seen at, and when. The seq is what this page marks against; `at` is
+// written too because the dashboard reads it for its own badge. Every access
+// is try/catch'd — private windows throw on localStorage, and a page about a
+// conversation must not die on bookkeeping.
+let seenDone = false;
+let SEEN_BASE = null;
+// The stored seq as this visit found it: the line between "already read" and
+// "new". Captured once — re-reading after seenRecord would move the line and
+// the marks would vanish under the reader on the next poll.
+function seenSeq() {
+  if (!seenDone) {
+    seenDone = true;
+    try {
+      const all = JSON.parse(localStorage.getItem("cctop-seen")) || {};
+      const entry = all[SESSION];
+      const seq = entry && Number(entry.seq);
+      SEEN_BASE = isFinite(seq) ? seq : null;
+    } catch (e) {
+      SEEN_BASE = null;
+    }
+  }
+  return SEEN_BASE;
+}
+// Written after the marks, which compare against the value from before this
+// visit — mark first, then record. The newest fetched seq is what "seen"
+// means: everything up to it was on offer this visit.
+function seenRecord() {
+  if (!TURNS.length) return;
+  const max = TURNS[TURNS.length - 1].seq;
+  try {
+    const all = JSON.parse(localStorage.getItem("cctop-seen")) || {};
+    const prev = all[SESSION] && Number(all[SESSION].seq);
+    all[SESSION] = { seq: Math.max(max, isFinite(prev) ? prev : 0), at: Date.now() };
+    localStorage.setItem("cctop-seen", JSON.stringify(all));
+  } catch (e) { /* bookkeeping only — the marks stay best-effort */ }
+}
+
 function show(name) {
   for (const [key, pane] of Object.entries(PANES)) pane.hidden = key !== name;
   for (const button of document.querySelectorAll("nav.views button")) {
@@ -1808,8 +1970,16 @@ function chatTools() {
   tools.title = "Open every tool call in the conversation";
   input.addEventListener("input", () => { seekAt = -1; applySeek(); });
   // Enter walks the matches like a find bar does; Shift+Enter walks back.
+  // Escape empties it through the input path so the marks and count leave
+  // with the text, then hands the page back its keys.
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); seekMove(e.shiftKey ? -1 : 1); }
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      input.value = "";
+      input.dispatchEvent(new Event("input"));
+      input.blur();
+    }
   });
   prev.addEventListener("click", () => seekMove(-1));
   next.addEventListener("click", () => seekMove(1));
@@ -1821,8 +1991,29 @@ function chatTools() {
       : "Open every tool call in the conversation";
     applyTools();
   });
-  SEEK = { input, count, prev, next };
-  bar.append(input, count, prev, next, tools);
+  // Compact or comfortable, persisted — the button says what is set, not
+  // what a click would do, because a two-state toggle that names its state
+  // needs no guessing.
+  const dense = el("button");
+  dense.type = "button";
+  const denseLabel = () => {
+    dense.textContent = "Density: " + density;
+    dense.title = density === "compact"
+      ? "Switch to the roomier spacing"
+      : "Tighter turns — more of the conversation per screen";
+  };
+  denseLabel();
+  dense.addEventListener("click", () => {
+    density = density === "compact" ? "comfortable" : "compact";
+    try { localStorage.setItem("cctop-density", density); } catch (e) {}
+    denseLabel();
+    applyDensity();
+  });
+  const hint = el("span", "n", "j/k · n/N · t · 1–4 · /");
+  hint.title = "Keys — j/k or arrows move through turns · Enter opens a turn's tools · " +
+               "n/N walk find hits · t folds every tool · 1–4 switch views · / focuses find · Esc clears";
+  SEEK = { input, count, prev, next, tools };
+  bar.append(input, count, prev, next, tools, dense, hint);
   return bar;
 }
 
@@ -1952,6 +2143,16 @@ function drawChat() {
   // find box's marks are replayed onto whatever was just drawn.
   applyTools();
   applySeek();
+  // Marked against the stored seq first, then the ledger moves to the newest
+  // fetched seq — in that order, so the marks this draw made are the ones a
+  // reader was just shown.
+  seenRecord();
+  // The keyboard selection is kept as a seq for exactly this: the nodes are
+  // new, the seq is not.
+  if (selSeq !== null) {
+    const sel = document.getElementById("turn-" + selSeq);
+    if (sel) sel.classList.add("sel");
+  }
 }
 
 async function refreshChat() {
@@ -2134,6 +2335,7 @@ function load() {
       // seconds, let alone a typing reader.
       PANES.chat.appendChild(chatTools());
       PANES.chat.appendChild(split);
+      applyDensity();
 
       // The report's own sections, split between the two views they belong to.
       // Cost, failures and the window are a report; a diff and a file list are
@@ -2321,6 +2523,16 @@ async function open_view(name, r) {
       wantTurn = null;
       gotoTurn(index);
     }
+    // A "?find=" seeds the box on the first draw — through the input path so
+    // the marks and count behave as if it were typed — then walks to the
+    // first hit, which is what the dashboard's search link was pointing at.
+    if (findSeed) {
+      const seed = findSeed;
+      findSeed = "";
+      SEEK.input.value = seed;
+      SEEK.input.dispatchEvent(new Event("input"));
+      seekMove(1);
+    }
   }
   if (name === "access" && !PANES.access.dataset.loaded) {
     PANES.access.dataset.loaded = "1";
@@ -2337,4 +2549,97 @@ async function open_view(name, r) {
     }
   }
 }
+
+// --- the keys ---------------------------------------------------------------
+
+// Every page-level key shares this guard — the same one the dashboard uses:
+// none of them may fire while the reader is typing, in the find box, the
+// composer, or anything editable.
+const typing = (t) =>
+  t instanceof HTMLElement &&
+  (t.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName));
+
+// The keyboard selection, kept as a seq rather than a node — the poll
+// rebuilds the turn nodes and a seq is the name that survives the rebuild.
+let selSeq = null;
+const listedTurns = () => [...document.querySelectorAll("#talk .turn")];
+const chatVisible = () => !!(PANES.chat && !PANES.chat.hidden);
+
+function moveSel(dir) {
+  const turns = listedTurns();
+  if (!turns.length) return;
+  const at = turns.findIndex((n) => n.id === "turn-" + selSeq);
+  // From nothing, j lands on the first turn and k on the last; past either
+  // end the mark just stays where it is.
+  const next = at < 0
+    ? (dir > 0 ? turns[0] : turns[turns.length - 1])
+    : turns[Math.min(turns.length - 1, Math.max(0, at + dir))];
+  selSeq = Number(next.id.slice(5));
+  for (const n of turns) n.classList.toggle("sel", n === next);
+  next.scrollIntoView({ block: "nearest" });
+}
+
+function clearSel() {
+  selSeq = null;
+  for (const n of listedTurns()) n.classList.remove("sel");
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+  // The view digits work from anywhere on the page; the rest are the
+  // conversation's, and a hidden conversation takes no keys.
+  if (/^[1-4]$/.test(e.key)) {
+    const buttons = [...document.querySelectorAll("nav.views button[data-view]")];
+    const button = buttons[Number(e.key) - 1];
+    if (button) {
+      e.preventDefault();
+      button.click();
+    }
+    return;
+  }
+  if (!chatVisible()) return;
+  if (e.key === "j" || e.key === "ArrowDown") {
+    e.preventDefault();
+    moveSel(1);
+  } else if (e.key === "k" || e.key === "ArrowUp") {
+    e.preventDefault();
+    moveSel(-1);
+  } else if (e.key === "Enter" && selSeq !== null) {
+    // A focused link or button already owns Enter; the selection borrows it
+    // only when nothing else is answering.
+    if (/^(A|BUTTON|SUMMARY)$/.test(e.target.tagName)) return;
+    const node = document.getElementById("turn-" + selSeq);
+    if (!node) return;
+    e.preventDefault();
+    const tools = [...node.querySelectorAll("details.tool")];
+    if (tools.length) {
+      // "Toggle" means open them all unless they already are: flipping each
+      // on a half-open turn would trade one mixed state for its mirror.
+      const opening = tools.some((d) => !d.open);
+      for (const d of tools) d.open = opening;
+    }
+  } else if (e.key === "n") {
+    seekMove(1);
+  } else if (e.key === "N") {
+    seekMove(-1);
+  } else if (e.key === "t" && SEEK && SEEK.tools) {
+    SEEK.tools.click();
+  } else if (e.key === "/" && SEEK) {
+    e.preventDefault();
+    SEEK.input.focus();
+    if (SEEK.input.value) SEEK.input.select();
+  } else if (e.key === "Escape") {
+    let used = false;
+    if (SEEK && SEEK.input.value) {
+      SEEK.input.value = "";
+      SEEK.input.dispatchEvent(new Event("input"));
+      used = true;
+    }
+    if (selSeq !== null) {
+      clearSel();
+      used = true;
+    }
+    if (used) e.preventDefault();
+  }
+});
 </script>

@@ -1872,4 +1872,64 @@ mod tests {
         assert_eq!(access_for(&open, ""), Some(Access::Full));
         assert_eq!(access_for(&open, "anything"), Some(Access::Full));
     }
+
+    /// Ask `api_search` the way the router does — a request parsed off a real
+    /// socket — and hand back whatever it wrote.
+    fn api_search_body(shared: &Shared, target: &str) -> String {
+        use std::io::Read;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(format!("GET {target} HTTP/1.1\r\n\r\n").as_bytes())
+            .unwrap();
+        let request = Request::parse(&server).unwrap();
+        api_search(shared, &mut server, &request);
+        // Closing the answering half is what lets the client read the response
+        // to its end rather than waiting out the connection.
+        drop(server);
+        let mut raw = String::new();
+        client.read_to_string(&mut raw).unwrap();
+        raw
+    }
+
+    /// A request with no `q` — or one shorter than a question — is an empty
+    /// answer, not an error and not a scan of every transcript.
+    #[test]
+    fn a_search_without_a_real_query_finds_nothing() {
+        let shared = shared("", "");
+        for target in ["/api/search", "/api/search?q=", "/api/search?q=ab"] {
+            let body = api_search_body(&shared, target);
+            assert!(body.contains("\"hits\":[]"), "{target}: {body}");
+        }
+    }
+
+    /// The route end to end, minus the listener: a session whose transcript
+    /// holds the word comes back under `session_id`, the field the page joins
+    /// its rows on.
+    ///
+    /// Only the hit direction is pinned here. A miss asks the topical tier,
+    /// which on a machine with the model fetched would load it and rewrite the
+    /// real embedding cache — a side effect no unit test should have; the
+    /// literal miss itself is covered in `session::search`'s tests.
+    #[test]
+    fn a_search_names_the_session_whose_transcript_matched() {
+        let path = std::env::temp_dir().join("cctop-serve-search.jsonl");
+        std::fs::write(&path, "{\"text\":\"please fix the flywheel\"}\n").unwrap();
+        let mut s = Session::new(crate::pricing::Provider::Claude, "sess-1".into());
+        s.data_file = Some(path.clone());
+
+        let shared = shared("", "");
+        *shared.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".to_string(),
+            sessions: vec![s],
+            host_errors: Vec::new(),
+        });
+
+        let body = api_search_body(&shared, "/api/search?q=flywheel");
+        let _ = std::fs::remove_file(path);
+        assert!(body.contains("\"session_id\":\"sess-1\""), "{body}");
+        assert!(body.contains("flywheel"), "{body}");
+    }
 }

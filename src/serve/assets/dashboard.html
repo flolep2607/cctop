@@ -79,6 +79,17 @@
   .row .name { min-width: 0; font-weight: 500; }
   .row .name .title { color: var(--dim); font-weight: 400; }
   .row .name .pin { color: var(--faint); font-weight: 400; margin-right: 4px; }
+  /* Bulk-selected, as distinct from keyboard-selected: the mark is a ✓ and a
+     bar on the edge rather than a background, so a row can carry both at once
+     and still read as two different claims. */
+  .row .name .tick { color: var(--accent); font-weight: 400; margin-right: 4px; }
+  .row.picked { box-shadow: inset 3px 0 0 var(--accent); }
+  /* "Something new since you opened the chat" — cctop-seen is report.html's
+     record, read here and never written. */
+  .row .name .newdot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); margin-left: 6px; vertical-align: 1px;
+  }
   .row .meta { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--faint); }
   /* The transcript line a search matched, quoted under the row's own metadata
      on a line of its own — the row matched nothing visible, so this is the
@@ -133,6 +144,69 @@
   .ctx i.hot { background: var(--amber); }
   .ctx i.full { background: var(--red); }
 
+  /* The bulk-select affordance: a checkbox in a gutter the row's left padding
+     widens to make, so it never sits on the status dot. Quiet until hovered
+     or checked — marking is the exception, not the default. Drawn only when
+     the serve may act; a read-only page never gets the wrappers. */
+  .pickrow { position: relative; }
+  #rows .pickrow { border-top: 1px solid var(--line); }
+  #rows .pickrow:first-of-type { border-top: 0; }
+  .pickrow .row { border-top: 0; padding-left: 30px; }
+  .pickrow .pick {
+    position: absolute; left: 9px; top: 14px; margin: 0;
+    accent-color: var(--accent); opacity: .4; cursor: pointer;
+  }
+  .pickrow:hover .pick, .pickrow .pick:checked, .pickrow .pick:focus-visible { opacity: 1; }
+
+  /* Transcript-search results stand in for the table while the card is open.
+     The table is only hidden, so closing puts back exactly what was there. */
+  .find { position: relative; }
+  .find h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--faint); padding: 11px 14px 0; }
+  .find .dismiss {
+    position: absolute; top: 9px; right: 8px; padding: 3px 7px;
+    font-size: 14px; line-height: 1; border-radius: 6px;
+    color: var(--faint); background: transparent; border-color: transparent;
+  }
+  .find .dismiss:hover { color: var(--ink); border-color: var(--line); }
+  .empty.bad { color: var(--red); }
+
+  /* The bulk bar: nothing while the set is empty, then the few verbs the set
+     answers to, between the table and the footer. */
+  .bulk {
+    display: flex; gap: 6px 10px; align-items: center; flex-wrap: wrap;
+    margin-top: 12px; font-size: 13px; color: var(--dim);
+  }
+  .bulk[hidden] { display: none; }
+  .bulk .sep { color: var(--faint); }
+  .bulk form { display: flex; gap: 8px; flex: 1 1 260px; min-width: 0; margin: 0; }
+  .bulk form[hidden] { display: none; }
+  .bulk input[type=text] {
+    flex: 1 1 auto; min-width: 0; font: inherit; font-size: 13px; padding: 6px 9px;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  .bulk input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .bulk button:disabled { opacity: .5; cursor: default; }
+  .bulk .said { font-size: 12px; }
+  .bulk .said.bad { color: var(--red); }
+
+  /* A phone gets the same page: the controls wrap, the table stacks its
+     figures under the metadata instead of squeezing the name column, and the
+     answer box lets its input take a line of its own. */
+  @media (max-width: 700px) {
+    .wrap { padding: 12px 10px 48px; }
+    .controls { gap: 6px; }
+    form.launch { flex-basis: 100%; flex-wrap: wrap; }
+    form.launch input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
+    .row { grid-template-columns: 8px minmax(0, 1fr); }
+    .row .figures {
+      grid-row: auto; grid-column: 2; text-align: left; white-space: normal;
+      display: flex; gap: 4px 14px; flex-wrap: wrap; margin-top: 3px;
+    }
+    form.say { flex-wrap: wrap; }
+    form.say input { flex: 1 1 150px; }
+  }
+
   footer { margin-top: 20px; font-size: 12px; color: var(--faint);
            display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   footer .hint { font-size: 11px; }
@@ -153,7 +227,9 @@
   <div id="banners"></div>
 
   <div class="controls">
-    <input type="search" id="filter" placeholder="Filter on project, model, branch, title…" autocomplete="off" spellcheck="false">
+    <input type="search" id="filter" placeholder="Filter on project, model, branch, title…" autocomplete="off" spellcheck="false"
+           title="Type to filter the table · Enter to search every transcript">
+    <button id="gsearch" title="Search every transcript for the filter text">Search transcripts</button>
     <button id="running" aria-pressed="false" title="Show only sessions with a live process">Running</button>
     <button id="bell" aria-pressed="false" title="Notify when a session starts waiting on you">Notify</button>
     <select id="sort" title="Order the table">
@@ -170,22 +246,47 @@
     </form>
   </div>
 
-  <section class="card attention" id="attention" hidden>
-    <h2 id="attention-heading"></h2>
-    <div class="rows" id="attention-rows"></div>
+  <section class="card find" id="find" hidden>
+    <h2 id="find-heading"></h2>
+    <button class="dismiss" id="find-close" type="button" title="Back to the session table"
+            aria-label="Back to the session table">×</button>
+    <div class="rows" id="find-rows"></div>
   </section>
 
-  <section class="card">
-    <div class="rows" id="rows"></div>
-    <div class="empty" id="empty">Waiting for the first refresh…</div>
-  </section>
+  <div id="tableview">
+    <section class="card attention" id="attention" hidden>
+      <h2 id="attention-heading"></h2>
+      <div class="rows" id="attention-rows"></div>
+    </section>
+
+    <section class="card">
+      <div class="rows" id="rows"></div>
+      <div class="empty" id="empty">Waiting for the first refresh…</div>
+    </section>
+  </div>
+
+  <div class="bulk" id="bulk" hidden>
+    <span id="bulk-count"></span>
+    <span class="sep">·</span>
+    <button id="bulk-send" type="button" title="Type one line at every selected session">send…</button>
+    <span class="sep">·</span>
+    <button id="bulk-resume" type="button" title="Resume every selected session">resume</button>
+    <span class="sep">·</span>
+    <button id="bulk-clear" type="button" title="Empty the selection">clear</button>
+    <form id="bulk-form" hidden>
+      <input id="bulk-text" type="text" maxlength="4000" autocomplete="off" spellcheck="false"
+             placeholder="One line, sent to each selected session">
+      <button type="submit">Send</button>
+    </form>
+    <span class="said" id="bulk-said"></span>
+  </div>
 
   <footer>
     <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
     <a id="analytics-link" href="/analytics">analytics</a>
     <span class="spacer"></span>
     <span id="counts"></span>
-    <span class="hint">j/k select · Enter opens · p pins · / filters</span>
+    <span class="hint" id="keys">j/k select · Enter opens · p pins · / filters · Enter in the filter searches transcripts</span>
     <a id="insight-optimize" href="/insight/optimize">optimize</a>
     <a id="insight-compare" href="/insight/compare">compare</a>
   </footer>
@@ -296,6 +397,18 @@ const shortModel = (model) => {
   return parts.length ? parts[parts.length - 1] : model;
 };
 
+// When each session's chat was last opened: `{id: {seq, at}}` written by
+// report.html, read here to mark rows with activity newer than the visit.
+// Every access is behind try/catch — a private window throws on the read, and
+// a shape from a version that stored it differently must not kill the render.
+const readSeen = () => {
+  try {
+    return JSON.parse(localStorage.getItem("cctop-seen")) || {};
+  } catch (e) {
+    return {};
+  }
+};
+
 let sessions = [];
 let filter = "";
 let runningOnly = false;
@@ -315,6 +428,17 @@ let selId = null;
 // once it wants something new. Both persist through the cctop-dash store.
 let pins = new Set();
 let dismissed = {};
+// The bulk-selection set: session ids marked for a send/resume across several
+// rows at once. Deliberately not in the store — a mark that survived a reload
+// could act on a session the reader no longer remembers choosing.
+let picked = new Set();
+// Sessions by id, for the two places that know an id and want its row's
+// words: transcript hits joining back to their metadata, and the bulk bar
+// naming the sessions it acted on.
+let sessionById = new Map();
+// report.html's "you last opened this chat at" record, refreshed every render
+// because a chat open in another tab keeps rewriting it. Read, never written.
+let seenNow = {};
 
 // How the table is ordered, by what the reader picked.
 //
@@ -372,14 +496,25 @@ function rowFor(s) {
   // the node itself is thrown away on the next render.
   row.dataset.id = s.session_id;
   if (s.session_id === selId) row.classList.add("sel");
+  if (picked.has(s.session_id)) row.classList.add("picked");
 
   row.appendChild(el("span", "dot " + (s.running || s.state === "error" ? s.state : "idle")));
 
   const name = el("div", "name trunc");
   if (pins.has(s.session_id)) name.appendChild(el("span", "pin", "★"));
+  if (picked.has(s.session_id)) name.appendChild(el("span", "tick", "✓"));
   name.appendChild(el("span", null, s.project ? shortPath(s.project) : s.session_id.slice(0, 8)));
   if (s.title) {
     name.appendChild(el("span", "title", " · " + s.title));
+  }
+  // New activity since the chat was last opened — the marker needs both a
+  // visit on record and something after it, so a session never opened and one
+  // read to the end both stay unmarked.
+  const seen = seenNow[s.session_id] || seenNow[s.provider + ":" + s.session_id];
+  if (seen && Date.parse(s.last_active) > Number(seen.at)) {
+    const dot = el("span", "newdot");
+    dot.title = "activity since you last opened this session";
+    name.appendChild(dot);
   }
   // The full path is worth having, but not worth the width. `title` is also
   // what a screen reader reads out, which is the same trade.
@@ -591,7 +726,7 @@ function answerBox(s) {
 // way to wave it away.
 function wantingNode(s) {
   const box = el("div", "wanting");
-  box.appendChild(rowFor(s));
+  box.appendChild(pickableRow(s));
   const say = answerBox(s);
   if (say) box.appendChild(say);
   // Dismissal is recorded against the state that was dismissed, not the
@@ -622,6 +757,17 @@ function render() {
   // The selection outlives the rebuild below only while its session is still
   // on screen — a session that filtered away or ended takes the mark with it.
   if (selId && !shown.some((s) => s.session_id === selId)) selId = null;
+  // The bulk set holds while its sessions exist, not while they are shown:
+  // filtering is a view, and a mark that a keystroke wiped would make picking
+  // a row and then looking for the next one impossible. A session that leaves
+  // the list entirely — ended, or walked away on the server's side — drops
+  // its mark, since acting on it is no longer possible anyway.
+  for (const id of picked) {
+    if (!sessions.some((s) => s.session_id === id)) picked.delete(id);
+  }
+  // Re-read on every render rather than once at load: a chat opened in
+  // another tab since the last pass writes the record this reads.
+  seenNow = readSeen();
 
   // Anything a person has to answer, first and on its own.
   //
@@ -686,7 +832,7 @@ function render() {
   document.getElementById("attention-heading").textContent =
     wanting.length === 1 ? "1 session needs you" : wanting.length + " sessions need you";
 
-  document.getElementById("rows").replaceChildren(...rest.map(rowFor));
+  document.getElementById("rows").replaceChildren(...rest.map(pickableRow));
   const empty = document.getElementById("empty");
   empty.hidden = shown.length > 0;
   if (shown.length === 0 && sessions.length > 0) empty.textContent = "Nothing matches that filter.";
@@ -707,6 +853,8 @@ function render() {
     box.appendChild(el("span", "k", label));
     totals.appendChild(box);
   }
+
+  renderBulk();
 }
 
 // A desktop notification for the moment a session crosses into waiting — the
@@ -756,6 +904,7 @@ function apply(next) {
   announce(next);
   previousState = new Map(next.map((s) => [s.session_id, s.state]));
   sessions = next;
+  sessionById = new Map(next.map((s) => [s.session_id, s]));
   firstRender = false;
   render();
 }
@@ -855,6 +1004,219 @@ async function transcriptSearch(q) {
     }
   }
   render();
+}
+
+// --- the transcript-results card ---------------------------------------------
+
+// The filter asks "which of these sessions"; the card answers "which
+// transcripts hold these words at all" — every session the server knows, not
+// only the rows on screen. Enter in the filter or the button beside it opens
+// it; Escape or its × puts the table back, which was only hidden, never torn
+// down — so the attention card, the marks and a half-typed answer all survive.
+const findCard = document.getElementById("find");
+const findRows = document.getElementById("find-rows");
+const findHeading = document.getElementById("find-heading");
+const tableview = document.getElementById("tableview");
+const findOpen = () => !findCard.hidden;
+
+function closeFind() {
+  findCard.hidden = true;
+  tableview.hidden = false;
+}
+
+// One hit, drawn like a session row but linked to the chat with its find box
+// already holding the query — `?find=` is the report page's spelling for that.
+// The route's answer carries only the id and the snippet; the project, title
+// and provider are the session's own, joined back from the table's data.
+function findRowFor(hit, q) {
+  const id = hit.session_id || hit.id || "";
+  const s = sessionById.get(id);
+  const row = el("a", "row");
+  row.href =
+    "/session/" + encodeURIComponent(id) +
+    (QUERY ? QUERY + "&find=" : "?find=") + encodeURIComponent(q);
+  row.setAttribute("role", "listitem");
+  row.dataset.id = id;
+  row.appendChild(
+    el("span", "dot " + (s && (s.running || s.state === "error") ? s.state : "idle")),
+  );
+  const name = el("div", "name trunc");
+  const project = (s && s.project) || hit.project;
+  name.appendChild(el("span", null, project ? shortPath(project) : id.slice(0, 8)));
+  const title = (s && s.title) || hit.title;
+  if (title) name.appendChild(el("span", "title", " · " + title));
+  if (project) name.title = project;
+  row.appendChild(name);
+  const meta = el("div", "meta");
+  const provider = (s && s.provider) || hit.provider;
+  const model = (s && s.model) || hit.model;
+  if (provider) meta.appendChild(el("span", null, provider));
+  if (model) meta.appendChild(el("span", null, shortModel(model)));
+  if (s && s.last_active) meta.appendChild(el("span", null, ago(s.last_active) + " ago"));
+  if (hit.snippet) {
+    meta.appendChild(el("span", "snip trunc", "“" + hit.snippet + "”"));
+  }
+  row.appendChild(meta);
+  return row;
+}
+
+async function openFind() {
+  const q = filterBox.value.trim();
+  if (!q) {
+    filterBox.focus();
+    return;
+  }
+  tableview.hidden = true;
+  findCard.hidden = false;
+  findHeading.textContent = "Transcript search — “" + q + "”";
+  // The server floors short queries rather than answering them; the card says
+  // so instead of asking and reporting an empty answer as "nothing mentions".
+  if (q.length < 3) {
+    findRows.replaceChildren(
+      el("div", "empty", "Three characters or more to search transcripts."),
+    );
+    return;
+  }
+  findRows.replaceChildren(el("div", "empty", "Searching every transcript…"));
+  let hits;
+  try {
+    const data = await ask(
+      "/api/search?q=" + encodeURIComponent(q) +
+        (TOKEN ? "&t=" + encodeURIComponent(TOKEN) : ""),
+    ).then(asJson);
+    // The route answers {"hits": [...]}; a bare array is accepted too — it is
+    // the shape an earlier version of the route was described as having.
+    hits = Array.isArray(data) ? data : data.hits || [];
+  } catch (e) {
+    if (findOpen()) {
+      findRows.replaceChildren(el("div", "empty bad", String(e.message || e)));
+    }
+    return;
+  }
+  // Closed while the search was in flight: the card's state belongs to the
+  // view that asked for it, and that view is gone.
+  if (!findOpen()) return;
+  if (!hits.length) {
+    findRows.replaceChildren(el("div", "empty", "No transcript mentions that."));
+    return;
+  }
+  findRows.replaceChildren(...hits.map((h) => findRowFor(h, q)));
+}
+
+// --- bulk selection ------------------------------------------------------------
+
+// `x` on the keyboard-selected row, or the checkbox in the row's gutter, marks
+// a session for a verb that takes several at once. A serve that may not act
+// gets none of this: no marks, no bar, no wiring — there would be nothing
+// behind it to run.
+function pickableRow(s) {
+  const row = rowFor(s);
+  if (!CAN_ACT) return row;
+  const wrap = el("div", "pickrow");
+  const box = el("input", "pick");
+  box.type = "checkbox";
+  box.checked = picked.has(s.session_id);
+  box.title = "Select for a bulk action";
+  box.setAttribute(
+    "aria-label",
+    box.title + " — " + (s.project ? shortPath(s.project) : s.session_id.slice(0, 8)),
+  );
+  box.addEventListener("click", () => togglePick(s.session_id));
+  wrap.appendChild(box);
+  wrap.appendChild(row);
+  return wrap;
+}
+
+function togglePick(id) {
+  if (picked.has(id)) picked.delete(id);
+  else picked.add(id);
+  render();
+}
+
+const bulkBar = document.getElementById("bulk");
+const bulkForm = document.getElementById("bulk-form");
+const bulkText = document.getElementById("bulk-text");
+const bulkSaid = document.getElementById("bulk-said");
+// One bulk run at a time; the buttons are disabled for the flight, so this is
+// a guard against a keypress landing between the click and the disable.
+let bulkBusy = false;
+
+function renderBulk() {
+  if (!CAN_ACT) return;
+  bulkBar.hidden = picked.size === 0;
+  document.getElementById("bulk-count").textContent = picked.size + " selected";
+}
+
+// How a selected row is named in the summary — its project, or the id's head
+// when there is none, the same choice the row itself makes.
+const nameOf = (id) => {
+  const s = sessionById.get(id);
+  return s && s.project ? shortPath(s.project) : id.slice(0, 8);
+};
+
+// One verb against every marked session, one request at a time: these type at
+// real terminals and start real agents, and a parallel burst is the mistake
+// the answer box's one-POST-at-a-time already avoids. The summary names the
+// failures rather than counting them — "2 failed" still has to be answered by
+// hand, while the names are the answer.
+async function bulkAct(verb, text) {
+  if (bulkBusy || picked.size === 0) return;
+  bulkBusy = true;
+  const buttons = bulkBar.querySelectorAll("button");
+  for (const b of buttons) b.disabled = true;
+  bulkSaid.className = "said";
+  bulkSaid.textContent = "…";
+  const done = [];
+  const failed = [];
+  for (const id of picked) {
+    try {
+      await ask("/api/act/" + verb + "/" + encodeURIComponent(id) + QUERY, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // The route insists on a JSON object even when the verb takes no
+        // arguments — a resume carries an empty one.
+        body: JSON.stringify(verb === "send" ? { text } : {}),
+      });
+      done.push(id);
+    } catch (e) {
+      failed.push(nameOf(id) + " — " + String(e.message || e));
+    }
+  }
+  bulkSaid.textContent =
+    (verb === "send" ? "sent to " : "resumed ") + done.length +
+    (failed.length
+      ? " · failed: " + failed.map((f) => f.split(" — ")[0]).join(", ")
+      : "");
+  bulkSaid.title = failed.join("\n");
+  bulkSaid.className = failed.length ? "said bad" : "said";
+  if (!failed.length && verb === "send") {
+    bulkText.value = "";
+    bulkForm.hidden = true;
+  }
+  for (const b of buttons) b.disabled = false;
+  bulkBusy = false;
+}
+
+if (CAN_ACT) {
+  document.getElementById("bulk-send").addEventListener("click", () => {
+    bulkForm.hidden = !bulkForm.hidden;
+    if (!bulkForm.hidden) bulkText.focus();
+  });
+  document.getElementById("bulk-resume").addEventListener("click", () => bulkAct("resume"));
+  document.getElementById("bulk-clear").addEventListener("click", () => {
+    picked.clear();
+    bulkForm.hidden = true;
+    bulkSaid.textContent = "";
+    render();
+  });
+  bulkForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = bulkText.value.trim();
+    if (text) bulkAct("send", text);
+  });
+  bulkText.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") bulkForm.hidden = true;
+  });
 }
 
 // --- the live connection ---------------------------------------------------
@@ -1027,6 +1389,8 @@ runningBtn.addEventListener("click", (e) => {
   store.write();
   render();
 });
+document.getElementById("gsearch").addEventListener("click", openFind);
+document.getElementById("find-close").addEventListener("click", closeFind);
 
 // Every page-level key shares this guard: none of them may fire while the
 // reader is typing — in the filter itself, the sort select, an answer box, or
@@ -1044,6 +1408,14 @@ document.addEventListener("keydown", (e) => {
   if (filterBox.value) filterBox.select();
 });
 filterBox.addEventListener("keydown", (e) => {
+  // Enter in the filter is the transcript search: the metadata match keeps
+  // answering as typing happens, but asking every transcript is deliberate —
+  // a keypress, not a debounce.
+  if (e.key === "Enter") {
+    e.preventDefault();
+    openFind();
+    return;
+  }
   if (e.key !== "Escape") return;
   e.preventDefault();
   // Cleared by running the same path as typing it empty: `filter`, the
@@ -1057,7 +1429,10 @@ filterBox.addEventListener("keydown", (e) => {
 // j/k walk the rows in the order the page shows them — the attention card
 // first, then the table — and Enter follows whichever is marked. The rows
 // are anchors, so "open" is just a click.
-const listedRows = () => [...document.querySelectorAll(".row[data-id]")];
+// Only rows on screen count: while the search-results card is open the table
+// is display:none, and its rows must not take j/k or Enter behind its back.
+const listedRows = () =>
+  [...document.querySelectorAll(".row[data-id]")].filter((r) => r.offsetParent !== null);
 
 function moveSelection(dir) {
   const rows = listedRows();
@@ -1096,9 +1471,17 @@ document.addEventListener("keydown", (e) => {
     else pins.add(selId);
     store.write();
     render();
-  } else if (e.key === "Escape" && selId) {
-    selId = null;
-    for (const row of listedRows()) row.classList.remove("sel");
+  } else if (e.key === "x" && selId && CAN_ACT) {
+    togglePick(selId);
+  } else if (e.key === "Escape") {
+    // The results card takes Escape first — it is a view over the table, and
+    // closing it is the smaller undo. Only then does Escape unmark the row.
+    if (findOpen()) {
+      closeFind();
+    } else if (selId) {
+      selId = null;
+      for (const row of listedRows()) row.classList.remove("sel");
+    }
   }
 });
 
@@ -1108,6 +1491,13 @@ document.addEventListener("keydown", (e) => {
 // claims a whole flex line, so this closes the first.
 const themeButton = window.themeToggle && window.themeToggle();
 if (themeButton) document.getElementById("quota").before(themeButton);
+
+// The hint names only keys that do something on this page: a read-only serve
+// never draws the bulk bar, so it never mentions the mark key either.
+document.getElementById("keys").textContent =
+  "j/k select · Enter opens · p pins · / filters" +
+  (CAN_ACT ? " · x marks" : "") +
+  " · Enter in the filter searches transcripts";
 
 // Ages are relative and nothing else changes between snapshots, so a slow tick
 // keeps "4m ago" honest without waiting on the next refresh.

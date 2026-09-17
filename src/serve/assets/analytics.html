@@ -76,6 +76,22 @@
 
   footer { margin-top: 24px; font-size: 12px; color: var(--faint); display: grid; gap: 4px; }
 </style>
+<style>
+  /* A phone gets the same page in one column. The wide things — the heat
+     grid, the charts, the tables — keep their size and scroll inside their
+     card rather than compressing until the text is gone; the filters and
+     tiles are what actually rearrange. */
+  @media (max-width: 700px) {
+    .controls select { flex: 1 1 140px; max-width: none; }
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tile .v { font-size: 18px; }
+    .decks { grid-template-columns: 1fr; }
+    .heat { min-width: 560px; }
+    .scroll-x > svg { min-width: 620px; height: auto; }
+    .sess td a { max-width: 28ch; }
+    .wr { grid-template-columns: minmax(0, 1fr) 60px auto; }
+  }
+</style>
 <script>__CCTOP_THEME__</script>
 
 <div class="wrap">
