@@ -65,8 +65,18 @@
   .decks td { padding: 5px 10px; }
   .decks .card { padding-bottom: 6px; }
 
+  /* The sessions table is the way off this page — every block above it is an
+     aggregate, these rows are the sessions themselves and link out to their
+     reports. The name truncates inside the link so a long title cannot push
+     the table sideways. */
+  .sess td a { display: inline-block; max-width: 46ch; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+               text-decoration: none; }
+  .sess td a:hover { color: var(--accent); }
+
   footer { margin-top: 24px; font-size: 12px; color: var(--faint); display: grid; gap: 4px; }
 </style>
+<script>__CCTOP_THEME__</script>
 
 <div class="wrap">
   <header class="top">
@@ -173,6 +183,18 @@ const clock3 = (iso) => {
   const d = new Date(t);
   return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
 };
+// How long ago a timestamp was. The sessions table lists "when" this way —
+// "3h ago" is the part a reader holds; a clock time would ask them to do the
+// subtraction against a clock they may not be looking at.
+const ago = (iso) => {
+  const then = Date.parse(iso);
+  if (!isFinite(then)) return "";
+  const s = Math.max(0, (Date.now() - then) / 1000);
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+};
 // Every day key from `a` to `b` inclusive, as local dates.
 function daysBetween(a, b) {
   const out = [];
@@ -190,6 +212,13 @@ function daysBetween(a, b) {
 // then the login, then the machine, then nobody in particular.
 const who = (s) => s.user || s.account || s.host || "local";
 const projKey = (s) => s.project_name || s.project || "—";
+
+// Model names arrive fully qualified from gateways and proxies
+// (`vendor/publisher/model`). The last segment is the part anyone reads.
+const shortModel = (model) => {
+  const parts = String(model).split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : model;
+};
 
 // The three claims the cost fields make, kept distinct: `cost_available` says
 // the provider records billable usage at all, `cost_included` says the plan
@@ -267,6 +296,36 @@ function offline(why) {
 let DATA = null;
 const SEL = { provider: "", project: "", model: "", who: "", range: "30d" };
 const RANGES = { "24h": 864e5, "7d": 7 * 864e5, "30d": 30 * 864e5, all: Infinity };
+
+// The filter set survives a reload — reopening the page should land on the
+// view it was left on, not back on the defaults. localStorage can throw
+// outright in an embedded context, so both directions of this are wrapped.
+const FILTERS_KEY = "cctop-analytics";
+function saveFilters() {
+  try {
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(SEL));
+  } catch (e) {}
+}
+function loadFilters() {
+  let stored;
+  try {
+    stored = JSON.parse(localStorage.getItem(FILTERS_KEY) || "null");
+  } catch (e) {
+    return;
+  }
+  if (!stored || typeof stored !== "object") return;
+  for (const key of ["provider", "project", "model", "who"]) {
+    if (typeof stored[key] === "string") SEL[key] = stored[key];
+  }
+  // SEL alone is enough for the dynamic selects — populateFilters adopts it
+  // when it rebuilds their options — but the range is fixed markup, so its
+  // element needs the restored value written back here.
+  if (typeof stored.range === "string" && Object.hasOwn(RANGES, stored.range)) {
+    SEL.range = stored.range;
+    document.getElementById("f-range").value = SEL.range;
+  }
+}
+
 // The window the range select names, as the oldest bucket key each chart may
 // use. Empty when "all" is picked — a string compare against "" keeps every
 // key, which is the same test either way.
@@ -779,6 +838,93 @@ function breakdowns(list) {
   return s;
 }
 
+// --- the sessions themselves ---------------------------------------------------
+
+// Every block above is an aggregate; this one is the drill-down — the rows
+// the figures were summed from, each linking out to its session report.
+// Fifty rows is enough to answer "which ones" without making the page carry
+// a table the size of the fleet.
+const MAX_ROWS = 50;
+
+// The cost cell of one session — the same three claims as `spendCell`:
+// bundled by a plan, unrecorded, or the figure.
+const sessCost = (s) => {
+  if (s.cost_included) return "incl";
+  if (!s.cost_available) return "—";
+  return typeof s.cost === "number" ? money(s.cost) : "—";
+};
+
+function sessionsTable(list) {
+  if (!list.length) return null;
+
+  // Cost ranks the rows where the set records it; where it mostly does not,
+  // the figure left to rank by is tokens. A session with no recorded cost
+  // sorts last rather than as zero — nothing recorded is not "cost nothing".
+  const tok = (s) => Number(s.tokens && s.tokens.total) || 0;
+  const costful = list.filter(hasRecorded).length * 2 >= list.length;
+  const ranked = [...list].sort((a, b) =>
+    (costful ? (hasRecorded(b) ? b.cost : -Infinity) - (hasRecorded(a) ? a.cost : -Infinity) : 0)
+    || tok(b) - tok(a));
+
+  const s = block(
+    "Sessions",
+    costful
+      ? "The filtered set, most expensive first. Each row opens its session report."
+      : "The filtered set, most tokens first — this set mostly records no cost. Each row opens its session report."
+  );
+
+  // Host is only a column when it can differ — on a one-machine fleet it
+  // would spend the width repeating itself.
+  const anyHost = list.some((x) => x.host);
+  const cols = [
+    ["Session", ""],
+    ...(anyHost ? [["Host", ""]] : []),
+    ["Agent", ""], ["Model", ""],
+    ["Cost", "num"], ["Tokens", "num"], ["Last active", "num"],
+  ];
+
+  const card = el("div", "card pad scroll-x sess");
+  const table = el("table");
+  const head = el("tr");
+  for (const [label, cls] of cols) head.appendChild(el("th", cls, label));
+  table.appendChild(head);
+
+  for (const sess of ranked.slice(0, MAX_ROWS)) {
+    const tr = el("tr");
+    const td = el("td");
+    // The token goes in the href — the address bar this page was opened at
+    // may already have been stripped of it.
+    const a = el("a", null, projKey(sess));
+    a.href = "/session/" + encodeURIComponent(sess.id) + QUERY;
+    if (sess.title) a.appendChild(el("span", "dim", " · " + sess.title));
+    // The full path is worth having, but not worth the width — same trade as
+    // the dashboard's rows.
+    if (sess.project) a.title = sess.project;
+    td.appendChild(a);
+    tr.appendChild(td);
+    if (anyHost) tr.appendChild(el("td", "mono dim", sess.host || ""));
+    tr.appendChild(el("td", null, sess.label || sess.provider || "—"));
+    tr.appendChild(el("td", "mono", sess.model ? shortModel(sess.model) : "—"));
+    tr.appendChild(el("td", "num", sessCost(sess)));
+    tr.appendChild(el("td", "num", tokens(tok(sess))));
+    // A running session's last_active is always "now"; its state word is the
+    // more honest cell.
+    tr.appendChild(el("td", "num",
+      sess.running ? sess.state || "running" : ago(sess.last_active) || "—"));
+    table.appendChild(tr);
+  }
+  if (list.length > MAX_ROWS) {
+    const tr = el("tr");
+    const td = el("td", "faint", "…and " + (list.length - MAX_ROWS) + " more");
+    td.colSpan = cols.length;
+    tr.appendChild(td);
+    table.appendChild(tr);
+  }
+  card.appendChild(table);
+  s.appendChild(card);
+  return s;
+}
+
 // --- the top strip -------------------------------------------------------------
 
 function kpis(list) {
@@ -877,7 +1023,7 @@ function renderAll() {
     return;
   }
   main.replaceChildren(
-    ...[spendChart, tokensChart, sessionsChart, heatSection, filesSection, breakdowns]
+    ...[spendChart, tokensChart, sessionsChart, heatSection, filesSection, breakdowns, sessionsTable]
       .map((f) => f(list))
       .filter(Boolean)
   );
@@ -885,6 +1031,19 @@ function renderAll() {
 }
 
 // --- load ---------------------------------------------------------------------
+
+// When the newest snapshot was built, so the header stamp can say how stale
+// it is as well as when — a bare clock time reads fresh forever on a page
+// whose refreshes have stopped landing.
+let UPDATED = 0;
+function paintUpdated() {
+  if (!UPDATED) return;
+  const s = Math.max(0, Math.round((Date.now() - UPDATED) / 1000));
+  const ago =
+    s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : Math.floor(s / 3600) + "h";
+  document.getElementById("updated").textContent =
+    "updated " + clock3(new Date(UPDATED).toISOString()) + " · " + ago + " ago";
+}
 
 async function refresh() {
   try {
@@ -895,8 +1054,9 @@ async function refresh() {
     renderAll();
     // "generated" is when the snapshot was built; if it does not parse, when
     // this page got it is still a true statement about the figures.
-    document.getElementById("updated").textContent =
-      "updated " + (clock3(DATA.generated) || clock3(new Date().toISOString()));
+    const t = Date.parse(DATA.generated);
+    UPDATED = isFinite(t) ? t : Date.now();
+    paintUpdated();
     offline(null);
   } catch (e) {
     offline(String(e.message || e));
@@ -912,16 +1072,26 @@ async function refresh() {
 // lands on a 403.
 document.getElementById("back").href = "/" + QUERY;
 
+// Inlined ahead of this script; if it ever is not, the header simply goes
+// without the button.
+const themeButton = window.themeToggle && window.themeToggle();
+if (themeButton) document.querySelector("header.top").appendChild(themeButton);
+
 for (const [id, key] of [
   ["f-provider", "provider"], ["f-project", "project"],
   ["f-model", "model"], ["f-who", "who"], ["f-range", "range"],
 ]) {
   document.getElementById(id).addEventListener("change", (e) => {
     SEL[key] = e.target.value;
+    saveFilters();
     renderAll();
   });
 }
 
+// Before the first refresh, so the first populateFilters and renderAll see
+// the restored set rather than the defaults.
+loadFilters();
 refresh();
 setInterval(refresh, 15000);
+setInterval(paintUpdated, 10000);
 </script>

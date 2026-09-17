@@ -98,6 +98,13 @@ pub struct Conversation {
 /// One thing that was said, and what it caused.
 #[derive(Debug, Clone, Serialize)]
 pub struct Turn {
+    /// The turn's place in the whole transcript, oldest counting from zero.
+    ///
+    /// Sent because the page needs a name for a turn that survives windowing:
+    /// `?before=` paging and `#chat/turn-N` links both speak in sequence
+    /// numbers, and a position in the returned window is neither — empty
+    /// turns are filtered out of `turns`, so position and sequence part ways.
+    pub seq: usize,
     /// `user`, `assistant`, or `system` for the harness speaking for itself.
     pub role: &'static str,
     /// `message` ordinarily; `reasoning` for a thinking summary, `compaction`
@@ -117,6 +124,8 @@ pub struct Turn {
 impl Turn {
     fn new(role: &'static str, kind: &'static str, ts: &str) -> Turn {
         Turn {
+            // Numbered by `push`, the only place that knows the count.
+            seq: 0,
             role,
             kind,
             ts: ts.to_string(),
@@ -188,11 +197,20 @@ fn is_zero(n: &u32) -> bool {
 }
 
 /// Read `session`'s conversation, as far as its harness allows.
-pub fn build(session: &Session) -> Conversation {
+///
+/// `before` pages backwards through the turns: when it is `Some(seq)`, the
+/// conversation returned ends just before that turn's sequence number instead
+/// of at the latest one — same [`MAX_TURNS`] window, reached from the other
+/// side. The parse still reads the whole transcript either way, because a tool
+/// result near the end of the file can belong to a call inside the window.
+pub fn build(session: &Session, before: Option<usize>) -> Conversation {
     let Some(path) = session.data_file.as_ref() else {
         return unsupported("this session has no transcript file on this machine");
     };
-    let mut sink = Sink::default();
+    let mut sink = Sink {
+        before,
+        ..Sink::default()
+    };
     let read = match session.provider {
         Provider::Claude => extract::for_each_jsonl(path, |item| sink.claude(item)),
         Provider::Codex => extract::for_each_jsonl(path, |item| sink.codex(item)),
@@ -252,6 +270,12 @@ struct Sink {
     first: usize,
     /// Sequence number the next turn will get.
     next: usize,
+    /// When set, the window stops at this sequence number: turns at or past it
+    /// still count (`next` keeps moving, so a later window's `earlier` is
+    /// unchanged) but are not kept. Their records are still read — a tool
+    /// result can arrive entries after the boundary and still needs to land on
+    /// a call inside the window.
+    before: Option<usize>,
     /// `tool_use` id -> (turn sequence, index within that turn's tools).
     index: HashMap<String, (usize, usize)>,
     /// Codex repeats an entry when a turn is retried; the second copy of a
@@ -283,10 +307,17 @@ impl Sink {
         self.run = None;
         let seq = self.next;
         self.next += 1;
-        self.turns.push_back(turn);
-        while self.turns.len() > MAX_TURNS {
-            self.turns.pop_front();
-            self.first += 1;
+        // Past the `before` boundary the turn is numbered but not kept: its
+        // sequence has to exist so `first` still counts it, but the window a
+        // paged-back request is answering ends before it.
+        if self.before.is_none_or(|before| seq < before) {
+            let mut turn = turn;
+            turn.seq = seq;
+            self.turns.push_back(turn);
+            while self.turns.len() > MAX_TURNS {
+                self.turns.pop_front();
+                self.first += 1;
+            }
         }
         seq
     }
@@ -1427,7 +1458,7 @@ mod tests {
     fn a_provider_with_no_reader_says_so_instead_of_looking_empty() {
         let mut session = Session::new(Provider::Windsurf, "s1".into());
         session.data_file = Some(std::path::PathBuf::from("/nonexistent"));
-        let chat = build(&session);
+        let chat = build(&session, None);
         assert!(!chat.supported);
         assert!(chat.note.is_some_and(|n| n.contains("Windsurf")));
     }
@@ -1593,8 +1624,70 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let mut session = Session::new(Provider::Devin, "s1".into());
         session.data_file = Some(path);
-        let chat = build(&session);
+        let chat = build(&session, None);
         assert!(!chat.supported);
         assert!(chat.note.is_some_and(|n| n.contains("could not read")));
+    }
+
+    /// A turn's `seq` is its place in the whole transcript, not its position
+    /// in the window — what `?before=` and the page's turn links count in.
+    #[test]
+    fn turns_kept_off_the_front_keep_their_sequence_numbers() {
+        let mut sink = Sink::default();
+        for i in 0..MAX_TURNS + 3 {
+            let mut turn = Turn::new("user", "message", "t");
+            turn.text = format!("turn {i}");
+            sink.push(turn);
+        }
+        let chat = sink.finish();
+        assert_eq!(chat.turns.len(), MAX_TURNS);
+        assert_eq!(chat.earlier, 3);
+        assert_eq!(chat.turns[0].seq, 3);
+        assert_eq!(chat.turns[0].text, "turn 3");
+    }
+
+    /// `?before=` ends the window at the boundary rather than the newest
+    /// turn, same size and same `earlier` count as the unwindowed one.
+    #[test]
+    fn a_before_window_ends_where_it_was_asked_to() {
+        let mut sink = Sink {
+            before: Some(MAX_TURNS + 2),
+            ..Sink::default()
+        };
+        for i in 0..MAX_TURNS + 5 {
+            let mut turn = Turn::new("user", "message", "t");
+            turn.text = format!("turn {i}");
+            sink.push(turn);
+        }
+        let chat = sink.finish();
+        // The three turns past the boundary were numbered — `earlier` and the
+        // next window's seqs depend on it — but never kept.
+        assert_eq!(chat.turns.len(), MAX_TURNS);
+        assert_eq!(chat.earlier, 2);
+        assert_eq!(chat.turns[0].seq, 2);
+        assert_eq!(chat.turns.last().unwrap().seq, MAX_TURNS + 1);
+    }
+
+    /// A result can be written entries after the window's boundary; the call
+    /// it answers still has to show as finished.
+    #[test]
+    fn a_result_past_the_boundary_still_lands_on_its_call() {
+        let mut sink = Sink {
+            before: Some(1),
+            ..Sink::default()
+        };
+        for line in [
+            r#"{"type":"assistant","timestamp":"t1","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/a"}}]}}"#,
+            // Turn 1 — past the boundary, numbered but not kept.
+            r#"{"type":"user","timestamp":"t2","message":{"content":"next question"}}"#,
+            // The call's result, recorded last of all.
+            r#"{"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}]}}"#,
+        ] {
+            sink.claude(&serde_json::from_str(line).unwrap());
+        }
+        let chat = sink.finish();
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].seq, 0);
+        assert_eq!(chat.turns[0].tools[0].result.as_deref(), Some("done"));
     }
 }

@@ -192,6 +192,23 @@
              color: var(--faint); font-size: 12px; text-align: left; }
   .earlier:hover { color: var(--accent); }
 
+  /* The chat pane's own controls. They sit above #split rather than inside
+     #talk because the poll rebuilds #talk every five seconds — a control in
+     there would be thrown away under a typing reader. */
+  .chattools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .chattools input {
+    flex: 1 1 180px; min-width: 0; font: inherit; font-size: 13px; padding: 6px 10px;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  .chattools input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .chattools .n { font-size: 12px; color: var(--faint); white-space: nowrap; }
+  .chattools button {
+    font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 99px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--dim); cursor: pointer;
+  }
+  .chattools button:hover:enabled { color: var(--accent); border-color: var(--accent); }
+  .chattools button:disabled { color: var(--faint); cursor: default; }
+
   /* --- the conversation -------------------------------------------------- */
 
   .turn { border-top: 1px solid var(--line); padding: 12px 14px;
@@ -252,6 +269,21 @@
   .turn.compaction { text-align: center; color: var(--faint); font-size: 12px; }
   .turn .clip { font-size: 11px; color: var(--faint); margin-top: 4px; }
 
+  /* The deep-link button at the .who line's far end — kept faint because it
+     is a way to point at a turn, not part of what was said. */
+  .turn > .who .anchor {
+    margin-left: auto; font: inherit; font-size: 12px; line-height: inherit;
+    text-transform: none; letter-spacing: 0; padding: 0 3px;
+    border: 0; background: none; color: var(--faint); cursor: pointer; opacity: .6;
+  }
+  .turn > .who .anchor:hover { color: var(--accent); opacity: 1; }
+
+  /* A turn the find box names, and the one it is sitting on — which is also
+     the mark a deep link leaves. An inset shadow rather than a border, so
+     marking a turn moves nothing. */
+  .turn.hit { box-shadow: inset 3px 0 0 var(--accent); }
+  .turn.current { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
   /* A tool call inside a turn: collapsed to one line, opened for the result. */
   details.tool { margin-top: 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
   details.tool > summary {
@@ -296,6 +328,9 @@
   .chip { font-size: 12px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); }
   .chip .n { font-family: var(--mono); color: var(--faint); margin-left: 5px; }
 </style>
+<!-- The stored light/dark choice has to land on <html> before the first
+     paint, so it runs here rather than down with the page's own script. -->
+<script>__CCTOP_THEME__</script>
 
 <div class="wrap">
   <header class="top">
@@ -315,6 +350,13 @@ const ID = decodeURIComponent(location.pathname.replace(/^\/session\//, ""));
 // the server rather than discovered, so the controls are never drawn for a run
 // that would refuse them.
 const CAN_ACT = "__CCTOP_ACTIONS__";
+
+// The light/dark/system switch, at the header's right end. The inlined
+// theme.js defines window.themeToggle when the page is served; a copy opened
+// as a bare file has none, so this is guarded rather than assumed.
+const topBar = document.querySelector("header.top");
+const themeButton = window.themeToggle && window.themeToggle();
+if (topBar && themeButton) topBar.appendChild(themeButton);
 
 const el = (tag, cls, text) => {
   const node = document.createElement(tag);
@@ -1103,9 +1145,13 @@ function markdown(text) {
   return root;
 }
 
-function turnNode(turn) {
+function turnNode(turn, seq) {
   const kind = turn.kind === "message" ? "" : " " + turn.kind;
   const node = el("div", "turn " + turn.role + kind);
+  // The id is the turn's transcript-wide seq — what a "#chat/turn-N" link and
+  // the find box's marks name. Set before the compaction early return because
+  // a link can name a compaction turn too.
+  node.id = "turn-" + seq;
   if (turn.kind === "compaction") {
     node.appendChild(el("div", "said-text", "— context compacted here —"));
     return node;
@@ -1113,6 +1159,12 @@ function turnNode(turn) {
   const who = el("div", "who");
   who.appendChild(el("span", null, turn.kind === "reasoning" ? "thinking" : (WHO[turn.role] || turn.role)));
   if (turn.ts) who.appendChild(el("span", "faint", clock(turn.ts, true) || ""));
+  // "#" copies a link that opens this page on this turn.
+  const anchor = el("button", "anchor", "#");
+  anchor.type = "button";
+  anchor.title = "Copy a link to this turn";
+  anchor.addEventListener("click", () => linkTurn(seq));
+  who.appendChild(anchor);
   node.appendChild(who);
   if (turn.text) node.appendChild(markdown(turn.text));
   if (turn.clipped) node.appendChild(el("div", "clip", "… cut for length; the whole of it is in the transcript"));
@@ -1127,36 +1179,62 @@ function conversation(chat) {
     return s;
   }
   const card = el("div", "card");
-  const turns = chat.turns || [];
+  const turns = TURNS;
   // Drawing every turn at once is what makes a big session stall — each is a
   // markdown pass plus its tool rows. The tail is what is live, so it is
-  // drawn and the rest is a click per chunk away.
+  // drawn and the rest is a click per chunk away — fetched turns first, and
+  // once those are all showing the same button pages the transcript itself.
   const hidden = Math.max(0, turns.length - chatShown);
-  const earlier = (chat.earlier || 0) + hidden;
+  const earlier = earlierCount() + hidden;
   if (earlier) {
-    if (hidden) {
-      const more = el("button", "earlier",
-        "show " + Math.min(CHAT_CHUNK, hidden) + " earlier turns — " + earlier + " in all not drawn");
-      more.type = "button";
-      more.addEventListener("click", () => {
-        chatShown += CHAT_CHUNK;
-        // The reveal lands above the fold, so the view is held on the same
-        // turn rather than jumping to wherever the new top put it.
-        const before = document.documentElement.scrollHeight;
-        drawChat(LAST_CHAT);
-        window.scrollTo(0, window.scrollY + document.documentElement.scrollHeight - before);
-      });
-      card.appendChild(more);
-    } else {
-      card.appendChild(el("div", "turn faint", earlier + " earlier turns are in the transcript and not shown"));
-    }
+    const more = el("button", "earlier",
+      "show " + Math.min(CHAT_CHUNK, earlier) + " earlier turns — " + earlier + " in all not drawn");
+    more.type = "button";
+    more.addEventListener("click", () => showEarlier(more));
+    card.appendChild(more);
   }
   if (!turns.length) {
     card.appendChild(el("div", "empty", "Nothing has been said in this session yet."));
   }
-  for (const turn of turns.slice(-chatShown)) card.appendChild(turnNode(turn));
+  // The id a turn is drawn with is its transcript seq — `hidden` is also the
+  // first drawn position — so a "#chat/turn-N" link names the same turn
+  // however the fetched window slides.
+  turns.forEach((turn, i) => {
+    if (i >= hidden) card.appendChild(turnNode(turn, turn.seq));
+  });
   s.appendChild(card);
   return s;
+}
+
+// One click on "show earlier": a chunk more of what is already held, or —
+// when everything held is drawn — a fetch for the turns before it. The
+// redraw lands above the fold either way, so the scroll is held on the same
+// turn rather than jumping to wherever the new top put it.
+async function showEarlier(button) {
+  if (TURNS.length - chatShown > 0) {
+    chatShown += CHAT_CHUNK;
+  } else {
+    const first = earlierCount();
+    if (!first) return;
+    button.disabled = true;
+    button.textContent = "Reading earlier turns…";
+    try {
+      const chat = await ask(
+        "/api/chat/" + encodeURIComponent(ID) +
+          (QUERY ? QUERY + "&" : "?") + "before=" + first,
+      ).then(asJson);
+      mergeChat(chat);
+      chatShown += Math.min(CHAT_CHUNK, (chat.turns || []).length);
+    } catch (e) {
+      // The button this came from is spent; the redraw remakes it.
+      drawChat();
+      saidFlash(String(e.message || e), false);
+      return;
+    }
+  }
+  const before = document.documentElement.scrollHeight;
+  drawChat();
+  window.scrollTo(0, window.scrollY + document.documentElement.scrollHeight - before);
 }
 
 // --- talking to the server -------------------------------------------------
@@ -1605,22 +1683,54 @@ let SESSION = ID;
 let REPORT = null;
 // What the conversation looked like at the last build — see chatSig.
 let CHAT_SIG = null;
-// The conversation itself, so "show earlier" expands without a fetch.
+// The newest window the server sent, kept for `supported`/`note` and the
+// change signature — the turns drawn come from TURNS, not straight from it.
 let LAST_CHAT = null;
-// How much of a long conversation is drawn: the newest CHAT_CHUNK turns, one
-// chunk more per click. The tail is the part that is live; drawing all of a
-// 200-turn session is the stall, not the poll.
+// Every turn fetched so far, oldest first, each carrying the transcript-wide
+// `seq` the server numbers it with. A poll merges over the tail; a paged-back
+// fetch (`?before=`) prepends older turns — so a turn's `seq` is the only name
+// that stays true across both, and it is what the DOM ids, deep links and the
+// find box all use.
+let TURNS = [];
+// How many of a long conversation's turns are drawn: the newest CHAT_CHUNK,
+// one chunk more per click. The tail is the part that is live; drawing all of
+// a 200-turn session is the stall, not the poll.
 const CHAT_CHUNK = 120;
 let chatShown = CHAT_CHUNK;
+// Turns the transcript holds before everything fetched — the seq of the
+// oldest held turn, which is exactly the count of what came before it.
+const earlierCount = () =>
+  TURNS.length ? TURNS[0].seq : (LAST_CHAT ? LAST_CHAT.earlier || 0 : 0);
+
+// Fold a response into TURNS: a shared seq is the same turn re-read, and the
+// fresh copy wins — for the tail that is a turn still being written.
+function mergeChat(chat) {
+  const fresh = new Map((chat.turns || []).map((t) => [t.seq, t]));
+  TURNS = TURNS.filter((t) => !fresh.has(t.seq))
+    .concat(chat.turns || [])
+    .sort((a, b) => a.seq - b.seq);
+}
 // The "new activity" pill, built on first use.
 let MORE = null;
+// The turn half of a "#chat/turn-N" link, kept until the conversation is
+// drawn — it cannot be scrolled to before it exists.
+let wantTurn = null;
+// The find box's parts and what it currently matches, plus the all-tools
+// fold. All of it lives outside the turns because drawChat replaces the
+// turns on every poll.
+let SEEK = null;
+let seekHits = [];
+let seekAt = -1;
+let toolsOpen = false;
 
 function show(name) {
   for (const [key, pane] of Object.entries(PANES)) pane.hidden = key !== name;
   for (const button of document.querySelectorAll("nav.views button")) {
     button.setAttribute("aria-selected", String(button.dataset.view === name));
   }
-  location.hash = name;
+  // A deep link already names this view — "#chat/turn-3" is the chat, plus
+  // where in it. Rewriting it to the bare name would strip the turn.
+  if (!location.hash.startsWith("#" + name + "/")) location.hash = name;
 }
 
 function startChatPoll() {
@@ -1673,15 +1783,175 @@ window.addEventListener("scroll", () => {
   if (MORE && !MORE.hidden && nearBottom()) moreActivity(false);
 }, { passive: true });
 
-// The redraw, shared by the poll and by the "show earlier" button — which
-// needs no fetch because the conversation it expands is the one already held.
-function drawChat(chat) {
+// --- finding a turn ---------------------------------------------------------
+
+// The chat pane's own controls: a find box over the drawn turns and the
+// all-tools fold. Built once and kept — they sit above #split rather than
+// inside #talk, which drawChat empties on every poll.
+function chatTools() {
+  const bar = el("div", "chattools");
+  const input = el("input");
+  input.type = "search";
+  input.autocomplete = "off";
+  input.placeholder = "Find in the conversation…";
+  input.setAttribute("aria-label", "Find in the conversation");
+  const count = el("span", "n");
+  const prev = el("button", null, "↑");
+  prev.type = "button";
+  prev.title = "Previous matching turn";
+  const next = el("button", null, "↓");
+  next.type = "button";
+  next.title = "Next matching turn";
+  prev.disabled = next.disabled = true;
+  const tools = el("button", null, "Tools ▸");
+  tools.type = "button";
+  tools.title = "Open every tool call in the conversation";
+  input.addEventListener("input", () => { seekAt = -1; applySeek(); });
+  // Enter walks the matches like a find bar does; Shift+Enter walks back.
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); seekMove(e.shiftKey ? -1 : 1); }
+  });
+  prev.addEventListener("click", () => seekMove(-1));
+  next.addEventListener("click", () => seekMove(1));
+  tools.addEventListener("click", () => {
+    toolsOpen = !toolsOpen;
+    tools.textContent = toolsOpen ? "Tools ▾" : "Tools ▸";
+    tools.title = toolsOpen
+      ? "Close every tool call in the conversation"
+      : "Open every tool call in the conversation";
+    applyTools();
+  });
+  SEEK = { input, count, prev, next };
+  bar.append(input, count, prev, next, tools);
+  return bar;
+}
+
+// What a turn can be found by: its own text, plus the names, arguments and
+// results of its tool calls — the same coverage the drawn textContent gave,
+// extended to turns the chunking has not drawn.
+const turnText = (t) => [
+  t.text,
+  ...(t.tools || []).flatMap((x) => [x.name, x.detail, x.full, x.result, ...(x.diff || [])]),
+].filter(Boolean).join(" ").toLowerCase();
+
+// What the find box currently matches. The search runs over every fetched
+// turn rather than the drawn ones — a hit the chunking hides is still a hit,
+// and walking to it draws the window it lives in. Marks are re-applied after
+// every drawChat because the poll's rebuild throws the nodes away.
+function applySeek() {
+  if (!SEEK) return;
+  const q = SEEK.input.value.trim().toLowerCase();
+  seekHits = q ? TURNS.filter((t) => turnText(t).includes(q)).map((t) => t.seq) : [];
+  const hitSet = new Set(seekHits);
+  const pane = document.getElementById("talk");
+  if (pane) {
+    for (const node of pane.querySelectorAll(".turn[id^=turn-]")) {
+      node.classList.toggle("hit", hitSet.has(Number(node.id.slice(5))));
+      node.classList.remove("current");
+    }
+  }
+  if (seekAt >= seekHits.length) seekAt = seekHits.length - 1;
+  if (seekAt >= 0) {
+    const on = document.getElementById("turn-" + seekHits[seekAt]);
+    if (on) on.classList.add("current");
+  }
+  SEEK.prev.disabled = SEEK.next.disabled = !seekHits.length;
+  // The count covers every turn fetched — only turns the transcript holds
+  // that no fetch has reached stay outside it, and the note says so.
+  const unsearched = earlierCount();
+  SEEK.count.textContent = q
+    ? seekHits.length + (seekHits.length === 1 ? " turn" : " turns") +
+      (unsearched ? " · earlier not searched" : "")
+    : "";
+}
+
+// ↑/↓ walk the hits. Landing opens the turn's tool calls too — a match whose
+// text lives inside a closed <details> would otherwise scroll to a turn that
+// does not show why it matched.
+function seekMove(dir) {
+  if (!seekHits.length) return;
+  // -1 is "not on a hit yet": the first ↓ lands on the first, the first ↑ on
+  // the last — the direction the reader asked for, not a step from nowhere.
+  seekAt = seekAt < 0
+    ? (dir > 0 ? 0 : seekHits.length - 1)
+    : (seekAt + dir + seekHits.length) % seekHits.length;
+  gotoTurn(seekHits[seekAt]);
+}
+
+// The fold is a choice about the conversation, not about the nodes — the poll
+// throws the nodes away, so the choice is kept here and replayed onto
+// whatever is currently drawn.
+function applyTools() {
+  const pane = document.getElementById("talk");
+  if (!pane) return;
+  for (const d of pane.querySelectorAll("details.tool")) d.open = toolsOpen;
+}
+
+// A "#chat/turn-N" link names a turn by its transcript seq. One the chunking
+// has not drawn is reached by growing the window, and one no fetch has
+// reached is paged back to — a deep link into a long conversation lands on
+// its turn rather than reporting a miss.
+async function gotoTurn(seq) {
+  // Each hop is a full transcript parse server-side, so the page-back is
+  // bounded: enough to reach any plausible link, not a way to spend the
+  // server in a loop.
+  let guard = 8;
+  while (earlierCount() > seq && guard-- > 0) {
+    try {
+      const chat = await ask(
+        "/api/chat/" + encodeURIComponent(ID) +
+          (QUERY ? QUERY + "&" : "?") + "before=" + earlierCount(),
+      ).then(asJson);
+      mergeChat(chat);
+    } catch (e) {
+      break;
+    }
+  }
+  // >= rather than ===: a filtered empty turn leaves a gap in the seqs, and
+  // the next real turn is the honest landing for a link that names one.
+  const pos = TURNS.findIndex((t) => t.seq >= seq);
+  if (pos < 0) {
+    saidFlash("That turn is not in this conversation", false);
+    return;
+  }
+  if (pos < TURNS.length - chatShown) {
+    chatShown = TURNS.length - pos;
+    drawChat();
+  }
+  const turn = document.getElementById("turn-" + TURNS[pos].seq);
+  if (!turn) return;
+  for (const t of document.querySelectorAll("#talk .turn.current")) {
+    t.classList.remove("current");
+  }
+  turn.classList.add("current");
+  for (const d of turn.querySelectorAll("details.tool")) d.open = true;
+  turn.scrollIntoView({ block: "center" });
+}
+
+// The address bar's token was stripped after load, so the bar gets the bare
+// anchor while the clipboard gets the link that opens for someone else.
+function linkTurn(seq) {
+  const hash = "#chat/turn-" + seq;
+  try { history.replaceState(null, "", location.pathname + hash); }
+  catch (e) { /* a context that forbids it keeps the URL it had */ }
+  copyText(location.origin + location.pathname + QUERY + hash)
+    .then(() => saidFlash("Copied — a link to this turn", true))
+    .catch((e) => saidFlash("Copy failed: " + String((e && e.message) || e), false));
+}
+
+// The redraw, shared by the poll, "show earlier" and the deep links — all of
+// them draw the same held conversation, so it takes no argument.
+function drawChat() {
   const pane = document.getElementById("talk");
   const say = pane.querySelector("form.say");
-  pane.replaceChildren(conversation(chat));
+  pane.replaceChildren(conversation(LAST_CHAT));
   // The composer is part of this pane and holds what someone is typing, so it
   // is moved across rather than rebuilt underneath them.
   if (say) pane.appendChild(say);
+  // Per-turn state the rebuilt nodes cannot keep: the fold choice and the
+  // find box's marks are replayed onto whatever was just drawn.
+  applyTools();
+  applySeek();
 }
 
 async function refreshChat() {
@@ -1701,7 +1971,8 @@ async function refreshChat() {
     const wasNear = nearBottom();
     CHAT_SIG = sig;
     LAST_CHAT = chat;
-    drawChat(chat);
+    mergeChat(chat);
+    drawChat();
     if (wasNear) {
       // Pinned to the tail: a rebuild must not scroll the newest turn out from
       // under someone watching it arrive.
@@ -1718,7 +1989,11 @@ async function refreshChat() {
     // A poll that fails when there is already a conversation on screen is a
     // connection problem, not an empty session: keep what is there and say so.
     if (pane.querySelector(".card")) offline(String(e.message || e));
-    else pane.replaceChildren(el("div", "empty", String(e.message || e)));
+    else {
+      pane.replaceChildren(el("div", "empty", String(e.message || e)));
+      // The turns are gone, so the find box's marks and count go with them.
+      applySeek();
+    }
   }
 }
 
@@ -1854,6 +2129,10 @@ function load() {
       side.id = "termside";
       side.hidden = true;
       split.append(talk, side);
+      // The pane's controls sit beside the split rather than inside #talk,
+      // which the poll rebuilds — in there they would not survive five
+      // seconds, let alone a typing reader.
+      PANES.chat.appendChild(chatTools());
       PANES.chat.appendChild(split);
 
       // The report's own sections, split between the two views they belong to.
@@ -1900,7 +2179,11 @@ function load() {
       nav.appendChild(copyButton());
 
       const wanted = location.hash.replace(/^#/, "");
-      open_view(labels[wanted] ? wanted : "chat", r);
+      // "#chat/turn-12" is a link into the conversation: it opens the chat
+      // view, and the turn half waits in wantTurn until the chat is drawn.
+      const jump = wanted.match(/^chat\/turn-(\d+)$/);
+      if (jump) wantTurn = Number(jump[1]);
+      open_view(jump ? "chat" : (labels[wanted] ? wanted : "chat"), r);
     })
     .catch((e) => {
       document.getElementById("main").replaceChildren(
@@ -2031,6 +2314,13 @@ async function open_view(name, r) {
     // that stopped since the page opened would otherwise be polled forever,
     // and one that started would never be.
     if (LIVE ? LIVE.running : r.running) startChatPoll();
+    // A deep link's turn can only be scrolled to once the conversation is
+    // drawn, so it waited for this rather than racing the fetch.
+    if (wantTurn !== null) {
+      const index = wantTurn;
+      wantTurn = null;
+      gotoTurn(index);
+    }
   }
   if (name === "access" && !PANES.access.dataset.loaded) {
     PANES.access.dataset.loaded = "1";
