@@ -1208,7 +1208,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         "/api/events" => events(shared, stream, &request),
         "/insight/optimize" => api_insight(shared, stream, &request, "optimize"),
         "/insight/compare" => api_insight(shared, stream, &request, "compare"),
-        "/analytics" => page(shared, stream, &request, ANALYTICS_HTML),
+        "/analytics" => page(shared, stream, &request, ANALYTICS_HTML, access),
         // The whole fleet's history in one document — the analytics page
         // filters and charts it client-side, so this one read-only route is
         // all the server owes it. Untrimmed buckets are affordable here
