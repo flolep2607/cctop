@@ -211,6 +211,10 @@ struct Shared {
     /// page is built: a page cached from a run that had them on must not be able
     /// to act on a run that has them off.
     actions: bool,
+    /// The port being served, because it is part of the access cookie's name —
+    /// cookies are scoped to the host and ignore the port, so two serves on
+    /// one machine would otherwise hand each other's credential back.
+    port: u16,
     plan: Plan,
     /// The latest snapshot, and a version that only ever increases.
     ///
@@ -495,6 +499,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         token: token.clone(),
         readonly,
         actions,
+        port: addr.port(),
         plan: options.plan,
         latest: Mutex::new(Arc::new(Snapshot {
             version: 0,
@@ -1124,6 +1129,14 @@ enum Access {
     ReadOnly,
 }
 
+/// The cookie a page hands back for the run's token. Named with the port
+/// because a cookie is scoped to the host alone — `127.0.0.1:7777` and
+/// `127.0.0.1:9999` share one jar — and a second serve would otherwise spend
+/// its visits overwriting the first one's credential.
+fn cookie_name(port: u16) -> String {
+    format!("cctop_access_{port}")
+}
+
 /// What the presented token buys, or `None` when it buys nothing.
 fn access_for(shared: &Shared, presented: &str) -> Option<Access> {
     if shared.token.is_empty() || token_matches(&shared.token, presented) {
@@ -1148,8 +1161,16 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // Before the route, so a wrong token cannot be used to find out which
     // routes exist. Every path is behind it, including the ones that only
     // return HTML. Either minted token opens the door; which one it was
-    // decides what lies behind it.
-    let Some(access) = access_for(shared, request.token()) else {
+    // decides what lies behind it. The cookie is the same credential on its
+    // second visit: `?t=` gets a page in once, the page's `Set-Cookie` is what
+    // a reload — which has no query left — presents instead. It adds no new
+    // way in: the cookie only ever repeats a token that was already minted.
+    let Some(access) = access_for(shared, request.token()).or_else(|| {
+        access_for(
+            shared,
+            request.cookie(&cookie_name(shared.port)).unwrap_or(""),
+        )
+    }) else {
         crate::elog::event(
             "http",
             "request",
@@ -1556,12 +1577,31 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str, 
         .replace("\"__CCTOP_HOME__\"", &home)
         .replace("__CCTOP_BACK__", &back)
         .replace("__CCTOP_VERSION__", env!("CARGO_PKG_VERSION"));
-    http::respond(
+
+    // Hand the credential back as a cookie so a reload — which has no `?t=`
+    // left, the page having stripped it — still gets in. Only a request that
+    // presented a token mints one: a page that got in on the cookie already
+    // has it, and a read-only link does not push a full cookie out of a jar
+    // that holds one.
+    let mut headers = String::new();
+    if !request.token().is_empty() && !credential.is_empty() {
+        let held = request
+            .cookie(&cookie_name(shared.port))
+            .and_then(|c| access_for(shared, c));
+        if !(access == Access::ReadOnly && held == Some(Access::Full)) {
+            headers = format!(
+                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict\r\n",
+                cookie_name(shared.port)
+            );
+        }
+    }
+    http::respond_extra(
         stream,
         Some(request),
         200,
         "text/html; charset=utf-8",
         body.as_bytes(),
+        &headers,
     );
 }
 
@@ -1785,6 +1825,7 @@ mod tests {
             token: token.to_string(),
             readonly: readonly.to_string(),
             actions: true,
+            port: 7777,
             plan: Plan::Retail,
             latest: Mutex::new(Arc::new(Snapshot {
                 version: 0,
