@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -10,7 +10,8 @@ homepage = "https://github.com/flolep2607/cctop"
 readme = "README.md"
 # Derives the session cache's version from the parser sources; see build.rs.
 build = "build.rs"
-keywords = ["tui", "monitoring", "claude", "codex", "devin", "htop"]
+# crates.io accepts at most five — "monitoring" is in the description already.
+keywords = ["tui", "claude", "codex", "devin", "htop"]
 categories = ["command-line-utilities", "development-tools"]
 # docs/harnesses is a mirror of seven other projects' documentation — 14 MB of
 # it, against a 10 MB crate limit. It is for people reading this repository,
