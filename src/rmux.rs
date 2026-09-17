@@ -589,6 +589,14 @@ pub fn quiet(name: &str) {
     let _ = Command::new("rmux")
         .args(["set-option", "-p", "-t", name, "allow-passthrough", "on"])
         .output();
+    // And let the agent copy out. `set-clipboard` defaults to `external`,
+    // which rmux reads as *clipboard writes from inside a pane are dropped* —
+    // so a copy in Claude Code went nowhere until this. Server-scoped rather
+    // than session: rmux stores the option globally whichever target names it,
+    // so `-s` says honestly what `-t` would do anyway.
+    let _ = Command::new(BIN)
+        .args(["set-option", "-s", "set-clipboard", "on"])
+        .output();
 }
 
 /// Record on the session itself what this tab is called.

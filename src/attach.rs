@@ -101,6 +101,31 @@ impl vt100::Callbacks for Signals {
         }
     }
 
+    /// The agent asked the terminal to copy — Claude Code's copy writes
+    /// `OSC 52 ; c ; <data>` — and a pane's output is repainted here as cells
+    /// rather than forwarded, so this callback is the only terminal the
+    /// request ever reaches. Honour it on the pane's behalf.
+    ///
+    /// The selection half (`ty` — `c`, `s`, `p`, …) names which X selection to
+    /// fill; every helper the copy shells out to writes the one clipboard, so
+    /// it is ignored rather than mapped. The read direction —
+    /// `paste_from_clipboard` — stays a no-op: answering it means writing the
+    /// reply back down the pty, which is plumbing this callback is layers
+    /// away from.
+    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], data: &[u8]) {
+        let Some(text) = std::str::from_utf8(data)
+            .ok()
+            .and_then(crate::util::b64_decode)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        else {
+            return;
+        };
+        // A helper can block, and the no-helper fallback writes the sequence
+        // onward to the real terminal's stdout — neither belongs on the
+        // thread that is mid-parse of the pane's output.
+        std::thread::spawn(move || crate::ui::render::copy_to_clipboard(&text));
+    }
+
     /// Watch for the agent turning on a keyboard protocol.
     ///
     /// Two of them, and the harnesses do not agree: Codex pushes the kitty
@@ -1396,6 +1421,20 @@ mod tests {
         let (mut attach, _) = probe();
         attach.parser.process(b"\x1b]0;claude: editing\x07");
         attach.parser.process(b"\x1b]2;claude: done\x07");
+        assert!(attach.rang().is_none());
+    }
+
+    /// A clipboard write is not a signal either — and it must reach the
+    /// callback that honours it without taking the bell path or the parser
+    /// down with it. The copy itself lands on the system clipboard, which no
+    /// test can read back; what is pinned here is that the sequence is
+    /// consumed quietly.
+    #[test]
+    fn a_clipboard_write_is_not_a_signal() {
+        let (mut attach, _) = probe();
+        attach.parser.process(b"\x1b]52;c;aGVsbG8=\x07");
+        attach.parser.process(b"\x1b]52;c;?\x07");
+        attach.parser.process(b"\x1b]52;c;!!!not-b64!!!\x07");
         assert!(attach.rang().is_none());
     }
 
