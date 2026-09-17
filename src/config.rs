@@ -391,6 +391,26 @@ pub static OPENCODE_DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
         })
 });
 
+/// Devin CLI stores sessions in the platform data directory.
+pub static DEVIN_CLI_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::var_os("CHISEL_SESSION_DB")
+        .and_then(|db_path| PathBuf::from(db_path).parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| HOME.join(".local").join("share"))
+                .join("devin")
+                .join("cli")
+        })
+});
+
+/// Devin's SQLite database containing session metadata.
+pub static DEVIN_SESSIONS_DB: LazyLock<PathBuf> =
+    LazyLock::new(|| DEVIN_CLI_DIR.join("sessions.db"));
+
+/// Devin's transcript JSON files directory.
+pub static DEVIN_TRANSCRIPTS_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| DEVIN_CLI_DIR.join("transcripts"));
+
 /// Where OpenCode reads its own configuration and global plugins, which is the
 /// *config* directory rather than the data one its sessions live in.
 pub static OPENCODE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -697,6 +717,11 @@ pub fn pi_sessions_roots() -> Vec<PathBuf> {
 
 pub fn gemini_chats_roots() -> Vec<PathBuf> {
     roots_across_homes(&GEMINI_CHATS_ROOT, |h| h.join(".gemini").join("tmp"))
+}
+
+#[allow(dead_code)]
+pub fn devin_sessions_roots() -> Vec<PathBuf> {
+    vec![DEVIN_TRANSCRIPTS_DIR.to_path_buf()]
 }
 
 /// The data directory *for another home*, which `dirs::data_dir` can only

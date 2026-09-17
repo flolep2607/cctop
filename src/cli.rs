@@ -316,6 +316,7 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
         ("Codex", Provider::Codex),
         ("Claude", Provider::Claude),
         ("Cursor", Provider::Cursor),
+        ("Devin", Provider::Devin),
         ("OpenCode", Provider::OpenCode),
         ("Pi", Provider::Pi),
         ("Gemini", Provider::Gemini),
@@ -611,6 +612,7 @@ pub fn json_sessions(
                 Provider::Codex if s.owner.is_none() => codex_account.as_ref(),
                 Provider::Claude | Provider::Codex => None,
                 Provider::Cursor
+                | Provider::Devin
                 | Provider::Gemini
                 | Provider::OpenCode
                 | Provider::Pi

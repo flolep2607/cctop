@@ -206,6 +206,21 @@ pub fn extract(path: &Path) -> SessionData {
                 .or_default()
                 .entry(model.clone())
                 .or_insert(0.0) += costs.total;
+            // `billable` above is only a did-anything-happen check and skips
+            // the 1h cache-write split; the bucket counts everything billed.
+            let billed = tokens.all_input() + tokens.output;
+            *data
+                .tokens_by_day
+                .entry(util::local_date_key(&dt))
+                .or_default()
+                .entry(model.clone())
+                .or_insert(0) += billed;
+            *data
+                .tokens_by_hour
+                .entry(util::local_hour_key(&dt))
+                .or_default()
+                .entry(model.clone())
+                .or_insert(0) += billed;
         }
 
         if let Some(content) = message.get("content").and_then(Value::as_array) {
@@ -308,6 +323,15 @@ mod tests {
         assert!((data.costs.total - 0.33).abs() < 1e-9);
         assert_eq!(data.metrics.tool_count, 1);
         assert_eq!(data.metrics.tools.get("read"), Some(&1));
+        // The same message also buckets its billed tokens: 100 input + 20
+        // output + 50 cache read + 10 cache write.
+        assert_eq!(
+            data.tokens_by_day
+                .values()
+                .flat_map(|m| m.values())
+                .sum::<u64>(),
+            180
+        );
 
         std::fs::remove_file(path).unwrap();
     }

@@ -204,6 +204,11 @@ const HISTORY_LINES: &str = "50000";
 /// session that already exists is left alone: it is someone's running agent, and
 /// this would take its window out from under it.
 pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
+    crate::elog::event(
+        "rmux",
+        "prepare",
+        serde_json::json!({ "session": name, "cmd": argv.join(" ") }),
+    );
     if exists(name) {
         return;
     }
@@ -534,6 +539,11 @@ pub fn kill(name: &str) -> Result<(), String> {
         .args(["kill-session", "-t", &format!("={name}")])
         .output()
         .map_err(|e| format!("rmux: {e}"))?;
+    crate::elog::event(
+        "rmux",
+        "kill",
+        serde_json::json!({ "session": name, "ok": out.status.success() }),
+    );
     if out.status.success() {
         return Ok(());
     }

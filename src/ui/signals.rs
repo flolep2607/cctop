@@ -112,6 +112,16 @@ impl App {
         let mut lifecycle = false;
         let mut moved = false;
         for event in events {
+            crate::elog::event(
+                "hook",
+                "recv",
+                serde_json::json!({
+                    "session": event.session_id,
+                    "signal": format!("{:?}", event.reported.signal),
+                    "pids": event.pids.len(),
+                    "cwd": &event.reported.cwd,
+                }),
+            );
             lifecycle |= event.reported.signal.is_lifecycle();
             if let Some(agent) = event.finished_agent {
                 self.finished_agents.insert(agent);

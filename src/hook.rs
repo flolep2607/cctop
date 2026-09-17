@@ -151,6 +151,7 @@ pub fn emit(args: &[String]) -> i32 {
     // operation also covers whatever else turns out to block that this comment
     // does not predict.
     let event = args.first().cloned().unwrap_or_default();
+    crate::elog::event("hook", "fire", serde_json::json!({ "name": event }));
     let args = args.to_vec();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -236,28 +237,40 @@ fn deliver(line: &[u8]) {
 
     let Some(dir) = socket_dir() else { return };
     let started = std::time::Instant::now();
-    for path in peers(&dir) {
+    let mut reached = 0usize;
+    let peers = peers(&dir);
+    for path in &peers {
         // Whatever is left of the agent's patience. Stopping here rather than
         // starting another connect is what keeps the fan-out from turning one
         // wedged cctop into a slow hook for everyone.
         if started.elapsed() >= DEADLINE {
-            return;
+            break;
         }
-        match UnixStream::connect(&path) {
+        match UnixStream::connect(path) {
             Ok(mut stream) => {
                 let _ = stream.set_write_timeout(Some(DEADLINE));
                 let _ = stream.write_all(line);
                 let _ = stream.flush();
+                reached += 1;
             }
             // A socket file whose owner is gone refuses connections but stays on
             // disk. Nobody else can be about to bind this name — an address is
             // stamped with the instant it was created and never reused — so the
             // process that finds it dead is the one that can clean it up.
             Err(_) => {
-                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path);
             }
         }
     }
+    crate::elog::event(
+        "hook",
+        "deliver",
+        serde_json::json!({
+            "peers": peers.len(),
+            "reached": reached,
+            "ms": started.elapsed().as_millis() as u64,
+        }),
+    );
 }
 
 /// How far up the process tree the hook looks for the agent that spawned it.

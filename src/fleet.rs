@@ -348,6 +348,7 @@ fn provider_of(name: &str) -> Option<Provider> {
         "claude" => Provider::Claude,
         "codex" => Provider::Codex,
         "cursor" => Provider::Cursor,
+        "devin" => Provider::Devin,
         "gemini" => Provider::Gemini,
         "opencode" => Provider::OpenCode,
         "pi" => Provider::Pi,

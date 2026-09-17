@@ -486,6 +486,36 @@ fn full_differs(short: &str, full: &str) -> bool {
     !full.is_empty() && short != full
 }
 
+/// The diff a Devin edit made, synthesised from its arguments.
+///
+/// ATIF records no `structuredPatch` — an `edit` call carries `old_string` and
+/// `new_string`, a `write` only the new `content` — so the hunks are the
+/// literal before and after rather than a minimal hunk. That is still the
+/// right thing to put in front of a reader asking what the session changed.
+pub fn edit_delta(input: &Value) -> Option<super::Delta> {
+    let mut delta = super::Delta::default();
+    if let Some(old) = input.get("old_string").and_then(Value::as_str) {
+        for line in old.lines() {
+            delta.removed += 1;
+            if delta.hunks.len() < crate::config::MAX_DIFF_LINES {
+                delta.hunks.push(format!("-{line}"));
+            }
+        }
+    }
+    let added = input
+        .get("new_string")
+        .or_else(|| input.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    for line in added.lines() {
+        delta.added += 1;
+        if delta.hunks.len() < crate::config::MAX_DIFF_LINES {
+            delta.hunks.push(format!("+{line}"));
+        }
+    }
+    (delta.added > 0 || delta.removed > 0).then_some(delta)
+}
+
 /// Best-effort summary for tools we don't have a specific rule for (mostly MCP).
 ///
 /// Strings win outright, arrays are joined, and numbers/bools are skipped —

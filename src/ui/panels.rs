@@ -181,6 +181,7 @@ pub fn info(
             Provider::Claude => theme::colors().claude,
             Provider::Codex => theme::colors().openai,
             Provider::Cursor => theme::colors().cursor,
+            Provider::Devin => theme::colors().claude,
             Provider::Gemini => theme::colors().gemini,
             Provider::OpenCode => theme::colors().opencode,
             Provider::Pi => theme::colors().pi,
@@ -249,6 +250,7 @@ pub fn info(
         Provider::Claude => format!("claude --resume {}", session.session_id),
         Provider::Codex => format!("codex resume {}", session.session_id),
         Provider::Cursor => "Open from Cursor history".to_string(),
+        Provider::Devin => "Open from Devin history".to_string(),
         Provider::Gemini => "gemini, then /chat resume".to_string(),
         Provider::OpenCode => format!("opencode --session {}", session.session_id),
         Provider::Pi => format!("pi --session {}", session.session_id),
@@ -278,6 +280,7 @@ pub fn info(
         Provider::Claude => crate::quota::claude_account(),
         Provider::Codex => crate::quota::codex_account(),
         Provider::Cursor
+        | Provider::Devin
         | Provider::Gemini
         | Provider::OpenCode
         | Provider::Pi
@@ -1692,6 +1695,30 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 theme::title(),
             )));
             lines.extend(skill_list(&crate::config::GEMINI_HOME.join("skills")));
+        }
+        Provider::Devin => {
+            let root = crate::config::DEVIN_CLI_DIR.clone();
+
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            let global = root.join("AGENTS.md");
+            match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", global.display()))),
+            }
+            if !session.label_source.is_empty() {
+                match file_section(&cwd.join("AGENTS.md"), "./AGENTS.md", 40) {
+                    Some(block) => lines.extend(block),
+                    None => lines.push(missing("./AGENTS.md not found".into())),
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Skills ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(skill_list(&root.join("skills")));
         }
         Provider::Windsurf => {
             // Windsurf's global rules live in the editor's own settings UI, not

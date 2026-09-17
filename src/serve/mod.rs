@@ -6,8 +6,9 @@
 //! This is the same data on a surface they have with them: a page that streams
 //! the rows over SSE, a per-session report that answers the question the live
 //! table cannot — where an afternoon's money went — the conversation itself,
-//! what the session has edited, what it is allowed to reach, and a prompt box
-//! for answering the agent that was waiting.
+//! what the session has edited, what it is allowed to reach, a prompt box
+//! for answering the agent that was waiting, and an analytics page for the
+//! questions no single row answers: when the fleet works, and on what.
 //!
 //! # It can act, and that is a decision with a cost
 //!
@@ -38,6 +39,9 @@
 //!   over whatever channel the user already trusts — and what makes `--no-token`
 //!   a thing to justify rather than a convenience. It also gates the actions:
 //!   no token, no acting, because there would be nothing left to authorise with.
+//!   Beside it a second token is minted — the read-only link. It opens every
+//!   page and every GET, and `/api/act/*` answers it 403: read-only is a
+//!   property of the credential, not a claim a request can make about itself.
 //! - **Nothing destructive.** No route stops an agent, kills a process or
 //!   deletes a transcript. Those stay in the terminal, where the confirmation
 //!   prompt is.
@@ -63,6 +67,9 @@
 //! anything here, because it authenticates rather than merely encrypting.
 
 mod actions;
+/// Cross-session aggregation behind `/api/analytics` — the data the
+/// analytics page charts, built from the snapshot plus cached extractions.
+mod analytics;
 /// The conversation reader. Public to the crate because a handoff brief
 /// carries what was said as well as what was done — see [`crate::handoff`].
 pub mod chat;
@@ -71,7 +78,10 @@ pub mod chat;
 #[cfg(feature = "debug")]
 mod debug;
 mod http;
+mod notify;
+mod quota;
 mod report;
+mod search;
 pub mod tunnel;
 
 use crate::cli;
@@ -140,6 +150,7 @@ const NO_SUCH_SESSION: &str = "no session with that id, or the prefix matches mo
 /// content policy that forbids loading anything at all.
 const DASHBOARD_HTML: &str = include_str!("assets/dashboard.html");
 const REPORT_HTML: &str = include_str!("assets/report.html");
+const ANALYTICS_HTML: &str = include_str!("assets/analytics.html");
 
 /// The stylesheet both pages share, substituted into each at send time.
 ///
@@ -148,10 +159,50 @@ const REPORT_HTML: &str = include_str!("assets/report.html");
 /// affordable because everything is already in the page.
 const COMMON_CSS: &str = include_str!("assets/common.css");
 
+/// A favicon small enough to keep inline: the table's dark tile with the amber
+/// dot it draws on a session that is waiting.
+///
+/// Served rather than embedded into the HTML — a `<link rel="icon">` is one
+/// request more, and embedding SVG in the pages would repeat it into both.
+/// `img-src 'self'` in the content policy is what lets the browser fetch it.
+const FAVICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">\
+    <rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#16151a\"/>\
+    <circle cx=\"32\" cy=\"32\" r=\"10\" fill=\"#e0a52c\"/></svg>";
+
+/// The web manifest, for a browser that wants to install the page as an app.
+///
+/// Its own route rather than a data: URL in a `<link>` because manifest fetches
+/// are governed by `manifest-src`, which `data:` is not a part of here.
+const MANIFEST: &str = concat!(
+    r#"{"name":"cctop","short_name":"cctop","display":"standalone","#,
+    r#""start_url":"/","icons":[{"src":"/favicon.svg","sizes":"any","#,
+    // `r##` rather than `r#` here: the colour hex begins `"#`, which is the
+    // short delimiter's own terminator.
+    r##""type":"image/svg+xml"}],"theme_color":"#16151a","background_color":"#16151a"}"##
+);
+
+/// Baseline gap between usage checks for a standalone `serve`.
+///
+/// A minute rather than the session refresh's seconds: quota moves slowly and
+/// the endpoints throttle aggressively — a 30s poll was once enough to earn a
+/// sustained 429 with a ~15 minute `retry-after`. When a provider asks for
+/// longer, `retry_delay_secs` honours that instead.
+const QUOTA_INTERVAL_SECS: u64 = 60;
+
+/// How often the quota poller wakes to see whether either provider is due.
+const QUOTA_TICK: Duration = Duration::from_secs(10);
+
 /// Everything a connection thread needs, shared behind one `Arc`.
 struct Shared {
     /// The per-run access token, or empty under `--no-token`.
     token: String,
+    /// The second token minted each run, and the link it makes possible.
+    ///
+    /// A token is the whole authorisation a request carries, so "read-only"
+    /// cannot be a flag a request sends — it has to be a different credential.
+    /// This one opens every page and every GET, and `/api/act/*` answers it
+    /// with 403. Empty under `--no-token`, which has nothing to withhold.
+    readonly: String,
     /// Whether the routes that act on a session answer at all.
     ///
     /// The token is what makes them safe to have, so `--no-token` turns them
@@ -160,6 +211,10 @@ struct Shared {
     /// page is built: a page cached from a run that had them on must not be able
     /// to act on a run that has them off.
     actions: bool,
+    /// The port being served, because it is part of the access cookie's name —
+    /// cookies are scoped to the host and ignore the port, so two serves on
+    /// one machine would otherwise hand each other's credential back.
+    port: u16,
     plan: Plan,
     /// The latest snapshot, and a version that only ever increases.
     ///
@@ -176,6 +231,18 @@ struct Shared {
     /// two owners writing one cache file is how a cache file gets corrupted,
     /// and the refresh thread is the owner that has something worth keeping.
     store: crate::cache::Store,
+    /// The `/api/quota` document, already serialised.
+    ///
+    /// Rendered by whoever produced the numbers — the standalone serve's own
+    /// poller, or the dashboard feeding [`Serving::publish_with_quota`] — so
+    /// the route itself is a memory read and never touches the rate-limited
+    /// usage endpoints on a browser's schedule.
+    quota: Mutex<String>,
+    /// The topical tier behind `/api/search`, built lazily on the first query
+    /// that wants it.
+    topics: Mutex<search::Topics>,
+    /// The webhook `--notify` points at, when one was asked for.
+    notify: Option<notify::Webhook>,
 }
 
 /// One publish of the whole table.
@@ -225,6 +292,9 @@ OPTIONS:
   --delay <SECS>   Seconds between refreshes [default: 2]
   --host <HOST>    Also serve the sessions on another machine, over ssh.
                    Repeatable; same syntax as `cctop --host`
+  --notify <URL>   POST a JSON event to this URL when a session crosses into
+                   waiting or asking — once per crossing, on a short deadline.
+                   [env: CCTOP_NOTIFY_URL]
   -h, --help       Print this help
 
 The page shows each session's conversation, what it edited, and what it can
@@ -256,6 +326,11 @@ pub struct Options {
     pub plan: Plan,
     pub delay: Duration,
     pub hosts: Vec<String>,
+    /// Where to POST when a session crosses into waiting or asking.
+    ///
+    /// `None` still falls back to `CCTOP_NOTIFY_URL` inside [`start`], which is
+    /// how a dashboard-hosted serve — no flag to have asked with — gets one.
+    pub notify: Option<String>,
     /// Whether the server scans for sessions itself.
     ///
     /// True for `cctop serve`, which is the only thing running. False for the
@@ -278,6 +353,7 @@ impl Default for Options {
             plan: Plan::Retail,
             delay: Duration::from_secs(2),
             hosts: Vec::new(),
+            notify: None,
             scan: true,
         }
     }
@@ -293,6 +369,12 @@ pub struct Serving {
     pub local: String,
     /// The public one, when a tunnel was asked for and registered.
     pub public: Option<String>,
+    /// The same page, read-only: every route answers but the ones that act.
+    ///
+    /// Carries the run's second token, on whichever origin is the one to hand
+    /// out — the tunnel's when there is one. Empty when the run has no token,
+    /// since a tokenless serve has nothing for a second credential to withhold.
+    pub readonly: String,
     pub actions: bool,
     shared: Arc<Shared>,
     remotes: Arc<Mutex<Remotes>>,
@@ -312,12 +394,17 @@ impl Serving {
         self.public.as_deref().unwrap_or(&self.local)
     }
 
-    /// Show the page these rows, replacing whatever it was showing.
+    /// Show the page these rows and this usage reading, replacing whatever it
+    /// was showing.
     ///
-    /// For a dashboard-hosted server, which has the rows already. Cheap enough
-    /// to call on every refresh: it costs one JSON encode of what the table is
-    /// already holding, and it is what wakes the event stream.
-    pub fn publish(&self, sessions: &[Session]) {
+    /// For a dashboard-hosted server, which has both already. Cheap enough to
+    /// call on every refresh: it costs one JSON encode of what the table is
+    /// already holding, and it is what wakes the event stream. The quota comes
+    /// along because the dashboard polls the usage endpoints for its own
+    /// panes — the page shares that reading rather than standing up a second
+    /// poller against the same rate-limited endpoints, and the two can never
+    /// disagree.
+    pub fn publish_with_quota(&self, sessions: &[Session], quota: &crate::quota::Quota) {
         let Ok(mut version) = self.version.lock() else {
             return;
         };
@@ -328,6 +415,7 @@ impl Serving {
             self.plan,
             &self.shared.store,
             &mut version,
+            Some(quota),
         );
     }
 }
@@ -380,6 +468,12 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         true => String::new(),
         false => new_token(),
     };
+    // A second credential for the same pages minus the actions — see
+    // `Shared::readonly` for why read-only is a token rather than a flag.
+    let readonly = match token.is_empty() {
+        true => String::new(),
+        false => new_token(),
+    };
     // The token is the whole authorisation story for an action, so there are no
     // actions without one. `--no-token` is already documented as "every process
     // and user on this machine can read your sessions"; letting that also mean
@@ -393,9 +487,19 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         false => None,
     };
 
+    // The origin a notification's link is built on: the tunnel's when there is
+    // one, since a webhook that names loopback is a link that works only on the
+    // machine that sent it.
+    let origin = tunnel
+        .as_ref()
+        .map(|t| t.url.clone())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", addr.port()));
+
     let shared = Arc::new(Shared {
         token: token.clone(),
+        readonly,
         actions,
+        port: addr.port(),
         plan: options.plan,
         latest: Mutex::new(Arc::new(Snapshot {
             version: 0,
@@ -405,6 +509,19 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         })),
         updated: Condvar::new(),
         store: crate::cache::Store::new(),
+        quota: Mutex::new(quota::EMPTY.to_string()),
+        topics: Mutex::new(search::Topics::default()),
+        notify: options
+            .notify
+            .or_else(|| {
+                // The dashboard builds its Options without a flag, so the
+                // environment is answered here — where every way of starting
+                // a serve passes through — rather than only in `run`'s parser.
+                std::env::var("CCTOP_NOTIFY_URL")
+                    .ok()
+                    .filter(|url| !url.is_empty())
+            })
+            .map(|target| notify::Webhook::new(target, origin.clone(), token.clone())),
     });
 
     let remotes = Arc::new(Mutex::new(Remotes::default()));
@@ -418,12 +535,27 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             options.plan,
             options.delay,
         );
+        // The dashboard's own poller feeds the page through
+        // `publish_with_quota`; a standalone serve has to ask the endpoints
+        // itself, on the slow cadence they demand.
+        spawn_quota_poller(Arc::clone(&shared));
     }
 
     let query = match token.is_empty() {
         true => String::new(),
         false => format!("?t={token}"),
     };
+    crate::elog::event(
+        "serve",
+        "listen",
+        serde_json::json!({
+            "addr": addr.to_string(),
+            "token": !token.is_empty(),
+            "actions": actions,
+            "tunnel": options.tunnel,
+            "notify": shared.notify.is_some(),
+        }),
+    );
     let running = Arc::new(AtomicBool::new(true));
     {
         let (shared, running) = (Arc::clone(&shared), Arc::clone(&running));
@@ -432,9 +564,17 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             .spawn(move || accept_loop(listener, shared, running))?;
     }
 
+    // The read-only link rides the same origin as whichever link is the one to
+    // hand out — public when a tunnel registered, loopback otherwise.
+    let readonly_link = match shared.readonly.is_empty() {
+        true => String::new(),
+        false => format!("{origin}/?t={}", shared.readonly),
+    };
+
     Ok(Serving {
         local: format!("http://127.0.0.1:{}/{query}", addr.port()),
         public: tunnel.as_ref().map(|t| format!("{}/{query}", t.url)),
+        readonly: readonly_link,
         actions,
         shared,
         remotes,
@@ -486,6 +626,9 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let mut plan = Plan::Retail;
     let mut delay = Duration::from_secs(2);
     let mut hosts: Vec<String> = Vec::new();
+    // `None` here still honours CCTOP_NOTIFY_URL — the fallback lives in
+    // `start`, so it also covers a dashboard, which has no flag to give.
+    let mut notify = None;
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -525,6 +668,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
                 delay = Duration::from_secs_f64(secs);
             }
             "--host" => hosts.push(value()?),
+            "--notify" => notify = Some(value()?),
             other => anyhow::bail!("unknown option '{other}'\n\n{HELP}"),
         }
     }
@@ -547,6 +691,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         plan,
         delay,
         hosts,
+        notify,
         // The only thing in this process, so it does its own walking.
         scan: true,
     })?;
@@ -661,6 +806,12 @@ fn announce(serving: &Serving, bind: &str, no_token: bool) {
     if let Some(public) = &serving.public {
         eprintln!("cctop: serving on {public}");
         eprintln!("cctop: also on {}", serving.local);
+        // The second link is a different credential, and labelled as such so
+        // it is never handed out as the full one: a link that can only read is
+        // only useful if the person holding it knows that is what they have.
+        if !serving.readonly.is_empty() {
+            eprintln!("cctop: read-only link — no actions: {}", serving.readonly);
+        }
         eprintln!(
             "cctop: that first link is on the public internet. Anyone who has it \
              can read every session on this machine — and, unless --no-actions, \
@@ -670,6 +821,9 @@ fn announce(serving: &Serving, bind: &str, no_token: bool) {
         let _ = std::io::stderr().flush();
     } else {
         eprintln!("cctop: serving on {}", serving.local);
+        if !serving.readonly.is_empty() {
+            eprintln!("cctop: read-only link — no actions: {}", serving.readonly);
+        }
     }
     if bind != "127.0.0.1" && serving.public.is_none() {
         eprintln!(
@@ -743,6 +897,74 @@ fn spawn_host_poller(host: fleet::Host, remotes: Arc<Mutex<Remotes>>) {
     });
 }
 
+/// Poll each provider's usage endpoint on the slow cadence they demand,
+/// storing the rendered `/api/quota` document each time one answers.
+///
+/// Each provider is paced by its own last outcome — a throttled one backs off
+/// without stalling the other — which is the same arithmetic the dashboard's
+/// poller runs (`spawn_quota_poller` in `src/ui/runloop.rs`), minus the burn
+/// log: a serve records nothing, it only reports.
+fn spawn_quota_poller(shared: Arc<Shared>) {
+    std::thread::spawn(move || {
+        let mut claude: Vec<crate::quota::ProfileQuota> = Vec::new();
+        let mut codex: Vec<crate::quota::ProfileQuota> = Vec::new();
+        let (mut claude_due, mut codex_due) = (Instant::now(), Instant::now());
+        loop {
+            let now = Instant::now();
+            let mut changed = false;
+            // Each profile is its own account with its own limits, so each is
+            // asked separately. They share one due time: the interval exists
+            // to be polite to the provider, and a machine with two logins is
+            // not entitled to twice the requests.
+            if now >= claude_due {
+                claude = crate::config::accounts_for(crate::pricing::Provider::Claude)
+                    .iter()
+                    .map(|profile| crate::quota::ProfileQuota {
+                        profile: profile.name.clone(),
+                        status: crate::quota::fetch_claude(profile),
+                        source: profile.source,
+                    })
+                    .collect();
+                // Paced by whichever account is most throttled, so backing off
+                // for one does not keep asking on behalf of another.
+                let delay = claude
+                    .iter()
+                    .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
+                    .max()
+                    .unwrap_or(QUOTA_INTERVAL_SECS);
+                claude_due = now + Duration::from_secs(delay);
+                changed = true;
+            }
+            if now >= codex_due {
+                codex = crate::config::accounts_for(crate::pricing::Provider::Codex)
+                    .iter()
+                    .map(|profile| crate::quota::ProfileQuota {
+                        profile: profile.name.clone(),
+                        status: crate::quota::fetch_codex(profile),
+                        source: profile.source,
+                    })
+                    .collect();
+                let delay = codex
+                    .iter()
+                    .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
+                    .max()
+                    .unwrap_or(QUOTA_INTERVAL_SECS);
+                codex_due = now + Duration::from_secs(delay);
+                changed = true;
+            }
+            if changed && let Ok(mut slot) = shared.quota.lock() {
+                *slot = serde_json::to_string(&quota::document(&crate::quota::Quota {
+                    fetched: true,
+                    claude: claude.clone(),
+                    codex: codex.clone(),
+                }))
+                .unwrap_or_else(|_| quota::EMPTY.to_string());
+            }
+            std::thread::sleep(QUOTA_TICK);
+        }
+    });
+}
+
 /// Walk, refresh, and publish, forever.
 ///
 /// The cadence mirrors the UI's: a light refresh every `delay` that re-reads
@@ -762,7 +984,15 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
         let mut rows = loader.load(plan);
         let mut walked = Instant::now();
         let mut version = 0u64;
-        publish(&shared, &remotes, &rows, plan, loader.store(), &mut version);
+        publish(
+            &shared,
+            &remotes,
+            &rows,
+            plan,
+            loader.store(),
+            &mut version,
+            None,
+        );
 
         loop {
             std::thread::sleep(delay);
@@ -781,7 +1011,15 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
             } else {
                 loader.refresh_live(plan, &mut rows);
             }
-            publish(&shared, &remotes, &rows, plan, loader.store(), &mut version);
+            publish(
+                &shared,
+                &remotes,
+                &rows,
+                plan,
+                loader.store(),
+                &mut version,
+                None,
+            );
         }
     });
 }
@@ -797,6 +1035,7 @@ fn publish(
     plan: Plan,
     store: &crate::cache::Store,
     version: &mut u64,
+    usage: Option<&crate::quota::Quota>,
 ) {
     let (mut sessions, host_errors) = match remotes.lock() {
         Ok(remotes) => {
@@ -825,6 +1064,15 @@ fn publish(
     let document = cli::json_sessions(&sessions, plan, store);
     let json = serde_json::to_string(&document).unwrap_or_else(|_| "[]".to_string());
 
+    // Written through the same lock as the snapshot, so the page's quota panel
+    // can never be newer than the rows it sits beside.
+    if let Some(usage) = usage
+        && let Ok(mut slot) = shared.quota.lock()
+    {
+        *slot = serde_json::to_string(&quota::document(usage))
+            .unwrap_or_else(|_| quota::EMPTY.to_string());
+    }
+
     *version += 1;
     let snapshot = Arc::new(Snapshot {
         version: *version,
@@ -832,15 +1080,76 @@ fn publish(
         sessions,
         host_errors,
     });
+    crate::elog::event(
+        "scan",
+        "snapshot",
+        serde_json::json!({
+            "version": snapshot.version,
+            "sessions": snapshot.sessions.len(),
+            "running": snapshot.sessions.iter().filter(|s| s.is_running()).count(),
+            "remote_hosts": snapshot.host_errors.len(),
+        }),
+    );
+    // The crossing is read off the pair of snapshots as they meet, which is the
+    // one place both feeds — this server's own refresher and the dashboard's —
+    // pass through. A webhook asked for here therefore covers both.
+    let mut crossed = Vec::new();
     if let Ok(mut latest) = shared.latest.lock() {
+        if let Some(hook) = &shared.notify {
+            crossed = hook
+                .crossed(&latest.sessions, &snapshot.sessions)
+                .into_iter()
+                .map(|(event, s)| (event, s.clone()))
+                .collect();
+        }
         *latest = snapshot;
     }
     shared.updated.notify_all();
+    if let Some(hook) = &shared.notify {
+        for (event, session) in crossed {
+            hook.post(event, &session);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
+
+/// Which of this run's two credentials a request presented.
+///
+/// The distinction lives at the router rather than inside each route: the
+/// check is the same for everything the read-only link may not do, and a route
+/// added later that forgets it is the bug the single gate prevents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// The full link: every page, every GET, and the actions when they are on.
+    Full,
+    /// The read-only link: everything but `/api/act/*`.
+    ReadOnly,
+}
+
+/// The cookie a page hands back for the run's token. Named with the port
+/// because a cookie is scoped to the host alone — `127.0.0.1:7777` and
+/// `127.0.0.1:9999` share one jar — and a second serve would otherwise spend
+/// its visits overwriting the first one's credential.
+fn cookie_name(port: u16) -> String {
+    format!("cctop_access_{port}")
+}
+
+/// What the presented token buys, or `None` when it buys nothing.
+fn access_for(shared: &Shared, presented: &str) -> Option<Access> {
+    if shared.token.is_empty() || token_matches(&shared.token, presented) {
+        return Some(Access::Full);
+    }
+    // The emptiness check is load-bearing: `token_matches` answers true for
+    // two empty strings, and an absent read-only credential must never be one
+    // a request can present.
+    if !shared.readonly.is_empty() && token_matches(&shared.readonly, presented) {
+        return Some(Access::ReadOnly);
+    }
+    None
+}
 
 /// Read one request, answer it, and let the connection close.
 fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
@@ -851,15 +1160,41 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
 
     // Before the route, so a wrong token cannot be used to find out which
     // routes exist. Every path is behind it, including the ones that only
-    // return HTML.
-    if !shared.token.is_empty() && !token_matches(&shared.token, request.token()) {
+    // return HTML. Either minted token opens the door; which one it was
+    // decides what lies behind it. The cookie is the same credential on its
+    // second visit: `?t=` gets a page in once, the page's `Set-Cookie` is what
+    // a reload — which has no query left — presents instead. It adds no new
+    // way in: the cookie only ever repeats a token that was already minted.
+    let Some(access) = access_for(shared, request.token()).or_else(|| {
+        access_for(
+            shared,
+            request.cookie(&cookie_name(shared.port)).unwrap_or(""),
+        )
+    }) else {
+        crate::elog::event(
+            "http",
+            "request",
+            serde_json::json!({"method": request.method, "path": request.path, "access": "denied"}),
+        );
         return http::respond_error(
             stream,
             Some(&request),
             403,
             "missing or wrong access token — open the link cctop printed",
         );
-    }
+    };
+    crate::elog::event(
+        "http",
+        "request",
+        serde_json::json!({
+            "method": request.method,
+            "path": request.path,
+            "access": match access {
+                Access::Full => "full",
+                Access::ReadOnly => "readonly",
+            },
+        }),
+    );
 
     // Before the router, so an armed fault covers every API route rather than
     // the handful somebody remembered to touch.
@@ -876,7 +1211,21 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         return;
     }
     match path.as_str() {
-        "/" => page(shared, stream, &request, DASHBOARD_HTML),
+        "/" => page(shared, stream, &request, DASHBOARD_HTML, access),
+        "/favicon.svg" => http::respond(
+            stream,
+            Some(&request),
+            200,
+            "image/svg+xml",
+            FAVICON.as_bytes(),
+        ),
+        "/manifest.webmanifest" => http::respond(
+            stream,
+            Some(&request),
+            200,
+            "application/manifest+json",
+            MANIFEST.as_bytes(),
+        ),
         "/api/sessions" => {
             let snapshot = current(shared);
             http::respond(
@@ -898,13 +1247,42 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 body.as_bytes(),
             );
         }
+        "/api/quota" => {
+            // Served from memory: the document is rendered by whoever polled
+            // the endpoints last, on their schedule rather than the browser's.
+            let body = shared
+                .quota
+                .lock()
+                .map(|q| q.clone())
+                .unwrap_or_else(|_| quota::EMPTY.to_string());
+            http::respond(
+                stream,
+                Some(&request),
+                200,
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+            );
+        }
+        "/api/search" => api_search(shared, stream, &request),
         "/api/events" => events(shared, stream, &request),
+        "/insight/optimize" => api_insight(shared, stream, &request, "optimize"),
+        "/insight/compare" => api_insight(shared, stream, &request, "compare"),
+        "/analytics" => page(shared, stream, &request, ANALYTICS_HTML, access),
+        // The whole fleet's history in one document — the analytics page
+        // filters and charts it client-side, so this one read-only route is
+        // all the server owes it. Untrimmed buckets are affordable here
+        // because the page fetches on its own cadence, not every refresh.
+        "/api/analytics" => {
+            let snapshot = current(shared);
+            let built = analytics::build(&snapshot.sessions, shared.plan, &shared.store);
+            json(stream, &request, &built);
+        }
         // What can be handed a session's work, and whether this run will act at
         // all. The page asks once and hides the controls it cannot use, rather
         // than offering buttons that answer 404.
         "/api/agents" => {
             let body = serde_json::json!({
-                "actions": shared.actions,
+                "actions": shared.actions && access == Access::Full,
                 "agents": actions::agents(),
             });
             http::respond(
@@ -915,7 +1293,24 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 body.to_string().as_bytes(),
             );
         }
-        _ if path.starts_with("/session/") => page(shared, stream, &request, REPORT_HTML),
+        // Not under /api/act/<id>/ — a launch names no session because there is
+        // none yet. The guards are the shared ones: same link, same flag, same
+        // insistence on a JSON POST.
+        "/api/launch" => {
+            let Some(body) = may_act(shared, stream, &request, access) else {
+                return;
+            };
+            let agent = body
+                .get("agent")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let cwd = body.get("cwd").and_then(serde_json::Value::as_str);
+            match actions::launch_agent(agent, cwd) {
+                Ok(done) => json(stream, &request, &done),
+                Err((status, why)) => http::respond_error(stream, Some(&request), status, &why),
+            }
+        }
+        _ if path.starts_with("/session/") => page(shared, stream, &request, REPORT_HTML, access),
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
@@ -926,10 +1321,50 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             api_access(shared, stream, &request, &path["/api/access/".len()..]);
         }
         _ if path.starts_with("/api/act/") => {
-            api_act(shared, stream, &request, &path["/api/act/".len()..]);
+            api_act(shared, stream, &request, &path["/api/act/".len()..], access);
         }
         _ => http::respond_error(stream, Some(&request), 404, "no such page"),
     }
+}
+
+/// Both transcript-search tiers over the current snapshot.
+fn api_search(shared: &Shared, stream: &mut TcpStream, request: &Request) {
+    let needle = request
+        .query
+        .get("q")
+        .map(|q| q.trim().to_lowercase())
+        .unwrap_or_default();
+    // Under a few characters a query is a keystroke rather than a question;
+    // answering one costs a scan of every transcript for a result that is
+    // nearly all of them.
+    if needle.chars().count() < search::MIN_CHARS {
+        return json(stream, request, &serde_json::json!({ "hits": [] }));
+    }
+    let snapshot = current(shared);
+    let hits = search::run(&shared.topics, &snapshot.sessions, &needle);
+    json(stream, request, &serde_json::json!({ "hits": hits }))
+}
+
+/// The text `cctop optimize` or `cctop compare` would print, as plain text.
+///
+/// Priced the way the report route is: the analysis re-parses every transcript
+/// because the tool calls it reasons about are never cached, so it happens on
+/// request rather than on the refresh clock — the same cost the CLI pays when
+/// asked the same question.
+fn api_insight(shared: &Shared, stream: &mut TcpStream, request: &Request, which: &str) {
+    let analyses = crate::insight::scan(shared.plan);
+    let selected = crate::insight::only(&analyses, None);
+    let text = match which {
+        "optimize" => crate::insight::optimize::report(&selected),
+        _ => crate::insight::compare::report(&selected),
+    };
+    http::respond(
+        stream,
+        Some(request),
+        200,
+        "text/plain; charset=utf-8",
+        text.as_bytes(),
+    );
 }
 
 /// Serve the conversation for one session.
@@ -954,34 +1389,62 @@ fn api_access(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &s
     json(stream, request, &crate::access::build(session, Some(&data)));
 }
 
-/// Do something to a session: `/api/act/<verb>/<id>`.
-///
-/// One route for the three verbs rather than three, because the guards in front
-/// of them are the whole security surface and they are identical — a route added
-/// later that forgets one of them is the bug this shape prevents.
-fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &str) {
+/// The guards every acting route shares, answered here once: a read-only link,
+/// a `--no-actions` serve, and a request that is not a JSON POST each get their
+/// own answer rather than a generic refusal. Returns the parsed body when the
+/// request may act — a route that forgets to go through this is the bug the
+/// shared shape exists to prevent.
+fn may_act(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    access: Access,
+) -> Option<serde_json::Value> {
+    // Before every other guard, because it is not one: this is the link doing
+    // what it was minted to do, and the answer names that rather than leaning
+    // on a flag the read-only page never had.
+    if access == Access::ReadOnly {
+        http::respond_error(stream, Some(request), 403, "this link is read-only");
+        return None;
+    }
     if !shared.actions {
-        return http::respond_error(
+        http::respond_error(
             stream,
             Some(request),
             403,
             "this cctop serve is read-only — restart it without --no-actions, \
              and with a token, to act on a session",
         );
+        return None;
     }
     // A `POST` with a JSON body, both of which are load-bearing: see the
     // module docs in `http` for why a form on another origin cannot be one.
     if !request.wants_json() {
-        return http::respond_error(
+        http::respond_error(
             stream,
             Some(request),
             405,
             "an action is a POST with a JSON body",
         );
+        return None;
     }
-    let body = match request.json() {
-        Ok(body) => body,
-        Err((status, why)) => return http::respond_error(stream, Some(request), status, why),
+    match request.json() {
+        Ok(body) => Some(body),
+        Err((status, why)) => {
+            http::respond_error(stream, Some(request), status, why);
+            None
+        }
+    }
+}
+
+/// Do something to a session: `/api/act/<verb>/<id>`.
+///
+/// One route for the three verbs rather than three, because the guards in front
+/// of them are the whole security surface and they are identical — a route added
+/// later that forgets one of them is the bug this shape prevents.
+fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &str, access: Access) {
+    let Some(body) = may_act(shared, stream, request, access) else {
+        return;
     };
     let Some((verb, id)) = rest.split_once('/') else {
         return http::respond_error(stream, Some(request), 404, "no such action");
@@ -1071,17 +1534,25 @@ fn current(shared: &Shared) -> Arc<Snapshot> {
 /// or being handed it. It is handed it, because the same page is fetched with
 /// no token at all under `--no-token` and a single substitution keeps both
 /// cases on one code path.
-fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str) {
+fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str, access: Access) {
+    // Which credential the page carries — and whether it may act — is decided
+    // by the one the request arrived with, not by the run: the read-only link
+    // opens the same page wired to the narrower token, so a page it hands out
+    // can neither act nor leak the token that could.
+    let (credential, actions) = match access {
+        Access::Full => (shared.token.as_str(), shared.actions),
+        Access::ReadOnly => (shared.readonly.as_str(), false),
+    };
     // JSON-encoded rather than pasted between quotes: the token is hex today,
     // and a literal substituted into script is exactly the shape of bug that
     // outlives the reason it was safe.
-    let token = serde_json::to_string(&shared.token).unwrap_or_else(|_| "\"\"".to_string());
+    let token = serde_json::to_string(&credential).unwrap_or_else(|_| "\"\"".to_string());
     // The report page links back to the table, and the link has to carry the
     // credential or it lands on a 403. Hex, so nothing in it needs escaping —
     // asserted by the tests rather than assumed, since the generator could change.
-    let back = match shared.token.is_empty() {
+    let back = match credential.is_empty() {
         true => String::new(),
-        false => format!("?t={}", shared.token),
+        false => format!("?t={credential}"),
     };
     // The page spells working directories with `~` the way the table does, and
     // cannot work out where home is on its own — the browser may not even be on
@@ -1097,7 +1568,7 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str) 
         .replace("__CCTOP_CSS__", COMMON_CSS)
         .replace(
             "\"__CCTOP_ACTIONS__\"",
-            match shared.actions {
+            match actions {
                 true => "true",
                 false => "false",
             },
@@ -1106,12 +1577,31 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str) 
         .replace("\"__CCTOP_HOME__\"", &home)
         .replace("__CCTOP_BACK__", &back)
         .replace("__CCTOP_VERSION__", env!("CARGO_PKG_VERSION"));
-    http::respond(
+
+    // Hand the credential back as a cookie so a reload — which has no `?t=`
+    // left, the page having stripped it — still gets in. Only a request that
+    // presented a token mints one: a page that got in on the cookie already
+    // has it, and a read-only link does not push a full cookie out of a jar
+    // that holds one.
+    let mut headers = String::new();
+    if !request.token().is_empty() && !credential.is_empty() {
+        let held = request
+            .cookie(&cookie_name(shared.port))
+            .and_then(|c| access_for(shared, c));
+        if !(access == Access::ReadOnly && held == Some(Access::Full)) {
+            headers = format!(
+                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict\r\n",
+                cookie_name(shared.port)
+            );
+        }
+    }
+    http::respond_extra(
         stream,
         Some(request),
         200,
         "text/html; charset=utf-8",
         body.as_bytes(),
+        &headers,
     );
 }
 
@@ -1120,21 +1610,24 @@ fn events(shared: &Shared, stream: &mut TcpStream, _request: &Request) {
     let Ok(mut sse) = EventStream::open(stream) else {
         return;
     };
+    crate::elog::event("sse", "open", serde_json::json!({}));
 
     let mut sent = 0u64;
-    loop {
+    // Which write lost the client is the difference between "browser closed"
+    // and "network went" — the reason is kept rather than collapsed.
+    let by = loop {
         // The wait is what makes an idle stream free: no polling, and one
         // wakeup per refresh rather than one per connection per tick.
         let snapshot = {
             let Ok(latest) = shared.latest.lock() else {
-                return;
+                break "lock";
             };
             let (latest, _) = match shared
                 .updated
                 .wait_timeout_while(latest, SSE_KEEPALIVE, |s| s.version <= sent)
             {
                 Ok(pair) => pair,
-                Err(_) => return,
+                Err(_) => break "wait",
             };
             Arc::clone(&latest)
         };
@@ -1144,16 +1637,21 @@ fn events(shared: &Shared, stream: &mut TcpStream, _request: &Request) {
         // quietly went away, since a write is the only thing that can.
         if snapshot.version <= sent {
             if sse.keepalive().is_err() {
-                return;
+                break "keepalive";
             }
             continue;
         }
 
         if sse.send("sessions", &snapshot.json).is_err() {
-            return;
+            break "send";
         }
         sent = snapshot.version;
-    }
+    };
+    crate::elog::event(
+        "sse",
+        "close",
+        serde_json::json!({ "by": by, "sent": sent }),
+    );
 }
 
 /// Build and send one session's report.
@@ -1284,7 +1782,7 @@ mod tests {
         // If an asset is edited and the placeholder goes with it, the page ships
         // with no token and fails at the first fetch — in the browser, where
         // nothing here would have noticed.
-        for html in [DASHBOARD_HTML, REPORT_HTML] {
+        for html in [DASHBOARD_HTML, REPORT_HTML, ANALYTICS_HTML] {
             assert!(html.contains("\"__CCTOP_TOKEN__\""));
             assert!(html.contains("__CCTOP_CSS__"));
             assert!(html.contains("__CCTOP_VERSION__"));
@@ -1320,5 +1818,44 @@ mod tests {
         assert!(listen("127.0.0.1", taken, true).is_err());
         let stepped = listen("127.0.0.1", taken, false).expect("the search finds a free port");
         assert_ne!(stepped.local_addr().unwrap().port(), taken);
+    }
+
+    fn shared(token: &str, readonly: &str) -> Shared {
+        Shared {
+            token: token.to_string(),
+            readonly: readonly.to_string(),
+            actions: true,
+            port: 7777,
+            plan: Plan::Retail,
+            latest: Mutex::new(Arc::new(Snapshot {
+                version: 0,
+                json: "[]".to_string(),
+                sessions: Vec::new(),
+                host_errors: Vec::new(),
+            })),
+            updated: Condvar::new(),
+            store: crate::cache::Store::new(),
+            quota: Mutex::new(quota::EMPTY.to_string()),
+            topics: Mutex::new(search::Topics::default()),
+            notify: None,
+        }
+    }
+
+    #[test]
+    fn the_readonly_token_opens_the_page_but_not_the_actions() {
+        // `access_for` is the single gate the whole distinction hangs on, so
+        // its table is what is worth pinning: both minted tokens get in, and
+        // which one it was is what `/api/act/*` later refuses on.
+        let guarded = shared("full", "view");
+        assert_eq!(access_for(&guarded, "full"), Some(Access::Full));
+        assert_eq!(access_for(&guarded, "view"), Some(Access::ReadOnly));
+        assert_eq!(access_for(&guarded, "wrong"), None);
+        assert_eq!(access_for(&guarded, ""), None);
+
+        // A tokenless run has nothing to withhold, so it grants full access
+        // to everything — the same answer `--no-token` has always given.
+        let open = shared("", "");
+        assert_eq!(access_for(&open, ""), Some(Access::Full));
+        assert_eq!(access_for(&open, "anything"), Some(Access::Full));
     }
 }

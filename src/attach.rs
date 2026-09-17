@@ -520,6 +520,21 @@ impl Attach {
     }
 
     fn send(&mut self, bytes: &[u8]) -> bool {
+        // `bytes` is one whole frame: kind byte, four length bytes, payload.
+        // Split it back out for the log rather than trusting the caller's say.
+        if crate::elog::level() >= crate::elog::Level::Events {
+            let (kind, payload) = match bytes.len() {
+                n if n >= 5 => (bytes[0] as char, &bytes[5..]),
+                _ => ('?', bytes),
+            };
+            crate::elog::bytes(
+                "attach",
+                "send",
+                "out",
+                payload,
+                serde_json::json!({ "frame": kind.to_string() }),
+            );
+        }
         self.input
             .write_all(bytes)
             .and_then(|()| self.input.flush())
@@ -605,6 +620,137 @@ fn encode_mouse(
                 cell(row),
             ])
         }
+    }
+}
+
+/// Remove bare-motion mouse reports from a chunk of terminal input before it
+/// is written into an agent's pty.
+///
+/// The paths that use it — [`shim::run`](crate::shim) and [`proxy`] — forward
+/// stdin verbatim, so a report is whatever the terminal was last asked for,
+/// not what the agent can read. Any-motion (`?1003h`) gets turned on by the
+/// agent's own output echoed straight through, or left on by a program that
+/// died mid-session — and a hover report split across two of the agent's reads
+/// lands in a composer as the literal text `<35;79;14M`. Presses, drags and
+/// the wheel still pass; only the hover stream is dropped, which is the same
+/// trade cctop makes for its own capture.
+///
+/// A report can itself arrive split across two reads, so what a chunk cannot
+/// complete is held in `tail` for the next one rather than half-forwarded.
+pub(crate) fn strip_hover_reports(chunk: &[u8], tail: &mut Vec<u8>) -> Vec<u8> {
+    let mut joined;
+    let chunk = match tail.is_empty() {
+        true => chunk,
+        false => {
+            joined = std::mem::take(tail);
+            joined.extend_from_slice(chunk);
+            joined.as_slice()
+        }
+    };
+    let mut out = Vec::with_capacity(chunk.len());
+    let mut at = 0;
+    while at < chunk.len() {
+        let esc = at
+            + chunk[at..]
+                .iter()
+                .position(|b| *b == 0x1b)
+                .unwrap_or(chunk.len() - at);
+        out.extend_from_slice(&chunk[at..esc]);
+        if esc == chunk.len() {
+            break;
+        }
+        match mouse_report(&chunk[esc..]) {
+            Report::Hover(n) => at = esc + n,
+            Report::Other(n) => {
+                out.extend_from_slice(&chunk[esc..esc + n]);
+                at = esc + n;
+            }
+            Report::Partial => {
+                tail.extend_from_slice(&chunk[esc..]);
+                break;
+            }
+            Report::None => {
+                out.push(0x1b);
+                at = esc + 1;
+            }
+        }
+    }
+    out
+}
+
+/// What the escape sequence at the head of `bytes` is, with its length.
+enum Report {
+    /// A complete bare-motion report — dropped.
+    Hover(usize),
+    /// Some other complete sequence, kept.
+    Other(usize),
+    /// The head of one but not the whole — held for the next chunk.
+    Partial,
+    /// Not a sequence at all.
+    None,
+}
+
+/// Whether the event code is a hover: bit 5 set (motion) with a button field
+/// of 3 (no button held). Modifier bits ride above it, so 35 with Shift or
+/// Ctrl held reads 39, 43, 51 and so on — all of them are still a hover.
+fn is_hover(cb: u16) -> bool {
+    cb & 0b100011 == 0b100011 && cb < 96
+}
+
+fn mouse_report(bytes: &[u8]) -> Report {
+    // SGR: ESC [ < Cb ; Cx ; Cy then M or m — Cb names the event.
+    if let Some(rest) = bytes.strip_prefix(b"\x1b[<") {
+        let mut cb = 0u16;
+        let mut i = 0;
+        for field in 0..3 {
+            let start = i;
+            while i < rest.len() && rest[i].is_ascii_digit() {
+                i += 1;
+            }
+            match i {
+                _ if i == start => {
+                    return match i == rest.len() {
+                        true => Report::Partial,
+                        false => Report::None,
+                    };
+                }
+                _ => {
+                    if field == 0 {
+                        cb = std::str::from_utf8(&rest[start..i])
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+            if field < 2 {
+                match rest.get(i) {
+                    Some(b';') => i += 1,
+                    None => return Report::Partial,
+                    _ => return Report::None,
+                }
+            }
+        }
+        match rest.get(i) {
+            None => Report::Partial,
+            // `\x1b[<` is three bytes, the fields are `i`, the M or m is one.
+            Some(b'M') | Some(b'm') => match is_hover(cb) {
+                true => Report::Hover(i + 4),
+                false => Report::Other(i + 4),
+            },
+            Some(_) => Report::None,
+        }
+    // Legacy X10: ESC [ M then three bytes biased by 32 — the first is Cb.
+    } else if let Some(rest) = bytes.strip_prefix(b"\x1b[M") {
+        if rest.len() < 3 {
+            return Report::Partial;
+        }
+        match is_hover(u16::from(rest[0]).saturating_sub(32)) {
+            true => Report::Hover(6),
+            false => Report::Other(6),
+        }
+    } else {
+        Report::None
     }
 }
 
@@ -836,16 +982,22 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
         std::thread::spawn(move || {
             let mut stdin = std::io::stdin();
             let mut buf = [0u8; 1024];
+            let mut tail = Vec::new();
             while let Ok(n) = stdin.read(&mut buf) {
                 // A terminal writes an escape sequence in one go, so looking for
                 // the detach key within a single read is enough.
                 if n == 0 || buf[..n].windows(DETACH.len()).any(|w| w == DETACH) {
                     break;
                 }
-                if input
-                    .write_all(&frame::encode(frame::KEYS, &buf[..n]))
-                    .and_then(|()| input.flush())
-                    .is_err()
+                // Verbatim except bare-motion mouse reports, which this end
+                // has no business forwarding — see `strip_hover_reports`.
+                let body = strip_hover_reports(&buf[..n], &mut tail);
+                crate::elog::bytes("attach", "stdin", "in", &body, serde_json::json!({}));
+                if !body.is_empty()
+                    && input
+                        .write_all(&frame::encode(frame::KEYS, &body))
+                        .and_then(|()| input.flush())
+                        .is_err()
                 {
                     break;
                 }
@@ -888,10 +1040,11 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
         // Size frames say nothing this terminal has to act on: the agent draws
         // within what it was given and the rest of the window stays blank.
         while let Some((kind, payload)) = decoder.next() {
-            if kind == frame::OUTPUT
-                && (stdout.write_all(&payload).is_err() || stdout.flush().is_err())
-            {
-                break 'session;
+            if kind == frame::OUTPUT {
+                crate::elog::bytes("attach", "out", "out", &payload, serde_json::json!({}));
+                if stdout.write_all(&payload).is_err() || stdout.flush().is_err() {
+                    break 'session;
+                }
             }
         }
     }
@@ -1576,5 +1729,50 @@ mod tests {
             ),
             Some(vec![0x1b, 1])
         );
+    }
+}
+
+#[cfg(test)]
+mod hover_tests {
+    use super::strip_hover_reports;
+
+    fn strip(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut tail = Vec::new();
+        let mut out = Vec::new();
+        for chunk in chunks {
+            out.extend(strip_hover_reports(chunk, &mut tail));
+        }
+        out
+    }
+
+    /// The leak the stripper exists for: a hover report that the terminal
+    /// emitted because something left `?1003h` on must not reach the agent,
+    /// however it is split across reads. Everything else passes untouched.
+    #[test]
+    fn a_hover_report_does_not_survive_however_it_is_split() {
+        assert_eq!(strip(&[b"a\x1b[<35;79;14Mb"]), b"ab".to_vec());
+        assert_eq!(strip(&[b"a\x1b[<3", b"5;79;14Mb"]), b"ab".to_vec());
+        // A hover with modifiers held reports as 39, 43, 51, …
+        assert_eq!(strip(&[b"\x1b[<51;1;1M"]), Vec::<u8>::new());
+        // The release form is a hover too.
+        assert_eq!(strip(&[b"\x1b[<35;1;1m"]), Vec::<u8>::new());
+        // Legacy X10 form, hover Cb biased by 32.
+        assert_eq!(strip(&[b"a\x1b[M", b"\x43\x10\x0eb"]), b"ab".to_vec());
+    }
+
+    #[test]
+    fn real_mouse_events_and_keys_pass_untouched() {
+        for kept in [
+            b"\x1b[<0;22;31M".as_slice(),  // left press
+            b"\x1b[<0;22;31m".as_slice(),  // release
+            b"\x1b[<32;22;31M".as_slice(), // left drag
+            b"\x1b[<64;22;31M".as_slice(), // wheel up
+            b"\x1b[3~".as_slice(),         // Delete
+            b"\x1b".as_slice(),            // a bare Esc at a chunk's end
+        ] {
+            assert_eq!(strip(&[kept]), kept.to_vec(), "{kept:?}");
+        }
+        // A motion *with a button* is a drag — kept.
+        assert_eq!(strip(&[b"x\x1b[<33;5;5My"]), b"x\x1b[<33;5;5My".to_vec());
     }
 }

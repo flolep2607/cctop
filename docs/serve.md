@@ -6,12 +6,13 @@ cctop serve
 
 ```
 cctop: serving on http://127.0.0.1:7777/?t=9f3ac1de…
+cctop: read-only link — no actions: http://127.0.0.1:7777/?t=71b02ee4…
 ```
 
 Open that link and you get the table cctop draws in the terminal, streamed live,
 plus what the terminal has no room for: per session, the conversation itself,
-what it edited, what it can reach, and a report that says where an afternoon's
-money went.
+what it edited, what it can reach, a report that says where an afternoon's money
+went, and each account's rate-limit windows at `/api/quota`.
 
 **It can also answer an agent.** A page that tells you a session has been waiting
 twenty minutes and cannot do anything about it has shown you a problem and
@@ -24,6 +25,16 @@ The whole authorisation for that is the token in the URL, so it is worth stating
 plainly: **whoever holds the link can drive the agents on this machine.** Hence
 the defaults — loopback, a token, and `--no-actions` to serve the pages without
 the buttons.
+
+**The second link is for showing, not driving.** Each run also mints a read-only
+token, printed as a labelled second line. It opens every page and answers every
+`GET` — the same dashboard, the same reports, the same search — but every
+`/api/act/*` request it makes is refused with `403 this link is read-only`, and
+the pages it serves are wired to it, so the prompt box never appears. It is a
+different credential rather than a flag on the first one: "read-only" is not
+something a request can assert about itself, it is a property of the token it
+carries. Hand it to a colleague who wants to watch a run, or a status board that
+has no business typing at your agents.
 
 ## From inside cctop, with the table still there
 
@@ -43,6 +54,9 @@ serves the same page while cctop keeps running.** `l` puts it on this machine,
 │                                                            │
 │ Anyone holding it reads every session here,                │
 │ and can type at your agents. Cloudflare carries it.        │
+│                                                            │
+│ Read-only — watches, never acts                            │
+│  https://supplemental-belt-spare-reflect.trycloudflare.com │
 │                                                            │
 │ o open · y copy · l local · t + tunnel · x stop            │
 ╰────────────────────────────────────────────────────────────╯
@@ -72,6 +86,28 @@ page. The **Notify** button asks for browser notification permission and then
 fires one the moment a session *crosses into* waiting — not for the ones already
 sitting there when you opened the page, which would be a notification about
 nothing.
+
+The same edge can leave the browser entirely. `--notify <URL>` (or
+`CCTOP_NOTIFY_URL`, which a dashboard-hosted serve also reads since it has no
+flag) POSTs one JSON event per crossing:
+
+```json
+{
+  "event": "waiting",
+  "session_id": "…",
+  "project": "cctop",
+  "title": "…",
+  "url": "https://…/session/…?t=…"
+}
+```
+
+`event` is `waiting` or `asking`; `url` links the session page, on the tunnel
+origin when there is one so the link works from wherever the webhook lands.
+Edge-triggered means exactly that: the first snapshot fires nothing, a session
+sitting waiting fires once rather than once per refresh, and it fires again only
+after it leaves the state and re-enters. The POST is made on a spawned thread
+with a five-second deadline, and a dead endpoint is reported once on stderr and
+then stays silent — a webhook that never answers costs the refresh loop nothing.
 
 ## The report
 
@@ -122,6 +158,7 @@ cctop serve --tunnel
 cctop: opening a trycloudflare tunnel…
 cctop: serving on https://particular-words-here.trycloudflare.com/?t=9f3ac1de…
 cctop: also on http://127.0.0.1:7777/?t=9f3ac1de…
+cctop: read-only link — no actions: https://particular-words-here.trycloudflare.com/?t=71b02ee4…
 cctop: that first link is on the public internet. Anyone who has it can read
        every session on this machine — and, unless --no-actions, type at your
        agents, which runs commands as you. Cloudflare carries the traffic and
@@ -202,6 +239,7 @@ Run `cctop serve` there for that.
 | `--plan <PLAN>` | `retail`, `max` or `included`, as elsewhere |
 | `--delay <SECS>` | Seconds between refreshes. Default `2` |
 | `--host <HOST>` | Also serve another machine's sessions. Repeatable |
+| `--notify <URL>` | POST a JSON event when a session crosses into waiting or asking. Also read from `CCTOP_NOTIFY_URL`, including by a dashboard-hosted serve |
 
 ## What it serves
 
@@ -213,13 +251,36 @@ Run `cctop serve` there for that.
 | `GET /api/report/<id>` | The report, as JSON |
 | `GET /api/events` | Server-sent events; one `sessions` event per refresh |
 | `GET /api/hosts` | Which `--host` machines could not be read, and why |
+| `GET /api/quota` | Each account's rate-limit status and windows — `{"claude":[…],"codex":[…]}`, each profile with `status`, `detail`, `plan` and `windows` |
+| `GET /api/search?q=<query>` | Both search tiers over every session: `{"hits":[{key, session_id, snippet, score}]}`. Literal matches carry the matching text; topical-only hits carry `~NN% ` plus the chunk head |
+| `GET /insight/optimize` | The text `cctop optimize` prints, as `text/plain` |
+| `GET /insight/compare` | The text `cctop compare` prints, as `text/plain` |
+| `GET /favicon.svg` | The page's icon |
+| `GET /manifest.webmanifest` | Installable-page metadata, so a browser can add the dashboard as an app |
 
 `/api/sessions` is byte-for-byte the document `--json` prints and `--host` parses
 — one builder, so a browser is never shown different figures than the terminal.
 
+`/api/quota` is served from memory: a standalone `serve` polls the usage
+endpoints itself on a 60-second cadence — slower than the two-second session
+refresh, because they throttle hard — and a dashboard-hosted one serves the
+reading the TUI's own poller already made. Either way a request never triggers a
+fetch.
+
+`/api/search` runs the same two tiers the TUI's `s` does: the literal byte scan,
+then the embedding index when the model is installed and the query earns it —
+an empty literal answer, or a sentence-length question. Queries under three
+characters answer `{"hits":[]}`, hits are capped at 25, and a missing or
+unloadable index simply means the literal tier answered alone.
+
+The insight routes re-parse every transcript on request, the same cost the CLI
+pays — they are asked for, not polled.
+
 ## Notes
 
 The pages carry their own CSS and JavaScript and fetch nothing at all, which is
-what lets every response send `default-src 'none'`. There is no build step, no
-CDN, and no assets on disk: an installed cctop is one binary, and a page that
-loaded its own stylesheet would break the moment that binary moved.
+what lets every response send `default-src 'none'`. The only same-origin
+exceptions are `img-src 'self'` for the favicon and `manifest-src 'self'` for
+the manifest — the two requests an installable page cannot inline. There is no
+build step, no CDN, and no assets on disk: an installed cctop is one binary, and
+a page that loaded its own stylesheet would break the moment that binary moved.

@@ -46,11 +46,30 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
 /// to this session, so a session under `cctop run` never falls through to the
 /// root-only path and the error the user sees names every option they have.
 pub fn send_line(pid: u32, text: &str) -> Result<(), String> {
-    for backend in [shim_send, rmux_send, tiocsti_send] {
-        if let Some(result) = backend(pid, text) {
+    for (backend, send) in [
+        (
+            "shim",
+            shim_send as fn(u32, &str) -> Option<Result<(), String>>,
+        ),
+        ("rmux", rmux_send),
+        ("tiocsti", tiocsti_send),
+    ] {
+        if let Some(result) = send(pid, text) {
+            crate::elog::bytes(
+                "inject",
+                "send",
+                "out",
+                text.as_bytes(),
+                serde_json::json!({"pid": pid, "via": backend, "ok": result.is_ok()}),
+            );
             return result;
         }
     }
+    crate::elog::event(
+        "inject",
+        "send",
+        serde_json::json!({"pid": pid, "via": "none", "ok": false}),
+    );
     Err(format!(
         "no way to type into session {pid}: start the agent with `cctop run <agent>` \
          or inside rmux, or run cctop as root with dev.tty.legacy_tiocsti=1"

@@ -94,6 +94,15 @@ pub struct Request {
     /// header anything here routes on, and it is routed on for a security
     /// reason rather than a parsing one — see the module docs.
     json_content_type: bool,
+    /// When the request finished parsing, so a response can say how long the
+    /// answer took without every route threading a clock through.
+    pub received: std::time::Instant,
+    /// The `Cookie` header as it arrived, empty when there was none.
+    ///
+    /// Kept whole rather than parsed into a map: one cookie is ever read off
+    /// it, and `;`-splitting at the request layer would hold a map nobody else
+    /// asks anything of.
+    cookie_header: String,
 }
 
 impl Request {
@@ -162,6 +171,7 @@ impl Request {
         let mut header_bytes = line.len();
         let mut length: Option<usize> = None;
         let mut json_content_type = false;
+        let mut cookie_header = String::new();
         loop {
             let mut header = String::new();
             match reader.read_line(&mut header) {
@@ -190,6 +200,11 @@ impl Request {
                             .unwrap_or_default()
                             .trim()
                             .eq_ignore_ascii_case("application/json");
+                    } else if name.eq_ignore_ascii_case("cookie") {
+                        // A second credential channel: `?t=` opens the door
+                        // once and the page hands the cookie back, so a reload
+                        // — which has no query to present — still gets in.
+                        cookie_header = value.to_string();
                     }
                 }
                 // Hitting the `take` limit surfaces here, as does a header that
@@ -225,6 +240,8 @@ impl Request {
             query,
             body,
             json_content_type,
+            received: std::time::Instant::now(),
+            cookie_header,
         })
     }
 
@@ -250,6 +267,17 @@ impl Request {
     /// The `t` query parameter, which is where the access token lives.
     pub fn token(&self) -> &str {
         self.query.get("t").map_or("", String::as_str)
+    }
+
+    /// One cookie's value by name, or `None` — cookies arrive as one header
+    /// of `name=value; name=value`, and only the access token is ever asked
+    /// for, so it is picked out rather than the header being parsed into a map.
+    pub fn cookie(&self, name: &str) -> Option<&str> {
+        self.cookie_header
+            .split(';')
+            .filter_map(|pair| pair.trim().split_once('='))
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v)
     }
 }
 
@@ -323,6 +351,12 @@ fn reason(status: u16) -> &'static str {
 /// rmux's browser terminal answers with `frame-ancestors 'none'`, so no policy
 /// written here could embed it. The policy therefore stays at `default-src
 /// 'none'` with nothing framed at all.
+///
+/// Two same-origin exceptions carry the installable-page furniture: `img-src
+/// 'self'` for `/favicon.svg`, and `manifest-src 'self'` for
+/// `/manifest.webmanifest`, which `default-src` does not cover. `data:` stays
+/// for images a transcript paste renders inline. Neither opens anything off
+/// this server.
 fn common_headers(out: &mut String) {
     out.push_str(
         "X-Content-Type-Options: nosniff\r\n\
@@ -330,7 +364,8 @@ fn common_headers(out: &mut String) {
          Content-Security-Policy: default-src 'none'; \
          style-src 'unsafe-inline'; \
          script-src 'unsafe-inline'; \
-         img-src data:; \
+         img-src 'self' data:; \
+         manifest-src 'self'; \
          connect-src 'self'; \
          base-uri 'none'; \
          form-action 'none'; \
@@ -350,6 +385,19 @@ pub fn respond(
     content_type: &str,
     body: &[u8],
 ) {
+    respond_extra(stream, request, status, content_type, body, "");
+}
+
+/// `respond`, plus headers the one route that needs them asks for — the
+/// `Set-Cookie` a page sets on first open is the only one there is.
+pub fn respond_extra(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &str,
+) {
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\n\
          Content-Type: {content_type}\r\n\
@@ -360,6 +408,7 @@ pub fn respond(
         body.len(),
     );
     common_headers(&mut head);
+    head.push_str(extra);
     head.push_str("\r\n");
 
     let head_only = request.is_some_and(|r| r.method == "HEAD");
@@ -372,6 +421,21 @@ pub fn respond(
     }
     let _ = stream.write_all(&buf);
     let _ = stream.flush();
+
+    crate::elog::event(
+        "http",
+        "response",
+        match request {
+            Some(r) => serde_json::json!({
+                "method": r.method,
+                "path": r.path,
+                "status": status,
+                "bytes": body.len(),
+                "ms": r.received.elapsed().as_millis() as u64,
+            }),
+            None => serde_json::json!({ "status": status, "bytes": body.len() }),
+        },
+    );
 }
 
 /// Send a plain-text error, the shape every refusal in the router takes.
@@ -422,8 +486,19 @@ impl<'a> EventStream<'a> {
             frame.push('\n');
         }
         frame.push('\n');
-        self.stream.write_all(frame.as_bytes())?;
-        self.stream.flush()
+        // Both halves logged: a client that went away mid-stream is the
+        // failure this stream exists to survive, and the send that failed is
+        // the only record of when it happened.
+        let sent = self
+            .stream
+            .write_all(frame.as_bytes())
+            .and_then(|()| self.stream.flush());
+        crate::elog::event(
+            "sse",
+            "send",
+            serde_json::json!({ "event": event, "bytes": frame.len(), "ok": sent.is_ok() }),
+        );
+        sent
     }
 
     /// Send a comment, which SSE ignores and every hop in between does not.
@@ -472,5 +547,34 @@ mod tests {
         assert!(headers.contains("default-src 'none'"));
         assert!(headers.contains("frame-ancestors 'none'"));
         assert!(headers.contains("nosniff"));
+        // The two exceptions are the installable-page furniture, both pinned
+        // to this origin: the favicon is an image and the manifest answers to
+        // no other directive.
+        assert!(headers.contains("img-src 'self'"));
+        assert!(headers.contains("manifest-src 'self'"));
+    }
+
+    /// The access cookie is one `name=value` among several — the lookup must
+    /// take the one asked for and nothing that merely shares a prefix.
+    #[test]
+    fn a_cookie_is_read_by_name() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        use std::io::Write;
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\n\
+                  Cookie: cctop_access_9999=other; cctop_access_7777=abc; theme=dark\r\n\
+                  \r\n",
+            )
+            .unwrap();
+        let req = Request::parse(&server).unwrap();
+        assert_eq!(req.cookie("cctop_access_7777"), Some("abc"));
+        assert_eq!(req.cookie("cctop_access_9999"), Some("other"));
+        assert_eq!(req.cookie("cctop_access"), None);
+        assert_eq!(req.cookie("theme"), Some("dark"));
+        assert_eq!(req.cookie("absent"), None);
     }
 }

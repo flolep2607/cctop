@@ -239,6 +239,9 @@ fn could_be_agent(name: &str, argv0: Option<&str>) -> bool {
         "claude" | "node" | "opencode" | "opencode-cli" | "pi"
         // Codex's sandbox launchers, which can be the agent root themselves.
         | "bwrap" | "codex-linux-sandbox"
+        // Devin's ACP backend, spawned per session by the CLI and by editor
+        // integrations.
+        | "devin"
     ) || is_codex_binary(name)
         || argv0.is_some_and(is_claude_argv0)
 }
@@ -509,10 +512,17 @@ impl Collector {
                 || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "opencode"));
             let is_pi = snap.name == "pi"
                 || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "pi"));
+            // The `acp` subcommand is the agent backend; the bare `devin` CLI
+            // that spawns it is the session's frontend, and every other
+            // subcommand (`auth`, `mcp`, `models`, …) is a short-lived tool
+            // that must not become a phantom session row.
+            let is_devin = snap.name == "devin" && snap.tokens.iter().any(|t| t == "acp");
             if is_opencode {
                 Some(crate::pricing::Provider::OpenCode)
             } else if is_pi {
                 Some(crate::pricing::Provider::Pi)
+            } else if is_devin {
+                Some(crate::pricing::Provider::Devin)
             } else if is_codex {
                 Some(crate::pricing::Provider::Codex)
             } else if is_claude {

@@ -499,6 +499,17 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
                     )));
                 }
             }
+            // The same origin as whichever link is handed out, but a different
+            // credential behind it — the label has to say that, because the
+            // drawn origin cannot.
+            if !serving.readonly.is_empty() {
+                lines.push(Line::default());
+                show(
+                    &mut lines,
+                    "Read-only — watches, never acts",
+                    &serving.readonly,
+                );
+            }
         }
     }
     // Said in the panel as well as in the corner: `t` is pressed here, and a

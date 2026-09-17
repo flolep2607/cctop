@@ -8,6 +8,7 @@ mod clipboard;
 mod collide;
 mod config;
 mod doctor;
+mod elog;
 mod embed;
 mod fingerprint;
 mod fleet;
@@ -107,6 +108,16 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("burn") {
             std::process::exit(burn::run(&argv[2..]));
+        }
+    }
+
+    // `cctop log` alongside `burn`, and for the same reason. It only ever
+    // reads a file, so it needs nothing set up before it — which is also why
+    // it can debug every other command line cctop has.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("log") {
+            std::process::exit(elog::run(&argv[2..]));
         }
     }
 
