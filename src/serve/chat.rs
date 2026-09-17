@@ -709,7 +709,7 @@ impl Sink {
                     _ => return,
                 }
                 let mut turn = Turn::new("system", "message", ts);
-                turn.set_text(text);
+                turn.set_text(&tidy_devin_event(text));
                 self.push(turn);
             }
             _ => {}
@@ -1031,6 +1031,43 @@ fn strip_outer_tags(text: &str) -> &str {
     match body.rfind("</") {
         Some(close) => &body[..close],
         None => body,
+    }
+}
+
+/// A Devin system event, readable.
+///
+/// The block arrives dressed for the model, not for a reader: an
+/// `additional_metadata` opens with instructions about when to mention it,
+/// then a `user_actions` carrying one `[diff_block]` per file the user
+/// touched — dozens of lines of pseudo-diff where the event was "you edited
+/// these files". The block and its footnote go; the file names and any other
+/// action prose stay. Anything else — a subagent's completion report — loses
+/// only its envelope, same as every other harness block.
+fn tidy_devin_event(text: &str) -> String {
+    let Some(actions) = tagged(text, "user_actions") else {
+        return tidy_harness_text(text);
+    };
+    let mut files = Vec::new();
+    let mut prose = Vec::new();
+    let mut in_diff = false;
+    for line in actions.lines().map(str::trim) {
+        match line {
+            "[diff_block_start]" => in_diff = true,
+            "[diff_block_end]" => in_diff = false,
+            _ if in_diff || line.is_empty() => {}
+            l if l.starts_with("Please note that") => {}
+            l => match l.strip_prefix("The following changes were made by the USER to: ") {
+                Some(file) => files.push(file.trim_end_matches('.').to_string()),
+                None => prose.push(l.to_string()),
+            },
+        }
+    }
+    if !files.is_empty() {
+        prose.insert(0, format!("the user edited {}", files.join(", ")));
+    }
+    match prose.is_empty() {
+        true => tidy_harness_text(text),
+        false => prose.join("\n"),
     }
 }
 
@@ -1526,7 +1563,25 @@ mod tests {
         );
         assert_eq!(chat.turns.len(), 1);
         assert_eq!(chat.turns[0].role, "system");
-        assert!(chat.turns[0].text.contains("subagent_completion"));
+        // The envelope comes off an event the same as any other harness block.
+        assert_eq!(chat.turns[0].text, "done");
+    }
+
+    /// The user-edited-a-file block is aimed at the model: a preamble about
+    /// when to mention it and a pseudo-diff per file. The turn is the event.
+    #[test]
+    fn a_devin_user_action_reads_as_the_files_touched() {
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":1,"source":"system","timestamp":"t1","message":"<additional_metadata>\nThe user took the following actions after the last message. ONLY talk about this if it is directly relevant to the user's next request.\n\n<user_actions>\nThe following changes were made by the USER to: /home/flo/src/a.rs.\n[diff_block_start]\n@@ -1 +1 @@\n-old\n+new\n[diff_block_end]\nPlease note that the above snippet only shows the MODIFIED lines.\nThe following changes were made by the USER to: /home/flo/src/b.rs.\n[diff_block_start]\n@@ -2 +2 @@\n-x\n+y\n[diff_block_end]\n</user_actions>\n</additional_metadata>","extra":{"telemetry":{"source":"system"}}}"#,
+            ],
+            &HashMap::new(),
+        );
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(
+            chat.turns[0].text,
+            "the user edited /home/flo/src/a.rs, /home/flo/src/b.rs"
+        );
     }
 
     /// A transcript that is not the document ATIF says it is reports as
