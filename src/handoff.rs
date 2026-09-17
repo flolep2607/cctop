@@ -322,7 +322,7 @@ fn recent(details: &ToolDetails, tools: &[&str], limit: usize) -> Vec<String> {
 /// [`chat::build`] attaches is written for the report's reader, who is looking
 /// at the session; an agent picking work up is not.
 fn conversation(session: &Session) -> Option<chat::Conversation> {
-    let chat = chat::build(session);
+    let chat = chat::build(session, None);
     (chat.supported && !chat.turns.is_empty()).then_some(chat)
 }
 
@@ -983,6 +983,7 @@ mod tests {
 
     fn turn(role: &'static str, kind: &'static str, text: &str) -> chat::Turn {
         chat::Turn {
+            seq: 0,
             role,
             kind,
             ts: "2026-08-05T10:00:00Z".into(),

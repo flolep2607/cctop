@@ -1373,12 +1373,20 @@ fn api_insight(shared: &Shared, stream: &mut TcpStream, request: &Request, which
 }
 
 /// Serve the conversation for one session.
+///
+/// `?before=<n>` pages backwards: the window returned ends just before turn
+/// `n` rather than at the newest, which is how the page reaches turns the
+/// first response counted but did not send.
 fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
     let snapshot = current(shared);
     let Some(session) = find(&snapshot.sessions, id) else {
         return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
     };
-    json(stream, request, &chat::build(session));
+    let before = request
+        .query
+        .get("before")
+        .and_then(|v| v.parse::<usize>().ok());
+    json(stream, request, &chat::build(session, before));
 }
 
 /// Serve what one session can reach.

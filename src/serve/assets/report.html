@@ -1145,13 +1145,13 @@ function markdown(text) {
   return root;
 }
 
-function turnNode(turn, index) {
+function turnNode(turn, seq) {
   const kind = turn.kind === "message" ? "" : " " + turn.kind;
   const node = el("div", "turn " + turn.role + kind);
-  // The id is the turn's place in chat.turns — what a "#chat/turn-N" link and
+  // The id is the turn's transcript-wide seq — what a "#chat/turn-N" link and
   // the find box's marks name. Set before the compaction early return because
   // a link can name a compaction turn too.
-  node.id = "turn-" + index;
+  node.id = "turn-" + seq;
   if (turn.kind === "compaction") {
     node.appendChild(el("div", "said-text", "— context compacted here —"));
     return node;
@@ -1163,7 +1163,7 @@ function turnNode(turn, index) {
   const anchor = el("button", "anchor", "#");
   anchor.type = "button";
   anchor.title = "Copy a link to this turn";
-  anchor.addEventListener("click", () => linkTurn(index));
+  anchor.addEventListener("click", () => linkTurn(seq));
   who.appendChild(anchor);
   node.appendChild(who);
   if (turn.text) node.appendChild(markdown(turn.text));
@@ -1179,41 +1179,62 @@ function conversation(chat) {
     return s;
   }
   const card = el("div", "card");
-  const turns = chat.turns || [];
+  const turns = TURNS;
   // Drawing every turn at once is what makes a big session stall — each is a
   // markdown pass plus its tool rows. The tail is what is live, so it is
-  // drawn and the rest is a click per chunk away.
+  // drawn and the rest is a click per chunk away — fetched turns first, and
+  // once those are all showing the same button pages the transcript itself.
   const hidden = Math.max(0, turns.length - chatShown);
-  const earlier = (chat.earlier || 0) + hidden;
+  const earlier = earlierCount() + hidden;
   if (earlier) {
-    if (hidden) {
-      const more = el("button", "earlier",
-        "show " + Math.min(CHAT_CHUNK, hidden) + " earlier turns — " + earlier + " in all not drawn");
-      more.type = "button";
-      more.addEventListener("click", () => {
-        chatShown += CHAT_CHUNK;
-        // The reveal lands above the fold, so the view is held on the same
-        // turn rather than jumping to wherever the new top put it.
-        const before = document.documentElement.scrollHeight;
-        drawChat(LAST_CHAT);
-        window.scrollTo(0, window.scrollY + document.documentElement.scrollHeight - before);
-      });
-      card.appendChild(more);
-    } else {
-      card.appendChild(el("div", "turn faint", earlier + " earlier turns are in the transcript and not shown"));
-    }
+    const more = el("button", "earlier",
+      "show " + Math.min(CHAT_CHUNK, earlier) + " earlier turns — " + earlier + " in all not drawn");
+    more.type = "button";
+    more.addEventListener("click", () => showEarlier(more));
+    card.appendChild(more);
   }
   if (!turns.length) {
     card.appendChild(el("div", "empty", "Nothing has been said in this session yet."));
   }
-  // The index a turn is drawn with is its place in chat.turns — `hidden` is
-  // also the first drawn index — so a "#chat/turn-N" link keeps naming the
-  // same turn however far back the drawn window starts.
+  // The id a turn is drawn with is its transcript seq — `hidden` is also the
+  // first drawn position — so a "#chat/turn-N" link names the same turn
+  // however the fetched window slides.
   turns.forEach((turn, i) => {
-    if (i >= hidden) card.appendChild(turnNode(turn, i));
+    if (i >= hidden) card.appendChild(turnNode(turn, turn.seq));
   });
   s.appendChild(card);
   return s;
+}
+
+// One click on "show earlier": a chunk more of what is already held, or —
+// when everything held is drawn — a fetch for the turns before it. The
+// redraw lands above the fold either way, so the scroll is held on the same
+// turn rather than jumping to wherever the new top put it.
+async function showEarlier(button) {
+  if (TURNS.length - chatShown > 0) {
+    chatShown += CHAT_CHUNK;
+  } else {
+    const first = earlierCount();
+    if (!first) return;
+    button.disabled = true;
+    button.textContent = "Reading earlier turns…";
+    try {
+      const chat = await ask(
+        "/api/chat/" + encodeURIComponent(ID) +
+          (QUERY ? QUERY + "&" : "?") + "before=" + first,
+      ).then(asJson);
+      mergeChat(chat);
+      chatShown += Math.min(CHAT_CHUNK, (chat.turns || []).length);
+    } catch (e) {
+      // The button this came from is spent; the redraw remakes it.
+      drawChat();
+      saidFlash(String(e.message || e), false);
+      return;
+    }
+  }
+  const before = document.documentElement.scrollHeight;
+  drawChat();
+  window.scrollTo(0, window.scrollY + document.documentElement.scrollHeight - before);
 }
 
 // --- talking to the server -------------------------------------------------
@@ -1662,13 +1683,33 @@ let SESSION = ID;
 let REPORT = null;
 // What the conversation looked like at the last build — see chatSig.
 let CHAT_SIG = null;
-// The conversation itself, so "show earlier" expands without a fetch.
+// The newest window the server sent, kept for `supported`/`note` and the
+// change signature — the turns drawn come from TURNS, not straight from it.
 let LAST_CHAT = null;
-// How much of a long conversation is drawn: the newest CHAT_CHUNK turns, one
-// chunk more per click. The tail is the part that is live; drawing all of a
-// 200-turn session is the stall, not the poll.
+// Every turn fetched so far, oldest first, each carrying the transcript-wide
+// `seq` the server numbers it with. A poll merges over the tail; a paged-back
+// fetch (`?before=`) prepends older turns — so a turn's `seq` is the only name
+// that stays true across both, and it is what the DOM ids, deep links and the
+// find box all use.
+let TURNS = [];
+// How many of a long conversation's turns are drawn: the newest CHAT_CHUNK,
+// one chunk more per click. The tail is the part that is live; drawing all of
+// a 200-turn session is the stall, not the poll.
 const CHAT_CHUNK = 120;
 let chatShown = CHAT_CHUNK;
+// Turns the transcript holds before everything fetched — the seq of the
+// oldest held turn, which is exactly the count of what came before it.
+const earlierCount = () =>
+  TURNS.length ? TURNS[0].seq : (LAST_CHAT ? LAST_CHAT.earlier || 0 : 0);
+
+// Fold a response into TURNS: a shared seq is the same turn re-read, and the
+// fresh copy wins — for the tail that is a turn still being written.
+function mergeChat(chat) {
+  const fresh = new Map((chat.turns || []).map((t) => [t.seq, t]));
+  TURNS = TURNS.filter((t) => !fresh.has(t.seq))
+    .concat(chat.turns || [])
+    .sort((a, b) => a.seq - b.seq);
+}
 // The "new activity" pill, built on first use.
 let MORE = null;
 // The turn half of a "#chat/turn-N" link, kept until the conversation is
@@ -1785,39 +1826,42 @@ function chatTools() {
   return bar;
 }
 
-// What the find box currently matches, drawn onto the turns — re-run after
-// every drawChat because the poll's rebuild throws the marked nodes away.
-// Turn-level rather than text-level: a hit inside a closed tool call still
-// marks the turn that holds it.
+// What a turn can be found by: its own text, plus the names, arguments and
+// results of its tool calls — the same coverage the drawn textContent gave,
+// extended to turns the chunking has not drawn.
+const turnText = (t) => [
+  t.text,
+  ...(t.tools || []).flatMap((x) => [x.name, x.detail, x.full, x.result, ...(x.diff || [])]),
+].filter(Boolean).join(" ").toLowerCase();
+
+// What the find box currently matches. The search runs over every fetched
+// turn rather than the drawn ones — a hit the chunking hides is still a hit,
+// and walking to it draws the window it lives in. Marks are re-applied after
+// every drawChat because the poll's rebuild throws the nodes away.
 function applySeek() {
   if (!SEEK) return;
   const q = SEEK.input.value.trim().toLowerCase();
+  seekHits = q ? TURNS.filter((t) => turnText(t).includes(q)).map((t) => t.seq) : [];
+  const hitSet = new Set(seekHits);
   const pane = document.getElementById("talk");
-  seekHits = [];
   if (pane) {
-    for (const turn of pane.querySelectorAll(".turn")) {
-      // Only real turns carry a turn-N id; the "earlier turns" notice shares
-      // the .turn class but is not something a find should name a match.
-      const on = q.length > 0 && !!turn.id &&
-                 turn.textContent.toLowerCase().includes(q);
-      turn.classList.toggle("hit", on);
-      turn.classList.remove("current");
-      if (on) seekHits.push(turn);
+    for (const node of pane.querySelectorAll(".turn[id^=turn-]")) {
+      node.classList.toggle("hit", hitSet.has(Number(node.id.slice(5))));
+      node.classList.remove("current");
     }
   }
   if (seekAt >= seekHits.length) seekAt = seekHits.length - 1;
-  if (seekAt >= 0) seekHits[seekAt].classList.add("current");
-  SEEK.prev.disabled = SEEK.next.disabled = !seekHits.length;
-  // The count covers only what is drawn, and says so — otherwise a transcript
-  // with undrawn earlier turns would read as searched end to end.
-  let note = "";
-  if (q && LAST_CHAT) {
-    const undrawn = (LAST_CHAT.earlier || 0) +
-                    Math.max(0, (LAST_CHAT.turns || []).length - chatShown);
-    if (undrawn > 0) note = " · earlier not searched";
+  if (seekAt >= 0) {
+    const on = document.getElementById("turn-" + seekHits[seekAt]);
+    if (on) on.classList.add("current");
   }
+  SEEK.prev.disabled = SEEK.next.disabled = !seekHits.length;
+  // The count covers every turn fetched — only turns the transcript holds
+  // that no fetch has reached stay outside it, and the note says so.
+  const unsearched = earlierCount();
   SEEK.count.textContent = q
-    ? seekHits.length + (seekHits.length === 1 ? " turn" : " turns") + note
+    ? seekHits.length + (seekHits.length === 1 ? " turn" : " turns") +
+      (unsearched ? " · earlier not searched" : "")
     : "";
 }
 
@@ -1831,10 +1875,7 @@ function seekMove(dir) {
   seekAt = seekAt < 0
     ? (dir > 0 ? 0 : seekHits.length - 1)
     : (seekAt + dir + seekHits.length) % seekHits.length;
-  const turn = seekHits[seekAt];
-  for (const t of seekHits) t.classList.toggle("current", t === turn);
-  for (const d of turn.querySelectorAll("details.tool")) d.open = true;
-  turn.scrollIntoView({ block: "center" });
+  gotoTurn(seekHits[seekAt]);
 }
 
 // The fold is a choice about the conversation, not about the nodes — the poll
@@ -1846,33 +1887,51 @@ function applyTools() {
   for (const d of pane.querySelectorAll("details.tool")) d.open = toolsOpen;
 }
 
-// A "#chat/turn-N" link names a turn by its place in chat.turns. One the
-// chunking has not drawn is reached by growing the window, not reported as a
-// miss — a click on "show earlier" would have found it anyway.
-function gotoTurn(index) {
-  const turns = (LAST_CHAT && LAST_CHAT.turns) || [];
-  if (!turns.length) return;
-  if (index < 0 || index >= turns.length) {
+// A "#chat/turn-N" link names a turn by its transcript seq. One the chunking
+// has not drawn is reached by growing the window, and one no fetch has
+// reached is paged back to — a deep link into a long conversation lands on
+// its turn rather than reporting a miss.
+async function gotoTurn(seq) {
+  // Each hop is a full transcript parse server-side, so the page-back is
+  // bounded: enough to reach any plausible link, not a way to spend the
+  // server in a loop.
+  let guard = 8;
+  while (earlierCount() > seq && guard-- > 0) {
+    try {
+      const chat = await ask(
+        "/api/chat/" + encodeURIComponent(ID) +
+          (QUERY ? QUERY + "&" : "?") + "before=" + earlierCount(),
+      ).then(asJson);
+      mergeChat(chat);
+    } catch (e) {
+      break;
+    }
+  }
+  // >= rather than ===: a filtered empty turn leaves a gap in the seqs, and
+  // the next real turn is the honest landing for a link that names one.
+  const pos = TURNS.findIndex((t) => t.seq >= seq);
+  if (pos < 0) {
     saidFlash("That turn is not in this conversation", false);
     return;
   }
-  if (index < turns.length - chatShown) {
-    chatShown = turns.length - index;
-    drawChat(LAST_CHAT);
+  if (pos < TURNS.length - chatShown) {
+    chatShown = TURNS.length - pos;
+    drawChat();
   }
-  const turn = document.getElementById("turn-" + index);
+  const turn = document.getElementById("turn-" + TURNS[pos].seq);
   if (!turn) return;
   for (const t of document.querySelectorAll("#talk .turn.current")) {
     t.classList.remove("current");
   }
   turn.classList.add("current");
+  for (const d of turn.querySelectorAll("details.tool")) d.open = true;
   turn.scrollIntoView({ block: "center" });
 }
 
 // The address bar's token was stripped after load, so the bar gets the bare
 // anchor while the clipboard gets the link that opens for someone else.
-function linkTurn(index) {
-  const hash = "#chat/turn-" + index;
+function linkTurn(seq) {
+  const hash = "#chat/turn-" + seq;
   try { history.replaceState(null, "", location.pathname + hash); }
   catch (e) { /* a context that forbids it keeps the URL it had */ }
   copyText(location.origin + location.pathname + QUERY + hash)
@@ -1880,12 +1939,12 @@ function linkTurn(index) {
     .catch((e) => saidFlash("Copy failed: " + String((e && e.message) || e), false));
 }
 
-// The redraw, shared by the poll and by the "show earlier" button — which
-// needs no fetch because the conversation it expands is the one already held.
-function drawChat(chat) {
+// The redraw, shared by the poll, "show earlier" and the deep links — all of
+// them draw the same held conversation, so it takes no argument.
+function drawChat() {
   const pane = document.getElementById("talk");
   const say = pane.querySelector("form.say");
-  pane.replaceChildren(conversation(chat));
+  pane.replaceChildren(conversation(LAST_CHAT));
   // The composer is part of this pane and holds what someone is typing, so it
   // is moved across rather than rebuilt underneath them.
   if (say) pane.appendChild(say);
@@ -1912,7 +1971,8 @@ async function refreshChat() {
     const wasNear = nearBottom();
     CHAT_SIG = sig;
     LAST_CHAT = chat;
-    drawChat(chat);
+    mergeChat(chat);
+    drawChat();
     if (wasNear) {
       // Pinned to the tail: a rebuild must not scroll the newest turn out from
       // under someone watching it arrive.
