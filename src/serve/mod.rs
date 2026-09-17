@@ -159,6 +159,11 @@ const ANALYTICS_HTML: &str = include_str!("assets/analytics.html");
 /// affordable because everything is already in the page.
 const COMMON_CSS: &str = include_str!("assets/common.css");
 
+/// The theme picker all three pages share, inlined for the same reason the
+/// stylesheet is — and placed early in each page so a chosen theme is on
+/// `<html>` before the first paint rather than one frame behind it.
+const THEME_JS: &str = include_str!("assets/theme.js");
+
 /// A favicon small enough to keep inline: the table's dark tile with the amber
 /// dot it draws on a session that is waiting.
 ///
@@ -1566,6 +1571,7 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str, 
     .unwrap_or_else(|_| "\"\"".to_string());
     let body = html
         .replace("__CCTOP_CSS__", COMMON_CSS)
+        .replace("__CCTOP_THEME__", THEME_JS)
         .replace(
             "\"__CCTOP_ACTIONS__\"",
             match actions {

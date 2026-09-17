@@ -67,6 +67,7 @@
 
   footer { margin-top: 24px; font-size: 12px; color: var(--faint); display: grid; gap: 4px; }
 </style>
+<script>__CCTOP_THEME__</script>
 
 <div class="wrap">
   <header class="top">
@@ -267,6 +268,36 @@ function offline(why) {
 let DATA = null;
 const SEL = { provider: "", project: "", model: "", who: "", range: "30d" };
 const RANGES = { "24h": 864e5, "7d": 7 * 864e5, "30d": 30 * 864e5, all: Infinity };
+
+// The filter set survives a reload — reopening the page should land on the
+// view it was left on, not back on the defaults. localStorage can throw
+// outright in an embedded context, so both directions of this are wrapped.
+const FILTERS_KEY = "cctop-analytics";
+function saveFilters() {
+  try {
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(SEL));
+  } catch (e) {}
+}
+function loadFilters() {
+  let stored;
+  try {
+    stored = JSON.parse(localStorage.getItem(FILTERS_KEY) || "null");
+  } catch (e) {
+    return;
+  }
+  if (!stored || typeof stored !== "object") return;
+  for (const key of ["provider", "project", "model", "who"]) {
+    if (typeof stored[key] === "string") SEL[key] = stored[key];
+  }
+  // SEL alone is enough for the dynamic selects — populateFilters adopts it
+  // when it rebuilds their options — but the range is fixed markup, so its
+  // element needs the restored value written back here.
+  if (typeof stored.range === "string" && Object.hasOwn(RANGES, stored.range)) {
+    SEL.range = stored.range;
+    document.getElementById("f-range").value = SEL.range;
+  }
+}
+
 // The window the range select names, as the oldest bucket key each chart may
 // use. Empty when "all" is picked — a string compare against "" keeps every
 // key, which is the same test either way.
@@ -886,6 +917,19 @@ function renderAll() {
 
 // --- load ---------------------------------------------------------------------
 
+// When the newest snapshot was built, so the header stamp can say how stale
+// it is as well as when — a bare clock time reads fresh forever on a page
+// whose refreshes have stopped landing.
+let UPDATED = 0;
+function paintUpdated() {
+  if (!UPDATED) return;
+  const s = Math.max(0, Math.round((Date.now() - UPDATED) / 1000));
+  const ago =
+    s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : Math.floor(s / 3600) + "h";
+  document.getElementById("updated").textContent =
+    "updated " + clock3(new Date(UPDATED).toISOString()) + " · " + ago + " ago";
+}
+
 async function refresh() {
   try {
     const response = await ask("/api/analytics" + QUERY);
@@ -895,8 +939,9 @@ async function refresh() {
     renderAll();
     // "generated" is when the snapshot was built; if it does not parse, when
     // this page got it is still a true statement about the figures.
-    document.getElementById("updated").textContent =
-      "updated " + (clock3(DATA.generated) || clock3(new Date().toISOString()));
+    const t = Date.parse(DATA.generated);
+    UPDATED = isFinite(t) ? t : Date.now();
+    paintUpdated();
     offline(null);
   } catch (e) {
     offline(String(e.message || e));
@@ -912,16 +957,26 @@ async function refresh() {
 // lands on a 403.
 document.getElementById("back").href = "/" + QUERY;
 
+// Inlined ahead of this script; if it ever is not, the header simply goes
+// without the button.
+const themeButton = window.themeToggle && window.themeToggle();
+if (themeButton) document.querySelector("header.top").appendChild(themeButton);
+
 for (const [id, key] of [
   ["f-provider", "provider"], ["f-project", "project"],
   ["f-model", "model"], ["f-who", "who"], ["f-range", "range"],
 ]) {
   document.getElementById(id).addEventListener("change", (e) => {
     SEL[key] = e.target.value;
+    saveFilters();
     renderAll();
   });
 }
 
+// Before the first refresh, so the first populateFilters and renderAll see
+// the restored set rather than the defaults.
+loadFilters();
 refresh();
 setInterval(refresh, 15000);
+setInterval(paintUpdated, 10000);
 </script>

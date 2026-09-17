@@ -122,6 +122,9 @@
            display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   .live { display: inline-flex; align-items: center; gap: 6px; }
 </style>
+<!-- Synchronous, before anything paints: a stored theme choice has to be on
+     <html> already, or a reader who picked dark sees a light frame first. -->
+<script>__CCTOP_THEME__</script>
 
 <div class="wrap">
   <header class="top">
@@ -583,6 +586,11 @@ function render() {
       s.running &&
       (s.state === "waiting" || s.state === "asking" || s.state === "error"),
   );
+  // The whole point of keeping this page in a pinned or background tab is
+  // noticing when a session starts waiting. The tab cannot ring a bell, but
+  // its title can announce the count — and it asks for no notification
+  // permission to do it.
+  document.title = wanting.length ? "(" + wanting.length + ") cctop" : "cctop";
   const rest = shown.filter((s) => !wanting.includes(s));
 
   const attention = document.getElementById("attention");
@@ -877,7 +885,56 @@ if (CAN_ACT) {
     .catch(() => {});
 }
 
-document.getElementById("filter").addEventListener("input", (e) => {
+// --- the controls ------------------------------------------------------------
+
+const filterBox = document.getElementById("filter");
+const sortBox = document.getElementById("sort");
+const runningBtn = document.getElementById("running");
+
+// The controls survive a reload: a filter someone typed is the question they
+// were asking, and a refresh that forgets it makes them ask again. One key,
+// one small object, every access behind try/catch — private windows and
+// embedded contexts throw on localStorage, and the page must not die on it.
+// The bell is not in here on purpose: notification permission belongs to the
+// browser, and re-arming it silently would claim a yes the reader gave for
+// one sitting, not for ever.
+const store = {
+  read() {
+    try {
+      return JSON.parse(localStorage.getItem("cctop-dash")) || {};
+    } catch (e) {
+      return {};
+    }
+  },
+  write() {
+    try {
+      localStorage.setItem(
+        "cctop-dash",
+        JSON.stringify({ filter: filterBox.value, sort: sortBy, running: runningOnly }),
+      );
+    } catch (e) {}
+  },
+};
+
+// Restored as if it had just been typed and picked: the box and the variable
+// it feeds get the value together, and a long-enough query goes back to the
+// transcript search so its snippet rows come back with it.
+const prefs = store.read();
+if (typeof prefs.filter === "string" && prefs.filter) {
+  filterBox.value = prefs.filter;
+  filter = prefs.filter.trim().toLowerCase();
+  if (filter.length >= 3) transcriptSearch(filter);
+}
+if (prefs.sort && ORDER[prefs.sort]) {
+  sortBy = prefs.sort;
+  sortBox.value = sortBy;
+}
+if (prefs.running) {
+  runningOnly = true;
+  runningBtn.setAttribute("aria-pressed", "true");
+}
+
+filterBox.addEventListener("input", (e) => {
   filter = e.target.value.trim().toLowerCase();
   // The metadata filter answers instantly; the transcript is asked only once
   // typing pauses, and only for a query long enough to mean something. A box
@@ -888,16 +945,54 @@ document.getElementById("filter").addEventListener("input", (e) => {
     searchTimer = setTimeout(() => transcriptSearch(filter), 400);
   }
   render();
+  store.write();
 });
-document.getElementById("sort").addEventListener("change", (e) => {
+sortBox.addEventListener("change", (e) => {
   sortBy = e.target.value;
+  store.write();
   render();
 });
-document.getElementById("running").addEventListener("click", (e) => {
+runningBtn.addEventListener("click", (e) => {
   runningOnly = !runningOnly;
   e.currentTarget.setAttribute("aria-pressed", String(runningOnly));
+  store.write();
   render();
 });
+
+// The one keyboard shortcut the page has: `/` reaches the filter from
+// anywhere, Escape inside it clears and leaves. It must never fire while the
+// reader is typing — in the filter itself, the sort select, an answer box, or
+// anything editable.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const on = e.target;
+  if (
+    on instanceof HTMLElement &&
+    (on.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(on.tagName))
+  ) {
+    return;
+  }
+  e.preventDefault();
+  filterBox.focus();
+  if (filterBox.value) filterBox.select();
+});
+filterBox.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  e.preventDefault();
+  // Cleared by running the same path as typing it empty: `filter`, the
+  // debounce and the transcript-hit gating all follow the box, so nothing —
+  // snippets included — lingers after it.
+  filterBox.value = "";
+  filterBox.dispatchEvent(new Event("input"));
+  filterBox.blur();
+});
+
+// The header's last control is not in the markup: the button comes from the
+// shared theme script inlined above, so a page served without it has one
+// fewer button rather than an error. It lands after the totals — #quota
+// claims a whole flex line, so this closes the first.
+const themeButton = window.themeToggle && window.themeToggle();
+if (themeButton) document.getElementById("quota").before(themeButton);
 
 // Ages are relative and nothing else changes between snapshots, so a slow tick
 // keeps "4m ago" honest without waiting on the next refresh.
