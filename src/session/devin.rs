@@ -116,13 +116,10 @@ pub fn extract(path: &Path) -> SessionData {
         }
     };
 
-    if let Some(model) = transcript
+    let agent_model = transcript
         .get("agent")
         .and_then(|a| a.get("model_name"))
-        .and_then(Value::as_str)
-    {
-        data.last_model = model.to_string();
-    }
+        .and_then(Value::as_str);
 
     // `final_metrics` is the session's token ledger; prompt is billed input,
     // completion is output, and cached input reads cheaper.
@@ -146,9 +143,15 @@ pub fn extract(path: &Path) -> SessionData {
     // (no update row) is not mistaken for a failure.
     let statuses = tool_statuses(transcript.get("session_id").and_then(Value::as_str));
 
-    // Tokens attributed to each model across the session's steps.
+    // Tokens attributed to each model across the session's steps. One model is
+    // spelled two ways in the same transcript — most steps record the slug the
+    // API was called with ("swe-2-high") while a few carry the display name the
+    // database knows ("SWE-2 High") — so the bucket is a case-and-punctuation
+    // fold, not the raw string, or the report splits one model into two rows.
+    // The slug is the spelling shown: it is what the pricing tables key on.
     let mut per_model: HashMap<String, Tokens> = HashMap::new();
-    let mut models_seen: Vec<String> = Vec::new();
+    let mut spellings: HashMap<String, String> = HashMap::new();
+    let mut canon_order: Vec<String> = Vec::new();
 
     if let Some(steps) = transcript.get("steps").and_then(Value::as_array) {
         for step in steps {
@@ -164,10 +167,24 @@ pub fn extract(path: &Path) -> SessionData {
                 .to_string();
 
             if let Some(model) = step.get("model_name").and_then(Value::as_str) {
-                if !models_seen.iter().any(|m| m == model) {
-                    models_seen.push(model.to_string());
+                // Buckets key on the fold and the spelling is chosen once all
+                // steps are read: bucketing under the spelling seen so far
+                // splits the model the moment a later step spells it better.
+                let canon = canonical_model(model);
+                match spellings.get_mut(&canon) {
+                    Some(seen)
+                        if *seen != seen.to_ascii_lowercase()
+                            && model == model.to_ascii_lowercase() =>
+                    {
+                        *seen = model.to_string();
+                    }
+                    Some(_) => {}
+                    None => {
+                        spellings.insert(canon.clone(), model.to_string());
+                        canon_order.push(canon.clone());
+                    }
                 }
-                let entry = per_model.entry(model.to_string()).or_default();
+                let entry = per_model.entry(canon.clone()).or_default();
                 if let Some(m) = step.get("metrics") {
                     let prompt = m.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
                     let completion = m
@@ -187,13 +204,13 @@ pub fn extract(path: &Path) -> SessionData {
                             .tokens_by_day
                             .entry(util::local_date_key(&dt))
                             .or_default()
-                            .entry(model.to_string())
+                            .entry(canon.clone())
                             .or_insert(0) += billed;
                         *data
                             .tokens_by_hour
                             .entry(util::local_hour_key(&dt))
                             .or_default()
-                            .entry(model.to_string())
+                            .entry(canon.clone())
                             .or_insert(0) += billed;
                     }
                 }
@@ -244,10 +261,32 @@ pub fn extract(path: &Path) -> SessionData {
         }
     }
 
-    data.models = models_seen;
-    for (model, tokens) in per_model {
+    let display = |canon: &str| {
+        spellings
+            .get(canon)
+            .cloned()
+            .unwrap_or_else(|| canon.to_string())
+    };
+    data.models = canon_order.iter().map(|c| display(c)).collect();
+    for by_model in data
+        .tokens_by_day
+        .values_mut()
+        .chain(data.tokens_by_hour.values_mut())
+    {
+        *by_model = std::mem::take(by_model)
+            .into_iter()
+            .map(|(canon, n)| (display(&canon), n))
+            .collect();
+    }
+    // The header model comes from `agent.model_name`, which is the display
+    // spelling; show it the way the steps do when they are the same model.
+    data.last_model = match agent_model {
+        Some(m) => display(&canonical_model(m)),
+        None => String::new(),
+    };
+    for (canon, tokens) in per_model {
         data.model_breakdown.push(ModelBreakdown {
-            model,
+            model: display(&canon),
             total: 0.0,
             tokens,
             costs: Costs::default(),
@@ -259,12 +298,23 @@ pub fn extract(path: &Path) -> SessionData {
     data
 }
 
+/// The name a model's spellings fold into: lowercase, letters and digits only.
+///
+/// "swe-2-high" and "SWE-2 High" are one model here — the fold is how a slug
+/// and its display name are recognised as such without a table of aliases.
+fn canonical_model(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 /// Map each tool call in `session_id` to its last reported status.
 ///
 /// The transcript records that a call was made; the database records how it
 /// ended. Returns an empty map when the database cannot be read — a transcript
 /// without its database is still worth extracting.
-fn tool_statuses(session_id: Option<&str>) -> HashMap<String, String> {
+pub(crate) fn tool_statuses(session_id: Option<&str>) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let Some(session_id) = session_id else {
         return out;
@@ -570,6 +620,29 @@ mod tests {
                 .unwrap_or("")
                 .contains("Could not parse")
         );
+    }
+
+    /// Steps and `agent.model_name` spell the same model two ways — the slug
+    /// the API was called with and the display name the database knows. They
+    /// are one row in the breakdown, shown the way the steps spell it, or the
+    /// report lists one model twice.
+    #[test]
+    fn one_models_spellings_fold_into_one_row() {
+        let dir = TempDir::new().unwrap();
+        let transcript = TRANSCRIPT.replace(
+            r#""model_name": "swe-1-6-slow", "tool_calls": []"#,
+            r#""model_name": "SWE-1-6 Slow", "tool_calls": []"#,
+        );
+        let data = extract(&write(&dir, "test-session.json", transcript.as_str()));
+
+        assert_eq!(data.models, vec!["swe-1-6-slow".to_string()]);
+        assert_eq!(data.last_model, "swe-1-6-slow");
+        assert_eq!(data.model_breakdown.len(), 1);
+        assert_eq!(data.model_breakdown[0].model, "swe-1-6-slow");
+        assert_eq!(data.model_breakdown[0].tokens.input, 220);
+        let spellings: std::collections::HashSet<&String> =
+            data.tokens_by_day.values().flat_map(|m| m.keys()).collect();
+        assert_eq!(spellings.len(), 1);
     }
 
     #[test]

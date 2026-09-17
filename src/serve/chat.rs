@@ -43,11 +43,12 @@
 //! subagent section already names them and what they cost.
 
 use crate::pricing::Provider;
-use crate::session::{Delta, Session, extract};
+use crate::session::{Delta, Session, devin, extract};
 use crate::util;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 /// How many of the newest turns are sent.
 ///
@@ -195,6 +196,7 @@ pub fn build(session: &Session) -> Conversation {
     let read = match session.provider {
         Provider::Claude => extract::for_each_jsonl(path, |item| sink.claude(item)),
         Provider::Codex => extract::for_each_jsonl(path, |item| sink.codex(item)),
+        Provider::Devin => read_devin(path, &mut sink),
         _ => {
             return unsupported(&format!(
                 "cctop cannot read a {} conversation yet — the tool calls, \
@@ -207,6 +209,24 @@ pub fn build(session: &Session) -> Conversation {
         return unsupported(&format!("could not read the transcript: {e}"));
     }
     sink.finish()
+}
+
+/// Devin's transcript is one ATIF document rather than a line stream, so it
+/// cannot go through [`extract::for_each_jsonl`]: read it whole and feed each
+/// step through the same sink the other readers use.
+fn read_devin(path: &Path, sink: &mut Sink) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let doc: Value = serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // A call's outcome is not in the transcript — the step records the call,
+    // the database records how it ended.
+    let statuses = devin::tool_statuses(doc.get("session_id").and_then(Value::as_str));
+    if let Some(steps) = doc.get("steps").and_then(Value::as_array) {
+        for step in steps {
+            sink.devin(step, &statuses);
+        }
+    }
+    Ok(())
 }
 
 fn unsupported(why: &str) -> Conversation {
@@ -635,6 +655,119 @@ impl Sink {
         let id = payload.get("call_id").and_then(Value::as_str);
         self.add_tool(seq, id, tool);
     }
+
+    // --- Devin ---
+
+    /// One ATIF step: the source says who is speaking, and an agent step is a
+    /// whole model response — reasoning, reply text, tool calls, and the
+    /// results they produced, which Devin records on the same step's
+    /// `observation` rather than as the later entry Claude and Codex use.
+    fn devin(&mut self, step: &Value, statuses: &HashMap<String, String>) {
+        let ts = step.get("timestamp").and_then(Value::as_str).unwrap_or("");
+        match step.get("source").and_then(Value::as_str) {
+            Some("user") => {
+                let Some(text) = step.get("message").and_then(Value::as_str) else {
+                    return;
+                };
+                if text.trim().is_empty() {
+                    return;
+                }
+                let mut turn = Turn::new("user", "message", ts);
+                turn.set_text(text);
+                self.push(turn);
+            }
+            Some("agent") => self.devin_agent(step, ts, statuses),
+            Some("system") => {
+                // `sysprompt` and `rules` steps are the prompt being assembled —
+                // the system prompt and the rule files injected into it, the
+                // same on every session. The rest are the harness talking
+                // mid-run: environment info, a backgrounded subagent finishing.
+                match step
+                    .pointer("/extra/telemetry/source")
+                    .and_then(Value::as_str)
+                {
+                    Some("sysprompt") | Some("rules") => return,
+                    _ => {}
+                }
+                let Some(text) = step.get("message").and_then(Value::as_str) else {
+                    return;
+                };
+                if text.trim().is_empty() {
+                    return;
+                }
+                let mut turn = Turn::new("system", "message", ts);
+                turn.set_text(text);
+                self.push(turn);
+            }
+            _ => {}
+        }
+    }
+
+    fn devin_agent(&mut self, step: &Value, ts: &str, statuses: &HashMap<String, String>) {
+        if let Some(thinking) = step.get("reasoning_content").and_then(Value::as_str)
+            && !thinking.trim().is_empty()
+        {
+            let mut turn = Turn::new("assistant", "reasoning", ts);
+            turn.set_text(thinking);
+            self.push(turn);
+        }
+
+        let text = step.get("message").and_then(Value::as_str).unwrap_or("");
+        let empty: Vec<Value> = Vec::new();
+        let calls = step
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        if text.trim().is_empty() && calls.is_empty() {
+            return;
+        }
+        // `step_id` names the response: every step gets a fresh id, so one
+        // step is one turn and nothing is ever folded into the reply before.
+        // It is a number in ATIF, not a string.
+        let request = step.get("step_id").map(|id| match id {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+        let seq = self.open_assistant(ts, request.as_deref());
+        if let Some(turn) = self.turn_mut(seq) {
+            turn.append_text(text);
+        }
+        for call in calls {
+            let name = call
+                .get("function_name")
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            let args = call.get("arguments").cloned().unwrap_or(Value::Null);
+            let (short, full) = extract::tool_detail(name, &args);
+            let mut tool = ToolUse {
+                name: util::pretty_mcp_name(name),
+                detail: short,
+                full,
+                ..ToolUse::default()
+            };
+            if let Some(delta) = devin_delta(&args) {
+                tool.added = delta.added;
+                tool.removed = delta.removed;
+                tool.diff = delta.hunks.into_iter().take(MAX_DIFF_LINES).collect();
+            }
+            let id = call.get("tool_call_id").and_then(Value::as_str);
+            self.add_tool(seq, id, tool);
+        }
+        for result in step
+            .get("observation")
+            .and_then(|o| o.get("results"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = result.get("source_call_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let body = flatten_content(result.get("content"));
+            let failed = statuses.get(id).is_some_and(|s| s != "completed");
+            self.resolve(id, Some(body), failed, None);
+        }
+    }
 }
 
 /// The diff a Claude edit reported, from the entry carrying its result.
@@ -657,6 +790,30 @@ fn claude_delta(item: &Value) -> Option<Delta> {
             if delta.hunks.len() < MAX_DIFF_LINES {
                 delta.hunks.push(line.to_string());
             }
+        }
+    }
+    (delta.added > 0 || delta.removed > 0).then_some(delta)
+}
+
+/// The patch a Devin `edit` applied, from its arguments.
+///
+/// Claude writes the applied patch onto the result (`structuredPatch`); ATIF
+/// records only `old_string`/`new_string`, so the diff shown is the literal
+/// before and after rather than a minimal hunk.
+fn devin_delta(args: &Value) -> Option<Delta> {
+    let old = args.get("old_string").and_then(Value::as_str)?;
+    let new = args.get("new_string").and_then(Value::as_str)?;
+    let mut delta = Delta::default();
+    for line in old.lines() {
+        delta.removed += 1;
+        if delta.hunks.len() < MAX_DIFF_LINES {
+            delta.hunks.push(format!("-{line}"));
+        }
+    }
+    for line in new.lines() {
+        delta.added += 1;
+        if delta.hunks.len() < MAX_DIFF_LINES {
+            delta.hunks.push(format!("+{line}"));
         }
     }
     (delta.added > 0 || delta.removed > 0).then_some(delta)
@@ -1245,5 +1402,150 @@ mod tests {
         let chat = build(&session);
         assert!(!chat.supported);
         assert!(chat.note.is_some_and(|n| n.contains("Windsurf")));
+    }
+
+    fn sink_devin(steps: &[&str], statuses: &HashMap<String, String>) -> Conversation {
+        let mut sink = Sink::default();
+        for step in steps {
+            sink.devin(&serde_json::from_str(step).unwrap(), statuses);
+        }
+        sink.finish()
+    }
+
+    /// One ATIF step is one model response: the message is the reply text,
+    /// `reasoning_content` is the thinking that preceded it.
+    #[test]
+    fn a_devin_exchange_reads_the_same_way() {
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":1,"source":"user","timestamp":"t1","message":"fix the parser"}"#,
+                r#"{"step_id":2,"source":"agent","timestamp":"t2","reasoning_content":"weighing it up","message":"on it"}"#,
+            ],
+            &HashMap::new(),
+        );
+        assert!(chat.supported);
+        let roles: Vec<(&str, &str)> = chat.turns.iter().map(|t| (t.role, t.kind)).collect();
+        assert_eq!(
+            roles,
+            vec![
+                ("user", "message"),
+                ("assistant", "reasoning"),
+                ("assistant", "message")
+            ]
+        );
+        assert_eq!(chat.turns[0].text, "fix the parser");
+        assert_eq!(chat.turns[1].text, "weighing it up");
+        assert_eq!(chat.turns[2].text, "on it");
+    }
+
+    /// Devin records a call's result on the same step that made it, under
+    /// `observation.results` keyed by `source_call_id` — the call and its
+    /// outcome still come back as one thing.
+    #[test]
+    fn a_devin_result_lands_on_the_call_it_made() {
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":3,"source":"agent","timestamp":"t","message":"reading","tool_calls":[{"tool_call_id":"read_1#abc","function_name":"read","arguments":{"file_path":"/a/b.rs"}}],"observation":{"results":[{"source_call_id":"read_1#abc","content":"fn main() {}"}]}}"#,
+            ],
+            &HashMap::new(),
+        );
+        assert_eq!(chat.turns.len(), 1);
+        let tool = &chat.turns[0].tools[0];
+        assert_eq!(tool.name, "read");
+        assert_eq!(tool.detail, "/a/b.rs");
+        assert_eq!(tool.result.as_deref(), Some("fn main() {}"));
+        assert!(!tool.failed);
+    }
+
+    /// Two steps are two replies even when neither made a call — the step id
+    /// is what stops them being folded into one.
+    #[test]
+    fn consecutive_devin_steps_stay_separate_replies() {
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":1,"source":"agent","timestamp":"t1","message":"first"}"#,
+                r#"{"step_id":2,"source":"agent","timestamp":"t2","message":"second"}"#,
+            ],
+            &HashMap::new(),
+        );
+        assert_eq!(chat.turns.len(), 2);
+        assert_eq!(chat.turns[0].text, "first");
+        assert_eq!(chat.turns[1].text, "second");
+    }
+
+    /// The transcript does not say how a call ended; the database's status
+    /// map does. A call whose last reported status is not `completed` failed.
+    #[test]
+    fn a_devin_call_the_database_marked_failed_is_marked() {
+        let statuses = HashMap::from([("exec_1#abc".to_string(), "failed".to_string())]);
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":1,"source":"agent","timestamp":"t","tool_calls":[{"tool_call_id":"exec_1#abc","function_name":"exec","arguments":{"command":"cargo test"}}],"observation":{"results":[{"source_call_id":"exec_1#abc","content":"error: no such target"}]}}"#,
+            ],
+            &statuses,
+        );
+        let tool = &chat.turns[0].tools[0];
+        assert!(tool.failed);
+        assert_eq!(tool.result.as_deref(), Some("error: no such target"));
+    }
+
+    /// A call still running has an observation pending, so no result at all —
+    /// which is what the page shows as in-flight.
+    #[test]
+    fn a_devin_call_with_no_observation_is_still_running() {
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":1,"source":"agent","timestamp":"t","tool_calls":[{"tool_call_id":"exec_1#abc","function_name":"exec","arguments":{"command":"sleep 60"}}]}"#,
+            ],
+            &HashMap::new(),
+        );
+        assert!(chat.turns[0].tools[0].result.is_none());
+    }
+
+    /// ATIF has no `structuredPatch`; the patch an `edit` applied is its own
+    /// `old_string`/`new_string` arguments.
+    #[test]
+    fn a_devin_edit_carries_its_diff() {
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":1,"source":"agent","timestamp":"t","tool_calls":[{"tool_call_id":"edit_1#abc","function_name":"edit","arguments":{"file_path":"/a/b.rs","old_string":"old\nlines","new_string":"new\nalso"}}],"observation":{"results":[{"source_call_id":"edit_1#abc","content":"updated"}]}}"#,
+            ],
+            &HashMap::new(),
+        );
+        let tool = &chat.turns[0].tools[0];
+        assert_eq!((tool.added, tool.removed), (2, 2));
+        assert_eq!(tool.diff, vec!["-old", "-lines", "+new", "+also"]);
+    }
+
+    /// The system prompt and the rule files are steps too, but they are the
+    /// prompt being assembled, not the conversation. A step the harness
+    /// actually injected mid-run — a backgrounded subagent finishing — is.
+    #[test]
+    fn devin_prompt_assembly_is_not_a_turn() {
+        let chat = sink_devin(
+            &[
+                r#"{"step_id":1,"source":"system","timestamp":"t1","message":"You are Devin…","extra":{"telemetry":{"source":"sysprompt"}}}"#,
+                r#"{"step_id":2,"source":"system","timestamp":"t2","message":"<rules>…</rules>","extra":{"telemetry":{"source":"rules"}}}"#,
+                r#"{"step_id":3,"source":"system","timestamp":"t3","message":"<subagent_completion_notification>done</subagent_completion_notification>","extra":{"telemetry":{"source":"system"}}}"#,
+            ],
+            &HashMap::new(),
+        );
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].role, "system");
+        assert!(chat.turns[0].text.contains("subagent_completion"));
+    }
+
+    /// A transcript that is not the document ATIF says it is reports as
+    /// unreadable rather than panicking or looking empty.
+    #[test]
+    fn a_devin_transcript_that_is_not_json_is_unsupported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s1.json");
+        std::fs::write(&path, b"not json").unwrap();
+        let mut session = Session::new(Provider::Devin, "s1".into());
+        session.data_file = Some(path);
+        let chat = build(&session);
+        assert!(!chat.supported);
+        assert!(chat.note.is_some_and(|n| n.contains("could not read")));
     }
 }
