@@ -113,6 +113,7 @@ loopback by default. See [In a browser](docs/serve.md).
 - [In a browser](docs/serve.md) — `cctop serve`, the session report, and reaching it from a phone
 - [The bottom panels](docs/panels.md) — Tool Activity and the context breakdown
 - [What the cost figures mean](docs/costs.md) — how each provider is priced, and where the data comes from
+- [Provider by provider](docs/providers/) — what each harness records, where its sessions live, and which columns it can fill
 - [Integrations](docs/integrations.md) — agent hooks, the MCP server, and `--host`
 - [Troubleshooting](docs/troubleshooting.md) — `cctop doctor` and the usual causes
 
@@ -133,7 +134,7 @@ reads, and [rmux](docs/rmux/), the multiplexer it hands agents to.
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 
 A `─` is a gap in what that harness records, not in cctop — the details are on
-the [cost page](docs/costs.md).
+each [provider's page](docs/providers/).
 
 ## A note on cost figures
 

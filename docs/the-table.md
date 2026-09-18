@@ -131,6 +131,12 @@ agents started from different subdirectories of one checkout are. Comparing
 directories gets both of those backwards, and the second is the arrangement
 `git worktree` exists to provide.
 
+The repository is the unit for the `·` case — the neighbourhood. A shared file
+is stronger evidence and is not limited by it: two sessions holding one path
+on disk are racing for it wherever they were launched from. An agent working
+a parent checkout can write into a nested checkout another agent owns, and an
+edit landing outside the repository has no ground to compare at all.
+
 Four limits worth knowing. Two agents rewriting one README whole *can* lose an
 edit, and the prose exemption above will not say so. Only running sessions are compared — a session that
 has stopped may well have left uncommitted work behind, but nothing it does from

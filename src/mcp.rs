@@ -353,7 +353,8 @@ fn check_conflicts(sessions: &[Session], args: &Value) -> Result<String, String>
         },
         "limits": "Only running sessions are compared, only the files each has written recently, \
                    and a linked git worktree counts as a separate repository — which is the point \
-                   of one.",
+                   of one. A file is stronger evidence than a shared repository, though: a peer \
+                   that already holds one of your files is reported wherever it was launched.",
     });
     Ok(serde_json::to_string_pretty(&payload).unwrap_or_default())
 }

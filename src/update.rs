@@ -4,7 +4,10 @@
 //! stays on whatever version it was fetched at. Installs that *do* have a
 //! package manager (`cargo install`, a distro package) must not be overwritten
 //! behind the manager's back — that refusal is absolute and is checked before
-//! anything else.
+//! anything else. A cargo *build output* (`target/<profile>/cctop`) is refused
+//! on the same grounds: cargo's fingerprint sits beside the binary and would
+//! go on reporting the swapped file as the build it produced, so the update
+//! would land and `cargo build` would never put the real one back.
 //!
 //! For an install cctop does own, it updates itself as the interactive UI
 //! starts, when the hourly check has *already* found a newer version. That is a
@@ -448,6 +451,9 @@ pub fn run(force: bool) -> Result<()> {
         offer_cargo_upgrade(&latest, &mut prefs);
         return Ok(());
     }
+    if built_by_cargo() {
+        return Err(cargo_built());
+    }
     let target =
         asset_target().ok_or_else(|| anyhow!("no release is published for this platform"))?;
 
@@ -567,6 +573,15 @@ pub fn auto_at_startup(enabled: bool, prefs: &mut crate::cache::UiPrefs) {
     // taken.
     if managed_by_cargo() {
         offer_cargo_upgrade(&latest, prefs);
+        return;
+    }
+    // A build output is cargo's in a quieter way than an install: no `cargo
+    // install --list` to contradict, but a fingerprint beside the binary that
+    // would go on reporting whatever was swapped in as the build it produced —
+    // so the update would land and `cargo build` would never repair the tree.
+    // Silent like the other refusals here: the release belongs in an install,
+    // not a target directory.
+    if built_by_cargo() {
         return;
     }
     // An install cctop cannot write to is not worth a download, and finding out
@@ -802,6 +817,30 @@ fn managed_by_cargo() -> bool {
     under(&exe, &bin)
 }
 
+/// Whether the running executable is a cargo build output.
+pub(crate) fn built_by_cargo() -> bool {
+    std::env::current_exe()
+        .map(|exe| is_build_output(&exe))
+        .unwrap_or(false)
+}
+
+/// Whether `exe` sits in a cargo profile directory.
+///
+/// The markers are what cargo leaves beside every binary it builds —
+/// `.fingerprint` always, `deps/` for anything with a dependency — rather than
+/// the directory's name, because `CARGO_TARGET_DIR` and per-target layouts can
+/// rename every part of the path. An install and a downloaded archive sit next
+/// to neither.
+fn is_build_output(exe: &Path) -> bool {
+    let Ok(exe) = exe.canonicalize() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    dir.join(".fingerprint").is_dir() || dir.join("deps").is_dir()
+}
+
 /// What to say to a user whose cctop came from `cargo install`.
 ///
 /// This is the case the permission check cannot catch, and the reason it needs
@@ -817,6 +856,21 @@ fn cargo_managed() -> anyhow::Error {
          next `cargo install-update` would undo the update. Run `cargo install cctop --force` \
          instead.",
         current_version()
+    )
+}
+
+/// What to say to a user whose cctop is a build output rather than an install.
+///
+/// Same shape as [`cargo_managed`], for bookkeeping that is quieter: the
+/// directory *is* writable and the replacement would work, but the fingerprint
+/// beside the binary would go on calling it the build it produced — `cargo
+/// build` would report it fresh and never rebuild it, which is a swapped file
+/// nobody can see. The release belongs somewhere cargo does not keep books on.
+fn cargo_built() -> anyhow::Error {
+    anyhow!(
+        "this cctop is a cargo build output, not an install — replacing it would leave cargo's \
+         fingerprint describing a binary that is no longer there, and `cargo build` would report \
+         it fresh and never put it back. `cargo install cctop --force` puts the release on PATH."
     )
 }
 
@@ -987,6 +1041,28 @@ mod tests {
         assert_eq!(wanted(true, true, latest()), None);
         // Nothing to update to, which is the ordinary case.
         assert_eq!(wanted(true, false, None), None);
+    }
+
+    /// A binary cargo built is as much cargo's as one it installed: the
+    /// fingerprint beside it would go on calling whatever was swapped in the
+    /// build it produced, so `cargo build` would report the file fresh and
+    /// never rebuild it. The markers are the directories cargo fills, not the
+    /// path's spelling — `CARGO_TARGET_DIR` renames all of it.
+    #[test]
+    fn a_cargo_build_output_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("cctop");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        assert!(
+            !is_build_output(&exe),
+            "a bare binary is not a build output"
+        );
+
+        std::fs::create_dir(dir.path().join(".fingerprint")).unwrap();
+        assert!(
+            is_build_output(&exe),
+            "a fingerprint is cargo's own bookkeeping"
+        );
     }
 
     /// A cargo install is never replaced by hand, and the command that does

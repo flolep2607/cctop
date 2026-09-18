@@ -94,7 +94,11 @@ fixture_env() {
 cmd_up() {
   [ -x "$BIN" ] || cmd_build
   [ -d "$FIXTURE" ] || cmd_fixture
-  local launch=("$BIN")
+  # --no-auto-update: a binary allowed to self-update can park on "Press Enter
+  # to start cctop…" before the UI ever draws — which is what a stale release
+  # left in target/ did, and wait_for("Overview") just timed out on it. The
+  # driver is here to see the UI, not to test updating.
+  local launch=("$BIN" --no-auto-update)
   if [ "${1:-}" = "--spawn" ]; then
     # Let the launcher actually start agents: cctop refuses to nest a
     # `new-session` under a $TMUX/$RMUX it can see, so the wrapper drops them.
@@ -108,7 +112,7 @@ cmd_up() {
     # cctop-* sessions, finds none, and draws a bar with no tabs; a
     # `set-option` on a real session answers "can't find session". That looked
     # for a while like a cctop bug and was this line.
-    printf '#!/bin/sh\nunset TMUX TMUX_PANE RMUX RMUX_PANE\nexec %s\n' "$BIN" > "$SHOTS/../nested.sh"
+    printf '#!/bin/sh\nunset TMUX TMUX_PANE RMUX RMUX_PANE\nexec %s --no-auto-update\n' "$BIN" > "$SHOTS/../nested.sh"
     chmod +x "$SHOTS/../nested.sh"
     launch=("$SHOTS/../nested.sh")
     say "spawn mode: real tmux server, real sessions will appear as tabs"

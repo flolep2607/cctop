@@ -14,12 +14,19 @@
 //! — gets both of those backwards, and the second is exactly the arrangement
 //! this repository's own contributors are told to use.
 //!
+//! The repository root is the unit for the *neighbourhood* warning. A shared
+//! file is stronger evidence and is not limited by it: two sessions holding
+//! one path on disk are racing for it wherever they were launched from — an
+//! agent working a parent checkout can write into a nested one another agent
+//! owns, and an edit landing outside the repository has no ground to compare
+//! at all.
+//!
 //! Only running sessions are compared. A session that has stopped may well have
 //! left uncommitted work behind, but nothing it does from here on can race
 //! anyone.
 
 use crate::session::Session;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -66,61 +73,84 @@ pub fn apply(sessions: &mut [Session]) -> Map {
 /// Pure over the sessions handed in, apart from the repository-root cache, so
 /// it can be recomputed every refresh without touching a transcript.
 pub fn detect(sessions: &[Session]) -> Map {
-    let mut by_repo: HashMap<PathBuf, Vec<&Session>> = HashMap::new();
     // Remote rows are excluded on both counts: their paths are on another
     // filesystem, so `ground` would stat whatever happens to sit at the same
     // path here, and each machine already detects and reports its own overlaps
     // through `--json`. [`apply`] leaves their carried verdict alone.
-    for s in sessions
+    let live: Vec<&Session> = sessions
         .iter()
-        .filter(|s| s.is_running() && s.remote.is_none())
-    {
-        if s.label_source.is_empty() {
-            continue;
-        }
-        by_repo.entry(ground(&s.label_source)).or_default().push(s);
-    }
+        .filter(|s| s.is_running() && s.remote.is_none() && !s.label_source.is_empty())
+        .collect();
 
     let mut out = Map::new();
-    for group in by_repo.into_values().filter(|g| g.len() > 1) {
-        for s in &group {
-            let mine: HashSet<&str> = s.recent_writes.iter().map(String::as_str).collect();
-            let mut sharing = Vec::new();
-            let mut neighbours = Vec::new();
-            let mut files: BTreeSet<&str> = BTreeSet::new();
 
-            let key = s.key();
-            for other in group.iter().filter(|o| o.key() != key) {
-                let common: Vec<&str> = other
-                    .recent_writes
-                    .iter()
-                    .map(String::as_str)
-                    .filter(|p| mine.contains(p) && contested(p))
-                    .collect();
-                if common.is_empty() {
-                    neighbours.push(other.key());
-                } else {
-                    files.extend(common);
-                    sharing.push(other.key());
-                }
-            }
-
-            let (level, peers) = match sharing.is_empty() {
-                false => (Overlap::File, sharing),
-                true => (Overlap::Directory, neighbours),
-            };
-            if peers.is_empty() {
+    // A shared file is global evidence, not scoped to a ground: the two
+    // sessions hold one path on disk wherever they were launched from. An
+    // agent working a parent checkout can write into a nested one another
+    // agent owns, and an edit landing outside the repository has no ground to
+    // group by at all — so this pass pairs every live session with every
+    // other, and the ground grouping below is only for the lesser warning.
+    for (i, s) in live.iter().enumerate() {
+        let mine: HashSet<&str> = s
+            .recent_writes
+            .iter()
+            .map(String::as_str)
+            .filter(|p| contested(p))
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        for other in live.iter().skip(i + 1) {
+            let common: Vec<&str> = other
+                .recent_writes
+                .iter()
+                .map(String::as_str)
+                .filter(|p| mine.contains(p))
+                .collect();
+            if common.is_empty() {
                 continue;
             }
-            out.insert(
-                key,
-                Collision {
-                    level,
-                    peers,
-                    files: files.into_iter().map(str::to_string).collect(),
-                },
-            );
+            for (a, b) in [(*s, *other), (*other, *s)] {
+                let entry = out.entry(a.key()).or_insert_with(|| Collision {
+                    level: Overlap::File,
+                    peers: Vec::new(),
+                    files: Vec::new(),
+                });
+                let key = b.key();
+                if !entry.peers.contains(&key) {
+                    entry.peers.push(key);
+                }
+                entry.files.extend(common.iter().map(|p| p.to_string()));
+            }
         }
+    }
+
+    // Same ground without a shared file — the lesser warning. A session
+    // already at [`Overlap::File`] keeps only the peers its warning is about
+    // rather than gaining the whole neighbourhood.
+    let mut by_repo: HashMap<PathBuf, Vec<&Session>> = HashMap::new();
+    for s in &live {
+        by_repo.entry(ground(&s.label_source)).or_default().push(*s);
+    }
+    for group in by_repo.into_values().filter(|g| g.len() > 1) {
+        for s in &group {
+            let key = s.key();
+            for other in group.iter().filter(|o| o.key() != key) {
+                let entry = out.entry(key.clone()).or_insert_with(|| Collision {
+                    level: Overlap::Directory,
+                    peers: Vec::new(),
+                    files: Vec::new(),
+                });
+                if entry.level == Overlap::Directory && !entry.peers.contains(&other.key()) {
+                    entry.peers.push(other.key());
+                }
+            }
+        }
+    }
+
+    for c in out.values_mut() {
+        c.files.sort();
+        c.files.dedup();
     }
     out
 }
@@ -168,12 +198,15 @@ fn contested(path: &str) -> bool {
     !matches(path.file_name(), &UNCONTESTED_NAME) && !matches(path.extension(), &UNCONTESTED_EXT)
 }
 
-/// Live sessions standing on the same ground as `dir`, each with whichever of
-/// `files` it has already written.
+/// Live sessions standing on the same ground as `dir`, or holding one of
+/// `files` wherever they stand, each with whichever of `files` it has already
+/// written.
 ///
 /// The question [`detect`] answers for sessions cctop can see, asked instead by
 /// something cctop cannot — an agent about to start a batch of edits, which has
-/// no row in the table yet and so cannot be compared against one.
+/// no row in the table yet and so cannot be compared against one. A session on
+/// other ground earns its place by evidence alone: it already holds a file the
+/// caller is about to touch.
 pub fn peers_of<'a>(
     sessions: &'a [Session],
     dir: &str,
@@ -184,9 +217,8 @@ pub fn peers_of<'a>(
     sessions
         .iter()
         .filter(|s| s.is_running() && s.remote.is_none() && !s.label_source.is_empty())
-        .filter(|s| ground(&s.label_source) == here)
         .map(|s| {
-            let shared = s
+            let shared: Vec<String> = s
                 .recent_writes
                 .iter()
                 // The same exemption `detect` makes, because this answers the
@@ -196,6 +228,7 @@ pub fn peers_of<'a>(
                 .collect();
             (s, shared)
         })
+        .filter(|(s, shared)| !shared.is_empty() || ground(&s.label_source) == here)
         .collect()
 }
 
@@ -471,8 +504,10 @@ mod tests {
         let fx = Fixture::new("prefix");
         let one = fx.checkout("repo");
         let two = fx.checkout("repo2");
-        let a = live("a", &one, &["x.rs"]);
-        let b = live("b", &two, &["x.rs"]);
+        // Each session's writes resolve against its own directory — the same
+        // relative name is a different file on disk in each repository.
+        let a = live("a", &one, &[&format!("{one}/x.rs")]);
+        let b = live("b", &two, &[&format!("{two}/x.rs")]);
         assert!(detect(&[a, b]).is_empty());
     }
 
@@ -486,14 +521,56 @@ mod tests {
         let wt = fx.dir("repo/.claude/worktrees/agent-1");
         std::fs::write(Path::new(&wt).join(".git"), "gitdir: /elsewhere\n").unwrap();
 
-        let a = live("a", &main, &["src/ui.rs"]);
-        let b = live("b", &wt, &["src/ui.rs"]);
+        // The same relative name resolves against each session's own ground,
+        // so these are two different files on disk — which is the point of a
+        // worktree.
+        let a = live("a", &main, &[&format!("{main}/src/ui.rs")]);
+        let b = live("b", &wt, &[&format!("{wt}/src/ui.rs")]);
         assert!(detect(&[a, b]).is_empty(), "worktrees are separate ground");
 
         // But two agents in the *same* worktree still are.
-        let c = live("c", &wt, &["src/ui.rs"]);
-        let d = live("d", &wt, &["src/ui.rs"]);
+        let shared = format!("{wt}/src/ui.rs");
+        let c = live("c", &wt, &[&shared]);
+        let d = live("d", &wt, &[&shared]);
         assert_eq!(detect(&[c, d]).len(), 2);
+    }
+
+    /// Separate ground keeps the neighbourhood warning out, but a file is
+    /// stronger evidence than where either session was launched: an agent in
+    /// the parent checkout writing into a nested checkout is racing the agent
+    /// that owns it, and the `!` has to say so.
+    #[test]
+    fn a_shared_file_collides_across_grounds() {
+        let fx = Fixture::new("cross-ground");
+        let outer = fx.checkout("outer");
+        let inner = fx.checkout("outer/nested");
+        let shared = format!("{inner}/src/x.rs");
+
+        let a = live("a", &outer, &[&shared]);
+        let b = live("b", &inner, &[&shared]);
+        let map = detect(&[a.clone(), b.clone()]);
+
+        let hit = map.get(&a.key()).expect("a collides");
+        assert_eq!(hit.level, Overlap::File);
+        assert_eq!(hit.peers, vec![b.key()]);
+        assert_eq!(hit.files, vec![normalise(&shared, "/anywhere")]);
+        assert_eq!(map[&b.key()].level, Overlap::File);
+    }
+
+    /// The agent-facing answer crosses grounds the same way — a session that
+    /// already holds one of the caller's files is the peer that matters most,
+    /// whichever checkout it was launched from.
+    #[test]
+    fn the_agent_facing_answer_reaches_across_grounds() {
+        let fx = Fixture::new("peers-cross");
+        let outer = fx.checkout("outer");
+        let inner = fx.checkout("outer/nested");
+        let shared = format!("{inner}/src/x.rs");
+        let sessions = [live("a", &inner, &[&shared])];
+
+        let peers = peers_of(&sessions, &outer, std::slice::from_ref(&shared));
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].1, vec![normalise(&shared, "/anywhere")]);
     }
 
     #[test]
