@@ -1267,7 +1267,12 @@ function turnNode(turn, seq) {
 function conversation(chat) {
   const s = block("Conversation");
   if (!chat.supported) {
-    s.appendChild(el("div", "card pad faint", chat.note || "no reader for this harness"));
+    // The same empty-in-a-card shape the drawn conversation uses for a session
+    // nothing has been said in yet — one "nothing here" look, and one class
+    // for anything watching for content to appear.
+    const card = el("div", "card");
+    card.appendChild(el("div", "empty", chat.note || "no reader for this harness"));
+    s.appendChild(card);
     return s;
   }
   const card = el("div", "card");

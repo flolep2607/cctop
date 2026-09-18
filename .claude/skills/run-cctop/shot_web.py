@@ -13,6 +13,7 @@ to produce on demand rather than by unplugging something.
 
 import os
 import sys
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -52,16 +53,59 @@ def main() -> int:
                     body=CLOUDFLARE_502,
                 ),
             )
+        # The document's own status, kept so a run that renders nothing can
+        # say whether the server even sent a page — a bare 404 body renders
+        # no element the selector list knows, and without this the failure
+        # is indistinguishable from a render that silently died.
+        document_status: list[int] = []
+        page.on(
+            "response",
+            lambda r: document_status.append(r.status)
+            if r.request.resource_type == "document" and r.url == URL
+            else None,
+        )
         page.goto(URL)
         # The pages build themselves from a fetch, so "loaded" is when something
         # other than the placeholder is on screen. Either outcome is a real
         # answer — an error banner is what the dead-tunnel run is here to see.
-        try:
-            page.wait_for_selector(
-                ".turn, .row, tbody tr, .empty, .banner", timeout=15000
+        # `.card` is the fallback for a state the other selectors do not name —
+        # a session with no transcript renders a card explaining that, and it
+        # is still a page that worked.
+        #
+        # Polled in Python rather than `wait_for_selector`: the injected waiter
+        # has starved to timeout on a live dashboard — SSE-driven DOM churn —
+        # while `query_selector_all` at the same moment returned seven visible
+        # rows. Protocol queries see the truth; the page-side poll does not.
+        deadline = time.time() + 15
+        rendered = False
+        while not rendered and time.time() < deadline:
+            rendered = any(
+                e.is_visible()
+                for e in page.query_selector_all(
+                    ".turn, .row, tbody tr, .empty, .banner, .card"
+                )
             )
-        except Exception:
-            problems.append("nothing rendered within 15s")
+            if not rendered:
+                time.sleep(0.25)
+        if not rendered:
+            status = document_status[-1] if document_status else "no response"
+            problems.append(
+                f"nothing rendered within 15s (document answered {status})"
+            )
+            # What the page actually holds, so a blank-looking failure can be
+            # told from content the selector simply does not name.
+            try:
+                problems.append(
+                    "body classes at timeout: "
+                    + page.evaluate(
+                        "() => Array.from(document.body.querySelectorAll('*'))"
+                        ".slice(0, 400)"
+                        ".map(e => e.className).filter(Boolean)"
+                        ".slice(0, 40).join(' | ')"
+                    )
+                )
+            except Exception as e:
+                problems.append(f"could not inspect the body either: {e}")
         page.screenshot(path=f"{OUT}.png", full_page=True)
         text = page.inner_text("body")
         with open(f"{OUT}.txt", "w") as fh:
