@@ -110,8 +110,6 @@ impl App {
         };
         self.pending_brief = Some(path);
         self.pending_fork = crate::handoff::forkable(&session).map(std::path::Path::to_path_buf);
-        // The receiving agent belongs in the directory the work is in, whatever
-        // row the cursor moves to while the launcher is up.
         self.launch_prompt(LaunchInto::Tab);
         // `launch_prompt` bails on its own when nothing can be launched, and
         // leaving a brief pending for a launcher that never opened would attach
@@ -121,6 +119,11 @@ impl App {
             self.pending_fork = None;
             return;
         }
+        // The receiving agent belongs in the directory the work is in —
+        // `launch_prompt` opens on `launch_root`, which is where *cctop* was
+        // invoked and right for a bare new tab. Here it is only the field's
+        // starting value, and `c` still changes it.
+        self.launch_cwd = session.work_dir().or_else(|| self.launch_root.clone());
         self.set_status(format!(
             "Handing off {} — pick who takes it",
             brief.summary()
@@ -156,6 +159,13 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
+        // Checked before `resume_argv` so the refusal names the real reason:
+        // the row exists because a process does, and its `_pid_` id names no
+        // conversation a harness could reopen.
+        if session.process_only() {
+            self.set_status("Nothing to resume — no transcript claims this process");
+            return;
+        }
         let Some(argv) = session.resume_argv() else {
             self.set_status(format!(
                 "{} sessions cannot be resumed from a shell",

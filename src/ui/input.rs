@@ -1878,6 +1878,31 @@ mod tests {
         assert!(items[app.menu_cursor].enabled());
     }
 
+    /// The row exists because a process does: its `_pid_` id names no
+    /// transcript, so Resume has to say that rather than launch `claude
+    /// --resume _pid_42` at a conversation that is not there.
+    #[test]
+    fn a_process_only_row_cannot_be_resumed() {
+        let mut app = test_app();
+        app.sessions = vec![session("_pid_42", true, "/repo")];
+        app.refilter();
+        app.selected = 0;
+
+        let items = menu::items(&app);
+        let resume = items
+            .iter()
+            .find(|i| i.action == menu::Action::Resume)
+            .expect("the menu always carries a Resume entry");
+        assert_eq!(
+            resume.blocked.as_deref(),
+            Some("no transcript claims this process")
+        );
+
+        app.resume_selected();
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("Nothing to resume"), "{status}");
+    }
+
     /// The whole point of the rebinding: a vim reflex moves the cursor and
     /// cannot reach a live agent.
     #[test]

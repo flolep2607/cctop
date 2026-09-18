@@ -246,7 +246,10 @@ pub fn info(
             &session.label_source
         }),
     ));
+    // A `_pid_` row's id names the process, not a conversation — showing a
+    // `--resume` command for it would prescribe a flag that finds nothing.
     let cmd = match session.provider {
+        _ if session.process_only() => "no transcript — there is nothing to resume".to_string(),
         Provider::Claude => format!("claude --resume {}", session.session_id),
         Provider::Codex => format!("codex resume {}", session.session_id),
         Provider::Cursor => "Open from Cursor history".to_string(),

@@ -66,12 +66,18 @@ impl App {
         });
     }
 
-    /// Jump the selection to whichever session rang last.
+    /// Jump the selection to whichever session the bell is still owed to.
+    ///
+    /// Several can have rung since the last press, so this asks the notifier
+    /// which one it has not landed on yet — a second `b` walks to the next
+    /// rather than re-selecting the same row.
     pub(super) fn jump_to_bell(&mut self) {
-        let Some(key) = self.notify.last.as_ref().map(|r| r.key.clone()) else {
+        let on = self.selected_session().map(|s| s.key());
+        let Some(rang) = self.notify.unanswered(on.as_deref()) else {
             self.set_status("Nothing has rung yet");
             return;
         };
+        let key = rang.key.clone();
         // The parent row, not a child of it: the bell rang for the session.
         match self
             .visible
@@ -909,7 +915,7 @@ mod tests {
         app.sessions = vec![session("a", true, "/x/a"), session("b", true, "/x/b")];
         app.refilter();
         let target = app.sessions[1].key();
-        app.notify.last = Some(crate::notify::Rang {
+        app.notify.record_for_test(crate::notify::Rang {
             key: target.clone(),
             label: "b".into(),
             reason: crate::notify::Reason::NeedsInput,

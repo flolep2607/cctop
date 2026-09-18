@@ -169,6 +169,15 @@ pub fn send(session: &Session, text: &str) -> Result<Done, Failed> {
 /// handed the transcript by the harness's own resume command.
 pub fn resume(session: &Session) -> Result<Done, Failed> {
     local(session)?;
+    // Checked before the liveness guard so the refusal says the true reason:
+    // a `_pid_` row is always running, and "something is already running this
+    // session" would imply there is a session to run.
+    if session.process_only() {
+        return Err((
+            409,
+            "no transcript claims this process — there is nothing to resume".into(),
+        ));
+    }
     let Some(argv) = session.resume_argv() else {
         return Err((
             409,
