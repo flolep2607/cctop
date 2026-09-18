@@ -488,6 +488,18 @@ impl Session {
         self.process.is_some() || self.inferred_running
     }
 
+    /// True when this row stands for a running process rather than a
+    /// transcript: [`crate::proc::collect`] mints `_pid_<pid>` for the id of
+    /// an agent no session file claimed.
+    ///
+    /// The id names nothing a harness can look up, so anything that points a
+    /// new agent at the conversation — resume, handoff — has nothing to point
+    /// at here. The process itself is real: typing into it still means
+    /// something.
+    pub fn process_only(&self) -> bool {
+        self.session_id.starts_with("_pid_")
+    }
+
     /// The command that reopens this session in a terminal, if its provider
     /// has one.
     ///
@@ -496,6 +508,12 @@ impl Session {
     /// own, and there is no CLI invocation that picks one back up. Callers show
     /// the transcript's path for those instead of guessing at a flag.
     pub fn resume_argv(&self) -> Option<Vec<String>> {
+        // A `_pid_` id names a process, not a conversation — proc::collect
+        // mints it precisely because no transcript claimed the agent — so
+        // there is nothing here for `--resume` to find.
+        if self.process_only() {
+            return None;
+        }
         let argv = match self.provider {
             Provider::Claude => vec!["claude", "--resume", &self.session_id],
             Provider::Codex => vec!["codex", "resume", &self.session_id],
@@ -844,6 +862,25 @@ mod tests {
         );
         for provider in [Provider::Cursor, Provider::Gemini, Provider::Windsurf] {
             assert_eq!(argv(provider), None, "{provider:?} has no resume command");
+        }
+    }
+
+    /// A `_pid_` id names a process, not a conversation — proc::collect mints
+    /// it because no transcript claimed the agent — so building `claude
+    /// --resume _pid_42` would point a harness at a session that is not there.
+    #[test]
+    fn a_process_only_row_has_no_resume_command() {
+        for provider in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::OpenCode,
+            Provider::Pi,
+        ] {
+            assert_eq!(
+                Session::new(provider, "_pid_42".into()).resume_argv(),
+                None,
+                "{provider:?} built a resume command for a synthetic id"
+            );
         }
     }
 

@@ -156,6 +156,13 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
+        // Checked before `resume_argv` so the refusal names the real reason:
+        // the row exists because a process does, and its `_pid_` id names no
+        // conversation a harness could reopen.
+        if session.process_only() {
+            self.set_status("Nothing to resume — no transcript claims this process");
+            return;
+        }
         let Some(argv) = session.resume_argv() else {
             self.set_status(format!(
                 "{} sessions cannot be resumed from a shell",

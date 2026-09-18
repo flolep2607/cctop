@@ -73,6 +73,7 @@ pub fn items(app: &App) -> Vec<Item> {
     let running = session.is_running();
     let deleting = app.deleting.contains(&session.key());
     let has_pid = session.root_pid().is_some();
+    let pid_only = session.process_only();
 
     // A remote row's transcript, process and pty are all on the other machine,
     // so everything that reaches into this filesystem is refused with the host
@@ -84,7 +85,7 @@ pub fn items(app: &App) -> Vec<Item> {
             action: Action::Resume,
             label: "Resume in a tab",
             key: "R",
-            blocked: far(None),
+            blocked: far(pid_only.then(|| "no transcript claims this process".to_string())),
             rule: false,
         },
         Item {
