@@ -242,15 +242,17 @@ fn cctop_itself() -> Section {
     });
 
     // The cached answer only. A doctor that blocks on GitHub to tell you your
-    // config is fine has misjudged what it is for.
+    // config is fine has misjudged what it is for. The advice names the route
+    // this binary can actually take: a build output refuses `--update`, and a
+    // cargo install is cargo's to replace.
     if let Some(latest) = crate::update::cached_latest_version()
         && latest != crate::update::current_version()
     {
-        checks.push(warn(
-            "update",
-            format!("v{latest} is available"),
-            "cctop --update",
-        ));
+        let route = match crate::update::built_by_cargo() {
+            true => "cargo install cctop --force",
+            false => "cctop --update",
+        };
+        checks.push(warn("update", format!("v{latest} is available"), route));
     }
     Section {
         title: "cctop",
