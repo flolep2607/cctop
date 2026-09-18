@@ -403,6 +403,17 @@ pub static DEVIN_CLI_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
         })
 });
 
+/// Devin CLI's user-level configuration directory — `~/.config/devin` — which
+/// is a different directory from [`DEVIN_CLI_DIR`]: sessions and transcripts
+/// are *data*, while AGENTS.md, config.json and mcp_config.json are *config*.
+/// Confusing the two is how the Access panel once looked for a `config.toml`
+/// that has never existed next to the session database.
+pub static DEVIN_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    dirs::config_dir()
+        .unwrap_or_else(|| HOME.join(".config"))
+        .join("devin")
+});
+
 /// Devin's SQLite database containing session metadata.
 pub static DEVIN_SESSIONS_DB: LazyLock<PathBuf> =
     LazyLock::new(|| DEVIN_CLI_DIR.join("sessions.db"));

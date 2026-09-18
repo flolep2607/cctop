@@ -1708,7 +1708,7 @@ function accessView(a) {
   }
 
   if (a.skills && a.skills.length) {
-    const k = block("Skills", a.skills_dir || "");
+    const k = block("Skills", (a.skills_dirs || []).join("  "));
     const card = el("div", "card");
     for (const skill of a.skills) {
       const node = el("div", "rule");

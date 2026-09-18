@@ -10,7 +10,7 @@ use crate::util;
 use chrono::{DateTime, Utc};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const TABS: [&str; 8] = [
     "Info",
@@ -1549,7 +1549,11 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── MCP ──".to_string(),
                 theme::title(),
             )));
-            lines.extend(mcp_from_json(&root.join("settings.json"), "global"));
+            lines.extend(mcp_from_config(
+                &root.join("settings.json"),
+                "mcpServers",
+                "global",
+            ));
             if !session.label_source.is_empty() {
                 lines.extend(mcp_from_json(&cwd.join(".mcp.json"), "project"));
             }
@@ -1625,14 +1629,16 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Config ──".to_string(),
                 theme::title(),
             )));
-            let config = dirs::config_dir()
-                .unwrap_or_else(|| crate::config::HOME.join(".config"))
-                .join("opencode")
-                .join("opencode.json");
+            let config = crate::config::OPENCODE_CONFIG_DIR.join("opencode.json");
             match file_section(&config, &util::tildify(&config.to_string_lossy()), 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing(format!("{} not found", config.display()))),
             }
+            lines.push(Line::from(Span::styled(
+                "── MCP ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(mcp_from_config(&config, "mcp", "user"));
         }
         Provider::Pi => {
             lines.push(Line::from(Span::styled(
@@ -1664,6 +1670,11 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 theme::title(),
             )));
             lines.extend(skill_list(&crate::config::PI_AGENT_DIR.join("skills")));
+            lines.push(Line::from(Span::styled(
+                "── MCP ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(mcp_from_config(&settings, "mcpServers", "user"));
         }
         Provider::Gemini => {
             lines.push(Line::from(Span::styled(
@@ -1695,30 +1706,57 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 theme::title(),
             )));
             lines.extend(skill_list(&crate::config::GEMINI_HOME.join("skills")));
+            lines.push(Line::from(Span::styled(
+                "── MCP ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(mcp_from_config(&settings, "mcpServers", "user"));
         }
         Provider::Devin => {
-            let root = crate::config::DEVIN_CLI_DIR.clone();
+            let files = crate::access::devin_layout(&session.label_source);
 
             lines.push(Line::from(Span::styled(
                 "── Instructions ──".to_string(),
                 theme::title(),
             )));
-            let global = root.join("AGENTS.md");
-            match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
-                Some(block) => lines.extend(block),
-                None => lines.push(missing(format!("{} not found", global.display()))),
-            }
-            if !session.label_source.is_empty() {
-                match file_section(&cwd.join("AGENTS.md"), "./AGENTS.md", 40) {
+            for (path, _) in &files.instructions {
+                let display = util::tildify(&path.to_string_lossy());
+                match file_section(path, &display, 30) {
                     Some(block) => lines.extend(block),
-                    None => lines.push(missing("./AGENTS.md not found".into())),
+                    None => lines.push(missing(format!("{display} not found"))),
                 }
             }
             lines.push(Line::from(Span::styled(
                 "── Skills ──".to_string(),
                 theme::title(),
             )));
-            lines.extend(skill_list(&root.join("skills")));
+            // Devin reads skills from several directories; an absent one is
+            // not worth a line, but with none at all the gap needs saying.
+            let installed: Vec<&PathBuf> = files
+                .skills_dirs
+                .iter()
+                .filter(|dir| dir.is_dir())
+                .collect();
+            if installed.is_empty() {
+                lines.push(missing("No skills installed".into()));
+            }
+            for dir in installed {
+                lines.push(Line::from(dim(format!(
+                    "({})",
+                    util::tildify(&dir.to_string_lossy())
+                ))));
+                lines.extend(skill_list(dir));
+            }
+            lines.push(Line::from(Span::styled(
+                "── MCP ──".to_string(),
+                theme::title(),
+            )));
+            for (path, scope) in &files.mcp_files {
+                lines.extend(mcp_from_json(path, scope));
+            }
+            for (path, scope) in &files.legacy_mcp_files {
+                lines.extend(mcp_from_config(path, "mcpServers", scope));
+            }
         }
         Provider::Windsurf => {
             // Windsurf's global rules live in the editor's own settings UI, not
@@ -1764,9 +1802,18 @@ fn skill_list(dir: &Path) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// MCP servers from a JSON config, as lines.
+/// MCP servers from a dedicated MCP file, as lines.
 fn mcp_from_json(path: &Path, scope: &'static str) -> Vec<Line<'static>> {
     crate::access::mcp_from_json(path, scope)
+        .into_iter()
+        .map(mcp_line)
+        .collect()
+}
+
+/// MCP servers from one key of a general config file, as lines — see
+/// [`crate::access::mcp_from_config`] for why the key is required.
+fn mcp_from_config(path: &Path, key: &str, scope: &'static str) -> Vec<Line<'static>> {
+    crate::access::mcp_from_config(path, key, scope)
         .into_iter()
         .map(mcp_line)
         .collect()

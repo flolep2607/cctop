@@ -77,8 +77,12 @@ pub struct Access {
     pub instructions: Vec<FileRef>,
     /// Settings files that apply here.
     pub configs: Vec<FileRef>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skills_dir: Option<String>,
+    /// The directories skills were read from, in precedence order. Only
+    /// directories that exist are listed — a harness may offer several
+    /// candidates and naming the ones that are not there is noise, not an
+    /// answer. (Devin alone has five documented locations.)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skills_dirs: Vec<String>,
     pub skills: Vec<Skill>,
     pub mcp: Vec<McpServer>,
     /// Whether cctop's own hooks are installed for this harness.
@@ -101,7 +105,8 @@ pub struct Access {
 pub struct FileRef {
     /// Spelled with `~`, since the browser may not be on this machine.
     pub path: String,
-    /// `user` or `project`.
+    /// `user`, `project`, or `local` — the last for the personal `.local.`
+    /// overrides a repository asks git to ignore.
     pub scope: &'static str,
     pub present: bool,
     pub bytes: u64,
@@ -121,8 +126,9 @@ pub struct Skill {
 #[derive(Debug, Serialize)]
 pub struct McpServer {
     pub name: String,
-    /// `user` or `project`, which is the difference between a server this
-    /// machine gives every session and one this repository asked for.
+    /// `user`, `project`, or `local`, which is the difference between a server
+    /// this machine gives every session, one this repository asked for, and
+    /// one only this checkout's owner asked for.
     pub scope: &'static str,
     /// The command that starts it, when the config names one. A remote server
     /// configured by URL has none, and inventing one would be a lie about where
@@ -180,7 +186,7 @@ pub fn build(session: &Session, data: Option<&SessionData>) -> Access {
         return access;
     }
 
-    let (instructions, configs, skills_dir, note) = layout(session, &root);
+    let (instructions, configs, skills_dirs, note) = layout(session, &root);
     access.instructions = instructions
         .into_iter()
         .map(|(path, scope)| file_ref(&path, scope))
@@ -189,10 +195,12 @@ pub fn build(session: &Session, data: Option<&SessionData>) -> Access {
         .into_iter()
         .map(|(path, scope)| file_ref(&path, scope))
         .collect();
-    access.skills_dir = skills_dir
-        .as_ref()
-        .map(|dir| util::tildify(&dir.to_string_lossy()));
-    access.skills = skills_dir.map(|dir| skills(&dir)).unwrap_or_default();
+    access.skills_dirs = skills_dirs
+        .iter()
+        .filter(|dir| dir.is_dir())
+        .map(|dir| util::tildify(&dir.to_string_lossy()))
+        .collect();
+    access.skills = skills_dirs.iter().flat_map(|dir| skills(dir)).collect();
     access.mcp = mcp_servers(session, &root);
     access.hooks = hooks(session, cwd);
     access.note = note;
@@ -235,7 +243,7 @@ fn claude_root(session: &Session) -> PathBuf {
 type Layout = (
     Vec<(PathBuf, &'static str)>,
     Vec<(PathBuf, &'static str)>,
-    Option<PathBuf>,
+    Vec<PathBuf>,
     Option<&'static str>,
 );
 
@@ -251,7 +259,7 @@ fn layout(session: &Session, root: &Path) -> Layout {
     };
     let mut instructions: Vec<(PathBuf, &'static str)> = Vec::new();
     let mut configs: Vec<(PathBuf, &'static str)> = Vec::new();
-    let mut skills = None;
+    let mut skills = Vec::new();
     let mut note = None;
 
     match session.provider {
@@ -265,13 +273,13 @@ fn layout(session: &Session, root: &Path) -> Layout {
             if !session.label_source.is_empty() {
                 configs.push((cwd.join(".claude").join("settings.json"), "project"));
             }
-            skills = Some(root.join("skills"));
+            skills = vec![root.join("skills")];
         }
         Provider::Codex => {
             instructions.push((crate::config::CODEX_HOME.join("AGENTS.md"), "user"));
             instructions.extend(project("AGENTS.md"));
             configs.push((crate::config::CODEX_HOME.join("config.toml"), "user"));
-            skills = Some(crate::config::CODEX_HOME.join("skills"));
+            skills = vec![crate::config::CODEX_HOME.join("skills")];
         }
         Provider::OpenCode => {
             instructions.extend(project("AGENTS.md"));
@@ -284,19 +292,26 @@ fn layout(session: &Session, root: &Path) -> Layout {
             instructions.push((crate::config::PI_AGENT_DIR.join("AGENTS.md"), "user"));
             instructions.extend(project("AGENTS.md"));
             configs.push((crate::config::PI_AGENT_DIR.join("settings.json"), "user"));
-            skills = Some(crate::config::PI_AGENT_DIR.join("skills"));
+            skills = vec![crate::config::PI_AGENT_DIR.join("skills")];
         }
         Provider::Gemini => {
             instructions.push((crate::config::GEMINI_HOME.join("GEMINI.md"), "user"));
             instructions.extend(project("GEMINI.md"));
             configs.push((crate::config::GEMINI_HOME.join("settings.json"), "user"));
-            skills = Some(crate::config::GEMINI_HOME.join("skills"));
+            skills = vec![crate::config::GEMINI_HOME.join("skills")];
         }
         Provider::Devin => {
-            instructions.push((crate::config::DEVIN_CLI_DIR.join("AGENTS.md"), "user"));
-            instructions.extend(project("AGENTS.md"));
-            configs.push((crate::config::DEVIN_CLI_DIR.join("config.toml"), "user"));
-            skills = Some(crate::config::DEVIN_CLI_DIR.join("skills"));
+            let files = devin_layout(&session.label_source);
+            instructions = files.instructions;
+            configs = files.configs;
+            skills = files.skills_dirs;
+            // `.windsurf/global_rules.md` is only a fallback for
+            // `.devin/global_rules.md`, so whether it applies cannot be said
+            // without checking the other file — it is noted rather than listed.
+            note = Some(
+                "a `.windsurf/global_rules.md` applies only when \
+                 `.devin/global_rules.md` does not, so it is not listed",
+            );
         }
         Provider::Cursor => {
             instructions.extend(project(".cursorrules"));
@@ -314,6 +329,107 @@ fn layout(session: &Session, root: &Path) -> Layout {
         }
     }
     (instructions, configs, skills, note)
+}
+
+/// Devin CLI's documented file layout for a session running in `label_source`.
+///
+/// Shared by [`layout`] and the terminal panel — the two surfaces drifted
+/// once already, both pointing at Devin's session-*data* directory
+/// (`~/.local/share/devin/cli`) rather than its config directory
+/// (`~/.config/devin`), which is how the panel came to look for a
+/// `config.toml` that has never existed. One map is how they stay honest.
+pub struct DevinLayout {
+    pub instructions: Vec<(PathBuf, &'static str)>,
+    pub configs: Vec<(PathBuf, &'static str)>,
+    pub skills_dirs: Vec<PathBuf>,
+    /// Dedicated `mcpServers` files — every top-level key is a server.
+    pub mcp_files: Vec<(PathBuf, &'static str)>,
+    /// `config.json` files that may still carry a pre-v3000.3 `mcpServers`
+    /// key (the CLI migrates it out on startup). Only that key may be read:
+    /// treating the whole file as a server map reports `agent`,
+    /// `permissions` and every other config section as a server.
+    pub legacy_mcp_files: Vec<(PathBuf, &'static str)>,
+}
+
+/// The map itself: user scope first, then the project's.
+pub fn devin_layout(label_source: &str) -> DevinLayout {
+    let cfg = &*crate::config::DEVIN_CONFIG_DIR;
+    let home_devin = crate::config::HOME.join(".devin");
+    let cwd = Path::new(label_source);
+    let has_cwd = !label_source.is_empty();
+
+    let mut instructions = vec![
+        (cfg.join("AGENTS.md"), "user"),
+        (home_devin.join("global_rules.md"), "user"),
+    ];
+    rules_in(&home_devin.join("rules"), "user", &mut instructions);
+    let mut configs = vec![(cfg.join("config.json"), "user")];
+    let mut skills_dirs = vec![
+        cfg.join("skills"),
+        crate::config::HOME.join(".agents").join("skills"),
+    ];
+    for channel in ["windsurf", "windsurf-next", "windsurf-insiders"] {
+        skills_dirs.push(
+            crate::config::HOME
+                .join(".codeium")
+                .join(channel)
+                .join("skills"),
+        );
+    }
+    let mut mcp_files = vec![(cfg.join("mcp_config.json"), "user")];
+    let mut legacy_mcp_files = vec![(cfg.join("config.json"), "user")];
+
+    if has_cwd {
+        let devin = cwd.join(".devin");
+        instructions.extend([
+            (cwd.join("AGENTS.md"), "project"),
+            (cwd.join("AGENTS.local.md"), "local"),
+            (devin.join("global_rules.md"), "project"),
+        ]);
+        rules_in(&devin.join("rules"), "project", &mut instructions);
+        rules_in(
+            &cwd.join(".windsurf").join("rules"),
+            "project",
+            &mut instructions,
+        );
+        configs.extend([
+            (devin.join("config.json"), "project"),
+            (devin.join("config.local.json"), "local"),
+        ]);
+        skills_dirs.extend([
+            devin.join("skills"),
+            cwd.join(".agents").join("skills"),
+            cwd.join(".windsurf").join("skills"),
+        ]);
+        mcp_files.extend([
+            (devin.join("mcp_config.json"), "project"),
+            (devin.join("mcp_config.local.json"), "local"),
+        ]);
+        legacy_mcp_files.extend([
+            (devin.join("config.json"), "project"),
+            (devin.join("config.local.json"), "local"),
+        ]);
+    }
+
+    DevinLayout {
+        instructions,
+        configs,
+        skills_dirs,
+        mcp_files,
+        legacy_mcp_files,
+    }
+}
+
+/// Each `*.md` file in a rules directory, appended to `out`.
+///
+/// Rule files only exist to be listed, so unlike the fixed entries above
+/// them, a directory that is absent adds nothing — not even a "not here".
+fn rules_in(dir: &Path, scope: &'static str, out: &mut Vec<(PathBuf, &'static str)>) {
+    for entry in crate::config::list_dir(dir) {
+        if entry.ends_with(".md") {
+            out.push((dir.join(&entry), scope));
+        }
+    }
 }
 
 /// One file, read if it is there.
@@ -371,12 +487,25 @@ pub fn skills(dir: &Path) -> Vec<Skill> {
 }
 
 /// Every MCP server configured for this session, user scope first.
+///
+/// The two readers exist because the files come in two shapes: a dedicated
+/// MCP file (`.mcp.json`, `mcp_config.json`) is a server map that may or may
+/// not sit under an `mcpServers` key, while a general config file
+/// (`settings.json`, `opencode.json`, `config.json`) names its servers under
+/// one key and everything else it holds is *not* a server. Reading the
+/// second shape with the first reader lists `permissions`, `hooks` and every
+/// other object-valued setting as a server — which is what a Claude
+/// `settings.json` without an `mcpServers` key used to show.
 fn mcp_servers(session: &Session, root: &Path) -> Vec<McpServer> {
     let cwd = Path::new(&session.label_source);
     let mut out = Vec::new();
     match session.provider {
         Provider::Claude => {
-            out.extend(mcp_from_json(&root.join("settings.json"), "user"));
+            out.extend(mcp_from_config(
+                &root.join("settings.json"),
+                "mcpServers",
+                "user",
+            ));
             if !session.label_source.is_empty() {
                 // A project's `.mcp.json` is the file a repository uses to hand
                 // every clone of itself the same servers.
@@ -387,36 +516,44 @@ fn mcp_servers(session: &Session, root: &Path) -> Vec<McpServer> {
             &crate::config::CODEX_HOME.join("config.toml"),
         )),
         Provider::Gemini => {
-            out.extend(mcp_from_json(
+            out.extend(mcp_from_config(
                 &crate::config::GEMINI_HOME.join("settings.json"),
+                "mcpServers",
                 "user",
             ));
         }
         Provider::Pi => {
-            out.extend(mcp_from_json(
+            out.extend(mcp_from_config(
                 &crate::config::PI_AGENT_DIR.join("settings.json"),
+                "mcpServers",
                 "user",
             ));
         }
         Provider::OpenCode => {
-            out.extend(mcp_from_json(
+            out.extend(mcp_from_config(
                 &crate::config::OPENCODE_CONFIG_DIR.join("opencode.json"),
+                "mcp",
                 "user",
             ));
         }
         Provider::Devin => {
-            out.extend(mcp_from_json(
-                &crate::config::DEVIN_CLI_DIR.join("config.toml"),
-                "user",
-            ));
+            let files = devin_layout(&session.label_source);
+            for (path, scope) in &files.mcp_files {
+                out.extend(mcp_from_json(path, scope));
+            }
+            for (path, scope) in &files.legacy_mcp_files {
+                out.extend(mcp_from_config(path, "mcpServers", scope));
+            }
         }
         Provider::Cursor | Provider::Windsurf => {}
     }
     out
 }
 
-/// Servers out of a JSON config, whether they sit under `mcpServers` or at the
-/// top level — a project `.mcp.json` uses either.
+/// Servers out of a dedicated MCP file, whether they sit under `mcpServers` or
+/// at the top level — a project `.mcp.json` and Devin's `mcp_config.json` use
+/// either. For a file whose other contents are *not* servers, use
+/// [`mcp_from_config`] instead.
 pub fn mcp_from_json(path: &Path, scope: &'static str) -> Vec<McpServer> {
     let Some(text) = util::read_head(path, 64 * 1024) else {
         return Vec::new();
@@ -424,7 +561,25 @@ pub fn mcp_from_json(path: &Path, scope: &'static str) -> Vec<McpServer> {
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
         return Vec::new();
     };
-    let servers = value.get("mcpServers").unwrap_or(&value);
+    servers_from(value.get("mcpServers").unwrap_or(&value), scope)
+}
+
+/// Servers out of one key of a general config file — `mcpServers` for Claude,
+/// Gemini and Pi settings, `mcp` for OpenCode's `opencode.json`.
+pub fn mcp_from_config(path: &Path, key: &str, scope: &'static str) -> Vec<McpServer> {
+    let Some(text) = util::read_head(path, 64 * 1024) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(servers) = value.get(key) else {
+        return Vec::new();
+    };
+    servers_from(servers, scope)
+}
+
+fn servers_from(servers: &Value, scope: &'static str) -> Vec<McpServer> {
     let Some(map) = servers.as_object() else {
         return Vec::new();
     };
@@ -433,17 +588,33 @@ pub fn mcp_from_json(path: &Path, scope: &'static str) -> Vec<McpServer> {
         .map(|(name, cfg)| McpServer {
             name: name.clone(),
             scope,
-            command: cfg
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| {
-                    cfg.get("url")
-                        .and_then(Value::as_str)
-                        .map(|url| url.to_string())
-                }),
+            command: command_of(cfg),
         })
         .collect()
+}
+
+/// How a server is reached, spelled for a reader.
+///
+/// `command` is a string in most configs but an argv array in OpenCode's —
+/// `"command": ["docker", "run", …]` — and a remote server has a `url`
+/// instead. Joining the array is still the truth about where tool calls go;
+/// reporting neither would be the same lie the field exists to prevent.
+fn command_of(cfg: &Value) -> Option<String> {
+    match cfg.get("command") {
+        Some(command) => command
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                command.as_array().map(|argv| {
+                    argv.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            })
+            .or_else(|| cfg.get("url").and_then(Value::as_str).map(str::to_string)),
+        None => cfg.get("url").and_then(Value::as_str).map(str::to_string),
+    }
 }
 
 /// Servers out of Codex's `config.toml`, by table header.
@@ -648,6 +819,111 @@ mod tests {
             project[0].command.as_deref(),
             Some("https://mcp.sentry.dev")
         );
+    }
+
+    /// A `settings.json` with no `mcpServers` key is a config file, not a
+    /// server map — reading it as one once listed `hooks`, `permissions` and
+    /// every other object-valued setting as an MCP server.
+    #[test]
+    fn a_config_file_without_the_key_is_not_a_server_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        fs::write(
+            &settings,
+            r#"{"hooks":{"PreToolUse":[]},"permissions":{"allow":[]},"model":"opus"}"#,
+        )
+        .unwrap();
+        assert!(mcp_from_config(&settings, "mcpServers", "user").is_empty());
+    }
+
+    /// OpenCode keeps its servers under `mcp`, not `mcpServers`, and spells a
+    /// command as an argv array rather than a string.
+    #[test]
+    fn opencode_servers_come_from_the_mcp_key_with_argv_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("opencode.json");
+        fs::write(
+            &config,
+            r#"{"agent":{},"mcp":{"docs":{"type":"local","command":["docker","run","docs-mcp"]},"web":{"type":"remote","url":"https://mcp.example.dev"}}}"#,
+        )
+        .unwrap();
+        let servers = mcp_from_config(&config, "mcp", "user");
+        assert_eq!(servers.len(), 2);
+        let docs = servers.iter().find(|s| s.name == "docs").unwrap();
+        assert_eq!(docs.command.as_deref(), Some("docker run docs-mcp"));
+        let web = servers.iter().find(|s| s.name == "web").unwrap();
+        assert_eq!(web.command.as_deref(), Some("https://mcp.example.dev"));
+    }
+
+    /// Devin's files live under `~/.config/devin` and `.devin/` — for a while
+    /// this reader looked for a `config.toml` in the *session data* directory,
+    /// a path that cannot exist, and reported nothing.
+    #[test]
+    fn devin_files_come_from_the_config_directories_not_the_data_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = devin_layout(&dir.path().to_string_lossy());
+        let all: Vec<&Path> = files
+            .instructions
+            .iter()
+            .chain(&files.configs)
+            .chain(&files.mcp_files)
+            .chain(&files.legacy_mcp_files)
+            .map(|(p, _)| p.as_path())
+            .chain(files.skills_dirs.iter().map(PathBuf::as_path))
+            .collect();
+        for path in &all {
+            let spelled = path.to_string_lossy();
+            assert!(
+                !spelled.contains(".local/share") && !spelled.ends_with("config.toml"),
+                "Devin keeps no config in its data directory: {spelled}"
+            );
+        }
+        let project_paths: Vec<String> = all
+            .iter()
+            .filter(|p| p.starts_with(dir.path()))
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        for expected in [
+            ".devin/config.json",
+            ".devin/config.local.json",
+            ".devin/mcp_config.json",
+            ".devin/mcp_config.local.json",
+            "AGENTS.md",
+            "AGENTS.local.md",
+        ] {
+            assert!(
+                project_paths.iter().any(|p| p.ends_with(expected)),
+                "{expected} should be in the Devin layout"
+            );
+        }
+    }
+
+    /// A project's `.devin/mcp_config.json` is read as a server map, and an
+    /// unmigrated `mcpServers` key inside `config.json` is still found —
+    /// without mistaking the rest of the config for servers.
+    #[test]
+    fn devin_mcp_servers_come_from_their_own_files_and_the_legacy_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let devin = dir.path().join(".devin");
+        fs::create_dir_all(&devin).unwrap();
+        fs::write(
+            devin.join("mcp_config.json"),
+            r#"{"mcpServers":{"linear":{"command":"npx linear-mcp"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            devin.join("config.json"),
+            r#"{"agent":{"model":"swe"},"mcpServers":{"sentry":{"url":"https://mcp.sentry.dev"}}}"#,
+        )
+        .unwrap();
+        let access = build(&session_in(dir.path(), Provider::Devin), None);
+        let names: Vec<&str> = access.mcp.iter().map(|s| s.name.as_str()).collect();
+        // The project files are the deterministic part — a real user-scope
+        // config on the machine running this test may legitimately add more.
+        assert!(names.contains(&"linear"));
+        assert!(names.contains(&"sentry"));
+        // `agent` is a config section, not a server.
+        assert!(!names.contains(&"agent"));
     }
 
     #[test]
