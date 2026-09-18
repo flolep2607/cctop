@@ -14,7 +14,7 @@
 //! session and fires only where the two disagree.
 
 use crate::session::{ActivityState, Session};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// How long the session that rang keeps its marker in the table.
@@ -55,6 +55,15 @@ pub struct Rang {
     pub at: Instant,
 }
 
+/// How many ringing sessions are remembered at once.
+///
+/// One bell per refresh however many crossed in it is the right amount of
+/// *noise*; the queue is what keeps the "+3 more" in that ring findable
+/// rather than a count with no address. Past this the table itself is the
+/// answer — more sessions finishing at once than this is a fleet event,
+/// not a notification.
+const MAX_RANG: usize = 16;
+
 #[derive(Default)]
 pub struct Notifier {
     /// Opt-in, and persisted: an unasked-for bell in a shared office is worse
@@ -65,8 +74,11 @@ pub struct Notifier {
     /// that exits between refreshes still has to be nameable, and by then the
     /// only thing left of it is this entry.
     watched: HashMap<String, (State, String)>,
-    /// The most recent ring.
-    pub last: Option<Rang>,
+    /// The sessions that rang, oldest first. An entry leaves when the session
+    /// goes back to work — the definition of answered — or outlives
+    /// [`MARK_FOR`]; being *looked at* hides the footer but keeps the row's
+    /// marker, so `b` can still land on it.
+    recent: VecDeque<Rang>,
 }
 
 impl Notifier {
@@ -84,6 +96,7 @@ impl Notifier {
     /// toggle sees every idle session as a fresh transition and rings for all
     /// of them at once.
     pub fn observe(&mut self, sessions: &[Session]) {
+        self.recent.retain(|r| r.at.elapsed() < MARK_FOR);
         let mut crossed: Vec<Rang> = Vec::new();
         // Only running sessions are tracked, which is what keeps this cheap:
         // the map holds a handful of entries, not one per transcript ever
@@ -111,8 +124,8 @@ impl Notifier {
             }
             // Back to work is the definition of answered, however it happened —
             // through cctop, or in the terminal the agent actually lives in.
-            if state == State::Busy && self.last.as_ref().is_some_and(|r| r.key == key) {
-                self.last = None;
+            if state == State::Busy {
+                self.recent.retain(|r| r.key != key);
             }
             next.insert(key, (state, label));
         }
@@ -140,14 +153,38 @@ impl Notifier {
         let extra = crossed.len() - 1;
         let rang = crossed.swap_remove(0);
         ring(&desktop_text(&rang, extra));
-        self.last = Some(rang);
+        // Every crossing is remembered, not only the one the bell named:
+        // each still needs finding, which is what the marker and `b` are for.
+        self.recent.push_back(rang);
+        self.recent.extend(crossed);
+        while self.recent.len() > MAX_RANG {
+            self.recent.pop_front();
+        }
+    }
+
+    /// Put a session on the queue as though it had just crossed — for the
+    /// UI tests, which exercise `b` and the marker rather than the machine.
+    #[cfg(test)]
+    pub(crate) fn record_for_test(&mut self, rang: Rang) {
+        self.recent.push_back(rang);
+    }
+
+    /// The session `b` should land on: the oldest ring still fresh that is
+    /// not the row already selected, so pressing it again walks the queue.
+    /// When nothing but the selected row is left — `b` pressed on the only
+    /// ringing session — the newest is the answer, rather than "nothing".
+    pub fn unanswered(&self, selected: Option<&str>) -> Option<&Rang> {
+        self.recent
+            .iter()
+            .find(|r| r.at.elapsed() < MARK_FOR && Some(r.key.as_str()) != selected)
+            .or_else(|| self.recent.iter().rev().find(|r| r.at.elapsed() < MARK_FOR))
     }
 
     /// True while this session's row should still carry the bell marker.
     pub fn rang_recently(&self, key: &str) -> bool {
-        self.last
-            .as_ref()
-            .is_some_and(|r| r.key == key && r.at.elapsed() < MARK_FOR)
+        self.recent
+            .iter()
+            .any(|r| r.key == key && r.at.elapsed() < MARK_FOR)
     }
 
     /// The footer's reminder of who rang, or `None` when there is nothing to
@@ -158,8 +195,8 @@ impl Notifier {
     /// the footer has done its job and does not need any state of its own to
     /// know that.
     pub fn footer(&self, selected: Option<&str>) -> Option<String> {
-        let rang = self.last.as_ref()?;
-        if selected == Some(rang.key.as_str()) {
+        let rang = self.unanswered(selected)?;
+        if Some(rang.key.as_str()) == selected {
             return None;
         }
         let secs = rang.at.elapsed().as_secs();
@@ -168,8 +205,19 @@ impl Notifier {
         } else {
             format!("{}m", secs / 60)
         };
+        // The others still waiting for a look, counted the way the bell's own
+        // text counts them: the number is all that fits, and `b` walks them.
+        let extra = self
+            .recent
+            .iter()
+            .filter(|r| r.at.elapsed() < MARK_FOR && r.key != rang.key)
+            .count();
+        let more = match extra {
+            0 => String::new(),
+            n => format!(" · +{n} more"),
+        };
         Some(format!(
-            "Bell: ◉ {} · {} · {ago} ago · b jumps to it",
+            "Bell: ◉ {} · {} · {ago} ago{more} · b jumps to it",
             rang.label,
             match rang.reason {
                 Reason::NeedsInput => "waiting for input",
@@ -288,7 +336,7 @@ mod tests {
         };
         n.observe(&[session("a", true, ActivityState::Working)]);
         n.observe(&[session("a", true, ActivityState::Asking)]);
-        let rang = n.last.as_ref().expect("a blocked agent rings");
+        let rang = n.recent.back().expect("a blocked agent rings");
         assert_eq!(rang.reason, Reason::Asking);
         assert!(
             desktop_text(rang, 0).contains("needs permission"),
@@ -303,7 +351,7 @@ mod tests {
         };
         n.observe(&[session("a", true, ActivityState::Working)]);
         n.observe(&[session("a", true, ActivityState::WaitingForInput)]);
-        assert_eq!(n.last.as_ref().map(|r| r.reason), Some(Reason::NeedsInput));
+        assert_eq!(n.recent.back().map(|r| r.reason), Some(Reason::NeedsInput));
     }
 
     /// Answering the prompt and having the turn end a moment later is one
@@ -317,9 +365,9 @@ mod tests {
         };
         n.observe(&[session("a", true, ActivityState::Working)]);
         n.observe(&[session("a", true, ActivityState::Asking)]);
-        n.last = None;
+        n.recent.clear();
         n.observe(&[session("a", true, ActivityState::WaitingForInput)]);
-        assert!(n.last.is_none(), "the same turn, reported twice");
+        assert!(n.recent.is_empty(), "the same turn, reported twice");
     }
 
     /// The whole point of the feature: one ring on the crossing, silence on
@@ -332,16 +380,16 @@ mod tests {
         };
         let busy = vec![session("a", true, ActivityState::Working)];
         n.observe(&busy);
-        assert!(n.last.is_none(), "still working, nothing to say");
+        assert!(n.recent.is_empty(), "still working, nothing to say");
 
         let waiting = vec![session("a", true, ActivityState::WaitingForInput)];
         n.observe(&waiting);
-        let first = n.last.clone().expect("the crossing rings");
+        let first = n.recent.back().cloned().expect("the crossing rings");
         assert_eq!(first.reason, Reason::NeedsInput);
 
         n.observe(&waiting);
         assert_eq!(
-            n.last.as_ref().map(|r| r.at),
+            n.recent.back().map(|r| r.at),
             Some(first.at),
             "a session that is still waiting must not ring again"
         );
@@ -356,14 +404,14 @@ mod tests {
         n.observe(&[session("a", true, ActivityState::Working)]);
         // Same session, its process gone.
         n.observe(&[session("a", false, ActivityState::Working)]);
-        let rang = n.last.as_ref().expect("an agent that exits is news");
+        let rang = n.recent.back().expect("an agent that exits is news");
         assert_eq!(rang.reason, Reason::Stopped);
         assert_eq!(rang.label, "a");
 
         // Gone from the table entirely: nothing left to cross.
-        n.last = None;
+        n.recent.clear();
         n.observe(&[]);
-        assert!(n.last.is_none());
+        assert!(n.recent.is_empty());
     }
 
     /// A session already idle when cctop starts — or when `n` is pressed — has
@@ -377,7 +425,7 @@ mod tests {
         let waiting = vec![session("a", true, ActivityState::WaitingForInput)];
         n.observe(&waiting);
         n.observe(&waiting);
-        assert!(n.last.is_none());
+        assert!(n.recent.is_empty());
     }
 
     #[test]
@@ -387,7 +435,7 @@ mod tests {
         n.enabled = true;
         n.observe(&[session("a", true, ActivityState::WaitingForInput)]);
         assert!(
-            n.last.is_some(),
+            !n.recent.is_empty(),
             "the busy state seen before the toggle still counts"
         );
     }
@@ -400,9 +448,9 @@ mod tests {
         };
         n.observe(&[session("a", true, ActivityState::Working)]);
         n.observe(&[session("a", true, ActivityState::WaitingForInput)]);
-        assert!(n.last.is_some());
+        assert!(!n.recent.is_empty());
         n.observe(&[session("a", true, ActivityState::Working)]);
-        assert!(n.last.is_none(), "answered, so stop naming it");
+        assert!(n.recent.is_empty(), "answered, so stop naming it");
     }
 
     #[test]
@@ -413,7 +461,7 @@ mod tests {
         };
         n.observe(&[session("a", true, ActivityState::Working)]);
         n.observe(&[session("a", true, ActivityState::WaitingForInput)]);
-        let key = n.last.as_ref().unwrap().key.clone();
+        let key = n.recent.back().unwrap().key.clone();
         assert!(n.footer(None).is_some_and(|t| t.contains('a')));
         assert!(n.footer(Some("claude:other")).is_some());
         assert!(n.footer(Some(&key)).is_none());
@@ -445,5 +493,49 @@ mod tests {
             desktop_text(&rang, 2),
             "cctop: alpha is waiting for input (+2 more)"
         );
+    }
+
+    /// A refresh that finishes two sessions owes the user two places to
+    /// look, not one: the bell says "+1 more", and every one of them keeps
+    /// its marker and its turn under `b` — not only the one the bell named.
+    #[test]
+    fn every_session_that_crossed_stays_findable() {
+        let mut n = Notifier {
+            enabled: true,
+            ..Default::default()
+        };
+        n.observe(&[
+            session("a", true, ActivityState::Working),
+            session("b", true, ActivityState::Working),
+        ]);
+        n.observe(&[
+            session("a", true, ActivityState::WaitingForInput),
+            session("b", true, ActivityState::Asking),
+        ]);
+
+        assert!(n.rang_recently("claude:a"));
+        assert!(
+            n.rang_recently("claude:b"),
+            "the crossing the bell did not name lost its marker"
+        );
+
+        // `b` walks the queue rather than parking on the first answer: each
+        // press names a session it is not already on, and cycles back around
+        // once every one has had its turn.
+        assert_eq!(n.unanswered(None).map(|r| r.key.as_str()), Some("claude:a"));
+        assert_eq!(
+            n.unanswered(Some("claude:a")).map(|r| r.key.as_str()),
+            Some("claude:b")
+        );
+        assert_eq!(
+            n.unanswered(Some("claude:b")).map(|r| r.key.as_str()),
+            Some("claude:a")
+        );
+
+        // And the footer says the same thing the bell did: the one `b` lands
+        // on, plus a count of the rest.
+        let footer = n.footer(None).expect("someone rang");
+        assert!(footer.contains('a'), "{footer}");
+        assert!(footer.contains("+1 more"), "{footer}");
     }
 }
