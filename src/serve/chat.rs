@@ -1021,6 +1021,9 @@ fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 /// Anything else the harness writes keeps its text and loses its wrapper: a
 /// reminder still reads as a reminder without the tag announcing it as one.
 fn tidy_harness_text(text: &str) -> String {
+    if text.trim_start().starts_with("<task-notification>") {
+        return tidy_task_notification(text);
+    }
     let out = tagged(text, "local-command-stdout").unwrap_or("").trim();
     if let Some(name) = tagged(text, "command-name") {
         let args = tagged(text, "command-args").unwrap_or("").trim();
@@ -1063,6 +1066,50 @@ fn strip_outer_tags(text: &str) -> &str {
         Some(close) => &body[..close],
         None => body,
     }
+}
+
+/// A `<task-notification>` as news, not markup.
+///
+/// The notice that a background task or a monitor spoke arrives as a `user`
+/// entry full of the fields a dispatcher needs — `task-id`, `tool-use-id`,
+/// `output-file`, `usage`, `worktree` — around the ones a reader does:
+/// `summary`, `event` when a monitor is reporting, and `result` when a
+/// finished agent left a note. Every field sits on its own `<field>value
+/// </field>` line, so the generic tidy strips them all, finds the body
+/// empty, and strips only the outer tag — which is how the whole field list
+/// reached the transcript as the turn's text. Read the fields that carry
+/// the news; a notification holding none of them says nothing worth a turn.
+fn tidy_task_notification(text: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for field in ["summary", "event", "result"] {
+        let Some(body) = tagged(text, field).map(str::trim) else {
+            continue;
+        };
+        if body.is_empty() || lines.iter().any(|l| l == body) {
+            continue;
+        }
+        lines.push(unescape_entities(body));
+    }
+    // Anything written after the closing tag is the entry's real text — the
+    // notice is only the part inside it.
+    if let Some(end) = text.find("</task-notification>") {
+        let tail = text[end + "</task-notification>".len()..].trim();
+        if !tail.is_empty() {
+            lines.push(tail.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+/// The entities the transcript writer escapes inside these fields. `&amp;`
+/// goes last, or `&amp;gt;` decodes twice.
+fn unescape_entities(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// A Devin system event, readable.
@@ -1307,6 +1354,59 @@ mod tests {
             r#"{"type":"user","timestamp":"t1","message":{"content":"<system-reminder>read the file first</system-reminder>"}}"#,
         ]);
         assert_eq!(chat.turns[0].text, "read the file first");
+    }
+
+    /// A task notification is fields for a dispatcher around one line of
+    /// news. The generic tidy used to strip every field line, find nothing
+    /// left, and keep the whole list as the turn's text.
+    #[test]
+    fn a_task_notification_reads_as_its_summary() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<task-notification>\n<task-id>bgbdzpbxb</task-id>\n<tool-use-id>toolu_01EK11bfRvKo9QaZMQWsMBGf</tool-use-id>\n<output-file>/tmp/tasks/bgbdzpbxb.output</output-file>\n<status>completed</status>\n<summary>Background command &quot;cargo build 2&gt;&amp;1 | tail -3&quot; completed (exit code 0)</summary>\n</task-notification>"}}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].role, "system");
+        assert_eq!(
+            chat.turns[0].text,
+            "Background command \"cargo build 2>&1 | tail -3\" completed (exit code 0)"
+        );
+    }
+
+    /// A monitor's report names its watch in `summary` and carries the news
+    /// in `event`; both belong on the turn.
+    #[test]
+    fn a_monitor_event_keeps_the_event_it_reports() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<task-notification>\n<task-id>br7crykx8</task-id>\n<summary>Monitor event: &quot;rebuild chain&quot;</summary>\n<event>[Monitor expired after 30m with 11 events delivered.]</event>\n</task-notification>"}}"#,
+        ]);
+        assert_eq!(
+            chat.turns[0].text,
+            "Monitor event: \"rebuild chain\"\n[Monitor expired after 30m with 11 events delivered.]"
+        );
+    }
+
+    /// A finished agent can leave a `result` note under its summary.
+    #[test]
+    fn a_task_notification_keeps_an_agents_parting_note() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<task-notification>\n<task-id>ad13e524</task-id>\n<status>completed</status>\n<summary>Agent &quot;bench linkage&quot; finished</summary>\n<result>the build query is running in the background</result>\n<usage><subagent_tokens>83901</subagent_tokens></usage>\n</task-notification>"}}"#,
+        ]);
+        assert_eq!(
+            chat.turns[0].text,
+            "Agent \"bench linkage\" finished\nthe build query is running in the background"
+        );
+    }
+
+    /// A notification carrying none of the fields a reader needs is not a
+    /// turn at all — the field list itself was the bug, not the content.
+    #[test]
+    fn a_notification_with_no_news_is_no_turn() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"<task-notification>\n<task-id>x</task-id>\n<output-file>/tmp/x.output</output-file>\n<status>completed</status>\n</task-notification>"}}"#,
+            r#"{"type":"user","timestamp":"t2","message":{"content":"a real message"}}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].text, "a real message");
     }
 
     /// Everything after the cap is dropped from the *front*, because a

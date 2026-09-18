@@ -530,6 +530,35 @@ pub fn exists(name: &str) -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
+/// Whether the agent in a session asked for the mouse itself.
+///
+/// `#{mouse_any_flag}` is rmux's record of the request the pane's own program
+/// made — the DECSET it emitted — and it is the flag `MouseDown3Pane` consults
+/// before choosing `send-keys -M` over its pane menu. Forwarding a right-click
+/// is only safe while this is set: with it the click reaches the agent, and
+/// without it the menu opens over the pane with splits and kills on it.
+pub fn mouse_wanted(name: &str) -> bool {
+    // `mouse_any_flag` is a pane format, which neither `display-message -t` nor
+    // `list-panes -t` will resolve against a session name — and the `=` exact
+    // target the rest of this module uses is rejected there outright. Asking
+    // every pane and matching the name here is the form that answers at all.
+    let Ok(out) = Command::new(BIN)
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name} #{mouse_any_flag}",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    let want = format!("{name} 1");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|line| line == want)
+}
+
 /// End a rmux session, taking the agent inside it with it.
 ///
 /// The `=` prefix makes the target an exact name rather than a prefix match —
@@ -1512,6 +1541,36 @@ mod tests {
             "placeholder window left over"
         );
         assert!(agent.is_some_and(|p| p > 0), "no agent in the session");
+    }
+
+    /// The flag is the pane program's own answer, so it can only be checked
+    /// against real panes: one whose program emitted `?1000h` reads as wanting
+    /// the mouse, and one running a plain `sleep` does not.
+    #[test]
+    fn mouse_wanted_is_the_pane_programs_own_answer() {
+        if !available() {
+            eprintln!("skipping: rmux not installed");
+            return;
+        }
+        let _turn = test_lock();
+        let asked = format!("cctop-mw-yes-{}", std::process::id());
+        let asleep = format!("cctop-mw-no-{}", std::process::id());
+        start_session(
+            &asked,
+            None,
+            &["sh", "-c", "printf '\\033[?1000h'; sleep 30"],
+        );
+        start_session(&asleep, None, &["sleep", "30"]);
+
+        // The flag lands when the program's DECSET does, and "not yet" reads
+        // the same as "never" — so the wanting side is the one waited on.
+        let wanted = wait_for(|| mouse_wanted(&asked).then_some(()));
+        let quiet = mouse_wanted(&asleep);
+        end_session(&asked);
+        end_session(&asleep);
+
+        assert!(wanted.is_some(), "the pane's DECSET never reached rmux");
+        assert!(!quiet, "a pane that never asked read as asking");
     }
 
     /// An agent nobody is attached to still has to read as busy while it is
