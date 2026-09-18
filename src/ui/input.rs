@@ -1409,19 +1409,17 @@ impl App {
             // and cctop holds the terminal's capture, so without forwarding the
             // click simply went nowhere.
             //
-            // The right button is the exception, and rmux is the reason. With
-            // `mouse` on — which cctop turns on so the wheel scrolls — rmux
-            // binds `MouseDown3Pane` to its own pane menu, so a right-click
-            // inside an agent opened a rmux popup whose entries split the pane
-            // in two. The binding lives in the server's `root` key table, not in
-            // the session, so cctop cannot unbind it without changing the user's
-            // own rmux sessions too; not sending the button is the fix that
-            // stays inside cctop. No agent cctop hosts asks for right-click, so
-            // nothing is lost by keeping it.
+            // The right button is the one rmux can intercept: its
+            // `MouseDown3Pane` binding reads `#{mouse_any_flag}` — the pane's
+            // own request for mouse reporting — and forwards the click to the
+            // agent when it is set, but opens rmux's pane menu, splits and
+            // kills included, when it is not. So the flag is asked before the
+            // click is written: an agent that asked gets its right-click, and
+            // a pane that did not keeps the menu out of reach.
             let button = |b| match b {
                 MouseButton::Left => Some(crate::attach::MouseButton::Left),
                 MouseButton::Middle => Some(crate::attach::MouseButton::Middle),
-                MouseButton::Right => None,
+                MouseButton::Right => Some(crate::attach::MouseButton::Right),
             };
             let action = match ev.kind {
                 MouseEventKind::Down(b) => button(b).map(|b| (crate::attach::MouseKind::Press, b)),
@@ -1441,9 +1439,21 @@ impl App {
                         tab.focus = i;
                     }
                     if let Some(pane) = self.active_tab().and_then(|t| t.panes.get_mut(i)) {
+                        // Right-click is the agent's only where rmux will hand
+                        // it over: without the flag the same click raises the
+                        // pane menu this guard exists to keep away. A pane with
+                        // no multiplexer behind it has no menu to raise —
+                        // `encode_mouse` already gates on the agent's own mode.
+                        let wanted = b != crate::attach::MouseButton::Right
+                            || match &pane.rmux {
+                                Some(name) => crate::rmux::mouse_wanted(name),
+                                None => true,
+                            };
                         // A failed send means that agent has gone, which the
                         // reaper already watches for.
-                        let _ = pane.view.mouse(kind, b, col, row);
+                        if wanted {
+                            let _ = pane.view.mouse(kind, b, col, row);
+                        }
                     }
                 }
                 return;
