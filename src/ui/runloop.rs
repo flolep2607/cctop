@@ -70,12 +70,16 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     }
 
     // One cached check per day, off the UI thread. Only ever reports: replacing
-    // the binary stays behind an explicit `--update`.
-    std::thread::spawn(move || {
-        if let Some(version) = crate::update::available_update() {
-            let _ = res_tx.send(Response::UpdateAvailable(version));
-        }
-    });
+    // the binary stays behind an explicit `--update`. A build output is told
+    // nothing at all — the hint's whole call to action is `--update`, which
+    // refuses on a file cargo is keeping books on.
+    if !crate::update::built_by_cargo() {
+        std::thread::spawn(move || {
+            if let Some(version) = crate::update::available_update() {
+                let _ = res_tx.send(Response::UpdateAvailable(version));
+            }
+        });
+    }
 
     let mut app = App::new(args.plan, req_tx.clone());
     app.refresh_secs = args.delay;

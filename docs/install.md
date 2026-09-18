@@ -116,6 +116,12 @@ again whenever you want it.
 A package manager other than cargo is left alone entirely — cctop will not touch
 a binary something else is responsible for. Update it the way you installed it.
 
+A `cargo build` output is left alone as well, for bookkeeping of a quieter kind:
+cargo's fingerprint sits beside `target/debug/cctop` and would go on calling
+whatever replaced it the build it produced — the update would land, and
+`cargo build` would report the file fresh and never put the real one back.
+`cargo install cctop --force` is how the release reaches PATH.
+
 ## With cargo
 
 ```bash
