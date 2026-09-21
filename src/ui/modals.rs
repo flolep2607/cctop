@@ -198,12 +198,16 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "Alt+Shift+← / →",
             "Move this tab along the bar (or drag it with the mouse)",
         ),
-        item("Right-click", "Rename the tab under the pointer"),
+        item(
+            "Right-click",
+            "Rename or recolour the tab under the pointer",
+        ),
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
         item("F9", "Paste the clipboard's image as a file path"),
         item("Ctrl+V", "The same, in terminals that send it"),
+        item("Home / End", "In a Claude pane: top / bottom of the chat"),
         item("F12", "Back to the dashboard, leaving it running"),
         Line::default(),
         section("Pasting an image"),
@@ -1523,7 +1527,7 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Send to session", lines, 64);
 }
 
-/// Renaming a workspace tab, opened by right-clicking it in the bar.
+/// Naming and painting a workspace tab, opened by right-clicking it in the bar.
 ///
 /// The old name is shown rather than pre-filled into the field: the reason to
 /// rename `3:claude-4` is that it says nothing, so starting from it would only
@@ -1539,13 +1543,38 @@ pub(super) fn draw_rename_tab(
     app: &App,
     layout: &mut super::render::Layout,
 ) {
+    // A swatch per hue with "none" leading, the current pick bracketed. The
+    // name is spelled beside them because under NO_COLOR every swatch is the
+    // same ink and the word is all there is to go on.
+    let mut swatches = vec![Span::styled(" Colour ", theme::dim())];
+    let mut named = "none";
+    for option in std::iter::once(None).chain(theme::Hue::ALL.into_iter().map(Some)) {
+        let picked = option == app.rename_color;
+        if picked {
+            named = option.map_or("none", theme::Hue::name);
+        }
+        let (glyph, style) = match option {
+            Some(hue) => ("●", Style::default().fg(hue.color())),
+            None => ("○", theme::dim()),
+        };
+        swatches.push(Span::raw(" "));
+        if picked {
+            swatches.push(Span::styled("[", theme::dim()));
+            swatches.push(Span::styled(glyph, style.add_modifier(Modifier::BOLD)));
+            swatches.push(Span::styled("]", theme::dim()));
+        } else {
+            swatches.push(Span::styled(format!(" {glyph} "), style));
+        }
+    }
+    swatches.push(Span::styled(format!("  {named}"), theme::value()));
+
     let lines = vec![
         Line::from(vec![
             Span::styled(" Now called ", theme::dim()),
             Span::styled(app.rename_was.clone(), theme::value()),
         ]),
         Line::from(Span::styled(
-            " The name follows the tab into every cctop on this machine.",
+            " The name and colour follow the tab into every cctop on this machine.",
             theme::dim(),
         )),
         Line::default(),
@@ -1560,7 +1589,12 @@ pub(super) fn draw_rename_tab(
             Span::styled("█", Style::default().fg(theme::colors().accent)),
         ]),
         Line::default(),
-        Line::from(Span::styled(" Enter rename   Esc cancel", theme::dim())),
+        Line::from(swatches),
+        Line::default(),
+        Line::from(Span::styled(
+            " Enter apply   ← → colour   Esc cancel",
+            theme::dim(),
+        )),
     ];
     let (outer, _) = modal(frame, area, "Rename tab", lines, 64);
     layout.modal_rect = Some(outer);
@@ -1628,6 +1662,44 @@ pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The picker row draws every swatch, brackets the pick, and spells its
+    /// name — under NO_COLOR the name is the only thing there is to read.
+    #[test]
+    fn the_colour_row_brackets_the_pick_and_names_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.rename_was = "claude-4".to_string();
+        app.rename_color = Some(theme::Hue::Cyan);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+        let mut layout = crate::ui::render::Layout::default();
+        terminal
+            .draw(|frame| draw_rename_tab(frame, frame.area(), &app, &mut layout))
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let text = buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            text.contains("cyan"),
+            "the pick's name is not spelled: {text}"
+        );
+        assert!(text.contains("[●]"), "the pick is not bracketed: {text}");
+        assert!(text.contains('○'), "the none stop is missing: {text}");
+        // The picked swatch carries the hue's colour; under the default
+        // palette that is an indexed colour, not the terminal's default ink.
+        let cyan = buf
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "●" && cell.fg == theme::Hue::Cyan.color());
+        assert!(cyan.is_some(), "no swatch wears the picked hue");
+    }
 
     #[test]
     fn centered_rect_never_exceeds_screen() {

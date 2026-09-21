@@ -631,6 +631,81 @@ pub fn tool_color(name: &str) -> Color {
     Color::Indexed(hues[(hash as usize) % hues.len()])
 }
 
+/// The colours a workspace tab can be painted, in the order the picker walks
+/// them.
+///
+/// A closed set on purpose: the choice is written onto the rmux session by
+/// name — see [`crate::rmux::set_color`] — so every cctop that shows the tab
+/// agrees on what the name means, and a word written by a newer cctop decodes
+/// to nothing rather than to a colour nobody picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hue {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+    Violet,
+    Pink,
+}
+
+impl Hue {
+    /// Every hue, in picker order. `None` is the picker's other stop — the tab
+    /// handed back to the default ink — and lives at index zero beside it.
+    pub const ALL: [Hue; 8] = [
+        Hue::Red,
+        Hue::Orange,
+        Hue::Yellow,
+        Hue::Green,
+        Hue::Cyan,
+        Hue::Blue,
+        Hue::Violet,
+        Hue::Pink,
+    ];
+
+    /// How the choice is spelled on the rmux session.
+    pub fn name(self) -> &'static str {
+        match self {
+            Hue::Red => "red",
+            Hue::Orange => "orange",
+            Hue::Yellow => "yellow",
+            Hue::Green => "green",
+            Hue::Cyan => "cyan",
+            Hue::Blue => "blue",
+            Hue::Violet => "violet",
+            Hue::Pink => "pink",
+        }
+    }
+
+    /// The hue a session records, or `None` for a word this cctop does not
+    /// know — including the empty string an unset or cleared option reads as.
+    pub fn from_name(name: &str) -> Option<Hue> {
+        Hue::ALL.into_iter().find(|hue| hue.name() == name)
+    }
+
+    /// The hue resolved for the active palette. Dark wants pastels, light wants
+    /// ink; in mono there is no colour to give, so `Reset` leaves the choice
+    /// recorded and simply undrawn.
+    pub fn color(self) -> Color {
+        let (dark, light) = match self {
+            Hue::Red => (203, 124),
+            Hue::Orange => (215, 166),
+            Hue::Yellow => (221, 136),
+            Hue::Green => (114, 28),
+            Hue::Cyan => (80, 30),
+            Hue::Blue => (110, 25),
+            Hue::Violet => (141, 91),
+            Hue::Pink => (213, 162),
+        };
+        match variant() {
+            Variant::Dark => Color::Indexed(dark),
+            Variant::Light => Color::Indexed(light),
+            Variant::Mono => Color::Reset,
+        }
+    }
+}
+
 /// Which gradient a series should use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gradient {
@@ -827,5 +902,41 @@ mod tests {
     fn dark_leaves_the_terminal_ground_alone() {
         assert_eq!(DARK.ground, Color::Reset);
         assert_eq!(canvas().bg, None);
+    }
+
+    /// The names are the wire format — a hue is written onto the rmux session
+    /// by name and read back off it — so each one has to survive the round
+    /// trip, and nothing else may decode: a word a newer cctop wrote is no
+    /// colour here, never a guess.
+    #[test]
+    fn hue_names_survive_the_round_trip_through_a_session() {
+        for hue in Hue::ALL {
+            assert_eq!(Hue::from_name(hue.name()), Some(hue));
+        }
+        assert_eq!(Hue::from_name(""), None, "an unset option is no colour");
+        assert_eq!(
+            Hue::from_name("puce"),
+            None,
+            "a word this cctop does not know was guessed at"
+        );
+    }
+
+    /// On the default palette every hue is a real, distinct colour: a `Reset`
+    /// would paint the tab in nothing, and two hues sharing an index would be
+    /// two names for the same mark.
+    #[test]
+    fn every_hue_is_its_own_colour() {
+        let mut seen = std::collections::HashSet::new();
+        for hue in Hue::ALL {
+            let color = hue.color();
+            assert!(
+                matches!(color, Color::Indexed(_)),
+                "{hue:?} resolved to no colour"
+            );
+            assert!(
+                seen.insert(color),
+                "{hue:?} shares a colour with another hue"
+            );
+        }
     }
 }

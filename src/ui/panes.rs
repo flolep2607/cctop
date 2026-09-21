@@ -188,6 +188,17 @@ impl App {
         // it is how a tab nobody is attached to knows its agent has stopped, and
         // a reading taken once when the tab appeared would have it idle forever.
         for tab in &mut self.tabs {
+            // The colour is asked of every tab, not only the detached ones: it
+            // is the one property of a tab another cctop can change while this
+            // one is still holding the pane. Everything else the sweep updates
+            // lives on `shared`, which only detached tabs have.
+            let painted = tab
+                .sessions()
+                .find_map(|name| running.iter().find(|a| a.name == name))
+                .map(|agent| agent.color.as_deref().and_then(theme::Hue::from_name));
+            if let Some(color) = painted {
+                tab.color = color;
+            }
             let Some(shared) = tab.shared.as_mut() else {
                 continue;
             };
@@ -479,6 +490,7 @@ mod tests {
                 profile: None,
                 order: None,
                 state: None,
+                color: None,
             })
         };
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
@@ -535,6 +547,7 @@ mod tests {
                 profile: None,
                 order: None,
                 state: None,
+                color: None,
             })
         };
         let layout = render::Layout {
@@ -620,6 +633,7 @@ mod tests {
                 profile: None,
                 order: None,
                 state: None,
+                color: None,
             })
         };
         let layout = render::Layout {
@@ -690,6 +704,77 @@ mod tests {
         );
     }
 
+    /// The same modal paints the tab: the arrows walk the colour stops and
+    /// Enter applies the pick, while Esc leaves the colour it found alone.
+    #[test]
+    fn a_tab_is_painted_from_the_same_modal_that_names_it() {
+        let named = |name: &str| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+            })
+        };
+        let layout = render::Layout {
+            workspace_spans: vec![(0, 11, 0), (11, 15, 1)],
+            ..Default::default()
+        };
+        let click = |column| event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Right),
+            column,
+            row: 0,
+            modifiers: event::KeyModifiers::NONE,
+        };
+
+        let mut app = test_app();
+        app.tabs = vec![named("a")];
+
+        // Three stops right of "none" is the third hue the picker walks.
+        app.on_mouse(click(12), &layout);
+        assert_eq!(app.mode, Mode::RenameTab);
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Right));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(app.tabs[0].color, Some(theme::Hue::ALL[2]));
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains(theme::Hue::ALL[2].name()), "{status}");
+
+        // The pick opens where the tab already stands — three stops in — so
+        // walking left past them reaches "none".
+        app.on_mouse(click(12), &layout);
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Left));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.tabs[0].color, None, "the cleared colour survived");
+
+        // And the row wraps: one step left of "none" is the last hue — there
+        // is no end worth stopping at.
+        app.on_mouse(click(12), &layout);
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.tabs[0].color, Some(theme::Hue::Pink));
+
+        // Esc really does leave it alone.
+        app.on_mouse(click(12), &layout);
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.tabs[0].color,
+            Some(theme::Hue::Pink),
+            "Esc repainted the tab"
+        );
+    }
+
     /// Closing is a kill now, but only of an agent that is cctop's to kill. On a
     /// pane opened with `a` — a window onto an agent cctop never started — there
     /// is nothing to stop, so the window closes and the status says the agent
@@ -739,6 +824,7 @@ mod tests {
             profile: None,
             order: None,
             state: None,
+            color: None,
         }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every

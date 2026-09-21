@@ -458,6 +458,7 @@ mod tests {
             profile: None,
             order: None,
             state,
+            color: None,
         };
         let now = 1_700_000_000;
         let recorded = |signal, ago: u64| {

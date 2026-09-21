@@ -244,6 +244,14 @@ them, `F12` goes back to the dashboard, and the rest bring the dashboard
 forward and act there. The full list is in
 [Reading the table](the-table.md#every-key).
 
+One pair of keys is translated rather than kept or passed through. Claude Code
+puts the top and bottom of the chat on `Ctrl+Home` and `Ctrl+End` — the right
+action, a chord too many for keys already named after where they go — so in
+one of its panes the bare `Home` and `End` are promoted on the way in.
+Everywhere else, a shell or another harness, they keep their line-editing
+meaning, and the shifted forms are never touched: `Shift+Home` is still
+"select to the start of the line".
+
 ### Shift+Enter, and the keys a terminal cannot spell
 
 Enter is a carriage return, and Shift+Enter is the same carriage return: the
