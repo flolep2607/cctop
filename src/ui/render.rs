@@ -309,7 +309,12 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     let titles: Vec<String> = std::iter::once("Dashboard".to_string())
         .chain(app.tabs.iter().map(|tab| tab.title()))
         .enumerate()
-        .map(|(i, title)| format!("{}:{}", i + 1, title))
+        // The number is the Alt- key that jumps to the tab, not an ordinal —
+        // past nine there is no such key, so the label stops pretending.
+        .map(|(i, title)| match i + 1 {
+            n @ 1..=9 => format!("{n}:{title}"),
+            _ => title,
+        })
         .collect();
     let on = app.blink_on();
     let mut spans = Vec::new();
@@ -342,15 +347,28 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
     // you can still count and click beats a bar that runs off the screen.
-    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>() + 2 * painted;
+    // `titles.len()` columns go to the rules between labels — one between
+    // every pair of tabs and one before the new-tab button.
+    let natural: usize =
+        titles.iter().map(|t| t.chars().count() + 2).sum::<usize>() + 2 * painted + titles.len();
     let cap = match natural <= label_room {
         true => usize::MAX,
-        false => (label_room.saturating_sub(2 * painted) / titles.len())
+        false => ((label_room.saturating_sub(2 * painted + titles.len())) / titles.len())
             .saturating_sub(2)
             .max(3),
     };
 
     for (i, title) in titles.iter().enumerate() {
+        if i > 0 {
+            // A rule in the border's ink: the two spaces between labels were
+            // never quite enough to tell where one tab ends and the next
+            // begins, and a painted swatch only made that harder.
+            spans.push(Span::styled(
+                "│",
+                Style::default().fg(theme::colors().border),
+            ));
+            pos += 1;
+        }
         let text = format!(" {} ", elide(title, cap));
         let mut width = text.chars().count() as u16;
         let hue = hues[i];
@@ -395,7 +413,12 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     // The button that says the feature exists. It carries its key as well as
     // its click target, because the keyboard is how anyone will use it twice.
     let width = new_tab.chars().count() as u16;
-    if pos + width <= area.x + area.width {
+    if pos + width < area.x + area.width {
+        spans.push(Span::styled(
+            "│",
+            Style::default().fg(theme::colors().border),
+        ));
+        pos += 1;
         spans.push(Span::styled(
             new_tab,
             Style::default()
@@ -2136,27 +2159,30 @@ mod tests {
                 .collect::<String>()
         };
 
+        // `│` and `●` are multi-byte, so `find`'s byte offset is not the cell's
+        // column: count the characters before the needle instead.
+        let col = |text: &str, needle: &str| {
+            text.find(needle)
+                .map(|byte| text[..byte].chars().count() as u16)
+        };
+
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
         let violet = theme::Hue::Violet.color();
-        let at = text.find('●').expect("the painted tab grew no swatch");
-        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, violet);
-        let at = text
-            .find("2:one")
-            .expect("the painted tab is not in the bar");
-        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, violet);
-        let at = text.find("3:two").expect("the plain tab is not in the bar");
-        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, theme::colors().dim);
+        let at = col(&text, "●").expect("the painted tab grew no swatch");
+        assert_eq!(buf.cell((at, 0)).unwrap().fg, violet);
+        let at = col(&text, "2:one").expect("the painted tab is not in the bar");
+        assert_eq!(buf.cell((at, 0)).unwrap().fg, violet);
+        let at = col(&text, "3:two").expect("the plain tab is not in the bar");
+        assert_eq!(buf.cell((at, 0)).unwrap().fg, theme::colors().dim);
 
         // The same tab while it is the one being watched: the wash stays, the
         // ink is the hue's.
         app.tab = 1;
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
-        let at = text
-            .find("2:one")
-            .expect("the painted tab is not in the bar");
-        let cell = buf.cell((at as u16, 0)).unwrap();
+        let at = col(&text, "2:one").expect("the painted tab is not in the bar");
+        let cell = buf.cell((at, 0)).unwrap();
         assert_eq!(cell.fg, violet);
         assert_eq!(cell.bg, theme::colors().selected_bg);
 
@@ -2166,15 +2192,10 @@ mod tests {
         app.tabs[0] = named("one", Some("violet"), Some(0));
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
-        let at = text
-            .find("2:one")
-            .expect("the painted tab is not in the bar");
-        assert_eq!(
-            buf.cell((at as u16, 0)).unwrap().fg,
-            theme::colors().cost_low
-        );
-        let at = text.find('●').expect("the painted tab grew no swatch");
-        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, violet);
+        let at = col(&text, "2:one").expect("the painted tab is not in the bar");
+        assert_eq!(buf.cell((at, 0)).unwrap().fg, theme::colors().cost_low);
+        let at = col(&text, "●").expect("the painted tab grew no swatch");
+        assert_eq!(buf.cell((at, 0)).unwrap().fg, violet);
     }
 
     /// The corner is drawn in the corner: last row, hard against the right
@@ -2347,15 +2368,19 @@ mod tests {
     fn a_crowded_tab_bar_elides_instead_of_overflowing() {
         let titles: Vec<String> = (1..=6).map(|i| format!("{i}:claude-{i}")).collect();
         let label_room = 40usize;
-        let cap = (label_room / titles.len()).saturating_sub(2).max(3);
+        let separators = titles.len();
+        let cap = ((label_room.saturating_sub(separators)) / titles.len())
+            .saturating_sub(2)
+            .max(3);
         let drawn: usize = titles
             .iter()
             .map(|t| elide(t, cap).chars().count() + 2)
-            .sum();
+            .sum::<usize>()
+            + separators;
 
         assert!(drawn <= label_room, "{drawn} columns in {label_room}");
-        assert_eq!(elide("1:claude-1", cap), "1:c…");
-        assert_eq!(elide("1:cc", cap), "1:cc");
+        assert_eq!(elide("1:claude-1", cap), "1:…");
+        assert_eq!(elide("1:cc", cap), "1:…");
     }
 
     #[test]
@@ -2574,7 +2599,7 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         let top: String = (0..cols).map(|x| buffer[(x, 0)].symbol()).collect();
         assert!(
-            top.starts_with(" 1:Dashboard  + Tab (t) "),
+            top.starts_with(" 1:Dashboard │ + Tab (t) "),
             "the new-tab button is not on the bar: {top:?}"
         );
         let (a, _) = layout.workspace_new.expect("no new-tab hit region");
@@ -2834,7 +2859,7 @@ mod tests {
             "the pty was never resized to the pane; wanted {want:?}"
         );
         assert!(
-            screen[0].starts_with(" 1:Dashboard  2:HELLO-FROM-AGENT"),
+            screen[0].starts_with(" 1:Dashboard │ 2:HELLO-FROM-AGENT"),
             "the tab bar is not the top row: {:?}",
             screen[0]
         );
