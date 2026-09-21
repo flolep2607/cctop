@@ -692,6 +692,8 @@ fn event_loop(
         // a channel nothing polls but this, and until it does the corner has a
         // spinner to turn.
         app.needs_redraw |= app.tick_share();
+        // The insight report's spinner turns on the same terms.
+        app.needs_redraw |= app.insight_loading();
 
         // A blinking tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only on
@@ -707,6 +709,15 @@ fn event_loop(
             && at.elapsed() > Duration::from_secs(3)
         {
             app.status = None;
+            app.needs_redraw = true;
+        }
+
+        // A pasted image's corner preview expires on the same terms, a touch
+        // longer — it is the confirmation that *that* image went.
+        if let Some(preview) = &app.paste_preview
+            && preview.at.elapsed() > Duration::from_secs(5)
+        {
+            app.paste_preview = None;
             app.needs_redraw = true;
         }
 
@@ -726,7 +737,7 @@ fn event_loop(
         };
         // A spinner that advances five times a second reads as a stutter. While
         // one is turning the loop wakes at its frame rate instead.
-        let idle_wait = match app.share_opening.is_some() {
+        let idle_wait = match app.share_opening.is_some() || app.insight_loading() {
             true => idle_wait.min(Duration::from_millis(100)),
             false => idle_wait,
         };

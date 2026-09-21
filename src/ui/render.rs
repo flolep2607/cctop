@@ -15,7 +15,7 @@ use ratatui::crossterm::event;
 use ratatui::layout::{Constraint, Layout as RLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 /// Screen regions recorded during a draw, so mouse events can be mapped back to
 /// what was actually rendered rather than to a guessed layout.
@@ -301,7 +301,46 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Insight => modals::draw_insight(frame, area, app),
         Mode::List => {}
     }
+    // Over everything, modals included: a few seconds of confirmation for a
+    // key that has already acted, in a corner nothing else owns.
+    draw_paste_preview(frame, area, app);
     layout
+}
+
+/// The image a paste just filed, held in the bottom-right corner briefly.
+///
+/// A toast rather than a modal — the paste has already happened and needs no
+/// answering, it only needs seeing: the difference between "a path was typed"
+/// and "*that* image was typed" is what this is for.
+fn draw_paste_preview(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(preview) = &mut app.paste_preview else {
+        return;
+    };
+    let width = 30u16.min(area.width.saturating_sub(4));
+    let height = 10u16.min(area.height.saturating_sub(6));
+    // Too small to say anything is too small to draw.
+    if width < 8 || height < 4 {
+        return;
+    }
+    let rect = Rect {
+        x: area.right().saturating_sub(width + 1),
+        y: area.bottom().saturating_sub(height + 2),
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
+        .title(Span::styled(format!(" {} ", preview.name), theme::title()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_stateful_widget(
+        ratatui_image::StatefulImage::default(),
+        inner,
+        &mut preview.image,
+    );
 }
 
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
@@ -2825,6 +2864,47 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    /// A paste is confirmed by seeing the image, not just by the status line
+    /// naming its file: the corner box carries the name and the halfblocks.
+    #[test]
+    fn a_pasted_image_is_previewed_in_the_corner() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        // A checkerboard, so the '▀' of a halfblock is earned in every cell —
+        // a uniform picture renders as background alone and asserts nothing.
+        let mut pixels = image::RgbaImage::new(16, 16);
+        for (x, y, px) in pixels.enumerate_pixels_mut() {
+            *px = match (x + y) % 2 == 0 {
+                true => image::Rgba([255, 0, 0, 255]),
+                false => image::Rgba([0, 0, 255, 255]),
+            };
+        }
+        app.paste_preview = Some(crate::ui::PastePreview {
+            name: "paste-20260922-120000.png".into(),
+            at: std::time::Instant::now(),
+            image: ratatui_image::picker::Picker::halfblocks()
+                .new_resize_protocol(image::DynamicImage::ImageRgba8(pixels)),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+        let screen = screen(&terminal, 80, 24).join("\n");
+
+        assert!(
+            screen.contains("paste-20260922-120000.png"),
+            "the preview never named the file: {screen}"
+        );
+        assert!(
+            screen.contains('▀'),
+            "no halfblock was drawn for the image: {screen}"
+        );
     }
 
     /// A tab keeps you inside cctop: the tab bar, the Overview and the footer

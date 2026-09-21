@@ -2,6 +2,7 @@
 
 use super::columns::COLUMNS;
 use super::render::Layout;
+use super::share;
 use super::theme;
 use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, tabs};
 use ratatui::Frame;
@@ -1616,14 +1617,18 @@ pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let body: Vec<Line> = match &app.insight {
-        // Said plainly rather than with a spinner: the wait is a full re-parse
-        // of every transcript, and how long that takes depends on the machine.
+        // The spinner is the difference between this wait and a hang: the
+        // report re-parses every transcript, and how long that takes depends
+        // on the machine.
         None => vec![
             Line::default(),
-            Line::from(Span::styled(
-                "  Reading every transcript. This is the slow one.",
-                theme::value(),
-            )),
+            Line::from(vec![
+                Span::styled(format!("  {}", share::spinner_frame()), theme::title()),
+                Span::styled(
+                    "  Reading every transcript. This is the slow one.",
+                    theme::value(),
+                ),
+            ]),
         ],
         Some(text) => text
             .lines()
@@ -1699,6 +1704,39 @@ mod tests {
             .iter()
             .find(|cell| cell.symbol() == "●" && cell.fg == theme::Hue::Cyan.color());
         assert!(cyan.is_some(), "no swatch wears the picked hue");
+    }
+
+    /// While the worker is still reading transcripts the overlay keeps moving:
+    /// the spinner frame is the difference between a wait and a hang.
+    #[test]
+    fn a_report_still_loading_turns_a_spinner() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.mode = crate::ui::Mode::Insight;
+        app.insight = None;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+        terminal
+            .draw(|frame| draw_insight(frame, frame.area(), &app))
+            .expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            text.contains("Reading every transcript"),
+            "the wait is not described: {text}"
+        );
+        assert!(
+            text.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)),
+            "no spinner frame on screen: {text}"
+        );
     }
 
     #[test]

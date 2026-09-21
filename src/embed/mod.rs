@@ -388,7 +388,7 @@ pub(crate) mod tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("cctop-embed-{name}"));
+        let d = std::env::temp_dir().join(format!("cctop-embed-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

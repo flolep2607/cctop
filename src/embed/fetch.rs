@@ -114,7 +114,7 @@ mod tests {
     /// model — which is what the `.part` rename protects against.
     #[test]
     fn a_partial_download_is_not_a_model() {
-        let dir = std::env::temp_dir().join("cctop-fetch-partial");
+        let dir = std::env::temp_dir().join(format!("cctop-fetch-partial-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("config.json"), "{}").expect("write");

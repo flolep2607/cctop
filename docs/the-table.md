@@ -288,7 +288,8 @@ why `Ctrl+V` in a pane appears to do nothing when the clipboard holds a picture.
 followed by a space — the form every one of these harnesses already reads an
 image in. No image bytes go near the pty. On the dashboard the same key opens
 the type-into box with the path in it, so a session you are not attached to can
-be sent one too.
+be sent one too. For a few seconds after either, the image itself sits in the
+bottom-right corner — the confirmation is the picture, not only its name.
 
 Inside a pane `Ctrl+V` does it too, but only when the clipboard actually holds
 a picture: with text on it the key goes to the agent untouched, as it always

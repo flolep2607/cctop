@@ -98,3 +98,13 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 tui-term = "0.3.4"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"
+# The corner preview of a pasted image. Only its halfblocks are used — sixel
+# and kitty are escape sequences written around ratatui's buffer rather than
+# cells inside it, and a paste confirmation has to survive tmux and ssh, which
+# is exactly where those protocols do not. Default features are off because
+# `chafa-dyn` needs the C chafa library at build time, which the musl release
+# has no toolchain for, and `image-defaults` pulls every codec `image` has.
+ratatui-image = { version = "11.0.8", default-features = false }
+# Decodes the PNG a paste writes into the DynamicImage ratatui-image takes.
+# PNG is the only format that ever arrives — see clipboard::HELPERS.
+image = { version = "0.25", default-features = false, features = ["png"] }

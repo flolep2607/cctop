@@ -409,7 +409,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp(name: &str, body: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("cctop-index-{name}.jsonl"));
+        let p = std::env::temp_dir().join(format!(
+            // The pid keeps two `cargo test` runs on the same machine from
+            // handing each other a file mid-test.
+            "cctop-index-{name}-{}.jsonl",
+            std::process::id()
+        ));
         let mut f = std::fs::File::create(&p).expect("create");
         f.write_all(body.as_bytes()).expect("write");
         p
@@ -513,7 +518,8 @@ mod tests {
     /// property that keeps a growing transcript cheap.
     #[test]
     fn refresh_embeds_only_what_changed() {
-        let model_dir = std::env::temp_dir().join("cctop-index-refresh-model");
+        let model_dir =
+            std::env::temp_dir().join(format!("cctop-index-refresh-model-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&model_dir);
         tiny(&model_dir, true);
         let model = Model::load(&model_dir).expect("model");
@@ -579,7 +585,8 @@ mod tests {
     /// treat anything it cannot read as simply absent.
     #[test]
     fn an_index_round_trips_and_refuses_rubbish() {
-        let dir = std::env::temp_dir().join("cctop-index-roundtrip");
+        let dir =
+            std::env::temp_dir().join(format!("cctop-index-roundtrip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("embeddings.bin");

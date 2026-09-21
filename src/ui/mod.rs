@@ -127,6 +127,23 @@ pub enum LaunchInto {
     Split { stacked: bool },
 }
 
+/// The image a paste just filed, drawn in the corner for a few seconds.
+///
+/// Decoded once when it is set rather than per frame — the file has already
+/// been handed to the agent as a path by then, so a preview that cannot decode
+/// costs the paste nothing and the status line still names it.
+pub struct PastePreview {
+    /// The filename, which is what the agent was told.
+    pub name: String,
+    /// When it was pasted; the corner holds it briefly, like the status line.
+    pub at: Instant,
+    /// Decoded and ready to draw. Halfblocks only: they land in ratatui's
+    /// buffer as ordinary cells, so they compose with whatever is underneath,
+    /// render over ssh and tmux without protocol support, and a `TestBackend`
+    /// can see them.
+    pub image: ratatui_image::protocol::StatefulProtocol,
+}
+
 /// The pending batch action shown in `Mode::BatchConfirm`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchKind {
@@ -599,6 +616,8 @@ pub struct App {
     /// reason quitting asks first: the agent is on a pty this process owns and
     /// does not survive it.
     pub hosted: Option<(u32, String)>,
+    /// The pasted image the corner is previewing, while it is previewing one.
+    pub paste_preview: Option<PastePreview>,
 
     prefs: UiPrefs,
     tx: Sender<Request>,
@@ -769,6 +788,7 @@ impl App {
             pending_fork: None,
             handoff_send: None,
             hosted: None,
+            paste_preview: None,
             needs_redraw: true,
             should_quit: false,
         }
@@ -813,6 +833,15 @@ impl App {
         self.insight_kind = which;
         self.mode = Mode::Insight;
         let _ = self.tx.send(Request::Insight { which });
+    }
+
+    /// A report still being read off disk by the worker.
+    ///
+    /// Its spinner is what tells that wait from a hang, and the loop asks this
+    /// so it knows to keep waking for the frames — the same reason
+    /// [`tick_share`](share) turns its spinner while a tunnel dials.
+    pub(super) fn insight_loading(&self) -> bool {
+        self.mode == Mode::Insight && self.insight.is_none()
     }
 }
 
