@@ -96,8 +96,12 @@ pub enum Mode {
     Insight,
     /// Offering to install rmux, a launch having found it missing.
     TmuxInstall,
-    /// Naming or painting a workspace tab, opened by right-clicking it.
+    /// Naming or painting a workspace tab, opened by right-clicking it or
+    /// with `Alt+r`.
     RenameTab,
+    /// The tab switcher: every tab in the bar, narrowed by typing, taken by
+    /// Enter. `Alt+t`, for the tabs that have no digit of their own.
+    SwitchTab,
     /// The browser panel: whether this cctop is serving its table to one, on
     /// what links, and whether they leave the machine.
     Serve,
@@ -379,6 +383,10 @@ pub struct App {
     /// into it. A paste that lands in the same instant as the click that
     /// opened the field is that echo, not a person, and is dropped.
     pub rename_opened_by_click: Option<Instant>,
+    /// What has been typed into the tab switcher, and which row of the
+    /// narrowed list the cursor is on. See `App::switch_matches`.
+    pub switch_filter: String,
+    pub switch_cursor: usize,
     /// Whether the footer's `q Quit` has been clicked once already.
     ///
     /// The share corner's `share_arm` for the other irreversible thing a
@@ -712,6 +720,8 @@ impl App {
             rename_was: String::new(),
             rename_color: None,
             rename_opened_by_click: None,
+            switch_filter: String::new(),
+            switch_cursor: 0,
             quit_arm: false,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),

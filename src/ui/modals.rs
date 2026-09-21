@@ -195,14 +195,13 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+v / Alt+s", "Split the tab right / down"),
         item("Alt+← / →", "Previous / next tab"),
         item("Alt+1 – 9", "Jump to a tab (1 is the dashboard)"),
+        item("Alt+t", "Pick a tab from a list, typing to narrow it"),
+        item("Alt+b", "Jump to the next tab that needs you"),
         item(
             "Alt+Shift+← / →",
             "Move this tab along the bar (or drag it with the mouse)",
         ),
-        item(
-            "Right-click",
-            "Rename or recolour the tab under the pointer",
-        ),
+        item("Right-click / Alt+r", "Rename or recolour a tab"),
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
@@ -1601,6 +1600,127 @@ pub(super) fn draw_rename_tab(
     layout.modal_rect = Some(outer);
 }
 
+/// The tab switcher, opened by `Alt+t`.
+///
+/// The list is the whole bar — the dashboard first, then the tabs in bar
+/// order — narrowed by whatever has been typed. Rows longer than the box
+/// are windowed around the cursor rather than scrolled: the pick is what
+/// moves, not the frame around it.
+pub(super) fn draw_switch_tab(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut super::render::Layout,
+) {
+    const WIDTH: u16 = 60;
+    /// Rows of list under the query line. Ten is a screenful of tab names;
+    /// past it the window slides under the cursor instead of growing.
+    const ROWS: usize = 10;
+    /// The column the title is fixed to before the state word.
+    const TITLE_W: usize = 38;
+
+    let matches = app.switch_matches();
+    let cursor = app.switch_cursor.min(matches.len().saturating_sub(1));
+    let start = cursor
+        .saturating_sub(ROWS / 2)
+        .min(matches.len().saturating_sub(ROWS));
+    let shown = &matches[start..matches.len().min(start + ROWS)];
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw(" > "),
+            Span::styled(
+                app.switch_filter.clone(),
+                Style::default()
+                    .fg(theme::colors().value)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(theme::colors().accent)),
+        ]),
+        Line::default(),
+    ];
+    if start > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("    … {start} above"),
+            theme::dim(),
+        )));
+    }
+    for (row, &i) in shown.iter().enumerate() {
+        let tab = i.checked_sub(1).and_then(|t| app.tabs.get(t));
+        let title = tab.map_or_else(|| "Dashboard".to_string(), tabs::Tab::title);
+        // The bar's own honesty about digits: 1 is the dashboard, and a
+        // position past 9 has no key to be labelled with.
+        let number = if i < 9 {
+            (i + 1).to_string()
+        } else {
+            String::new()
+        };
+        let state = match app.tab_attention(i) {
+            Some(tabs::Attention::NeedsInput) => Some(("needs you", theme::colors().cost_mid)),
+            Some(tabs::Attention::Idle) => Some(("idle", theme::colors().cost_low)),
+            // Something to say about every row that asks nothing: the tab
+            // you would land on by doing nothing at all.
+            None if i == app.tab => Some(("current", theme::colors().dim)),
+            None => None,
+        };
+
+        let mut spans = vec![
+            Span::styled(
+                if start + row == cursor {
+                    " › "
+                } else {
+                    "   "
+                },
+                Style::default().fg(theme::colors().accent),
+            ),
+            Span::styled(format!("{number:>2} "), theme::dim()),
+        ];
+        match tab.and_then(|tab| tab.color) {
+            Some(hue) => spans.push(Span::styled("● ", Style::default().fg(hue.color()))),
+            None => spans.push(Span::raw("  ")),
+        }
+        spans.push(Span::styled(
+            format!(
+                "{:<width$}",
+                super::render::elide(&title, TITLE_W),
+                width = TITLE_W
+            ),
+            theme::value(),
+        ));
+        if let Some((word, color)) = state {
+            spans.push(Span::styled(
+                format!(" {word:>9}"),
+                Style::default().fg(color),
+            ));
+        }
+        let mut line = Line::from(spans);
+        if start + row == cursor {
+            line = line.patch_style(theme::selected());
+        }
+        lines.push(line);
+    }
+    if start + shown.len() < matches.len() {
+        lines.push(Line::from(Span::styled(
+            format!("    … {} below", matches.len() - start - shown.len()),
+            theme::dim(),
+        )));
+    }
+    if matches.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "    No tab by that name",
+            theme::dim(),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " Enter go   ↑↓ choose   Esc cancel",
+        theme::dim(),
+    )));
+
+    let (outer, _) = modal(frame, area, "Go to tab", lines, WIDTH);
+    layout.modal_rect = Some(outer);
+}
+
 // ---------------------------------------------------------------------------
 // Clipboard
 // ---------------------------------------------------------------------------
@@ -1737,6 +1857,78 @@ mod tests {
             text.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)),
             "no spinner frame on screen: {text}"
         );
+    }
+
+    /// The switcher draws the whole bar — dashboard first — names the pick
+    /// with `›`, and says beside each tab what it wants, so the row you land
+    /// on is the row you read.
+    #[test]
+    fn the_switcher_lists_the_bar_with_its_states() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let shared = |name: &str, signal: Option<crate::hook::Signal>| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: signal.map(|signal| crate::rmux::State {
+                    signal,
+                    at: crate::rmux::now_secs(),
+                }),
+                color: None,
+            })
+        };
+
+        let mut app = crate::ui::tests::test_app();
+        app.tabs = vec![
+            shared("claude", None),
+            shared("blocked", Some(crate::hook::Signal::NeedsInput)),
+        ];
+        app.mode = crate::ui::Mode::SwitchTab;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+        let mut layout = crate::ui::render::Layout::default();
+        terminal
+            .draw(|frame| draw_switch_tab(frame, frame.area(), &app, &mut layout))
+            .expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("Go to tab"), "no title: {text}");
+        assert!(
+            text.contains("Dashboard"),
+            "the dashboard is missing: {text}"
+        );
+        assert!(text.contains("claude"), "a tab is missing: {text}");
+        assert!(text.contains("needs you"), "the ask is not marked: {text}");
+        assert!(text.contains("›"), "no cursor on the pick: {text}");
+
+        // A filter that matches nothing says so rather than listing air.
+        app.switch_filter = "zzz".to_string();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+        let mut layout = crate::ui::render::Layout::default();
+        terminal
+            .draw(|frame| draw_switch_tab(frame, frame.area(), &app, &mut layout))
+            .expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("No tab by that name"), "silence: {text}");
     }
 
     #[test]

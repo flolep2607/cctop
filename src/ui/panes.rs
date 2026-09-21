@@ -99,6 +99,60 @@ impl App {
         self.go_to_tab((self.tab as isize + delta).rem_euclid(count) as usize);
     }
 
+    /// The next bar position after the view whose agent is blocked on you,
+    /// wrapping — `None` when no tab is asking.
+    ///
+    /// The current tab is checked last rather than skipped: a split's other
+    /// pane can be the one asking, and you cannot tell from the bar.
+    /// `NeedsInput` is the only state worth a jump — `Idle` is context the
+    /// bar already carries in green.
+    fn next_waiting(&self) -> Option<usize> {
+        let waiting = |i: usize| self.tab_attention(i) == Some(tabs::Attention::NeedsInput);
+        (self.tab + 1..=self.tabs.len())
+            .find(|&i| waiting(i))
+            .or_else(|| (1..self.tab).find(|&i| waiting(i)))
+            .or_else(|| waiting(self.tab).then_some(self.tab))
+    }
+
+    /// Jump the view to the next tab that wants you — `Alt+b`, beside the
+    /// dashboard's `b`, which answers the same question for the table.
+    pub fn next_waiting_tab(&mut self) {
+        match self.next_waiting() {
+            Some(tab) if tab != self.tab => self.go_to_tab(tab),
+            // The only ask in the bar is inside the tab already on screen:
+            // a split's other pane. `go_to_tab` would wave the tab through
+            // as already there, so the keyboard moves instead. Each press
+            // visits the next pane, so an asking one always comes round.
+            Some(_) => {
+                if let Some(tab) = self.active_tab() {
+                    tab.cycle_focus();
+                }
+            }
+            None => self.set_status("Nothing is waiting for you"),
+        }
+    }
+
+    /// The bar positions the switcher's filter leaves standing, `0` for the
+    /// dashboard.
+    ///
+    /// A plain substring, case-insensitive: the field is typed a letter or
+    /// two at a time, and a scored fuzzy match is a ranking nobody asked
+    /// for across a dozen names.
+    pub(super) fn switch_matches(&self) -> Vec<usize> {
+        let needle = self.switch_filter.trim().to_lowercase();
+        let matches = |title: &str| needle.is_empty() || title.to_lowercase().contains(&needle);
+        let mut found = Vec::new();
+        if matches("Dashboard") {
+            found.push(0);
+        }
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if matches(&tab.title()) {
+                found.push(i + 1);
+            }
+        }
+        found
+    }
+
     /// Move to `want`, taking the rmux client with you.
     ///
     /// This is what makes one set of tabs work across several cctops. Every tab
@@ -842,5 +896,147 @@ mod tests {
         assert_eq!(app.tab, 0);
         let (status, _) = app.status.clone().expect("nothing was said");
         assert!(status.contains("Improve super cctop"), "{status}");
+    }
+
+    /// `Alt+b` walks the bar to the next tab asking for you, wrapping at the
+    /// end — and says so plainly when nothing is, rather than jumping
+    /// somewhere arbitrary.
+    #[test]
+    fn the_next_waiting_tab_is_the_next_one_asking() {
+        let shared = |name: &str, signal: Option<crate::hook::Signal>| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: signal.map(|signal| crate::rmux::State {
+                    signal,
+                    at: crate::rmux::now_secs(),
+                }),
+                color: None,
+            })
+        };
+        let mut app = test_app();
+        app.tabs = vec![
+            shared("a", Some(crate::hook::Signal::Busy)),
+            shared("b", Some(crate::hook::Signal::NeedsInput)),
+            shared("c", None),
+            shared("d", Some(crate::hook::Signal::NeedsInput)),
+        ];
+
+        // Bar positions, not vec indices: "a" is 1, "b" is 2, "d" is 4.
+        app.tab = 0;
+        assert_eq!(app.next_waiting(), Some(2), "the first ask was skipped");
+        app.tab = 2;
+        assert_eq!(
+            app.next_waiting(),
+            Some(4),
+            "the next ask is not the same tab"
+        );
+        app.tab = 4;
+        assert_eq!(app.next_waiting(), Some(2), "the walk did not wrap");
+        app.tab = 3;
+        assert_eq!(app.next_waiting(), Some(4), "the jump went backward first");
+
+        // Nothing asking: the key has to say so rather than go nowhere quiet.
+        app.tabs = vec![shared("a", Some(crate::hook::Signal::Busy))];
+        app.next_waiting_tab();
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("Nothing is waiting"), "{status}");
+    }
+
+    /// `Alt+r` opens the same rename the right-click does, on the tab being
+    /// watched — the dashboard excepted, which is nobody's to name.
+    #[test]
+    fn the_keyboard_can_rename_the_tab_it_is_on() {
+        let named = |name: &str| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+            })
+        };
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+
+        let mut app = test_app();
+        app.tabs = vec![named("a"), named("b")];
+
+        app.on_key(alt(KeyCode::Char('r')));
+        assert_eq!(app.mode, Mode::List, "the dashboard offered a rename");
+
+        app.tab = 2;
+        app.on_key(alt(KeyCode::Char('r')));
+        assert_eq!(app.mode, Mode::RenameTab);
+        assert_eq!(app.rename_tab, 2);
+        assert_eq!(app.rename_was, "b");
+    }
+
+    /// `Alt+t` lists the bar, typing narrows it, and Enter goes to the pick.
+    /// The cursor opens on the tab being watched, so Down walks the bar from
+    /// where you are rather than from the dashboard.
+    #[test]
+    fn the_switcher_narrows_the_bar_and_goes_to_the_pick() {
+        let named = |name: &str| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+            })
+        };
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+        let typed = |app: &mut App, text: &str| {
+            for c in text.chars() {
+                app.on_key(key(KeyCode::Char(c)));
+            }
+        };
+
+        let mut app = test_app();
+        app.tabs = vec![named("claude"), named("codex"), named("review")];
+
+        app.on_key(alt(KeyCode::Char('t')));
+        assert_eq!(app.mode, Mode::SwitchTab);
+        assert_eq!(app.switch_matches(), vec![0, 1, 2, 3]);
+
+        typed(&mut app, "cod");
+        assert_eq!(app.switch_matches(), vec![2]);
+        // Case-insensitive, and the dashboard is a row like any other.
+        app.switch_filter.clear();
+        typed(&mut app, "DASH");
+        assert_eq!(app.switch_matches(), vec![0]);
+
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::List);
+
+        // Enter goes to the pick — here the dashboard, the only landing that
+        // needs no agent behind it.
+        app.tab = 1;
+        app.on_key(alt(KeyCode::Char('t')));
+        assert_eq!(
+            app.switch_matches()[app.switch_cursor],
+            1,
+            "the cursor did not open on the current tab"
+        );
+        typed(&mut app, "dash");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(app.tab, 0, "Enter did not take the pick");
     }
 }

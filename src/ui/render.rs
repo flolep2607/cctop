@@ -246,6 +246,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             // A tab is renamed by right-clicking it, and the bar is on screen
             // inside a tab as much as over the dashboard.
             Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
+            Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
             _ => {}
         }
         return layout;
@@ -293,6 +294,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
         Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
+        Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
         // The same modal: the directory field replaces one line of it, so the
         // list of agents stays on screen while the path is being typed.
         Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
@@ -471,7 +473,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
 }
 
 /// `text`, clipped to `max` columns with an ellipsis when it does not fit.
-fn elide(text: &str, max: usize) -> String {
+pub(super) fn elide(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }

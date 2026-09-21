@@ -17,6 +17,10 @@ pub(super) const MAX_PATH_INPUT: usize = 512;
 /// transcript.
 pub(super) const TAB_NAME_MAX: usize = 64;
 
+/// Longest query the tab switcher takes — the same reasoning as the name it
+/// is matched against, minus the need to store it anywhere.
+const SWITCH_FILTER_MAX: usize = 64;
+
 /// How long after a right-click a paste still counts as that click's echo.
 ///
 /// One frame's worth of slack: the terminal writes the click and the clipboard
@@ -144,6 +148,7 @@ impl App {
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
             Mode::RenameTab => self.on_key_rename(key),
+            Mode::SwitchTab => self.on_key_switch(key),
             Mode::Launch => self.on_key_launch(key),
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
@@ -239,6 +244,11 @@ impl App {
                 self.launch_cwd_input.push_str(&flatten(text, room));
                 self.launch_cwd_bad = false;
                 self.launch_cwd_suggest();
+            }
+            Mode::SwitchTab => {
+                let room = SWITCH_FILTER_MAX.saturating_sub(self.switch_filter.chars().count());
+                self.switch_filter.push_str(&flatten(text, room));
+                self.switch_cursor = 0;
             }
             // The cost floor is a number, so a paste is filtered the way typing
             // one is rather than flattened: anything that is not a digit or a
@@ -404,6 +414,15 @@ impl App {
             // The dashboard is tab 1, matching where it sits in the tab bar.
             KeyCode::Char(c @ '1'..='9') => self.show_tab(c as usize - '1' as usize),
             KeyCode::Char('n') => self.launch_prompt(LaunchInto::Tab),
+            // The tab half of `b` on the dashboard: both go to what rang.
+            KeyCode::Char('b') => self.next_waiting_tab(),
+            // The keyboard's way into what a right-click opens — the modal
+            // renames and paints, and the bar is not the only way to reach it.
+            KeyCode::Char('r') => match self.tab {
+                0 => self.set_status("The dashboard is not a tab to rename"),
+                tab => self.rename_prompt(tab),
+            },
+            KeyCode::Char('t') => self.switch_prompt(),
             KeyCode::Char('v') => self.launch_prompt(LaunchInto::Split { stacked: false }),
             KeyCode::Char('s') => self.launch_prompt(LaunchInto::Split { stacked: true }),
             KeyCode::Char('o') => match self.active_tab() {
@@ -904,6 +923,59 @@ impl App {
         self.rename_input.clear();
         self.rename_opened_by_click = None;
         self.mode = Mode::RenameTab;
+        self.needs_redraw = true;
+    }
+
+    /// The tab switcher: letters narrow the list, arrows move in it, Enter
+    /// goes to the pick. Letters type into the filter rather than stepping
+    /// the cursor — unlike every other list here, the thing being spelled
+    /// is the thing being searched, so `j` and `k` belong to the name.
+    fn on_key_switch(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Up => self.step_switch(-1),
+            KeyCode::Down => self.step_switch(1),
+            KeyCode::Enter => {
+                self.mode = Mode::List;
+                if let Some(&tab) = self.switch_matches().get(self.switch_cursor) {
+                    self.go_to_tab(tab);
+                }
+            }
+            KeyCode::Backspace => {
+                self.switch_filter.pop();
+                // Back to the top: the list just widened, and a cursor kept
+                // at its old depth is pointing at a name nobody picked.
+                self.switch_cursor = 0;
+            }
+            KeyCode::Char(c) if self.switch_filter.chars().count() < SWITCH_FILTER_MAX => {
+                self.switch_filter.push(c);
+                self.switch_cursor = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Move the switcher's cursor within the narrowed list, wrapping.
+    fn step_switch(&mut self, delta: isize) {
+        let n = self.switch_matches().len();
+        if n == 0 {
+            self.switch_cursor = 0;
+            return;
+        }
+        self.switch_cursor = (self.switch_cursor as isize + delta).rem_euclid(n as isize) as usize;
+    }
+
+    /// Open the switcher on the tab being watched: Down walks the bar from
+    /// where you are, and Enter on an unchanged pick is `go_to_tab` seeing
+    /// the tab it is already on.
+    fn switch_prompt(&mut self) {
+        self.switch_filter.clear();
+        self.switch_cursor = self
+            .switch_matches()
+            .iter()
+            .position(|&i| i == self.tab)
+            .unwrap_or(0);
+        self.mode = Mode::SwitchTab;
         self.needs_redraw = true;
     }
 
