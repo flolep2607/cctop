@@ -20,13 +20,27 @@ pub struct Opening {
     pub(super) since: Instant,
 }
 
+/// The spinner's alphabet, shared by everything that has to keep saying it is
+/// alive.
+const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 impl Opening {
     /// The spinner's current frame.
     pub fn frame(&self) -> char {
-        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let i = self.since.elapsed().as_millis() / 100;
         FRAMES[i as usize % FRAMES.len()]
     }
+}
+
+/// The same spinner, for a wait that is not an [`Opening`].
+///
+/// Read off one clock for the process rather than off an `Instant` each caller
+/// would have to carry: whatever asks gets the current frame, and every
+/// spinner on screen ticks together.
+pub(super) fn spinner_frame() -> char {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    FRAMES[(start.elapsed().as_millis() / 100) as usize % FRAMES.len()]
 }
 
 impl App {

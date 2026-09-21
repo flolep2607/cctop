@@ -181,6 +181,7 @@ impl App {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     self.set_status(format!("Pasted {shown}"));
+                    self.show_paste_preview(&path);
                     self.paste_text(&format!("{} ", path.display()));
                 }
                 // The paste is not put through as text on a failure: 100KB of
@@ -271,6 +272,7 @@ impl App {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 self.set_status(format!("Pasted {shown}"));
+                self.show_paste_preview(&path);
                 Some(path.display().to_string())
             }
             Err(why) => {
@@ -338,6 +340,7 @@ impl App {
             .unwrap_or_default();
         self.send_to_focused_pane(&format!("{} ", path.display()));
         self.set_status(format!("Pasted {shown}"));
+        self.show_paste_preview(&path);
         true
     }
 
@@ -366,6 +369,25 @@ impl App {
             return;
         };
         self.send_to_focused_pane(&format!("{path} "));
+    }
+
+    /// Hold the image that was just filed up in the corner for a few seconds.
+    ///
+    /// Decode failure is silent on purpose: the path is already on its way to
+    /// the agent and the status line has already named the file, so a preview
+    /// that cannot decode is a nicety lost, not part of the paste.
+    fn show_paste_preview(&mut self, path: &std::path::Path) {
+        let Ok(image) = image::open(path) else {
+            return;
+        };
+        self.paste_preview = Some(super::PastePreview {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            at: Instant::now(),
+            image: ratatui_image::picker::Picker::halfblocks().new_resize_protocol(image),
+        });
     }
 
     /// The multiplexer keys, live everywhere including inside a pane. Returns

@@ -354,23 +354,25 @@ mod tests {
         // Every test that drives the real server takes its turn — see
         // [`rmux::test_lock`](crate::rmux::test_lock).
         let _turn = crate::rmux::test_lock();
-        let out = std::env::temp_dir().join("cctop-mux-test.txt");
+        let out = std::env::temp_dir().join(format!("cctop-mux-test-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
         // `tee` takes the path as an argument, so the reader is findable by
         // cmdline; the trailing `:` stops the shell from exec'ing it, keeping a
         // shell between the pane and the reader so the ancestor walk has to
-        // climb at least one level.
-        let session = "cctop-mux-test";
-        // The name is fixed, so a run killed before its teardown leaves the
-        // session behind and `new-session` then fails as a duplicate — for every
-        // run after it, until someone thinks to look in rmux.
+        // climb at least one level. Both names carry the pid: the daemon is
+        // machine-wide, so two `cargo test` runs share it and a fixed name or
+        // file would have them stomping each other's session.
+        let session = format!("cctop-mux-test-{}", std::process::id());
+        // A run killed before its teardown leaves the session behind and
+        // `new-session` then fails as a duplicate — for every run after it,
+        // until someone thinks to look in rmux.
         let _ = Command::new(crate::rmux::BIN)
             .args(["kill-session", "-t", &format!("={session}")])
             .status();
         let script = format!("tee {} >/dev/null; :", out.display());
         assert!(
             Command::new(crate::rmux::BIN)
-                .args(["new-session", "-d", "-s", session, "sh", "-c", &script])
+                .args(["new-session", "-d", "-s", &session, "sh", "-c", &script])
                 .status()
                 .unwrap()
                 .success()
@@ -392,7 +394,7 @@ mod tests {
                     p.name().to_string_lossy().starts_with("tee")
                         && p.cmd()
                             .iter()
-                            .any(|a| a.to_string_lossy().contains("cctop-mux-test.txt"))
+                            .any(|a| a.to_string_lossy() == out.to_string_lossy())
                 })
                 .map(|p| p.pid().as_u32())
         });
@@ -406,7 +408,7 @@ mod tests {
             wait_for(|| std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty()))
         });
         let _ = Command::new(crate::rmux::BIN)
-            .args(["kill-session", "-t", session])
+            .args(["kill-session", "-t", &session])
             .status();
         let _ = std::fs::remove_file(&out);
 

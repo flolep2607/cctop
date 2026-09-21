@@ -1914,7 +1914,8 @@ mod tests {
     /// literal miss itself is covered in `session::search`'s tests.
     #[test]
     fn a_search_names_the_session_whose_transcript_matched() {
-        let path = std::env::temp_dir().join("cctop-serve-search.jsonl");
+        let path =
+            std::env::temp_dir().join(format!("cctop-serve-search-{}.jsonl", std::process::id()));
         std::fs::write(&path, "{\"text\":\"please fix the flywheel\"}\n").unwrap();
         let mut s = Session::new(crate::pricing::Provider::Claude, "sess-1".into());
         s.data_file = Some(path.clone());

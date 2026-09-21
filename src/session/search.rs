@@ -581,7 +581,7 @@ mod tests {
     }
 
     fn temp(name: &str, body: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("cctop-search-{name}"));
+        let path = std::env::temp_dir().join(format!("cctop-search-{name}-{}", std::process::id()));
         let mut f = std::fs::File::create(&path).expect("create");
         f.write_all(body.as_bytes()).expect("write");
         path

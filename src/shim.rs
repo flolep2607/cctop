@@ -935,7 +935,7 @@ mod tests {
     /// terminal — so this drives the same pty and the same listener.
     #[test]
     fn a_line_sent_to_the_socket_becomes_the_childs_input() {
-        let out = std::env::temp_dir().join("cctop-shim-test.txt");
+        let out = std::env::temp_dir().join(format!("cctop-shim-test-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let (mut child, master) = spawn_on_pty(
             &[
