@@ -96,7 +96,7 @@ pub enum Mode {
     Insight,
     /// Offering to install rmux, a launch having found it missing.
     TmuxInstall,
-    /// Typing a new name for a workspace tab, opened by right-clicking it.
+    /// Naming or painting a workspace tab, opened by right-clicking it.
     RenameTab,
     /// The browser panel: whether this cctop is serving its table to one, on
     /// what links, and whether they leave the machine.
@@ -348,6 +348,12 @@ pub struct App {
     pub rename_input: String,
     pub rename_tab: usize,
     pub rename_was: String,
+    /// The colour the rename modal is offering for the tab.
+    ///
+    /// Seeded from the tab's own when the prompt opens, so Enter pressed for
+    /// the name alone leaves it alone — and so the swatch that would need no
+    /// paint is the one already bracketed.
+    pub rename_color: Option<theme::Hue>,
     /// When a right-click opened the rename prompt.
     ///
     /// Terminals that paste on the right button — Windows Terminal does, and
@@ -685,6 +691,7 @@ impl App {
             rename_input: String::new(),
             rename_tab: 0,
             rename_was: String::new(),
+            rename_color: None,
             rename_opened_by_click: None,
             quit_arm: false,
             list_height: 0,

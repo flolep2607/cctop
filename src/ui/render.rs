@@ -187,11 +187,17 @@ impl Layout {
 }
 
 pub(super) fn panel_block(title: &str) -> Block<'static> {
+    panel_block_titled(title, theme::title())
+}
+
+/// A [`panel_block`] whose title is drawn in `title_style` rather than the
+/// usual ink — how a painted tab colours the borders of its panes.
+fn panel_block_titled(title: &str, title_style: Style) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::colors().border))
         .style(theme::canvas())
-        .title(Span::styled(format!(" {title} "), theme::title()))
+        .title(Span::styled(format!(" {title} "), title_style))
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
@@ -319,18 +325,35 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     };
     let label_room = area.width.saturating_sub(new_tab.chars().count() as u16) as usize;
 
+    // Each tab's painted hue, read once so the loop can spend it twice: on the
+    // label while nothing is being said louder, and on a swatch that keeps it
+    // even then. A hue that resolves to nothing — under `NO_COLOR` or the mono
+    // palette — earns no swatch, or every painted tab would grow a grey dot.
+    let hues: Vec<Option<theme::Hue>> = (0..titles.len())
+        .map(|i| {
+            i.checked_sub(1)
+                .and_then(|t| app.tabs.get(t))
+                .and_then(|tab| tab.color)
+                .filter(|hue| hue.color() != Color::Reset)
+        })
+        .collect();
+    let painted = hues.iter().flatten().count();
+
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
     // you can still count and click beats a bar that runs off the screen.
-    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum();
+    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>() + 2 * painted;
     let cap = match natural <= label_room {
         true => usize::MAX,
-        false => (label_room / titles.len()).saturating_sub(2).max(3),
+        false => (label_room.saturating_sub(2 * painted) / titles.len())
+            .saturating_sub(2)
+            .max(3),
     };
 
     for (i, title) in titles.iter().enumerate() {
         let text = format!(" {} ", elide(title, cap));
-        let width = text.chars().count() as u16;
+        let mut width = text.chars().count() as u16;
+        let hue = hues[i];
         // A tab wanting something outranks the plain selected/unselected look:
         // the whole point of the colour is to be seen while you are reading a
         // different tab.
@@ -349,9 +372,21 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             Some(tabs::Attention::Idle) => Style::default()
                 .fg(theme::colors().cost_low)
                 .add_modifier(Modifier::BOLD),
-            None if i == app.tab => theme::selected(),
-            None => Style::default().fg(theme::colors().dim),
+            // The wash says "this one"; the hue is the tab's own mark and
+            // keeps saying it on top.
+            None if i == app.tab => match hue {
+                Some(hue) => theme::selected().fg(hue.color()),
+                None => theme::selected(),
+            },
+            None => Style::default().fg(hue.map_or(theme::colors().dim, theme::Hue::color)),
         };
+        if let Some(hue) = hue {
+            // The label's colour is borrowed — attention and the wash both
+            // outrank it — so the tab keeps its own mark beside the text, a
+            // swatch that stays its colour whatever the label is saying.
+            spans.push(Span::styled(" ●", style.fg(hue.color())));
+            width += 2;
+        }
         spans.push(Span::styled(text, style));
         layout.workspace_spans.push((pos, pos + width, i));
         pos += width;
@@ -484,9 +519,21 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
     .split(area);
 
     let focus = tab.focus;
+    // The tab's colour, read before the panes are borrowed: a painted tab
+    // tints the title on every border it owns, which is where the mark is
+    // visible while the bar is a row you are not looking at. A hue that
+    // resolves to nothing under `NO_COLOR` tints nothing either.
+    let tint = tab
+        .color
+        .filter(|hue| hue.color() != Color::Reset)
+        .map(|hue| {
+            Style::default()
+                .fg(hue.color())
+                .add_modifier(Modifier::BOLD)
+        });
     let now = chrono::Utc::now().timestamp();
     for (i, pane) in tab.panes.iter_mut().enumerate() {
-        let mut block = panel_block(&pane.label);
+        let mut block = panel_block_titled(&pane.label, tint.unwrap_or_else(theme::title));
         // The border is long and empty, and the label has already told you which
         // agent this is; the quota is the other thing you want while it runs.
         // Right-aligned so it does not move when the label changes, and only if
@@ -2041,6 +2088,93 @@ mod tests {
                 "{ch} at column {x} survived: {erased:?}"
             );
         }
+    }
+
+    /// A painted tab wears its colour in the bar; an unpainted one keeps the
+    /// usual dim ink. The tab being watched keeps its colour in the ink over
+    /// the selection wash — "this one" and "the violet one" are both said —
+    /// and when the label's ink is spent on an attention state instead, the
+    /// swatch beside it keeps wearing the hue.
+    #[test]
+    fn a_painted_tab_wears_its_colour_in_the_bar() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let named = |name: &str, color: Option<&str>, activity: Option<u64>| {
+            crate::ui::tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: color.map(str::to_string),
+            })
+        };
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.tabs = vec![named("one", Some("violet"), None), named("two", None, None)];
+        // Watching the dashboard, so no tab holds the selection wash.
+        app.tab = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("backend");
+        let mut layout = Layout::default();
+        let row = |app: &App, layout: &mut Layout, terminal: &mut Terminal<TestBackend>| {
+            layout.workspace_spans.clear();
+            terminal
+                .draw(|frame| draw_workspace_bar(frame, frame.area(), app, layout))
+                .expect("draw");
+            let buf = terminal.backend().buffer();
+            (0..80)
+                .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+                .collect::<String>()
+        };
+
+        let text = row(&app, &mut layout, &mut terminal);
+        let buf = terminal.backend().buffer();
+        let violet = theme::Hue::Violet.color();
+        let at = text.find('●').expect("the painted tab grew no swatch");
+        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, violet);
+        let at = text
+            .find("2:one")
+            .expect("the painted tab is not in the bar");
+        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, violet);
+        let at = text.find("3:two").expect("the plain tab is not in the bar");
+        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, theme::colors().dim);
+
+        // The same tab while it is the one being watched: the wash stays, the
+        // ink is the hue's.
+        app.tab = 1;
+        let text = row(&app, &mut layout, &mut terminal);
+        let buf = terminal.backend().buffer();
+        let at = text
+            .find("2:one")
+            .expect("the painted tab is not in the bar");
+        let cell = buf.cell((at as u16, 0)).unwrap();
+        assert_eq!(cell.fg, violet);
+        assert_eq!(cell.bg, theme::colors().selected_bg);
+
+        // And while its label is spent saying "idle" in green, the swatch is
+        // still the violet the tab was painted — the mark survives the state.
+        app.tab = 0;
+        app.tabs[0] = named("one", Some("violet"), Some(0));
+        let text = row(&app, &mut layout, &mut terminal);
+        let buf = terminal.backend().buffer();
+        let at = text
+            .find("2:one")
+            .expect("the painted tab is not in the bar");
+        assert_eq!(
+            buf.cell((at as u16, 0)).unwrap().fg,
+            theme::colors().cost_low
+        );
+        let at = text.find('●').expect("the painted tab grew no swatch");
+        assert_eq!(buf.cell((at as u16, 0)).unwrap().fg, violet);
     }
 
     /// The corner is drawn in the corner: last row, hard against the right

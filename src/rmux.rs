@@ -755,6 +755,28 @@ pub fn set_order(name: &str, order: usize) {
         .output();
 }
 
+/// Record the tab's colour on the session, by name — "amber", not an index, so
+/// the word means the same thing to a cctop on a different palette.
+///
+/// The same trick as [`set_label`], for the same reason: the colour is a
+/// property of the tab everywhere it is shown, and the session is the only
+/// place every cctop can read it back from. An empty `color` clears it — the
+/// option reads back as unset either way, so there is nothing to take off.
+///
+/// Best effort, like its neighbours: a colour that failed to save is a tab in
+/// the default ink, not a broken one.
+pub fn set_color(name: &str, color: &str) {
+    let _ = Command::new(BIN)
+        .args([
+            "set-option",
+            "-t",
+            &format!("={name}"),
+            "@cctop_color",
+            color,
+        ])
+        .output();
+}
+
 /// Every cctop-owned session, in the order their tabs were last left in.
 ///
 /// [`running`] answers "which is newest", which is what the launcher wants.
@@ -869,6 +891,11 @@ pub struct Running {
     /// creation times on every start, and a tab dragged to the front was back
     /// where it began the next time cctop opened.
     pub order: Option<u64>,
+    /// The colour the tab was painted, as [`set_color`] wrote it — a name like
+    /// "amber", left for [`ui::theme::Hue`](crate::ui::theme::Hue) to decode.
+    /// Opaque here for the reason `label` and `profile` are strings: this
+    /// module is the transport, not the palette.
+    pub color: Option<String>,
 }
 
 /// Every cctop-owned rmux session currently alive, newest first.
@@ -889,7 +916,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}",
         ])
         .output()
     else {
@@ -943,6 +970,7 @@ pub fn running() -> Vec<Running> {
         // A word this cctop does not know, or a value some other tool wrote,
         // reads as nothing reported rather than as a guess.
         let state = option().as_deref().and_then(State::decode);
+        let color = option();
         found.push((
             created,
             Running {
@@ -955,6 +983,7 @@ pub fn running() -> Vec<Running> {
                 profile,
                 order,
                 state,
+                color,
             },
         ));
     }
@@ -1190,6 +1219,7 @@ mod tests {
             profile: None,
             order,
             state: None,
+            color: None,
         };
         // As `running` gives them: newest first.
         let found = vec![
@@ -1486,6 +1516,49 @@ mod tests {
         // The default account writes nothing, and nothing is what it reads as —
         // not an empty string that would name a profile no one has.
         assert_eq!(bare.and_then(|s| s.profile), None);
+    }
+
+    /// The colour written onto a session comes back off it, and clearing it
+    /// comes back as nothing — the empty string and the absent option read
+    /// alike, which is what makes "no colour" writable at all.
+    #[test]
+    fn a_session_remembers_the_colour_its_tab_was_painted() {
+        if !available() {
+            eprintln!("skipping: rmux not installed");
+            return;
+        }
+        let _turn = test_lock();
+        let ours = format!("cctop-probe-color-{}", std::process::id());
+        start_session(&ours, None, &["sh", "-c", "sleep 30"]);
+
+        let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
+        set_color(&ours, "violet");
+        let painted = wait_for(|| {
+            running()
+                .into_iter()
+                .find(|s| s.name == ours && s.color.is_some())
+        });
+        set_color(&ours, "");
+        let cleared = wait_for(|| {
+            running()
+                .into_iter()
+                .find(|s| s.name == ours && s.color.is_none())
+        });
+        end_session(&ours);
+
+        assert_eq!(
+            before
+                .expect("the session cctop just created was not listed")
+                .color,
+            None,
+            "a fresh session claimed a colour"
+        );
+        assert_eq!(
+            painted.and_then(|s| s.color).as_deref(),
+            Some("violet"),
+            "the colour written did not come back"
+        );
+        assert!(cleared.is_some(), "the cleared colour was still reported");
     }
 
     /// A pane's scrollback is fixed when the pane is made, so the only proof

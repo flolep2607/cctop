@@ -2,7 +2,7 @@
 
 use super::columns::COLUMNS;
 use super::select::PAGE;
-use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, Request, render};
+use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, Request, render, theme};
 /// Longest path the launcher's directory field accepts.
 ///
 /// Comfortably past any real working directory — Linux caps a path at 4096
@@ -110,7 +110,7 @@ impl App {
                 // The agent this key is going to, taken before the borrow ends:
                 // answering its question is the one thing no hook reports.
                 let agent = pane.agent();
-                let alive = pane.view.send_key(key);
+                let alive = pane.view.send_key(pane.translate_key(key));
                 self.mark_answered(agent);
                 if !alive {
                     self.close_pane();
@@ -789,30 +789,58 @@ impl App {
         }
     }
 
-    /// The tab-rename field. Empty is not a name, so Enter with nothing typed
-    /// backs out the same way Esc does rather than blanking the tab bar.
+    /// The tab-rename field, which is also the tab-colour field.
+    ///
+    /// The name half has no cursor — text only ever appends — so the arrows
+    /// were free for the colour row, which is what they drive. Enter applies
+    /// whichever half changed; an empty name is still not a name, so pressing
+    /// it with nothing typed only ever moved the colour, never blanks the tab.
     fn on_key_rename(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Left => self.step_rename_color(-1),
+            KeyCode::Right => self.step_rename_color(1),
             KeyCode::Enter => {
                 let name = self.rename_input.trim().to_string();
+                let color = self.rename_color;
                 self.mode = Mode::List;
-                if name.is_empty() {
-                    return;
-                }
                 // The bar may have moved while the field was open — see
                 // [`App::rename_was`]. A tab that is no longer the one the
-                // right-click landed on keeps its name.
+                // right-click landed on keeps its name and its colour alike,
+                // and the answer says so when anything was being asked of it.
                 let Some(tab) = self
                     .tabs
                     .get_mut(self.rename_tab.saturating_sub(1))
                     .filter(|tab| tab.title() == self.rename_was)
                 else {
-                    self.set_status("That tab is gone; nothing was renamed");
+                    if !name.is_empty() || color.is_some() {
+                        self.set_status("That tab is gone; nothing was changed");
+                    }
                     return;
                 };
-                tab.rename(name.clone());
-                self.set_status(format!("Tab renamed to {name}"));
+                let repainted = tab.color != color;
+                if repainted {
+                    tab.recolor(color);
+                }
+                if !name.is_empty() {
+                    tab.rename(name.clone());
+                }
+                // Say what changed in the terms it was changed in: a name, a
+                // colour, or both. Nothing at all is a cancel, not a clear.
+                match (name.is_empty(), repainted, color) {
+                    (true, false, _) => {}
+                    (true, true, Some(hue)) => {
+                        self.set_status(format!("Tab coloured {}", hue.name()))
+                    }
+                    (true, true, None) => self.set_status("Tab colour cleared".to_string()),
+                    (false, false, _) => self.set_status(format!("Tab renamed to {name}")),
+                    (false, true, Some(hue)) => {
+                        self.set_status(format!("Tab renamed to {name}, coloured {}", hue.name()))
+                    }
+                    (false, true, None) => {
+                        self.set_status(format!("Tab renamed to {name}, colour cleared"))
+                    }
+                }
             }
             KeyCode::Backspace => {
                 self.rename_input.pop();
@@ -824,6 +852,22 @@ impl App {
         }
     }
 
+    /// Move the colour pick in the rename modal one stop along.
+    ///
+    /// The stops are "no colour" and then [`theme::Hue::ALL`] in the order it
+    /// lists them, wrapping at both ends: a row of swatches has no end worth
+    /// stopping at, and holding Right down is how you look at them all.
+    fn step_rename_color(&mut self, delta: isize) {
+        let stops = theme::Hue::ALL.len() + 1;
+        let at = self
+            .rename_color
+            .and_then(|hue| theme::Hue::ALL.iter().position(|h| *h == hue))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let next = (at as isize + delta).rem_euclid(stops as isize) as usize;
+        self.rename_color = (next > 0).then(|| theme::Hue::ALL[next - 1]);
+    }
+
     /// Ask for a new name for a tab, addressed the way the bar numbers them:
     /// tab 0 is the dashboard, which is not a tab anything renames.
     fn rename_prompt(&mut self, tab: usize) {
@@ -832,6 +876,9 @@ impl App {
         };
         self.rename_tab = tab;
         self.rename_was = target.title();
+        // The pick starts where the tab already is: Enter that only meant to
+        // fix a typo must not strip a colour it never touched.
+        self.rename_color = target.color;
         self.rename_input.clear();
         self.rename_opened_by_click = None;
         self.mode = Mode::RenameTab;

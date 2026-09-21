@@ -412,5 +412,8 @@ reported as every account's usage.
 In the tab bar, drag a tab to move it along the bar — the arrangement is
 written onto the rmux sessions, so it is still there after `F10` and in every
 other cctop on the machine — and right-click one to
-rename it: `3:claude-4` says nothing about what that agent is doing, and the
-name you give it follows the tab into every cctop on the machine.
+name it or paint it: `3:claude-4` says nothing about what that agent is doing,
+and the name and colour you give it follow the tab into every cctop on the
+machine. `←`/`→` walk the colours in the same prompt; the leading `○` stop is
+no colour at all. A painted tab wears its colour in the bar and on the title
+of every pane border it owns.

@@ -13,6 +13,10 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::theme::Hue;
+
 /// How long a pane's screen has to sit still before the agent counts as idle.
 ///
 /// An agent that is working repaints constantly — Claude Code's "✻ Baked for
@@ -191,6 +195,44 @@ impl Pane {
     /// and does nothing.
     pub fn owns_agent(&self) -> bool {
         self.hosted.is_some() || self.rmux.is_some()
+    }
+
+    /// The harness running in this pane, as one word — `"claude"`, `"zsh"`.
+    ///
+    /// Read off the rmux session name where there is one: it is spelled
+    /// `cctop-<harness>-…` at creation and never rewritten, so it still says
+    /// "claude" after the tab has been renamed to anything at all. A pane with
+    /// no session — one cctop hosts itself, or a window opened with `a` —
+    /// falls back to the first word of its label, which a rename does clobber.
+    ///
+    /// ponytail: a renamed pane on cctop's own pty answers with its new name.
+    pub fn harness(&self) -> &str {
+        let name = self.rmux.as_deref().unwrap_or(self.label.as_str());
+        name.strip_prefix("cctop-")
+            .unwrap_or(name)
+            .split(['-', ' ', '·'])
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// The key to actually send this pane's agent, once pane-specific
+    /// translation is done.
+    ///
+    /// There is exactly one translation: Claude Code puts the top and bottom
+    /// of the chat on Ctrl+Home and Ctrl+End — the right action, a chord too
+    /// many for keys already named after where they go. In one of its panes
+    /// the bare keys are promoted to the shifted forms on the way in; anywhere
+    /// else they keep their line-editing meaning, which a shell reaches for
+    /// constantly.
+    pub fn translate_key(&self, key: KeyEvent) -> KeyEvent {
+        match key.code {
+            KeyCode::Home | KeyCode::End
+                if key.modifiers.is_empty() && self.harness() == "claude" =>
+            {
+                KeyEvent::new(key.code, KeyModifiers::CONTROL)
+            }
+            _ => key,
+        }
     }
 }
 
@@ -389,6 +431,13 @@ pub struct Tab {
     /// back, so the two are never both true and an empty tab with no `shared` is
     /// still an agent that has exited.
     pub shared: Option<Shared>,
+    /// The colour the tab was painted, if any.
+    ///
+    /// Kept on the tab rather than on a pane or a `Shared`, because it is the
+    /// one place that survives the trade between them: a pane is swapped for a
+    /// `Shared` on every switch away, and a property either side held would
+    /// have to be handed across both ways.
+    pub color: Option<Hue>,
 }
 
 impl Tab {
@@ -398,6 +447,7 @@ impl Tab {
             focus: 0,
             stacked: false,
             shared: None,
+            color: None,
         }
     }
 
@@ -408,6 +458,9 @@ impl Tab {
             panes: Vec::new(),
             focus: 0,
             stacked: false,
+            // Read off the session like the label is: a word this cctop does
+            // not know means nothing was painted, never a guess at a colour.
+            color: agent.color.as_deref().and_then(Hue::from_name),
             shared: Some(Shared {
                 label: agent.label.clone().unwrap_or_else(|| {
                     // No label recorded: an agent from a cctop older than this,
@@ -517,6 +570,22 @@ impl Tab {
             crate::rmux::set_label(&shared.name, &name);
             shared.label = name;
         }
+    }
+
+    /// Paint the tab, the way [`Tab::rename`] names it.
+    ///
+    /// Written onto every rmux session the tab stands for — both halves of a
+    /// split included, which is why `sessions` rather than the first pane —
+    /// so every cctop that lists them paints it the same way, and so the
+    /// colour is still there after a detach. A pane with no session behind it
+    /// keeps the colour in memory only, as far as its label gets either.
+    ///
+    /// `None` hands the tab back to the default ink.
+    pub fn recolor(&mut self, color: Option<Hue>) {
+        for session in self.sessions() {
+            crate::rmux::set_color(session, color.map(Hue::name).unwrap_or(""));
+        }
+        self.color = color;
     }
 
     /// What the tab bar calls this tab.
@@ -927,6 +996,7 @@ mod tests {
             profile: None,
             order: None,
             state: None,
+            color: None,
         }
     }
 
@@ -1219,6 +1289,7 @@ mod tests {
             profile: None,
             order: None,
             state: None,
+            color: None,
         })
     }
 
@@ -1397,5 +1468,66 @@ mod tests {
             label_of(&["codex".into(), "--full-auto".into()]),
             "codex --full-auto"
         );
+    }
+
+    /// The colour a session records becomes the tab's, and a word this cctop
+    /// does not know is no colour rather than a wrong one.
+    #[test]
+    fn a_sessions_colour_paints_its_tab() {
+        let mut agent = session("cctop-claude-x", Some("claude"), 0);
+        agent.color = Some("violet".to_string());
+        assert_eq!(Tab::shared(&agent).color, Some(Hue::Violet));
+        agent.color = Some("chartreuse".to_string());
+        assert_eq!(
+            Tab::shared(&agent).color,
+            None,
+            "a newer cctop's hue was guessed at"
+        );
+    }
+
+    /// A tab keeps the colour it was painted even where there is no session to
+    /// hold it: a pane on cctop's own pty is painted in memory only, which is
+    /// as far as its name travels too.
+    #[test]
+    fn a_tab_with_no_session_still_keeps_its_colour() {
+        let mut tab = Tab::new(pane("claude", true, 0));
+        tab.recolor(Some(Hue::Cyan));
+        assert_eq!(tab.color, Some(Hue::Cyan));
+        tab.recolor(None);
+        assert_eq!(tab.color, None);
+    }
+
+    /// The harness is read off the session name when there is one — it
+    /// survives a rename, which is the whole point — and off the label's first
+    /// word when there is not.
+    #[test]
+    fn a_panes_harness_comes_from_its_session_before_its_label() {
+        let mut pane = pane("renamed work", true, 0);
+        assert_eq!(pane.harness(), "renamed");
+        pane.rmux = Some("cctop-claude-32cca860-b503".into());
+        assert_eq!(pane.harness(), "claude", "a rename hid the harness");
+        pane.rmux = Some("cctop-zsh".into());
+        assert_eq!(pane.harness(), "zsh");
+    }
+
+    /// In a claude pane Home and End go in as the Ctrl- forms the agent binds
+    /// to the top and bottom of the chat; anywhere else they are the
+    /// line-editing keys they say, and a modified Home keeps its own meaning
+    /// even there.
+    #[test]
+    fn home_and_end_are_promoted_only_in_a_claude_pane() {
+        let claude = pane("claude", true, 0);
+        for code in [KeyCode::Home, KeyCode::End] {
+            let sent = claude.translate_key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert_eq!(sent.code, code);
+            assert_eq!(sent.modifiers, KeyModifiers::CONTROL);
+        }
+        // Shift+Home is still "select to the start of the line", not a jump.
+        let shifted = claude.translate_key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+        assert_eq!(shifted.modifiers, KeyModifiers::SHIFT);
+        // And a shell's Home is the shell's own.
+        let shell = pane("zsh", false, 0);
+        let sent = shell.translate_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(sent.modifiers, KeyModifiers::NONE);
     }
 }
