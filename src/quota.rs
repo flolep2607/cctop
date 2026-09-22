@@ -2,14 +2,22 @@
 
 use crate::config;
 use crate::util;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Baseline gap between usage checks of one account.
+///
+/// Quota moves slowly, and the endpoints throttle aggressively — a 30s poll was
+/// enough to earn a sustained 429 with a ~15 minute `retry-after`. When a
+/// provider asks for longer, `retry_delay_secs` honours that instead.
+pub const INTERVAL_SECS: u64 = 300;
+
 /// One rate-limit window.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Window {
     pub label: &'static str,
     pub pct: u32,
@@ -19,7 +27,36 @@ pub struct Window {
     pub resets_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// A [`Window`] as the usage cache holds it. Read through this because a
+/// derived `Deserialize` of a `&'static str` could only borrow from input that
+/// lives forever, which a file read is not.
+#[derive(Deserialize)]
+struct StoredWindow {
+    label: String,
+    pct: u32,
+    duration: Option<Duration>,
+    resets_at: Option<i64>,
+}
+
+impl<'de> Deserialize<'de> for Window {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let w = StoredWindow::deserialize(d)?;
+        Ok(Window {
+            // Back to the `&'static str` the fetchers would have produced.
+            label: match w.label.as_str() {
+                "5h" => "5h",
+                "7d" => "7d",
+                "cr" => "cr",
+                _ => "?",
+            },
+            pct: w.pct,
+            duration: w.duration,
+            resets_at: w.resets_at,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderQuota {
     pub plan: Option<String>,
     pub windows: Vec<Window>,
@@ -31,7 +68,7 @@ pub struct ProviderQuota {
 /// The reasons are worth distinguishing: an expired sign-in needs the user to do
 /// something, a rate-limit resolves on its own, and "not signed in" is neither.
 /// Collapsing them all into one message tells the user nothing actionable.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum ProviderStatus {
     #[default]
     Pending,
@@ -319,18 +356,134 @@ fn stored_token(profile: &str) -> Option<String> {
     )
 }
 
-/// Store a token for `profile`, reading it from stdin so it never lands in the
-/// shell's history the way an argument would.
-pub fn add_account(profile: &str) -> anyhow::Result<()> {
-    let path = &*config::CONFIG_FILE;
-    eprintln!("Paste a token from `claude setup-token`, then Enter:");
-    let mut token = String::new();
-    std::io::stdin().read_line(&mut token)?;
-    let token = token.trim();
-    if token.is_empty() {
-        anyhow::bail!("no token given; nothing written");
+/// Add one or more token accounts, starting with `first`.
+///
+/// On a terminal this walks the user through it: sign in as the right account,
+/// let cctop run `claude setup-token`, paste what it printed, see that it
+/// works, and go again for the next one. The browser step is the one people
+/// get wrong — `setup-token` authorises whichever claude.ai login the browser
+/// already has, so a second account run straight after the first silently
+/// mints another token for the first.
+///
+/// Piped, it reads a single token from stdin and stores it, as it always has:
+/// `cctop --add-account work < token.txt` is a script's way in.
+pub fn add_account(first: &str) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        let token = read_line()?;
+        if token.is_empty() {
+            anyhow::bail!("no token given; nothing written");
+        }
+        return store_token(first, &token);
     }
+    let mut name = first.to_string();
+    for n in 1.. {
+        eprintln!(
+            "\nAdding Claude account '{name}'.\n\
+             \x20 1. In your browser, be signed in to claude.ai as that account{}.\n\
+             \x20 2. cctop runs `claude setup-token`: approve it in the browser, and it\n\
+             \x20    prints a token that lasts a year.\n\
+             \x20 3. Paste that token back here.",
+            if n > 1 {
+                " — not the one\n     you just added: sign out, or use a private window"
+            } else {
+                ""
+            }
+        );
+        eprint!("Press Enter to run `claude setup-token`, or paste a token you already have: ");
+        let mut token = read_line()?;
+        if token.is_empty() {
+            match std::process::Command::new("claude")
+                .arg("setup-token")
+                .status()
+            {
+                Ok(status) if !status.success() => {
+                    eprintln!("! `claude setup-token` exited with {status}.")
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("! Could not run `claude setup-token` ({e}); run it yourself."),
+            }
+            eprint!("\nPaste the token it printed: ");
+            token = read_line()?;
+        }
+        if token.is_empty() {
+            eprintln!("No token given; nothing written for '{name}'.");
+        } else {
+            store_token(&name, &token)?;
+            eprintln!("  Checking it against the usage endpoint…");
+            eprintln!("  {}", describe(&cached(&token, || claude_usage(&token))));
+        }
+        eprint!("\nAdd another account? Name it, or press Enter to finish: ");
+        name = read_line()?;
+        if name.is_empty() {
+            break;
+        }
+    }
+    eprintln!(
+        "Switch accounts in the launcher with `p`, or from a shell with\n\
+         \x20 cctop as <name> claude"
+    );
+    Ok(())
+}
 
+fn read_line() -> anyhow::Result<String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// One line on what the usage endpoint said about a freshly stored token.
+fn describe(status: &ProviderStatus) -> String {
+    match status {
+        ProviderStatus::Ok(q) => {
+            let windows: Vec<String> = q
+                .windows
+                .iter()
+                .map(|w| format!("{} {}%", w.label, w.pct))
+                .collect();
+            format!("✓ Works — {}", windows.join(", "))
+        }
+        ProviderStatus::Expired => {
+            "! Refused as expired or invalid. Check the whole token was pasted, then run this again.".into()
+        }
+        ProviderStatus::RateLimited { .. } => {
+            "· Stored; the usage endpoint is rate-limiting, so it is unchecked for now.".into()
+        }
+        ProviderStatus::ApiBilling => "· That is an API key: billed per use, with no limits to show.".into(),
+        other => format!("· Stored, but could not check it: {other:?}"),
+    }
+}
+
+/// Store `token` as `profile`'s, saying on stderr what that means.
+fn store_token(profile: &str, token: &str) -> anyhow::Result<()> {
+    save_token(profile, token)?;
+    eprintln!(
+        "Stored a token for profile '{profile}' in {}.",
+        config::CONFIG_FILE.display()
+    );
+
+    if !is_api_key(token) && !token.starts_with("sk-ant-oat") {
+        eprintln!("! That does not look like a `claude setup-token` token.");
+    }
+    // A name with no `~/.claude-<name>` behind it is the ordinary case for a
+    // token, not a mistake: it is an account whose sessions live in the one
+    // `~/.claude` with everything else. Say which of the two happened, because
+    // it decides whether the account will ever label a row.
+    if config::profile_named(crate::pricing::Provider::Claude, profile).is_none() {
+        eprintln!(
+            "  No `~/.claude-{profile}` directory, so this is a token-only account: its\n\
+             \x20 limits get a column of their own, and its sessions stay in ~/.claude\n\
+             \x20 with the rest. Start one with `cctop as {profile} claude`."
+        );
+    }
+    Ok(())
+}
+
+/// Store `token` as `profile`'s in cctop's config, printing nothing — the TUI
+/// calls this with the terminal in raw mode, where a stray line is garbage on
+/// the dashboard.
+pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
+    let path = &*config::CONFIG_FILE;
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -371,26 +524,111 @@ pub fn add_account(profile: &str) -> anyhow::Result<()> {
     std::fs::write(&tmp, doc.to_string())?;
     restrict(&tmp)?;
     std::fs::rename(&tmp, path)?;
-    eprintln!(
-        "Stored a token for profile '{profile}' in {}.",
-        path.display()
-    );
-
-    if !is_api_key(token) && !token.starts_with("sk-ant-oat") {
-        eprintln!("! That does not look like a `claude setup-token` token.");
-    }
-    // A name with no `~/.claude-<name>` behind it is the ordinary case for a
-    // token, not a mistake: it is an account whose sessions live in the one
-    // `~/.claude` with everything else. Say which of the two happened, because
-    // it decides whether the account will ever label a row.
-    if config::profile_named(crate::pricing::Provider::Claude, profile).is_none() {
-        eprintln!(
-            "  No `~/.claude-{profile}` directory, so this is a token-only account: its\n\
-             \x20 limits get a column of their own, and its sessions stay in ~/.claude\n\
-             \x20 with the rest — start one with CLAUDE_CODE_OAUTH_TOKEN set to spend it."
-        );
-    }
+    // Launchable at once, and polled at once, rather than after a restart and
+    // after the next interval: the account was added to be used.
+    config::refresh_launchable();
+    NUDGE.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
+}
+
+/// Set when an account has just been added, so the poller asks about it now
+/// rather than at its next interval. The usage cache answers for every other
+/// account, so this costs one request: the new one's.
+pub static NUDGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A name an account can go by: the TOML key, the launcher entry, and the
+/// argument to `cctop as`, so nothing a shell or a table header would trip on.
+pub fn valid_account_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The token `claude setup-token` printed, read off its screen.
+///
+/// The TUI runs `setup-token` in a terminal of its own rather than asking for a
+/// paste, so this is how the token gets back. Too short to be whole means it is
+/// not there yet — the screen is read on every tick, including mid-draw.
+pub fn token_on_screen(screen: &vt100::Screen) -> Option<String> {
+    let token = run_on_screen(screen, "sk-ant-oat", |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_')
+    })?;
+    (token.len() >= 60).then_some(token)
+}
+
+/// The sign-in link `setup-token` prints for when no browser opened — the
+/// usual case over ssh or under WSL.
+pub fn link_on_screen(screen: &vt100::Screen) -> Option<String> {
+    run_on_screen(screen, "https://", |c| !c.is_whitespace())
+}
+
+/// The first run of `ok` characters starting with `prefix`, joined across the
+/// rows it was wrapped onto.
+///
+/// Whoever drew it may have wrapped it — the terminal, or the program, which
+/// breaks a long word with a real newline at the width it was given. Both look
+/// the same from here: a run that reaches the right edge, carried on at the
+/// start of the next row. One column of slack, since some renderers leave the
+/// last one empty.
+fn run_on_screen(
+    screen: &vt100::Screen,
+    prefix: &str,
+    ok: impl Fn(char) -> bool,
+) -> Option<String> {
+    let (_, width) = screen.size();
+    let rows: Vec<String> = screen.rows(0, width).collect();
+    let (first, at) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(i, row)| row.find(prefix).map(|at| (i, at)))?;
+    let mut out: String = rows[first][at..].chars().take_while(|c| ok(*c)).collect();
+    let mut end = rows[first][..at].chars().count() + out.chars().count();
+    for row in &rows[first + 1..] {
+        if end + 1 < width as usize {
+            break;
+        }
+        let trimmed = row.trim_start();
+        let more: String = trimmed.chars().take_while(|c| ok(*c)).collect();
+        if more.is_empty() {
+            break;
+        }
+        end = row.len() - trimmed.len() + more.chars().count();
+        out.push_str(&more);
+    }
+    Some(out)
+}
+
+/// `cctop as <account> <agent> [args…]`: run the agent spending a stored token
+/// account's subscription.
+///
+/// This is how a token account is launched at all. The launcher cannot put the
+/// token in the argv it hands rmux — that is readable by every `ps` on the
+/// machine — so it puts this command there instead, naming the account, and
+/// the token travels only in the child's environment, which is the owner's
+/// alone to read.
+pub fn run_as(args: &[String]) -> anyhow::Result<i32> {
+    let [name, command, rest @ ..] = args else {
+        anyhow::bail!("usage: cctop as <account> <agent> [args…]");
+    };
+    let Some(token) = stored_token(name) else {
+        anyhow::bail!("no token stored for '{name}'; add one with `cctop --add-account {name}`");
+    };
+    let mut cmd = std::process::Command::new(command);
+    cmd.args(rest)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", token)
+        // Claude Code prefers either of these to the OAuth token, so one left
+        // in the shell would quietly bill an API key instead of the account
+        // that was asked for.
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(anyhow::anyhow!("could not run {command}: {}", cmd.exec()))
+    }
+    #[cfg(not(unix))]
+    Ok(cmd.status()?.code().unwrap_or(1))
 }
 
 /// Owner-only permissions, where the platform has them.
@@ -542,6 +780,83 @@ fn as_epoch_secs(v: Option<&Value>) -> Option<i64> {
     }
 }
 
+/// One account's last answer, and when it may be asked again.
+#[derive(Serialize, Deserialize)]
+struct Cached {
+    due: i64,
+    status: ProviderStatus,
+}
+
+/// The usage for `token`, from the cache while it is fresh, else from `fetch`.
+///
+/// Every cctop polled on its own — the TUI in one terminal, another in a
+/// second, `serve` — so running three asked three times as often as one, and
+/// earned the 429 the interval exists to avoid. The file makes the interval
+/// per account rather than per process: whoever is due first pays for the
+/// request, and everyone else reads its answer until the account is due again.
+/// A throttled answer is kept until its own `retry-after`, so no cctop on the
+/// machine asks early on that account's behalf.
+///
+/// Keyed by a hash of the token rather than the account's name: a fresh login
+/// or a replaced token is then a miss, not fifteen minutes of "expired", and
+/// the token itself is not written to a directory `--clear-cache` treats as
+/// disposable.
+///
+/// ponytail: no lock, so two processes due in the same instant both fetch —
+/// one extra request per interval at worst.
+fn cached(token: &str, fetch: impl FnOnce() -> ProviderStatus) -> ProviderStatus {
+    cached_in(
+        &config::CACHE_DIR.join("usage.json"),
+        token,
+        chrono::Utc::now().timestamp(),
+        fetch,
+    )
+}
+
+fn cached_in(
+    path: &Path,
+    token: &str,
+    now: i64,
+    fetch: impl FnOnce() -> ProviderStatus,
+) -> ProviderStatus {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    token.hash(&mut hasher);
+    let key = format!("{:016x}", hasher.finish());
+    let read = || -> std::collections::HashMap<String, Cached> {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    };
+    if let Some(hit) = read().remove(&key)
+        && now < hit.due
+    {
+        return hit.status;
+    }
+    let status = fetch();
+    // Read again rather than reusing the first read: the request took a while,
+    // and another cctop may have stored its own accounts in the meantime.
+    let mut all = read();
+    // A day past due is a token nobody polls any more.
+    all.retain(|_, c| c.due > now - 86_400);
+    all.insert(
+        key,
+        Cached {
+            due: now + status.retry_delay_secs(INTERVAL_SECS) as i64,
+            status: status.clone(),
+        },
+    );
+    // Best effort: a cache that cannot be written costs a request, not an answer.
+    if let (Some(parent), Ok(json)) = (path.parent(), serde_json::to_vec(&all)) {
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let _ = std::fs::create_dir_all(parent)
+            .and_then(|()| std::fs::write(&tmp, json))
+            .and_then(|()| std::fs::rename(&tmp, path));
+    }
+    status
+}
+
 pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
     // A token account shares the default directory but is not the default
     // account: it was named precisely to be a second one, so the keychain and
@@ -556,7 +871,11 @@ pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
         Credential::None => return ProviderStatus::NotSignedIn,
         Credential::OAuth(t) => t,
     };
+    cached(&token, || claude_usage(&token))
+}
 
+/// What Claude's usage endpoint says about `token`, asked now.
+fn claude_usage(token: &str) -> ProviderStatus {
     let data = match get_json(
         agent()
             .get("https://api.anthropic.com/api/oauth/usage")
@@ -599,6 +918,11 @@ pub fn fetch_codex(profile: &config::Profile) -> ProviderStatus {
     let Some(token) = read_codex_token_in(&profile.dir) else {
         return ProviderStatus::NotSignedIn;
     };
+    cached(&token, || codex_usage(&token))
+}
+
+/// What Codex's usage endpoint says about `token`, asked now.
+fn codex_usage(token: &str) -> ProviderStatus {
     let data = match get_json(
         agent()
             .get("https://chatgpt.com/backend-api/wham/usage")
@@ -733,6 +1057,79 @@ mod tests {
             ProviderStatus::Ok(ProviderQuota::default()).retry_delay_secs(300),
             300
         );
+    }
+
+    /// The request is made once per account per interval, however many
+    /// cctops ask, and a new token is never answered with an old one's figures.
+    #[test]
+    fn usage_is_asked_once_per_account_until_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let asked = std::cell::Cell::new(0);
+        let fetch = || {
+            asked.set(asked.get() + 1);
+            ProviderStatus::Ok(ProviderQuota {
+                plan: None,
+                windows: vec![Window {
+                    label: "5h",
+                    pct: 42,
+                    duration: None,
+                    resets_at: None,
+                }],
+                limit_reached: false,
+            })
+        };
+        // Now, because `retry_delay_secs` counts a retry-after from the clock.
+        let t0 = chrono::Utc::now().timestamp();
+        let first = cached_in(&path, "tok-a", t0, fetch);
+        let again = cached_in(&path, "tok-a", t0 + 60, fetch);
+        assert_eq!(asked.get(), 1);
+        // Read back from disk, label and all.
+        let ProviderStatus::Ok(q) = again else {
+            panic!("got {again:?}")
+        };
+        assert_eq!((q.windows[0].label, q.windows[0].pct), ("5h", 42));
+        assert!(matches!(first, ProviderStatus::Ok(_)));
+
+        // Another account is its own entry.
+        cached_in(&path, "tok-b", t0 + 60, fetch);
+        assert_eq!(asked.get(), 2);
+        // And once due, the first is asked again.
+        cached_in(&path, "tok-a", t0 + INTERVAL_SECS as i64, fetch);
+        assert_eq!(asked.get(), 3);
+
+        // A throttled answer holds until its own retry-after, past the interval.
+        let retry_at = t0 + 2_000;
+        cached_in(&path, "tok-c", t0, || ProviderStatus::RateLimited {
+            retry_at: Some(retry_at),
+        });
+        cached_in(&path, "tok-c", t0 + INTERVAL_SECS as i64 + 1, fetch);
+        assert_eq!(asked.get(), 3);
+    }
+
+    /// The token comes back whole however the screen wrapped it: by the
+    /// terminal, or by the program breaking it with a newline of its own.
+    #[test]
+    fn a_wrapped_token_is_read_back_whole() {
+        let token = format!("sk-ant-oat01-{}", "Ab9_-".repeat(20));
+        let mut parser = vt100::Parser::new(10, 40, 0);
+        parser.process(format!("Your token:\r\n\r\n{token}\r\n\r\nStore it.").as_bytes());
+        assert_eq!(token_on_screen(parser.screen()).as_deref(), Some(&*token));
+
+        let mut parser = vt100::Parser::new(10, 40, 0);
+        let (a, rest) = token.split_at(40);
+        let (b, c) = rest.split_at(40);
+        parser.process(format!("{a}\r\n{b}\r\n{c}\r\n\r\nhttps://x.y/z").as_bytes());
+        assert_eq!(token_on_screen(parser.screen()).as_deref(), Some(&*token));
+        assert_eq!(
+            link_on_screen(parser.screen()).as_deref(),
+            Some("https://x.y/z")
+        );
+
+        // Half drawn is not a token.
+        let mut parser = vt100::Parser::new(10, 40, 0);
+        parser.process(b"sk-ant-oat01-abc");
+        assert_eq!(token_on_screen(parser.screen()), None);
     }
 
     #[test]

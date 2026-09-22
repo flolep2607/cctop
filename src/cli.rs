@@ -17,6 +17,7 @@ use serde::Serialize;
     override_usage = "cctop [OPTIONS]\n       \
                       cctop <agent> [args…]\n       \
                       cctop attach [pid]\n       \
+                      cctop as <account> <agent> [args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop doctor",
     // Shown by `-h` as well as `--help`: the long description is the only place
@@ -166,9 +167,11 @@ pub struct Args {
     #[arg(long)]
     pub mcp: bool,
 
-    /// Store a Claude token (from `claude setup-token`) for a profile in
-    /// cctop's config, read from stdin, and exit. Takes the profile name;
-    /// defaults to `default`
+    /// Add Claude accounts by token: walks through `claude setup-token` for
+    /// each one and stores what it prints in cctop's config (piped, reads one
+    /// token from stdin). Takes the first account's name; defaults to
+    /// `default`. Launch under one with `p` in the launcher, or `cctop as
+    /// <name> claude`
     #[arg(long, num_args = 0..=1, default_missing_value = "default", value_name = "PROFILE")]
     pub add_account: Option<String>,
 

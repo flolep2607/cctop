@@ -143,6 +143,7 @@ impl App {
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
             Mode::RenameTab => self.on_key_rename(key),
+            Mode::AddAccount => self.on_key_add_account(key),
             Mode::Launch => self.on_key_launch(key),
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
@@ -210,6 +211,18 @@ impl App {
         }
 
         match self.mode {
+            // To `setup-token` once it is running — it may ask for the code
+            // the browser showed — and to the name field before.
+            Mode::AddAccount => match self.add_account.pane.as_mut() {
+                Some(pane) => {
+                    pane.view.send_paste(text);
+                }
+                None if self.add_account.outcome.is_none() => {
+                    let room = TAB_NAME_MAX.saturating_sub(self.add_account.name.chars().count());
+                    self.add_account.name.push_str(&flatten(text, room));
+                }
+                None => {}
+            },
             Mode::Search => {
                 self.search.push_str(&flatten(text, usize::MAX));
                 self.search_edited();
@@ -791,6 +804,52 @@ impl App {
         }
     }
 
+    /// The add-account popup: the name, then `setup-token`'s own terminal,
+    /// then what came of it.
+    fn on_key_add_account(&mut self, key: KeyEvent) {
+        let flow = &mut self.add_account;
+        if flow.outcome.is_some() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                *flow = super::AddAccount::default();
+                self.mode = Mode::List;
+            }
+            return;
+        }
+        if let Some(pane) = flow.pane.as_mut() {
+            match key.code {
+                // Esc is cctop's here, not `setup-token`'s: it is the only way
+                // out of a popup whose every other key goes to the terminal.
+                KeyCode::Esc => {
+                    *flow = super::AddAccount::default();
+                    self.mode = Mode::List;
+                }
+                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(link) = flow.link.clone() {
+                        let opened = crate::serve::open_in_browser(&link);
+                        render::copy_to_clipboard(&link);
+                        self.set_status(match opened {
+                            true => "Opened the sign-in link, and copied it",
+                            false => "Copied the sign-in link; open it in a browser",
+                        });
+                    }
+                }
+                _ => {
+                    pane.view.send_key(key);
+                }
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Enter => self.start_setup_token(),
+            KeyCode::Backspace => {
+                flow.name.pop();
+            }
+            KeyCode::Char(c) if flow.name.chars().count() < TAB_NAME_MAX => flow.name.push(c),
+            _ => {}
+        }
+    }
+
     /// Ask for a new name for a tab, addressed the way the bar numbers them:
     /// tab 0 is the dashboard, which is not a tab anything renames.
     fn rename_prompt(&mut self, tab: usize) {
@@ -939,6 +998,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::F(10) => self.request_quit(),
+            KeyCode::Char('+') => self.open_add_account(),
             // Terminate is deliberately behind a modifier: `k` is vim's "up",
             // and every modal in this file already binds it that way, so a
             // plain `k` aimed at the cursor must never reach a live agent.
@@ -1265,6 +1325,11 @@ impl App {
             // nothing.
             if let Some(key) = layout.key_at(ev.column, ev.row) {
                 self.on_key(key);
+                return;
+            }
+            // A click beside the popup must not cancel a sign-in half done in
+            // the browser; only its own Esc does.
+            if self.mode == Mode::AddAccount {
                 return;
             }
             // The row menu answers a single click: unlike the launcher, every

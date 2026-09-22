@@ -64,11 +64,12 @@ pub enum AccountSource {
     /// credentials. Its sessions are its own, and the launcher can start an
     /// agent under it by pointing the harness's env var at the directory.
     Directory,
-    /// A token in cctop's `config.toml` and nothing else. It contributes a
-    /// column to the limits panel and nothing more: it owns no transcripts to
-    /// label, and it is not offered as somewhere to launch, since the only way
-    /// to hand the token to a child would be to put it in an argv every
-    /// `ps` on the machine can read.
+    /// A token in cctop's `config.toml` and nothing else. It owns no
+    /// transcripts to label — its sessions live in the default directory — but
+    /// it has a column in the limits panel and can be launched under, through
+    /// `cctop as <name>`, which puts the token in the child's environment. The
+    /// token itself never goes in an argv, which every `ps` on the machine can
+    /// read.
     Token,
 }
 
@@ -125,11 +126,17 @@ pub fn profile_env(provider: Provider) -> Option<(&'static str, &'static Path)> 
 pub fn argv_under_profile(argv: Vec<String>, profile: &Profile) -> Vec<String> {
     // A token account names no directory of its own, and the token itself must
     // not become an argument: `ps` and `/proc/<pid>/cmdline` are readable by
-    // every user on a Linux box. Such an account is not offered as a place to
-    // launch for that reason, and this is the backstop for it — the sessions
-    // run under the default directory, which is where they were anyway.
+    // every user on a Linux box. So the argv carries the account's *name*, and
+    // `cctop as` looks the token up and hands it over in the environment, which
+    // only the owner can read. The sessions run under the default directory,
+    // which is where that account's history is anyway.
     if profile.source == AccountSource::Token {
-        return argv;
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "cctop".to_string());
+        let mut out = vec![exe, "as".to_string(), profile.name.clone()];
+        out.extend(argv);
+        return out;
     }
     let Some((var, inherited)) = profile_env(profile.provider) else {
         return argv;
@@ -143,6 +150,40 @@ pub fn argv_under_profile(argv: Vec<String>, profile: &Profile) -> Vec<String> {
     ];
     out.extend(argv);
     out
+}
+
+/// The agent's own argv, with whatever a profile launch put in front of it —
+/// `env VAR=value …` or `cctop as <name> …` — taken off again.
+///
+/// One function because the tab label and the handoff both need to know which
+/// agent a launch runs, and each used to strip the `env` form on its own.
+pub fn without_launch_prefix(argv: &[String]) -> &[String] {
+    let mut rest = argv;
+    // By prefix, since the running binary is what gets named and a test build
+    // is `cctop-<hash>`.
+    let is_cctop = |a: &String| {
+        a.rsplit(['/', '\\'])
+            .next()
+            .is_some_and(|base| base.starts_with("cctop"))
+    };
+    if rest.len() > 3 && is_cctop(&rest[0]) && rest[1] == "as" {
+        rest = &rest[3..];
+    }
+    if rest.first().map(String::as_str) == Some("env") {
+        let mut after = &rest[1..];
+        while after
+            .first()
+            .is_some_and(|a| a.contains('=') && !a.starts_with('-'))
+        {
+            after = &after[1..];
+        }
+        // Only when a command is left. `env` alone is a command in its own
+        // right, and naming it after nothing is worse than naming it oddly.
+        if !after.is_empty() {
+            rest = after;
+        }
+    }
+    rest
 }
 
 /// The name a profile directory goes by, given the prefix its harness uses.
@@ -269,6 +310,46 @@ pub fn accounts_for(provider: Provider) -> Vec<Profile> {
     }
     out
 }
+
+/// Every account the launcher offers for `provider`: [`accounts_for`], as of
+/// the last [`refresh_launchable`].
+///
+/// Held rather than read fresh because the launcher remembers its choice as an
+/// index into this list and hands out `&'static` profiles. New accounts are
+/// appended, so an index already chosen keeps pointing at the same account.
+pub fn launchable_for(provider: Provider) -> Vec<&'static Profile> {
+    if LAUNCHABLE.lock().map(|l| l.is_empty()).unwrap_or(false) {
+        refresh_launchable();
+    }
+    LAUNCHABLE
+        .lock()
+        .map(|l| {
+            l.iter()
+                .copied()
+                .filter(|p| p.provider == provider)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pick up accounts added since the launcher last looked.
+///
+/// ponytail: an account removed from the config stays launchable until
+/// restart, and each one added is a small leak for the life of the process.
+pub fn refresh_launchable() {
+    let Ok(mut known) = LAUNCHABLE.lock() else {
+        return;
+    };
+    for provider in PROFILED.map(|(provider, _, _)| provider) {
+        for account in accounts_for(provider) {
+            if !known.iter().any(|p| **p == account) {
+                known.push(Box::leak(Box::new(account)));
+            }
+        }
+    }
+}
+
+static LAUNCHABLE: std::sync::Mutex<Vec<&'static Profile>> = std::sync::Mutex::new(Vec::new());
 
 /// The names under `[accounts]` in cctop's config that carry a token.
 fn token_account_names() -> Vec<String> {
@@ -1091,18 +1172,26 @@ mod tests {
         assert!(account_names_in("accounts = 3").is_empty());
     }
 
-    /// A token account launches under the directory it shares with everyone
-    /// else, and never carries its token into an argv — `ps` is world-readable.
+    /// A token account launches through `cctop as <name>`, under the
+    /// directory it shares with everyone else, and never carries its token
+    /// into an argv — `ps` is world-readable. The tab and the handoff still see
+    /// the agent underneath.
     #[test]
-    fn a_token_account_adds_no_env_prefix() {
-        let argv = vec!["claude".to_string()];
+    fn a_token_account_launches_by_name_not_by_token() {
+        let argv = vec!["claude".to_string(), "--resume".to_string()];
         let token = Profile {
             provider: Provider::Claude,
             name: "work".into(),
             dir: PathBuf::from("/home/x/.claude-work"),
             source: AccountSource::Token,
         };
-        assert_eq!(argv_under_profile(argv.clone(), &token), argv);
+        let launched = argv_under_profile(argv.clone(), &token);
+        assert_eq!(launched[1..], ["as", "work", "claude", "--resume"]);
+        assert!(!launched.iter().any(|a| a.contains("CLAUDE")));
+        assert_eq!(without_launch_prefix(&launched), argv);
+        // `cctop as` with nothing after the name is not stripped to nothing.
+        let bare: Vec<String> = ["cctop", "as", "work"].map(String::from).into();
+        assert_eq!(without_launch_prefix(&bare), bare);
 
         // The same directory as a real profile is prefixed as it always was.
         let dir = Profile {
@@ -1111,7 +1200,12 @@ mod tests {
         };
         assert_eq!(
             argv_under_profile(argv, &dir),
-            ["env", "CLAUDE_CONFIG_DIR=/home/x/.claude-work", "claude"]
+            [
+                "env",
+                "CLAUDE_CONFIG_DIR=/home/x/.claude-work",
+                "claude",
+                "--resume"
+            ]
         );
     }
 

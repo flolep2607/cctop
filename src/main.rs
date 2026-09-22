@@ -108,6 +108,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `cctop as <account> <agent>` alongside `doctor`, and for the same reason.
+    // Every platform: it is how a token account is launched, from the launcher
+    // or a shell, and the environment it sets is not unix-only.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("as") {
+            std::process::exit(quota::run_as(&argv[2..])?);
+        }
+    }
+
     // `cctop serve` is intercepted alongside `doctor`, and for the same reason:
     // it is a bare word, and cctop has no positionals for clap to read one as.
     // Every platform — a socket and a browser are not unix-only.

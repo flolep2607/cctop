@@ -29,12 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
-/// Baseline gap between usage checks.
-///
-/// Quota moves slowly, and the endpoints throttle aggressively — a 30s poll was
-/// enough to earn a sustained 429 with a ~15 minute `retry-after`. When a
-/// provider asks for longer, `retry_delay_secs` honours that instead.
-const QUOTA_INTERVAL_SECS: u64 = 300;
+use crate::quota::INTERVAL_SECS as QUOTA_INTERVAL_SECS;
 
 /// How often the poller wakes to see whether any provider is due.
 const QUOTA_TICK: Duration = Duration::from_secs(10);
@@ -124,6 +119,28 @@ pub enum Mode {
     /// The browser panel: whether this cctop is serving its table to one, on
     /// what links, and whether they leave the machine.
     Serve,
+    /// Adding a Claude account: naming it, then `claude setup-token` in a
+    /// terminal inside the popup. See [`AddAccount`].
+    AddAccount,
+}
+
+/// The add-account popup, from naming the account to its token being saved.
+///
+/// `claude setup-token` runs on a pty of the popup's own, and the token is read
+/// off its screen the moment it is printed — so the whole thing happens without
+/// leaving cctop, and nothing is copied or pasted by hand. The browser step is
+/// the one that goes wrong: `setup-token` authorises whichever claude.ai login
+/// the browser already has, so the popup says so before it starts.
+#[derive(Default)]
+pub struct AddAccount {
+    pub name: String,
+    /// `setup-token`, once the name is in. Dropping it ends the process, which
+    /// is what cancelling the popup should do.
+    pub pane: Option<tabs::Pane>,
+    /// The sign-in link off its screen, for when no browser opened.
+    pub link: Option<String>,
+    /// How it ended: the saved account's name, or what went wrong.
+    pub outcome: Option<Result<String, String>>,
 }
 
 /// Everything [`App::open_tab`] needs beyond the command itself.
@@ -643,7 +660,7 @@ pub struct App {
     /// Only show sessions whose total cost reaches this floor.
     pub cost_floor: f64,
     /// Which profile the launcher will start each harness under, as an index
-    /// into that harness's [`crate::config::profiles_for`] list.
+    /// into that harness's [`crate::config::launchable_for`] list.
     ///
     /// Per harness rather than one index: the launcher cursor moves between
     /// `claude` and `codex`, and an index is only meaningful against the list
@@ -688,6 +705,8 @@ pub struct App {
     /// the title back means a rename either lands on the tab it was aimed at or
     /// is dropped, rather than renaming whichever tab slid into the slot.
     pub rename_input: String,
+    /// The add-account popup, while `Mode::AddAccount` is up.
+    pub add_account: AddAccount,
     pub rename_tab: usize,
     pub rename_was: String,
     /// When a right-click opened the rename prompt.
@@ -989,7 +1008,7 @@ impl App {
             .map(|(provider, remembered)| {
                 let at = remembered
                     .and_then(|name| {
-                        crate::config::profiles_for(provider)
+                        crate::config::launchable_for(provider)
                             .iter()
                             .position(|p| p.name == name)
                     })
@@ -1001,6 +1020,7 @@ impl App {
             cost_input: String::new(),
             send_input: String::new(),
             rename_input: String::new(),
+            add_account: AddAccount::default(),
             rename_tab: 0,
             rename_was: String::new(),
             rename_opened_by_click: None,
@@ -1298,6 +1318,71 @@ impl App {
         self.prefs.notify = self.notify.enabled;
         self.prefs.search_history = self.search_history.clone();
         self.prefs.save();
+    }
+
+    /// Open the add-account popup on its first step, the name.
+    pub(super) fn open_add_account(&mut self) {
+        self.add_account = AddAccount::default();
+        self.mode = Mode::AddAccount;
+        self.needs_redraw = true;
+    }
+
+    /// The name is in: start `claude setup-token` inside the popup.
+    fn start_setup_token(&mut self) {
+        let name = self.add_account.name.trim().to_string();
+        if !crate::quota::valid_account_name(&name) {
+            self.set_status("An account name is letters, digits, - _ and . only");
+            return;
+        }
+        self.add_account.name = name;
+        let argv = ["claude".to_string(), "setup-token".to_string()];
+        match tabs::Pane::launch(&argv, None, tabs::Own::Cctop) {
+            Ok(pane) => self.add_account.pane = Some(pane),
+            // Where cctop cannot host a terminal — Windows has no ptys for it —
+            // the command-line walkthrough does the same job.
+            Err(e) => {
+                self.add_account.outcome = Some(Err(format!(
+                    "Could not run `claude setup-token` here ({e}). In a terminal, \
+                     `cctop --add-account {}` walks through the same steps.",
+                    self.add_account.name
+                )))
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Feed the popup's terminal, and take the token the moment it is printed.
+    fn pump_add_account(&mut self) {
+        let flow = &mut self.add_account;
+        let Some(pane) = flow.pane.as_mut() else {
+            return;
+        };
+        if pane.view.pump() {
+            self.needs_redraw = true;
+            let screen = pane.view.parser.screen();
+            if flow.link.is_none() {
+                flow.link = crate::quota::link_on_screen(screen);
+            }
+            if let Some(token) = crate::quota::token_on_screen(screen) {
+                // Its job is done, and a process holding a fresh token has no
+                // reason to outlive the popup that asked for it.
+                flow.pane = None;
+                flow.outcome = Some(
+                    crate::quota::save_token(&flow.name, &token)
+                        .map(|()| flow.name.clone())
+                        .map_err(|e| format!("Could not save the token: {e}")),
+                );
+                return;
+            }
+        }
+        // Left on screen rather than dropped: whatever it said before it went
+        // is the explanation.
+        if flow.outcome.is_none() && pane.view.closed() {
+            self.needs_redraw = true;
+            flow.outcome = Some(Err(
+                "`claude setup-token` ended without printing a token.".to_string()
+            ));
+        }
     }
 
     fn set_status(&mut self, msg: impl Into<String>) {
@@ -3137,7 +3222,7 @@ impl App {
     /// The profile `provider` would be started under, or `None` when it has
     /// only the one and so nothing to choose between.
     pub fn chosen_profile(&self, provider: Provider) -> Option<&'static crate::config::Profile> {
-        let profiles = crate::config::profiles_for(provider);
+        let profiles = crate::config::launchable_for(provider);
         if profiles.len() <= 1 {
             return None;
         }
@@ -3152,7 +3237,7 @@ impl App {
         let Some(provider) = self.launch_provider() else {
             return;
         };
-        let n = crate::config::profiles_for(provider).len();
+        let n = crate::config::launchable_for(provider).len();
         if n > 1 {
             let at = self.launch_profile.entry(provider).or_insert(0);
             *at = (*at + 1) % n;
@@ -4335,11 +4420,14 @@ fn spawn_quota_poller(tx: Sender<Response>) {
 
             // Each provider is paced by its own last outcome: a throttled one
             // backs off without stalling the other.
-            if now >= claude_due {
+            // An account just added is asked about now; the cache answers
+            // for the others, so this is one request.
+            if now >= claude_due
+                || crate::quota::NUDGE.swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
                 // Each profile is its own account with its own limits, so each
-                // is asked separately. They share one due time: the interval
-                // exists to be polite to the provider, and a machine with two
-                // logins is not entitled to twice the requests.
+                // is asked separately — and paced separately, by the usage
+                // cache, which answers for any account that is not due yet.
                 quota.claude = crate::config::accounts_for(Provider::Claude)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
@@ -4348,20 +4436,21 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                         source: profile.source,
                     })
                     .collect();
-                // Paced by whichever account is most throttled, so backing off
-                // for one does not keep asking on behalf of another.
+                // Woken for whichever account is due soonest. The cache holds
+                // the rest, so a throttled one is not asked early on behalf of
+                // another, and a healthy one is not left waiting on it.
                 let delay = quota
                     .claude
                     .iter()
                     .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
-                    .max()
+                    .min()
                     .unwrap_or(QUOTA_INTERVAL_SECS);
                 claude_due = now + Duration::from_secs(delay);
                 changed = true;
             }
             if now >= codex_due {
-                // Per account for the same reason as Claude's, and sharing one
-                // due time for the same reason too.
+                // Per account for the same reason as Claude's, and paced the
+                // same way.
                 quota.codex = crate::config::accounts_for(Provider::Codex)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
@@ -4374,7 +4463,7 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                     .codex
                     .iter()
                     .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
-                    .max()
+                    .min()
                     .unwrap_or(QUOTA_INTERVAL_SECS);
                 codex_due = now + Duration::from_secs(delay);
                 changed = true;
@@ -4608,6 +4697,7 @@ fn event_loop(
         if closed {
             app.drop_empty_tabs();
         }
+        app.pump_add_account();
         // After the reap, so a finished install is seen as finished on the same
         // tick its pane goes away.
         app.poll_rmux_install();
