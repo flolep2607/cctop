@@ -37,6 +37,20 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Full debug info is mostly link time and disk for a debugger nobody attached.
+# Line tables keep panic backtraces useful; `--profile debugging` restores the
+# rest when someone does want to step through. Per the Cargo book's
+# build-performance guide.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true
+
 [dependencies]
 anyhow = "1.0.104"
 # The pty shim and TIOCSTI injection need libc. It is already in the tree under
