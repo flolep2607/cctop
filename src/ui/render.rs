@@ -1571,9 +1571,11 @@ impl Hint {
             "Esc" => (KeyCode::Esc, Mods::NONE),
             "Tab" => (KeyCode::Tab, Mods::NONE),
             "Space" => (KeyCode::Char(' '), Mods::NONE),
-            "F1" => (KeyCode::F(1), Mods::NONE),
-            "F10" => (KeyCode::F(10), Mods::NONE),
-            "F12" => (KeyCode::F(12), Mods::NONE),
+            // Any function key, read off its number: a list of the ones in use
+            // left `F9 Image` a label that did nothing when clicked.
+            f if f.starts_with('F') && f.len() > 1 => {
+                (KeyCode::F(f[1..].parse().ok()?), Mods::NONE)
+            }
             // `Alt+n` and friends. The letter is the last character, and the
             // handler for these reads the modifier as well as the code.
             alt if alt.starts_with("Alt+") => {
@@ -2338,6 +2340,23 @@ mod tests {
         assert_eq!(fit_hints(&hints, 17).len(), 2);
         assert_eq!(fit_hints(&hints, 18).len(), 4);
         assert!(fit_hints(&hints, 3).is_empty());
+    }
+
+    /// Every hint a tab shows that names one key is a button for that key.
+    #[test]
+    fn every_single_key_tab_hint_can_be_clicked() {
+        for h in tab_hints() {
+            assert!(
+                h.event().is_some() || h.key.contains('/') || h.key.contains('→'),
+                "`{} {}` is drawn as a hint but clicking it does nothing",
+                h.key,
+                h.name
+            );
+        }
+        assert_eq!(
+            hint("F9", "Image").event().map(|k| k.code),
+            Some(event::KeyCode::F(9))
+        );
     }
 
     /// The footer is a map of the state you are in, not a fixed list. Marking
