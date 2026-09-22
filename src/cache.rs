@@ -356,8 +356,16 @@ struct MemEntry {
     size: u64,
 }
 
+/// Bytes a re-parse reads: the transcript plus any subagent transcripts beside
+/// it, which Claude's extractor reads end to end on every parse too. Counting
+/// only the main file let a session whose bulk lives in its subagents — a
+/// 640 KB transcript over 4 MB of them — slip under the size floor and be
+/// re-read whole on every tick.
 fn file_size(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    crate::session::transcript_files(path)
+        .iter()
+        .map(|f| std::fs::metadata(f).map(|m| m.len()).unwrap_or(0))
+        .sum()
 }
 
 /// How many times its own parse cost a transcript must wait before being parsed
