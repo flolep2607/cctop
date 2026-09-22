@@ -255,6 +255,13 @@ Only the Info panel is filled in for a remote session. Cost, Context, Tool
 Activity and the rest are readings of a transcript that stays where it is, and
 they say so rather than drawing zeroes.
 
+Two readers do reach back across the wire. `i` opens the conversation view for
+a remote row — the transcript is walked by the cctop on the far side and the
+document comes back over the same ssh channel, never parsed at the local path.
+And a `cctop serve` — whether standalone or the one `B` runs inside the TUI —
+answers `/api/report`, `/api/chat` and `/api/access` for remote rows the same
+way.
+
 A host that stops answering keeps its last rows and says so in the footer
 (`⚠ devbox: Permission denied`). Blanking them would be the stronger claim —
 those agents have not stopped, cctop has merely lost sight of them.

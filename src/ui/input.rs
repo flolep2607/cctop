@@ -154,6 +154,7 @@ impl App {
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
             Mode::Hooks => self.on_key_hooks(key),
             Mode::Insight => self.on_key_insight(key),
+            Mode::Conversation => self.on_key_conversation(key),
             Mode::Help => self.on_key_help(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             Mode::List => self.on_key_list(key),
@@ -539,6 +540,72 @@ impl App {
             KeyCode::Char('c') => self.open_insight("compare"),
             _ => {}
         }
+    }
+
+    /// Scroll the conversation, page further back into it, or close it.
+    ///
+    /// Like the insight overlay there is nothing here that can touch the
+    /// session: it is a transcript being read, not a terminal being driven.
+    /// `back` is a distance from the end rather than a position from the top,
+    /// so a turn landing mid-read does not shift the text under the cursor.
+    fn on_key_conversation(&mut self, key: KeyEvent) {
+        const PAGE: u16 = 20;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::List;
+                self.chat = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(view) = &mut self.chat {
+                    view.back = view.back.saturating_sub(1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(view) = &mut self.chat {
+                    view.back = (view.back + 1).min(view.max_back);
+                }
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                if let Some(view) = &mut self.chat {
+                    view.back = view.back.saturating_sub(PAGE);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(view) = &mut self.chat {
+                    view.back = (view.back + PAGE).min(view.max_back);
+                }
+            }
+            // Home is the transcript's start, End the live edge it opened on.
+            KeyCode::Home => {
+                if let Some(view) = &mut self.chat {
+                    view.back = view.max_back;
+                }
+            }
+            KeyCode::End => {
+                if let Some(view) = &mut self.chat {
+                    view.back = 0;
+                }
+            }
+            // `u` for "earlier": the window grows at the top, which a
+            // bottom-anchored scroll survives without moving a line.
+            KeyCode::Char('u') => {
+                let wants = self.chat.as_ref().is_some_and(|v| {
+                    !v.fetching && v.conversation.as_ref().is_some_and(|c| c.earlier > 0)
+                });
+                if wants {
+                    let before = self
+                        .chat
+                        .as_ref()
+                        .and_then(|v| v.conversation.as_ref())
+                        .and_then(|c| c.turns.first().map(|t| t.seq));
+                    if let Some(seq) = before {
+                        self.fetch_chat(Some(seq));
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
     }
 
     fn on_key_hooks(&mut self, key: KeyEvent) {
@@ -1047,6 +1114,7 @@ impl App {
             Action::Attach => self.attach_selected(),
             Action::Send => self.send_prompt(),
             Action::Handoff => self.handoff_selected(),
+            Action::Read => self.open_conversation(),
             Action::Expand => self.toggle_expanded(),
             Action::Mark => self.toggle_mark(),
             Action::Terminate => self.confirm_terminate(),
@@ -1263,6 +1331,11 @@ impl App {
                 self.set_status("Hand off the session, not one of its subagents")
             }
             KeyCode::Char('O') => self.handoff_selected(),
+            // `i` for "inspect": the conversation the report page shows, over
+            // the table. Deliberately not in the remote-refusal list — this is
+            // the one reader that works on a remote row, over the ssh channel
+            // the row arrived by.
+            KeyCode::Char('i') => self.open_conversation(),
             // Alt+n does this too and works from inside a pane; here on the
             // dashboard, where nothing is competing for the keyboard, a plain
             // letter is what anyone will try first.

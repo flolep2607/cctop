@@ -78,9 +78,14 @@ pub mod chat;
 #[cfg(feature = "debug")]
 mod debug;
 mod http;
-mod notify;
+/// The `--notify` webhook. Crate-visible because the TUI POSTs crossings to
+/// `$CCTOP_NOTIFY_URL` through the same send — one transport, two triggers.
+pub(crate) mod notify;
 mod quota;
-mod report;
+/// The per-session postmortem behind `/api/report`. Crate-visible because
+/// `cctop --report` prints the same document — the flag exists so a serve can
+/// answer for a remote row by running it on the machine that has the file.
+pub(crate) mod report;
 mod search;
 pub mod tunnel;
 
@@ -248,6 +253,11 @@ struct Shared {
     topics: Mutex<search::Topics>,
     /// The webhook `--notify` points at, when one was asked for.
     notify: Option<notify::Webhook>,
+    /// The `--host` machines by target name, so a route for a remote row can
+    /// ask the cctop that actually holds the transcript — see [`remote_json`].
+    /// Present even when `scan` is off: a dashboard-hosted serve still owes
+    /// its remote rows an answer.
+    hosts: HashMap<String, fleet::Host>,
 }
 
 /// One publish of the whole table.
@@ -330,7 +340,12 @@ pub struct Options {
     pub tunnel: bool,
     pub plan: Plan,
     pub delay: Duration,
-    pub hosts: Vec<String>,
+    /// The machines whose sessions this serve shows, already parsed.
+    ///
+    /// `Host`s rather than spec strings because the dashboard's copy was
+    /// collected once at startup — passing specs back through `collect` here
+    /// would merge `$CCTOP_HOSTS` a second time for it.
+    pub hosts: Vec<fleet::Host>,
     /// Where to POST when a session crosses into waiting or asking.
     ///
     /// `None` still falls back to `CCTOP_NOTIFY_URL` inside [`start`], which is
@@ -527,11 +542,21 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
                     .filter(|url| !url.is_empty())
             })
             .map(|target| notify::Webhook::new(target, origin.clone(), token.clone())),
+        hosts: options
+            .hosts
+            .iter()
+            .map(|host| (host.target.clone(), host.clone()))
+            .collect(),
     });
 
     let remotes = Arc::new(Mutex::new(Remotes::default()));
-    for host in fleet::Host::collect(&options.hosts) {
-        spawn_host_poller(host, Arc::clone(&remotes));
+    // A dashboard-hosted serve leaves the polling to the dashboard, which is
+    // already running one loop per host — spawning these anyway would poll
+    // every remote twice.
+    if options.scan {
+        for host in &options.hosts {
+            spawn_host_poller(host.clone(), Arc::clone(&remotes));
+        }
     }
     if options.scan {
         spawn_refresher(
@@ -695,7 +720,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         tunnel: want_tunnel,
         plan,
         delay,
-        hosts,
+        hosts: fleet::Host::collect(&hosts),
         notify,
         // The only thing in this process, so it does its own walking.
         scan: true,
@@ -1386,6 +1411,13 @@ fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str
         .query
         .get("before")
         .and_then(|v| v.parse::<usize>().ok());
+    if session.remote.is_some() {
+        let mut args = vec!["--chat".to_string(), session.session_id.clone()];
+        if let Some(before) = before {
+            args.extend(["--before".to_string(), before.to_string()]);
+        }
+        return remote_json(shared, stream, request, session, &args);
+    }
     json(stream, request, &chat::build(session, before));
 }
 
@@ -1395,6 +1427,15 @@ fn api_access(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &s
     let Some(session) = find(&snapshot.sessions, id) else {
         return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
     };
+    if session.remote.is_some() {
+        return remote_json(
+            shared,
+            stream,
+            request,
+            session,
+            &["--access".to_string(), session.session_id.clone()],
+        );
+    }
     // The tool counts are the one part of this that needs the transcript, and
     // the rest of the answer is worth having without it — so a session whose
     // extraction fails still reports its instructions, skills and servers.
@@ -1675,18 +1716,15 @@ fn api_report(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &s
         return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
     };
 
-    // A remote row names a transcript on the machine it came from. Parsing the
-    // same path here would report whatever happens to live at it locally, which
-    // is the failure mode `Session::remote` exists to prevent.
-    if let Some(remote) = &session.remote {
-        return http::respond_error(
+    // A remote row names a transcript on the machine it came from, so the
+    // report is built there and the body relayed — never parsed here.
+    if session.remote.is_some() {
+        return remote_json(
+            shared,
             stream,
-            Some(request),
-            404,
-            &format!(
-                "this session is on {} — run cctop serve there to report on it",
-                remote.host
-            ),
+            request,
+            session,
+            &["--report".to_string(), session.session_id.clone()],
         );
     }
 
@@ -1708,6 +1746,60 @@ fn api_report(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &s
             Some(request),
             503,
             &format!("could not render the report: {e}"),
+        ),
+    }
+}
+
+/// Answer a session route for a remote row by asking the cctop on the machine
+/// it came from, and relay the body verbatim.
+///
+/// The far side runs `cctop --report`, `--chat` or `--access` over the same ssh
+/// channel `--host` polls with, so a remote report is as reachable as the row
+/// was. Building the answer here instead would read whatever happens to live
+/// at the same path on *this* filesystem — the failure `Session::remote`
+/// exists to prevent.
+fn remote_json(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    session: &Session,
+    args: &[String],
+) {
+    let remote = session
+        .remote
+        .as_ref()
+        .expect("only a remote row reaches remote_json");
+    let Some(host) = shared.hosts.get(&remote.host) else {
+        // The row is real — it arrived over ssh — so a host this map does not
+        // know is a spec that was dropped between polls, not a session that
+        // does not exist. 502 rather than 404 says which of those it is.
+        return http::respond_error(
+            stream,
+            Some(request),
+            502,
+            &format!(
+                "this session is on {}, which this run is not connected to",
+                remote.host
+            ),
+        );
+    };
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    match host.run(&argv) {
+        Ok(body) => http::respond(
+            stream,
+            Some(request),
+            200,
+            "application/json; charset=utf-8",
+            body.as_bytes(),
+        ),
+        // The far side's own words are usually the answer: "command not
+        // found", "no session id starts with …", or — for a cctop older than
+        // these flags — clap's "unexpected argument".
+        Err(why) => http::respond_error(
+            stream,
+            Some(request),
+            502,
+            &format!("{} could not answer: {why}", remote.host),
         ),
     }
 }
@@ -1852,6 +1944,7 @@ mod tests {
             quota: Mutex::new(quota::EMPTY.to_string()),
             topics: Mutex::new(search::Topics::default()),
             notify: None,
+            hosts: HashMap::new(),
         }
     }
 

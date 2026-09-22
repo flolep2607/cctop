@@ -16,7 +16,7 @@ const END: &str = "# <<< cctop <<<";
 
 /// Agent commands worth routing through the shim. Absent ones are skipped by the
 /// block's own guard, so listing an agent the user doesn't have costs nothing.
-pub const AGENTS: &str = "claude codex opencode pi";
+pub const AGENTS: &str = "claude codex devin opencode pi";
 
 /// The managed block, in the bash/zsh syntax both shells share.
 fn block() -> String {
@@ -198,13 +198,18 @@ pub fn ask_on_first_run(prefs: &mut crate::cache::UiPrefs) {
          and attach to those sessions (the `s` and `a` keys).",
         files.join(" and ")
     );
-    eprint!("Install the alias? [y] install / [n] not now: ");
+    eprint!("Install the alias? [y] install / [n] no, don't ask again: ");
     let _ = std::io::Write::flush(&mut std::io::stderr());
 
     let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        // No answer available: leave the question open rather than guessing.
-        return;
+    match std::io::stdin().read_line(&mut answer) {
+        // End-of-input or a read error is not an answer, and neither is a bare
+        // Enter. Recording a decline nobody typed would close the question
+        // forever, which is the one outcome this prompt must not reach by
+        // accident.
+        Ok(0) | Err(_) => return,
+        Ok(_) if answer.trim().is_empty() => return,
+        Ok(_) => {}
     }
     let yes = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
 

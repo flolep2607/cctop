@@ -931,6 +931,9 @@ pub fn opening_argv(argv: &[String], line: &str) -> Option<Vec<String>> {
     // `None` is a positional prompt, which is what most of them take.
     let flag = match command_of(argv)? {
         "claude" | "codex" | "cursor-agent" => None,
+        // Devin's bare positional is a path to open; the prompt sits behind
+        // `--`, so without it a brief is read as a directory name.
+        "devin" => Some("--"),
         "opencode" => Some("--prompt"),
         _ => return None,
     };
@@ -984,8 +987,8 @@ mod tests {
     fn turn(role: &'static str, kind: &'static str, text: &str) -> chat::Turn {
         chat::Turn {
             seq: 0,
-            role,
-            kind,
+            role: role.into(),
+            kind: kind.into(),
             ts: "2026-08-05T10:00:00Z".into(),
             text: text.to_string(),
             clipped: false,
@@ -1314,6 +1317,12 @@ mod tests {
         // here and the exec re-splits it.
         let flagged = opening_argv(&argv(&["opencode"]), "Read /tmp/b.md").unwrap();
         assert_eq!(flagged, argv(&["opencode", "--prompt", "Read /tmp/b.md"]));
+        // Devin's bare positional is a path to open — the prompt has to sit
+        // behind `--`, or a brief is read as a directory name.
+        assert_eq!(
+            opening_argv(&argv(&["devin"]), "Read /tmp/b.md"),
+            Some(argv(&["devin", "--", "Read /tmp/b.md"]))
+        );
     }
 
     /// A profile launch is `env CODEX_HOME=… codex`, and the prompt belongs to

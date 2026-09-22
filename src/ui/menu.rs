@@ -30,6 +30,7 @@ pub enum Action {
     Attach,
     Send,
     Handoff,
+    Read,
     Expand,
     Mark,
     Terminate,
@@ -111,6 +112,15 @@ pub fn items(app: &App) -> Vec<Item> {
             label: "Hand off to another agent",
             key: "O",
             blocked: far(subagent.then(|| "hand off the session, not a subagent".to_string())),
+            rule: false,
+        },
+        Item {
+            action: Action::Read,
+            label: "Read the conversation",
+            key: "i",
+            // Works on a remote row: the read goes over the ssh channel the
+            // row arrived by, to the machine that actually has the transcript.
+            blocked: subagent.then(|| "a subagent has no transcript of its own".to_string()),
             rule: false,
         },
         Item {

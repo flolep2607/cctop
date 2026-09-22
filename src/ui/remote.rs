@@ -267,7 +267,9 @@ mod tests {
         // refusal names the host — the same answer pressing the key gives.
         for item in &items {
             match item.action {
-                menu::Action::Expand | menu::Action::Mark => {
+                // Read joins Expand and Mark on a remote row: it reads over the
+                // same ssh channel the row arrived by, never the local path.
+                menu::Action::Read | menu::Action::Expand | menu::Action::Mark => {
                     assert!(item.enabled(), "{} works on a remote row", item.label);
                 }
                 _ => {

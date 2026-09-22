@@ -69,6 +69,15 @@ pub struct Notifier {
     /// Opt-in, and persisted: an unasked-for bell in a shared office is worse
     /// than a missed one.
     pub enabled: bool,
+    /// Where crossings are POSTed, from `$CCTOP_NOTIFY_URL` — the same webhook
+    /// `cctop serve --notify` answers to. Deliberately independent of
+    /// `enabled`: the bell is for the person at the keyboard and the webhook
+    /// is for the one who is not, so each gets its own switch.
+    pub webhook: Option<String>,
+    /// The link a running `B`-serve hands out — `origin/?t=token` — kept so a
+    /// webhook can carry a link that opens the session it is about. `None`
+    /// while nothing is being served; the dashboard sets it on each refresh.
+    pub link_base: Option<String>,
     /// Last state of every session that was running at the previous refresh,
     /// with the label to name it by. The label is carried because a session
     /// that exits between refreshes still has to be nameable, and by then the
@@ -79,12 +88,19 @@ pub struct Notifier {
     /// [`MARK_FOR`]; being *looked at* hides the footer but keeps the row's
     /// marker, so `b` can still land on it.
     recent: VecDeque<Rang>,
+    /// Which quota windows were saturated at the last reading, keyed by
+    /// `provider/profile/window` — the edge the quota ring fires on, and the
+    /// only state that edge needs.
+    quota_limited: HashMap<String, bool>,
 }
 
 impl Notifier {
     pub fn new(enabled: bool) -> Self {
         Notifier {
             enabled,
+            webhook: std::env::var("CCTOP_NOTIFY_URL")
+                .ok()
+                .filter(|url| !url.is_empty()),
             ..Default::default()
         }
     }
@@ -98,6 +114,9 @@ impl Notifier {
     pub fn observe(&mut self, sessions: &[Session]) {
         self.recent.retain(|r| r.at.elapsed() < MARK_FOR);
         let mut crossed: Vec<Rang> = Vec::new();
+        // The same crossings, for the webhook — kept as sessions because the
+        // payload wants fields a `Rang` deliberately does not carry.
+        let mut posts: Vec<(&'static str, &Session)> = Vec::new();
         // Only running sessions are tracked, which is what keeps this cheap:
         // the map holds a handful of entries, not one per transcript ever
         // written, and only those few need a formatted key per refresh.
@@ -121,6 +140,16 @@ impl Notifier {
                     reason,
                     at: Instant::now(),
                 });
+                // A stopped session is announced by its exit; the serve's
+                // webhook draws the same line, so only the two waits POST.
+                let event = match reason {
+                    Reason::NeedsInput => Some("waiting"),
+                    Reason::Asking => Some("asking"),
+                    Reason::Stopped => None,
+                };
+                if let Some(event) = event {
+                    posts.push((event, session));
+                }
             }
             // Back to work is the definition of answered, however it happened —
             // through cctop, or in the terminal the agent actually lives in.
@@ -144,6 +173,12 @@ impl Notifier {
             }
         }
         self.watched = next;
+
+        if let Some(target) = &self.webhook {
+            for (event, session) in posts {
+                self.post_session(target.clone(), event, session);
+            }
+        }
 
         if !self.enabled || crossed.is_empty() {
             return;
@@ -226,6 +261,98 @@ impl Notifier {
             }
         ))
     }
+
+    /// Fold a quota reading into the watch, returning the windows that just
+    /// freed up — the ones worth telling somebody about.
+    ///
+    /// Same edge rule as the sessions: the first reading only establishes
+    /// where things stand, so a window that has been free all along is never
+    /// announced, and a saturated one rings once when it clears — not on every
+    /// poll that keeps finding it clear.
+    pub fn observe_quota(&mut self, quota: &crate::quota::Quota) -> Vec<String> {
+        let mut freed: Vec<String> = Vec::new();
+        // The state kept is one bool per window — saturated or not — because
+        // the crossing is all that is news. A window missing from a reading
+        // (a throttled provider answers nothing) keeps its last state, which
+        // is the honest one: unknown is not "freed".
+        for (provider, profiles) in [("claude", &quota.claude), ("codex", &quota.codex)] {
+            for profile in profiles {
+                let crate::quota::ProviderStatus::Ok(q) = &profile.status else {
+                    continue;
+                };
+                // The provider's own flag counts too: Codex reports a held
+                // limit before any window reads 100, and the crossing back is
+                // the same news either way.
+                let mut watch = |key: String, limited: bool, what: String| {
+                    if self.quota_limited.insert(key, limited) == Some(true) && !limited {
+                        freed.push(what);
+                    }
+                };
+                watch(
+                    format!("{provider}/{}", profile.profile),
+                    q.limit_reached,
+                    format!(
+                        "{provider} · {}: the rate limit has lifted",
+                        profile.profile
+                    ),
+                );
+                for window in &q.windows {
+                    watch(
+                        format!("{provider}/{}/{}", profile.profile, window.label),
+                        window.pct >= 100,
+                        format!(
+                            "{provider} · {}: the {} window is open again",
+                            profile.profile, window.label
+                        ),
+                    );
+                }
+            }
+        }
+        freed
+    }
+
+    /// POST one crossing — through the same send `cctop serve --notify` uses,
+    /// so a webhook sees the same document either way.
+    fn post_session(&self, target: String, event: &'static str, session: &Session) {
+        let mut body = serde_json::json!({
+            "event": event,
+            "session_id": session.session_id,
+            "project": session.label_source,
+            "title": session.title,
+        });
+        if let Some(base) = &self.link_base {
+            body["url"] = session_link(base, &session.session_id).into();
+        }
+        crate::serve::notify::post(
+            target,
+            body.to_string(),
+            serde_json::json!({ "event": event, "session": session.session_id }),
+        );
+    }
+
+    /// POST a quota window opening back up, when a webhook is configured.
+    ///
+    /// The event has no session and no link — there is no row it is about —
+    /// which is also what distinguishes it from a crossing at the far end.
+    pub fn post_event(&self, event: &'static str, text: &str) {
+        let Some(target) = &self.webhook else {
+            return;
+        };
+        crate::serve::notify::post(
+            target.clone(),
+            serde_json::json!({ "event": event, "text": text }).to_string(),
+            serde_json::json!({ "event": event }),
+        );
+    }
+}
+
+/// The page link for a session, built off the link a serve hands out:
+/// `origin/?t=token` becomes `origin/session/<id>?t=token`.
+fn session_link(base: &str, id: &str) -> String {
+    match base.split_once("/?") {
+        Some((origin, query)) => format!("{origin}/session/{id}?{query}"),
+        None => format!("{base}session/{id}"),
+    }
 }
 
 /// Which crossings are worth a bell, and what to call them.
@@ -287,7 +414,7 @@ fn desktop_text(rang: &Rang, extra: usize) -> String {
 /// cell or moves the cursor, so what is on screen — alternate screen included —
 /// is untouched. Written from the worker thread instead, it could land in the
 /// middle of a flush and cut somebody's escape sequence in half.
-fn ring(text: &str) {
+pub(crate) fn ring(text: &str) {
     use std::io::Write;
     // The state-machine tests drive real crossings, and stdout under `cargo
     // test` is the developer's terminal: without this the suite beeps at them
@@ -537,5 +664,95 @@ mod tests {
         let footer = n.footer(None).expect("someone rang");
         assert!(footer.contains('a'), "{footer}");
         assert!(footer.contains("+1 more"), "{footer}");
+    }
+
+    /// The quota ring is an edge, not a level: the first reading only
+    /// establishes where things stand, the saturated→free crossing is the one
+    /// announcement, and every reading after it is silence.
+    #[test]
+    fn a_quota_window_rings_once_on_the_way_back() {
+        let mut n = Notifier::default();
+        let at = |pct: u32| crate::quota::Quota {
+            fetched: true,
+            claude: vec![crate::quota::ProfileQuota {
+                profile: "default".into(),
+                status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                    plan: None,
+                    windows: vec![crate::quota::Window {
+                        label: "5h",
+                        pct,
+                        duration: None,
+                        resets_at: None,
+                    }],
+                    limit_reached: false,
+                }),
+                source: crate::config::AccountSource::Directory,
+            }],
+            codex: Vec::new(),
+        };
+
+        // Arriving already free is not news — the first observation only sets
+        // the baseline, exactly like a session first seen idle.
+        assert!(n.observe_quota(&at(40)).is_empty());
+        assert!(
+            n.observe_quota(&at(100)).is_empty(),
+            "filling is not the edge"
+        );
+        let freed = n.observe_quota(&at(60));
+        assert_eq!(freed.len(), 1, "the crossing is the announcement");
+        assert!(freed[0].contains("5h"), "{freed:?}");
+        assert!(
+            n.observe_quota(&at(60)).is_empty(),
+            "a window that stays open stays quiet"
+        );
+
+        // A window missing from a reading is not a freed one: a throttled
+        // provider answers nothing, and unknown is not "back".
+        let mut gone = at(60);
+        gone.claude[0].status = crate::quota::ProviderStatus::RateLimited { retry_at: None };
+        assert!(n.observe_quota(&gone).is_empty());
+        assert!(
+            n.observe_quota(&at(60)).is_empty(),
+            "still nothing new to say"
+        );
+    }
+
+    /// The provider's own `limit_reached` is watched beside the windows:
+    /// Codex reports the hold before any window reads full, and the lift is
+    /// the same piece of news.
+    #[test]
+    fn a_provider_level_limit_rings_on_lift() {
+        let mut n = Notifier::default();
+        let quota = |held: bool| crate::quota::Quota {
+            fetched: true,
+            claude: Vec::new(),
+            codex: vec![crate::quota::ProfileQuota {
+                profile: "default".into(),
+                status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                    plan: None,
+                    windows: Vec::new(),
+                    limit_reached: held,
+                }),
+                source: crate::config::AccountSource::Directory,
+            }],
+        };
+        assert!(n.observe_quota(&quota(true)).is_empty());
+        let freed = n.observe_quota(&quota(false));
+        assert_eq!(freed.len(), 1);
+        assert!(freed[0].contains("limit has lifted"), "{freed:?}");
+    }
+
+    /// `origin/?t=tok` becomes `origin/session/<id>?t=tok`, keeping the token
+    /// the link needs to open anything.
+    #[test]
+    fn a_session_link_keeps_the_token_in_the_query() {
+        assert_eq!(
+            session_link("https://x.trycloudflare.com/?t=abc", "s1"),
+            "https://x.trycloudflare.com/session/s1?t=abc"
+        );
+        assert_eq!(
+            session_link("http://127.0.0.1:7777/", "s1"),
+            "http://127.0.0.1:7777/session/s1"
+        );
     }
 }
