@@ -1489,6 +1489,14 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                     (_, "Codex") => ("sign-in expired — ", "codex login"),
                     _ => ("sign-in expired — ", "claude login"),
                 };
+                // Three accounts on 120 columns is 37 a column, one short of
+                // `Codex (work) sign-in expired — codex login`: the words give
+                // way before the command does.
+                let wanted = util::cells(name) + 1 + util::cells(said) + cmd.len();
+                let said = match wanted > cols[i].width as usize {
+                    true => "expired — ",
+                    false => said,
+                };
                 spans.push(Span::styled(
                     said,
                     Style::default().fg(theme::colors().cost_mid),
@@ -1578,8 +1586,41 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), cols[i]);
+        frame.render_widget(
+            Paragraph::new(clip_spans(spans, cols[i].width as usize)),
+            cols[i],
+        );
     }
+}
+
+/// `spans` cut to `width` cells, with an ellipsis where they were cut.
+///
+/// A Limits column is a share of one line, and clipped by the frame alone its
+/// message stopped mid-word — `sign-in expi` — with nothing saying there was
+/// more; the ellipsis is what says it.
+fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let line = Line::from(spans);
+    if line.width() <= width {
+        return line;
+    }
+    let mut room = width;
+    let mut out = Vec::new();
+    for span in line.spans {
+        let w = span.width();
+        // Strictly less: the line is being cut, so a cell stays free for the
+        // ellipsis even when this span would end exactly at the edge.
+        if w < room {
+            room -= w;
+            out.push(span);
+            continue;
+        }
+        // The trailing `…` makes the span too long for `room` even when it
+        // was exactly `room`, so truncate always marks the cut.
+        let cut = util::truncate(&format!("{}…", span.content), room);
+        out.push(Span::styled(cut, span.style));
+        break;
+    }
+    Line::from(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2468,6 +2509,36 @@ mod tests {
                 text.contains("73.2K in / 2.2K out"),
                 "{text}"
             );
+        }
+    }
+
+    /// Three expired accounts on 120 columns keep the whole login command, and
+    /// on 80, where nothing fits, the cut is marked rather than mid-word.
+    #[test]
+    fn a_narrow_limits_column_shortens_its_words_before_its_command() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let expired = |profile: &str| crate::quota::ProfileQuota {
+            profile: profile.to_string(),
+            status: crate::quota::ProviderStatus::Expired,
+            source: crate::config::AccountSource::Directory,
+        };
+        let mut app = crate::ui::tests::test_app();
+        app.quota.claude = vec![expired("default")];
+        app.quota.codex = vec![expired("default"), expired("work")];
+        for (cols, wanted) in [(120u16, "Codex (work) expired — codex login"), (80, "…")] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, 40)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let limits = screen(&terminal, cols, 40)
+                .into_iter()
+                .find(|l| l.contains("Codex (work)"))
+                .expect("no Limits line");
+            assert!(limits.contains(wanted), "{limits:?}");
         }
     }
 
