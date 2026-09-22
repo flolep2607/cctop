@@ -109,7 +109,12 @@
      session to the client that last typed — so a narrow frame narrows the
      session in every other terminal attached to it too. */
   .wrap:has(.split.with-term) { max-width: none; }
-  .split.with-term { grid-template-columns: minmax(360px, 2fr) minmax(0, 3fr); }
+  .split.with-term { grid-template-columns: minmax(360px, 2fr) minmax(0, 3fr);
+                     height: calc(100dvh - 24px); align-items: stretch; }
+  /* Both columns are the window's height and scroll on their own, so the
+     conversation can be read back without the terminal leaving the screen. */
+  .split.with-term > .talk { overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
+  .split.with-term > .termside { position: static; min-height: 0; }
   .termside { display: flex; flex-direction: column; min-width: 0;
               position: sticky; top: 12px; }
   /* `display` beats the `hidden` attribute, so closed has to be said in CSS —
@@ -131,15 +136,17 @@
   .termcard .why.bad { color: var(--amber); }
   .termside .note { font-size: 12px; color: var(--amber); margin-top: 7px; }
   .termside .why.bad { font-size: 12px; color: var(--amber); margin-top: 7px; }
-  .termframe { width: 100%; height: calc(100vh - 80px); min-height: 360px;
+  .termframe { width: 100%; flex: 1 1 auto; min-height: 0;
                border: 1px solid var(--line); border-radius: 8px; background: #000; }
   nav.views button.toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
   /* Two columns need a screen. On a phone the terminal goes under the
      conversation at a readable height rather than into a 40-column strip. */
   @media (max-width: 900px) {
-    .split.with-term { grid-template-columns: minmax(0, 1fr); }
+    .split.with-term { grid-template-columns: minmax(0, 1fr); height: auto; }
+    .split.with-term > .talk { overflow-y: visible; }
     .termside { position: static; }
+    .termframe { flex: none; height: 70vh; }
   }
 
   /* --- acting on the session -------------------------------------------- */
@@ -224,6 +231,8 @@
   .md blockquote { border-left: 2px solid var(--line); padding-left: 11px; color: var(--dim); }
   .md hr { border: 0; border-top: 1px solid var(--line); }
   .md a { color: var(--accent); }
+  button.turn.more { display: block; width: 100%; font: inherit; font-size: 12px; text-align: center;
+                     background: none; border: 0; color: var(--accent); cursor: pointer; }
   .turn.compaction { text-align: center; color: var(--faint); font-size: 12px; }
   .turn .clip { font-size: 11px; color: var(--faint); margin-top: 4px; }
 
@@ -1092,13 +1101,20 @@ function conversation(chat) {
     return s;
   }
   const card = el("div", "card");
-  if (chat.earlier) {
+  const hidden = Math.max(0, chat.turns.length - CHAT_SHOWN);
+  if (hidden) {
+    const more = el("button", "turn more",
+      "Show " + Math.min(hidden, CHAT_PAGE) + " earlier turns — " + hidden + " not drawn yet");
+    more.type = "button";
+    more.addEventListener("click", earlierTurns);
+    card.appendChild(more);
+  } else if (chat.earlier) {
     card.appendChild(el("div", "turn faint", chat.earlier + " earlier turns are in the transcript and not shown"));
   }
   if (!chat.turns.length) {
     card.appendChild(el("div", "empty", "Nothing has been said in this session yet."));
   }
-  for (const turn of chat.turns) card.appendChild(turnNode(turn));
+  for (const turn of chat.turns.slice(hidden)) card.appendChild(turnNode(turn));
   s.appendChild(card);
   return s;
 }
@@ -1426,6 +1442,52 @@ function accessView(a) {
 const PANES = {};
 let CHAT_TIMER = null;
 
+// Drawn from the newest end, a page at a time. A long session is thousands of
+// turns, each a markdown parse and a pile of nodes, and the poll below redraws
+// the lot every five seconds — for turns nobody has scrolled back to.
+const CHAT_PAGE = 40;
+let CHAT_SHOWN = CHAT_PAGE;
+let LAST_CHAT = null;
+
+// What scrolls the conversation: its own column beside a terminal, the page
+// otherwise.
+function chatScroller() {
+  const split = document.getElementById("split");
+  return split && split.classList.contains("with-term")
+    ? document.getElementById("talk")
+    : document.scrollingElement;
+}
+
+// `hold` says which edge the reader's place is measured from. A poll keeps
+// the top, so text being read does not move — except in the terminal's column
+// when the reader is already at the end, where following along is the point.
+// Drawing earlier turns keeps the bottom, because they arrive above.
+function drawChat(chat, hold) {
+  const pane = document.getElementById("talk");
+  if (!pane) return;
+  LAST_CHAT = chat;
+  const box = chatScroller();
+  const top = box.scrollTop;
+  const fromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+  const follow = box === pane && fromBottom < 40;
+  // The composer is part of this pane and holds what someone is typing, so it
+  // is moved across rather than rebuilt underneath them.
+  const say = pane.querySelector("form.say");
+  pane.replaceChildren(conversation(chat));
+  if (say) pane.appendChild(say);
+  if (hold === "bottom" || follow) {
+    box.scrollTop = box.scrollHeight - box.clientHeight - (follow ? 0 : fromBottom);
+  } else {
+    box.scrollTop = top;
+  }
+}
+
+function earlierTurns() {
+  if (!LAST_CHAT || LAST_CHAT.turns.length <= CHAT_SHOWN) return;
+  CHAT_SHOWN += CHAT_PAGE;
+  drawChat(LAST_CHAT, "bottom");
+}
+
 function show(name) {
   for (const [key, pane] of Object.entries(PANES)) pane.hidden = key !== name;
   for (const button of document.querySelectorAll("nav.views button")) {
@@ -1439,13 +1501,7 @@ async function refreshChat() {
   if (!pane) return;
   try {
     const response = await ask("/api/chat/" + encodeURIComponent(ID) + QUERY);
-    const chat = await asJson(response);
-    const rebuilt = conversation(chat);
-    // The composer is part of this pane and holds what someone is typing, so it
-    // is moved across rather than rebuilt underneath them.
-    const say = pane.querySelector("form.say");
-    pane.replaceChildren(rebuilt);
-    if (say) pane.appendChild(say);
+    drawChat(await asJson(response), "top");
     offline(null);
   } catch (e) {
     // A poll that fails when there is already a conversation on screen is a
@@ -1501,6 +1557,11 @@ function load() {
       split.id = "split";
       const talk = el("div", "talk");
       talk.id = "talk";
+      // Reaching the top of the column is asking for what came before. Only
+      // the column: the page's own top is the header, not a request.
+      talk.addEventListener("scroll", () => {
+        if (talk.scrollTop < 300) earlierTurns();
+      }, { passive: true });
       const side = el("aside", "termside");
       side.id = "termside";
       side.hidden = true;
@@ -1589,6 +1650,9 @@ async function toggleTerminal(button) {
   button.disabled = true;
   side.hidden = false;
   split.classList.add("with-term");
+  split.scrollIntoView({ block: "start" });
+  const talk = document.getElementById("talk");
+  if (talk) talk.scrollTop = talk.scrollHeight;
   side.replaceChildren(el("div", "empty", "Opening this agent's terminal…"));
   try {
     // Minted per opening, never cached: the link is a shell credential, and a
@@ -1616,7 +1680,8 @@ async function toggleTerminal(button) {
         "Whoever holds this page's link can type into this agent — it is a shell, not a prompt box.")];
       if (!terminal.tunnelled && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
         notes.unshift(el("div", "note",
-          "rmux's tunnel did not come up, so this terminal only opens in a browser on the machine cctop runs on."));
+          "rmux's tunnel did not come up, so this terminal only opens in a browser on the machine cctop runs on. " +
+          "Close it and open it again to retry the tunnel."));
       }
       side.replaceChildren(head, frame, ...notes);
       return;

@@ -385,7 +385,8 @@ pub fn share_link(name: &str, frontend: Option<&str>) -> Result<(Share, bool), S
     // the daemon's socket directly. Sending it out through a public relay and
     // back would only add a way to fail — and a relay that rate-limits is how
     // a page came to be holding a loopback link anyway.
-    let made = match frontend.is_some_and(is_loopback_url) {
+    let local = frontend.is_some_and(is_loopback_url);
+    let made = match local {
         true => (mint(false)?, false),
         // The tunnel is the half that needs a network and a relay that will
         // have it; the loopback share needs neither, so a failure to reach the
@@ -395,7 +396,14 @@ pub fn share_link(name: &str, frontend: Option<&str>) -> Result<(Share, bool), S
             Err(why) => (mint(false).map_err(|_| why)?, false),
         },
     };
-    if let Ok(mut cache) = CACHE.lock() {
+    // A fallback is not kept when the tunnel was the point. The relay
+    // rate-limits and recovers, and a cached loopback link would answer every
+    // later ask from a remote page with a terminal it cannot reach, for as long
+    // as this process lives. The cost of not keeping it is one extra share per
+    // retry, which is the trade the retry is worth.
+    if (made.1 || local)
+        && let Ok(mut cache) = CACHE.lock()
+    {
         cache
             .get_or_insert_with(HashMap::new)
             .insert(key, made.clone());
