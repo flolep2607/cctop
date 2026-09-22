@@ -208,11 +208,31 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Above this, a per-token rate is a unit error rather than an expensive model.
+///
+/// A few upstream rows quote dollars per *million* (or per thousand) tokens in
+/// a field documented as per-token: `wandb/zai-org/GLM-4.5` says `0.055` input and
+/// `0.2` output, which prices a million input tokens at $55,000. The priciest real listing is `o1-pro`
+/// at 6e-4 per token ($600 per million output), so this cutoff sits less than
+/// 2x above a genuine model — close enough that a future premium tier past
+/// $1000 per million would be dropped as a typo and fall through to another
+/// listing, or to unpriced.
+// ponytail: fixed cutoff, less than 2x above o1-pro; raise it if a real model
+// is ever listed above $1000 per million tokens.
+const IMPLAUSIBLE_COST_PER_TOKEN: f64 = 1e-3;
+
+/// Rows over [`IMPLAUSIBLE_COST_PER_TOKEN`] are dropped rather than repaired:
+/// whether a row is off by a thousand or a million cannot be told from the row,
+/// and dropping it lets the lookup fall through to a sane listing of the same
+/// model from another provider.
 fn parse_entries(raw: &HashMap<String, serde_json::Value>) -> HashMap<String, LitellmEntry> {
     raw.iter()
         .filter_map(|(k, v)| {
             serde_json::from_value::<LitellmEntry>(v.clone())
                 .ok()
+                .filter(|e| {
+                    e.input_cost_per_token.max(e.output_cost_per_token) < IMPLAUSIBLE_COST_PER_TOKEN
+                })
                 .map(|e| (k.clone(), e))
         })
         .collect()
@@ -587,6 +607,39 @@ mod tests {
     fn a_loaded_table_never_reports_the_empty_epoch() {
         assert_ne!(digest_rates(&HashMap::new()), 0);
         assert_ne!(digest_rates(&table(&[("m", 1.0)])), 0);
+    }
+
+    /// The real rows, as LiteLLM listed them at 0.16.12. Asked for by its
+    /// Hugging Face name, GLM-4.5 matches both routes, and the shorter key —
+    /// the one `best_match` prefers — is wandb's, which quotes per-million
+    /// dollars in a per-token field: $55,000 per million input tokens.
+    #[test]
+    fn a_per_million_rate_in_a_per_token_field_is_not_a_match() {
+        let rows = [
+            (
+                "wandb/zai-org/GLM-4.5",
+                serde_json::json!({"input_cost_per_token": 0.055, "output_cost_per_token": 0.2}),
+            ),
+            (
+                "deepinfra/zai-org/GLM-4.5",
+                serde_json::json!({"input_cost_per_token": 4e-7, "output_cost_per_token": 1.6e-6}),
+            ),
+        ];
+        let guard = install_test_table(&rows);
+        let p = resolve_generic("zai-org/GLM-4.5").expect("a listing");
+        assert!(
+            (p.input - 0.4).abs() < 1e-9,
+            "priced at ${} per million",
+            p.input
+        );
+        drop(guard);
+
+        // The priciest real listing stays under the cutoff.
+        let _guard = install_test_table(&[(
+            "o1-pro",
+            serde_json::json!({"input_cost_per_token": 1.5e-4, "output_cost_per_token": 6e-4}),
+        )]);
+        assert!(resolve_generic("o1-pro").is_some());
     }
 
     #[test]
