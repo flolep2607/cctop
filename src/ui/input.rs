@@ -116,6 +116,18 @@ impl App {
                 return;
             }
             if let Some(pane) = self.focused_pane() {
+                // Paging through history, which the wheel could already do and
+                // the keyboard could not. Both ask the screen first, so an agent
+                // in fullscreen still gets these keys for its own scrolling.
+                let scrolled = match pane.rmux.as_deref() {
+                    Some(name) => {
+                        key.modifiers.is_empty() && crate::rmux::scroll_key(name, key.code)
+                    }
+                    None => pane.view.scroll_key(key),
+                };
+                if scrolled {
+                    return;
+                }
                 // The agent this key is going to, taken before the borrow ends:
                 // answering its question is the one thing no hook reports.
                 let agent = pane.agent();
