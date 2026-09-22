@@ -328,7 +328,26 @@ unasked — so kitty wants `read-clipboard` in `clipboard_control` before it
 will say, and where the terminal stays silent `F9` still says so rather than
 telling you to install `xclip`.
 
-The way that needs nothing of the terminal is the browser. `cctop serve` on
+For a terminal that will never answer — Windows Terminal does not, and no
+Ctrl+V or right-click there can put an image on the wire — the way in is the
+connection itself. `ssh` carries sockets back down the link it opened, so a
+small listener on the machine you ssh from can hand the clipboard over.
+`tools/clipboard-bridge.ps1` is that listener, on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File clipboard-bridge.ps1
+```
+
+with the port forwarded — `ssh -R 8377:127.0.0.1:8377 <host>` on the command
+line, or `RemoteForward 8377 127.0.0.1:8377` in `~/.ssh/config` to make it
+permanent. cctop asks by connecting; the bridge answers with the clipboard's
+image, or with a closed connection when there is none. `F9` uses it, and so
+does Ctrl+V in a pane — the ask is a localhost connect that costs nothing
+where no bridge is listening — so from Windows Terminal an image pastes the
+way text does. The port is `CCTOP_CLIPBOARD_PORT` on the far side and `-Port`
+on the bridge when 8377 is already taken.
+
+The way that needs nothing of the terminal or a script is the browser. `cctop serve` on
 that machine puts the table on an HTTP port; reach it from your own machine —
 `ssh -L 7788:127.0.0.1:7788 <host>`, or `--tunnel` — and paste the screenshot
 straight into the box that answers a waiting session. A browser can take a
