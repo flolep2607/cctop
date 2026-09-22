@@ -355,15 +355,17 @@ pub(super) fn spawn_worker(
                     }
                 }
                 Request::Data(session) => {
-                    // The open panels are the one view where staleness shows, so
-                    // this path never accepts a backed-off entry.
-                    let data = loader.store().session_data_fresh(&session);
-                    if tx
-                        .send(Response::Data(session.key(), Box::new(data)))
-                        .is_err()
-                    {
-                        break;
-                    }
+                    // Off the request loop: a big transcript takes seconds to
+                    // re-read, and everything queued behind it on this thread —
+                    // refreshes, searches, the next keystroke's work — waits
+                    // with it. The UI drops responses for a selection it has
+                    // already left, so an answer landing late is safe.
+                    let store = loader.store_shared();
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let data = store.session_data_fresh(&session);
+                        let _ = tx.send(Response::Data(session.key(), Box::new(data)));
+                    });
                 }
                 Request::Delete(session) => {
                     let result = match session.provider {

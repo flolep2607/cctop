@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.16.8"
+version = "0.16.11"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -105,6 +105,7 @@ vt100 = "0.16.2"
 # `chafa-dyn` needs the C chafa library at build time, which the musl release
 # has no toolchain for, and `image-defaults` pulls every codec `image` has.
 ratatui-image = { version = "11.0.8", default-features = false }
-# Decodes the PNG a paste writes into the DynamicImage ratatui-image takes.
-# PNG is the only format that ever arrives — see clipboard::HELPERS.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Decodes the image a paste files into the DynamicImage ratatui-image takes —
+# the same set the sniff accepts (clipboard::format_of): a JPEG or WebP that
+# could not preview would still paste, but the toast would go silently missing.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }

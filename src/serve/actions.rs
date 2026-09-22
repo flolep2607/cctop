@@ -97,13 +97,13 @@ pub type Failed = (u16, String);
 /// here, and the agent is handed the path exactly as `F9` hands it one locally.
 ///
 /// Reuses the terminal side's sniff rather than trusting the content type: what
-/// is written is a PNG or the request is refused, so nothing else can be
-/// deposited on the machine through a route whose name says "image".
+/// is written is a real image or the request is refused, so nothing else can
+/// be deposited on the machine through a route whose name says "image".
 pub fn image(data: &str) -> Result<Filed, Failed> {
-    let Some(png) = crate::clipboard::png_from_paste(data) else {
-        return Err((400, "only a PNG can be pasted here".into()));
+    let Some(image) = crate::clipboard::image_from_paste(data) else {
+        return Err((400, "only an image can be pasted here".into()));
     };
-    match crate::clipboard::write_png(&png) {
+    match crate::clipboard::write_image(&image) {
         Ok(path) => Ok(Filed {
             path: path.display().to_string(),
         }),
@@ -468,15 +468,16 @@ pub fn terminal(session: &Session) -> Result<Terminal, Failed> {
 mod image_tests {
     use super::*;
 
-    /// The page's route files a PNG and refuses everything else.
+    /// The page's route files an image and refuses everything else.
     ///
     /// The refusal matters more than the acceptance: this is a route that
     /// writes a file on the machine the agents run on, so what it will write is
     /// bounded by the same sniff the terminal side uses rather than by the
     /// content type the sender claimed.
     #[test]
-    fn only_a_png_is_filed() {
-        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+    fn only_an_image_is_filed() {
+        let mut png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
+        png.resize(64, 0);
         let data = format!(
             "data:image/png;base64,{}",
             crate::util::b64_encode(png.as_slice())
@@ -487,9 +488,9 @@ mod image_tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(
-            image("data:image/png;base64,bm90IGEgcG5n").map(|f| f.path),
-            Err((400, "only a PNG can be pasted here".to_string())),
-            "a base64 payload that is not a PNG was filed"
+            image("data:image/png;base64,bm90IGEgcG5nIGF0IGFsbCwgaG9uZXN0bHkgbm90").map(|f| f.path),
+            Err((400, "only an image can be pasted here".to_string())),
+            "a base64 payload that is not an image was filed"
         );
         assert!(image("what is wrong with this?").is_err());
         assert!(image("").is_err());

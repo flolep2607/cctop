@@ -174,13 +174,13 @@ impl App {
     pub(super) fn on_paste(&mut self, text: &str) {
         self.needs_redraw = true;
 
-        // An image that arrived as text, which is the only way one reaches a
-        // cctop running over ssh: the clipboard is on the machine the ssh was
-        // typed on, and no helper on this side can see it. What is pasted is a
+        // An image that arrived as text — one of the ways one reaches a cctop
+        // running over ssh, where the clipboard is on the machine the ssh was
+        // typed on and no helper on this side can see it. What is pasted is a
         // file here, and what the agent is given is its path — the same as F9,
         // by a different road.
-        if let Some(png) = crate::clipboard::png_from_paste(text) {
-            match crate::clipboard::write_png(&png) {
+        if let Some(image) = crate::clipboard::image_from_paste(text) {
+            match crate::clipboard::write_image(&image) {
                 Ok(path) => {
                     let shown = path
                         .file_name()
@@ -276,7 +276,7 @@ impl App {
     /// machine with no helper installed — are things the user can act on.
     fn image_paste(&mut self) -> Option<String> {
         self.needs_redraw = true;
-        match crate::clipboard::image_to_file() {
+        match crate::clipboard::image_to_file(true) {
             Ok(path) => {
                 let shown = path
                     .file_name()
@@ -341,7 +341,10 @@ impl App {
     /// copy it got an image pasted into their agent instead. A gesture whose
     /// meaning depends on a selection cctop cannot see is not one it can take.
     fn image_gesture_into_pane(&mut self) -> bool {
-        let Ok(path) = crate::clipboard::image_to_file() else {
+        // No terminal ask on this path: Ctrl+V is pressed for whatever is on
+        // the clipboard, usually text, and a clipboard-read escape plus a wait
+        // on every paste would stall the common case for the rare one.
+        let Ok(path) = crate::clipboard::image_to_file(false) else {
             return false;
         };
         self.needs_redraw = true;

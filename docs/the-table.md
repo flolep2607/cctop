@@ -317,23 +317,49 @@ and a machine with no such tool need different answers.
 
 ### Pasting an image into a cctop you sshed to
 
-None of the above can work there. The clipboard is on the machine you typed the
-`ssh` on, and nothing installed on the far side can reach it — so `F9` says so
-rather than telling you to install `xclip`.
+No helper on the far side can reach it — the clipboard is on the machine you
+typed the `ssh` on. So `F9` goes the other way and asks the terminal that is
+showing you cctop, over the escapes the connection already carries: kitty's
+clipboard protocol can hand back `image/png` itself, and any terminal that
+answers the classic OSC 52 read gives up its clipboard as text, which files
+the same when the text is a base64 image. Most terminals refuse the read —
+the answer to "what is on the clipboard" is something no program should get
+unasked — so kitty wants `read-clipboard` in `clipboard_control` before it
+will say, and where the terminal stays silent `F9` still says so rather than
+telling you to install `xclip`.
 
-The way that needs nothing of you is the browser. `cctop serve` on that machine
-puts the table on an HTTP port; reach it from your own machine — `ssh -L
-7788:127.0.0.1:7788 <host>`, or `--tunnel` — and paste the screenshot straight
-into the box that answers a waiting session. A browser can take a real image
-off the clipboard where a terminal cannot, so the bytes travel over the
-connection cctop already has, land in `pastes/` on the far machine, and the
-box fills with the path. Then write the sentence around it and send.
+For a terminal that will never answer — Windows Terminal does not, and no
+Ctrl+V or right-click there can put an image on the wire — the way in is the
+connection itself. `ssh` carries sockets back down the link it opened, so a
+small listener on the machine you ssh from can hand the clipboard over.
+`tools/clipboard-bridge.ps1` is that listener, on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File clipboard-bridge.ps1
+```
+
+with the port forwarded — `ssh -R 8377:127.0.0.1:8377 <host>` on the command
+line, or `RemoteForward 8377 127.0.0.1:8377` in `~/.ssh/config` to make it
+permanent. cctop asks by connecting; the bridge answers with the clipboard's
+image, or with a closed connection when there is none. `F9` uses it, and so
+does Ctrl+V in a pane — the ask is a localhost connect that costs nothing
+where no bridge is listening — so from Windows Terminal an image pastes the
+way text does. The port is `CCTOP_CLIPBOARD_PORT` on the far side and `-Port`
+on the bridge when 8377 is already taken.
+
+The way that needs nothing of the terminal or a script is the browser. `cctop serve` on
+that machine puts the table on an HTTP port; reach it from your own machine —
+`ssh -L 7788:127.0.0.1:7788 <host>`, or `--tunnel` — and paste the screenshot
+straight into the box that answers a waiting session. A browser can take a
+real image off the clipboard where a terminal cannot, so the bytes travel over
+the connection cctop already has, land in `pastes/` on the far machine, and
+the box fills with the path. Then write the sentence around it and send.
 
 The other way needs no browser. What crosses a terminal is text, so send the
-image as text: cctop reads any paste that is a PNG in base64 — bare, or as a `data:image/png;base64,…` URI —
-writes it to the same `pastes/` directory, and gives the agent the path. Every
-base64 PNG starts `iVBORw0KGgo`, which is what cctop recognises, so an ordinary
-paste is never mistaken for one.
+image as text: cctop reads any paste that is an image in base64 — bare, or as
+a `data:image/…;base64,…` URI — writes it to the same `pastes/` directory, and
+gives the agent the path. The decoded bytes are sniffed for a real format —
+PNG, JPEG, GIF, WebP, BMP — so an ordinary paste is never mistaken for one.
 
 Encoding it is a one-liner where your clipboard is. In PowerShell, which is
 where you would be if you sshed from Windows:

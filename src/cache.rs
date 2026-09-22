@@ -418,13 +418,16 @@ impl Store {
         self.data(session, true)
     }
 
-    /// Extracted data for the session the user has open, never served stale and
-    /// never served incomplete.
+    /// Extracted data for the session the user has open, never served
+    /// incomplete and stale only within the same bound the rows already use.
     ///
     /// The row-level refresh backs off on expensive transcripts because it pays
     /// that cost once per session, thousands of times over. The open panels are
-    /// one session — the one place where a few seconds of lag is actually visible,
-    /// and the one place where a full parse per change is affordable.
+    /// one session, but the transcript does not know that: a full parse per
+    /// append on a huge file stalls the worker the whole TUI waits on, and a
+    /// lagging panel beats a lagging monitor. So the same backoff applies —
+    /// just never to an entry that came off disk, because what this path exists
+    /// for is exactly the fields that copy dropped.
     ///
     /// It is also the only path that sees the fields the cache drops — the tool
     /// history and the context series — so a cached copy of those, which is
@@ -459,7 +462,14 @@ impl Store {
             // straddle the boundary gets counted twice. Until then, bound the
             // waste: a transcript costing 500ms to parse is re-read every 10s
             // instead of every 2s, while cheap ones stay effectively live.
-            if allow_stale && reuse_stale(entry.parsed_in, entry.parsed_at.elapsed(), entry.size) {
+            //
+            // The panel path joins the backoff for a *complete* entry: it came
+            // from a real parse, so it carries the fields a disk copy drops,
+            // and serving it a few seconds old is what keeps a giant transcript
+            // from being re-read end to end on every append.
+            if (allow_stale || entry.data.complete)
+                && reuse_stale(entry.parsed_in, entry.parsed_at.elapsed(), entry.size)
+            {
                 crate::trace::add("served stale to bound cpu", 1);
                 return entry.data.clone();
             }
@@ -974,6 +984,46 @@ mod tests {
             !back.complete,
             "a restored entry must not claim completeness"
         );
+    }
+
+    /// A stale entry that came from a real parse may answer the panel too: it
+    /// carries the fields a disk copy drops, and a transcript expensive enough
+    /// to back the rows off is just as expensive for the one reader watching it.
+    /// The file has to be over a megabyte for the size floor to apply, or a
+    /// cheap parse's own measured backoff is too small to observe.
+    #[test]
+    fn a_stale_parse_serves_the_panel_within_the_backoff() {
+        let dir = std::env::temp_dir().join(format!("cctop-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("a.jsonl");
+        let assistant = |request: &str, out: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"{request}","message":{{"id":"m_{request}","role":"assistant","model":"claude-opus-5","content":[{{"type":"text","text":"a"}}],"usage":{{"input_tokens":100,"output_tokens":{out}}}}}}}"#
+            )
+        };
+        // A whitespace-only line bulks the file out without adding a record.
+        let body = format!("{}\n{}", assistant("r1", 5), " ".repeat(1 << 20));
+        std::fs::write(&transcript, &body).unwrap();
+
+        let store = Store::new();
+        let mut s = Session::new(crate::pricing::Provider::Claude, "s1".into());
+        s.data_file = Some(transcript.clone());
+        let first = store.session_data_fresh(&s);
+        assert_eq!(first.tokens.output, 5);
+        assert!(first.complete);
+
+        // The transcript grew, but the entry is inside its re-parse bound, so
+        // the panel gets the parse it already paid for rather than a second
+        // one — before this, the fresh path re-read the whole file every time.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&transcript, format!("{body}\n{}", assistant("r2", 50))).unwrap();
+        let second = store.session_data_fresh(&s);
+        assert_eq!(
+            second.tokens.output, 5,
+            "inside the backoff the panel is served the previous parse"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The panel is the one view that reads the fields the cache drops, so a
