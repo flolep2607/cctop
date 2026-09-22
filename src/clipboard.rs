@@ -124,6 +124,24 @@ pub fn image_to_file(ask_terminal: bool) -> Result<PathBuf, NoImage> {
     // something unusable.
     let _ = std::fs::remove_file(&dest);
 
+    // A clipboard bridge on the near side of an ssh link, reached through a
+    // reverse forward — the one channel that needs nothing of the terminal at
+    // all. The ask is a localhost connect, so where no bridge is listening it
+    // costs microseconds rather than a wait, and it runs on every path
+    // including Ctrl+V.
+    if over_ssh() {
+        match image_over_bridge(&dest, bridge_port()) {
+            Attempt::Wrote => return Ok(dest),
+            // A bridge that answered empty was asked about the real clipboard;
+            // the terminal would only repeat the question.
+            Attempt::Empty => {
+                let _ = std::fs::remove_file(&dest);
+                return Err(NoImage::Clipboard);
+            }
+            Attempt::Missing => {}
+        }
+    }
+
     // The terminal is asked when it might see a clipboard the helpers cannot:
     // always over ssh, where that clipboard is the only one that exists, and
     // locally only when no helper ran at all — a helper that reported empty
@@ -419,6 +437,47 @@ impl Helper {
             .ok()?;
         let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
         (!path.is_empty()).then_some(path)
+    }
+}
+
+/// The port a clipboard bridge listens on, on the machine the ssh was typed
+/// from, reached back through `ssh -R <port>:127.0.0.1:<port>`.
+///
+/// The bridge is `tools/clipboard-bridge.ps1`: over ssh the clipboard lives
+/// with the client, and a terminal cannot carry one — but an ssh connection
+/// carries sockets back down it fine. The port is a `CCTOP_` knob because a
+/// forward is named in `~/.ssh/config`, where a fixed port somebody else
+/// already claimed is a real thing to trip on.
+fn bridge_port() -> u16 {
+    std::env::var("CCTOP_CLIPBOARD_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8377)
+}
+
+/// Ask the machine on the near side of the ssh link for its clipboard's image,
+/// through the reverse forward a `clipboard-bridge.ps1` is listening on.
+///
+/// The bridge's whole protocol is a connect that is answered by the PNG or by
+/// nothing: connecting when nothing listens fails at once and cheaply, which
+/// is what makes this safe to try on every paste gesture. What comes back is
+/// sniffed like anything else — a listener on the port is a local process
+/// saying "clipboard", not proof of one.
+fn image_over_bridge(dest: &Path, port: u16) -> Attempt {
+    use std::io::Read;
+    use std::net::TcpStream;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) else {
+        return Attempt::Missing;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    let mut bytes = Vec::new();
+    if stream.read_to_end(&mut bytes).is_err() || format_of(&bytes).is_none() {
+        return Attempt::Empty;
+    }
+    match std::fs::write(dest, &bytes) {
+        Ok(()) => Attempt::Wrote,
+        Err(_) => Attempt::Empty,
     }
 }
 
@@ -906,5 +965,49 @@ mod tests {
         assert!(!clipboard_reply_complete(
             b"\x1b]52;c;aGk=\x07\x1b]5522;type=read:status=OK\x1b\\"
         ));
+    }
+
+    /// A listener on the loopback answering once with whatever it is given —
+    /// the shape of `clipboard-bridge.ps1` from the far side of a forward.
+    fn bridge(answer: Vec<u8>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::Write;
+                let _ = stream.write_all(&answer);
+            }
+        });
+        port
+    }
+
+    /// The bridge's three answers: the image, an empty clipboard, and nobody
+    /// home — each a distinct `Attempt`, since only the middle one is allowed
+    /// to say "clipboard asked, nothing on it".
+    #[test]
+    fn the_bridges_three_answers_are_distinct() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("paste.png");
+        let png = fake(PNG_MAGIC);
+
+        let port = bridge(png.clone());
+        assert!(matches!(image_over_bridge(&dest, port), Attempt::Wrote));
+        assert_eq!(std::fs::read(&dest).expect("written"), png);
+
+        // Answered, and the clipboard held no image.
+        let port = bridge(Vec::new());
+        assert!(matches!(image_over_bridge(&dest, port), Attempt::Empty));
+
+        // Answered, but not with an image — a listener claiming to be the
+        // bridge is still just bytes to be sniffed.
+        let port = bridge(b"not an image, whatever the port says".to_vec());
+        assert!(matches!(image_over_bridge(&dest, port), Attempt::Empty));
+
+        // A port whose listener has gone away is refusal, not emptiness.
+        let gone = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        assert!(matches!(image_over_bridge(&dest, gone), Attempt::Missing));
     }
 }
