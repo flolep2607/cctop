@@ -713,6 +713,12 @@ impl UiPrefs {
     }
 
     pub fn save(&self) {
+        // Every key a test presses that changes a preference ends here, and
+        // `CACHE_DIR` is the developer's real one: the suite was overwriting
+        // their `ui-prefs.json` with defaults on every run.
+        if cfg!(test) {
+            return;
+        }
         let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
         if let Ok(text) = serde_json::to_string(self) {
             let _ = std::fs::write(&*config::UI_PREFS_FILE, text);

@@ -228,6 +228,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `F6`, `>`, `<` | Sort-by panel |
 | `F7` | Filter by age (1d / 1w / 1mo) |
 | `#` | Cost floor: only sessions costing ≥ `$X` |
+| `,` | Settings and keybinds (see below) |
 | `` ` `` | Show only running sessions |
 | `[`, `]` | Move through the Tool Activity tool filter |
 | `v` | Toggle inline diffs for edits |
@@ -279,6 +280,33 @@ sequence.
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+### Settings and keybinds
+
+`,` opens every setting and every key on the session table at the value it has
+now, a `*` beside the ones you have changed. `Enter` changes the row under the
+cursor — a toggle flips, the theme turns to the next one, and a key waits for
+you to press the combination it should move to — and `Backspace` puts it back.
+A key another action was on is still taken; the status line says which action
+lost it. `e` opens the file itself in `$VISUAL` or `$EDITOR`, and an edit saved
+there applies at the next keypress.
+
+It all lives in `config.toml` under your config directory, beside any account
+tokens, and only what you changed is written:
+
+```toml
+[settings]
+theme = "light"          # auto / light / dark / mono
+notify = true
+compact_threshold = 90   # context % the agent compacts at
+
+[keys]
+quit = "x"
+bottom = "shift+down"    # ctrl+, alt+ and shift+ all work
+```
+
+Only the session table's keys move. A modal's keys are the letters on its own
+buttons, and inside a pane the keyboard is the agent's.
 
 ### Pasting an image
 

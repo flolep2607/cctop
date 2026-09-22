@@ -384,6 +384,40 @@ impl App {
         }
     }
 
+    /// Open `config.toml` in `$VISUAL` / `$EDITOR` in a tab of its own, the
+    /// commented reference appended first when the file has none.
+    pub(super) fn edit_settings(&mut self) {
+        let Some(path) = self.settings_file.clone() else {
+            return;
+        };
+        if let Err(e) = crate::settings::ensure_template(&path) {
+            self.set_status(format!("Could not write the config file: {e}"));
+            return;
+        }
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .ok()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or_else(|| "vi".into());
+        // Split on whitespace the way a shell would for `code --wait`, which
+        // is as much of a shell as an editor variable is ever relied on for.
+        let mut argv: Vec<String> = editor.split_whitespace().map(String::from).collect();
+        argv.push(path.display().to_string());
+        self.mode = Mode::List;
+        self.open_tab(
+            &argv,
+            NewTab {
+                cwd: None,
+                what: "the config file",
+                own: tabs::Own::Cctop,
+                verb: "Opened",
+                resumed: None,
+                label: Some("settings".into()),
+                profile: None,
+            },
+        );
+    }
+
     /// Start `argv` in a new tab, reporting what happened either way.
     ///
     /// `resumed` names the session the tab is going back to, when it is going
