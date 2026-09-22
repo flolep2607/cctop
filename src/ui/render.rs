@@ -254,17 +254,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 
     // Overview and limits are fixed; the table and bottom panel split the rest,
     // with the bottom panel capped so the list never collapses to nothing.
-    let body_height = area.height.saturating_sub(5 + 3 + 1);
+    // On a short terminal the fixed panels go whole, limits first, so the table
+    // and the footer keep their rows. Left to the solver, a 12-row screen drew
+    // Limits as a lone top border, and a 5-row one lost the footer.
+    // Overview, the table's floor, and the footer; then Limits on top of those.
+    const WITH_OVERVIEW: u16 = 6 + 4 + 1;
+    const WITH_LIMITS: u16 = WITH_OVERVIEW + 3;
+    let limits_height = if area.height >= WITH_LIMITS { 3 } else { 0 };
+    let overview_height = if area.height >= WITH_OVERVIEW { 6 } else { 0 };
+    let body_height = area
+        .height
+        .saturating_sub(overview_height + limits_height + 1);
     let bottom_height = ((body_height as f32 * 0.45) as u16)
         .clamp(8, 24)
         .min(body_height.saturating_sub(4));
 
     let chunks = RLayout::vertical([
         // Four spend rows plus the border.
-        Constraint::Length(6),
-        Constraint::Min(4),
+        Constraint::Length(overview_height),
+        Constraint::Min(3),
         Constraint::Length(bottom_height),
-        Constraint::Length(3),
+        Constraint::Length(limits_height),
         Constraint::Length(1),
     ])
     .split(area);
@@ -2394,6 +2404,29 @@ mod tests {
 
         app.search = "web".into();
         assert!(names(&app).contains(&"Clear filter"));
+    }
+
+    /// A short terminal drops whole panels rather than drawing half of one,
+    /// and never the footer.
+    #[test]
+    fn a_short_terminal_drops_whole_panels_and_keeps_the_footer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        for (cols, rows) in [(40u16, 12u16), (20, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let lines = screen(&terminal, cols, rows);
+            let text = lines.join("\n");
+            assert!(!text.contains("Limits"), "{text}");
+            assert!(text.contains("Sessions"), "{text}");
+            assert!(lines[rows as usize - 1].contains("Move"), "{text}");
+        }
     }
 
     /// On the 80-column terminal most people open, with the share corner
