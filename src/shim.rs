@@ -137,11 +137,17 @@ impl Drop for Hosted {
 ///
 /// `cwd` is where the agent starts, which for a tab opened from a session's row
 /// is that session's project rather than wherever cctop was launched.
-pub fn host(argv: &[String], cwd: Option<&std::path::Path>) -> anyhow::Result<Hosted> {
+/// `size` is what the pty starts at: the pane it will be drawn in, so the agent
+/// is not resized the moment the first frame lands.
+pub fn host(
+    argv: &[String],
+    cwd: Option<&std::path::Path>,
+    size: (u16, u16),
+) -> anyhow::Result<Hosted> {
     if argv.is_empty() {
         anyhow::bail!("usage: cctop <command> [args…]  (e.g. cctop claude)");
     }
-    let (child, master) = spawn_on_pty(argv, cwd)?;
+    let (child, master) = spawn_on_pty_at(argv, cwd, size)?;
     let pid = child.id();
     crate::elog::event(
         "shim",
@@ -552,7 +558,15 @@ fn spawn_on_pty(
     argv: &[String],
     cwd: Option<&std::path::Path>,
 ) -> anyhow::Result<(std::process::Child, File)> {
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    spawn_on_pty_at(argv, cwd, crossterm::terminal::size().unwrap_or((80, 24)))
+}
+
+/// [`spawn_on_pty`] at `(cols, rows)` rather than the size of this terminal.
+fn spawn_on_pty_at(
+    argv: &[String],
+    cwd: Option<&std::path::Path>,
+    (cols, rows): (u16, u16),
+) -> anyhow::Result<(std::process::Child, File)> {
     let mut size = winsize(cols, rows);
     let mut master_fd = -1;
     let mut slave_fd = -1;
@@ -896,7 +910,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let mut hosted = host(&argv, None).expect("a pty for the child");
+        let mut hosted = host(&argv, None, (80, 24)).expect("a pty for the child");
         // `sh` writes the file and exits at once; poll rather than sleep.
         for _ in 0..200 {
             if hosted.finished().is_some() {
@@ -1178,7 +1192,7 @@ mod tests {
         // see them.
         let script = "stty raw -echo; printf '\\033[c'; dd bs=1 count=9 2>/dev/null | tr -d '\\033'; sleep 30";
         let argv: Vec<String> = ["sh", "-c", script].iter().map(|s| s.to_string()).collect();
-        let Ok(hosted) = host(&argv, None) else {
+        let Ok(hosted) = host(&argv, None, (80, 24)) else {
             eprintln!("skipping: no pty available");
             return;
         };

@@ -331,7 +331,9 @@ fn main() -> anyhow::Result<()> {
 
     // Started before the UI so a failure to launch prints as an ordinary error
     // rather than from inside the alternate screen.
-    let hosted = agent.map(|agent| shim::host(&agent, None)).transpose()?;
+    let hosted = agent
+        .map(|agent| shim::host(&agent, None, ui::render::pane_size()))
+        .transpose()?;
 
     let code = ui::run(&args, hosted)?;
     // After the UI is down, so the message is not painted over by the alternate

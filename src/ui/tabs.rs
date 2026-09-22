@@ -267,7 +267,7 @@ impl Pane {
             Own::TmuxExisting(name) => crate::rmux::attach(name),
             Own::Cctop => argv.to_vec(),
         };
-        let hosted = crate::shim::host(&spawn, cwd)?;
+        let hosted = crate::shim::host(&spawn, cwd, super::render::pane_size())?;
         // The shim binds and serves the socket before returning, so there is
         // something to connect to even though the agent has drawn nothing yet.
         let mut view = crate::attach::attach(hosted.pid).ok_or_else(|| {
