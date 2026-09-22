@@ -200,6 +200,32 @@ fn panel_block_titled(title: &str, title_style: Style) -> Block<'static> {
         .title(Span::styled(format!(" {title} "), title_style))
 }
 
+/// A tab's rows below the bar: the Overview, its terminals, and the footer.
+fn tab_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
+    RLayout::vertical([
+        Constraint::Length(6),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area)
+}
+
+/// The size a one-pane tab draws its terminal at in this window, for starting an
+/// agent at the size it will be shown rather than resizing it on the first frame.
+///
+/// That first-frame resize is not free. Claude outside fullscreen answers every
+/// change of width by reprinting its whole conversation, and a reattach — which
+/// is what switching to a rmux tab does — used to start the client at the
+/// window's full size and then shrink it to the pane: two reprints of thousands
+/// of lines, every switch.
+pub fn pane_size() -> (u16, u16) {
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    // Less the workspace bar, as `draw` takes it.
+    let body = tab_chunks(Rect::new(0, 1, cols, rows.saturating_sub(1)))[1];
+    let inner = Block::bordered().inner(body);
+    (inner.width.max(1), inner.height.max(1))
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     let mut area = frame.area();
     // Light paints the page first so empty cells and Reset spans stay on the
@@ -226,12 +252,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     // the space that leaves them rather than cropped to fit, so giving cctop
     // these rows costs nothing but the rows.
     if app.tab > 0 {
-        let chunks = RLayout::vertical([
-            Constraint::Length(6),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .split(area);
+        let chunks = tab_chunks(area);
         draw_overview(frame, chunks[0], app);
         draw_panes(frame, chunks[1], app, &mut layout);
         draw_footer(frame, chunks[2], app, &mut layout);
@@ -2148,6 +2169,13 @@ fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layou
 pub fn copy_to_clipboard(text: &str) {
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    // A test that copies — an OSC 52 fed through a pane, a selection — would
+    // otherwise land on the clipboard of whoever ran `cargo test`, which is how
+    // a developer's copy came back as `hello`.
+    if cfg!(test) {
+        return;
+    }
 
     const HELPERS: &[(&str, &[&str])] = &[
         ("wl-copy", &[]),

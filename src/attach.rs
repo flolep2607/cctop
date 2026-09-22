@@ -1457,8 +1457,8 @@ mod tests {
 
     /// A clipboard write is not a signal either — and it must reach the
     /// callback that honours it without taking the bell path or the parser
-    /// down with it. The copy itself lands on the system clipboard, which no
-    /// test can read back; what is pinned here is that the sequence is
+    /// down with it. Under test the copy goes nowhere — it would otherwise be
+    /// the system clipboard's — so what is pinned here is that the sequence is
     /// consumed quietly.
     #[test]
     fn a_clipboard_write_is_not_a_signal() {
@@ -1479,7 +1479,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let Ok(hosted) = crate::shim::host(&argv, None) else {
+        let Ok(hosted) = crate::shim::host(&argv, None, (80, 24)) else {
             eprintln!("skipping: no pty available");
             return;
         };
