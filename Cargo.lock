@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "cctop"
-version = "0.16.11"
+version = "0.16.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3206,6 +3206,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

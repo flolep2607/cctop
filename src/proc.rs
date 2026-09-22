@@ -103,9 +103,12 @@ impl Default for Collector {
 }
 
 /// Background daemons that are not interactive sessions.
-fn is_daemon(args: &str) -> bool {
-    args.split_whitespace().any(|tok| {
-        matches!(tok, "app-server" | "server" | "daemon")
+///
+/// Matched per argv element, not per word of the joined command line: a prompt
+/// is one argument, and `claude "restart the dev server"` is a session.
+fn is_daemon(tokens: &[String]) -> bool {
+    tokens.iter().any(|tok| {
+        matches!(tok.as_str(), "app-server" | "server" | "daemon")
             || tok.ends_with("/app-server")
             || tok.ends_with("/daemon")
     })
@@ -192,7 +195,7 @@ fn is_codex_binary(name: &str) -> bool {
 /// processes have no UUID argument, so they must reach the cwd-based fallback
 /// below instead of being discarded as daemons up front.
 fn exclude_agent_process(name: &str, tokens: &[String], args: &str) -> bool {
-    is_app_bundle(args) || (is_daemon(args) && !is_codex_process(name, tokens))
+    is_app_bundle(args) || (is_daemon(tokens) && !is_codex_process(name, tokens))
 }
 
 fn is_node_hosted_agent(tokens: &[String], agent: &str) -> bool {
@@ -1306,7 +1309,7 @@ mod tests {
     #[test]
     fn codex_app_server_reaches_cwd_session_matching() {
         let native = toks("/opt/codex -c features.code_mode_host=true app-server");
-        assert!(is_daemon(&native.join(" ")));
+        assert!(is_daemon(&native));
         assert!(!exclude_agent_process("codex", &native, &native.join(" ")));
 
         let claude = toks("claude app-server");
@@ -1354,10 +1357,19 @@ mod tests {
         assert!(is_codex_process("bwrap", &tokens));
     }
 
+    /// Regression: the daemon test split the *joined* argv on whitespace, so a
+    /// prompt passed as one argument was read word by word, and a session
+    /// started as `claude "restart the dev server"` was dropped as a daemon.
+    #[test]
+    fn a_prompt_that_mentions_a_server_is_still_a_session() {
+        let argv = vec!["claude".to_string(), "restart the dev server".to_string()];
+        assert!(!exclude_agent_process("claude", &argv, &argv.join(" ")));
+    }
+
     #[test]
     fn daemons_and_bundles_excluded() {
-        assert!(is_daemon("codex app-server"));
-        assert!(!is_daemon("codex resume abc"));
+        assert!(is_daemon(&toks("codex app-server")));
+        assert!(!is_daemon(&toks("codex resume abc")));
         assert!(is_app_bundle(
             "/Applications/Claude.app/Contents/MacOS/Claude"
         ));

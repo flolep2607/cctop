@@ -100,6 +100,12 @@ fn without_block(text: &str) -> String {
             skipping = false;
         }
     }
+    // A start with no end is a block someone has edited, and what follows it is
+    // theirs: removing "to the end marker" would remove the rest of the file.
+    // Leaving it means a second block is appended, which is the cheaper mistake.
+    if skipping {
+        return text.to_string();
+    }
     out
 }
 
@@ -266,5 +272,14 @@ mod tests {
     fn removal_keeps_surrounding_lines() {
         let text = format!("before\n{}after\n", block());
         assert_eq!(without_block(&text), "before\nafter\n");
+    }
+
+    /// Regression: a block whose end marker had been edited away swallowed
+    /// every line after it, so the next install or remove truncated the rc
+    /// file from our marker to its end.
+    #[test]
+    fn an_unclosed_block_removes_nothing() {
+        let text = format!("before\n{BEGIN}\nexport PATH=$HOME/bin:$PATH\n");
+        assert_eq!(without_block(&text), text);
     }
 }

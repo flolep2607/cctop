@@ -254,17 +254,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 
     // Overview and limits are fixed; the table and bottom panel split the rest,
     // with the bottom panel capped so the list never collapses to nothing.
-    let body_height = area.height.saturating_sub(5 + 3 + 1);
+    // On a short terminal the fixed panels go whole, limits first, so the table
+    // and the footer keep their rows. Left to the solver, a 12-row screen drew
+    // Limits as a lone top border, and a 5-row one lost the footer.
+    // Overview, the table's floor, and the footer; then Limits on top of those.
+    const WITH_OVERVIEW: u16 = 6 + 4 + 1;
+    const WITH_LIMITS: u16 = WITH_OVERVIEW + 3;
+    let limits_height = if area.height >= WITH_LIMITS { 3 } else { 0 };
+    let overview_height = if area.height >= WITH_OVERVIEW { 6 } else { 0 };
+    let body_height = area
+        .height
+        .saturating_sub(overview_height + limits_height + 1);
     let bottom_height = ((body_height as f32 * 0.45) as u16)
         .clamp(8, 24)
         .min(body_height.saturating_sub(4));
 
     let chunks = RLayout::vertical([
         // Four spend rows plus the border.
-        Constraint::Length(6),
-        Constraint::Min(4),
+        Constraint::Length(overview_height),
+        Constraint::Min(3),
         Constraint::Length(bottom_height),
-        Constraint::Length(3),
+        Constraint::Length(limits_height),
         Constraint::Length(1),
     ])
     .split(area);
@@ -734,6 +744,25 @@ fn ranked_row(name: &str, amount: f64, width: usize) -> Vec<Span<'static>> {
     ]
 }
 
+/// Append each group to `spans` while the whole group still fits in `width`,
+/// stopping at the first that does not.
+///
+/// The Overview's machine column is narrow on an 80-column terminal, and a
+/// figure clipped at the edge reads as a different figure: `73.2K in` cut to
+/// `73.2`, `96%` cut to `96`. A group is a figure with its unit, so it is shown
+/// whole or not at all.
+fn push_while_fits(spans: &mut Vec<Span<'static>>, groups: Vec<Vec<Span<'static>>>, width: usize) {
+    let mut used: usize = spans.iter().map(Span::width).sum();
+    for group in groups {
+        let w: usize = group.iter().map(Span::width).sum();
+        if used + w > width {
+            break;
+        }
+        used += w;
+        spans.extend(group);
+    }
+}
+
 fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel_block("Overview");
     let inner = block.inner(area);
@@ -917,16 +946,19 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             // Percentages of today's spend, not a count of sessions ever seen:
             // the mix that is costing money is the one worth naming.
+            let mut groups = Vec::new();
             for (i, (name, cost)) in stats.models_today.iter().take(3).enumerate() {
-                if i > 0 {
-                    model_spans.push(Span::styled(" · ", theme::dim()));
-                }
-                model_spans.push(Span::styled(name.clone(), theme::value()));
-                model_spans.push(Span::styled(
+                let sep = if i > 0 { " · " } else { "" };
+                groups.push(vec![
+                    Span::styled(sep, theme::dim()),
+                    Span::styled(name.clone(), theme::value()),
+                ]);
+                groups.push(vec![Span::styled(
                     format!(" {:.0}%", cost / today * 100.0),
                     theme::dim(),
-                ));
+                )]);
             }
+            push_while_fits(&mut model_spans, groups, right_w);
         }
 
         let mem_mb = stats.total_memory as f64 / (1024.0 * 1024.0);
@@ -945,31 +977,48 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             app.global_cpu.values().len().checked_sub(1),
         ));
 
+        let mut session_spans = vec![
+            Span::styled(format!("{:<r_label_w$}", "Sessions"), theme::label()),
+            Span::styled(stats.total.to_string(), theme::value()),
+        ];
+        push_while_fits(
+            &mut session_spans,
+            vec![
+                vec![
+                    Span::styled(" · ", theme::dim()),
+                    Span::styled(
+                        format!("{} live", stats.running),
+                        Style::default().fg(theme::colors().cost_low),
+                    ),
+                ],
+                vec![Span::styled(
+                    format!(" · {} in 24h", stats.active_24h),
+                    theme::dim(),
+                )],
+            ],
+            right_w,
+        );
+        let mut mem_spans = vec![
+            Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
+            Span::styled(format!("{mem_mb:.0} MB"), theme::value()),
+        ];
+        push_while_fits(
+            &mut mem_spans,
+            vec![vec![Span::styled(
+                format!(
+                    " · {} in / {} out",
+                    util::compact_tokens(stats.total_input),
+                    util::compact_tokens(stats.total_output)
+                ),
+                theme::dim(),
+            )]],
+            right_w,
+        );
         let right_lines = vec![
             Line::from(model_spans),
-            Line::from(vec![
-                Span::styled(format!("{:<r_label_w$}", "Sessions"), theme::label()),
-                Span::styled(stats.total.to_string(), theme::value()),
-                Span::styled(" · ", theme::dim()),
-                Span::styled(
-                    format!("{} live", stats.running),
-                    Style::default().fg(theme::colors().cost_low),
-                ),
-                Span::styled(format!(" · {} in 24h", stats.active_24h), theme::dim()),
-            ]),
+            Line::from(session_spans),
             Line::from(cpu_spans),
-            Line::from(vec![
-                Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
-                Span::styled(format!("{mem_mb:.0} MB"), theme::value()),
-                Span::styled(
-                    format!(
-                        " · {} in / {} out",
-                        util::compact_tokens(stats.total_input),
-                        util::compact_tokens(stats.total_output)
-                    ),
-                    theme::dim(),
-                ),
-            ]),
+            Line::from(mem_spans),
         ];
         frame.render_widget(Paragraph::new(right_lines), cols[2]);
     }
@@ -1440,6 +1489,14 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                     (_, "Codex") => ("sign-in expired — ", "codex login"),
                     _ => ("sign-in expired — ", "claude login"),
                 };
+                // Three accounts on 120 columns is 37 a column, one short of
+                // `Codex (work) sign-in expired — codex login`: the words give
+                // way before the command does.
+                let wanted = util::cells(name) + 1 + util::cells(said) + cmd.len();
+                let said = match wanted > cols[i].width as usize {
+                    true => "expired — ",
+                    false => said,
+                };
                 spans.push(Span::styled(
                     said,
                     Style::default().fg(theme::colors().cost_mid),
@@ -1529,8 +1586,41 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), cols[i]);
+        frame.render_widget(
+            Paragraph::new(clip_spans(spans, cols[i].width as usize)),
+            cols[i],
+        );
     }
+}
+
+/// `spans` cut to `width` cells, with an ellipsis where they were cut.
+///
+/// A Limits column is a share of one line, and clipped by the frame alone its
+/// message stopped mid-word — `sign-in expi` — with nothing saying there was
+/// more; the ellipsis is what says it.
+fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let line = Line::from(spans);
+    if line.width() <= width {
+        return line;
+    }
+    let mut room = width;
+    let mut out = Vec::new();
+    for span in line.spans {
+        let w = span.width();
+        // Strictly less: the line is being cut, so a cell stays free for the
+        // ellipsis even when this span would end exactly at the edge.
+        if w < room {
+            room -= w;
+            out.push(span);
+            continue;
+        }
+        // The trailing `…` makes the span too long for `room` even when it
+        // was exactly `room`, so truncate always marks the cut.
+        let cut = util::truncate(&format!("{}…", span.content), room);
+        out.push(Span::styled(cut, span.style));
+        break;
+    }
+    Line::from(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1571,9 +1661,11 @@ impl Hint {
             "Esc" => (KeyCode::Esc, Mods::NONE),
             "Tab" => (KeyCode::Tab, Mods::NONE),
             "Space" => (KeyCode::Char(' '), Mods::NONE),
-            "F1" => (KeyCode::F(1), Mods::NONE),
-            "F10" => (KeyCode::F(10), Mods::NONE),
-            "F12" => (KeyCode::F(12), Mods::NONE),
+            // Any function key, read off its number: a list of the ones in use
+            // left `F9 Image` a label that did nothing when clicked.
+            f if f.starts_with('F') && f.len() > 1 => {
+                (KeyCode::F(f[1..].parse().ok()?), Mods::NONE)
+            }
             // `Alt+n` and friends. The letter is the last character, and the
             // handler for these reads the modifier as well as the code.
             alt if alt.starts_with("Alt+") => {
@@ -1686,10 +1778,13 @@ fn list_hints(app: &App) -> Vec<Hint> {
         hints.push(hint("a", "Attach"));
         hints.push(hint("R", "Resume"));
     }
+    // Ahead of the rest, because it is the key that teaches the rest: behind
+    // them, an 80-column footer never showed it. `t` is also on the tab bar's
+    // `+ Tab (t)`, so it is the one that can best afford to go.
+    hints.push(hint("?", "Help"));
     hints.push(hint("t", "New tab"));
     hints.push(hint("Tab", "Panel"));
     hints.push(hint("S", "Sort"));
-    hints.push(hint("?", "Help"));
     hints.push(hint("q", "Quit"));
     hints
 }
@@ -2340,6 +2435,23 @@ mod tests {
         assert!(fit_hints(&hints, 3).is_empty());
     }
 
+    /// Every hint a tab shows that names one key is a button for that key.
+    #[test]
+    fn every_single_key_tab_hint_can_be_clicked() {
+        for h in tab_hints() {
+            assert!(
+                h.event().is_some() || h.key.contains('/') || h.key.contains('→'),
+                "`{} {}` is drawn as a hint but clicking it does nothing",
+                h.key,
+                h.name
+            );
+        }
+        assert_eq!(
+            hint("F9", "Image").event().map(|k| k.code),
+            Some(event::KeyCode::F(9))
+        );
+    }
+
     /// The footer is a map of the state you are in, not a fixed list. Marking
     /// rows swaps the mark key for the things you can now do with the marks,
     /// and a filter that is on brings `Esc` forward.
@@ -2372,6 +2484,106 @@ mod tests {
 
         app.search = "web".into();
         assert!(names(&app).contains(&"Clear filter"));
+    }
+
+    /// A figure the machine column cannot fit is left out, not cut to a
+    /// different number at the panel edge.
+    #[test]
+    fn the_overview_never_shows_a_figure_without_its_unit() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.stats.total_input = 73_200;
+        app.stats.total_output = 2_200;
+        for cols in [80u16, 200] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, 30)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let text = screen(&terminal, cols, 6).join("\n");
+            assert_eq!(
+                text.contains("73.2"),
+                text.contains("73.2K in / 2.2K out"),
+                "{text}"
+            );
+        }
+    }
+
+    /// Three expired accounts on 120 columns keep the whole login command, and
+    /// on 80, where nothing fits, the cut is marked rather than mid-word.
+    #[test]
+    fn a_narrow_limits_column_shortens_its_words_before_its_command() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let expired = |profile: &str| crate::quota::ProfileQuota {
+            profile: profile.to_string(),
+            status: crate::quota::ProviderStatus::Expired,
+            source: crate::config::AccountSource::Directory,
+        };
+        let mut app = crate::ui::tests::test_app();
+        app.quota.claude = vec![expired("default")];
+        app.quota.codex = vec![expired("default"), expired("work")];
+        for (cols, wanted) in [(120u16, "Codex (work) expired — codex login"), (80, "…")] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, 40)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let limits = screen(&terminal, cols, 40)
+                .into_iter()
+                .find(|l| l.contains("Codex (work)"))
+                .expect("no Limits line");
+            assert!(limits.contains(wanted), "{limits:?}");
+        }
+    }
+
+    /// A short terminal drops whole panels rather than drawing half of one,
+    /// and never the footer.
+    #[test]
+    fn a_short_terminal_drops_whole_panels_and_keeps_the_footer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        for (cols, rows) in [(40u16, 12u16), (20, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let lines = screen(&terminal, cols, rows);
+            let text = lines.join("\n");
+            assert!(!text.contains("Limits"), "{text}");
+            assert!(text.contains("Sessions"), "{text}");
+            assert!(lines[rows as usize - 1].contains("Move"), "{text}");
+        }
+    }
+
+    /// On the 80-column terminal most people open, with the share corner
+    /// taking its columns, the help key is still on the footer.
+    #[test]
+    fn an_80_column_footer_still_says_how_to_get_help() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.sessions = vec![crate::ui::tests::session("a", false, "proj")];
+        app.visible = vec![crate::ui::Row::Session(0)];
+        app.selected = 0;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+        terminal
+            .draw(|frame| {
+                draw(frame, &mut app);
+            })
+            .expect("draw");
+        let footer = screen(&terminal, 80, 24).pop().unwrap_or_default();
+        assert!(footer.contains("? Help"), "{footer:?}");
     }
 
     #[test]

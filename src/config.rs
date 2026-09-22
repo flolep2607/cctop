@@ -872,10 +872,9 @@ pub fn is_full_uuid(s: &str) -> bool {
 
 /// Extract a trailing UUID from a Codex rollout filename stem.
 pub fn trailing_uuid(stem: &str) -> Option<&str> {
-    if stem.len() < 36 {
-        return None;
-    }
-    let tail = &stem[stem.len() - 36..];
+    // `get`, not a slice: the stem is any filename under the sessions root, and
+    // 36 bytes from its end can land inside a multi-byte character.
+    let tail = stem.get(stem.len().checked_sub(36)?..)?;
     is_full_uuid(tail).then_some(tail)
 }
 
@@ -1208,6 +1207,15 @@ mod tests {
             trailing_uuid(stem),
             Some("019f1075-3f22-7ad0-b496-73dcda6a7a25")
         );
+    }
+
+    /// Regression: any `.jsonl` under the Codex sessions root is offered here,
+    /// and a stem whose 36th-from-last byte fell inside a multi-byte character
+    /// panicked the slice — on a rayon worker, which takes the whole load down.
+    #[test]
+    fn uuid_extraction_survives_a_non_ascii_stem() {
+        let stem = format!("é{}", "a".repeat(35));
+        assert_eq!(trailing_uuid(&stem), None);
     }
 
     /// Regression: `R` on an ordinary Claude session opened a fresh, logged-out

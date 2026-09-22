@@ -501,10 +501,11 @@ mod tests {
     fn a_line_renders_for_a_person() {
         let line = r#"{"ts":"2026-09-17T12:34:56.789Z","pid":1,"src":"http","kind":"response","path":"/api/sessions","status":200,"bytes":1234}"#;
         let shown = render(line).unwrap();
-        // serde_json's map is ordered: the extra fields print alphabetically.
+        // serde_json keeps insertion order (`preserve_order`): the extra fields
+        // print in the order they were logged.
         assert_eq!(
             shown,
-            "12:34:56.789Z http    response bytes=1234 path=/api/sessions status=200"
+            "12:34:56.789Z http    response path=/api/sessions status=200 bytes=1234"
         );
     }
 

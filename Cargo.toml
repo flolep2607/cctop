@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.16.11"
+version = "0.16.12"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -37,6 +37,20 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Full debug info is mostly link time and disk for a debugger nobody attached.
+# Line tables keep panic backtraces useful; `--profile debugging` restores the
+# rest when someone does want to step through. Per the Cargo book's
+# build-performance guide.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true
+
 [dependencies]
 anyhow = "1.0.104"
 # The pty shim and TIOCSTI injection need libc. It is already in the tree under
@@ -61,7 +75,10 @@ regex = "1.13.1"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 self-replace = "1.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+# `preserve_order` because cctop rewrites other tools' settings files to add its
+# hooks, and a `BTreeMap` behind `Map` would hand the user back every key they
+# own sorted alphabetically.
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"

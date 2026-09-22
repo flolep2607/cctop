@@ -223,16 +223,35 @@ pub fn path_tail(path: &str, parts: usize) -> String {
 }
 
 /// Truncate to `width` display cells, appending `…` when it doesn't fit.
+///
+/// Cells, not chars: a CJK project name is two cells a character, and counting
+/// chars let it run past its column and off the edge with no ellipsis at all.
 pub fn truncate(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
+    if cells(s) <= width {
         return s.to_string();
     }
-    if width <= 1 {
-        return s.chars().take(width).collect();
+    if width == 0 {
+        return String::new();
     }
-    let mut out: String = s.chars().take(width - 1).collect();
+    let mut out = String::new();
+    let mut used = 0;
+    let mut utf8 = [0u8; 4];
+    for c in s.chars() {
+        let w = cells(c.encode_utf8(&mut utf8));
+        // One cell stays free for the ellipsis.
+        if used + w >= width {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
     out.push('…');
     out
+}
+
+/// Terminal cells `s` occupies, by the same measure ratatui lays text out with.
+pub fn cells(s: &str) -> usize {
+    ratatui::text::Span::raw(s).width()
 }
 
 /// Strip a leading `$HOME` and replace it with `~`.
