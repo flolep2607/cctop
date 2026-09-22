@@ -89,6 +89,9 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     if hosts.is_empty() {
         app.hidden_columns.push(ColumnId::Host);
     }
+    // The conversations and serves that reach back to a remote row ask the
+    // `Host`, not the row — the row only knows the machine's name.
+    app.remote_hosts = hosts;
     // Likewise USER: with only this user's homes in view, every row's owner is
     // the person reading the screen.
     if crate::config::OTHER_HOMES.is_empty() {
@@ -529,6 +532,11 @@ fn event_loop(
                     }
                 }
                 Ok(Response::Quota(q)) => {
+                    // Before the new reading replaces the old: the notifier's
+                    // edge is between the two, so it has to see this one first.
+                    for text in app.notify.observe_quota(&q) {
+                        app.announce_quota_freed(&text);
+                    }
                     app.quota = *q;
                     // The poller has just written whatever this reading added,
                     // so this is the one moment the log is known to have moved.
@@ -601,6 +609,11 @@ fn event_loop(
                     app.insight = Some(text);
                     app.insight_scroll = 0;
                 }
+                Ok(Response::Chat {
+                    key,
+                    before,
+                    result,
+                }) => app.got_chat(key, before, result),
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -692,8 +705,9 @@ fn event_loop(
         // a channel nothing polls but this, and until it does the corner has a
         // spinner to turn.
         app.needs_redraw |= app.tick_share();
-        // The insight report's spinner turns on the same terms.
-        app.needs_redraw |= app.insight_loading();
+        // The insight report's spinner turns on the same terms, and so does
+        // the conversation view's.
+        app.needs_redraw |= app.insight_loading() || app.chat_loading();
 
         // A blinking tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only on
@@ -737,10 +751,11 @@ fn event_loop(
         };
         // A spinner that advances five times a second reads as a stutter. While
         // one is turning the loop wakes at its frame rate instead.
-        let idle_wait = match app.share_opening.is_some() || app.insight_loading() {
-            true => idle_wait.min(Duration::from_millis(100)),
-            false => idle_wait,
-        };
+        let idle_wait =
+            match app.share_opening.is_some() || app.insight_loading() || app.chat_loading() {
+                true => idle_wait.min(Duration::from_millis(100)),
+                false => idle_wait,
+            };
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())
             .unwrap_or(Duration::ZERO)

@@ -121,7 +121,7 @@ impl Host {
 
     /// Read this host once.
     pub fn poll(&self) -> Snapshot {
-        match self.run() {
+        match self.run(&["--json"]) {
             Ok(json) => match parse(&self.target, &json) {
                 Ok(rows) => Snapshot::Rows(rows),
                 Err(why) => Snapshot::Failed(why),
@@ -130,7 +130,13 @@ impl Host {
         }
     }
 
-    fn run(&self) -> Result<String, String> {
+    /// Run this host's cctop with `args`, returning its stdout.
+    ///
+    /// `--json` is the poll; `--report`, `--chat` and `--access` are how a
+    /// serve or the TUI reads a remote row's transcript on the machine that
+    /// has it. Both are the same `ssh target -- command …` with the same
+    /// options — the flag differs, the transport does not.
+    pub fn run(&self, args: &[&str]) -> Result<String, String> {
         // `BatchMode` is the important one: without it a host whose key needs a
         // passphrase, or one that is not in `known_hosts`, blocks on a prompt
         // that has nowhere to appear — the poll thread would hang forever
@@ -148,8 +154,8 @@ impl Host {
                 &self.target,
                 "--",
                 &self.command,
-                "--json",
             ])
+            .args(args)
             .output()
             .map_err(|e| format!("could not run ssh: {e}"))?;
 

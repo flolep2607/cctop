@@ -252,7 +252,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if args.list || args.json {
+    if args.list
+        || args.json
+        || args.statusline
+        || args.report.is_some()
+        || args.chat.is_some()
+        || args.access.is_some()
+    {
         // Non-interactive modes need pricing before they can print anything, so
         // fetch synchronously. The TUI refreshes it on a background thread.
         pricing::refresh_pricing_blocking();
@@ -261,8 +267,16 @@ fn main() -> anyhow::Result<()> {
         let sessions = loader.load(args.plan);
         if args.json {
             cli::run_json(&sessions, args.plan, &loader)?;
-        } else {
+        } else if args.list {
             cli::run_list(&sessions, args.plan);
+        } else if let Some(which) = &args.report {
+            cli::run_report(&sessions, which, args.plan, &loader)?;
+        } else if let Some(which) = &args.chat {
+            cli::run_chat(&sessions, which, args.before)?;
+        } else if let Some(which) = &args.access {
+            cli::run_access(&sessions, which, &loader)?;
+        } else {
+            cli::run_statusline(&sessions);
         }
         loader.store().save();
         finish_trace(&args);

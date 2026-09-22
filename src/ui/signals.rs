@@ -52,7 +52,26 @@ impl App {
     /// stdout, which ratatui owns, and only here is it certain that no frame is
     /// halfway through being flushed.
     pub(super) fn check_bells(&mut self) {
+        // The serve's link is what a webhook POST points at, so it is refreshed
+        // with the crossings: starting `B` mid-run must not leave every future
+        // notification saying there is nowhere to look.
+        self.notify.link_base = self.serving.as_ref().map(|s| s.best().to_string());
         self.notify.observe(&self.sessions);
+    }
+
+    /// A quota window that just opened back up.
+    ///
+    /// The same machinery as a session crossing — the bell, the webhook, the
+    /// log — pointed at the other thing worth being interrupted for: "you can
+    /// spend again" is the one event a monitor of agent spend owes a person
+    /// who has stepped away.
+    pub(super) fn announce_quota_freed(&mut self, text: &str) {
+        crate::elog::event("quota", "freed", serde_json::json!({ "text": text }));
+        self.notify.post_event("quota-freed", text);
+        if self.notify.enabled {
+            crate::notify::ring(&format!("cctop: {text}"));
+        }
+        self.set_status(text.to_string());
     }
 
     /// Turn the bell on or off, and remember which.

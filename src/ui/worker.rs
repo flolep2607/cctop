@@ -33,6 +33,14 @@ pub(super) enum Request {
     Insight {
         which: &'static str,
     },
+    /// A window of the open conversation view. `host` is the machine to ask
+    /// over ssh when the row is remote; `before` pages backwards through a
+    /// session longer than one window.
+    Chat {
+        session: Box<Session>,
+        host: Option<crate::fleet::Host>,
+        before: Option<usize>,
+    },
     /// What the agents' own hooks have said about which processes they run
     /// under. Sent when it changes rather than with each walk: events arrive on
     /// the agents' clock and walks on the UI's, and the worker is where the
@@ -88,6 +96,15 @@ pub(super) enum Response {
     },
     /// A finished report, already laid out as text.
     Insight(String),
+    /// A conversation read. `key` and `before` echo the request so an answer
+    /// for a view that has since moved on is recognised and dropped; the
+    /// remote path's document deserialises into the same `Conversation` the
+    /// local builder produces, which is why both come back in one arm.
+    Chat {
+        key: String,
+        before: Option<usize>,
+        result: Result<Box<crate::serve::chat::Conversation>, String>,
+    },
 }
 
 /// Remembered scan results, keyed by session and query. `None` is a remembered
@@ -419,6 +436,44 @@ pub(super) fn spawn_worker(
                         }
                     });
                     if tx.send(Response::Insight(text)).is_err() {
+                        break;
+                    }
+                }
+                Request::Chat {
+                    session,
+                    host,
+                    before,
+                } => {
+                    let result = match host {
+                        // The transcript lives on the far side — ask the cctop
+                        // there for the same document the local build would
+                        // make, rather than parsing a local file that happens
+                        // to share the path.
+                        Some(host) => {
+                            let marker = before.map(|b| b.to_string());
+                            let mut args = vec!["--chat", session.session_id.as_str()];
+                            if let Some(marker) = marker.as_deref() {
+                                args.extend(["--before", marker]);
+                            }
+                            host.run(&args).and_then(|json| {
+                                serde_json::from_str(&json).map_err(|e| {
+                                    format!(
+                                        "{} returned an unreadable conversation: {e}",
+                                        host.target
+                                    )
+                                })
+                            })
+                        }
+                        None => Ok(crate::serve::chat::build(&session, before)),
+                    };
+                    if tx
+                        .send(Response::Chat {
+                            key: session.key(),
+                            before,
+                            result: result.map(Box::new),
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }

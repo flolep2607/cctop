@@ -174,6 +174,35 @@ pub struct Args {
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub handoff: Option<String>,
 
+    /// Print one line for a status bar — tmux, waybar, a shell prompt — and
+    /// exit: how many agents are working, how many are waiting on you, and
+    /// the current spend rate
+    #[arg(long)]
+    pub statusline: bool,
+
+    /// Print one session's report as JSON — the document `cctop serve` answers
+    /// /api/report/<id> with — and exit. Takes a session id or a unique
+    /// prefix; with no argument, the most recently active session. A serve
+    /// answers for a remote row by running this on the machine the session
+    /// lives on, over the same ssh channel the row arrived by
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
+    pub report: Option<String>,
+
+    /// Print one session's conversation as JSON — /api/chat/<id> — and exit.
+    /// With --before, the window of turns ends just before that sequence
+    /// number, which is how older turns are reached
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
+    pub chat: Option<String>,
+
+    /// With --chat, end the returned window before this turn's sequence number
+    #[arg(long, requires = "chat", value_name = "SEQ")]
+    pub before: Option<usize>,
+
+    /// Print what one session can reach — instructions, skills, MCP servers —
+    /// as JSON, and exit. /api/access/<id> on a serve
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
+    pub access: Option<String>,
+
     /// Download the model the topical search needs (about 30 MB, once), then
     /// exit. Until this is run, `/` searches transcripts literally and nothing
     /// reaches the network
@@ -510,15 +539,13 @@ pub struct JsonConflict {
     files: Vec<String>,
 }
 
-/// Print one session's context brief to stdout.
+/// Resolve `which` to one session — a full id, an unambiguous prefix, or the
+/// empty string for the most recently active — or bail saying why.
 ///
-/// The non-interactive half of `O` in the UI, and the half a script can use:
-/// the brief is plain markdown on stdout, so piping it into another agent's own
-/// prompt flag needs nothing of cctop beyond this call.
-///
-/// `which` is a session id or any unique prefix of one; empty means the most
-/// recently active session, which is nearly always the one just left.
-pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
+/// Shared by every flag that prints one session's detail (`--handoff`,
+/// `--report`, `--chat`, `--access`), so they all answer an ambiguous prefix
+/// the same way and all agree on what no argument means.
+fn find_session<'a>(sessions: &'a [Session], which: &str) -> anyhow::Result<&'a Session> {
     let matched: Vec<&Session> = match which.is_empty() {
         true => {
             // `max_by_key` on the timestamps rather than on load order: the
@@ -536,8 +563,8 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
             .collect(),
     };
 
-    let session = match matched.as_slice() {
-        [only] => *only,
+    match matched.as_slice() {
+        [only] => Ok(*only),
         [] if which.is_empty() => anyhow::bail!("no sessions found"),
         [] => anyhow::bail!("no session id starts with '{which}'"),
         // Listing them is what makes the error actionable — a prefix is only
@@ -550,8 +577,16 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
                 .collect::<Vec<_>>()
                 .join("\n")
         ),
-    };
+    }
+}
 
+/// Print one session's context brief to stdout.
+///
+/// The non-interactive half of `O` in the UI, and the half a script can use:
+/// the brief is plain markdown on stdout, so piping it into another agent's own
+/// prompt flag needs nothing of cctop beyond this call.
+pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
     // The brief is built out of the tool history, which the cache does not
     // carry, so this is one of the two callers that needs a real parse.
     let data = loader.store().session_data_fresh(session);
@@ -559,6 +594,93 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
     // Printed *and* written: the record of the conversation is a file, and a
     // brief that named one it had not left would send its reader looking.
     print!("{}", crate::handoff::rendered(&brief));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --statusline
+// ---------------------------------------------------------------------------
+
+/// Print the one line a status bar shows, and exit.
+///
+/// `--list` answers "what is running" for a person and `--json` for a program;
+/// this answers it for a tmux `status-right` or a waybar module, which has
+/// room for a line and already knows how to keep one fresh. The counts use the
+/// same state names the status dot and the `--json` document do.
+pub fn run_statusline(sessions: &[Session]) {
+    println!("{}", statusline(sessions));
+}
+
+/// The line `run_statusline` prints, split out so the tests can read it.
+fn statusline(sessions: &[Session]) -> String {
+    use crate::session::ActivityState;
+    let live: Vec<&Session> = sessions.iter().filter(|s| s.is_running()).collect();
+    if live.is_empty() {
+        return "no agents running".to_string();
+    }
+    let mut parts = Vec::new();
+    for (state, word) in [
+        (ActivityState::Working, "working"),
+        (ActivityState::WaitingForInput, "waiting"),
+        (ActivityState::Asking, "asking"),
+        (ActivityState::ApiError, "error"),
+    ] {
+        let n = live.iter().filter(|s| s.activity_state == state).count();
+        if n > 0 {
+            parts.push(format!("{n} {word}"));
+        }
+    }
+    // The rate is the number a line refreshed every few seconds is there to
+    // move: today's total is in the table for whoever wants it.
+    let per_hour = live.iter().map(|s| s.cost_per_min * 60.0).sum::<f64>();
+    if per_hour >= 0.005 {
+        parts.push(format!("{}/h", util::adaptive_usd(per_hour)));
+    }
+    parts.join(" · ")
+}
+
+// ---------------------------------------------------------------------------
+// --report / --chat / --access: the per-session documents, as commands
+// ---------------------------------------------------------------------------
+//
+// The same three documents `cctop serve` answers `/api/report`, `/api/chat`
+// and `/api/access` with. They exist as commands so the serve on *this*
+// machine can answer for a remote row by asking the cctop that actually has
+// the transcript — `ssh host cctop --report <id>` over the channel `--host`
+// already opens — rather than by reading a path on the wrong filesystem.
+
+/// Print one session's report as JSON, and exit.
+pub fn run_report(
+    sessions: &[Session],
+    which: &str,
+    plan: Plan,
+    loader: &Loader,
+) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
+    let data = loader.store().session_data_fresh(session);
+    let report = crate::serve::report::build(session, &data, plan);
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+/// Print one session's conversation as JSON, and exit.
+pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
+    // Deliberately not the cache: a conversation is the text the cache drops.
+    let conversation = crate::serve::chat::build(session, before);
+    println!("{}", serde_json::to_string(&conversation)?);
+    Ok(())
+}
+
+/// Print what one session can reach — instructions, skills, MCP servers —
+/// as JSON, and exit.
+pub fn run_access(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
+    let data = loader.store().session_data_fresh(session);
+    println!(
+        "{}",
+        serde_json::to_string(&crate::access::build(session, Some(&data)))?
+    );
     Ok(())
 }
 
@@ -740,5 +862,39 @@ mod tests {
     fn clear_cache_flag_is_accepted() {
         let args = Args::try_parse_from(["cctop", "--clear-cache"]).expect("valid args");
         assert!(args.clear_cache);
+    }
+
+    /// The line a status bar is handed: live counts in the words the status
+    /// dot uses, the burn rate while money is moving, and a quiet answer when
+    /// nothing is running — stale rows must not count.
+    #[test]
+    fn the_statusline_names_live_states_and_the_burn_rate() {
+        use crate::session::ActivityState;
+        let live = |state| {
+            let mut s = Session::new(crate::pricing::Provider::Claude, "x".into());
+            s.inferred_running = true;
+            s.activity_state = state;
+            s
+        };
+
+        assert_eq!(statusline(&[]), "no agents running");
+        assert_eq!(
+            statusline(&[Session::new(crate::pricing::Provider::Claude, "x".into())]),
+            "no agents running",
+            "a stale transcript is not an agent at work"
+        );
+
+        let mut working = live(ActivityState::Working);
+        working.cost_per_min = 0.20; // $12/h
+        let line = statusline(&[
+            working,
+            live(ActivityState::WaitingForInput),
+            live(ActivityState::WaitingForInput),
+            live(ActivityState::Asking),
+        ]);
+        assert!(line.contains("1 working"), "{line}");
+        assert!(line.contains("2 waiting"), "{line}");
+        assert!(line.contains("1 asking"), "{line}");
+        assert!(line.contains("$12"), "{line}");
     }
 }

@@ -45,8 +45,9 @@
 use crate::pricing::Provider;
 use crate::session::{Delta, Session, devin, extract};
 use crate::util;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
@@ -81,7 +82,11 @@ const MAX_TOOLS_PER_TURN: usize = 64;
 const MAX_DIFF_LINES: usize = 200;
 
 /// One session's conversation, as much of it as is sent.
-#[derive(Debug, Default, Clone, Serialize)]
+///
+/// `Deserialize` because the same document is the wire format between two
+/// cctops: a remote row's conversation is this, read off an ssh pipe rather
+/// than off a transcript — see [`crate::fleet`].
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     /// Whether this harness has a reader at all. False carries a `note` saying
     /// why, and is not an error: the rest of the report is still true.
@@ -91,12 +96,12 @@ pub struct Conversation {
     /// Turns the transcript holds that came before the ones sent.
     pub earlier: usize,
     /// Why this is empty or short, when there is a reason worth saying.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub note: Option<String>,
 }
 
 /// One thing that was said, and what it caused.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
     /// The turn's place in the whole transcript, oldest counting from zero.
     ///
@@ -106,18 +111,22 @@ pub struct Turn {
     /// turns are filtered out of `turns`, so position and sequence part ways.
     pub seq: usize,
     /// `user`, `assistant`, or `system` for the harness speaking for itself.
-    pub role: &'static str,
+    ///
+    /// A `Cow` rather than `&'static str` because a turn read back over ssh is
+    /// owned; every writer below still passes a literal, so nothing here
+    /// allocates.
+    pub role: Cow<'static, str>,
     /// `message` ordinarily; `reasoning` for a thinking summary, `compaction`
     /// for the summary a harness writes when it reclaims the window. The page
     /// styles them differently because they are read differently — a compaction
     /// is a seam in the conversation, not a thing anybody said.
-    pub kind: &'static str,
+    pub kind: Cow<'static, str>,
     pub ts: String,
     pub text: String,
     /// Whether `text` was cut to [`MAX_TEXT_CHARS`].
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub clipped: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tools: Vec<ToolUse>,
 }
 
@@ -126,8 +135,8 @@ impl Turn {
         Turn {
             // Numbered by `push`, the only place that knows the count.
             seq: 0,
-            role,
-            kind,
+            role: Cow::Borrowed(role),
+            kind: Cow::Borrowed(kind),
             ts: ts.to_string(),
             text: String::new(),
             clipped: false,
@@ -166,7 +175,7 @@ impl Turn {
 }
 
 /// One tool call, with whatever came back from it.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ToolUse {
     /// The name as the transcript spelled it, with an MCP server's prefix made
     /// readable — `mcp__linear__list_issues` is `linear: list issues` on screen
@@ -175,20 +184,20 @@ pub struct ToolUse {
     /// The one-line form: the path, the command, the pattern.
     pub detail: String,
     /// The argument in full, when it differs from `detail`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub full: Option<String>,
     /// The head of what the tool returned, or `None` while it is still running —
     /// which is what makes the last call of a live session visibly pending.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub result: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub failed: bool,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "is_zero", default)]
     pub added: u32,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "is_zero", default)]
     pub removed: u32,
     /// Unified-diff lines, when the harness recorded the patch it applied.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diff: Vec<String>,
 }
 
@@ -1247,7 +1256,7 @@ mod tests {
             r#"{"type":"user","timestamp":"t4","message":{"content":"again"}}"#,
             r#"{"type":"assistant","timestamp":"t5","message":{"content":[{"type":"text","text":"a new reply"}]}}"#,
         ]);
-        let roles: Vec<&str> = chat.turns.iter().map(|t| t.role).collect();
+        let roles: Vec<&str> = chat.turns.iter().map(|t| t.role.as_ref()).collect();
         assert_eq!(roles, vec!["user", "assistant", "user", "assistant"]);
         assert_eq!(chat.turns[1].text, "first\n\nsecond");
         assert_eq!(chat.turns[1].tools.len(), 1);
@@ -1532,7 +1541,7 @@ mod tests {
             r#"{"type":"assistant","timestamp":"t2","requestId":"req_1","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/a"}}]}}"#,
             r#"{"type":"assistant","timestamp":"t3","requestId":"req_1","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/b"}}]}}"#,
         ]);
-        let kinds: Vec<&str> = chat.turns.iter().map(|t| t.kind).collect();
+        let kinds: Vec<&str> = chat.turns.iter().map(|t| t.kind.as_ref()).collect();
         assert_eq!(kinds, vec!["message", "reasoning", "message"]);
         assert_eq!(chat.turns[2].text, "two at once");
         assert_eq!(chat.turns[2].tools.len(), 2, "{:?}", chat.turns[2]);
@@ -1546,7 +1555,7 @@ mod tests {
             r#"{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"contents"}]}}"#,
             r#"{"type":"assistant","timestamp":"t3","message":{"content":[{"type":"text","text":"now I know"}]}}"#,
         ]);
-        let roles: Vec<&str> = chat.turns.iter().map(|t| t.role).collect();
+        let roles: Vec<&str> = chat.turns.iter().map(|t| t.role.as_ref()).collect();
         assert_eq!(roles, vec!["user", "assistant", "assistant"]);
         assert_eq!(chat.turns[1].text, "looking");
         assert_eq!(chat.turns[1].tools.len(), 1);
@@ -1583,7 +1592,11 @@ mod tests {
             &HashMap::new(),
         );
         assert!(chat.supported);
-        let roles: Vec<(&str, &str)> = chat.turns.iter().map(|t| (t.role, t.kind)).collect();
+        let roles: Vec<(&str, &str)> = chat
+            .turns
+            .iter()
+            .map(|t| (t.role.as_ref(), t.kind.as_ref()))
+            .collect();
         assert_eq!(
             roles,
             vec![

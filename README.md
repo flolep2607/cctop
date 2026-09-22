@@ -160,6 +160,7 @@ bundled usage as `incl` instead.
 cctop                 # interactive UI
 cctop --list          # print a table and exit
 cctop --json          # dump full session data as JSON
+cctop --statusline    # one line for a status bar: "3 working · 1 waiting · $4.12/h"
 cctop --plan max      # treat Claude usage as bundled
 cctop --host devbox   # also show another machine's sessions, read over ssh
 cctop doctor          # check this installation and say what is wrong with it

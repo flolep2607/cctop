@@ -5,6 +5,7 @@ use super::render::Layout;
 use super::share;
 use super::theme;
 use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, tabs};
+use crate::session::Session;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -152,6 +153,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("R", "Resume it in a tab of its own"),
         item("s", "Type a line into its terminal"),
         item("O", "Hand its context off to a different agent"),
+        item("i", "Read its conversation (works on remote rows)"),
         item("y", "Copy resume command or transcript path"),
         item("e / E", "Show its subagents / all subagents"),
         item("d", "Delete it (only when it is not running)"),
@@ -1783,6 +1785,169 @@ pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
             .scroll((app.insight_scroll.min(max_scroll), 0)),
         box_area,
     );
+}
+
+/// The selected session's conversation, read-only — the terminal half of what
+/// the report page shows a browser, over the same `chat::build`.
+///
+/// `back` is scrolled from the end rather than the top: the document the user
+/// is reading can grow while they read it, and a position counted from the
+/// start would shift under them every time it does.
+pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(view) = &mut app.chat else {
+        return;
+    };
+
+    let title = match &view.session.remote {
+        // The host is worth the title room: a remote conversation is otherwise
+        // indistinguishable from a local one, and knowing which machine it was
+        // read off is the whole difference.
+        Some(remote) => format!(
+            " {} — conversation · on {} ",
+            view.session.display_label(),
+            remote.host
+        ),
+        None => format!(" {} — conversation ", view.session.display_label()),
+    };
+
+    let width = area.width.saturating_sub(4).min(110);
+    let height = area.height.saturating_sub(4);
+    let box_area = centered(area, width, height);
+    frame.render_widget(Clear, box_area);
+
+    // Borders, plus a space of padding either side, is what the wrap below has
+    // to agree with.
+    let text_width = (box_area.width as usize).saturating_sub(4).max(1);
+    let body: Vec<Line> = match (&view.conversation, &view.error) {
+        (None, None) => vec![
+            Line::default(),
+            Line::from(vec![
+                Span::styled(format!("  {}", share::spinner_frame()), theme::title()),
+                match view.host.is_some() {
+                    true => Span::styled("  Reading it over ssh…", theme::value()),
+                    false => Span::styled("  Reading the transcript…", theme::value()),
+                },
+            ]),
+        ],
+        (None, Some(why)) => vec![
+            Line::default(),
+            Line::from(Span::styled(format!("  {why}"), theme::failed())),
+        ],
+        (Some(conv), _) => chat_lines(&view.session, conv, text_width),
+    };
+
+    let footer = match &view.conversation {
+        _ if view.fetching => format!(
+            " ↑↓ scroll · {} loading earlier… · esc close ",
+            share::spinner_frame()
+        ),
+        Some(c) if c.earlier > 0 => {
+            format!(" ↑↓ scroll · u load {} earlier · esc close ", c.earlier)
+        }
+        _ => " ↑↓ scroll · esc close ".to_string(),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
+        .title(Span::styled(title, theme::title()))
+        .title_bottom(Span::styled(footer, theme::dim()));
+
+    let visible = box_area.height.saturating_sub(2) as usize;
+    // The only place the wrapped height is known, so the furthest-back offset
+    // is written here for the key handler to clamp against.
+    view.max_back = (body.len().saturating_sub(visible)).min(u16::MAX as usize) as u16;
+    let top = body.len().saturating_sub(visible + view.back as usize);
+    frame.render_widget(
+        Paragraph::new(body).block(block).scroll((top as u16, 0)),
+        box_area,
+    );
+}
+
+/// A conversation laid out as styled lines, wrapped to `width`.
+///
+/// Turns read like the report page's: a small header naming the speaker, the
+/// text at full width, and each tool call underneath it dimmed — a tool's work
+/// is context for the text, not the text itself.
+fn chat_lines(
+    session: &Session,
+    conv: &crate::serve::chat::Conversation,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let assistant = session.surface.label(session.provider).to_string();
+    let now = chrono::Utc::now();
+    let mut out: Vec<Line> = Vec::new();
+
+    if let Some(note) = &conv.note {
+        for line in super::panels::wrap(note, width) {
+            out.push(Line::styled(line, theme::dim()));
+        }
+        out.push(Line::default());
+    }
+    for turn in &conv.turns {
+        if turn.kind.as_ref() == "compaction" {
+            // A seam, not something said — drawn as a rule so the eye reads it
+            // as one rather than hunting for a speaker.
+            out.push(Line::styled("  ── compacted ──", theme::dim()));
+            out.push(Line::default());
+            continue;
+        }
+        let (who, style) = match turn.role.as_ref() {
+            "user" => ("you".to_string(), theme::title()),
+            "assistant" => (assistant.clone(), theme::title()),
+            _ => ("system".to_string(), theme::dim()),
+        };
+        let when = crate::util::relative_age(&turn.ts, &now);
+        let text_style = match turn.kind.as_ref() {
+            // Reasoning is the agent thinking out loud: kept dim so the
+            // transcript's own hierarchy survives the small screen.
+            "reasoning" => theme::dim(),
+            _ => theme::value(),
+        };
+        out.push(Line::from(vec![
+            Span::styled(format!("  {who}"), style),
+            Span::styled(format!("  {when}"), theme::dim()),
+        ]));
+        for line in super::panels::wrap(&turn.text, width) {
+            out.push(Line::styled(format!("  {line}"), text_style));
+        }
+        for tool in &turn.tools {
+            let (mark, style) = match tool.failed {
+                true => ("✗", theme::failed()),
+                false => ("⚙", theme::dim()),
+            };
+            let counts = match (tool.added, tool.removed) {
+                (0, 0) => String::new(),
+                (a, r) => format!("  +{a} −{r}"),
+            };
+            out.push(Line::from(vec![
+                Span::styled(format!("    {mark} {}", tool.name), style),
+                Span::styled(format!("  {}", tool.detail), theme::dim()),
+                Span::styled(counts, theme::dim()),
+            ]));
+            // The full argument only exists where it says more than the
+            // one-liner did — a long command, a whole file body.
+            if let Some(full) = &tool.full {
+                for line in super::panels::wrap(full, width.saturating_sub(6)) {
+                    out.push(Line::styled(format!("      {line}"), theme::dim()));
+                }
+            }
+            if let Some(result) = &tool.result {
+                for line in super::panels::wrap(result, width.saturating_sub(6)) {
+                    out.push(Line::styled(format!("      {line}"), theme::dim()));
+                }
+            }
+            for line in &tool.diff {
+                let style = match line.starts_with('+') {
+                    true => theme::value(),
+                    false => theme::dim(),
+                };
+                out.push(Line::styled(format!("      {line}"), style));
+            }
+        }
+        out.push(Line::default());
+    }
+    out
 }
 
 #[cfg(test)]

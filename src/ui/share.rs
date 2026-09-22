@@ -129,6 +129,9 @@ impl App {
             // — a page saying one thing while the table beside it says another
             // is the bug nobody thinks to look for.
             scan: false,
+            // The dashboard's rows include the remote ones, and the serve owes
+            // them the same answers — the `Host`s are how it reaches back.
+            hosts: self.remote_hosts.clone(),
             ..Default::default()
         };
         if tunnel {

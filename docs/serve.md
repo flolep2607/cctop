@@ -223,9 +223,13 @@ Remote rows are read over ssh and merged into the same table. A host that cannot
 be read shows a banner saying which one and why, rather than quietly going
 missing and leaving the totals looking complete.
 
-Remote rows have no report page: the transcript is on the other machine, and
-parsing the same path here would report whatever happens to live at it locally.
-Run `cctop serve` there for that.
+A remote row's report page works too: `/api/report`, `/api/chat` and
+`/api/access` are answered by asking the cctop on the machine the session lives
+on — `ssh <host> cctop --report <id>` over the same channel the rows arrive by —
+and relaying the document it prints. Nothing is parsed at the row's path on
+this filesystem, which would report whatever happens to live there locally.
+When the far side cannot answer — the host is down, or its cctop is older than
+these flags — the route says so with a 502 rather than an empty page.
 
 ## Flags
 

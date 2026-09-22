@@ -524,7 +524,10 @@ pub fn detail_key(d: &crate::session::ToolDetail) -> String {
 }
 
 /// Wrap text to `width`, breaking on the last space that fits.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+///
+/// `pub(super)` for the conversation view in `modals`, which lays a session's
+/// turns out in the same fixed-width way.
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     for raw in text.lines() {
         let mut line = raw;

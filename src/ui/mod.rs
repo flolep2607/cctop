@@ -94,6 +94,9 @@ pub enum Mode {
     Hooks,
     /// `cctop optimize` or `cctop compare`, drawn over the table.
     Insight,
+    /// The selected session's conversation, read-only — what the report page
+    /// shows in a browser, over the table. `i` on a row, or Enter's menu.
+    Conversation,
     /// Offering to install rmux, a launch having found it missing.
     TmuxInstall,
     /// Naming or painting a workspace tab, opened by right-clicking it or
@@ -525,6 +528,13 @@ pub struct App {
     /// Which report was asked for, so the overlay can name itself before the
     /// text arrives.
     pub insight_kind: &'static str,
+    /// The open conversation view. `None` while no overlay is up; the
+    /// `Conversation` inside it is `None` while the worker is still reading.
+    pub chat: Option<ChatView>,
+    /// The remote machines this run is reading, kept beside `remotes` because
+    /// the rows say only *where* a session lives — reaching it for a
+    /// conversation or a served report wants the `Host`, command and all.
+    pub remote_hosts: Vec<crate::fleet::Host>,
     /// The socket the agents push their events to. `None` when one could not be
     /// bound, in which case every estimate carries on exactly as it did before
     /// hooks existed.
@@ -658,6 +668,8 @@ impl App {
             insight: None,
             insight_scroll: 0,
             insight_kind: "optimize",
+            chat: None,
+            remote_hosts: Vec::new(),
             loaded: false,
             visible: Vec::new(),
             finished_agents: std::collections::HashSet::new(),
@@ -853,6 +865,149 @@ impl App {
     pub(super) fn insight_loading(&self) -> bool {
         self.mode == Mode::Insight && self.insight.is_none()
     }
+
+    /// Open the conversation view on the selected row.
+    ///
+    /// Read-only: it never resumes, attaches to, or types into the session —
+    /// it only reads the transcript the way the report page does. A remote
+    /// row's transcript is read on the machine that has it, over the same ssh
+    /// channel the row arrived by.
+    pub(super) fn open_conversation(&mut self) {
+        if self.on_subagent() {
+            self.set_status("A subagent has no transcript of its own — read the session's");
+            return;
+        }
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let host = session.remote.as_ref().and_then(|remote| {
+            self.remote_hosts
+                .iter()
+                .find(|h| h.target == remote.host)
+                .cloned()
+        });
+        if let Some(remote) = &session.remote
+            && host.is_none()
+        {
+            // A remote row with no `Host` in hand is one whose spec went away
+            // since the poll — nothing to ask, and the machine's name is the
+            // useful part of the answer.
+            self.set_status(format!(
+                "{} is on {}, which this run is not connected to",
+                session.display_label(),
+                remote.host
+            ));
+            return;
+        }
+        self.chat = Some(ChatView {
+            session: session.clone(),
+            host,
+            conversation: None,
+            error: None,
+            back: 0,
+            max_back: 0,
+            fetching: false,
+        });
+        self.mode = Mode::Conversation;
+        self.fetch_chat(None);
+    }
+
+    /// Ask the worker for a window of the open conversation.
+    ///
+    /// `None` is the latest; `Some(seq)` is the page that ends just before that
+    /// turn, which is how `u` walks backwards through a long session.
+    fn fetch_chat(&mut self, before: Option<usize>) {
+        let Some(view) = self.chat.as_mut() else {
+            return;
+        };
+        view.fetching = true;
+        let _ = self.tx.send(Request::Chat {
+            session: Box::new(view.session.clone()),
+            host: view.host.clone(),
+            before,
+        });
+    }
+
+    /// Fold a worker's conversation answer into the open view.
+    ///
+    /// An answer for a view that has since closed or moved to another row is
+    /// dropped: the key is checked because `u` can still be in flight when the
+    /// user picks a different session.
+    pub(super) fn got_chat(
+        &mut self,
+        key: String,
+        before: Option<usize>,
+        result: Result<Box<crate::serve::chat::Conversation>, String>,
+    ) {
+        let Some(view) = &mut self.chat else {
+            return;
+        };
+        if view.session.key() != key {
+            return;
+        }
+        view.fetching = false;
+        match result {
+            Ok(mut page) => match before {
+                // A page of older turns goes *before* the window already shown
+                // — and `back` is a distance from the end, so the read position
+                // survives the prepend untouched.
+                Some(_) => match &mut view.conversation {
+                    Some(current) => {
+                        let mut older = std::mem::take(&mut page.turns);
+                        older.append(&mut current.turns);
+                        current.turns = older;
+                        current.earlier = page.earlier;
+                        current.supported &= page.supported;
+                        if current.note.is_none() {
+                            current.note = page.note.take();
+                        }
+                    }
+                    None => view.conversation = Some(*page),
+                },
+                None => view.conversation = Some(*page),
+            },
+            Err(why) => view.error = Some(why),
+        }
+        self.needs_redraw = true;
+    }
+
+    /// A conversation still being read off disk — or off the wire — by the
+    /// worker. Same contract as [`insight_loading`]: the loop keeps waking so
+    /// the spinner turns.
+    pub(super) fn chat_loading(&self) -> bool {
+        self.mode == Mode::Conversation
+            && self
+                .chat
+                .as_ref()
+                .is_some_and(|v| v.conversation.is_none() && v.error.is_none())
+    }
+}
+
+/// The state behind the conversation overlay.
+pub struct ChatView {
+    /// The session the view is about — kept because a page of older turns is
+    /// asked for on the same row the view was opened on.
+    pub session: Session,
+    /// The host that can read it, when the row is remote. `Some` exactly when
+    /// `session.remote` is — the fetch then goes over ssh rather than to the
+    /// local transcript path, which does not exist on this machine.
+    pub host: Option<crate::fleet::Host>,
+    /// What has been read so far. `None` while the first read is in flight;
+    /// `error` says why it came back without one when it did.
+    pub conversation: Option<crate::serve::chat::Conversation>,
+    /// Why the read failed, when it did.
+    pub error: Option<String>,
+    /// Lines scrolled back from the bottom. A scrollback's zero is the end:
+    /// new turns arriving while it sits there must not move what you are
+    /// reading, and a prepend of older turns leaves a distance from the end
+    /// exactly where it was.
+    pub back: u16,
+    /// How far `back` can go, written by the draw — the only place the wrapped
+    /// line count is known.
+    pub max_back: u16,
+    /// A fetch is in flight — the spinner's reason to keep turning, and what
+    /// keeps a second `u` from asking for the page already coming.
+    pub fetching: bool,
 }
 
 /// Columns the user has hidden outright, which win over the automatic
@@ -1008,6 +1163,70 @@ mod tests {
         app.insight_scroll = u16::MAX;
         let scrolled = screen_of(&mut app);
         assert!(scrolled.contains("something else"), "{scrolled}");
+    }
+
+    /// A page of older turns goes *before* the window already shown — and an
+    /// answer meant for a view the user has since left is dropped, not folded
+    /// into whatever is open now.
+    #[test]
+    fn an_earlier_chat_page_prepends_and_a_stray_answer_is_dropped() {
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "/repo")];
+        app.refilter();
+        app.selected = 0;
+        app.open_conversation();
+        let key = app.chat.as_ref().expect("the view opened").session.key();
+
+        let turn = |seq: usize| crate::serve::chat::Turn {
+            seq,
+            role: "assistant".into(),
+            kind: "message".into(),
+            ts: String::new(),
+            text: format!("turn {seq}"),
+            clipped: false,
+            tools: Vec::new(),
+        };
+        let page = |seqs: &[usize], earlier: usize| {
+            Box::new(crate::serve::chat::Conversation {
+                supported: true,
+                turns: seqs.iter().map(|s| turn(*s)).collect(),
+                earlier,
+                note: None,
+            })
+        };
+
+        // The latest window arrives first, then the page `u` asked for —
+        // which belongs in front of it, not after.
+        app.got_chat(key.clone(), None, Ok(page(&[3, 4, 5], 7)));
+        app.got_chat(key.clone(), Some(3), Ok(page(&[0, 1, 2], 0)));
+        let conv = app
+            .chat
+            .as_ref()
+            .and_then(|v| v.conversation.as_ref())
+            .expect("the conversation arrived");
+        assert_eq!(
+            conv.turns.iter().map(|t| t.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(conv.earlier, 0);
+
+        // An answer addressed to another row's key — a fetch still in flight
+        // from a view since closed — must not land in this one.
+        app.got_chat("other".into(), None, Ok(page(&[9], 0)));
+        assert_eq!(
+            app.chat
+                .as_ref()
+                .and_then(|v| v.conversation.as_ref())
+                .map(|c| c.turns.len()),
+            Some(6)
+        );
+
+        // And an error is shown rather than an empty box pretending to load.
+        app.got_chat(key, None, Err("no such session".into()));
+        assert_eq!(
+            app.chat.as_ref().and_then(|v| v.error.as_deref()),
+            Some("no such session")
+        );
     }
 
     /// Regression: these tests once read the developer's real prefs file, so a

@@ -517,9 +517,10 @@ impl Session {
         let argv = match self.provider {
             Provider::Claude => vec!["claude", "--resume", &self.session_id],
             Provider::Codex => vec!["codex", "resume", &self.session_id],
+            Provider::Devin => vec!["devin", "--resume", &self.session_id],
             Provider::OpenCode => vec!["opencode", "--session", &self.session_id],
             Provider::Pi => vec!["pi", "--session", &self.session_id],
-            Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Windsurf => {
+            Provider::Cursor | Provider::Gemini | Provider::Windsurf => {
                 return None;
             }
         };
