@@ -104,7 +104,12 @@
      to the viewport, so scrolling a long transcript does not scroll the thing
      you opened it to watch. */
   .split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); align-items: start; }
-  .split.with-term { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  /* The terminal gets the larger share and the page drops its width cap. An
+     agent's output is written for a full-width terminal, and rmux sizes the
+     session to the client that last typed — so a narrow frame narrows the
+     session in every other terminal attached to it too. */
+  .wrap:has(.split.with-term) { max-width: none; }
+  .split.with-term { grid-template-columns: minmax(360px, 2fr) minmax(0, 3fr); }
   .termside { display: flex; flex-direction: column; min-width: 0;
               position: sticky; top: 12px; }
   /* `display` beats the `hidden` attribute, so closed has to be said in CSS —
