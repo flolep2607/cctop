@@ -1688,10 +1688,13 @@ fn list_hints(app: &App) -> Vec<Hint> {
         hints.push(hint("a", "Attach"));
         hints.push(hint("R", "Resume"));
     }
+    // Ahead of the rest, because it is the key that teaches the rest: behind
+    // them, an 80-column footer never showed it. `t` is also on the tab bar's
+    // `+ Tab (t)`, so it is the one that can best afford to go.
+    hints.push(hint("?", "Help"));
     hints.push(hint("t", "New tab"));
     hints.push(hint("Tab", "Panel"));
     hints.push(hint("S", "Sort"));
-    hints.push(hint("?", "Help"));
     hints.push(hint("q", "Quit"));
     hints
 }
@@ -2391,6 +2394,27 @@ mod tests {
 
         app.search = "web".into();
         assert!(names(&app).contains(&"Clear filter"));
+    }
+
+    /// On the 80-column terminal most people open, with the share corner
+    /// taking its columns, the help key is still on the footer.
+    #[test]
+    fn an_80_column_footer_still_says_how_to_get_help() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.sessions = vec![crate::ui::tests::session("a", false, "proj")];
+        app.visible = vec![crate::ui::Row::Session(0)];
+        app.selected = 0;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+        terminal
+            .draw(|frame| {
+                draw(frame, &mut app);
+            })
+            .expect("draw");
+        let footer = screen(&terminal, 80, 24).pop().unwrap_or_default();
+        assert!(footer.contains("? Help"), "{footer:?}");
     }
 
     #[test]
