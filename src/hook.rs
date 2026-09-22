@@ -1543,7 +1543,7 @@ fn json_install(path: &Path, shape: Shape, events: &[&str], exe: &str) -> anyhow
         // Idempotent: running the installer twice must not fire twice, and an
         // entry left by an older cctop at a path that has since moved is
         // replaced rather than added to.
-        list.retain(|entry| !is_ours(entry));
+        drop_ours(list);
         let command = serde_json::json!({
             "type": "command",
             "command": format!("{exe} hook {event}"),
@@ -1568,9 +1568,7 @@ fn json_remove(path: &Path) -> anyhow::Result<usize> {
     if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         for (_, value) in hooks.iter_mut() {
             if let Some(list) = value.as_array_mut() {
-                let before = list.len();
-                list.retain(|entry| !is_ours(entry));
-                removed += before - list.len();
+                removed += drop_ours(list);
             }
         }
         // An event whose only entry was ours goes too, rather than leaving an
@@ -1585,6 +1583,33 @@ fn json_remove(path: &Path) -> anyhow::Result<usize> {
         write_settings(path, &root)?;
     }
     Ok(removed)
+}
+
+/// Take cctop's commands out of one event's list, and say how many went.
+///
+/// By command, not by entry: cctop writes a wrapper holding only its own
+/// command, but a user may add theirs into the same one, and dropping the
+/// wrapper whole would delete a hook that was never cctop's. A wrapper left
+/// with nothing in it goes, like an entry that was cctop's alone.
+fn drop_ours(list: &mut Vec<serde_json::Value>) -> usize {
+    let is_our_hook = |h: &serde_json::Value| {
+        h.get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(is_our_command)
+    };
+    let mut removed = 0;
+    for entry in list.iter_mut() {
+        if let Some(inner) = entry.get_mut("hooks").and_then(|h| h.as_array_mut())
+            && inner.iter().any(|h| !is_our_hook(h))
+        {
+            let before = inner.len();
+            inner.retain(|h| !is_our_hook(h));
+            removed += before - inner.len();
+        }
+    }
+    let before = list.len();
+    list.retain(|entry| !is_ours(entry));
+    removed + before - list.len()
 }
 
 /// Whether a settings entry is one cctop wrote, in either shape.
@@ -2763,6 +2788,41 @@ mod tests {
     /// The settings file belongs to the user and their other tools. Installing
     /// must not disturb a hook cctop did not write, and removing must put the
     /// file back exactly as it was found.
+    /// Regression: an entry was dropped whole if any command in it was cctop's,
+    /// so a user's own command added into the same wrapper went with it on the
+    /// next install, repair or remove.
+    #[test]
+    fn a_users_command_sharing_a_wrapper_with_ours_survives() {
+        let dir = scratch("hooks-shared");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let theirs = serde_json::json!({"type": "command", "command": "notify-send done"});
+        let settings = serde_json::json!({
+            "hooks": {"Stop": [{"hooks": [
+                {"type": "command", "command": "/old/cctop hook Stop"},
+                theirs,
+            ]}]}
+        });
+        std::fs::write(&path, settings.to_string()).unwrap();
+
+        let commands = |path: &Path| -> Vec<String> {
+            let root = read_settings(path).unwrap();
+            let list = root["hooks"]["Stop"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            list.iter()
+                .flat_map(|e| entry_commands(e).map(str::to_string).collect::<Vec<_>>())
+                .collect()
+        };
+        install(&scope);
+        assert!(commands(&path).contains(&"notify-send done".to_string()));
+        remove(&scope);
+        assert_eq!(commands(&path), ["notify-send done"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn installing_leaves_another_tools_hooks_exactly_as_they_were() {
         let dir = scratch("hooks");
