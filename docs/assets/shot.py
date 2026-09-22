@@ -314,17 +314,21 @@ def nearest256(hexcolour):
     return best
 
 
-# What the recording shows: settle, walk the table, step through the panels to
-# the context breakdown, then filter. Each entry is (key or literal, frames to
-# hold afterwards) — the hold is what gives a reader time to read the screen.
+# What the recording shows: settle on the dashboard, walk the table, step
+# through the panels to the context breakdown, filter, then open the tab
+# switcher. F12 first because cctop can reopen inside a previously adopted tab;
+# on the dashboard it is a no-op. Each entry is (key or literal, frames to hold
+# afterwards) — the hold is what gives a reader time to read the screen.
 DEMO = [
-    ("", 4),
+    ("F12", 4),
     ("Down", 1), ("Down", 3),
     ("Right", 2), ("Right", 2), ("Right", 4),
     ("Right", 1), ("Right", 1), ("Right", 1), ("Right", 5),
     ("/", 2), ("cctop", 4), ("Escape", 3),
+    ("M-t", 4), ("Escape", 2),
 ]
-KEYNAMES = {"Down", "Up", "Left", "Right", "Escape", "Tab", "Enter", "Space"}
+KEYNAMES = {"Down", "Up", "Left", "Right", "Escape", "Tab", "Enter", "Space",
+            "F12", "M-t"}
 
 
 def record(size, settle, extra, scale):

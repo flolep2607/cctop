@@ -4,6 +4,8 @@
 Codex, Cursor, Gemini CLI, OpenCode, Pi and Windsurf session on your machine —
 what each is doing, what it has spent, and which one is waiting on you.
 
+![The dashboard: a spend overview, the session table, and a tab bar along the top](docs/assets/dashboard.png)
+
 ![cctop: walking the session table, opening the context breakdown, then filtering](docs/assets/demo.gif)
 
 <sub>A real recording — [play it in a terminal](docs/assets/demo.cast) with
@@ -20,17 +22,19 @@ A Rust rewrite of an earlier Node implementation.
 **cctop runs on Linux, including WSL.** It reads Linux process tables and drives
 agents over ptys and unix sockets; there is no macOS or Windows build.
 
-```bash
-cargo install cctop
-```
-
-Or grab a binary from the
+Grab a binary from the
 [latest release](https://github.com/flolep2607/cctop/releases/latest) —
 x86_64 and aarch64, both statically linked, so either runs on any distro:
 
 ```bash
 curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m755 cctop /usr/local/bin/cctop
+```
+
+Or with cargo:
+
+```bash
+cargo install cctop
 ```
 
 Checksums and `cctop --update` are in [Installing cctop](docs/install.md).
@@ -42,16 +46,22 @@ cctop
 ```
 
 That is the whole first run. It finds your sessions, prices them, and draws the
-table above.
-
-Four keys are worth knowing before anything else:
+table above. The keys worth knowing before anything else:
 
 | Key | |
 |---|---|
 | `↑` `↓` | move between sessions |
 | `←` `→` | move between the panels underneath |
 | `/` | filter, on anything a row is |
+| `R` | reopen the selected session in a tab of its own |
+| `F12` or `Alt+1` | back to the dashboard, leaving the tab running |
 | `q` | quit |
+
+A tab is a real terminal: type into it, split it with `Alt+v`/`Alt+s`, drag it
+along the bar. Right-click a tab — or press `Alt+r` — to give it a name and a
+colour, which every cctop on the machine then shows. Once there are more tabs
+than digits, `Alt+t` picks one from a list you narrow by typing, and `Alt+b`
+jumps straight to whichever agent is waiting on you.
 
 Then two commands worth running once:
 
@@ -153,6 +163,7 @@ cctop --json          # dump full session data as JSON
 cctop --plan max      # treat Claude usage as bundled
 cctop --host devbox   # also show another machine's sessions, read over ssh
 cctop doctor          # check this installation and say what is wrong with it
+cctop serve           # the same table in a browser, on a port or a phone
 cctop claude          # start an agent on a pty cctop can watch and type into
 ```
 
