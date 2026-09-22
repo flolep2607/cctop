@@ -122,8 +122,11 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
     let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
     let item = |k: &str, d: &str| {
         Line::from(vec![
+            // The space after the padding is the floor: a key longer than the
+            // column (`g / G  Home / End`) otherwise runs into its description
+            // and reads as `EndJump`.
             Span::styled(
-                format!("  {k:<16}"),
+                format!("  {k:<16} "),
                 Style::default().fg(theme::colors().accent),
             ),
             Span::raw(d.to_string()),
@@ -1953,6 +1956,26 @@ fn chat_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_help_key_longer_than_its_column_keeps_a_gap() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
+        terminal
+            .draw(|frame| draw_help(frame, frame.area(), &mut app))
+            .expect("draw");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Home / End Jump"), "{text}");
+    }
 
     /// The picker row draws every swatch, brackets the pick, and spells its
     /// name — under NO_COLOR the name is the only thing there is to read.

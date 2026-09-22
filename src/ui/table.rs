@@ -97,7 +97,7 @@ fn empty_lines(app: &App) -> Vec<Line<'static>> {
 fn pad(text: &str, width: u16, right: bool) -> String {
     let w = width as usize;
     let t = util::truncate(text, w);
-    let len = t.chars().count();
+    let len = util::cells(&t);
     if right {
         format!("{}{}", " ".repeat(w.saturating_sub(len)), t)
     } else {
@@ -757,5 +757,9 @@ mod tests {
         assert_eq!(pad("abc", 5, false), "abc  ");
         assert_eq!(pad("abc", 5, true), "  abc");
         assert_eq!(pad("abcdefgh", 4, false).chars().count(), 4);
+        // Two cells a character: the cell fills its column exactly, ellipsis
+        // included, rather than spilling into the next one.
+        assert_eq!(pad("日本語のプロジェクト", 12, false), "日本語のプ… ");
+        assert_eq!(util::cells(&pad("日本語のプロジェクト", 12, true)), 12);
     }
 }
