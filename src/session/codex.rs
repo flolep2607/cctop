@@ -444,6 +444,10 @@ pub fn extract(path: &Path) -> SessionData {
     let mut reasoning_effort: Option<String> = None;
     let mut totals = Tokens::default();
     let mut saw_usage = false;
+    // The running total of the last `token_count` counted. Codex re-emits the
+    // event unchanged — a rate-limit refresh carries the previous turn's usage
+    // again — so one whose total has not moved describes no new tokens.
+    let mut counted_total: Option<Value> = None;
     let mut by_day: HashMap<String, RawBucket> = HashMap::new();
     let mut by_hour: HashMap<String, RawBucket> = HashMap::new();
     let mut metrics = Metrics::default();
@@ -477,6 +481,14 @@ pub fn extract(path: &Path) -> SessionData {
                 .and_then(|p| p.get("info"))
                 .and_then(|i| i.get("last_token_usage"))
             && last.is_object()
+            && {
+                let total = payload
+                    .and_then(|p| p.get("info"))
+                    .and_then(|i| i.get("total_token_usage"));
+                let repeat = total.is_some() && total == counted_total.as_ref();
+                counted_total = total.cloned();
+                !repeat
+            }
         {
             saw_usage = true;
             let g = |k: &str| last.get(k).and_then(Value::as_u64).unwrap_or(0);
@@ -992,6 +1004,34 @@ const result = await tools.apply_patch(patch);"#;
         );
         assert_eq!(name, "Read");
         assert_eq!(args["file_path"], "/tmp/chart.png");
+    }
+
+    /// Regression: Codex re-emits `token_count` with the same `info` — on a
+    /// rate-limit refresh, for one — and each copy's `last_token_usage` was
+    /// added again. Across 217 real rollouts that overcounted 68 of them, by
+    /// up to 64%; skipping an event whose running total has not moved makes
+    /// the sum agree with Codex's own total in all but one.
+    #[test]
+    fn a_repeated_token_count_is_counted_once() {
+        let path =
+            std::env::temp_dir().join(format!("cctop-codex-repeat-{}.jsonl", std::process::id()));
+        let event = |input: u64, total: u64| {
+            json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-06T00:00:00Z",
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"input_tokens": input, "output_tokens": 10},
+                    "total_token_usage": {"input_tokens": total, "output_tokens": 10},
+                }}
+            })
+        };
+        let lines = [event(1000, 1000), event(1000, 1000), event(500, 1500)];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).expect("write rollout");
+
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(data.tokens.input_total, 1500);
     }
 
     #[test]
