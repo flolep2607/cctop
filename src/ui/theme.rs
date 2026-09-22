@@ -308,10 +308,13 @@ pub fn no_color() -> bool {
 
 /// Choose the palette from the environment. Call once, before the first draw;
 /// later calls are ignored, which keeps the choice stable for a whole run.
-pub fn init_from_env() {
+///
+/// `configured` is `theme` from `config.toml`; `$CCTOP_THEME` beats it, being
+/// the more local of the two.
+pub fn init_from_env(configured: Option<&str>) {
     let _ = PALETTE.set(select(
         std::env::var("NO_COLOR").ok().as_deref(),
-        std::env::var("CCTOP_THEME").ok().as_deref(),
+        std::env::var("CCTOP_THEME").ok().as_deref().or(configured),
         std::env::var("COLORFGBG").ok().as_deref(),
     ));
 }

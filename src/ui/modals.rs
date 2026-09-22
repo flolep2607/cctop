@@ -140,6 +140,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         section("Start here"),
         item("Enter", "Everything you can do to this row, in one menu"),
         item("?  F1", "This page"),
+        item(",", "Settings and keybinds, and the file that holds them"),
         item("q  F10", "Quit"),
         Line::default(),
         section("Navigation"),
@@ -280,6 +281,101 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         )),
     ];
     app.help_max_scroll = scrollable_modal(frame, area, "Help", lines, 76, app.help_scroll);
+}
+
+/// Every setting and dashboard key at the value it has now, marked where
+/// `config.toml` is what set it — so the panel answers both "what can I tune"
+/// and "what did my file actually do" — with a cursor to change them in place.
+pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
+    use crate::settings::{BINDINGS, SETTINGS};
+    let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
+    let path = crate::util::tildify(&crate::config::CONFIG_FILE.to_string_lossy());
+    let mut lines = vec![
+        Line::from(vec![Span::styled("  File ", theme::dim()), Span::raw(path)]),
+        Line::from(Span::styled(
+            "  * set in the file, rather than left at the default",
+            theme::dim(),
+        )),
+    ];
+    for problem in &app.settings.problems {
+        lines.push(Line::from(Span::styled(
+            format!("  ! {problem}"),
+            theme::failed(),
+        )));
+    }
+
+    // One row per setting, then per keybind; `row` is the cursor's index.
+    let mut cursor_line = 0;
+    let mut push_row = |lines: &mut Vec<Line<'static>>,
+                        row: usize,
+                        name: &str,
+                        value: String,
+                        set: bool,
+                        what: &str| {
+        let here = row == app.settings_cursor;
+        let value = match here {
+            true if app.settings_capture => "press a key… (Esc cancels)".to_string(),
+            true if app.settings_input.is_some() => {
+                format!("{}█", app.settings_input.as_deref().unwrap_or_default())
+            }
+            _ => value,
+        };
+        let accent = Style::default().fg(theme::colors().accent);
+        let mut line = Line::from(vec![
+            Span::raw(format!("  {name:<18}")),
+            Span::styled(
+                format!("{value:<14}"),
+                if set {
+                    accent.add_modifier(Modifier::BOLD)
+                } else {
+                    accent
+                },
+            ),
+            Span::styled(if set { " * " } else { "   " }, theme::dim()),
+            Span::styled(what.to_string(), theme::dim()),
+        ]);
+        if here {
+            cursor_line = lines.len();
+            line = line.style(theme::selected());
+        }
+        lines.push(line);
+    };
+
+    lines.push(Line::default());
+    lines.push(section("[settings]"));
+    for (row, (name, _, what)) in SETTINGS.iter().enumerate() {
+        let (value, set) = app.settings.value_of(name);
+        push_row(&mut lines, row, name, value, set, what);
+    }
+    lines.push(Line::default());
+    lines.push(section("[keys]  on the session table"));
+    for (i, (action, default, what)) in BINDINGS.iter().enumerate() {
+        let key = app.settings.key_for(action).to_string();
+        let set = key != *default;
+        push_row(&mut lines, SETTINGS.len() + i, action, key, set, what);
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "  ↵ change   ⌫ reset   e open in your editor   Esc close",
+        theme::dim(),
+    )));
+
+    // Keep the cursor on screen: the same height `scrollable_modal` will give
+    // the box, less its border.
+    let inner = (lines.len() as u16 + 2)
+        .min(area.height.saturating_sub(2))
+        .saturating_sub(2)
+        .max(1);
+    let at = cursor_line as u16;
+    // The first row brings the file's name and any problems back into view.
+    if app.settings_cursor == 0 {
+        app.settings_scroll = 0;
+    } else if at < app.settings_scroll {
+        app.settings_scroll = at;
+    } else if at >= app.settings_scroll + inner {
+        app.settings_scroll = at + 1 - inner;
+    }
+    scrollable_modal(frame, area, "Settings", lines, 96, app.settings_scroll);
 }
 
 pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {

@@ -25,6 +25,7 @@ mod quota;
 mod rmux;
 mod serve;
 mod session;
+mod settings;
 mod shim;
 mod trace;
 mod ui;
@@ -311,7 +312,11 @@ fn main() -> anyhow::Result<()> {
     // `cctop claude` is excluded for the reason the alias prompt below is: an
     // agent is being waited on, and a download and a keypress between the
     // command and the agent starting is not what was asked for.
-    let auto_update = !args.no_auto_update && !launching_agent && prefs.auto_update;
+    let auto_update = !args.no_auto_update
+        && !launching_agent
+        && settings::Settings::load()
+            .auto_update
+            .unwrap_or(prefs.auto_update);
     update::auto_at_startup(auto_update, &mut prefs);
 
     // After the update offer: a process that is about to be replaced by a newer

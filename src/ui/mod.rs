@@ -28,6 +28,7 @@ mod remote;
 pub mod render;
 mod runloop;
 mod select;
+mod settings;
 mod share;
 mod signals;
 pub mod spark;
@@ -108,6 +109,8 @@ pub enum Mode {
     /// The browser panel: whether this cctop is serving its table to one, on
     /// what links, and whether they leave the machine.
     Serve,
+    /// What `config.toml` sets and what it could set, keybinds included.
+    Settings,
 }
 
 /// A launch that stopped to ask about rmux, and how to pick it up again.
@@ -409,6 +412,27 @@ pub struct App {
     /// Last computed bottom of the help overlay, recorded during draw.
     pub help_max_scroll: u16,
 
+    /// `[settings]` and `[keys]` from `config.toml`, as last read.
+    pub settings: crate::settings::Settings,
+    /// Those `[keys]`, applied in front of the dashboard's key handler.
+    pub keymap: crate::settings::Keymap,
+    /// The file those are read from and written to. `None` in tests, which
+    /// must not touch the developer's own config.
+    pub settings_file: Option<std::path::PathBuf>,
+    /// The file's mtime when it was last read, so an edit made in an editor is
+    /// picked up at the next key without a restart.
+    pub settings_stamp: u64,
+    /// Scroll offset of the settings overlay, kept following the cursor.
+    pub settings_scroll: u16,
+    /// The panel's row: the settings first, then the keybinds, in the order of
+    /// [`SETTINGS`](crate::settings::SETTINGS) and
+    /// [`BINDINGS`](crate::settings::BINDINGS).
+    pub settings_cursor: usize,
+    /// Waiting for the key the cursor's action should move to.
+    pub settings_capture: bool,
+    /// A setting's value being typed, for the ones that are not a toggle.
+    pub settings_input: Option<String>,
+
     pub bottom_tab: usize,
     pub panel_data: Option<SessionData>,
     panel_key: String,
@@ -645,7 +669,20 @@ pub struct App {
 
 impl App {
     fn new(plan: Plan, tx: Sender<Request>) -> Self {
-        Self::with_prefs(plan, tx, UiPrefs::load())
+        let settings = crate::settings::Settings::load();
+        let mut prefs = UiPrefs::load();
+        if let Some(notify) = settings.notify {
+            prefs.notify = notify;
+        }
+        let mut app = Self::with_prefs(plan, tx, prefs);
+        if std::env::var_os("CCTOP_COLUMNS_HIDE").is_none()
+            && let Some(hide) = &settings.hide_columns
+        {
+            app.hidden_columns = columns::parse_hidden(hide);
+        }
+        app.settings_file = Some(crate::config::CONFIG_FILE.clone());
+        app.reload_settings();
+        app
     }
 
     /// Build with explicit preferences.
@@ -739,6 +776,14 @@ impl App {
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
             help_max_scroll: 0,
+            settings: Default::default(),
+            keymap: Default::default(),
+            settings_file: None,
+            settings_stamp: 0,
+            settings_scroll: 0,
+            settings_cursor: 0,
+            settings_capture: false,
+            settings_input: None,
             bottom_tab: prefs.bottom_tab.min(panels::TABS.len() - 1),
             panel_data: None,
             panel_key: String::new(),
@@ -1303,5 +1348,69 @@ mod tests {
         let app = test_app();
         assert!(!app.loaded);
         assert!(app.sessions.is_empty());
+    }
+
+    /// Rebinding from the panel: Enter on a keybind, then the new key, lands
+    /// in the file and works on the dashboard at once — and the panel draws
+    /// what it wrote.
+    #[test]
+    fn a_key_bound_in_the_panel_is_saved_and_works() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        let mut app = test_app();
+        app.settings_file = Some(file.clone());
+
+        app.on_key(key(KeyCode::Char(',')));
+        assert_eq!(app.mode, Mode::Settings);
+        let help = crate::settings::SETTINGS.len()
+            + crate::settings::BINDINGS
+                .iter()
+                .position(|b| b.0 == "help")
+                .expect("help is bindable");
+        app.settings_cursor = help;
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.settings_capture);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(!app.settings_capture);
+        let text = std::fs::read_to_string(&file).expect("written");
+        assert!(text.contains("help = \"x\""), "{text}");
+
+        let (cols, rows) = (100u16, 50u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        terminal
+            .draw(|frame| {
+                render::draw(frame, &mut app);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..rows)
+            .flat_map(|y| (0..cols).map(move |x| (x, y)))
+            .map(|at| buffer[at].symbol().to_string())
+            .collect();
+        assert!(screen.contains("help"), "the cursor's row scrolled away");
+
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('?')));
+        assert_eq!(app.mode, Mode::List, "the old key was moved away");
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(app.mode, Mode::Help);
+
+        // Backspace on the row puts it back.
+        app.mode = Mode::Settings;
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.settings.key_for("help"), "?");
+
+        // A toggle flips in place.
+        app.settings_cursor = 1;
+        assert_eq!(crate::settings::SETTINGS[1].0, "notify");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.settings.notify, Some(true));
+        assert!(
+            app.notify.enabled,
+            "the running cctop did not follow the file"
+        );
     }
 }

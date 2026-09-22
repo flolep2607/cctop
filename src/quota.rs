@@ -368,7 +368,7 @@ pub fn add_account(profile: &str) -> anyhow::Result<()> {
 }
 
 /// Owner-only permissions: the file holds a token.
-fn restrict(path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }

@@ -482,12 +482,15 @@ pub const LITELLM_URL: &str =
 pub const PRICING_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
 /// Claude Code triggers auto-compaction at ~83.5% of the context window.
-/// Overridable via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (an integer percentage).
+/// Overridable via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (an integer percentage),
+/// which is what Claude Code itself reads, else `compact_threshold` in cctop's
+/// config for a user whose agents are configured some other way.
 pub static COMPACT_THRESHOLD: LazyLock<f64> = LazyLock::new(|| {
     std::env::var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .map(|p| p / 100.0)
+        .or_else(|| crate::settings::Settings::load().compact_threshold)
         .unwrap_or(0.835)
 });
 

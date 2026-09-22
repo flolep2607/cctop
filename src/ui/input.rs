@@ -82,7 +82,12 @@ impl App {
         // every other key belongs to the agent. Alt is the modifier left over:
         // Ctrl- is the agent's (Ctrl-C interrupts it), and the function keys are
         // too few to also carry the splits.
-        if key.modifiers.contains(KeyModifiers::ALT) && self.on_key_workspace(key) {
+        // Except while the settings panel waits for a key to bind: then Alt+n
+        // is the answer, not a new tab.
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && !self.settings_capture
+            && self.on_key_workspace(key)
+        {
             return;
         }
 
@@ -156,8 +161,14 @@ impl App {
             Mode::Insight => self.on_key_insight(key),
             Mode::Conversation => self.on_key_conversation(key),
             Mode::Help => self.on_key_help(key),
+            Mode::Settings => self.on_key_settings(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
-            Mode::List => self.on_key_list(key),
+            Mode::List => {
+                self.reload_settings();
+                if let Some(key) = self.keymap.apply(key) {
+                    self.on_key_list(key);
+                }
+            }
         }
     }
 
@@ -262,6 +273,12 @@ impl App {
                     .take(room)
                     .collect();
                 self.cost_input.push_str(&digits);
+            }
+            Mode::Settings => {
+                if let Some(input) = &mut self.settings_input {
+                    let room = 200usize.saturating_sub(input.len());
+                    input.push_str(&flatten(text, room));
+                }
             }
             _ => {}
         }
@@ -714,6 +731,46 @@ impl App {
                 self.mode = Mode::List;
                 self.help_scroll = 0;
             }
+        }
+    }
+
+    /// The settings panel: a cursor over every setting and keybind, changed
+    /// in place, with `e` for the whole file in an editor.
+    fn on_key_settings(&mut self, key: KeyEvent) {
+        // Waiting for a key takes every key, including the ones that would
+        // otherwise move or close the panel — they are what may be bound.
+        if self.settings_capture {
+            return self.settings_capture_key(key);
+        }
+        if let Some(input) = &mut self.settings_input {
+            match key.code {
+                KeyCode::Esc => self.settings_input = None,
+                KeyCode::Enter => self.settings_commit_input(),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) if input.len() < 200 => input.push(c),
+                _ => {}
+            }
+            return;
+        }
+        let rows = crate::settings::SETTINGS.len() + crate::settings::BINDINGS.len();
+        let step = |app: &mut App, delta: i32| {
+            app.settings_cursor =
+                (app.settings_cursor as i32 + delta).clamp(0, rows as i32 - 1) as usize;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => step(self, -1),
+            KeyCode::Down | KeyCode::Char('j') => step(self, 1),
+            KeyCode::PageUp => step(self, -(PAGE as i32)),
+            KeyCode::PageDown => step(self, PAGE as i32),
+            KeyCode::Home | KeyCode::Char('g') => self.settings_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => self.settings_cursor = rows - 1,
+            KeyCode::Enter | KeyCode::Char(' ') => self.settings_activate(),
+            KeyCode::Backspace | KeyCode::Delete => self.settings_reset(),
+            KeyCode::Char('e') => self.edit_settings(),
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => self.mode = Mode::List,
+            _ => {}
         }
     }
 
@@ -1276,6 +1333,7 @@ impl App {
             KeyCode::Char('h') | KeyCode::F(8) => self.open_hooks(),
             KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
             KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
+            KeyCode::Char(',') => self.mode = Mode::Settings,
             // One way in, rather than the six single-letter sort keys this
             // replaced. `P`/`M`/`T` were htop's, and `H`/`X`/`S` were three
             // more that only cctop has columns for: six keys spent on an

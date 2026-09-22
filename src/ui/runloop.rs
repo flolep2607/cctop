@@ -49,7 +49,7 @@ const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i32> {
     // Before anything draws, and once: the palette is read by every widget and
     // must not change under them mid-run.
-    theme::init_from_env();
+    theme::init_from_env(crate::settings::Settings::load().theme.as_deref());
 
     let (req_tx, req_rx) = channel::<Request>();
     let (res_tx, res_rx) = channel::<Response>();

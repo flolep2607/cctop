@@ -287,6 +287,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 
     match app.mode {
         Mode::Help => modals::draw_help(frame, area, app),
+        Mode::Settings => modals::draw_settings(frame, area, app),
         Mode::Search => modals::draw_search(frame, area, app),
         Mode::SortBy => modals::draw_sortby(frame, area, app),
         Mode::AgeFilter => modals::draw_age_filter(frame, area, app),
