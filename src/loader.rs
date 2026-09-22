@@ -9,7 +9,7 @@ use crate::util;
 use chrono::Utc;
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Half-life for the token- and cost-rate exponential moving averages. Short
 /// enough to react to a burst, long enough not to jitter between refreshes.
@@ -57,7 +57,10 @@ fn gentle_threads() -> usize {
 
 #[derive(Default)]
 pub struct Loader {
-    store: OnceLock<Store>,
+    /// Behind an `Arc` so a parse can be handed to a pool thread — see
+    /// [`Self::store_shared`]. The `OnceLock` stays because the store is only
+    /// worth its disk read once a walk actually asks for it.
+    store: OnceLock<Arc<Store>>,
     /// Small pool for background extraction; `None` if one can't be built, which
     /// just means falling back to rayon's default.
     gentle: Option<rayon::ThreadPool>,
@@ -111,7 +114,16 @@ impl Loader {
     }
 
     pub fn store(&self) -> &Store {
-        self.store.get_or_init(Store::new)
+        self.store.get_or_init(|| Arc::new(Store::new()))
+    }
+
+    /// The store as a shared handle, for work sent off this thread.
+    ///
+    /// [`Self::gently`] borrows the loader, so anything it runs can already
+    /// reach `store()`. A job that outlives the borrow — a parse reporting back
+    /// over a channel instead of returning — needs the `Arc`.
+    pub fn store_shared(&self) -> Arc<Store> {
+        self.store.get_or_init(|| Arc::new(Store::new())).clone()
     }
 
     /// Run `job` on the background pool, or inline when there isn't one.
@@ -124,6 +136,22 @@ impl Loader {
         match self.gentle.as_ref() {
             Some(pool) => pool.install(job),
             None => job(),
+        }
+    }
+
+    /// Run `job` on the background pool without waiting for it.
+    ///
+    /// [`Self::gently`] blocks the caller, which is wrong for work whose result
+    /// is reported out of band: a slow read on the worker's request loop
+    /// delays everything queued behind it, so the job goes to the pool and its
+    /// answer travels a channel instead. No pool means a plain thread — the
+    /// fallback is "somewhere else", never "on the request loop".
+    pub fn gently_spawn(&self, job: impl FnOnce() + Send + 'static) {
+        match self.gentle.as_ref() {
+            Some(pool) => pool.spawn(job),
+            None => {
+                std::thread::spawn(job);
+            }
         }
     }
 
