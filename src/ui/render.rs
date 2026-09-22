@@ -744,6 +744,25 @@ fn ranked_row(name: &str, amount: f64, width: usize) -> Vec<Span<'static>> {
     ]
 }
 
+/// Append each group to `spans` while the whole group still fits in `width`,
+/// stopping at the first that does not.
+///
+/// The Overview's machine column is narrow on an 80-column terminal, and a
+/// figure clipped at the edge reads as a different figure: `73.2K in` cut to
+/// `73.2`, `96%` cut to `96`. A group is a figure with its unit, so it is shown
+/// whole or not at all.
+fn push_while_fits(spans: &mut Vec<Span<'static>>, groups: Vec<Vec<Span<'static>>>, width: usize) {
+    let mut used: usize = spans.iter().map(Span::width).sum();
+    for group in groups {
+        let w: usize = group.iter().map(Span::width).sum();
+        if used + w > width {
+            break;
+        }
+        used += w;
+        spans.extend(group);
+    }
+}
+
 fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel_block("Overview");
     let inner = block.inner(area);
@@ -927,16 +946,19 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             // Percentages of today's spend, not a count of sessions ever seen:
             // the mix that is costing money is the one worth naming.
+            let mut groups = Vec::new();
             for (i, (name, cost)) in stats.models_today.iter().take(3).enumerate() {
-                if i > 0 {
-                    model_spans.push(Span::styled(" · ", theme::dim()));
-                }
-                model_spans.push(Span::styled(name.clone(), theme::value()));
-                model_spans.push(Span::styled(
+                let sep = if i > 0 { " · " } else { "" };
+                groups.push(vec![
+                    Span::styled(sep, theme::dim()),
+                    Span::styled(name.clone(), theme::value()),
+                ]);
+                groups.push(vec![Span::styled(
                     format!(" {:.0}%", cost / today * 100.0),
                     theme::dim(),
-                ));
+                )]);
             }
+            push_while_fits(&mut model_spans, groups, right_w);
         }
 
         let mem_mb = stats.total_memory as f64 / (1024.0 * 1024.0);
@@ -955,31 +977,48 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             app.global_cpu.values().len().checked_sub(1),
         ));
 
+        let mut session_spans = vec![
+            Span::styled(format!("{:<r_label_w$}", "Sessions"), theme::label()),
+            Span::styled(stats.total.to_string(), theme::value()),
+        ];
+        push_while_fits(
+            &mut session_spans,
+            vec![
+                vec![
+                    Span::styled(" · ", theme::dim()),
+                    Span::styled(
+                        format!("{} live", stats.running),
+                        Style::default().fg(theme::colors().cost_low),
+                    ),
+                ],
+                vec![Span::styled(
+                    format!(" · {} in 24h", stats.active_24h),
+                    theme::dim(),
+                )],
+            ],
+            right_w,
+        );
+        let mut mem_spans = vec![
+            Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
+            Span::styled(format!("{mem_mb:.0} MB"), theme::value()),
+        ];
+        push_while_fits(
+            &mut mem_spans,
+            vec![vec![Span::styled(
+                format!(
+                    " · {} in / {} out",
+                    util::compact_tokens(stats.total_input),
+                    util::compact_tokens(stats.total_output)
+                ),
+                theme::dim(),
+            )]],
+            right_w,
+        );
         let right_lines = vec![
             Line::from(model_spans),
-            Line::from(vec![
-                Span::styled(format!("{:<r_label_w$}", "Sessions"), theme::label()),
-                Span::styled(stats.total.to_string(), theme::value()),
-                Span::styled(" · ", theme::dim()),
-                Span::styled(
-                    format!("{} live", stats.running),
-                    Style::default().fg(theme::colors().cost_low),
-                ),
-                Span::styled(format!(" · {} in 24h", stats.active_24h), theme::dim()),
-            ]),
+            Line::from(session_spans),
             Line::from(cpu_spans),
-            Line::from(vec![
-                Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
-                Span::styled(format!("{mem_mb:.0} MB"), theme::value()),
-                Span::styled(
-                    format!(
-                        " · {} in / {} out",
-                        util::compact_tokens(stats.total_input),
-                        util::compact_tokens(stats.total_output)
-                    ),
-                    theme::dim(),
-                ),
-            ]),
+            Line::from(mem_spans),
         ];
         frame.render_widget(Paragraph::new(right_lines), cols[2]);
     }
@@ -2404,6 +2443,32 @@ mod tests {
 
         app.search = "web".into();
         assert!(names(&app).contains(&"Clear filter"));
+    }
+
+    /// A figure the machine column cannot fit is left out, not cut to a
+    /// different number at the panel edge.
+    #[test]
+    fn the_overview_never_shows_a_figure_without_its_unit() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.stats.total_input = 73_200;
+        app.stats.total_output = 2_200;
+        for cols in [80u16, 200] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, 30)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let text = screen(&terminal, cols, 6).join("\n");
+            assert_eq!(
+                text.contains("73.2"),
+                text.contains("73.2K in / 2.2K out"),
+                "{text}"
+            );
+        }
     }
 
     /// A short terminal drops whole panels rather than drawing half of one,
