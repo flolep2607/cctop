@@ -826,6 +826,58 @@ pub fn mouse(name: &str) {
         .output();
 }
 
+/// Let PageUp, PageDown, Home and End scroll one of cctop's rmux sessions, as
+/// [`mouse`] lets the wheel. Returns whether the key was spent on scrolling.
+///
+/// Only for an agent on the normal screen, which is Claude outside fullscreen:
+/// one on the alternate screen has no history here (see [`mouse`]) and binds
+/// these keys to its own scrolling, so they go to it untouched.
+///
+/// PageUp enters copy-mode with `-e`, so paging back down past the bottom
+/// leaves it again on its own — and once in copy-mode, PageUp and PageDown are
+/// its own keys, so forwarding them is what scrolls. Home enters it too, at
+/// the top of the history. End is the composer's while nothing is scrolled
+/// back, and only in copy-mode means the live screen.
+///
+/// Asking rmux costs a process per key, which these keys can afford.
+pub fn scroll_key(name: &str, code: crossterm::event::KeyCode) -> bool {
+    use crossterm::event::KeyCode;
+    // Pane commands want the trailing colon: `=name` alone is a pane-less
+    // target and rmux rejects it.
+    let target = format!("={name}:");
+    // The target straight after the command: display-message's format is its
+    // trailing argument, and a flag after it would be read as more message.
+    let run = |args: &[&str]| {
+        Command::new(BIN)
+            .arg(args[0])
+            .args(["-t", &target])
+            .args(&args[1..])
+            .output()
+    };
+    let Ok(out) = run(&["display-message", "-p", "#{alternate_on} #{pane_in_mode}"]) else {
+        return false;
+    };
+    let (alternate, scrolled) = match String::from_utf8_lossy(&out.stdout).trim() {
+        "0 0" => (false, false),
+        "0 1" => (false, true),
+        _ => (true, false),
+    };
+    if alternate {
+        return false;
+    }
+    let args: &[&str] = match (code, scrolled) {
+        (KeyCode::PageUp, false) => &["copy-mode", "-eu"],
+        (KeyCode::Home, false) => {
+            return run(&["copy-mode", "-e"]).is_ok_and(|out| out.status.success())
+                && run(&["send-keys", "-X", "history-top"]).is_ok_and(|out| out.status.success());
+        }
+        (KeyCode::Home, true) => &["send-keys", "-X", "history-top"],
+        (KeyCode::End, true) => &["send-keys", "-X", "cancel"],
+        _ => return false,
+    };
+    run(args).is_ok_and(|out| out.status.success())
+}
+
 /// One cctop-owned rmux session, and the agent living in it.
 ///
 /// The pid is the point. Everything cctop knows about a live agent — what its

@@ -503,6 +503,39 @@ impl Attach {
         self.send(&frame::encode(frame::KEYS, &bytes))
     }
 
+    /// Let PageUp, PageDown, Home and End scroll what cctop kept, as
+    /// [`wheel`](Self::wheel) does. Returns whether the key was spent on it.
+    ///
+    /// Only on the normal screen, which is where an agent that is not
+    /// fullscreen — Claude by default — writes, and where there is history to
+    /// read. An agent on the alternate screen scrolls itself with these keys.
+    /// So does rmux's client, which is why a rmux pane never scrolls here:
+    /// [`rmux::scroll_key`](crate::rmux::scroll_key) is its equivalent.
+    ///
+    /// PageUp and Home always scroll. PageDown and End only while scrolled
+    /// back: at the live screen PageDown has nowhere to go, and End belongs to
+    /// the composer, where it moves the cursor. Home would too, but reaching
+    /// the top in one key was worth more than a cursor move Ctrl+A also makes.
+    pub fn scroll_key(&mut self, key: KeyEvent) -> bool {
+        let screen = self.parser.screen();
+        if !key.modifiers.is_empty() || screen.alternate_screen() {
+            return false;
+        }
+        let at = screen.scrollback();
+        // A line short of a page, so the line you were reading stays in view.
+        let page = usize::from(screen.size().0.saturating_sub(1).max(1));
+        let to = match key.code {
+            KeyCode::PageUp => at + page,
+            KeyCode::PageDown if at > 0 => at.saturating_sub(page),
+            // Clamped by the screen to the oldest line it kept.
+            KeyCode::Home => usize::MAX,
+            KeyCode::End if at > 0 => 0,
+            _ => return false,
+        };
+        self.parser.screen_mut().set_scrollback(to);
+        true
+    }
+
     pub fn wheel(&mut self, up: bool, col: u16, row: u16) -> bool {
         use vt100::{MouseProtocolEncoding as Enc, MouseProtocolMode as Mode};
         if self.parser.screen().mouse_protocol_mode() == Mode::None {
@@ -1578,6 +1611,40 @@ mod tests {
         // The bottom is as far down as it goes, however hard the wheel is spun.
         assert!(attach.wheel(false, 0, 0));
         assert_eq!(attach.parser.screen().scrollback(), 0);
+    }
+
+    /// The paging keys move through the same history, but only off the
+    /// alternate screen, and End only while there is something to come back
+    /// from — at the live screen it is the composer's.
+    #[test]
+    fn paging_keys_scroll_what_cctop_kept_until_an_agent_goes_fullscreen() {
+        let (mut attach, written) = probe();
+        let key = |code| KeyEvent::from(code);
+        assert!(!attach.scroll_key(key(KeyCode::End)));
+        assert!(!attach.scroll_key(key(KeyCode::PageDown)));
+
+        for i in 0..100 {
+            attach.parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        assert!(attach.scroll_key(key(KeyCode::Home)));
+        let top = attach.parser.screen().scrollback();
+        assert!(top > 23);
+        assert!(attach.scroll_key(key(KeyCode::End)));
+        assert!(attach.scroll_key(key(KeyCode::PageUp)));
+        assert_eq!(attach.parser.screen().scrollback(), 23);
+        assert!(attach.scroll_key(key(KeyCode::Home)));
+        assert!(attach.scroll_key(key(KeyCode::PageDown)));
+        assert_eq!(attach.parser.screen().scrollback(), top - 23);
+        assert!(attach.scroll_key(key(KeyCode::End)));
+        assert_eq!(attach.parser.screen().scrollback(), 0);
+        assert!(written.lock().unwrap().is_empty());
+
+        // A held modifier is a different key, and the agent's.
+        let shifted = KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT);
+        assert!(!attach.scroll_key(shifted));
+
+        attach.parser.process(b"\x1b[?1049h");
+        assert!(!attach.scroll_key(key(KeyCode::PageUp)));
     }
 
     /// A paste has to leave as one write with one line ending per line, or the
