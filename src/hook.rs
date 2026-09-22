@@ -1546,7 +1546,7 @@ fn json_install(path: &Path, shape: Shape, events: &[&str], exe: &str) -> anyhow
         drop_ours(list);
         let command = serde_json::json!({
             "type": "command",
-            "command": format!("{exe} hook {event}"),
+            "command": hook_command(exe, event),
         });
         list.push(match shape {
             Shape::Nested => serde_json::json!({ "hooks": [command] }),
@@ -1657,16 +1657,42 @@ fn entry_commands(entry: &serde_json::Value) -> impl Iterator<Item = &str> {
     nested.chain(flat)
 }
 
+/// The command line the installer writes for one event.
+///
+/// The harnesses hand this to a shell, so a path with a space in it — an
+/// `/Applications/My Tools/cctop`, a home directory with a space — has to be
+/// quoted, or every fire runs `/Applications/My` and exits 127. A path with
+/// nothing the shell would read is written bare, so an install that already
+/// works is byte-for-byte what it was.
+fn hook_command(exe: &str, event: &str) -> String {
+    let plain = !exe.is_empty()
+        && exe
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+,:=@%".contains(c));
+    if plain {
+        format!("{exe}{MARKER}{event}")
+    } else {
+        format!("'{}'{MARKER}{event}", exe.replace('\'', r"'\''"))
+    }
+}
+
 /// The cctop an installed command names, taken back out of the command text.
 ///
-/// The installer writes `<exe> hook <Event>` and never quotes, so everything
-/// before the last `hook` is the path — including a path with spaces in it,
-/// which is why this splits on the marker rather than on whitespace.
-fn recorded_exe(command: &str) -> Option<&str> {
+/// Everything before the last `hook` is the path, which is why this splits on
+/// the marker rather than on whitespace: an install from before the path was
+/// quoted wrote a spaced path bare, and it still has to be recognised to be
+/// repaired. A quoted path is unquoted, the inverse of [`hook_command`].
+fn recorded_exe(command: &str) -> Option<String> {
     if !is_our_command(command) {
         return None;
     }
-    Some(command.rsplit_once(MARKER)?.0.trim())
+    let exe = command.rsplit_once(MARKER)?.0.trim();
+    Some(
+        match exe.strip_prefix('\'').and_then(|e| e.strip_suffix('\'')) {
+            Some(quoted) => quoted.replace(r"'\''", "'"),
+            None => exe.to_string(),
+        },
+    )
 }
 
 fn read_settings(path: &Path) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
@@ -1686,6 +1712,21 @@ fn read_settings(path: &Path) -> anyhow::Result<serde_json::Map<String, serde_js
     }
 }
 
+/// The file a write to `path` should land in: the link's target when `path` is
+/// a symlink, `path` itself otherwise.
+///
+/// A config symlinked in from a dotfiles repository is common, and the
+/// write-and-rename below would replace the link with a plain file — after
+/// which the user's next change to the repository silently stops reaching the
+/// agent. A dangling link is left to be replaced, since there is nothing behind
+/// it to keep in step.
+fn through_link(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(target) if path.is_symlink() => target,
+        _ => path.to_path_buf(),
+    }
+}
+
 fn write_settings(
     path: &Path,
     root: &serde_json::Map<String, serde_json::Value>,
@@ -1693,6 +1734,7 @@ fn write_settings(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let path = &through_link(path);
     // Written beside the target and renamed: a crash mid-write would otherwise
     // leave the user with no settings at all, which breaks their agent far more
     // thoroughly than a missing hook.
@@ -1786,6 +1828,7 @@ fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let path = &through_link(path);
     let tmp = path.with_extension("toml.cctop-tmp");
     std::fs::write(&tmp, doc.to_string())?;
     std::fs::rename(&tmp, path)?;
@@ -1937,11 +1980,17 @@ fn json_health(path: &Path, shape: Shape, events: &[&'static str]) -> Health {
         match entry {
             None => missing.push(*event),
             Some(entry) => {
-                recorded = recorded.or_else(|| {
-                    entry_commands(entry)
-                        .find_map(recorded_exe)
-                        .map(str::to_string)
-                })
+                let exe = entry_commands(entry).find_map(recorded_exe);
+                // An entry the installer would not write today — a spaced path
+                // left bare by an older cctop — is counted as missing, so that
+                // `repair` rewrites it instead of calling it installed while
+                // every fire fails.
+                if !entry_commands(entry)
+                    .any(|c| exe.as_deref().is_some_and(|e| c == hook_command(e, event)))
+                {
+                    missing.push(*event);
+                }
+                recorded = recorded.or(exe);
             }
         }
     }
@@ -2826,6 +2875,86 @@ mod tests {
     }
 
     #[test]
+    fn a_path_with_a_space_is_quoted_for_the_shell_and_read_back() {
+        let spaced = "/home/My User/.cargo/bin/cctop";
+        let command = hook_command(spaced, "Stop");
+        assert_eq!(command, "'/home/My User/.cargo/bin/cctop' hook Stop");
+        // What the harness does with it: hand it to a shell, which must see one
+        // program, not `/home/My` with arguments.
+        let words = std::process::Command::new("sh")
+            .args(["-c", &format!("set -- {command}; echo \"$#|$1\"")])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&words.stdout).trim(),
+            format!("3|{spaced}")
+        );
+        assert_eq!(recorded_exe(&command).as_deref(), Some(spaced));
+
+        let quote = "/opt/it's/cctop";
+        assert_eq!(
+            recorded_exe(&hook_command(quote, "Stop")).as_deref(),
+            Some(quote)
+        );
+        // A path the shell reads as-is stays bare, so a working install is
+        // not rewritten.
+        assert_eq!(
+            hook_command("/usr/local/bin/cctop", "Stop"),
+            "/usr/local/bin/cctop hook Stop"
+        );
+    }
+
+    #[test]
+    fn a_spaced_path_an_older_cctop_left_bare_counts_as_missing() {
+        let dir = scratch("hooks-spaced");
+        let bin = dir.join("My Tools");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("cctop");
+        std::fs::write(&exe, "").unwrap();
+        let path = dir.join("settings.json");
+        let bare = format!("{} hook Stop", exe.display());
+        let settings = serde_json::json!({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": bare},
+        ]}]}});
+        std::fs::write(&path, settings.to_string()).unwrap();
+
+        match json_health(&path, Shape::Nested, &["Stop"]) {
+            Health::Other {
+                exe: found,
+                missing,
+            } => {
+                assert_eq!(found, exe.display().to_string());
+                assert_eq!(missing, ["Stop"]);
+            }
+            other => panic!("expected the bare entry to be flagged, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_symlinked_settings_file_stays_a_symlink() {
+        let dir = scratch("hooks-link");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let dotfiles = dir.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("settings.json");
+        std::fs::write(&real, r#"{"model": "opus"}"#).unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+
+        install(&scope);
+        assert!(path.is_symlink(), "the link was replaced by a plain file");
+        let written = read_settings(&real).unwrap();
+        assert_eq!(written["model"], "opus");
+        assert!(
+            written.contains_key("hooks"),
+            "the hooks never reached the target"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_round_trip_keeps_the_users_key_order() {
         let dir = scratch("hooks-order");
         let scope = Scope::Project(dir.clone());
@@ -3166,7 +3295,7 @@ mod tests {
             assert!(is_our_command(command), "{command} was not recognised");
         }
         assert_eq!(
-            recorded_exe("/Applications/My Tools/cctop hook Stop"),
+            recorded_exe("/Applications/My Tools/cctop hook Stop").as_deref(),
             Some("/Applications/My Tools/cctop")
         );
 
