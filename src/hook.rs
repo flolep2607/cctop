@@ -1575,8 +1575,10 @@ fn json_remove(path: &Path) -> anyhow::Result<usize> {
         // empty array behind in someone else's file.
         hooks.retain(|_, value| !value.as_array().is_some_and(|l| l.is_empty()));
         // And the `hooks` object itself, once cctop's were all it held.
+        // `shift_remove`, not `remove`: under `preserve_order` the latter is a
+        // swap, which would move the file's last key into the hole.
         if hooks.is_empty() {
-            root.remove("hooks");
+            root.shift_remove("hooks");
         }
     }
     if removed > 0 {
@@ -2820,6 +2822,33 @@ mod tests {
         assert!(commands(&path).contains(&"notify-send done".to_string()));
         remove(&scope);
         assert_eq!(commands(&path), ["notify-send done"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_round_trip_keeps_the_users_key_order() {
+        let dir = scratch("hooks-order");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Deliberately not alphabetical, and `hooks` is not last, so a sorted
+        // map and a swap-remove would each move something.
+        let theirs = r#"{"zeta": 1, "hooks": {}, "model": "opus", "alpha": {"y": 1, "b": 2}}"#;
+        std::fs::write(&path, theirs).unwrap();
+        let keys =
+            |path: &Path| -> Vec<String> { read_settings(path).unwrap().keys().cloned().collect() };
+
+        install(&scope);
+        assert_eq!(keys(&path), ["zeta", "hooks", "model", "alpha"]);
+        let alpha: Vec<String> = read_settings(&path).unwrap()["alpha"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(alpha, ["y", "b"]);
+        remove(&scope);
+        assert_eq!(keys(&path), ["zeta", "model", "alpha"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
