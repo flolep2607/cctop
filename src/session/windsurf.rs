@@ -113,7 +113,11 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         let decoded = (bytes[i] == b'%' && i + 2 < bytes.len())
-            .then(|| u8::from_str_radix(&s[i + 1..i + 3], 16).ok())
+            // `get`: the two bytes after a `%` need not end on a character.
+            .then(|| {
+                s.get(i + 1..i + 3)
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+            })
             .flatten();
         match decoded {
             Some(byte) => {
@@ -328,5 +332,15 @@ mod tests {
         assert_eq!(percent_decode("/plain/path"), "/plain/path");
         // A stray `%` is data, not the start of an escape.
         assert_eq!(percent_decode("/100%"), "/100%");
+    }
+
+    /// Regression: the two bytes after a `%` were sliced out of the `str`, so a
+    /// `%` followed by a multi-byte character cut it in half and panicked the
+    /// discovery walk. A URI VS Code wrote never has one; a hand-edited
+    /// `workspace.json` can.
+    #[test]
+    fn a_percent_before_a_multibyte_character_is_data() {
+        assert_eq!(percent_decode("/x/%€"), "/x/%€");
+        assert_eq!(percent_decode("/x/%a€"), "/x/%a€");
     }
 }
