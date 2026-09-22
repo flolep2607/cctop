@@ -125,6 +125,9 @@
   .termcard .why { font-size: 12px; color: var(--faint); }
   .termcard .why.bad { color: var(--amber); }
   .termside .note { font-size: 12px; color: var(--amber); margin-top: 7px; }
+  .termside .why.bad { font-size: 12px; color: var(--amber); margin-top: 7px; }
+  .termframe { width: 100%; height: calc(100vh - 80px); min-height: 360px;
+               border: 1px solid var(--line); border-radius: 8px; background: #000; }
   nav.views button.toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
   /* Two columns need a screen. On a phone the terminal goes under the
@@ -1585,7 +1588,10 @@ async function toggleTerminal(button) {
   try {
     // Minted per opening, never cached: the link is a shell credential, and a
     // page that kept one would be handing out the last reader's door.
-    const terminal = await act("terminal", {});
+    // The page's own origin, because that is where rmux's frontend is
+    // mirrored for the frame — and the server cannot tell loopback from a
+    // tunnel on its own.
+    const terminal = await act("terminal", { origin: location.origin });
     const head = el("div", "head");
     head.appendChild(el("span", null, "This session's terminal"));
     const close = el("button", null, "Close");
@@ -1593,12 +1599,29 @@ async function toggleTerminal(button) {
     close.addEventListener("click", () => closeTerminal(button));
     head.appendChild(close);
 
-    // A link and not a frame, because rmux's browser terminal refuses to be
-    // one: share.rmux.io sends `frame-ancestors 'none'`, so any page that
-    // embeds it gets an empty rectangle and a console error. A window of its
-    // own is the nearest thing to beside-the-conversation that a page is
-    // allowed to open — it floats over the desktop rather than hiding this one
-    // behind a tab, and it can be dragged next to it.
+    if (terminal.framed) {
+      // rmux's frontend, mirrored onto this origin by the server so it may be
+      // framed at all, and so a loopback share is a loopback page talking to a
+      // loopback socket — which Chrome's Local Network Access leaves alone.
+      const frame = el("iframe", "termframe");
+      frame.src = terminal.url;
+      frame.title = "This session's terminal";
+      frame.allow = "clipboard-read; clipboard-write";
+      const notes = [el("div", "why bad",
+        "Whoever holds this page's link can type into this agent — it is a shell, not a prompt box.")];
+      if (!terminal.tunnelled && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
+        notes.unshift(el("div", "note",
+          "rmux's tunnel did not come up, so this terminal only opens in a browser on the machine cctop runs on."));
+      }
+      side.replaceChildren(head, frame, ...notes);
+      return;
+    }
+
+    // A page on plain http off loopback — a `--bind` on the LAN — is one rmux
+    // will not serve a frontend to, so the link is share.rmux.io's, which
+    // refuses to be framed. A window of its own is the nearest thing to
+    // beside-the-conversation: it floats over the desktop rather than hiding
+    // this one behind a tab, and it can be dragged next to it.
     const card = el("div", "card pad termcard");
     const open = el("a", "open", "Open the terminal");
     open.href = terminal.url;
@@ -1621,7 +1644,7 @@ async function toggleTerminal(button) {
     card.appendChild(el(
       "div", "why",
       "It opens in a window of its own, which you can put beside this one: " +
-      "rmux's terminal page refuses to be framed, so it cannot be drawn inside."
+      "this page is on plain http, so rmux's terminal cannot be drawn inside it."
     ));
     card.appendChild(el(
       "div", "why",

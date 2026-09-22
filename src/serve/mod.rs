@@ -70,6 +70,7 @@ pub mod chat;
 /// feature, so a released cctop contains none of this — see the module docs.
 #[cfg(feature = "debug")]
 mod debug;
+mod frontend;
 mod http;
 mod report;
 pub mod tunnel;
@@ -855,6 +856,12 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         Err((status, why)) => return http::respond_error(stream, None, status, why),
     };
 
+    // Ahead of the token, and the only route that is: it mirrors a public
+    // CDN's files, whose subresources cannot carry `?t=`. See `frontend`.
+    if let Some(upstream) = frontend::upstream_path(&request.path) {
+        return frontend::serve(stream, &request, upstream);
+    }
+
     // Before the route, so a wrong token cannot be used to find out which
     // routes exist. Every path is behind it, including the ones that only
     // return HTML.
@@ -1017,7 +1024,7 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
     // Answered before the others because it does not answer in their shape: a
     // terminal is a link and a reach, not a sentence about what was done.
     if verb == "terminal" {
-        return match actions::terminal(session) {
+        return match actions::terminal(session, &field("origin")) {
             Ok(terminal) => json(stream, request, &terminal),
             Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
         };

@@ -3730,7 +3730,7 @@ impl App {
         // where it cannot; the status line below says which came back. Pressing
         // `W` twice reuses the first share rather than minting a second.
         let mut reachable = false;
-        let share = crate::rmux::share_link(&name, false).map(|(share, tunnelled)| {
+        let share = crate::rmux::share_link(&name, None).map(|(share, tunnelled)| {
             reachable = tunnelled;
             share
         });

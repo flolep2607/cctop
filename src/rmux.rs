@@ -342,7 +342,7 @@ pub const SHARE_TUNNEL: &str = "localhost-run";
 /// live coding agent should not rest on which file descriptor a line arrived
 /// on, and here it does not — the two links are separate fields.
 fn web_share(name: &str, tunnelled: bool) -> Result<Share, String> {
-    share_with(name, tunnelled, false)
+    share_with(name, tunnelled, None)
 }
 
 /// The share for `name`, minted on the first ask and reused after it.
@@ -354,8 +354,8 @@ fn web_share(name: &str, tunnelled: bool) -> Result<Share, String> {
 /// session per cctop is also the honest number: it is one terminal, and every
 /// link minted for it opens the same one.
 ///
-/// Keyed by whether it is the embedded flavour, because that is a different
-/// link and not a different terminal — see [`web_share_embedded`].
+/// Keyed by the frontend it is embedded in, if any, because that is a
+/// different link and not a different terminal — see [`web_share_embedded`].
 ///
 /// Tunnelled first, loopback second, and which one came back is the `bool`. A
 /// machine with no way out still has a terminal worth opening from the browser
@@ -365,27 +365,35 @@ fn web_share(name: &str, tunnelled: bool) -> Result<Share, String> {
 /// Held for the life of the process. If the session it belongs to ends, the
 /// share ends with it and the cached link stops answering — which is correct,
 /// since there is no terminal left for it to reach either.
-pub fn share_link(name: &str, embedded: bool) -> Result<(Share, bool), String> {
+pub fn share_link(name: &str, frontend: Option<&str>) -> Result<(Share, bool), String> {
     /// A share and whether its endpoint is reachable off this machine.
     type Reachable = (Share, bool);
-    static CACHE: std::sync::Mutex<Option<HashMap<(String, bool), Reachable>>> =
-        std::sync::Mutex::new(None);
-    let key = (name.to_string(), embedded);
+    /// A session name, and the frontend it is embedded in if any.
+    type Key = (String, Option<String>);
+    static CACHE: std::sync::Mutex<Option<HashMap<Key, Reachable>>> = std::sync::Mutex::new(None);
+    let key = (name.to_string(), frontend.map(str::to_string));
     if let Ok(cache) = CACHE.lock()
         && let Some(held) = cache.as_ref().and_then(|c| c.get(&key))
     {
         return Ok(held.clone());
     }
-    let mint = |tunnelled| match embedded {
-        true => web_share_embedded(name, tunnelled),
-        false => web_share(name, tunnelled),
+    let mint = |tunnelled| match frontend {
+        Some(frontend) => web_share_embedded(name, tunnelled, frontend),
+        None => web_share(name, tunnelled),
     };
-    // The tunnel is the half that needs a network and a relay that will have
-    // it; the loopback share needs neither, so a failure to reach the world is
-    // not a failure to open a terminal.
-    let made = match mint(true) {
-        Ok(share) => (share, true),
-        Err(why) => (mint(false).map_err(|_| why)?, false),
+    // A frame on a loopback page is a browser on this machine, which reaches
+    // the daemon's socket directly. Sending it out through a public relay and
+    // back would only add a way to fail — and a relay that rate-limits is how
+    // a page came to be holding a loopback link anyway.
+    let made = match frontend.is_some_and(is_loopback_url) {
+        true => (mint(false)?, false),
+        // The tunnel is the half that needs a network and a relay that will
+        // have it; the loopback share needs neither, so a failure to reach the
+        // world is not a failure to open a terminal.
+        false => match mint(true) {
+            Ok(share) => (share, true),
+            Err(why) => (mint(false).map_err(|_| why)?, false),
+        },
     };
     if let Ok(mut cache) = CACHE.lock() {
         cache
@@ -397,8 +405,12 @@ pub fn share_link(name: &str, embedded: bool) -> Result<(Share, bool), String> {
 
 /// The same share, minted to live inside cctop's own page.
 ///
-/// Four differences, all of them because the frame is not a browser tab:
+/// Five differences, all of them because the frame is not a browser tab:
 ///
+/// - **Its frontend is cctop's page's own origin** — `frontend`, where
+///   [`crate::serve`] mirrors rmux's static client. share.rmux.io refuses to be
+///   framed, and a page there reaching a loopback socket is what Chrome's
+///   Local Network Access blocks; see `serve::frontend` for both.
 /// - **No navigation bar and no disclaimer toast.** rmux draws both for a link
 ///   somebody was sent cold. Here the surrounding page is cctop's, the reader
 ///   arrived through it, and a second chrome inside the frame is chrome twice.
@@ -420,20 +432,22 @@ pub fn share_link(name: &str, embedded: bool) -> Result<(Share, bool), String> {
 /// **whoever holds the page link can type into this agent's terminal**, not
 /// merely prompt it. That is a shell, and it is why this is behind the same
 /// `--no-actions` switch as everything else that acts.
-fn web_share_embedded(name: &str, tunnelled: bool) -> Result<Share, String> {
-    share_with(name, tunnelled, true)
+fn web_share_embedded(name: &str, tunnelled: bool, frontend: &str) -> Result<Share, String> {
+    share_with(name, tunnelled, Some(frontend))
 }
 
-fn share_with(name: &str, tunnelled: bool, embedded: bool) -> Result<Share, String> {
+fn share_with(name: &str, tunnelled: bool, frontend: Option<&str>) -> Result<Share, String> {
     let name = name.to_string();
+    let frontend = frontend.map(str::to_string);
     on_daemon(move |rmux| async move {
         let session = rmux.session(rmux_sdk::SessionName::new(name)?).await?;
         let mut builder = session.share();
         if tunnelled {
             builder = builder.tunnel_provider(SHARE_TUNNEL);
         }
-        if embedded {
+        if let Some(frontend) = frontend {
             builder = builder
+                .frontend_url(frontend)
                 .operator_only()
                 .no_navbar()
                 .no_disclaimer()
@@ -452,6 +466,20 @@ fn share_with(name: &str, tunnelled: bool, embedded: bool) -> Result<Share, Stri
         None => Err("the share came back without an operator link".to_string()),
         Some(_) => Ok(share),
     })
+}
+
+/// Whether a URL's host is this machine's loopback.
+pub fn is_loopback_url(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// A rmux session name for a session being resumed.
@@ -985,6 +1013,27 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Loopback decides whether a framed share skips the tunnel, so a LAN or
+    /// tunnel origin misread as local would hand a remote browser a link to
+    /// its own `127.0.0.1`.
+    #[test]
+    fn only_this_machine_counts_as_loopback() {
+        for local in [
+            "http://127.0.0.1:8080/rmux",
+            "http://localhost:1/rmux",
+            "http://[::1]:9/rmux",
+        ] {
+            assert!(super::is_loopback_url(local), "{local}");
+        }
+        for remote in [
+            "https://abc.trycloudflare.com/rmux",
+            "http://192.168.1.4:8080/rmux",
+            "http://localhost.example.com/rmux",
+        ] {
+            assert!(!super::is_loopback_url(remote), "{remote}");
+        }
+    }
 
     /// The option is one string in a tab-separated listing, so its spelling is
     /// load-bearing in both directions: a word this cctop cannot read, or a

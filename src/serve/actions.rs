@@ -68,10 +68,15 @@ pub struct Terminal {
     /// never logged, never put on the status line, and never returned to a
     /// request that did not carry the token.
     pub url: String,
-    /// Whether that link travels through cctop's quick tunnel. `false` means it
+    /// Whether that link travels through rmux's tunnel. `false` means it
     /// resolves to this machine's loopback and works only in a browser already
     /// on it — which the page says rather than showing an empty frame.
     pub tunnelled: bool,
+    /// Whether the link's frontend is this page's own origin, and so can be
+    /// framed. `false` for a page on plain `http` off loopback — a `--bind`
+    /// address on the LAN — where rmux will not accept a frontend, and the
+    /// link is share.rmux.io's, for a window of its own.
+    pub framed: bool,
 }
 
 /// Where an image the page sent was written, for the prompt to name.
@@ -396,7 +401,11 @@ fn local(session: &Session) -> Result<(), Failed> {
 /// loopback link rather than to nothing. Which of the two it got is in the
 /// answer, because a link that only opens on the server's own desk is not a
 /// failure the reader can see.
-pub fn terminal(session: &Session) -> Result<Terminal, Failed> {
+///
+/// `origin` is the page's own `location.origin`, which is where the frontend
+/// is mirrored — the server cannot tell on its own, since the same page is
+/// reached on loopback and through a tunnel.
+pub fn terminal(session: &Session, origin: &str) -> Result<Terminal, Failed> {
     local(session)?;
     let Some(pid) = session.root_pid() else {
         return Err((
@@ -410,12 +419,27 @@ pub fn terminal(session: &Session) -> Result<Terminal, Failed> {
             "only an agent cctop put in a multiplexer has a terminal to show".into(),
         ));
     };
-    let (share, tunnelled) = crate::rmux::share_link(&name, true)
+    // An origin and nothing else, or it is not one: a path or a fragment would
+    // be pasted into the frontend URL the share is minted with.
+    let origin = origin.trim_end_matches('/');
+    let shaped = ["https://", "http://"].iter().any(|scheme| {
+        origin
+            .strip_prefix(scheme)
+            .is_some_and(|host| !host.is_empty() && !host.contains(['/', '?', '#', '@']))
+    });
+    // rmux refuses a plain-`http` frontend anywhere but loopback.
+    let framed = shaped && (origin.starts_with("https://") || crate::rmux::is_loopback_url(origin));
+    let frontend = framed.then(|| format!("{origin}{}", super::frontend::PREFIX));
+    let (share, tunnelled) = crate::rmux::share_link(&name, frontend.as_deref())
         .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));
     };
-    Ok(Terminal { url, tunnelled })
+    Ok(Terminal {
+        url,
+        tunnelled,
+        framed,
+    })
 }
 
 #[cfg(test)]

@@ -302,6 +302,7 @@ fn reason(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Error",
     }
@@ -319,10 +320,8 @@ fn reason(status: u16) -> &'static str {
 /// and read what it renders, or talk a browser into sniffing a JSON response as
 /// something executable.
 ///
-/// The session's terminal is a link out of this page and not a frame in it:
-/// rmux's browser terminal answers with `frame-ancestors 'none'`, so no policy
-/// written here could embed it. The policy therefore stays at `default-src
-/// 'none'` with nothing framed at all.
+/// `frame-src 'self'` is the one thing framed: the session's terminal, which
+/// is rmux's frontend mirrored onto this origin — see [`super::frontend`].
 fn common_headers(out: &mut String) {
     out.push_str(
         "X-Content-Type-Options: nosniff\r\n\
@@ -332,6 +331,7 @@ fn common_headers(out: &mut String) {
          script-src 'unsafe-inline'; \
          img-src data:; \
          connect-src 'self'; \
+         frame-src 'self'; \
          base-uri 'none'; \
          form-action 'none'; \
          frame-ancestors 'none'\r\n",
@@ -350,6 +350,21 @@ pub fn respond(
     content_type: &str,
     body: &[u8],
 ) {
+    let mut security = String::new();
+    common_headers(&mut security);
+    respond_with(stream, request, status, content_type, body, &security);
+}
+
+/// [`respond`] under a security policy other than this server's own — for the
+/// one route whose content was written somewhere else.
+pub fn respond_with(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    security: &str,
+) {
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\n\
          Content-Type: {content_type}\r\n\
@@ -359,7 +374,7 @@ pub fn respond(
         reason(status),
         body.len(),
     );
-    common_headers(&mut head);
+    head.push_str(security);
     head.push_str("\r\n");
 
     let head_only = request.is_some_and(|r| r.method == "HEAD");
@@ -460,7 +475,7 @@ mod tests {
 
     #[test]
     fn every_status_the_router_sends_has_a_reason() {
-        for status in [200, 400, 403, 404, 405, 409, 411, 413, 431, 503] {
+        for status in [200, 400, 403, 404, 405, 409, 411, 413, 431, 502, 503] {
             assert_ne!(reason(status), "Error", "status {status} has no reason");
         }
     }
