@@ -712,24 +712,25 @@ impl Hue {
     ///
     /// [`Hue::color`] is ink — right for a label or a border, and loud as a
     /// block of background: a bar of saturated tabs outshouts everything
-    /// under it. So a tab rests in a pastel, the one being watched is a step
-    /// stronger, and only a tab that needs you reaches the full colour — the
-    /// same hue at every step, so it is still *that* tab while it shouts. One
-    /// set for both palettes: all three carry dark text on either.
+    /// under it. So a tab rests in a dark pastel, the one being watched is a
+    /// step lighter, and only a tab that needs you reaches the full colour —
+    /// the same hue at every step, so it is still *that* tab while it shouts.
     ///
-    /// The resting tones are the cube's dusty middle (`d78787`, `87af87`), not
-    /// its palest row: `ffd7d7` and its neighbours are pastel on a chart and
-    /// nearly white on a dark terminal, which read as a bar of lit blocks.
+    /// Dark because the terminal nearly always is: the pale row of the cube
+    /// (`ffd7d7` and its neighbours) is pastel on a chart and a lit block on a
+    /// black screen, and even its dusty middle (`d78787`) stood out more than a
+    /// tab's colour should at rest. The two quiet strengths carry light text
+    /// ([`Fill::ink`]); the vivid one carries dark.
     pub fn fill(self, strength: Fill) -> Color {
         let (rest, selected, alert) = match self {
-            Hue::Red => (174, 210, 203),
-            Hue::Orange => (180, 216, 208),
-            Hue::Yellow => (186, 228, 220),
-            Hue::Green => (108, 114, 77),
-            Hue::Cyan => (109, 116, 44),
-            Hue::Blue => (110, 117, 39),
-            Hue::Violet => (140, 141, 135),
-            Hue::Pink => (175, 211, 205),
+            Hue::Red => (95, 131, 203),
+            Hue::Orange => (137, 173, 208),
+            Hue::Yellow => (101, 143, 220),
+            Hue::Green => (65, 71, 77),
+            Hue::Cyan => (66, 73, 44),
+            Hue::Blue => (67, 68, 39),
+            Hue::Violet => (97, 134, 135),
+            Hue::Pink => (132, 168, 205),
         };
         let index = match strength {
             Fill::Rest => rest,
@@ -752,6 +753,16 @@ pub enum Fill {
     Selected,
     /// The lit half of a blink: the tab's agent needs you.
     Alert,
+}
+
+impl Fill {
+    /// The text colour that reads on a fill of this strength.
+    pub fn ink(self) -> Color {
+        match self {
+            Fill::Rest | Fill::Selected => Color::Indexed(254),
+            Fill::Alert => Color::Black,
+        }
+    }
 }
 
 /// Which gradient a series should use.

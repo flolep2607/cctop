@@ -455,12 +455,11 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             // every time its agent finished a turn would not be a mark at all.
             Some(hue) => {
                 let watched = i == app.tab;
-                let fill = Style::default()
-                    .bg(hue.fill(match watched {
-                        true => theme::Fill::Selected,
-                        false => theme::Fill::Rest,
-                    }))
-                    .fg(Color::Black);
+                let strength = match watched {
+                    true => theme::Fill::Selected,
+                    false => theme::Fill::Rest,
+                };
+                let fill = Style::default().bg(hue.fill(strength)).fg(strength.ink());
                 let fill = match watched {
                     true => fill.add_modifier(Modifier::UNDERLINED),
                     false => fill,
@@ -472,6 +471,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                     Some(tabs::Attention::NeedsInput) => match on {
                         true => fill
                             .bg(hue.fill(theme::Fill::Alert))
+                            .fg(theme::Fill::Alert.ink())
                             .add_modifier(Modifier::BOLD),
                         false => fill.add_modifier(Modifier::BOLD),
                     },
@@ -2399,7 +2399,7 @@ mod tests {
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
         let cell = buf.cell((at, 0)).unwrap();
         assert_eq!(cell.bg, violet, "the label is not on the tab's pastel");
-        assert_eq!(cell.fg, Color::Black);
+        assert_eq!(cell.fg, theme::Fill::Rest.ink());
         // The padding is the tab too: filled up to the rule, not just behind
         // the letters.
         assert_eq!(buf.cell((at - 1, 0)).unwrap().bg, violet);
