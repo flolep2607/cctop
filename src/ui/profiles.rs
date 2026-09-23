@@ -49,8 +49,11 @@ impl App {
         if pane.view.pump() {
             self.needs_redraw = true;
             let screen = pane.view.parser.screen();
-            if flow.link.is_none() {
-                flow.link = crate::quota::link_on_screen(screen);
+            // Read again on every draw rather than kept from the first: the
+            // link is printed over several rows, and the first sighting can be
+            // before the last of them has arrived — which kept half a URL.
+            if let Some(link) = crate::quota::link_on_screen(screen) {
+                flow.link = Some(link);
             }
             if let Some(token) = crate::quota::token_on_screen(screen) {
                 // Its job is done, and a process holding a fresh token has no

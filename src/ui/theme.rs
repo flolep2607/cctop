@@ -707,6 +707,30 @@ impl Hue {
             Variant::Mono => Color::Reset,
         }
     }
+
+    /// The hue washed out to a pastel, for filling a whole tab.
+    ///
+    /// [`Hue::color`] is ink — right for a label or a border, and loud as a
+    /// block of background: a bar of saturated tabs outshouts everything
+    /// under it. The pastel is the same colour at rest, which leaves the full
+    /// one free to mean something when it blinks. One set for both palettes:
+    /// these are light enough to carry dark text on either.
+    pub fn pastel(self) -> Color {
+        let index = match self {
+            Hue::Red => 224,
+            Hue::Orange => 223,
+            Hue::Yellow => 230,
+            Hue::Green => 194,
+            Hue::Cyan => 195,
+            Hue::Blue => 153,
+            Hue::Violet => 183,
+            Hue::Pink => 225,
+        };
+        match variant() {
+            Variant::Mono => Color::Reset,
+            _ => Color::Indexed(index),
+        }
+    }
 }
 
 /// Which gradient a series should use.

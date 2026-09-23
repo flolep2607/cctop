@@ -1085,11 +1085,13 @@ impl App {
                 }
                 KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(link) = flow.link.clone() {
-                        let opened = crate::serve::open_in_browser(&link);
                         render::copy_to_clipboard(&link);
+                        // Over ssh a browser opened here is on the wrong
+                        // machine, so the clipboard is the whole answer.
+                        let opened = !render::over_ssh() && crate::serve::open_in_browser(&link);
                         self.set_status(match opened {
-                            true => "Opened the sign-in link, and copied it",
-                            false => "Copied the sign-in link; open it in a browser",
+                            true => "Copied the sign-in link, and asked the browser to open it",
+                            false => "Copied the sign-in link — paste it into your browser",
                         });
                     }
                 }
