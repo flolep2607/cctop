@@ -1879,15 +1879,7 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
     let Some(pane) = flow.pane.as_mut() else {
         let hint = " [Enter] run claude setup-token   [Esc] cancel";
         let lines = vec![
-            Line::from(Span::styled(
-                " What should cctop call it? The launcher, the Limits panel and",
-                theme::dim(),
-            )),
-            Line::from(Span::styled(
-                " `cctop as <name>` all use this name.",
-                theme::dim(),
-            )),
-            Line::default(),
+            Line::from(Span::styled(" What is it called?", theme::dim())),
             Line::from(vec![
                 Span::raw(" > "),
                 Span::styled(
@@ -1899,23 +1891,10 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
                 Span::styled("█", Style::default().fg(theme::colors().accent)),
             ]),
             Line::default(),
-            Line::from(Span::styled(
-                " Next, `claude setup-token` runs here. Before approving it, make sure",
-                theme::dim(),
-            )),
-            Line::from(Span::styled(
-                " the browser is signed in to claude.ai as this account — sign out, or",
-                theme::dim(),
-            )),
-            Line::from(Span::styled(
-                " use a private window, if another one is.",
-                theme::dim(),
-            )),
-            Line::default(),
             Line::from(Span::styled(hint, theme::dim())),
         ];
         let row = lines.len() as u16 - 1;
-        let (outer, inner) = modal(frame, area, "Add a Claude account", lines, 76);
+        let (outer, inner) = modal(frame, area, "Add a Claude account", lines, 52);
         confirm_chips(
             layout,
             outer,
