@@ -142,6 +142,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("?  F1", "This page"),
         item(",", "Settings and keybinds, and the file that holds them"),
         item("q  F10", "Quit"),
+        item("+", "Add a Claude account (runs claude setup-token)"),
         Line::default(),
         section("Navigation"),
         item("↑/k  ↓/j", "Move between sessions"),
@@ -211,6 +212,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
+        item(
+            "Alt+Shift+R",
+            "Restart its agent on the same session (after an update)",
+        ),
         item("F9", "Paste the clipboard's image as a file path"),
         item("Ctrl+V", "The same, in terminals that send it"),
         item("Home / End", "In a Claude pane: top / bottom of the chat"),
@@ -1821,6 +1826,175 @@ pub(super) fn draw_switch_tab(
 
     let (outer, _) = modal(frame, area, "Go to tab", lines, WIDTH);
     layout.modal_rect = Some(outer);
+}
+
+/// The add-account popup: a name field, then `claude setup-token` running in a
+/// terminal inside it, then what came of it.
+pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
+    let esc = KeyEvent::from(KeyCode::Esc);
+    let flow = &mut app.add_account;
+
+    if let Some(outcome) = &flow.outcome
+        && flow.pane.is_none()
+    {
+        let mut lines = match outcome {
+            Ok(name) => vec![
+                Line::from(vec![
+                    Span::styled(" ✓ Saved ", Style::default().fg(theme::colors().cost_low)),
+                    Span::styled(name.clone(), theme::value()),
+                    Span::styled(". Its limits appear in the panel below.", theme::dim()),
+                ]),
+                Line::from(Span::styled(
+                    " Start an agent on it with p in the launcher, or from a shell:",
+                    theme::dim(),
+                )),
+                Line::from(Span::styled(
+                    format!("   cctop as {name} claude"),
+                    theme::value(),
+                )),
+            ],
+            Err(why) => vec![Line::from(Span::styled(
+                format!(" {why}"),
+                Style::default().fg(theme::colors().cost_mid),
+            ))],
+        };
+        let hint = " [Enter] done";
+        lines.extend([
+            Line::default(),
+            Line::from(Span::styled(hint, theme::dim())),
+        ]);
+        let row = lines.len() as u16 - 1;
+        let (outer, inner) = modal(frame, area, "Add a Claude account", lines, 72);
+        confirm_chips(
+            layout,
+            outer,
+            inner,
+            row,
+            hint,
+            &[("[Enter]", KeyEvent::from(KeyCode::Enter))],
+        );
+        return;
+    }
+
+    let Some(pane) = flow.pane.as_mut() else {
+        let hint = " [Enter] run claude setup-token   [Esc] cancel";
+        let lines = vec![
+            Line::from(Span::styled(
+                " What should cctop call it? The launcher, the Limits panel and",
+                theme::dim(),
+            )),
+            Line::from(Span::styled(
+                " `cctop as <name>` all use this name.",
+                theme::dim(),
+            )),
+            Line::default(),
+            Line::from(vec![
+                Span::raw(" > "),
+                Span::styled(
+                    flow.name.clone(),
+                    Style::default()
+                        .fg(theme::colors().value)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("█", Style::default().fg(theme::colors().accent)),
+            ]),
+            Line::default(),
+            Line::from(Span::styled(
+                " Next, `claude setup-token` runs here. Before approving it, make sure",
+                theme::dim(),
+            )),
+            Line::from(Span::styled(
+                " the browser is signed in to claude.ai as this account — sign out, or",
+                theme::dim(),
+            )),
+            Line::from(Span::styled(
+                " use a private window, if another one is.",
+                theme::dim(),
+            )),
+            Line::default(),
+            Line::from(Span::styled(hint, theme::dim())),
+        ];
+        let row = lines.len() as u16 - 1;
+        let (outer, inner) = modal(frame, area, "Add a Claude account", lines, 76);
+        confirm_chips(
+            layout,
+            outer,
+            inner,
+            row,
+            hint,
+            &[("[Enter]", KeyEvent::from(KeyCode::Enter)), ("[Esc]", esc)],
+        );
+        return;
+    };
+
+    // Wide enough for the token on one line where the screen allows: it is
+    // read back off this terminal, and unwrapped is the easy case.
+    let rect = centered(area, 116, 30);
+    frame.render_widget(Clear, rect);
+    let hint = match flow.link {
+        Some(_) => " [Ctrl+O] open sign-in link   [Esc] cancel ",
+        None => " [Esc] cancel ",
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
+        .title(Span::styled(
+            format!(" Add Claude account {} — claude setup-token ", flow.name),
+            theme::title(),
+        ))
+        .title_bottom(Span::styled(hint, theme::title()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let [note, term] = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Length(2),
+        ratatui::layout::Constraint::Min(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!(
+                    " Approve it in the browser signed in as {}. The token is saved",
+                    flow.name
+                ),
+                theme::dim(),
+            )),
+            Line::from(Span::styled(
+                " the moment it is printed — nothing to copy.",
+                theme::dim(),
+            )),
+        ]),
+        note,
+    );
+    pane.view.resize(term.width, term.height);
+    let (cols, rows) = pane.view.size;
+    let screen = Rect {
+        width: cols.min(term.width),
+        height: rows.min(term.height),
+        ..term
+    };
+    frame.render_widget(
+        tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()),
+        screen,
+    );
+    // The chips are on the bottom border, one row below the terminal.
+    layout.modal_rect = Some(rect);
+    let bottom = rect.y + rect.height - 1;
+    for (chip, key) in [
+        (
+            "[Ctrl+O] open sign-in link",
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        ),
+        ("[Esc] cancel", esc),
+    ] {
+        if let Some(at) = hint.find(chip) {
+            let x = rect.x + 1 + hint[..at].chars().count() as u16;
+            layout
+                .key_hits
+                .push((bottom, x, x + chip.chars().count() as u16, key));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -943,20 +943,10 @@ pub fn opening_argv(argv: &[String], line: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// The command an argv runs, bare of any path and of the `env VAR=value` prefix
-/// a profile launch carries.
+/// The command an argv runs, bare of any path and of the prefix a profile
+/// launch carries.
 pub fn command_of(argv: &[String]) -> Option<&str> {
-    let mut rest = argv;
-    if rest.first().map(String::as_str) == Some("env") {
-        rest = &rest[1..];
-        while rest
-            .first()
-            .is_some_and(|a| a.contains('=') && !a.starts_with('-'))
-        {
-            rest = &rest[1..];
-        }
-    }
-    let first = rest.first()?.as_str();
+    let first = crate::config::without_launch_prefix(argv).first()?.as_str();
     Some(first.rsplit('/').next().unwrap_or(first))
 }
 

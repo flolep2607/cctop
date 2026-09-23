@@ -16,12 +16,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-/// Baseline gap between usage checks.
-///
-/// Quota moves slowly, and the endpoints throttle aggressively — a 30s poll was
-/// enough to earn a sustained 429 with a ~15 minute `retry-after`. When a
-/// provider asks for longer, `retry_delay_secs` honours that instead.
-const QUOTA_INTERVAL_SECS: u64 = 300;
+use crate::quota::INTERVAL_SECS as QUOTA_INTERVAL_SECS;
 
 /// How often the poller wakes to see whether any provider is due.
 const QUOTA_TICK: Duration = Duration::from_secs(10);
@@ -365,11 +360,14 @@ fn spawn_quota_poller(tx: Sender<Response>) {
 
             // Each provider is paced by its own last outcome: a throttled one
             // backs off without stalling the other.
-            if now >= claude_due {
+            // An account just added is asked about now; the cache answers
+            // for the others, so this is one request.
+            if now >= claude_due
+                || crate::quota::NUDGE.swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
                 // Each profile is its own account with its own limits, so each
-                // is asked separately. They share one due time: the interval
-                // exists to be polite to the provider, and a machine with two
-                // logins is not entitled to twice the requests.
+                // is asked separately — and paced separately, by the usage
+                // cache, which answers for any account that is not due yet.
                 quota.claude = crate::config::accounts_for(Provider::Claude)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
@@ -378,20 +376,21 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                         source: profile.source,
                     })
                     .collect();
-                // Paced by whichever account is most throttled, so backing off
-                // for one does not keep asking on behalf of another.
+                // Woken for whichever account is due soonest. The cache holds
+                // the rest, so a throttled one is not asked early on behalf of
+                // another, and a healthy one is not left waiting on it.
                 let delay = quota
                     .claude
                     .iter()
                     .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
-                    .max()
+                    .min()
                     .unwrap_or(QUOTA_INTERVAL_SECS);
                 claude_due = now + Duration::from_secs(delay);
                 changed = true;
             }
             if now >= codex_due {
-                // Per account for the same reason as Claude's, and sharing one
-                // due time for the same reason too.
+                // Per account for the same reason as Claude's, and paced the
+                // same way.
                 quota.codex = crate::config::accounts_for(Provider::Codex)
                     .iter()
                     .map(|profile| crate::quota::ProfileQuota {
@@ -404,7 +403,7 @@ fn spawn_quota_poller(tx: Sender<Response>) {
                     .codex
                     .iter()
                     .map(|q| q.status.retry_delay_secs(QUOTA_INTERVAL_SECS))
-                    .max()
+                    .min()
                     .unwrap_or(QUOTA_INTERVAL_SECS);
                 codex_due = now + Duration::from_secs(delay);
                 changed = true;
@@ -671,6 +670,7 @@ fn event_loop(
         if closed {
             app.drop_empty_tabs();
         }
+        app.pump_add_account();
         // After the reap, so a finished install is seen as finished on the same
         // tick its pane goes away.
         app.poll_rmux_install();

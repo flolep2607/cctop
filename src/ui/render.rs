@@ -268,6 +268,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             // inside a tab as much as over the dashboard.
             Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
             Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
+            // A sign-in in progress stays on screen whichever tab is open.
+            Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
             _ => {}
         }
         return layout;
@@ -303,7 +305,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     draw_overview(frame, chunks[0], app);
     table::draw_table(frame, chunks[1], app, &mut layout);
     draw_bottom(frame, chunks[2], app, &mut layout);
-    draw_limits(frame, chunks[3], app);
+    draw_limits(frame, chunks[3], app, &mut layout);
     draw_footer(frame, chunks[4], app, &mut layout);
 
     match app.mode {
@@ -334,6 +336,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::Insight => modals::draw_insight(frame, area, app),
         Mode::Conversation => modals::draw_conversation(frame, area, app),
+        Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
         Mode::List => {}
     }
     // Over everything, modals included: a few seconds of confirmation for a
@@ -1444,8 +1447,22 @@ fn quota_color(window: &crate::quota::Window, now: i64) -> Color {
     }
 }
 
-fn draw_limits(frame: &mut Frame, area: Rect, app: &App) {
-    let block = panel_block("Limits");
+fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    // On the panel whose columns it adds to, as a button: cctop holds the mouse,
+    // so a click on it is answered as the key it names.
+    const ADD: &str = " + account ";
+    let add_width = ADD.chars().count() as u16;
+    let block = panel_block("Limits")
+        .title_top(Line::from(Span::styled(ADD, theme::title())).right_aligned());
+    if area.width > add_width + 12 {
+        let x = area.x + area.width - 1 - add_width;
+        layout.key_hits.push((
+            area.y,
+            x,
+            x + add_width,
+            event::KeyEvent::from(event::KeyCode::Char('+')),
+        ));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
