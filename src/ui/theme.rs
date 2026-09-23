@@ -708,29 +708,46 @@ impl Hue {
         }
     }
 
-    /// The hue washed out to a pastel, for filling a whole tab.
+    /// The hue as the fill of a whole tab, at one of three strengths.
     ///
     /// [`Hue::color`] is ink — right for a label or a border, and loud as a
     /// block of background: a bar of saturated tabs outshouts everything
-    /// under it. The pastel is the same colour at rest, which leaves the full
-    /// one free to mean something when it blinks. One set for both palettes:
-    /// these are light enough to carry dark text on either.
-    pub fn pastel(self) -> Color {
-        let index = match self {
-            Hue::Red => 224,
-            Hue::Orange => 223,
-            Hue::Yellow => 230,
-            Hue::Green => 194,
-            Hue::Cyan => 195,
-            Hue::Blue => 153,
-            Hue::Violet => 183,
-            Hue::Pink => 225,
+    /// under it. So a tab rests in a pastel, the one being watched is a step
+    /// stronger, and only a tab that needs you reaches the full colour — the
+    /// same hue at every step, so it is still *that* tab while it shouts. One
+    /// set for both palettes: all three carry dark text on either.
+    pub fn fill(self, strength: Fill) -> Color {
+        let (rest, selected, alert) = match self {
+            Hue::Red => (224, 217, 203),
+            Hue::Orange => (223, 216, 208),
+            Hue::Yellow => (230, 229, 220),
+            Hue::Green => (194, 157, 120),
+            Hue::Cyan => (195, 159, 87),
+            Hue::Blue => (153, 117, 75),
+            Hue::Violet => (183, 177, 135),
+            Hue::Pink => (225, 218, 205),
+        };
+        let index = match strength {
+            Fill::Rest => rest,
+            Fill::Selected => selected,
+            Fill::Alert => alert,
         };
         match variant() {
             Variant::Mono => Color::Reset,
             _ => Color::Indexed(index),
         }
     }
+}
+
+/// How strongly a painted tab wears its hue. See [`Hue::fill`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fill {
+    /// Any tab, at rest.
+    Rest,
+    /// The tab being watched.
+    Selected,
+    /// The lit half of a blink: the tab's agent needs you.
+    Alert,
 }
 
 /// Which gradient a series should use.

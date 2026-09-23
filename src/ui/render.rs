@@ -454,19 +454,24 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             // agent is the normal state of a tab, and a colour that vanished
             // every time its agent finished a turn would not be a mark at all.
             Some(hue) => {
-                let fill = Style::default().bg(hue.pastel()).fg(Color::Black);
-                let fill = match i == app.tab {
+                let watched = i == app.tab;
+                let fill = Style::default()
+                    .bg(hue.fill(match watched {
+                        true => theme::Fill::Selected,
+                        false => theme::Fill::Rest,
+                    }))
+                    .fg(Color::Black);
+                let fill = match watched {
                     true => fill.add_modifier(Modifier::UNDERLINED),
                     false => fill,
                 };
                 match attention {
                     // The flash is the tab's own colour at full strength and
-                    // back to its pastel: loud enough to be seen from another
-                    // tab, and still unmistakably *that* tab while it is.
+                    // back: loud enough to be seen from another tab, and still
+                    // unmistakably *that* tab while it is.
                     Some(tabs::Attention::NeedsInput) => match on {
                         true => fill
-                            .bg(hue.color())
-                            .fg(theme::colors().on_accent)
+                            .bg(hue.fill(theme::Fill::Alert))
                             .add_modifier(Modifier::BOLD),
                         false => fill.add_modifier(Modifier::BOLD),
                     },
@@ -2336,9 +2341,9 @@ mod tests {
     }
 
     /// A painted tab is filled with its colour, the whole cell between the
-    /// rules the way a browser fills a tab group, in a pastel of its hue; an
-    /// unpainted one keeps the usual dim ink. The fill survives the tab being
-    /// watched and its agent going idle — both are said on top of it.
+    /// rules the way a browser fills a tab group, in a pastel of its hue that
+    /// strengthens for the watched tab; an unpainted one keeps the usual dim
+    /// ink. Its agent going idle is said on top of the fill, not instead.
     #[test]
     fn a_painted_tab_wears_its_colour_in_the_bar() {
         use crate::cache::UiPrefs;
@@ -2389,7 +2394,7 @@ mod tests {
 
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
-        let violet = theme::Hue::Violet.pastel();
+        let violet = theme::Hue::Violet.fill(theme::Fill::Rest);
         assert!(!text.contains('●'), "a busy painted tab grew a dot: {text}");
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
         let cell = buf.cell((at, 0)).unwrap();
@@ -2402,14 +2407,18 @@ mod tests {
         assert_eq!(buf.cell((at, 0)).unwrap().fg, theme::colors().dim);
         assert_ne!(buf.cell((at, 0)).unwrap().bg, violet);
 
-        // The same tab while it is the one being watched: still its colour,
-        // and marked as the current one on top.
+        // The same tab while it is the one being watched: a step stronger in
+        // the same hue, and underlined.
         app.tab = 1;
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
         let cell = buf.cell((at, 0)).unwrap();
-        assert_eq!(cell.bg, violet);
+        assert_eq!(cell.bg, theme::Hue::Violet.fill(theme::Fill::Selected));
+        assert_ne!(
+            cell.bg, violet,
+            "the watched tab is no brighter than the rest"
+        );
         assert!(cell.modifier.contains(Modifier::UNDERLINED));
 
         // And idle: the fill stays and the label goes bold — no glyph, so the
