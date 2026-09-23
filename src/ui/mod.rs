@@ -111,6 +111,28 @@ pub enum Mode {
     Serve,
     /// What `config.toml` sets and what it could set, keybinds included.
     Settings,
+    /// Adding a Claude account: naming it, then `claude setup-token` in a
+    /// terminal inside the popup. See [`AddAccount`].
+    AddAccount,
+}
+
+/// The add-account popup, from naming the account to its token being saved.
+///
+/// `claude setup-token` runs on a pty of the popup's own, and the token is read
+/// off its screen the moment it is printed — so the whole thing happens without
+/// leaving cctop, and nothing is copied or pasted by hand. The browser step is
+/// the one that goes wrong: `setup-token` authorises whichever claude.ai login
+/// the browser already has, so the popup says so before it starts.
+#[derive(Default)]
+pub struct AddAccount {
+    pub name: String,
+    /// `setup-token`, once the name is in. Dropping it ends the process, which
+    /// is what cancelling the popup should do.
+    pub pane: Option<tabs::Pane>,
+    /// The sign-in link off its screen, for when no browser opened.
+    pub link: Option<String>,
+    /// How it ended: the saved account's name, or what went wrong.
+    pub outcome: Option<Result<String, String>>,
 }
 
 /// A launch that stopped to ask about rmux, and how to pick it up again.
@@ -328,7 +350,7 @@ pub struct App {
     /// Only show sessions whose total cost reaches this floor.
     pub cost_floor: f64,
     /// Which profile the launcher will start each harness under, as an index
-    /// into that harness's [`crate::config::profiles_for`] list.
+    /// into that harness's [`crate::config::launchable_for`] list.
     ///
     /// Per harness rather than one index: the launcher cursor moves between
     /// `claude` and `codex`, and an index is only meaningful against the list
@@ -604,6 +626,8 @@ pub struct App {
     /// Dropping it revokes the tunnel and stops the listener, so quitting cctop
     /// takes the page with it. That is the same bargain `serve` makes.
     pub serving: Option<crate::serve::Serving>,
+    /// The add-account popup, while `Mode::AddAccount` is up.
+    pub add_account: AddAccount,
     /// A tunnel being registered on a thread of its own.
     ///
     /// Registering with Cloudflare's edge is a second or more of network, and
@@ -761,7 +785,7 @@ impl App {
             .map(|(provider, remembered)| {
                 let at = remembered
                     .and_then(|name| {
-                        crate::config::profiles_for(provider)
+                        crate::config::launchable_for(provider)
                             .iter()
                             .position(|p| p.name == name)
                     })
@@ -856,6 +880,7 @@ impl App {
             rmux_declined: false,
             rmux_installing: None,
             serving: None,
+            add_account: AddAccount::default(),
             serve_error: None,
             share_opening: None,
             share_arm: false,

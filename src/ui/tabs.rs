@@ -835,22 +835,8 @@ pub fn label_of(argv: &[String]) -> String {
     // `env VAR=value claude` is a `claude` tab. The prefix is how the agent was
     // started, which is plumbing, and naming a tab after its plumbing is the
     // same mistake as calling one `rmux new-session -A -s cctop-claude`.
-    let mut argv = argv;
-    if argv.first().map(String::as_str) == Some("env") {
-        let mut rest = &argv[1..];
-        while rest
-            .first()
-            .is_some_and(|a| a.contains('=') && !a.starts_with('-'))
-        {
-            rest = &rest[1..];
-        }
-        // Only when a command is left. `env` alone is a command in its own
-        // right, and a tab with no name at all is worse than one named oddly.
-        if !rest.is_empty() {
-            argv = rest;
-        }
-    }
-    argv.iter()
+    crate::config::without_launch_prefix(argv)
+        .iter()
         .map(|arg| arg.rsplit('/').next().unwrap_or(arg))
         .collect::<Vec<_>>()
         .join(" ")

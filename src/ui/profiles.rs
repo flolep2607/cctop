@@ -9,6 +9,71 @@
 use super::*;
 
 impl App {
+    /// Open the add-account popup on its first step, the name.
+    pub(super) fn open_add_account(&mut self) {
+        self.add_account = AddAccount::default();
+        self.mode = Mode::AddAccount;
+        self.needs_redraw = true;
+    }
+
+    /// The name is in: start `claude setup-token` inside the popup.
+    pub(super) fn start_setup_token(&mut self) {
+        let name = self.add_account.name.trim().to_string();
+        if !crate::quota::valid_account_name(&name) {
+            self.set_status("An account name is letters, digits, - _ and . only");
+            return;
+        }
+        self.add_account.name = name;
+        let argv = ["claude".to_string(), "setup-token".to_string()];
+        match tabs::Pane::launch(&argv, None, tabs::Own::Cctop) {
+            Ok(pane) => self.add_account.pane = Some(pane),
+            // A `claude` that cannot be started here: the command-line
+            // walkthrough does the same job and says what went wrong.
+            Err(e) => {
+                self.add_account.outcome = Some(Err(format!(
+                    "Could not run `claude setup-token` here ({e}). In a terminal, \
+                     `cctop --add-account {}` walks through the same steps.",
+                    self.add_account.name
+                )))
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Feed the popup's terminal, and take the token the moment it is printed.
+    pub(super) fn pump_add_account(&mut self) {
+        let flow = &mut self.add_account;
+        let Some(pane) = flow.pane.as_mut() else {
+            return;
+        };
+        if pane.view.pump() {
+            self.needs_redraw = true;
+            let screen = pane.view.parser.screen();
+            if flow.link.is_none() {
+                flow.link = crate::quota::link_on_screen(screen);
+            }
+            if let Some(token) = crate::quota::token_on_screen(screen) {
+                // Its job is done, and a process holding a fresh token has no
+                // reason to outlive the popup that asked for it.
+                flow.pane = None;
+                flow.outcome = Some(
+                    crate::quota::save_token(&flow.name, &token)
+                        .map(|()| flow.name.clone())
+                        .map_err(|e| format!("Could not save the token: {e}")),
+                );
+                return;
+            }
+        }
+        // Left on screen rather than dropped: whatever it said before it went
+        // is the explanation.
+        if flow.outcome.is_none() && pane.view.closed() {
+            self.needs_redraw = true;
+            flow.outcome = Some(Err(
+                "`claude setup-token` ended without printing a token.".to_string()
+            ));
+        }
+    }
+
     /// The profile a launch would use, or `None` when the highlighted command
     /// takes none — or takes one but has only a single account, so there is
     /// nothing to choose between.
@@ -28,7 +93,7 @@ impl App {
     /// The profile `provider` would be started under, or `None` when it has
     /// only the one and so nothing to choose between.
     pub fn chosen_profile(&self, provider: Provider) -> Option<&'static crate::config::Profile> {
-        let profiles = crate::config::profiles_for(provider);
+        let profiles = crate::config::launchable_for(provider);
         if profiles.len() <= 1 {
             return None;
         }
@@ -43,7 +108,7 @@ impl App {
         let Some(provider) = self.launch_provider() else {
             return;
         };
-        let n = crate::config::profiles_for(provider).len();
+        let n = crate::config::launchable_for(provider).len();
         if n > 1 {
             let at = self.launch_profile.entry(provider).or_insert(0);
             *at = (*at + 1) % n;
