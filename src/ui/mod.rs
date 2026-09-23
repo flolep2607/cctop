@@ -120,9 +120,11 @@ pub enum Mode {
 ///
 /// `claude setup-token` runs on a pty of the popup's own, and the token is read
 /// off its screen the moment it is printed — so the whole thing happens without
-/// leaving cctop, and nothing is copied or pasted by hand. The browser step is
-/// the one that goes wrong: `setup-token` authorises whichever claude.ai login
-/// the browser already has, so the popup says so before it starts.
+/// leaving cctop, and nothing is copied or pasted by hand.
+///
+/// ponytail: `setup-token` authorises whichever claude.ai login the browser
+/// already has, and the popup no longer warns about it — the prompt is kept to
+/// the one question. `cctop --add-account` still says it.
 #[derive(Default)]
 pub struct AddAccount {
     pub name: String,
