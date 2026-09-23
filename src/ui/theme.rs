@@ -708,27 +708,59 @@ impl Hue {
         }
     }
 
-    /// The hue washed out to a pastel, for filling a whole tab.
+    /// The hue as the fill of a whole tab, at one of three strengths.
     ///
     /// [`Hue::color`] is ink — right for a label or a border, and loud as a
     /// block of background: a bar of saturated tabs outshouts everything
-    /// under it. The pastel is the same colour at rest, which leaves the full
-    /// one free to mean something when it blinks. One set for both palettes:
-    /// these are light enough to carry dark text on either.
-    pub fn pastel(self) -> Color {
-        let index = match self {
-            Hue::Red => 224,
-            Hue::Orange => 223,
-            Hue::Yellow => 230,
-            Hue::Green => 194,
-            Hue::Cyan => 195,
-            Hue::Blue => 153,
-            Hue::Violet => 183,
-            Hue::Pink => 225,
+    /// under it. So a tab rests in a dark pastel, the one being watched is a
+    /// step lighter, and only a tab that needs you reaches the full colour —
+    /// the same hue at every step, so it is still *that* tab while it shouts.
+    ///
+    /// Dark because the terminal nearly always is: the pale row of the cube
+    /// (`ffd7d7` and its neighbours) is pastel on a chart and a lit block on a
+    /// black screen, and even its dusty middle (`d78787`) stood out more than a
+    /// tab's colour should at rest. The two quiet strengths carry light text
+    /// ([`Fill::ink`]); the vivid one carries dark.
+    pub fn fill(self, strength: Fill) -> Color {
+        let (rest, selected, alert) = match self {
+            Hue::Red => (95, 131, 203),
+            Hue::Orange => (137, 173, 208),
+            Hue::Yellow => (101, 143, 220),
+            Hue::Green => (65, 71, 77),
+            Hue::Cyan => (66, 73, 44),
+            Hue::Blue => (67, 68, 39),
+            Hue::Violet => (97, 134, 135),
+            Hue::Pink => (132, 168, 205),
+        };
+        let index = match strength {
+            Fill::Rest => rest,
+            Fill::Selected => selected,
+            Fill::Alert => alert,
         };
         match variant() {
             Variant::Mono => Color::Reset,
             _ => Color::Indexed(index),
+        }
+    }
+}
+
+/// How strongly a painted tab wears its hue. See [`Hue::fill`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fill {
+    /// Any tab, at rest.
+    Rest,
+    /// The tab being watched.
+    Selected,
+    /// The lit half of a blink: the tab's agent needs you.
+    Alert,
+}
+
+impl Fill {
+    /// The text colour that reads on a fill of this strength.
+    pub fn ink(self) -> Color {
+        match self {
+            Fill::Rest | Fill::Selected => Color::Indexed(254),
+            Fill::Alert => Color::Black,
         }
     }
 }
