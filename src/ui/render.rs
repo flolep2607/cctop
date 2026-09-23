@@ -443,7 +443,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             ));
             pos += 1;
         }
-        let mut text = format!(" {} ", elide(title, cap));
+        let text = format!(" {} ", elide(title, cap));
         let width = text.chars().count() as u16;
         let attention = app.tab_attention(i);
         let style = match hues[i] {
@@ -454,28 +454,26 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             // agent is the normal state of a tab, and a colour that vanished
             // every time its agent finished a turn would not be a mark at all.
             Some(hue) => {
-                let fill = Style::default()
-                    .bg(hue.color())
-                    .fg(theme::colors().on_accent);
+                let fill = Style::default().bg(hue.pastel()).fg(Color::Black);
                 let fill = match i == app.tab {
-                    true => fill.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    true => fill.add_modifier(Modifier::UNDERLINED),
                     false => fill,
                 };
                 match attention {
-                    // The flash swaps the whole block to amber and back, which
-                    // is the one thing louder than a coloured tab.
+                    // The flash is the tab's own colour at full strength and
+                    // back to its pastel: loud enough to be seen from another
+                    // tab, and still unmistakably *that* tab while it is.
                     Some(tabs::Attention::NeedsInput) => match on {
-                        true => theme::attention_lit(theme::colors().cost_mid),
+                        true => fill
+                            .bg(hue.color())
+                            .fg(theme::colors().on_accent)
+                            .add_modifier(Modifier::BOLD),
                         false => fill.add_modifier(Modifier::BOLD),
                     },
-                    // A dot in the leading space rather than a green label: green
-                    // ink on a green or cyan fill would say nothing, and taking
-                    // the space keeps the tab from changing width every time its
-                    // agent goes between working and idle.
-                    Some(tabs::Attention::Idle) => {
-                        text.replace_range(..1, "●");
-                        fill
-                    }
+                    // Bold rather than green ink, which on a green or cyan fill
+                    // would say nothing — and rather than a glyph, which made the
+                    // tab look like it carried a second label.
+                    Some(tabs::Attention::Idle) => fill.add_modifier(Modifier::BOLD),
                     None => fill,
                 }
             }
@@ -2338,9 +2336,9 @@ mod tests {
     }
 
     /// A painted tab is filled with its colour, the whole cell between the
-    /// rules the way a browser fills a tab group; an unpainted one keeps the
-    /// usual dim ink. The fill survives the tab being watched and its agent
-    /// going idle — both are said on top of it, not instead of it.
+    /// rules the way a browser fills a tab group, in a pastel of its hue; an
+    /// unpainted one keeps the usual dim ink. The fill survives the tab being
+    /// watched and its agent going idle — both are said on top of it.
     #[test]
     fn a_painted_tab_wears_its_colour_in_the_bar() {
         use crate::cache::UiPrefs;
@@ -2391,12 +2389,12 @@ mod tests {
 
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
-        let violet = theme::Hue::Violet.color();
+        let violet = theme::Hue::Violet.pastel();
         assert!(!text.contains('●'), "a busy painted tab grew a dot: {text}");
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
         let cell = buf.cell((at, 0)).unwrap();
-        assert_eq!(cell.bg, violet, "the label is not on the tab's colour");
-        assert_eq!(cell.fg, theme::colors().on_accent);
+        assert_eq!(cell.bg, violet, "the label is not on the tab's pastel");
+        assert_eq!(cell.fg, Color::Black);
         // The padding is the tab too: filled up to the rule, not just behind
         // the letters.
         assert_eq!(buf.cell((at - 1, 0)).unwrap().bg, violet);
@@ -2414,17 +2412,21 @@ mod tests {
         assert_eq!(cell.bg, violet);
         assert!(cell.modifier.contains(Modifier::UNDERLINED));
 
-        // And idle: the fill stays, and the state is a dot in the leading space
-        // rather than green ink, so the tab is no wider than it was.
+        // And idle: the fill stays and the label goes bold — no glyph, so the
+        // tab is no wider than it was.
         app.tab = 0;
         let width_busy = layout.workspace_spans[1];
         app.tabs[0] = named("one", Some("violet"), Some(0));
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
-        let at = col(&text, "●").expect("an idle painted tab says nothing");
-        assert_eq!(buf.cell((at, 0)).unwrap().bg, violet);
+        assert!(
+            !text.contains('●'),
+            "an idle painted tab grew a dot: {text}"
+        );
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
-        assert_eq!(buf.cell((at, 0)).unwrap().bg, violet);
+        let cell = buf.cell((at, 0)).unwrap();
+        assert_eq!(cell.bg, violet);
+        assert!(cell.modifier.contains(Modifier::BOLD));
         assert_eq!(
             layout.workspace_spans[1], width_busy,
             "the tab changed width"
