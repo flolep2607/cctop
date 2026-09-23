@@ -463,6 +463,9 @@ impl App {
                 None => return false,
             },
             KeyCode::Char('w') => self.close_pane(),
+            // Shifted for the same reason as `W`, and because `r` renames: the
+            // agent is ended and resumed, on whatever version is now installed.
+            KeyCode::Char('R') => self.restart_pane(),
             // Shifted, because it is the irreversible one: `w` on a rmux-backed
             // pane only detaches, and the key that ends the agent should not be
             // the same key with a slip of a finger.

@@ -618,6 +618,14 @@ pub struct App {
     /// happening now, and one left standing from ten minutes ago is exactly the
     /// stray click it exists to prevent.
     pub share_arm: bool,
+    /// A restart asked for while the agent was mid-turn: which agent, and when.
+    ///
+    /// Restarting kills the agent, and a turn in flight dies with it. The key
+    /// pressed again within [`RESTART_ARM`](launch::RESTART_ARM) is the answer
+    /// to that, rather than a dialog: the usual restart is of an idle agent that
+    /// has just said an update is installed, and that one should not be asked
+    /// anything.
+    pub restart_arm: Option<(u32, Instant)>,
     /// Why the last attempt to serve failed, kept for the panel to show.
     ///
     /// A port in use or a tunnel that would not register are both answers
@@ -851,6 +859,7 @@ impl App {
             serve_error: None,
             share_opening: None,
             share_arm: false,
+            restart_arm: None,
             pending_brief: None,
             pending_fork: None,
             handoff_send: None,

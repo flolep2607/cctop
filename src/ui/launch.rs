@@ -53,6 +53,36 @@ pub(super) const TAB_LABEL_CHARS: usize = 24;
 /// is left looking at an idle agent wondering whether the handoff worked.
 const HANDOFF_SETTLE: Duration = Duration::from_secs(3);
 
+/// How long a restart asked for mid-turn waits for the key to be pressed again.
+///
+/// Long enough to read the status line that asks, short enough that a press
+/// much later is a new request, and is asked about again.
+pub(super) const RESTART_ARM: Duration = Duration::from_secs(4);
+
+/// The command that resumes `session`, under the account its transcript lives
+/// in, and that account.
+///
+/// Under that account and not whatever the launcher last chose. For Codex this
+/// is the difference between resuming and not: a session id under
+/// `~/.codex-work` does not exist under `~/.codex`, so `codex resume <id>` would
+/// start a blank session and report nothing wrong. The row already knows which
+/// account it came from — `Session::profile` is stamped from the transcript
+/// path.
+fn resume_under_profile(
+    session: &Session,
+) -> Option<(Vec<String>, Option<&'static crate::config::Profile>)> {
+    let argv = session.resume_argv()?;
+    let profile = session
+        .profile
+        .as_deref()
+        .and_then(|name| crate::config::profile_named(session.provider, name));
+    let argv = match profile {
+        Some(profile) => crate::config::argv_under_profile(argv, profile),
+        None => argv,
+    };
+    Some((argv, profile))
+}
+
 impl App {
     /// Open the launcher, remembering where the pick should go and which
     /// directory it should start in.
@@ -191,22 +221,8 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let Some(argv) = session.resume_argv() else {
+        let Some((argv, profile)) = resume_under_profile(session) else {
             return;
-        };
-        // Resumed under the account the transcript lives in, not under
-        // whatever the launcher last chose. For Codex this is the difference
-        // between resuming and not: a session id under `~/.codex-work` does not
-        // exist under `~/.codex`, so `codex resume <id>` would start a blank
-        // session and report nothing wrong. The row already knows which account
-        // it came from — `Session::profile` is stamped from the transcript path.
-        let profile = session
-            .profile
-            .as_deref()
-            .and_then(|name| crate::config::profile_named(session.provider, name));
-        let argv = match profile {
-            Some(profile) => crate::config::argv_under_profile(argv, profile),
-            None => argv,
         };
         // The transcript is full of paths relative to where the agent ran, so a
         // resumed session belongs in the same directory.
@@ -269,6 +285,131 @@ impl App {
                 profile: profile.map(|p| p.name.clone()),
             },
         );
+    }
+
+    /// Stop the focused pane's agent and resume its session in the same place.
+    ///
+    /// For the agent that has updated itself and now asks to be restarted —
+    /// Claude Code installs an update in the background and then says
+    /// `Restart to update`, which from inside a pane meant closing the tab,
+    /// finding the row, and resuming it by hand. The new agent is the same
+    /// command `R` would run, so it is whatever version is now installed, on
+    /// the same transcript, in the same directory, under the same account.
+    ///
+    /// In place rather than in a new tab: the pane keeps its slot in the split,
+    /// its tab keeps its place in the bar, its name and its colour. A restart
+    /// is not a different piece of work, so nothing on screen should say it is.
+    pub(super) fn restart_pane(&mut self) {
+        let Some(pane) = self.active_tab().and_then(|tab| tab.panes.get(tab.focus)) else {
+            self.set_status("Nothing to restart — open the agent's tab first");
+            return;
+        };
+        let (owned, agent, label, on_rmux) = (
+            pane.owns_agent(),
+            pane.agent(),
+            pane.label.clone(),
+            pane.rmux.is_some(),
+        );
+        // A window onto an agent started elsewhere: cctop can neither end it
+        // nor put the new one where the old one was.
+        if !owned {
+            self.set_status(format!("{label} is not cctop's to restart"));
+            return;
+        }
+        // The row is found by the agent's pid, which is what every session's
+        // process list is keyed by. A fresh agent that has not written a
+        // transcript yet has no row, and nothing to resume either.
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| session.root_pid() == Some(agent))
+            .cloned()
+        else {
+            self.set_status(format!(
+                "No session found for {label} yet — nothing to resume it onto"
+            ));
+            return;
+        };
+        let Some((argv, profile)) = resume_under_profile(&session) else {
+            self.set_status(format!(
+                "{} sessions cannot be resumed from a shell",
+                session.provider.as_str()
+            ));
+            return;
+        };
+        if !crate::shim::is_command(&argv[0]) {
+            self.set_status(format!("{} is not installed on this machine", argv[0]));
+            return;
+        }
+        // Mid-turn, a restart throws the turn away. Asked once through the
+        // status line and answered by pressing the key again; see `restart_arm`.
+        let working = self.pane_signal(agent).is_some_and(|s| s.is_working());
+        let armed = self
+            .restart_arm
+            .take()
+            .is_some_and(|(pid, at)| pid == agent && at.elapsed() < RESTART_ARM);
+        if working && !armed {
+            self.restart_arm = Some((agent, Instant::now()));
+            self.set_status(format!(
+                "{label} is mid-turn — Alt+R again to restart it anyway"
+            ));
+            return;
+        }
+
+        // The old agent goes first, and completely: under rmux the new session
+        // may carry the very name the old one had (a pane opened with `R`), and
+        // `attach_or_create` finding it still there would reattach to the agent
+        // being replaced. `kill` and dropping a hosted pty both wait for it.
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let at = tab.focus;
+        let old = tab.panes.remove(at);
+        let stopped = old.kill_agent();
+        drop(old);
+        if let Err(error) = stopped {
+            // Put back nothing: the pane is gone either way, and a tab left
+            // standing with no pane would draw as an agent that exited.
+            self.drop_empty_tabs();
+            self.set_status(format!("Could not stop {label}: {error}"));
+            return;
+        }
+
+        // Where it lives stays what it was. A pane on cctop's own pty was the
+        // user's choice, or rmux was not there, and neither is a reason to ask
+        // about installing it now.
+        let resumed = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let own = match on_rmux {
+            true => tabs::Own::Tmux(resumed.clone()),
+            false => tabs::Own::Cctop,
+        };
+        let mut pane = match tabs::Pane::launch(&argv, session.work_dir().as_deref(), own) {
+            Ok(pane) => pane,
+            Err(error) => {
+                self.drop_empty_tabs();
+                self.set_status(format!(
+                    "Stopped {label}, but could not start it again: {error}"
+                ));
+                return;
+            }
+        };
+        pane.resumed = Some(resumed);
+        pane.profile = profile.map(|p| p.name.clone());
+        pane.label = label.clone();
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let at = at.min(tab.panes.len());
+        tab.panes.insert(at, pane);
+        tab.focus = at;
+        // A new rmux session knows nothing of the old one's options, and the
+        // colour and the bar position live there for every other cctop to read.
+        let color = tab.color;
+        if on_rmux {
+            tab.recolor(color);
+            self.save_tab_order();
+        }
+        self.set_status(format!("Restarted {label}"));
     }
 
     /// Where the agent about to start should live, offering to install rmux if
@@ -767,6 +908,45 @@ mod tests {
     /// `None` on every pane when rmux is not installed — so `R` on a session
     /// already resumed in a tab started a second agent on the one transcript,
     /// and being stopped, it did so without even the confirmation.
+    /// A window onto an agent cctop did not start is refused, and left open:
+    /// ending an agent somebody else is responsible for is not a restart.
+    #[test]
+    fn a_pane_cctop_does_not_own_is_not_restarted() {
+        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let pane = tabs::Pane::view_of(pid, "claude".into()).expect("attach");
+        let mut app = test_app();
+        app.tabs.push(tabs::Tab::new(pane));
+        app.tab = 1;
+
+        app.restart_pane();
+
+        assert_eq!(app.tabs[0].panes.len(), 1, "the view was closed");
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("not cctop's"), "{status}");
+        assert!(child.try_wait().unwrap().is_none(), "the agent was ended");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+    }
+
+    /// An agent with no session row yet has nothing to resume onto, so it is
+    /// left running rather than stopped and never replaced.
+    #[test]
+    fn an_agent_with_no_session_is_left_running() {
+        let argv: Vec<String> = ["sh", "-c", "sleep 30"].map(String::from).to_vec();
+        let pane = tabs::Pane::launch(&argv, None, tabs::Own::Cctop).expect("launch");
+        let mut app = test_app();
+        app.tabs.push(tabs::Tab::new(pane));
+        app.tab = 1;
+
+        app.restart_pane();
+
+        assert_eq!(app.tabs[0].panes.len(), 1, "the pane was dropped");
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("No session found"), "{status}");
+    }
+
     #[test]
     fn resuming_a_session_already_in_a_tab_goes_to_that_tab() {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
