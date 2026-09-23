@@ -2213,6 +2213,12 @@ pub fn copy_to_clipboard(text: &str) {
     if cfg!(test) {
         return;
     }
+    // Over ssh the helpers below reach the remote machine's clipboard, and one
+    // of them working would stop the escape that reaches the user's.
+    if over_ssh() {
+        osc52(text);
+        return;
+    }
 
     const HELPERS: &[(&str, &[&str])] = &[
         ("wl-copy", &[]),
@@ -2242,6 +2248,21 @@ pub fn copy_to_clipboard(text: &str) {
         }
     }
 
+    osc52(text);
+}
+
+/// Whether cctop is running on the far end of an ssh session.
+///
+/// Then the machine's own clipboard and browser are not the ones in front of
+/// the user: a helper that "succeeds" copies onto a clipboard nobody reads.
+pub fn over_ssh() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
+/// Hand `text` to the terminal emulator's clipboard, which is the user's
+/// wherever cctop runs — it travels down the same connection the screen does.
+fn osc52(text: &str) {
+    use std::io::Write;
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b]52;c;{}\x07", util::b64_encode(text.as_bytes()));
     let _ = out.flush();

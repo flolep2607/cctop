@@ -1828,6 +1828,25 @@ pub(super) fn draw_switch_tab(
     layout.modal_rect = Some(outer);
 }
 
+/// The rows of `screen` that `link` is drawn across, from the one it starts on
+/// to the last one that carries a piece of it.
+fn link_rows(screen: &vt100::Screen, link: &str) -> Vec<u16> {
+    let (_, width) = screen.size();
+    let rows: Vec<String> = screen.rows(0, width).collect();
+    let Some(first) = rows.iter().position(|row| row.contains("https://")) else {
+        return Vec::new();
+    };
+    let mut out = vec![first as u16];
+    for (i, row) in rows.iter().enumerate().skip(first + 1) {
+        let piece = row.trim();
+        if piece.is_empty() || !link.contains(piece) {
+            break;
+        }
+        out.push(i as u16);
+    }
+    out
+}
+
 /// The add-account popup: a name field, then `claude setup-token` running in a
 /// terminal inside it, then what came of it.
 pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
@@ -1911,7 +1930,7 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
     let rect = centered(area, 116, 30);
     frame.render_widget(Clear, rect);
     let hint = match flow.link {
-        Some(_) => " [Ctrl+O] open sign-in link   [Esc] cancel ",
+        Some(_) => " [Ctrl+O] or click the link: copy it   [Esc] cancel ",
         None => " [Esc] cancel ",
     };
     let block = Block::bordered()
@@ -1957,12 +1976,27 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
         tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()),
         screen,
     );
+    // Every row the link is wrapped over is one target. The terminal's own
+    // link detection sees only the row under the pointer, so a click there
+    // opened the first line of the URL — a sign-in page that cannot work.
+    if let Some(link) = &flow.link {
+        for y in link_rows(pane.view.parser.screen(), link) {
+            if y < screen.height {
+                layout.key_hits.push((
+                    screen.y + y,
+                    screen.x,
+                    screen.x + screen.width,
+                    KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+                ));
+            }
+        }
+    }
     // The chips are on the bottom border, one row below the terminal.
     layout.modal_rect = Some(rect);
     let bottom = rect.y + rect.height - 1;
     for (chip, key) in [
         (
-            "[Ctrl+O] open sign-in link",
+            "[Ctrl+O] or click the link: copy it",
             KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
         ),
         ("[Esc] cancel", esc),
@@ -2205,6 +2239,16 @@ fn chat_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sign-in link wrapped over three rows is three click targets, and the
+    /// text after it is none — a click there is not a click on the link.
+    #[test]
+    fn every_row_of_a_wrapped_link_is_clickable() {
+        let mut parser = vt100::Parser::new(6, 20, 0);
+        let link = "https://claude.com/cai/oauth/authorize?code=true";
+        parser.process(format!("Sign in:\r\n{link}\r\n\r\nPaste code:").as_bytes());
+        assert_eq!(link_rows(parser.screen(), link), vec![1, 2, 3]);
+    }
 
     #[test]
     fn a_help_key_longer_than_its_column_keeps_a_gap() {
