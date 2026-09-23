@@ -404,10 +404,9 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     };
     let label_room = area.width.saturating_sub(new_tab.chars().count() as u16) as usize;
 
-    // Each tab's painted hue, read once so the loop can spend it twice: on the
-    // label while nothing is being said louder, and on a swatch that keeps it
-    // even then. A hue that resolves to nothing — under `NO_COLOR` or the mono
-    // palette — earns no swatch, or every painted tab would grow a grey dot.
+    // Each tab's painted hue. A hue that resolves to nothing — under
+    // `NO_COLOR` or the mono palette — leaves the tab drawn as an unpainted
+    // one, or every painted tab would be a block of the terminal's default.
     let hues: Vec<Option<theme::Hue>> = (0..titles.len())
         .map(|i| {
             i.checked_sub(1)
@@ -416,18 +415,16 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                 .filter(|hue| hue.color() != Color::Reset)
         })
         .collect();
-    let painted = hues.iter().flatten().count();
 
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
     // you can still count and click beats a bar that runs off the screen.
     // `titles.len()` columns go to the rules between labels — one between
     // every pair of tabs and one before the new-tab button.
-    let natural: usize =
-        titles.iter().map(|t| t.chars().count() + 2).sum::<usize>() + 2 * painted + titles.len();
+    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>() + titles.len();
     let cap = match natural <= label_room {
         true => usize::MAX,
-        false => ((label_room.saturating_sub(2 * painted + titles.len())) / titles.len())
+        false => ((label_room.saturating_sub(titles.len())) / titles.len())
             .saturating_sub(2)
             .max(3),
     };
@@ -436,49 +433,72 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         if i > 0 {
             // A rule in the border's ink: the two spaces between labels were
             // never quite enough to tell where one tab ends and the next
-            // begins, and a painted swatch only made that harder.
+            // begins.
             spans.push(Span::styled(
                 "│",
                 Style::default().fg(theme::colors().border),
             ));
             pos += 1;
         }
-        let text = format!(" {} ", elide(title, cap));
-        let mut width = text.chars().count() as u16;
-        let hue = hues[i];
-        // A tab wanting something outranks the plain selected/unselected look:
-        // the whole point of the colour is to be seen while you are reading a
-        // different tab.
-        let style = match app.tab_attention(i) {
-            // Blinking by hand rather than with `Modifier::SLOW_BLINK`, which
-            // many terminals quietly drop — an attention cue that only works on
-            // some emulators is worse than none, because you stop trusting it.
-            Some(tabs::Attention::NeedsInput) => match on {
-                true => theme::attention_lit(theme::colors().cost_mid),
-                false => Style::default()
-                    .fg(theme::colors().cost_mid)
+        let mut text = format!(" {} ", elide(title, cap));
+        let width = text.chars().count() as u16;
+        let attention = app.tab_attention(i);
+        let style = match hues[i] {
+            // A painted tab is filled with its colour the way a browser fills a
+            // tab group: the whole cell between the rules, not the ink of the
+            // label, so it reads as *that* tab from across the room. Attention
+            // is said on top of the fill rather than instead of it — an idle
+            // agent is the normal state of a tab, and a colour that vanished
+            // every time its agent finished a turn would not be a mark at all.
+            Some(hue) => {
+                let fill = Style::default()
+                    .bg(hue.color())
+                    .fg(theme::colors().on_accent);
+                let fill = match i == app.tab {
+                    true => fill.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    false => fill,
+                };
+                match attention {
+                    // The flash swaps the whole block to amber and back, which
+                    // is the one thing louder than a coloured tab.
+                    Some(tabs::Attention::NeedsInput) => match on {
+                        true => theme::attention_lit(theme::colors().cost_mid),
+                        false => fill.add_modifier(Modifier::BOLD),
+                    },
+                    // A dot in the leading space rather than a green label: green
+                    // ink on a green or cyan fill would say nothing, and taking
+                    // the space keeps the tab from changing width every time its
+                    // agent goes between working and idle.
+                    Some(tabs::Attention::Idle) => {
+                        text.replace_range(..1, "●");
+                        fill
+                    }
+                    None => fill,
+                }
+            }
+            // A tab wanting something outranks the plain selected/unselected
+            // look: the whole point of the colour is to be seen while you are
+            // reading a different tab.
+            None => match attention {
+                // Blinking by hand rather than with `Modifier::SLOW_BLINK`, which
+                // many terminals quietly drop — an attention cue that only works
+                // on some emulators is worse than none, because you stop
+                // trusting it.
+                Some(tabs::Attention::NeedsInput) => match on {
+                    true => theme::attention_lit(theme::colors().cost_mid),
+                    false => Style::default()
+                        .fg(theme::colors().cost_mid)
+                        .add_modifier(Modifier::BOLD),
+                },
+                // A quiet agent is useful context, not an alarm. Keep its green
+                // label visible without repeatedly pulling attention from work.
+                Some(tabs::Attention::Idle) => Style::default()
+                    .fg(theme::colors().cost_low)
                     .add_modifier(Modifier::BOLD),
+                None if i == app.tab => theme::selected(),
+                None => Style::default().fg(theme::colors().dim),
             },
-            // A quiet agent is useful context, not an alarm. Keep its green
-            // label visible without repeatedly pulling attention from work.
-            Some(tabs::Attention::Idle) => Style::default()
-                .fg(theme::colors().cost_low)
-                .add_modifier(Modifier::BOLD),
-            // The wash says "this one"; the hue is the tab's own mark and
-            // keeps saying it on top.
-            None if i == app.tab => match hue {
-                Some(hue) => theme::selected().fg(hue.color()),
-                None => theme::selected(),
-            },
-            None => Style::default().fg(hue.map_or(theme::colors().dim, theme::Hue::color)),
         };
-        if let Some(hue) = hue {
-            // The label's colour is borrowed — attention and the wash both
-            // outrank it — so the tab keeps its own mark beside the text, a
-            // swatch that stays its colour whatever the label is saying.
-            spans.push(Span::styled(" ●", style.fg(hue.color())));
-            width += 2;
-        }
         spans.push(Span::styled(text, style));
         layout.workspace_spans.push((pos, pos + width, i));
         pos += width;
@@ -2279,11 +2299,10 @@ mod tests {
         }
     }
 
-    /// A painted tab wears its colour in the bar; an unpainted one keeps the
-    /// usual dim ink. The tab being watched keeps its colour in the ink over
-    /// the selection wash — "this one" and "the violet one" are both said —
-    /// and when the label's ink is spent on an attention state instead, the
-    /// swatch beside it keeps wearing the hue.
+    /// A painted tab is filled with its colour, the whole cell between the
+    /// rules the way a browser fills a tab group; an unpainted one keeps the
+    /// usual dim ink. The fill survives the tab being watched and its agent
+    /// going idle — both are said on top of it, not instead of it.
     #[test]
     fn a_painted_tab_wears_its_colour_in_the_bar() {
         use crate::cache::UiPrefs;
@@ -2335,33 +2354,43 @@ mod tests {
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
         let violet = theme::Hue::Violet.color();
-        let at = col(&text, "●").expect("the painted tab grew no swatch");
-        assert_eq!(buf.cell((at, 0)).unwrap().fg, violet);
+        assert!(!text.contains('●'), "a busy painted tab grew a dot: {text}");
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
-        assert_eq!(buf.cell((at, 0)).unwrap().fg, violet);
+        let cell = buf.cell((at, 0)).unwrap();
+        assert_eq!(cell.bg, violet, "the label is not on the tab's colour");
+        assert_eq!(cell.fg, theme::colors().on_accent);
+        // The padding is the tab too: filled up to the rule, not just behind
+        // the letters.
+        assert_eq!(buf.cell((at - 1, 0)).unwrap().bg, violet);
         let at = col(&text, "3:two").expect("the plain tab is not in the bar");
         assert_eq!(buf.cell((at, 0)).unwrap().fg, theme::colors().dim);
+        assert_ne!(buf.cell((at, 0)).unwrap().bg, violet);
 
-        // The same tab while it is the one being watched: the wash stays, the
-        // ink is the hue's.
+        // The same tab while it is the one being watched: still its colour,
+        // and marked as the current one on top.
         app.tab = 1;
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
         let cell = buf.cell((at, 0)).unwrap();
-        assert_eq!(cell.fg, violet);
-        assert_eq!(cell.bg, theme::colors().selected_bg);
+        assert_eq!(cell.bg, violet);
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
 
-        // And while its label is spent saying "idle" in green, the swatch is
-        // still the violet the tab was painted — the mark survives the state.
+        // And idle: the fill stays, and the state is a dot in the leading space
+        // rather than green ink, so the tab is no wider than it was.
         app.tab = 0;
+        let width_busy = layout.workspace_spans[1];
         app.tabs[0] = named("one", Some("violet"), Some(0));
         let text = row(&app, &mut layout, &mut terminal);
         let buf = terminal.backend().buffer();
+        let at = col(&text, "●").expect("an idle painted tab says nothing");
+        assert_eq!(buf.cell((at, 0)).unwrap().bg, violet);
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
-        assert_eq!(buf.cell((at, 0)).unwrap().fg, theme::colors().cost_low);
-        let at = col(&text, "●").expect("the painted tab grew no swatch");
-        assert_eq!(buf.cell((at, 0)).unwrap().fg, violet);
+        assert_eq!(buf.cell((at, 0)).unwrap().bg, violet);
+        assert_eq!(
+            layout.workspace_spans[1], width_busy,
+            "the tab changed width"
+        );
     }
 
     /// The corner is drawn in the corner: last row, hard against the right
