@@ -716,16 +716,20 @@ impl Hue {
     /// stronger, and only a tab that needs you reaches the full colour — the
     /// same hue at every step, so it is still *that* tab while it shouts. One
     /// set for both palettes: all three carry dark text on either.
+    ///
+    /// The resting tones are the cube's dusty middle (`d78787`, `87af87`), not
+    /// its palest row: `ffd7d7` and its neighbours are pastel on a chart and
+    /// nearly white on a dark terminal, which read as a bar of lit blocks.
     pub fn fill(self, strength: Fill) -> Color {
         let (rest, selected, alert) = match self {
-            Hue::Red => (224, 217, 203),
-            Hue::Orange => (223, 216, 208),
-            Hue::Yellow => (230, 229, 220),
-            Hue::Green => (194, 157, 120),
-            Hue::Cyan => (195, 159, 87),
-            Hue::Blue => (153, 117, 75),
-            Hue::Violet => (183, 177, 135),
-            Hue::Pink => (225, 218, 205),
+            Hue::Red => (174, 210, 203),
+            Hue::Orange => (180, 216, 208),
+            Hue::Yellow => (186, 228, 220),
+            Hue::Green => (108, 114, 77),
+            Hue::Cyan => (109, 116, 44),
+            Hue::Blue => (110, 117, 39),
+            Hue::Violet => (140, 141, 135),
+            Hue::Pink => (175, 211, 205),
         };
         let index = match strength {
             Fill::Rest => rest,
