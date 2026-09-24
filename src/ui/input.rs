@@ -249,7 +249,7 @@ impl App {
                 Some(pane) => {
                     pane.view.send_paste(text);
                 }
-                None if self.add_account.outcome.is_none() => {
+                None if self.add_account.outcome.is_none() && !self.add_account.named => {
                     let room = TAB_NAME_MAX.saturating_sub(self.add_account.name.chars().count());
                     self.add_account.name.push_str(&flatten(text, room));
                 }
@@ -1064,8 +1064,8 @@ impl App {
         self.rename_color = (next > 0).then(|| theme::Hue::ALL[next - 1]);
     }
 
-    /// The add-account popup: the name, then `setup-token`'s own terminal,
-    /// then what came of it.
+    /// The add-account popup: the name, then which kind of account, then the
+    /// terminal that makes it, then what came of it.
     fn on_key_add_account(&mut self, key: KeyEvent) {
         let flow = &mut self.add_account;
         if flow.outcome.is_some() {
@@ -1101,9 +1101,25 @@ impl App {
             }
             return;
         }
+        // The name is in, and the popup is asking which kind of account.
+        if flow.named {
+            match key.code {
+                KeyCode::Char('f') => self.start_add_account(super::AccountKind::Login),
+                KeyCode::Char('t') => self.start_add_account(super::AccountKind::Token),
+                // Back to the name rather than out: a typo in it is the likely
+                // reason for stopping here.
+                KeyCode::Backspace => flow.named = false,
+                KeyCode::Esc => {
+                    *flow = super::AddAccount::default();
+                    self.mode = Mode::List;
+                }
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
-            KeyCode::Enter => self.start_setup_token(),
+            KeyCode::Enter => self.accept_account_name(),
             KeyCode::Backspace => {
                 flow.name.pop();
             }

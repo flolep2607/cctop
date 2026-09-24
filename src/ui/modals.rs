@@ -4,7 +4,7 @@ use super::columns::COLUMNS;
 use super::render::Layout;
 use super::share;
 use super::theme;
-use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, tabs};
+use super::{AGE_OPTIONS, AccountKind, App, BatchKind, LaunchInto, tabs};
 use crate::session::Session;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1847,8 +1847,8 @@ fn link_rows(screen: &vt100::Screen, link: &str) -> Vec<u16> {
     out
 }
 
-/// The add-account popup: a name field, then `claude setup-token` running in a
-/// terminal inside it, then what came of it.
+/// The add-account popup: a name field, which kind of account, then the command
+/// that makes it running in a terminal inside the popup, then what came of it.
 pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
     let esc = KeyEvent::from(KeyCode::Esc);
     let flow = &mut app.add_account;
@@ -1895,8 +1895,53 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
         return;
     }
 
+    if flow.named && flow.pane.is_none() {
+        let hint = " [f] full login   [t] token   [Esc] cancel";
+        let key = |label: &'static str| Span::styled(label, theme::value());
+        let lines = vec![
+            Line::from(vec![
+                key(" [f] full login  "),
+                Span::styled(
+                    format!("its own ~/.claude-{}, everything works", flow.name),
+                    theme::dim(),
+                ),
+            ]),
+            Line::from(vec![
+                key(" [t] token       "),
+                Span::styled("shares ~/.claude history, but no Remote", theme::dim()),
+            ]),
+            Line::from(Span::styled(
+                "                  Control or claude.ai connectors",
+                theme::dim(),
+            )),
+            Line::default(),
+            Line::from(Span::styled(hint, theme::dim())),
+        ];
+        let row = lines.len() as u16 - 1;
+        let (outer, inner) = modal(
+            frame,
+            area,
+            &format!("Add Claude account {}", flow.name),
+            lines,
+            64,
+        );
+        confirm_chips(
+            layout,
+            outer,
+            inner,
+            row,
+            hint,
+            &[
+                ("[f]", KeyEvent::from(KeyCode::Char('f'))),
+                ("[t]", KeyEvent::from(KeyCode::Char('t'))),
+                ("[Esc]", esc),
+            ],
+        );
+        return;
+    }
+
     let Some(pane) = flow.pane.as_mut() else {
-        let hint = " [Enter] run claude setup-token   [Esc] cancel";
+        let hint = " [Enter] next   [Esc] cancel";
         let lines = vec![
             Line::from(Span::styled(" What is it called?", theme::dim())),
             Line::from(vec![
@@ -1938,7 +1983,14 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
         .border_style(Style::default().fg(theme::colors().border_hi))
         .style(theme::canvas())
         .title(Span::styled(
-            format!(" Add Claude account {} — claude setup-token ", flow.name),
+            format!(
+                " Add Claude account {} — {} ",
+                flow.name,
+                match flow.kind {
+                    Some(AccountKind::Login) => "claude auth login",
+                    _ => "claude setup-token",
+                }
+            ),
             theme::title(),
         ))
         .title_bottom(Span::styled(hint, theme::title()));
@@ -1953,13 +2005,20 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
         Paragraph::new(vec![
             Line::from(Span::styled(
                 format!(
-                    " Approve it in the browser signed in as {}. The token is saved",
-                    flow.name
+                    " Approve it in the browser signed in as {}. {}",
+                    flow.name,
+                    match flow.kind {
+                        Some(AccountKind::Login) => "The account is ready",
+                        _ => "The token is saved",
+                    }
                 ),
                 theme::dim(),
             )),
             Line::from(Span::styled(
-                " the moment it is printed — nothing to copy.",
+                match flow.kind {
+                    Some(AccountKind::Login) => " the moment the login finishes.",
+                    _ => " the moment it is printed — nothing to copy.",
+                },
                 theme::dim(),
             )),
         ]),

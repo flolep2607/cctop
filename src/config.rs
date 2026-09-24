@@ -286,6 +286,16 @@ pub fn profiles_for(provider: Provider) -> Vec<&'static Profile> {
 /// until it is restarted.
 pub fn accounts_for(provider: Provider) -> Vec<Profile> {
     let mut out: Vec<Profile> = profiles_for(provider).into_iter().cloned().collect();
+    // Directories are looked for again too, for the same reason: the popup
+    // makes `~/.claude-<name>` and logs it in while cctop runs.
+    //
+    // ponytail: [`PROFILES`] itself is not refreshed, so the sessions such an
+    // account starts are labelled with its name only once cctop restarts.
+    for found in profiles_in(&HOME, provider) {
+        if !out.iter().any(|p| p.dir == found.dir) {
+            out.push(found);
+        }
+    }
     // Claude's alone: a token account is one `$CLAUDE_CODE_OAUTH_TOKEN` could
     // have named, and Codex has no such variable to make the same promise.
     if provider != Provider::Claude {
@@ -350,6 +360,13 @@ pub fn refresh_launchable() {
 }
 
 static LAUNCHABLE: std::sync::Mutex<Vec<&'static Profile>> = std::sync::Mutex::new(Vec::new());
+
+/// Where the popup puts a full login named `name`: the directory discovery
+/// already knows to look in, so the account is found the way one made by hand
+/// would be.
+pub fn claude_login_dir(name: &str) -> PathBuf {
+    HOME.join(format!(".claude-{name}"))
+}
 
 /// The names under `[accounts]` in cctop's config that carry a token.
 fn token_account_names() -> Vec<String> {

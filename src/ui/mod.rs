@@ -116,6 +116,21 @@ pub enum Mode {
     AddAccount,
 }
 
+/// The two things an added Claude account can be.
+///
+/// Both, because each gives up something the other keeps — see
+/// [`AccountSource`](crate::config::AccountSource). A full login is its own
+/// `~/.claude-<name>`, and every feature works under it. A token keeps the one
+/// `~/.claude` history every account resumes from, and Claude Code lets it make
+/// model requests and nothing else: no Remote Control, no claude.ai connectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountKind {
+    /// `claude auth login` under `CLAUDE_CONFIG_DIR=~/.claude-<name>`.
+    Login,
+    /// `claude setup-token`, the token kept in cctop's config.
+    Token,
+}
+
 /// The add-account popup, from naming the account to its token being saved.
 ///
 /// `claude setup-token` runs on a pty of the popup's own, and the token is read
@@ -128,6 +143,12 @@ pub enum Mode {
 #[derive(Default)]
 pub struct AddAccount {
     pub name: String,
+    /// Which kind of account, once the name is in and the choice is made.
+    /// `None` with a name accepted is the popup asking.
+    pub kind: Option<AccountKind>,
+    /// Whether the name has been accepted, which moves the popup on to asking
+    /// which kind of account it is.
+    pub named: bool,
     /// `setup-token`, once the name is in. Dropping it ends the process, which
     /// is what cancelling the popup should do.
     pub pane: Option<tabs::Pane>,

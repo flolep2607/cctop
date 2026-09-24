@@ -505,6 +505,20 @@ pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether `claude auth login` under `dir` finished: it leaves its credentials
+/// there, and nothing else says so once the process has gone.
+///
+/// Makes the account launchable and polled at once when it did, the way
+/// [`save_token`] does for a token.
+pub fn login_landed(dir: &Path) -> bool {
+    if !dir.join(".credentials.json").is_file() {
+        return false;
+    }
+    config::refresh_launchable();
+    NUDGE.store(true, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
 /// Set when an account has just been added, so the poller asks about it now
 /// rather than at its next interval. The usage cache answers for every other
 /// account, so this costs one request: the new one's.
@@ -582,21 +596,31 @@ fn run_on_screen(
 /// the token travels only in the child's environment, which is the owner's
 /// alone to read.
 pub fn run_as(args: &[String]) -> anyhow::Result<i32> {
+    use std::os::unix::process::CommandExt;
     let [name, command, rest @ ..] = args else {
         anyhow::bail!("usage: cctop as <account> <agent> [args…]");
     };
-    let Some(token) = stored_token(name) else {
-        anyhow::bail!("no token stored for '{name}'; add one with `cctop --add-account {name}`");
-    };
     let mut cmd = std::process::Command::new(command);
-    cmd.args(rest)
-        .env("CLAUDE_CODE_OAUTH_TOKEN", token)
+    cmd.args(rest);
+    // A full login is its directory, and pointing Claude Code at it is all
+    // there is to launching under it — the credentials are already in there.
+    if stored_token(name).is_none()
+        && let Some(account) = config::accounts_for(crate::pricing::Provider::Claude)
+            .into_iter()
+            .find(|p| p.name == *name && p.source == config::AccountSource::Directory)
+    {
+        cmd.env("CLAUDE_CONFIG_DIR", &account.dir);
+        return Err(anyhow::anyhow!("could not run {command}: {}", cmd.exec()));
+    }
+    let Some(token) = stored_token(name) else {
+        anyhow::bail!("no account named '{name}'; add one with `+ account` in cctop");
+    };
+    cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token)
         // Claude Code prefers either of these to the OAuth token, so one left
         // in the shell would quietly bill an API key instead of the account
         // that was asked for.
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN");
-    use std::os::unix::process::CommandExt;
     Err(anyhow::anyhow!("could not run {command}: {}", cmd.exec()))
 }
 
@@ -946,6 +970,18 @@ fn codex_usage(token: &str) -> ProviderStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// A login is done when its credentials are on disk, and not before: the
+    /// directory is made first, so its existence says nothing.
+    #[test]
+    fn a_login_has_landed_once_its_credentials_are_written() {
+        let dir = std::env::temp_dir().join(format!("cctop-login-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!super::login_landed(&dir));
+        std::fs::write(dir.join(".credentials.json"), "{}").unwrap();
+        assert!(super::login_landed(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The bug this closes: one figure stood for every account, so a pane
     /// running as somebody's work login showed their personal usage. The number
