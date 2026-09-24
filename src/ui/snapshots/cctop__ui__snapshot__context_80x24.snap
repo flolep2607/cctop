@@ -11,12 +11,12 @@ expression: screen
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
 │   LAST▲         $ MODEL          PERM   ! HOST       BRANCH       PROJECT    │
-│●    now    $18.42 opus-4-1       ─        local      ─            Fix the ch…│
+│●    now    $18.42 opus-4-1       ─        local      ─            Fix the ch…┃
 │●     7m     $2.87 sonnet-4-5     ─        local      ─            api        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context╮
-│Window  151.0K of 200.0K   90% to compaction   16.0K left                     │
-│                                                                              │
+│Window  151.0K of 200.0K   90% to compaction   16.0K left                     ┃
+│                                                                              ┃
 │███████████████████████████████████████████████████████████░░░░░░┊░░░░░░░░░░░░│
 │                                                                              │
 │█ Tool output     71.0K  36%   █ Startup         24.0K  12%                   │
