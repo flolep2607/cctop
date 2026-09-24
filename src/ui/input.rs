@@ -115,28 +115,10 @@ impl App {
             {
                 return;
             }
-            if let Some(pane) = self.focused_pane() {
-                // Paging through history, which the wheel could already do and
-                // the keyboard could not. Both ask the screen first, so an agent
-                // in fullscreen still gets these keys for its own scrolling.
-                let scrolled = match pane.rmux.as_deref() {
-                    Some(name) => {
-                        key.modifiers.is_empty() && crate::rmux::scroll_key(name, key.code)
-                    }
-                    None => pane.view.scroll_key(key),
-                };
-                if scrolled {
-                    return;
-                }
-                // The agent this key is going to, taken before the borrow ends:
-                // answering its question is the one thing no hook reports.
-                let agent = pane.agent();
-                let alive = pane.view.send_key(pane.translate_key(key));
-                self.mark_answered(agent);
-                if !alive {
-                    self.close_pane();
-                    self.set_status("The agent's terminal closed");
-                }
+            // Through the torn-report filter first: an Esc may be the front of
+            // a mouse report split across two reads. See [`super::torn`].
+            for key in self.torn.feed(key, Instant::now()) {
+                self.key_into_pane(key);
             }
             return;
         }
@@ -181,6 +163,46 @@ impl App {
                 if let Some(key) = self.keymap.apply(key) {
                     self.on_key_list(key);
                 }
+            }
+        }
+    }
+
+    /// One key for the focused pane's agent, once it is known not to be part of
+    /// a torn mouse report.
+    fn key_into_pane(&mut self, key: KeyEvent) {
+        let Some(pane) = self.focused_pane() else {
+            return;
+        };
+        // Paging through history, which the wheel could already do and the
+        // keyboard could not. Both ask the screen first, so an agent in
+        // fullscreen still gets these keys for its own scrolling.
+        let scrolled = match pane.rmux.as_deref() {
+            Some(name) => key.modifiers.is_empty() && crate::rmux::scroll_key(name, key.code),
+            None => pane.view.scroll_key(key),
+        };
+        if scrolled {
+            return;
+        }
+        // The agent this key is going to, taken before the borrow ends:
+        // answering its question is the one thing no hook reports.
+        let agent = pane.agent();
+        let alive = pane.view.send_key(pane.translate_key(key));
+        self.mark_answered(agent);
+        if !alive {
+            self.close_pane();
+            self.set_status("The agent's terminal closed");
+        }
+    }
+
+    /// Deliver the keys the torn-report filter held, once it has waited long
+    /// enough to know they were typed.
+    pub(super) fn tick_torn(&mut self) {
+        for key in self.torn.expire(Instant::now()) {
+            // Only where they were headed: a pane still on screen. A key held
+            // across a switch to the dashboard is dropped rather than read there
+            // as a command nobody meant for it.
+            if self.tab > 0 && self.mode == Mode::List {
+                self.key_into_pane(key);
             }
         }
     }

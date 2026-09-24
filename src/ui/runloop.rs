@@ -270,7 +270,12 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 ///
 /// `?1000h` presses and releases, `?1002h` drags, `?1006h` the SGR encoding that
 /// can name a column past 223.
-const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+///
+/// `?1003l` first, turning any-motion *off*: asking only for the modes above
+/// leaves one already on exactly as it was, and a program that ran in this
+/// terminal before cctop — an agent in fullscreen, a cctop that died — can have
+/// left it on. The hover stream it keeps sending is what gets torn.
+const MOUSE_ON: &str = "\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 
 /// `ratatui::restore` intentionally only disables raw mode and leaves the
 /// alternate screen; it does not restore cursor visibility. Keep this separate
@@ -700,6 +705,7 @@ fn event_loop(
         // A brief for a just-launched agent comes due on a timer rather than an
         // event, so the loop is the only thing that can notice.
         app.tick_handoff();
+        app.tick_torn();
 
         // The same is true of a tunnel being registered: the answer arrives on
         // a channel nothing polls but this, and until it does the corner has a

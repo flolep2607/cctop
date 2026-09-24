@@ -35,6 +35,7 @@ pub mod spark;
 mod table;
 pub mod tabs;
 pub mod theme;
+mod torn;
 mod worker;
 
 pub use runloop::run;
@@ -673,6 +674,9 @@ pub struct App {
     /// has just said an update is installed, and that one should not be asked
     /// anything.
     pub restart_arm: Option<(u32, Instant)>,
+    /// Keys bound for a pane, held while they might be a mouse report the
+    /// terminal's input was split through. See [`torn`].
+    pub torn: torn::Torn,
     /// Why the last attempt to serve failed, kept for the panel to show.
     ///
     /// A port in use or a tunnel that would not register are both answers
@@ -908,6 +912,7 @@ impl App {
             share_opening: None,
             share_arm: false,
             restart_arm: None,
+            torn: torn::Torn::default(),
             pending_brief: None,
             pending_fork: None,
             handoff_send: None,
