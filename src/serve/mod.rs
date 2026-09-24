@@ -78,6 +78,8 @@ pub mod chat;
 #[cfg(feature = "debug")]
 mod debug;
 mod http;
+/// `/metrics`, the snapshot in Prometheus's text format.
+mod metrics;
 /// The `--notify` webhook. Crate-visible because the TUI POSTs crossings to
 /// `$CCTOP_NOTIFY_URL` through the same send — one transport, two triggers.
 pub(crate) mod notify;
@@ -1294,6 +1296,22 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             );
         }
         "/api/search" => api_search(shared, stream, &request),
+        "/metrics" => {
+            let snapshot = current(shared);
+            let body = metrics::render(
+                &snapshot.sessions,
+                shared.plan,
+                &shared.store,
+                snapshot.host_errors.len(),
+            );
+            http::respond(
+                stream,
+                Some(&request),
+                200,
+                metrics::CONTENT_TYPE,
+                body.as_bytes(),
+            );
+        }
         "/api/events" => events(shared, stream, &request),
         "/insight/optimize" => api_insight(shared, stream, &request, "optimize"),
         "/insight/compare" => api_insight(shared, stream, &request, "compare"),
