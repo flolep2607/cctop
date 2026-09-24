@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰────────╭ Fix the checkout redirect loop ────────────────────────────╮────────╯
+╭ Session│ Resume in a tab                                          R │────────╮
+│   LAST▲│ Restart it in its tab      it is not running in a tab here │JECT    │
+│●    now│ Attach to it                                             a │ the ch…│
+│●     7m│ Type into it                                             s │        │
+╰────────│ Hand off to another agent                                O │────────╯
+╭ Info  P│ Read the conversation                                    i │ Context╮
+│Root /us│ Show its subagents                                       e │        │
+│    PID │ Mark for a batch action                              space │        │
+│   4101 │ ────────────────────────────────────────────────────────── │        │
+│   4188 │ Terminate the agent                                 ctrl+k │        │
+│   4290 │ Delete the transcript                  it is still running │        │
+│        ╰ ↑↓ Enter · Esc ────────────────────────────────────────────╯        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

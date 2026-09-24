@@ -35,6 +35,13 @@ cargo test
 cargo publish --dry-run --allow-dirty   # what `verify / package` runs
 ```
 
+Whole screens are pinned as snapshots (`src/ui/snapshot.rs`, with the `.snap`
+files beside it in `src/ui/snapshots/`). A change to what the TUI draws fails
+them on purpose. Look at the diff, and if the new frame is the one you meant,
+accept it with `cargo insta review` (needs `cargo install cargo-insta`) or with
+`INSTA_UPDATE=always cargo test`, and commit the `.snap` files that changed. CI
+only compares against the committed files and never writes new ones.
+
 ## cctop is Linux-only
 
 There is one platform, and it is Linux. macOS and Windows were supported once

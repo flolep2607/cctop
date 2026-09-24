@@ -147,3 +147,9 @@ ratatui-image = { version = "11.0.8", default-features = false }
 # the same set the sniff accepts (clipboard::format_of): a JPEG or WebP that
 # could not preview would still paste, but the toast would go silently missing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+[dev-dependencies]
+# Whole-screen snapshots of the TUI (`ui::snapshot`). The `.snap` files are
+# committed, so CI compares against them and needs no insta CLI; CLAUDE.md
+# says how to accept a change.
+insta = "1.48.0"
