@@ -850,6 +850,7 @@ mod tests {
         let shared = Shared {
             token: "full".to_string(),
             readonly: "view".to_string(),
+            metrics: String::new(),
             actions: true,
             port: 7777,
             plan: Plan::Retail,
