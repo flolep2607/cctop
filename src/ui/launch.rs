@@ -622,6 +622,9 @@ impl App {
             tab.recolor(color);
             self.save_tab_order();
         }
+        // Marked here rather than by each caller, so the key, the row menu and
+        // the bulk restart all get the same sweep on the tab that took it.
+        self.tabs[at].restarted = Some(Instant::now());
         Restart::Done(label)
     }
 
@@ -675,6 +678,7 @@ impl App {
         let color = tab.color;
         tab.recolor(color);
         self.save_tab_order();
+        self.tabs[at].restarted = Some(Instant::now());
         Restart::Done(label)
     }
 

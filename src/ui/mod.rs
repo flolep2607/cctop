@@ -14,6 +14,7 @@
 mod batch;
 pub mod columns;
 mod dirs;
+mod effects;
 mod filter;
 mod hooks;
 mod input;

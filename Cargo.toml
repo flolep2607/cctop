@@ -121,6 +121,11 @@ safetensors = "0.6"
 # C++, and a C++ toolchain is the one dependency class the musl release does not
 # already carry. `fancy-regex` is the pure-Rust path through the same crate.
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+# The tab bar's attention pulse and restart flash. Only its colour
+# interpolation, timers and one-shot effects are used — not the DSL, whose
+# parser the bar has no use for. Pure Rust, on the same `ratatui-core` cctop
+# draws with, so the musl release takes it as it is.
+tachyonfx = { version = "0.25.2", default-features = false, features = ["std"] }
 tui-term = "0.3.4"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"

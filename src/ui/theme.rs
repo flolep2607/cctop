@@ -490,6 +490,50 @@ pub fn no_color() -> bool {
     variant() == Variant::Mono
 }
 
+/// Whether the terminal has said it takes 24-bit colour, which is when an
+/// eased colour can be written as it is rather than snapped to an index.
+///
+/// Asked of `$COLORTERM` alone, the one convention terminals and multiplexers
+/// actually pass along. A terminal that takes truecolor without saying so gets
+/// the snapped pulse, which is coarser and still correct; one that claimed it
+/// wrongly would get escape codes it prints as garbage, so silence is read as no.
+pub fn truecolor() -> bool {
+    static TRUECOLOR: OnceLock<bool> = OnceLock::new();
+    *TRUECOLOR.get_or_init(|| truecolor_from(std::env::var("COLORTERM").ok().as_deref()))
+}
+
+fn truecolor_from(colorterm: Option<&str>) -> bool {
+    matches!(
+        colorterm
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("truecolor" | "24bit")
+    )
+}
+
+/// The terminal's ground, as a colour something can be eased from.
+///
+/// The dark palette leaves the ground `Reset` and the light one names `White`,
+/// and neither has a value cctop can know. So this is the grey each palette is
+/// drawn to sit on — near-black, and the cube's white.
+///
+/// ponytail: a terminal themed far from either (a navy ground, say) sees the
+/// first and last steps of an unpainted tab's pulse start from grey rather
+/// than from its own ground. Those steps are the faintest of the swing, and
+/// asking the terminal for its real background (OSC 11) is a round trip at
+/// startup that multiplexers answer unreliably.
+pub fn ground_rgb() -> Color {
+    match colors().ground {
+        Color::Indexed(i) if i >= 16 => Color::Indexed(i),
+        Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        _ => match variant() {
+            Variant::Light => Color::Indexed(231),
+            _ => Color::Indexed(234),
+        },
+    }
+}
+
 /// Choose the palette from the environment. Call once, before the first draw;
 /// later calls are ignored, which keeps the choice stable for a whole run.
 ///
@@ -1357,6 +1401,18 @@ mod tests {
         assert_eq!(running_dot_color(Some(1_000)), Color::Indexed(71));
         // Same hash over the same ten hues, so a tool keeps the colour it had.
         assert_eq!(tool_color("Bash"), Color::Indexed(173));
+    }
+
+    /// Only a terminal that says so gets RGB; anything else — including the
+    /// `256color` a `TERM` might put there — is snapped to an index.
+    #[test]
+    fn truecolor_is_only_what_colorterm_claims() {
+        assert!(truecolor_from(Some("truecolor")));
+        assert!(truecolor_from(Some("24bit")));
+        assert!(truecolor_from(Some(" TrueColor ")));
+        assert!(!truecolor_from(None));
+        assert!(!truecolor_from(Some("")));
+        assert!(!truecolor_from(Some("256color")));
     }
 
     #[test]

@@ -470,6 +470,11 @@ pub struct Tab {
     /// `Shared` on every switch away, and a property either side held would
     /// have to be handed across both ways.
     pub color: Option<Hue>,
+    /// When this tab's agent was last restarted, for the sweep across its
+    /// label that says so. On the tab for the reason `color` is: a restart
+    /// swaps the pane or the `Shared` underneath, and the one thing still
+    /// standing afterwards is the tab.
+    pub restarted: Option<Instant>,
 }
 
 impl Tab {
@@ -480,6 +485,7 @@ impl Tab {
             stacked: false,
             shared: None,
             color: None,
+            restarted: None,
         }
     }
 
@@ -493,6 +499,7 @@ impl Tab {
             // Read off the session like the label is: a word this cctop does
             // not know means nothing was painted, never a guess at a colour.
             color: agent.color.as_deref().and_then(Hue::from_name),
+            restarted: None,
             shared: Some(Shared {
                 label: agent.label.clone().unwrap_or_else(|| {
                     // No label recorded: an agent from a cctop older than this,
