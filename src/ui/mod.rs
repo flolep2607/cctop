@@ -25,6 +25,7 @@ mod modals;
 pub mod panels;
 mod panes;
 mod profiles;
+mod qr;
 mod remote;
 pub mod render;
 mod runloop;
@@ -41,7 +42,7 @@ mod torn;
 mod worker;
 
 pub use runloop::run;
-use share::Opening;
+use share::{Opening, ShareQr};
 use worker::Request;
 
 use crate::cache::UiPrefs;
@@ -112,6 +113,9 @@ pub enum Mode {
     /// The browser panel: whether this cctop is serving its table to one, on
     /// what links, and whether they leave the machine.
     Serve,
+    /// A terminal just shared with `W`, as a code a phone can scan. See
+    /// [`ShareQr`].
+    ShareQr,
     /// What `config.toml` sets and what it could set, keybinds included.
     Settings,
     /// Adding a Claude account: naming it, then `claude setup-token` in a
@@ -678,6 +682,13 @@ pub struct App {
     /// happening now, and one left standing from ten minutes ago is exactly the
     /// stray click it exists to prevent.
     pub share_arm: bool,
+    /// Whether the Serve panel is showing its tunnel link as a QR code.
+    ///
+    /// Off each time the panel opens, and on only for `c`: the code is the link,
+    /// and the panel is opened to check on a serve as often as to hand one out.
+    pub serve_qr: bool,
+    /// The terminal share `W` just made, while `Mode::ShareQr` is up.
+    pub share_qr: Option<ShareQr>,
     /// A restart asked for while the agent was mid-turn: which agent, and when.
     ///
     /// Restarting kills the agent, and a turn in flight dies with it. The key
@@ -924,6 +935,8 @@ impl App {
             serve_error: None,
             share_opening: None,
             share_arm: false,
+            serve_qr: false,
+            share_qr: None,
             restart_arm: None,
             torn: torn::Torn::default(),
             pending_brief: None,

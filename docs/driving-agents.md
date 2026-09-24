@@ -195,7 +195,11 @@ still running — nothing here kills one — but cctop stops being able to see t
 `rmux web-share -t <session>` and puts the operator link on your clipboard — open
 it on a phone and you are typing into that agent. The pairing code goes on
 cctop's status line; the link never does, because it grants input to a live
-coding agent and a status line survives into a screenshot.
+coding agent and a status line survives into a screenshot. When the share
+reaches off this machine, `W` also opens a panel with the link as a QR code and
+the pairing code under it, for pointing a phone at; any key closes it. The code
+is the link — the panel says so — and on a terminal too small to hold it the
+panel says that instead.
 
 The link reaches this machine over cctop's own TryCloudflare quick tunnel, the
 same kind `cctop serve --tunnel` opens, handed to rmux as `--tunnel-url` rather
