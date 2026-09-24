@@ -947,11 +947,12 @@ impl App {
     /// `claude`, `codex`, or a shell binds one — and cctop's own map is written
     /// in them, which is why they were the keys it kept.
     ///
-    /// Most act on the dashboard: a search box, a sort order, or the help sheet
-    /// drawn over a pane would be a modal on a screen the agent is repainting
-    /// underneath, and the thing being filtered is not on screen at all. So the
+    /// Most act on the dashboard: a search box or a sort order over a pane
+    /// would be a modal for a table that is not on screen at all. So the
     /// dashboard comes forward first and the key then does exactly what it does
-    /// there. The three that need no dashboard stay where they are pressed.
+    /// there. The ones that need no dashboard stay where they are pressed —
+    /// help among them, since the sheet is about the keys, not about the table,
+    /// and reading it should not cost you the agent you were looking at.
     fn on_key_function(&mut self, key: KeyEvent) {
         match key.code {
             // Back to the dashboard, which is the one function key that only
@@ -967,8 +968,11 @@ impl App {
             // the dashboard forward would take the composer off screen at the
             // moment something is being put into it.
             KeyCode::F(9) => self.paste_image_into_pane(),
+            // The help sheet, over the pane. Every frame repaints it on top of
+            // the agent, and Esc gives the keyboard back to the same pane.
+            KeyCode::F(1) => self.mode = Mode::Help,
             // The keys the dashboard binds, on the dashboard.
-            KeyCode::F(1) | KeyCode::F(3) | KeyCode::F(6) | KeyCode::F(7) | KeyCode::F(8) => {
+            KeyCode::F(3) | KeyCode::F(6) | KeyCode::F(7) | KeyCode::F(8) => {
                 self.show_tab(0);
                 self.on_key_list(key);
             }
@@ -1744,6 +1748,20 @@ impl App {
             self.needs_redraw = true;
         }
 
+        // The help sheet covers most of the screen and records no rectangle,
+        // so it answers the mouse itself: the wheel reads it and a click puts
+        // it away. Over a pane this is what keeps a click from reaching the
+        // agent the sheet is drawn on top of.
+        if self.mode == Mode::Help {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.on_key_help(KeyEvent::from(KeyCode::Up)),
+                MouseEventKind::ScrollDown => self.on_key_help(KeyEvent::from(KeyCode::Down)),
+                MouseEventKind::Down(_) => self.on_key_help(KeyEvent::from(KeyCode::Esc)),
+                _ => {}
+            }
+            return;
+        }
+
         // A modal owns the mouse while it is up. Without this the dashboard
         // underneath still answers, so a click on a launcher row lands on the
         // panel tab or session row the modal is drawn over.
@@ -2446,7 +2464,6 @@ mod tests {
     fn function_keys_are_cctops_inside_a_pane_and_bring_the_dashboard_with_them() {
         // Each key, and the dashboard state it must leave behind.
         for (code, mode) in [
-            (KeyCode::F(1), Mode::Help),
             (KeyCode::F(3), Mode::Search),
             (KeyCode::F(6), Mode::SortBy),
             (KeyCode::F(7), Mode::AgeFilter),
@@ -2457,6 +2474,16 @@ mod tests {
             assert_eq!(app.tab, 0, "{code:?} left the dashboard behind");
             assert_eq!(app.mode, mode, "{code:?} did not open its modal");
         }
+
+        // F1's sheet is drawn over the pane, and Esc hands the keyboard back
+        // to it rather than to the dashboard.
+        let mut app = test_app();
+        app.tab = 1;
+        app.on_key(key(KeyCode::F(1)));
+        assert_eq!(app.tab, 1, "the help sheet took you off the agent");
+        assert_eq!(app.mode, Mode::Help);
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!((app.tab, app.mode), (1, Mode::List));
 
         // F12 is the pane's own key and F5 acts on the walk, so neither takes
         // you off the agent — F5 says so on the footer instead.
