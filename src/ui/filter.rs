@@ -95,19 +95,32 @@ impl App {
         // Sessions are sorted first, then each expanded one has its children
         // spliced in beneath it: subagents belong to their parent's position in
         // the table, not to the ordering the sort column would give them.
-        self.visible = visible
-            .into_iter()
-            .flat_map(|i| {
-                let session = &self.sessions[i];
-                let children = if self.expanded.contains(&session.key()) {
-                    session.subagents.len()
-                } else {
-                    0
-                };
-                std::iter::once(Row::Session(i))
-                    .chain((0..children).map(move |index| Row::Subagent { parent: i, index }))
-            })
-            .collect();
+        let children = |i: usize| {
+            let session = &self.sessions[i];
+            if self.expanded.contains(&session.key()) {
+                session.subagents.len()
+            } else {
+                0
+            }
+        };
+        self.matched = visible.len();
+        if self.tree {
+            let tree = super::tree::build(&self.sessions, &visible, &self.collapsed, children);
+            self.visible = tree.rows;
+            self.groups = tree.groups;
+            self.indent = tree.indent;
+        } else {
+            self.visible = visible
+                .iter()
+                .flat_map(|&i| {
+                    std::iter::once(Row::Session(i)).chain(
+                        (0..children(i)).map(move |index| Row::Subagent { parent: i, index }),
+                    )
+                })
+                .collect();
+            self.groups.clear();
+            self.indent.clear();
+        }
         self.selected = anchor
             .and_then(|key| self.visible.iter().position(|&r| self.row_key(r) == key))
             .unwrap_or(self.selected)
@@ -376,7 +389,10 @@ impl App {
             .visible
             .iter()
             .enumerate()
-            .filter(|(_, row)| self.matches_search(&self.sessions[row.session()]))
+            .filter(|(_, row)| {
+                row.session()
+                    .is_some_and(|i| self.matches_search(&self.sessions[i]))
+            })
             .map(|(at, _)| at)
             .collect();
         if matches.is_empty() {
@@ -403,7 +419,10 @@ mod tests {
         app.live_only = true;
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0].session()].session_id, "a");
+        assert_eq!(
+            app.sessions[app.visible[0].session().unwrap()].session_id,
+            "a"
+        );
     }
 
     #[test]
@@ -417,8 +436,12 @@ mod tests {
         app.live_only = true;
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert!(app.sessions[app.visible[0].session()].is_running());
-        assert!(app.sessions[app.visible[0].session()].process.is_none());
+        assert!(app.sessions[app.visible[0].session().unwrap()].is_running());
+        assert!(
+            app.sessions[app.visible[0].session().unwrap()]
+                .process
+                .is_none()
+        );
     }
 
     #[test]
@@ -435,7 +458,10 @@ mod tests {
         app.search = "BBB".into();
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0].session()].session_id, "bbb");
+        assert_eq!(
+            app.sessions[app.visible[0].session().unwrap()].session_id,
+            "bbb"
+        );
     }
 
     /// The table abbreviates the working directory to fit its column, so the
@@ -452,7 +478,10 @@ mod tests {
         app.search = "work/api".into();
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0].session()].session_id, "aaa");
+        assert_eq!(
+            app.sessions[app.visible[0].session().unwrap()].session_id,
+            "aaa"
+        );
     }
 
     /// Content hits widen the filter, and only for the query they were found
@@ -477,7 +506,10 @@ mod tests {
         app.search_content = true;
         app.scanned("flywheel".into(), hit("claude:bbb"));
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0].session()].session_id, "bbb");
+        assert_eq!(
+            app.sessions[app.visible[0].session().unwrap()].session_id,
+            "bbb"
+        );
 
         app.search = "alpha".into();
         app.scanned("alpha".into(), hit("claude:bbb"));
@@ -599,7 +631,10 @@ mod tests {
         app.age_filter = Some(AgeFilter::Day);
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0].session()].session_id, "new");
+        assert_eq!(
+            app.sessions[app.visible[0].session().unwrap()].session_id,
+            "new"
+        );
     }
 
     #[test]
@@ -613,7 +648,10 @@ mod tests {
         app.cost_floor = 1.0;
         app.refilter();
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.sessions[app.visible[0].session()].session_id, "pricey");
+        assert_eq!(
+            app.sessions[app.visible[0].session().unwrap()].session_id,
+            "pricey"
+        );
     }
 
     #[test]

@@ -111,15 +111,18 @@ fn pad(text: &str, width: u16, right: bool) -> String {
 pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
     // Once anything is filtered, the count that matters is how much of the
     // table is being hidden — "Sessions (54)" over six rows reads as a bug.
-    let title = match (app.live_only, app.visible.len() != app.sessions.len()) {
-        (true, _) => format!(
-            "Sessions ({}/{}) — live",
-            app.visible.len(),
-            app.sessions.len()
-        ),
-        (false, true) => format!("Sessions ({}/{})", app.visible.len(), app.sessions.len()),
+    //
+    // Counted in sessions that passed the filters, not in rows: a tree's
+    // headings and a folded group would otherwise read as a filter at work.
+    let shown = app.matched;
+    let mut title = match (app.live_only, shown != app.sessions.len()) {
+        (true, _) => format!("Sessions ({}/{}) — live", shown, app.sessions.len()),
+        (false, true) => format!("Sessions ({}/{})", shown, app.sessions.len()),
         (false, false) => format!("Sessions ({})", app.sessions.len()),
     };
+    if app.tree {
+        title.push_str(" — tree");
+    }
     let block = panel_block(&title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -192,10 +195,25 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
         .take(height)
         .enumerate()
         .map(|(i, &row)| {
-            let s = &app.sessions[row.session()];
             let selected = app.scroll + i == app.selected;
+            let indent = app
+                .indent
+                .get(app.scroll + i)
+                .map(String::as_str)
+                .unwrap_or("");
+            let Some(at) = row.session() else {
+                return match row {
+                    crate::ui::Row::Group(g) => match app.groups.get(g) {
+                        Some(g) => group_row(g, &cols, &widths, selected, indent, &now),
+                        None => Line::default(),
+                    },
+                    _ => Line::default(),
+                };
+            };
+            let s = &app.sessions[at];
             let key = s.key();
             match row {
+                crate::ui::Row::Group(_) => Line::default(),
                 crate::ui::Row::Session(_) => session_row(
                     s,
                     &cols,
@@ -214,6 +232,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                             (false, true) => Some('▾'),
                             (false, false) => Some('▸'),
                         },
+                        indent,
                     },
                     &now,
                 ),
@@ -224,6 +243,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                         &widths,
                         selected,
                         index + 1 == s.subagents.len(),
+                        indent,
                         &now,
                     ),
                     None => Line::default(),
@@ -290,6 +310,8 @@ struct RowState<'a> {
     query: &'a str,
     /// The expansion marker, for a session that has subagents.
     expand: Option<char>,
+    /// The tree's glyphs ahead of the label, empty in the flat table.
+    indent: &'a str,
 }
 
 fn session_row(
@@ -307,6 +329,7 @@ fn session_row(
         deleting,
         query,
         expand,
+        indent,
     } = row;
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
     let base = if selected {
@@ -343,8 +366,8 @@ fn session_row(
             // more column costs every row two cells of width to serve the few
             // rows that have children.
             match expand {
-                Some(glyph) => format!("{glyph} {}", columns::render_cell(c.id, s, now)),
-                None => columns::render_cell(c.id, s, now),
+                Some(glyph) => format!("{indent}{glyph} {}", columns::render_cell(c.id, s, now)),
+                None => format!("{indent}{}", columns::render_cell(c.id, s, now)),
             }
         } else {
             columns::render_cell(c.id, s, now)
@@ -411,6 +434,7 @@ fn subagent_row(
     widths: &[u16],
     selected: bool,
     last: bool,
+    indent: &str,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Line<'static> {
     let running = matches!(sub.status, crate::session::SubagentStatus::Running);
@@ -422,7 +446,10 @@ fn subagent_row(
 
     let mut spans = Vec::with_capacity(cols.len() * 2);
     for (c, w) in cols.iter().zip(widths) {
-        let text = columns::render_subagent_cell(c.id, sub, last, now);
+        let mut text = columns::render_subagent_cell(c.id, sub, last, now);
+        if c.id == ColumnId::Project {
+            text.insert_str(0, indent);
+        }
         // The status dot keeps its colour on the selected row for the same
         // reason a session's does: it is the one cell whose colour *is* the
         // information. A ghost's transcript is gone, so its dot is hollow.
@@ -444,6 +471,72 @@ fn subagent_row(
                     Style::default().fg(fg)
                 }
             }
+            _ => base,
+        };
+        spans.push(Span::styled(pad(&text, *w, c.right_align), style));
+        spans.push(Span::styled(" ", base));
+    }
+    Line::from(spans)
+}
+
+/// A tree heading: one repository, or one checkout of it.
+///
+/// Bold where a session row is plain, and carrying only the columns a group
+/// has an answer for — its total cost, its latest activity, the branch a
+/// checkout has out. Averaging CPU or context across unrelated agents would be
+/// a figure that describes none of them. The count and how many are waiting go
+/// in the label, since no column is a count, and "two of these need you" is the
+/// thing worth reading off a folded heading.
+fn group_row(
+    g: &super::tree::Group,
+    cols: &[&'static columns::Column],
+    widths: &[u16],
+    selected: bool,
+    indent: &str,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Line<'static> {
+    let base = if selected {
+        theme::selected()
+    } else {
+        Style::default()
+    }
+    .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::with_capacity(cols.len() * 2);
+    for (c, w) in cols.iter().zip(widths) {
+        let (text, fg) = match c.id {
+            // The loudest state beneath it, so a folded heading still says
+            // that something inside is waiting on you.
+            ColumnId::Status if g.asking > 0 => ("◉".to_string(), Some(theme::colors().cost_high)),
+            ColumnId::Status if g.waiting > 0 => ("●".to_string(), Some(theme::colors().cost_mid)),
+            ColumnId::Status if g.running > 0 => ("●".to_string(), Some(theme::colors().cost_low)),
+            ColumnId::Status => ("○".to_string(), Some(theme::colors().dim)),
+            ColumnId::Cost => match g.cost {
+                Some(cost) => (util::compact_usd(cost), Some(theme::cost_color(cost))),
+                None => ("─".to_string(), Some(theme::colors().dimmer)),
+            },
+            ColumnId::Last if !g.last_active.is_empty() => {
+                (util::relative_age(&g.last_active, now), None)
+            }
+            ColumnId::Branch => (g.branch.clone().unwrap_or_default(), None),
+            ColumnId::Project => {
+                let fold = if g.collapsed { '▸' } else { '▾' };
+                let noun = if g.sessions == 1 {
+                    "session"
+                } else {
+                    "sessions"
+                };
+                let mut label = format!("{indent}{fold} {}  {} {noun}", g.label, g.sessions);
+                if g.waiting > 0 {
+                    label.push_str(&format!(", {} waiting", g.waiting));
+                }
+                (label, None)
+            }
+            _ => (String::new(), None),
+        };
+        // The status dot keeps its colour on the selected row, as a session's
+        // does; everything else takes the selection's own ink.
+        let style = match fg {
+            Some(fg) if !selected || c.id == ColumnId::Status => base.fg(fg),
             _ => base,
         };
         spans.push(Span::styled(pad(&text, *w, c.right_align), style));
@@ -653,6 +746,7 @@ mod tests {
             deleting: false,
             query: "",
             expand: None,
+            indent: "",
         };
         let quiet = session_row(&s, &cols, &widths, &row(false), &now);
         let rang = session_row(&s, &cols, &widths, &row(true), &now);
@@ -752,6 +846,7 @@ mod tests {
                 deleting: false,
                 query: "",
                 expand: Some('▾'),
+                indent: "",
             },
             &now,
         );
@@ -771,7 +866,7 @@ mod tests {
             context: None,
             ghost: false,
         };
-        let child = subagent_row(&sub, &cols, &widths, false, true, &now);
+        let child = subagent_row(&sub, &cols, &widths, false, true, "", &now);
 
         assert_eq!(
             parent.spans[0].content, "○ ",
@@ -812,12 +907,61 @@ mod tests {
             context: None,
             ghost: false,
         };
-        let child = subagent_row(&sub, &cols, &widths, true, true, &now);
+        let child = subagent_row(&sub, &cols, &widths, true, true, "", &now);
         let want = theme::selected();
         // Column 0 is the status dot, which keeps its own colour. The next
         // text cell is the one that used to be hardcoded white.
         assert_eq!(child.spans[2].style.fg, want.fg);
         assert_eq!(child.spans[2].style.bg, want.bg);
+    }
+
+    /// A heading lines up under the same headers as the sessions it folds,
+    /// and says in its label what it holds and how many of those need you.
+    #[test]
+    fn a_tree_heading_keeps_the_columns_and_counts_its_sessions() {
+        let now = chrono::Utc::now();
+        let cols = all_columns();
+        let widths = column_widths(&cols, 200);
+        let g = crate::ui::tree::Group {
+            key: "repo:/r/.git".into(),
+            label: "~/r".into(),
+            sessions: 3,
+            running: 2,
+            waiting: 1,
+            cost: Some(4.2),
+            ..Default::default()
+        };
+        let heading = group_row(&g, &cols, &widths, false, "", &now);
+        let s = crate::session::Session::new(Provider::Claude, "a".into());
+        let row = session_row(
+            &s,
+            &cols,
+            &widths,
+            &RowState {
+                selected: false,
+                marked: false,
+                rang: false,
+                deleting: false,
+                query: "",
+                expand: None,
+                indent: "├─ ",
+            },
+            &now,
+        );
+        let width =
+            |line: &Line| -> usize { line.spans.iter().map(|s| util::cells(&s.content)).sum() };
+        assert_eq!(width(&heading), width(&row));
+
+        let text: String = heading.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("▾ ~/r  3 sessions, 1 waiting"), "{text}");
+        assert!(text.contains("$4.20"), "{text}");
+        // Waiting outranks working in the heading's dot, as it does on a row.
+        assert_eq!(heading.spans[0].style.fg, Some(theme::colors().cost_mid));
+        let project: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            project.contains("├─ "),
+            "the session carries its tree glyph"
+        );
     }
 
     /// Highlighting marks the match and changes nothing else — a row that
