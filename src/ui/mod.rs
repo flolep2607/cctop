@@ -21,6 +21,7 @@ mod hyperlink;
 mod input;
 mod launch;
 mod launch_cwd;
+mod line_edit;
 pub mod menu;
 mod modals;
 pub mod panels;
@@ -150,7 +151,7 @@ pub enum AccountKind {
 /// the one question. `cctop --add-account` still says it.
 #[derive(Default)]
 pub struct AddAccount {
-    pub name: String,
+    pub name: line_edit::LineEdit,
     /// Which kind of account, once the name is in and the choice is made.
     /// `None` with a name accepted is the popup asking.
     pub kind: Option<AccountKind>,
@@ -340,7 +341,7 @@ pub struct App {
     pub sort_asc: bool,
     pub sortby_cursor: usize,
 
-    pub search: String,
+    pub search: line_edit::LineEdit,
     /// Search the transcripts as well as the columns.
     ///
     /// Off by default, and deliberately: the metadata filter answers instantly
@@ -395,10 +396,10 @@ pub struct App {
     /// [`menu::step`].
     pub menu_cursor: usize,
     /// Raw digits being typed into the cost-floor modal.
-    pub cost_input: String,
+    pub cost_input: line_edit::LineEdit,
     /// The directory being typed into the launcher, spelled as the user is
     /// spelling it — `~` and all, expanded only when it is accepted.
-    pub launch_cwd_input: String,
+    pub launch_cwd_input: line_edit::LineEdit,
     /// Set when the typed directory does not name one, so the field can say so
     /// where it is being typed rather than in a toast across the screen.
     pub launch_cwd_bad: bool,
@@ -417,7 +418,7 @@ pub struct App {
     /// `None` means the field is being typed in, and Enter takes what is typed.
     pub launch_cwd_pick: Option<usize>,
     /// Line being typed into the selected session's terminal.
-    pub send_input: String,
+    pub send_input: line_edit::LineEdit,
     /// The new name being typed for a tab, and which tab it is for.
     ///
     /// The title as it stood when the rename opened is kept alongside the
@@ -425,7 +426,7 @@ pub struct App {
     /// retired mid-typing and every index after it shifts down one. Checking
     /// the title back means a rename either lands on the tab it was aimed at or
     /// is dropped, rather than renaming whichever tab slid into the slot.
-    pub rename_input: String,
+    pub rename_input: line_edit::LineEdit,
     pub rename_tab: usize,
     pub rename_was: String,
     /// The colour the rename modal is offering for the tab.
@@ -444,7 +445,7 @@ pub struct App {
     pub rename_opened_by_click: Option<Instant>,
     /// What has been typed into the tab switcher, and which row of the
     /// narrowed list the cursor is on. See `App::switch_matches`.
-    pub switch_filter: String,
+    pub switch_filter: line_edit::LineEdit,
     pub switch_cursor: usize,
     /// Whether the footer's `q Quit` has been clicked once already.
     ///
@@ -484,7 +485,7 @@ pub struct App {
     /// Waiting for the key the cursor's action should move to.
     pub settings_capture: bool,
     /// A setting's value being typed, for the ones that are not a toggle.
-    pub settings_input: Option<String>,
+    pub settings_input: Option<line_edit::LineEdit>,
 
     pub bottom_tab: usize,
     pub panel_data: Option<SessionData>,
@@ -808,7 +809,7 @@ impl App {
             sort_col: ColumnId::Last,
             sort_asc: true,
             sortby_cursor: 0,
-            search: String::new(),
+            search: Default::default(),
             search_content: false,
             scan_query: String::new(),
             scan_hits: HashMap::new(),
@@ -845,14 +846,14 @@ impl App {
             })
             .collect(),
             menu_cursor: 0,
-            cost_input: String::new(),
-            send_input: String::new(),
-            rename_input: String::new(),
+            cost_input: Default::default(),
+            send_input: Default::default(),
+            rename_input: Default::default(),
             rename_tab: 0,
             rename_was: String::new(),
             rename_color: None,
             rename_opened_by_click: None,
-            switch_filter: String::new(),
+            switch_filter: Default::default(),
             switch_cursor: 0,
             quit_arm: false,
             list_height: 0,
@@ -922,7 +923,7 @@ impl App {
             launch_into: LaunchInto::Tab,
             launch_root: std::env::current_dir().ok(),
             launch_cwd: None,
-            launch_cwd_input: String::new(),
+            launch_cwd_input: Default::default(),
             launch_cwd_bad: false,
             launch_cwd_known: Vec::new(),
             launch_cwd_hits: Vec::new(),

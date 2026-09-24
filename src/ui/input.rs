@@ -1,6 +1,7 @@
 //! Key and mouse handling: translate input events into state changes.
 
 use super::columns::COLUMNS;
+use super::line_edit::LineEdit;
 use super::select::PAGE;
 use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, Request, render, theme};
 /// Longest path the launcher's directory field accepts.
@@ -21,6 +22,16 @@ pub(super) const TAB_NAME_MAX: usize = 64;
 /// is matched against, minus the need to store it anywhere.
 const SWITCH_FILTER_MAX: usize = 64;
 
+/// Longest line the send box takes: a prompt, not a document — anything
+/// longer belongs in the agent's own composer, where it can be read back.
+const SEND_MAX: usize = 500;
+
+/// Longest cost floor: more digits than any dollar amount a session reaches.
+const COST_MAX: usize = 12;
+
+/// Longest value the settings panel takes for one setting.
+const SETTING_MAX: usize = 200;
+
 /// How long after a right-click a paste still counts as that click's echo.
 ///
 /// One frame's worth of slack: the terminal writes the click and the clipboard
@@ -33,9 +44,9 @@ use ratatui::crossterm::event::{
 };
 use std::time::{Duration, Instant};
 
-/// The pasted text as a single line, within `room` more bytes — the budget being
-/// in bytes because the caps it enforces are the ones `on_key_send` and
-/// `on_key_cost` already apply to a `String`'s length.
+/// The pasted text as a single line, within `room` more characters — the room
+/// left under the cap of the field it is going into (see [`LineEdit::room`]),
+/// so a runaway paste is cut here rather than copied whole first.
 ///
 /// Every input on the dashboard is one line drawn in one strip, and none of them
 /// has a notion of a cursor on a second row — a newline dropped straight in would
@@ -47,9 +58,10 @@ use std::time::{Duration, Instant};
 /// among them would repaint the strip it landed in.
 fn flatten(text: &str, room: usize) -> String {
     let mut out = String::new();
+    let mut taken = 0;
     let mut last_was_break = false;
     for c in text.chars() {
-        if out.len() + c.len_utf8() > room {
+        if taken == room {
             break;
         }
         match c {
@@ -58,17 +70,31 @@ fn flatten(text: &str, room: usize) -> String {
             '\n' | '\r' | '\t' => {
                 if !last_was_break {
                     out.push(' ');
+                    taken += 1;
                 }
                 last_was_break = true;
             }
             c if c.is_control() => {}
             c => {
                 out.push(c);
+                taken += 1;
                 last_was_break = false;
             }
         }
     }
     out
+}
+
+/// A paste typed into `field` at its cursor, flattened to the one line every
+/// field is, and cut to `cap`. True when anything went in.
+fn paste_into(field: &mut LineEdit, text: &str, cap: usize) -> bool {
+    field.insert_str(&flatten(text, field.room(cap)), cap)
+}
+
+/// What the cost floor can hold: it is parsed as a number, so nothing else
+/// could have been meant.
+fn cost_char(c: char) -> bool {
+    c.is_ascii_digit() || c == '.'
 }
 
 impl App {
@@ -278,18 +304,17 @@ impl App {
                     pane.view.send_paste(text);
                 }
                 None if self.add_account.outcome.is_none() && !self.add_account.named => {
-                    let room = TAB_NAME_MAX.saturating_sub(self.add_account.name.chars().count());
-                    self.add_account.name.push_str(&flatten(text, room));
+                    paste_into(&mut self.add_account.name, text, TAB_NAME_MAX);
                 }
                 None => {}
             },
             Mode::Search => {
-                self.search.push_str(&flatten(text, usize::MAX));
-                self.search_edited();
+                if paste_into(&mut self.search, text, usize::MAX) {
+                    self.search_edited();
+                }
             }
             Mode::SendKeys => {
-                let room = 500usize.saturating_sub(self.send_input.len());
-                self.send_input.push_str(&flatten(text, room));
+                paste_into(&mut self.send_input, text, SEND_MAX);
             }
             Mode::RenameTab => {
                 // The clipboard a right-click brought along with it, not a
@@ -299,38 +324,31 @@ impl App {
                 {
                     return;
                 }
-                let room = TAB_NAME_MAX.saturating_sub(self.rename_input.chars().count());
-                self.rename_input.push_str(&flatten(text, room));
+                paste_into(&mut self.rename_input, text, TAB_NAME_MAX);
             }
             // Pasting a path in is the point of this field: a directory deep
             // enough to be worth typing is one you copied from somewhere.
             Mode::LaunchCwd => {
-                let room = MAX_PATH_INPUT.saturating_sub(self.launch_cwd_input.chars().count());
-                self.launch_cwd_input.push_str(&flatten(text, room));
-                self.launch_cwd_bad = false;
-                self.launch_cwd_suggest();
+                if paste_into(&mut self.launch_cwd_input, text, MAX_PATH_INPUT) {
+                    self.launch_cwd_bad = false;
+                    self.launch_cwd_suggest();
+                }
             }
             Mode::SwitchTab => {
-                let room = SWITCH_FILTER_MAX.saturating_sub(self.switch_filter.chars().count());
-                self.switch_filter.push_str(&flatten(text, room));
-                self.switch_cursor = 0;
+                if paste_into(&mut self.switch_filter, text, SWITCH_FILTER_MAX) {
+                    self.switch_cursor = 0;
+                }
             }
             // The cost floor is a number, so a paste is filtered the way typing
             // one is rather than flattened: anything that is not a digit or a
             // point could not have been typed here either.
             Mode::CostFilter => {
-                let room = 12usize.saturating_sub(self.cost_input.len());
-                let digits: String = text
-                    .chars()
-                    .filter(|c| c.is_ascii_digit() || *c == '.')
-                    .take(room)
-                    .collect();
-                self.cost_input.push_str(&digits);
+                let digits: String = text.chars().filter(|c| cost_char(*c)).collect();
+                self.cost_input.insert_str(&digits, COST_MAX);
             }
             Mode::Settings => {
                 if let Some(input) = &mut self.settings_input {
-                    let room = 200usize.saturating_sub(input.len());
-                    input.push_str(&flatten(text, room));
+                    paste_into(input, text, SETTING_MAX);
                 }
             }
             _ => {}
@@ -387,7 +405,7 @@ impl App {
         };
         self.send_prompt();
         if self.mode == Mode::SendKeys {
-            self.send_input = format!("{path} ");
+            self.send_input = format!("{path} ").into();
             return;
         }
         // `send_prompt` will have said why it could not open, which is no
@@ -571,19 +589,14 @@ impl App {
             // moved while its directory is being typed.
             KeyCode::Down => self.step_launch_cwd(true),
             KeyCode::Up => self.step_launch_cwd(false),
-            KeyCode::Backspace => {
-                self.launch_cwd_input.pop();
-                self.launch_cwd_bad = false;
-                self.launch_cwd_suggest();
-            }
             // Bounded like every other one-line input here: a path longer than
             // this is not one anybody typed on purpose.
-            KeyCode::Char(c) if self.launch_cwd_input.chars().count() < MAX_PATH_INPUT => {
-                self.launch_cwd_input.push(c);
-                self.launch_cwd_bad = false;
-                self.launch_cwd_suggest();
+            _ => {
+                if self.launch_cwd_input.key(key, MAX_PATH_INPUT).changed() {
+                    self.launch_cwd_bad = false;
+                    self.launch_cwd_suggest();
+                }
             }
-            _ => {}
         }
         self.needs_redraw = true;
     }
@@ -754,20 +767,16 @@ impl App {
                 self.mode = Mode::List;
             }
             KeyCode::Esc => self.mode = Mode::List,
-            KeyCode::Backspace => {
-                self.search.pop();
-                self.search_edited();
-            }
             // Tab rather than a letter: every printable character belongs to the
             // query being typed.
             KeyCode::Tab => self.toggle_content_search(),
             KeyCode::Up => self.history_step(1),
             KeyCode::Down => self.history_step(-1),
-            KeyCode::Char(c) => {
-                self.search.push(c);
-                self.search_edited();
+            _ => {
+                if self.search.key(key, usize::MAX).changed() {
+                    self.search_edited();
+                }
             }
-            _ => {}
         }
     }
 
@@ -812,11 +821,9 @@ impl App {
             match key.code {
                 KeyCode::Esc => self.settings_input = None,
                 KeyCode::Enter => self.settings_commit_input(),
-                KeyCode::Backspace => {
-                    input.pop();
+                _ => {
+                    input.key(key, SETTING_MAX);
                 }
-                KeyCode::Char(c) if input.len() < 200 => input.push(c),
-                _ => {}
             }
             return;
         }
@@ -983,13 +990,14 @@ impl App {
                 }
                 self.mode = Mode::List;
             }
-            KeyCode::Backspace => {
-                self.cost_input.pop();
+            // A number, so a letter is not typed — but a letter with Ctrl
+            // held is still the editor's, which is why the modifiers are
+            // looked at before the character is.
+            KeyCode::Char(c)
+                if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() && !cost_char(c) => {}
+            _ => {
+                self.cost_input.key(key, COST_MAX);
             }
-            KeyCode::Char(c) if (c.is_ascii_digit() || c == '.') && self.cost_input.len() < 12 => {
-                self.cost_input.push(c);
-            }
-            _ => {}
         }
     }
 
@@ -997,7 +1005,7 @@ impl App {
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Enter => {
-                let text = self.send_input.clone();
+                let text = self.send_input.to_string();
                 if !text.is_empty()
                     && let Some(pid) = self.selected_session().and_then(|s| s.root_pid())
                 {
@@ -1006,34 +1014,34 @@ impl App {
                 }
                 self.mode = Mode::List;
             }
-            KeyCode::Backspace => {
-                self.send_input.pop();
-            }
+            // At the cursor, like a paste, and whole or not at all: half a
+            // path is a file the agent cannot open.
             KeyCode::F(9) => {
-                if let Some(path) = self.image_paste() {
-                    let room = 500usize.saturating_sub(self.send_input.len());
-                    if path.len() < room {
-                        self.send_input.push_str(&path);
-                        self.send_input.push(' ');
-                    }
+                if let Some(path) = self.image_paste()
+                    && path.chars().count() < self.send_input.room(SEND_MAX)
+                {
+                    self.send_input.insert_str(&format!("{path} "), SEND_MAX);
                 }
             }
-            KeyCode::Char(c) if self.send_input.len() < 500 => self.send_input.push(c),
-            _ => {}
+            _ => {
+                self.send_input.key(key, SEND_MAX);
+            }
         }
     }
 
     /// The tab-rename field, which is also the tab-colour field.
     ///
-    /// The name half has no cursor — text only ever appends — so the arrows
-    /// were free for the colour row, which is what they drive. Enter applies
+    /// The arrows were the colour row's before the name had a cursor, and they
+    /// still are: the name moves with Home and End, Ctrl+A and Ctrl+E, and by
+    /// word with Ctrl+← and Ctrl+→, while a plain arrow paints. Enter applies
     /// whichever half changed; an empty name is still not a name, so pressing
     /// it with nothing typed only ever moved the colour, never blanks the tab.
     fn on_key_rename(&mut self, key: KeyEvent) {
+        let plain = key.modifiers.is_empty();
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
-            KeyCode::Left => self.step_rename_color(-1),
-            KeyCode::Right => self.step_rename_color(1),
+            KeyCode::Left if plain => self.step_rename_color(-1),
+            KeyCode::Right if plain => self.step_rename_color(1),
             KeyCode::Enter => {
                 let name = self.rename_input.trim().to_string();
                 let color = self.rename_color;
@@ -1076,13 +1084,9 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
-                self.rename_input.pop();
+            _ => {
+                self.rename_input.key(key, TAB_NAME_MAX);
             }
-            KeyCode::Char(c) if self.rename_input.chars().count() < TAB_NAME_MAX => {
-                self.rename_input.push(c)
-            }
-            _ => {}
         }
     }
 
@@ -1158,11 +1162,9 @@ impl App {
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Enter => self.accept_account_name(),
-            KeyCode::Backspace => {
-                flow.name.pop();
+            _ => {
+                flow.name.key(key, TAB_NAME_MAX);
             }
-            KeyCode::Char(c) if flow.name.chars().count() < TAB_NAME_MAX => flow.name.push(c),
-            _ => {}
         }
     }
 
@@ -1198,17 +1200,14 @@ impl App {
                     self.go_to_tab(tab);
                 }
             }
-            KeyCode::Backspace => {
-                self.switch_filter.pop();
-                // Back to the top: the list just widened, and a cursor kept
-                // at its old depth is pointing at a name nobody picked.
-                self.switch_cursor = 0;
+            // Back to the top on any change: the list just narrowed or
+            // widened, and a cursor kept at its old depth is pointing at a
+            // name nobody picked.
+            _ => {
+                if self.switch_filter.key(key, SWITCH_FILTER_MAX).changed() {
+                    self.switch_cursor = 0;
+                }
             }
-            KeyCode::Char(c) if self.switch_filter.chars().count() < SWITCH_FILTER_MAX => {
-                self.switch_filter.push(c);
-                self.switch_cursor = 0;
-            }
-            _ => {}
         }
     }
 
@@ -1441,9 +1440,9 @@ impl App {
             }
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
-                    format!("{:.2}", self.cost_floor)
+                    format!("{:.2}", self.cost_floor).into()
                 } else {
-                    String::new()
+                    Default::default()
                 };
                 self.mode = Mode::CostFilter;
             }
@@ -1987,6 +1986,46 @@ mod tests {
         assert_eq!(app.cost_input, "12.50");
     }
 
+    /// Every box edits at its cursor, typed or pasted, and the keys a box had
+    /// already given a meaning to keep it.
+    #[test]
+    fn the_boxes_edit_at_the_cursor_and_keep_their_own_keys() {
+        let mut app = test_app();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+
+        app.mode = Mode::Search;
+        app.search = "login".into();
+        app.on_key(key(KeyCode::Home));
+        app.on_key(key(KeyCode::Char('!')));
+        app.on_paste("fix\nthe ");
+        assert_eq!(app.search, "!fix the login");
+        app.on_key(ctrl('w'));
+        assert_eq!(app.search, "!fix login");
+        // Tab is still the transcript toggle, not a character.
+        let content = app.search_content;
+        app.on_key(key(KeyCode::Tab));
+        assert_ne!(app.search_content, content);
+        assert_eq!(app.search, "!fix login");
+
+        // The rename box's plain arrows still paint; Home moves the name.
+        app.mode = Mode::RenameTab;
+        app.rename_input = "ab".into();
+        app.rename_color = None;
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.rename_color, Some(theme::Hue::ALL[0]));
+        app.on_key(key(KeyCode::Home));
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(app.rename_input, "xab");
+
+        // The cost floor takes no letters, but Ctrl+U still clears it.
+        app.mode = Mode::CostFilter;
+        app.cost_input = "12".into();
+        app.on_key(key(KeyCode::Char('z')));
+        assert_eq!(app.cost_input, "12");
+        app.on_key(ctrl('u'));
+        assert_eq!(app.cost_input, "");
+    }
+
     /// The caps the typed path enforces are the paste's too, and a paste with
     /// nowhere to land does nothing rather than something surprising.
     #[test]
@@ -1994,7 +2033,7 @@ mod tests {
         let mut app = test_app();
 
         app.mode = Mode::SendKeys;
-        app.send_input = "x".repeat(495);
+        app.send_input = "x".repeat(495).into();
         app.on_paste(&"y".repeat(50));
         assert_eq!(app.send_input.len(), 500);
 

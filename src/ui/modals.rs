@@ -2,6 +2,7 @@
 
 use super::columns::COLUMNS;
 use super::hyperlink;
+use super::line_edit::LineEdit;
 use super::qr;
 use super::render::Layout;
 use super::share;
@@ -29,6 +30,28 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width: w,
         height: h,
     }
+}
+
+/// The typing style every one-line box shares, and the cursor's.
+fn input_styles() -> (Style, Style) {
+    (
+        Style::default()
+            .fg(theme::colors().value)
+            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme::colors().accent),
+    )
+}
+
+/// A box's ` > ` row, with the cursor drawn where it is in the text.
+///
+/// Not windowed: the modals these sit in wrap, so a line longer than the box
+/// goes onto a second row rather than off its edge, and all of it stays
+/// readable — which the send box, at up to five hundred characters, needs.
+fn input_line(field: &LineEdit) -> Line<'static> {
+    let (text, cursor) = input_styles();
+    let mut spans = vec![Span::raw(" > ")];
+    spans.extend(field.spans(usize::MAX, text, cursor, "█"));
+    Line::from(spans)
 }
 
 /// Draws the overlay and returns `(outer, inner)`: the frame it covers, which is
@@ -366,27 +389,37 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
                         set: bool,
                         what: &str| {
         let here = row == app.settings_cursor;
-        let value = match here {
-            true if app.settings_capture => "press a key… (Esc cancels)".to_string(),
-            true if app.settings_input.is_some() => {
-                format!("{}█", app.settings_input.as_deref().unwrap_or_default())
-            }
-            _ => value,
-        };
         let accent = Style::default().fg(theme::colors().accent);
-        let mut line = Line::from(vec![
-            Span::raw(format!("  {name:<18}")),
-            Span::styled(
-                format!("{value:<14}"),
-                if set {
-                    accent.add_modifier(Modifier::BOLD)
-                } else {
-                    accent
-                },
-            ),
-            Span::styled(if set { " * " } else { "   " }, theme::dim()),
-            Span::styled(what.to_string(), theme::dim()),
-        ]);
+        let style = if set {
+            accent.add_modifier(Modifier::BOLD)
+        } else {
+            accent
+        };
+        let value = match (here, &app.settings_input) {
+            (true, _) if app.settings_capture => {
+                vec![Span::styled(
+                    format!("{:<14}", "press a key… (Esc cancels)"),
+                    style,
+                )]
+            }
+            (true, Some(input)) => {
+                let mut spans = input.spans(usize::MAX, style, accent, "█");
+                // Padded to the column the other rows fill, so the `*` and
+                // the description do not shift as the value is typed.
+                let used: usize = spans.iter().map(Span::width).sum();
+                spans.push(Span::raw(" ".repeat(14usize.saturating_sub(used))));
+                spans
+            }
+            _ => vec![Span::styled(format!("{value:<14}"), style)],
+        };
+        let mut line = Line::from_iter(
+            std::iter::once(Span::raw(format!("  {name:<18}")))
+                .chain(value)
+                .chain([
+                    Span::styled(if set { " * " } else { "   " }, theme::dim()),
+                    Span::styled(what.to_string(), theme::dim()),
+                ]),
+        );
         if here {
             cursor_line = lines.len();
             line = line.style(theme::selected());
@@ -436,16 +469,7 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
     let text_w = WIDTH as usize - 4;
 
     let mut lines = vec![
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.search.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        input_line(&app.search),
         Line::from(Span::styled(
             format!(
                 " {} of {} session{}",
@@ -1228,27 +1252,33 @@ pub(super) fn draw_launch(
         // The field, in place of the line it replaces. Editing here rather than
         // in a modal of its own keeps the list of agents on screen: which agent
         // is picked is half of what the directory is being chosen for.
-        Line::from(vec![
-            Span::styled(" in ", Style::default().fg(theme::colors().label)),
-            Span::styled(
-                // The tail, when a long path outgrows the box. The end is the
-                // part being typed, and a field that showed the start would
-                // hide the cursor as soon as it mattered.
-                tail(&app.launch_cwd_input, WIDTH as usize - 8),
+        Line::from_iter(
+            std::iter::once(Span::styled(
+                " in ",
+                Style::default().fg(theme::colors().label),
+            ))
+            // Windowed around the cursor when a long path outgrows the box,
+            // which at the end is its tail: the end is the part being typed,
+            // and a field that showed the start would hide the cursor as soon
+            // as it mattered.
+            .chain(app.launch_cwd_input.spans(
+                // The cursor's cell is in this, where it used to follow it.
+                WIDTH as usize - 7,
                 match app.launch_cwd_bad {
                     true => Style::default().fg(theme::colors().cost_high),
                     false => theme::value(),
                 },
-            ),
-            Span::styled("▏", theme::value()),
-            Span::styled(
+                theme::value(),
+                "▏",
+            ))
+            .chain(std::iter::once(Span::styled(
                 match app.launch_cwd_bad {
                     true => "  no such directory",
                     false => "",
                 },
                 Style::default().fg(theme::colors().cost_high),
-            ),
-        ])
+            ))),
+        )
     } else {
         Line::from(Span::styled(
             match (picked, &app.launch_cwd) {
@@ -1761,25 +1791,20 @@ pub(super) fn draw_batch_blocked(
 }
 
 pub(super) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
-    let mut input = app.cost_input.clone();
-    if input.is_empty() {
-        input = "0.00".to_string();
+    let (text, cursor) = input_styles();
+    // An empty floor shows the zero it means, with the cursor after it as it
+    // always was — it is a hint, not text the cursor can move through.
+    let mut input = vec![Span::raw(" $ ")];
+    match app.cost_input.is_empty() {
+        true => input.extend([Span::styled("0.00", text), Span::styled("█", cursor)]),
+        false => input.extend(app.cost_input.spans(usize::MAX, text, cursor, "█")),
     }
     let lines = vec![
         Line::from(Span::styled(
             " Only show sessions whose total cost is at least:",
             theme::dim(),
         )),
-        Line::from(vec![
-            Span::raw(" $ "),
-            Span::styled(
-                input,
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        Line::from(input),
         Line::default(),
         Line::from(Span::styled(
             " 0 clears the filter   Enter apply   Esc cancel",
@@ -1807,16 +1832,7 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
             theme::dim(),
         )),
         Line::default(),
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.send_input.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        input_line(&app.send_input),
         Line::default(),
         Line::from(Span::styled(
             " Enter send   F9 paste an image   Esc cancel",
@@ -1877,16 +1893,7 @@ pub(super) fn draw_rename_tab(
             theme::dim(),
         )),
         Line::default(),
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.rename_input.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        input_line(&app.rename_input),
         Line::default(),
         Line::from(swatches),
         Line::default(),
@@ -1925,19 +1932,7 @@ pub(super) fn draw_switch_tab(
         .min(matches.len().saturating_sub(ROWS));
     let shown = &matches[start..matches.len().min(start + ROWS)];
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.switch_filter.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
-        Line::default(),
-    ];
+    let mut lines = vec![input_line(&app.switch_filter), Line::default()];
     if start > 0 {
         lines.push(Line::from(Span::styled(
             format!("    … {start} above"),
@@ -2173,16 +2168,7 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
         let hint = " [Enter] next   [Esc] cancel";
         let lines = vec![
             Line::from(Span::styled(" What is it called?", theme::dim())),
-            Line::from(vec![
-                Span::raw(" > "),
-                Span::styled(
-                    flow.name.clone(),
-                    Style::default()
-                        .fg(theme::colors().value)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("█", Style::default().fg(theme::colors().accent)),
-            ]),
+            input_line(&flow.name),
             Line::default(),
             Line::from(Span::styled(hint, theme::dim())),
         ];
@@ -2810,7 +2796,7 @@ mod tests {
         assert!(text.contains("›"), "no cursor on the pick: {text}");
 
         // A filter that matches nothing says so rather than listing air.
-        app.switch_filter = "zzz".to_string();
+        app.switch_filter = "zzz".into();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
         let mut layout = crate::ui::render::Layout::default();
         terminal

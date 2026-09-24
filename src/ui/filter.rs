@@ -297,15 +297,15 @@ impl App {
             Some((at, typed)) => (at as isize + delta, typed),
             // Nothing walked yet: ↓ has nowhere older to come back from.
             None if delta < 0 => return,
-            None => (0, self.search.clone()),
+            None => (0, self.search.to_string()),
         };
         // Stepping back past the newest entry restores the partial query, which
         // is the one thing the history itself cannot hold.
         if at < 0 {
-            self.search = typed;
+            self.search = typed.into();
         } else {
             let at = (at as usize).min(self.search_history.len() - 1);
-            self.search = self.search_history[at].clone();
+            self.search = self.search_history[at].as_str().into();
             self.history_cursor = Some((at, typed));
         }
         self.scan_typed_at = Some(Instant::now());

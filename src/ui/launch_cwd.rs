@@ -25,7 +25,8 @@ impl App {
             .launch_cwd
             .as_ref()
             .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into();
         self.launch_cwd_bad = false;
         self.launch_cwd_known = self.known_dirs();
         self.launch_cwd_suggest();
@@ -121,7 +122,7 @@ impl App {
         if filled.chars().count() > input::MAX_PATH_INPUT {
             return;
         }
-        self.launch_cwd_input = filled;
+        self.launch_cwd_input = filled.into();
         self.launch_cwd_bad = false;
         self.launch_cwd_suggest();
         self.needs_redraw = true;
@@ -138,7 +139,7 @@ impl App {
             .launch_cwd_pick
             .and_then(|i| self.launch_cwd_hits.get(i))
         {
-            self.launch_cwd_input = crate::util::tildify(&dir.to_string_lossy());
+            self.launch_cwd_input = crate::util::tildify(&dir.to_string_lossy()).into();
         }
         self.accept_launch_cwd();
     }
@@ -195,7 +196,7 @@ mod tests {
             .map(|i| tabs::Choice::Start(vec![format!("agent-{i}")]))
             .collect();
         app.launch_cwd_known = vec![project.clone()];
-        app.launch_cwd_input = String::new();
+        app.launch_cwd_input = Default::default();
         app.launch_cwd_suggest();
         app.launch_cwd_pick = Some(0);
         app.mode = Mode::LaunchCwd;
@@ -256,7 +257,12 @@ mod tests {
         // A directory that is not one is refused where it was typed, and the
         // field stays open. Failing at launch instead would report it from
         // inside the shim, after the launcher had gone.
-        app.launch_cwd_input = dir.path().join("nope").to_string_lossy().into_owned();
+        app.launch_cwd_input = dir
+            .path()
+            .join("nope")
+            .to_string_lossy()
+            .into_owned()
+            .into();
         app.accept_launch_cwd();
         assert!(app.launch_cwd_bad);
         assert_eq!(app.mode, Mode::LaunchCwd, "the field stays open");
@@ -265,7 +271,7 @@ mod tests {
         // A real one is taken.
         let sub = dir.path().join("work");
         std::fs::create_dir(&sub).expect("mkdir");
-        app.launch_cwd_input = sub.to_string_lossy().into_owned();
+        app.launch_cwd_input = sub.to_string_lossy().into_owned().into();
         app.accept_launch_cwd();
         assert!(!app.launch_cwd_bad);
         assert_eq!(app.mode, Mode::Launch);
@@ -335,7 +341,12 @@ mod tests {
         // Typing still decides on its own: a path with no match offers nothing
         // and is refused where it was typed, exactly as before.
         app.edit_launch_cwd();
-        app.launch_cwd_input = root.path().join("nowhere").to_string_lossy().into_owned();
+        app.launch_cwd_input = root
+            .path()
+            .join("nowhere")
+            .to_string_lossy()
+            .into_owned()
+            .into();
         app.launch_cwd_suggest();
         assert!(app.launch_cwd_hits.is_empty());
         app.on_key(key(KeyCode::Enter));
