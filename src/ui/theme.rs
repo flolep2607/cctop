@@ -712,35 +712,59 @@ impl Hue {
     ///
     /// [`Hue::color`] is ink — right for a label or a border, and loud as a
     /// block of background: a bar of saturated tabs outshouts everything
-    /// under it. So a tab rests in a dark pastel, the one being watched is a
-    /// step lighter, and only a tab that needs you reaches the full colour —
-    /// the same hue at every step, so it is still *that* tab while it shouts.
+    /// under it. So a tab rests in a pastel, the one being watched is a step
+    /// stronger, and only a tab that needs you reaches the full colour — the
+    /// same hue at every step, so it is still *that* tab while it shouts.
     ///
-    /// Dark because the terminal nearly always is: the pale row of the cube
+    /// Which pastel depends on the ground, because a quiet tab is one that
+    /// sits close to it. On dark it is a dark pastel: the pale row of the cube
     /// (`ffd7d7` and its neighbours) is pastel on a chart and a lit block on a
     /// black screen, and even its dusty middle (`d78787`) stood out more than a
-    /// tab's colour should at rest. The two quiet strengths carry light text
-    /// ([`Fill::ink`]); the vivid one carries dark.
+    /// tab's colour should at rest. On light that pale row is the quiet one and
+    /// the dark set is the slab, so light gets the pale row, and "stronger"
+    /// there is a step deeper rather than lighter. The text that goes on each
+    /// is [`Fill::ink`]'s business; [`Hue::wash`] hands over the two together.
     pub fn fill(self, strength: Fill) -> Color {
-        let (rest, selected, alert) = match self {
-            Hue::Red => (95, 131, 203),
-            Hue::Orange => (137, 173, 208),
-            Hue::Yellow => (101, 143, 220),
-            Hue::Green => (65, 71, 77),
-            Hue::Cyan => (66, 73, 44),
-            Hue::Blue => (67, 68, 39),
-            Hue::Violet => (97, 134, 135),
-            Hue::Pink => (132, 168, 205),
+        self.fill_in(strength, variant())
+    }
+
+    /// [`Hue::fill`] for a palette named outright, so the light set can be
+    /// checked without the process-wide choice being light.
+    fn fill_in(self, strength: Fill, variant: Variant) -> Color {
+        let (rest, selected, alert) = match variant {
+            Variant::Mono => return Color::Reset,
+            Variant::Dark => match self {
+                Hue::Red => (95, 131, 203),
+                Hue::Orange => (137, 173, 208),
+                Hue::Yellow => (101, 143, 220),
+                Hue::Green => (65, 71, 77),
+                Hue::Cyan => (66, 73, 44),
+                Hue::Blue => (67, 68, 39),
+                Hue::Violet => (97, 134, 135),
+                Hue::Pink => (132, 168, 205),
+            },
+            Variant::Light => match self {
+                Hue::Red => (224, 217, 203),
+                Hue::Orange => (223, 216, 208),
+                Hue::Yellow => (230, 229, 220),
+                Hue::Green => (194, 157, 120),
+                Hue::Cyan => (195, 159, 87),
+                Hue::Blue => (153, 117, 75),
+                Hue::Violet => (183, 177, 135),
+                Hue::Pink => (225, 218, 205),
+            },
         };
-        let index = match strength {
+        Color::Indexed(match strength {
             Fill::Rest => rest,
             Fill::Selected => selected,
             Fill::Alert => alert,
-        };
-        match variant() {
-            Variant::Mono => Color::Reset,
-            _ => Color::Indexed(index),
-        }
+        })
+    }
+
+    /// A tab's fill with the text that reads on it. The pair rather than two
+    /// lookups, so no caller can put one strength's ink on another's ground.
+    pub fn wash(self, strength: Fill) -> Style {
+        Style::default().bg(self.fill(strength)).fg(strength.ink())
     }
 }
 
@@ -756,11 +780,27 @@ pub enum Fill {
 }
 
 impl Fill {
-    /// The text colour that reads on a fill of this strength.
+    /// The text colour that reads on a fill of this strength, on the active
+    /// palette.
+    ///
+    /// Keyed on the strength and not the hue: at one strength every hue's fill
+    /// sits at about the same lightness, which is what lets one ink serve all
+    /// eight — and a tab that changed text colour with its hue would look like
+    /// it was saying something by it.
     pub fn ink(self) -> Color {
-        match self {
-            Fill::Rest | Fill::Selected => Color::Indexed(254),
-            Fill::Alert => Color::Black,
+        self.ink_in(variant())
+    }
+
+    /// [`Fill::ink`] for a palette named outright.
+    fn ink_in(self, variant: Variant) -> Color {
+        match (variant, self) {
+            // The dark set's quiet strengths are dark enough to want light
+            // text; its alert strength is the full hue, which wants dark.
+            (Variant::Dark, Fill::Rest | Fill::Selected) => Color::Indexed(254),
+            (Variant::Dark, Fill::Alert) => Color::Black,
+            // Every step of the light set is pale, even the loud one.
+            (Variant::Light, _) => Color::Black,
+            (Variant::Mono, _) => Color::Reset,
         }
     }
 }
@@ -978,6 +1018,51 @@ mod tests {
             None,
             "a word this cctop does not know was guessed at"
         );
+    }
+
+    /// How light an xterm-256 colour is, for the six-level cube the fills are
+    /// drawn from — enough to say which of two fills sits nearer the ground.
+    fn lightness(color: Color) -> f64 {
+        const LEVEL: [f64; 6] = [0.0, 95.0, 135.0, 175.0, 215.0, 255.0];
+        let Color::Indexed(i @ 16..=231) = color else {
+            panic!("{color:?} is not a cube colour");
+        };
+        let i = (i - 16) as usize;
+        let (r, g, b) = (LEVEL[i / 36], LEVEL[(i / 6) % 6], LEVEL[i % 6]);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    /// "Stronger" means further from the ground, which is lighter on dark and
+    /// deeper on light. The watched tab has to be that on both, or on one of
+    /// them it is the tab you are *not* looking at that stands out. And each
+    /// palette's text has to be the one that reads on it: light on the dark
+    /// set's quiet steps, dark on every step of the pale set.
+    #[test]
+    fn the_watched_tab_stands_further_from_the_ground_on_either_palette() {
+        for hue in Hue::ALL {
+            let at = |fill, variant| hue.fill_in(fill, variant);
+            assert!(
+                lightness(at(Fill::Selected, Variant::Dark))
+                    > lightness(at(Fill::Rest, Variant::Dark)),
+                "{hue:?}: the watched tab is no lighter than the rest on dark"
+            );
+            assert!(
+                lightness(at(Fill::Selected, Variant::Light))
+                    < lightness(at(Fill::Rest, Variant::Light)),
+                "{hue:?}: the watched tab is no deeper than the rest on light"
+            );
+            for variant in [Variant::Dark, Variant::Light] {
+                assert_ne!(at(Fill::Alert, variant), at(Fill::Selected, variant));
+            }
+            assert_eq!(at(Fill::Rest, Variant::Mono), Color::Reset);
+        }
+        for fill in [Fill::Rest, Fill::Selected, Fill::Alert] {
+            assert_eq!(fill.ink_in(Variant::Light), Color::Black);
+            assert_eq!(fill.ink_in(Variant::Mono), Color::Reset);
+        }
+        assert_eq!(Fill::Rest.ink_in(Variant::Dark), Color::Indexed(254));
+        assert_eq!(Fill::Selected.ink_in(Variant::Dark), Color::Indexed(254));
+        assert_eq!(Fill::Alert.ink_in(Variant::Dark), Color::Black);
     }
 
     /// On the default palette every hue is a real, distinct colour: a `Reset`

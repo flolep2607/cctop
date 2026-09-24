@@ -459,7 +459,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                     true => theme::Fill::Selected,
                     false => theme::Fill::Rest,
                 };
-                let fill = Style::default().bg(hue.fill(strength)).fg(strength.ink());
+                let fill = hue.wash(strength);
                 let fill = match watched {
                     true => fill.add_modifier(Modifier::UNDERLINED),
                     false => fill,
@@ -470,8 +470,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                     // unmistakably *that* tab while it is.
                     Some(tabs::Attention::NeedsInput) => match on {
                         true => fill
-                            .bg(hue.fill(theme::Fill::Alert))
-                            .fg(theme::Fill::Alert.ink())
+                            .patch(hue.wash(theme::Fill::Alert))
                             .add_modifier(Modifier::BOLD),
                         false => fill.add_modifier(Modifier::BOLD),
                     },
@@ -2415,6 +2414,10 @@ mod tests {
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
         let cell = buf.cell((at, 0)).unwrap();
         assert_eq!(cell.bg, theme::Hue::Violet.fill(theme::Fill::Selected));
+        // Its own strength's text, not the resting one's: on the light set the
+        // two differ, and a mismatched pair is how a label vanishes into its
+        // tab.
+        assert_eq!(cell.fg, theme::Fill::Selected.ink());
         assert_ne!(
             cell.bg, violet,
             "the watched tab is no brighter than the rest"
