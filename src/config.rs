@@ -5,15 +5,74 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-pub static HOME: LazyLock<PathBuf> =
-    LazyLock::new(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")));
+/// This user's home: where cctop reads its own sessions and writes everything
+/// it writes.
+///
+/// For root it is root's home as `/etc/passwd` gives it, not `$HOME`. A plain
+/// `sudo` can keep the invoking user's `$HOME` (`env_keep`, `sudo -E`, older
+/// defaults), and trusting it would make that user's home "mine": their rows
+/// would go unnamed, and root's cache, UI prefs and any hook it installed
+/// would land in their home as files owned by root — which their next
+/// unprivileged cctop could then not rewrite. Their home is still read, as one
+/// of the [`OTHER_HOMES`], under their own name.
+pub static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+    if running_as_root()
+        && let Some(home) = std::fs::read_to_string("/etc/passwd")
+            .ok()
+            .and_then(|text| passwd_home_of(&text, 0))
+    {
+        return home;
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+});
+
+/// A directory named by the environment, unless root inherited it from
+/// somebody else.
+///
+/// The same `sudo` that keeps `$HOME` keeps `$CLAUDE_CONFIG_DIR`,
+/// `$XDG_CACHE_HOME` and the rest, all pointing into the invoking user's home.
+/// Reading through them would only show that user's rows under the wrong name
+/// — their home is swept anyway — but writing through them is writing into
+/// someone else's home, which root mode never does. So as root a directory
+/// inside another user's home is treated as unset, and the caller falls back to
+/// the conventional place under root's own [`HOME`].
+fn own_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    dir.filter(|d| !foreign_to_root(d))
+}
+
+/// [`own_dir`] for an environment variable.
+pub fn env_dir(var: &str) -> Option<PathBuf> {
+    own_dir(std::env::var_os(var).map(PathBuf::from))
+}
+
+/// The XDG base directories, with [`own_dir`]'s guard: `dirs` reads `$HOME`
+/// and `$XDG_*` straight from the environment, so under a `sudo` that kept them
+/// it answers for the invoking user.
+pub fn config_base() -> PathBuf {
+    own_dir(dirs::config_dir()).unwrap_or_else(|| HOME.join(".config"))
+}
+
+pub fn data_base() -> PathBuf {
+    own_dir(dirs::data_dir()).unwrap_or_else(|| HOME.join(".local").join("share"))
+}
+
+fn cache_base() -> PathBuf {
+    own_dir(dirs::cache_dir()).unwrap_or_else(|| HOME.join(".cache"))
+}
+
+/// The runtime directory, else the cache directory: where the sockets live
+/// that hooks and shims reach a running cctop through.
+///
+/// Guarded like the rest because a root cctop binds its socket here, and
+/// without a runtime directory a `sudo` that kept `$HOME` would have it bind
+/// one inside the invoking user's `~/.cache`.
+pub fn runtime_base() -> PathBuf {
+    own_dir(dirs::runtime_dir()).unwrap_or_else(cache_base)
+}
 
 /// `$CLAUDE_CONFIG_DIR`, falling back to `~/.claude`.
-pub static CLAUDE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| claude_config_dir_in(&HOME))
-});
+pub static CLAUDE_CONFIG_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| claude_config_dir_in(&HOME)));
 
 pub static CLAUDE_PROJECTS_ROOT: LazyLock<PathBuf> =
     LazyLock::new(|| CLAUDE_CONFIG_DIR.join("projects"));
@@ -503,52 +562,35 @@ fn account_names_in(text: &str) -> Vec<String> {
 ///
 /// Separate from `CACHE_DIR` on purpose: a cache is something cctop may delete
 /// to recover, and `--clear-cache` does. A token the user typed in is not.
-pub static CONFIG_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
-    dirs::config_dir()
-        .unwrap_or_else(|| HOME.join(".config"))
-        .join("cctop")
-        .join("config.toml")
-});
+pub static CONFIG_FILE: LazyLock<PathBuf> =
+    LazyLock::new(|| config_base().join("cctop").join("config.toml"));
 
 /// `$CODEX_HOME`, falling back to `~/.codex`.
-pub static CODEX_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| HOME.join(".codex"))
-});
+pub static CODEX_HOME: LazyLock<PathBuf> =
+    LazyLock::new(|| env_dir("CODEX_HOME").unwrap_or_else(|| HOME.join(".codex")));
 
 pub static CODEX_SESSIONS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| CODEX_HOME.join("sessions"));
 
 /// `$CURSOR_HOME`, falling back to `~/.cursor`.
-pub static CURSOR_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("CURSOR_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| HOME.join(".cursor"))
-});
+pub static CURSOR_HOME: LazyLock<PathBuf> =
+    LazyLock::new(|| env_dir("CURSOR_HOME").unwrap_or_else(|| HOME.join(".cursor")));
 
 /// Cursor's native agent transcripts, grouped by project slug.
 pub static CURSOR_PROJECTS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| CURSOR_HOME.join("projects"));
 
 /// `$PI_CODING_AGENT_DIR`, falling back to `~/.pi/agent`.
 pub static PI_AGENT_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| HOME.join(".pi").join("agent"))
+    env_dir("PI_CODING_AGENT_DIR").unwrap_or_else(|| HOME.join(".pi").join("agent"))
 });
 
 /// `$PI_CODING_AGENT_SESSION_DIR`, falling back to Pi's standard session root.
 pub static PI_SESSIONS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PI_AGENT_DIR.join("sessions"))
+    env_dir("PI_CODING_AGENT_SESSION_DIR").unwrap_or_else(|| PI_AGENT_DIR.join("sessions"))
 });
 
 /// `$GEMINI_DIR`, falling back to `~/.gemini`.
-pub static GEMINI_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("GEMINI_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| HOME.join(".gemini"))
-});
+pub static GEMINI_HOME: LazyLock<PathBuf> =
+    LazyLock::new(|| env_dir("GEMINI_DIR").unwrap_or_else(|| HOME.join(".gemini")));
 
 /// Gemini CLI files its chats under a scratch directory, one subtree per
 /// project: `tmp/<project>/chats/session-*.json{,l}`. The name reads like
@@ -560,39 +602,24 @@ pub static GEMINI_CHATS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| GEMINI_HOME.j
 /// `$WINDSURF_USER_DIR` overrides the whole `User` directory, which is what a
 /// portable install moves; without it, the XDG config directory.
 pub static WINDSURF_USER_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    if let Some(dir) = std::env::var_os("WINDSURF_USER_DIR") {
-        return PathBuf::from(dir);
+    if let Some(dir) = env_dir("WINDSURF_USER_DIR") {
+        return dir;
     }
-    dirs::config_dir()
-        .unwrap_or_else(|| HOME.join(".config"))
-        .join("Windsurf")
-        .join("User")
+    config_base().join("Windsurf").join("User")
 });
 
 pub static WINDSURF_WORKSPACE_STORAGE: LazyLock<PathBuf> =
     LazyLock::new(|| WINDSURF_USER_DIR.join("workspaceStorage"));
 
 /// OpenCode follows the platform data directory (`~/.local/share` on Linux).
-pub static OPENCODE_DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("OPENCODE_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::data_dir()
-                .unwrap_or_else(|| HOME.join(".local").join("share"))
-                .join("opencode")
-        })
-});
+pub static OPENCODE_DATA_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| env_dir("OPENCODE_DATA_DIR").unwrap_or_else(|| data_base().join("opencode")));
 
 /// Devin CLI stores sessions in the platform data directory.
 pub static DEVIN_CLI_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("CHISEL_SESSION_DB")
-        .and_then(|db_path| PathBuf::from(db_path).parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| {
-            dirs::data_dir()
-                .unwrap_or_else(|| HOME.join(".local").join("share"))
-                .join("devin")
-                .join("cli")
-        })
+    env_dir("CHISEL_SESSION_DB")
+        .and_then(|db_path| db_path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| data_base().join("devin").join("cli"))
 });
 
 /// Devin CLI's user-level configuration directory — `~/.config/devin` — which
@@ -600,11 +627,7 @@ pub static DEVIN_CLI_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 /// are *data*, while AGENTS.md, config.json and mcp_config.json are *config*.
 /// Confusing the two is how the Access panel once looked for a `config.toml`
 /// that has never existed next to the session database.
-pub static DEVIN_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    dirs::config_dir()
-        .unwrap_or_else(|| HOME.join(".config"))
-        .join("devin")
-});
+pub static DEVIN_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| config_base().join("devin"));
 
 /// Devin's SQLite database containing session metadata.
 pub static DEVIN_SESSIONS_DB: LazyLock<PathBuf> =
@@ -617,13 +640,7 @@ pub static DEVIN_TRANSCRIPTS_DIR: LazyLock<PathBuf> =
 /// Where OpenCode reads its own configuration and global plugins, which is the
 /// *config* directory rather than the data one its sessions live in.
 pub static OPENCODE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::var_os("OPENCODE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::config_dir()
-                .unwrap_or_else(|| HOME.join(".config"))
-                .join("opencode")
-        })
+    env_dir("OPENCODE_CONFIG_DIR").unwrap_or_else(|| config_base().join("opencode"))
 });
 
 /// Cowork (VM) sessions. macOS only.
@@ -646,11 +663,7 @@ pub static CLAUDE_MAC_CODE_ROOT: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     })
 });
 
-pub static CACHE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    dirs::cache_dir()
-        .unwrap_or_else(|| HOME.join(".cache"))
-        .join("cctop")
-});
+pub static CACHE_DIR: LazyLock<PathBuf> = LazyLock::new(|| cache_base().join("cctop"));
 
 pub static COST_CACHE_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join("cost-cache.json"));
 pub static PRICING_CACHE_FILE: LazyLock<PathBuf> =
@@ -727,8 +740,14 @@ pub const MAX_DIFF_LINE_CHARS: usize = 300;
 #[derive(Debug, Clone)]
 pub struct OtherHome {
     pub home: PathBuf,
-    /// Login name, used for the USER column and nothing else.
+    /// Login name, for the USER column, the `user:` filter and the tree's top
+    /// level.
     pub user: String,
+    /// Who owns the directory, which is how a process is tied back to it: a
+    /// process carries a uid, never a login name or a home. Read off the
+    /// directory rather than out of `passwd` because a home found by listing
+    /// `/home` has no `passwd` line to read it from.
+    pub uid: Option<u32>,
 }
 
 /// `$CCTOP_ALL_USERS`: `0`/`false`/`no` forces the single-home behaviour even
@@ -776,10 +795,43 @@ fn running_as_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// Every person's home on the machine besides this user's, whether or not the
+/// sweep is on.
+///
+/// Split from [`OTHER_HOMES`] because it answers two questions: which homes to
+/// read, when the sweep is on, and which directories root must never write
+/// into ([`foreign_to_root`]), which holds when it is off too.
+static PEOPLES_HOMES: LazyLock<Vec<OtherHome>> = LazyLock::new(|| {
+    let mut seen: HashSet<PathBuf> = HashSet::from([HOME.clone()]);
+    let mut out = Vec::new();
+    // `/etc/passwd` first, since it is the only source that pairs a home with
+    // the login name that owns it.
+    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+        for (home, user) in passwd_homes(&passwd) {
+            push_home(&mut out, &mut seen, home, user);
+        }
+    }
+
+    // ponytail: users served by LDAP, SSSD or another directory are not in
+    // `/etc/passwd`, and enumerating them properly means getpwent(3) and a
+    // libc call per entry — not something a static musl build can make answer
+    // for NSS anyway. Listing `/home` catches them in the shape that actually
+    // occurs: one directory per user, named after them.
+    let parent = Path::new("/home");
+    for name in list_dir(parent) {
+        push_home(&mut out, &mut seen, parent.join(&name), name);
+    }
+    out
+});
+
 /// Every home besides this user's that cctop reads sessions out of.
 ///
 /// Empty in the ordinary case, which is what keeps the single-user cost at
 /// zero: each provider's root list is then just its own root, unchanged.
+///
+/// Read-only by construction: nothing cctop writes — its cache, its prefs, a
+/// hook, a shell alias — is placed through this list. Those all hang off
+/// [`HOME`], which for root is root's own.
 pub static OTHER_HOMES: LazyLock<Vec<OtherHome>> = LazyLock::new(|| {
     let named = named_homes();
     if named.is_empty() && !all_users_wanted() {
@@ -791,29 +843,25 @@ pub static OTHER_HOMES: LazyLock<Vec<OtherHome>> = LazyLock::new(|| {
     for (home, user) in named {
         push_home(&mut out, &mut seen, home, user);
     }
-    if !all_users_wanted() {
-        return out;
-    }
-
-    // `/etc/passwd` first, since it is the only source that pairs a home with
-    // the login name that owns it.
-    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
-        for (home, user) in passwd_homes(&passwd) {
-            push_home(&mut out, &mut seen, home, user);
-        }
-    }
-
-    // ponytail: users served by LDAP, SSSD or another directory are not in
-    // `/etc/passwd`, and enumerating them properly means getpwent(3) and a
-    // libc call per entry. Listing the home parents catches them in the shape
-    // that actually occurs — one directory per user, named after them.
-    for parent in ["/home", "/Users"].map(PathBuf::from) {
-        for name in list_dir(&parent) {
-            push_home(&mut out, &mut seen, parent.join(&name), name);
+    if all_users_wanted() {
+        for other in PEOPLES_HOMES.iter() {
+            if seen.insert(other.home.clone()) {
+                out.push(other.clone());
+            }
         }
     }
     out
 });
+
+/// Whether `path` is inside another person's home while cctop runs as root.
+///
+/// Only ever true for root: an unprivileged user's environment names their own
+/// directories, and if it names someone else's the permissions already decide.
+fn foreign_to_root(path: &Path) -> bool {
+    running_as_root()
+        && !path.starts_with(&*HOME)
+        && PEOPLES_HOMES.iter().any(|o| path.starts_with(&o.home))
+}
 
 /// Lowest uid a login account gets, below which an entry is a service account.
 ///
@@ -823,36 +871,123 @@ pub static OTHER_HOMES: LazyLock<Vec<OtherHome>> = LazyLock::new(|| {
 /// that lowered `UID_MIN` still keeps its service accounts below the default.
 const UID_MIN: u32 = 1000;
 
-/// `(home, user)` for every `passwd` line belonging to a person.
+/// One `passwd` line's `(name, uid, home)`.
 ///
 /// Field 0 is the name, 2 the uid and 5 the home; a line with fewer fields is
-/// a comment or a truncated write and is skipped rather than half-read. Only
-/// root and the login accounts are kept — a system account's home exists, is
-/// readable as root, and holds nothing, so sweeping the couple of dozen of
-/// them is pure noise in the doctor report and pure stat calls at startup.
+/// a comment or a truncated write and is skipped rather than half-read.
+fn passwd_entries(text: &str) -> impl Iterator<Item = (&str, u32, &str)> {
+    text.lines().filter_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        let [user, _, uid, _, _, home, ..] = fields[..] else {
+            return None;
+        };
+        let uid: u32 = uid.parse().ok()?;
+        (!user.is_empty() && !home.is_empty()).then_some((user, uid, home))
+    })
+}
+
+/// `(home, user)` for every `passwd` line belonging to a person.
+///
+/// Only root and the login accounts are kept — a system account's home exists,
+/// is readable as root, and holds nothing, so sweeping the couple of dozen of
+/// them is pure noise in the doctor report and pure stat calls at startup. A
+/// home under `/home` counts as a person's whatever its uid, since a site that
+/// numbers its people from 500 still gives them homes there.
 fn passwd_homes(text: &str) -> Vec<(PathBuf, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split(':').collect();
-            let [user, _, uid, _, _, home, ..] = fields[..] else {
-                return None;
-            };
-            let uid: u32 = uid.parse().ok()?;
-            let person = uid == 0 || uid >= UID_MIN;
-            (person && !user.is_empty() && !home.is_empty())
-                .then(|| (PathBuf::from(home), user.to_string()))
-        })
+    passwd_entries(text)
+        .filter(|(_, uid, home)| *uid == 0 || *uid >= UID_MIN || home.starts_with("/home/"))
+        .map(|(user, _, home)| (PathBuf::from(home), user.to_string()))
         .collect()
+}
+
+fn passwd_home_of(text: &str, uid: u32) -> Option<PathBuf> {
+    passwd_entries(text)
+        .find(|(_, u, _)| *u == uid)
+        .map(|(_, _, home)| PathBuf::from(home))
+}
+
+fn passwd_name_of(text: &str, uid: u32) -> Option<String> {
+    passwd_entries(text)
+        .find(|(_, u, _)| *u == uid)
+        .map(|(user, _, _)| user.to_string())
 }
 
 /// Record `home` as `user`'s if it is a real directory nobody claimed yet.
 fn push_home(out: &mut Vec<OtherHome>, seen: &mut HashSet<PathBuf>, home: PathBuf, user: String) {
+    use std::os::unix::fs::MetadataExt;
     // `/` is what the system accounts carry; taking it would put every path on
     // the machine under one "user" and make the sweep recurse the filesystem.
-    if home.parent().is_none() || !seen.insert(home.clone()) || !home.is_dir() {
+    if home.parent().is_none() || seen.contains(&home) {
         return;
     }
-    out.push(OtherHome { home, user });
+    let Ok(meta) = std::fs::metadata(&home) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    seen.insert(home.clone());
+    out.push(OtherHome {
+        home,
+        user,
+        uid: Some(meta.uid()),
+    });
+}
+
+/// The login name of whoever is running cctop, for the rows [`owner_of`]
+/// leaves unnamed because they are this user's own.
+///
+/// Only asked for once other homes are in view — a table of one person's rows
+/// never names them. `passwd` first, since `$USER` is whatever the shell said;
+/// then `$USER`, for an account `passwd` does not list; then the bare uid,
+/// which is at least not somebody else's name.
+pub static MY_USER: LazyLock<String> = LazyLock::new(|| {
+    // SAFETY: getuid reads process state and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    std::fs::read_to_string("/etc/passwd")
+        .ok()
+        .and_then(|text| passwd_name_of(&text, uid))
+        .or_else(|| std::env::var("USER").ok().filter(|u| !u.is_empty()))
+        .unwrap_or_else(|| format!("uid {uid}"))
+});
+
+/// The name a row is shown and filtered under: its owner, or this user's own
+/// name for a row that has none.
+pub fn user_label(owner: Option<&str>) -> &str {
+    owner.unwrap_or(MY_USER.as_str())
+}
+
+/// Whose sessions a process owned by `uid` may be matched to, in the terms of
+/// [`Session::owner`](crate::session::Session::owner): `None` for this user's
+/// own, else the owning home's user.
+///
+/// With no other homes in view every process cctop keeps is its user's own —
+/// the process scan drops the rest — so the answer is always `None` and a
+/// single-user machine pays nothing for the scoping.
+pub fn owner_for_uid(uid: u32) -> Option<String> {
+    // SAFETY: getuid reads process state and cannot fail.
+    owner_among(uid, unsafe { libc::getuid() }, &OTHER_HOMES)
+}
+
+/// [`owner_for_uid`] with its inputs passed in, so it can be tested without
+/// being root.
+///
+/// A uid that owns no home in view still gets a name, just not one any session
+/// carries: its process then matches nothing and shows as a row of its own,
+/// which is the truth — cctop can see the agent and not its transcript. Falling
+/// back to `None` instead would hand it to *this* user's sessions in the same
+/// directory.
+pub fn owner_among(uid: u32, me: u32, homes: &[OtherHome]) -> Option<String> {
+    if uid == me {
+        return None;
+    }
+    Some(
+        homes
+            .iter()
+            .find(|o| o.uid == Some(uid))
+            .map(|o| o.user.clone())
+            .unwrap_or_else(|| format!("uid {uid}")),
+    )
 }
 
 /// `primary` plus the same location under every other scanned home.
@@ -936,9 +1071,11 @@ pub fn gemini_chats_roots() -> Vec<PathBuf> {
     roots_across_homes(&GEMINI_CHATS_ROOT, |h| h.join(".gemini").join("tmp"))
 }
 
-#[allow(dead_code)]
-pub fn devin_sessions_roots() -> Vec<PathBuf> {
-    vec![DEVIN_TRANSCRIPTS_DIR.to_path_buf()]
+/// Devin's CLI directories — `sessions.db` beside `transcripts/` — across
+/// homes. A directory rather than a transcript root, because a Devin session is
+/// half database row and half transcript and both halves live in it.
+pub fn devin_cli_dirs() -> Vec<PathBuf> {
+    roots_across_homes(&DEVIN_CLI_DIR, |h| data_dir_in(h).join("devin").join("cli"))
 }
 
 /// The data directory *for another home*, which `dirs::data_dir` can only
@@ -1419,6 +1556,57 @@ mod tests {
                 (PathBuf::from("/home/ana"), "ana".to_string()),
             ]
         );
+    }
+
+    /// A person numbered below `UID_MIN` still has a home under `/home`, and
+    /// is swept; a service account with its home elsewhere is not.
+    #[test]
+    fn passwd_parsing_keeps_a_low_uid_with_a_home_under_home() {
+        let homes = passwd_homes(
+            "old:x:500:500::/home/old:/bin/sh\n\
+             svc:x:500:500::/srv/svc:/bin/sh\n",
+        );
+        assert_eq!(homes, vec![(PathBuf::from("/home/old"), "old".to_string())]);
+    }
+
+    /// Root's own home comes from `passwd`, not `$HOME`, which a `sudo` may
+    /// have kept pointing at the invoking user's.
+    #[test]
+    fn passwd_answers_a_uid_with_its_home_and_name() {
+        let text = "ana:x:1000:1000::/home/ana:/bin/zsh\n\
+                    root:x:0:0:root:/var/root:/bin/sh\n";
+        assert_eq!(passwd_home_of(text, 0), Some(PathBuf::from("/var/root")));
+        assert_eq!(passwd_name_of(text, 1000).as_deref(), Some("ana"));
+        assert_eq!(passwd_home_of(text, 42), None);
+    }
+
+    /// A home carries the uid that owns it, which is what ties a process to it.
+    #[test]
+    fn a_home_records_who_owns_it() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        push_home(
+            &mut out,
+            &mut HashSet::new(),
+            dir.path().to_path_buf(),
+            "me".into(),
+        );
+        let uid = std::fs::metadata(dir.path()).unwrap().uid();
+        assert_eq!(out[0].uid, Some(uid));
+        assert_eq!(owner_among(uid, uid, &out), None, "my own process is mine");
+        assert_eq!(owner_among(uid, uid + 1, &out).as_deref(), Some("me"));
+    }
+
+    /// An unprivileged run never mistakes a directory for someone else's: the
+    /// guard only exists for root, and the suite does not run as root.
+    #[test]
+    fn only_root_rejects_an_inherited_directory() {
+        if running_as_root() {
+            return;
+        }
+        let elsewhere = PathBuf::from("/home/somebody-else/.cache");
+        assert_eq!(own_dir(Some(elsewhere.clone())), Some(elsewhere));
     }
 
     #[test]

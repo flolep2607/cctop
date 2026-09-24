@@ -208,9 +208,7 @@ pub fn socket_path(pid: u32) -> Option<PathBuf> {
 /// Runtime dir when there is one (cleaned on logout, already user-private),
 /// otherwise the cache dir.
 fn base_dir() -> Option<PathBuf> {
-    dirs::runtime_dir()
-        .or_else(dirs::cache_dir)
-        .map(|d| d.join("cctop"))
+    Some(crate::config::runtime_base().join("cctop"))
 }
 
 /// PIDs of the agents currently reachable through a shim, oldest socket first.

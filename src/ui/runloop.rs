@@ -89,11 +89,6 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // The conversations and serves that reach back to a remote row ask the
     // `Host`, not the row — the row only knows the machine's name.
     app.remote_hosts = hosts;
-    // Likewise USER: with only this user's homes in view, every row's owner is
-    // the person reading the screen.
-    if crate::config::OTHER_HOMES.is_empty() {
-        app.hidden_columns.push(ColumnId::User);
-    }
     // And PROFILE, which most machines have exactly one of. A column repeating
     // `default` down every row is a column that answers nothing.
     if crate::config::profile_count() <= 1 {

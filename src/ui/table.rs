@@ -130,7 +130,8 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     if inner.height == 0 {
         return;
     }
-    let cols = columns::visible_columns(inner.width, &app.hidden_columns);
+    let hidden = columns::hidden_for(&app.hidden_columns, &app.sessions);
+    let cols = columns::visible_columns(inner.width, &hidden);
     let widths = column_widths(&cols, inner.width);
 
     // Header, recording click spans as we go.

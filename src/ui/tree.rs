@@ -1,4 +1,5 @@
-//! The tree view: sessions grouped by repository, then by checkout.
+//! The tree view: sessions grouped by repository, then by checkout — and,
+//! when root is watching more than one user, by user above both.
 //!
 //! htop's `F5` for agents. A flat table answers "what is running"; with a dozen
 //! agents across three repositories and their worktrees, the question is as
@@ -22,6 +23,13 @@
 //! that one *session* started another — a Claude resume or a Codex fork keeps
 //! only the id it came from, not a live parent — so sessions are never nested
 //! under each other.
+//!
+//! The user level exists for root's view of a shared machine, where the first
+//! question is whose agents these are. It is added only when the rows on screen
+//! belong to more than one user, the same way a repository seen through one
+//! checkout gets no checkout level: a heading that every row sits under says
+//! nothing. Two users in one repository get a heading each, and fold
+//! separately, because to them it is two pieces of work rather than one.
 
 use super::*;
 use crate::session::ActivityState;
@@ -39,7 +47,8 @@ pub struct Group {
     /// Stable across refreshes, and what the fold state is remembered under.
     pub key: String,
     pub label: String,
-    /// 0 for a repository, 1 for a checkout inside one.
+    /// 0 for the outermost level shown and one more for each level in: a
+    /// repository and its checkouts, under a user when there is a user level.
     pub depth: usize,
     pub collapsed: bool,
     pub sessions: usize,
@@ -235,6 +244,20 @@ fn file_name(p: &Path) -> String {
 /// sessions in it.
 type Checkout = (Option<(String, String)>, Vec<usize>);
 
+/// The fold key of a user's heading, and the prefix of every heading under it.
+fn user_key(s: &Session) -> String {
+    format!("user:{}", crate::config::user_label(s.owner.as_deref()))
+}
+
+/// A heading's fold key under `scope` — empty without a user level, so a
+/// single-user tree remembers its folds under the keys it always had.
+fn scoped(scope: &str, key: String) -> String {
+    match scope.is_empty() {
+        true => key,
+        false => format!("{scope}/{key}"),
+    }
+}
+
 /// Lay `ordered` out as a tree.
 ///
 /// `ordered` is the filtered sessions already sorted, and the tree keeps that
@@ -253,6 +276,72 @@ pub(super) fn build(
     collapsed: &HashSet<String>,
     children: impl Fn(usize) -> usize,
 ) -> Tree {
+    let mut tree = Tree {
+        groups: Vec::new(),
+        rows: Vec::new(),
+        indent: Vec::new(),
+    };
+    let ordered_sessions = ordered.iter().map(|&i| &sessions[i]);
+    if columns::users_in_view(ordered_sessions) < 2 {
+        repos(&mut tree, sessions, ordered, collapsed, &children, None);
+        return tree;
+    }
+
+    // (user key, members), in first-seen order, for the same reason the
+    // repositories below are.
+    let mut users: Vec<(String, Vec<usize>)> = Vec::new();
+    for &i in ordered {
+        let key = user_key(&sessions[i]);
+        match users.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(i),
+            None => users.push((key, vec![i])),
+        }
+    }
+    for (key, members) in users {
+        let label = crate::config::user_label(sessions[members[0]].owner.as_deref()).to_string();
+        tree.indent.push(String::new());
+        let mut g = Group {
+            collapsed: collapsed.contains(&key),
+            key: key.clone(),
+            label,
+            depth: 0,
+            ..Group::default()
+        };
+        for &i in &members {
+            g.add(&sessions[i]);
+        }
+        let folded = g.collapsed;
+        tree.groups.push(g);
+        tree.rows.push(Row::Group(tree.groups.len() - 1));
+        if !folded {
+            repos(
+                &mut tree,
+                sessions,
+                &members,
+                collapsed,
+                &children,
+                Some(&key),
+            );
+        }
+    }
+    tree
+}
+
+/// Lay out `ordered` as repositories and their checkouts.
+///
+/// `user` is the heading these hang under, when there is a user level: the
+/// repositories then become its children, drawn with the same `├─` rails a
+/// checkout is, and every key is scoped to it.
+fn repos(
+    tree: &mut Tree,
+    sessions: &[Session],
+    ordered: &[usize],
+    collapsed: &HashSet<String>,
+    children: &impl Fn(usize) -> usize,
+    user: Option<&str>,
+) {
+    let scope = user.unwrap_or_default();
+    let depth = usize::from(user.is_some());
     // (repo place, [(checkout, members)]), in first-seen order. Linear lookup:
     // a table holds tens of repositories, not thousands.
     let mut repos: Vec<(Place, Vec<Checkout>)> = Vec::new();
@@ -272,12 +361,8 @@ pub(super) fn build(
         }
     }
 
-    let mut tree = Tree {
-        groups: Vec::new(),
-        rows: Vec::new(),
-        indent: Vec::new(),
-    };
     let heading = |tree: &mut Tree, key: String, label: String, depth, members: &[usize]| {
+        let key = scoped(scope, key);
         let mut g = Group {
             collapsed: collapsed.contains(&key),
             key,
@@ -309,17 +394,25 @@ pub(super) fn build(
         }
     };
 
-    for (repo, checkouts) in repos {
+    let r_count = repos.len();
+    for (r, (repo, checkouts)) in repos.into_iter().enumerate() {
+        // Under a user, a repository is a child like any other and carries the
+        // rails for everything beneath it; at the top it needs none.
+        let (glyph, rail) = match (user.is_some(), r + 1 == r_count) {
+            (false, _) => ("", ""),
+            (true, false) => ("├─ ", "│  "),
+            (true, true) => ("└─ ", "   "),
+        };
         let all: Vec<usize> = checkouts.iter().flat_map(|(_, m)| m.clone()).collect();
-        tree.indent.push(String::new());
-        if heading(&mut tree, repo.repo, repo.repo_label, 0, &all) {
+        tree.indent.push(glyph.to_string());
+        if heading(tree, repo.repo, repo.repo_label, depth, &all) {
             continue;
         }
         // A repository seen through one checkout has nothing for a second level
         // to distinguish, and a heading per level would only push the sessions
         // further right.
         if checkouts.len() == 1 {
-            leaves(&mut tree, &all, "");
+            leaves(tree, &all, rail);
             continue;
         }
         let n = checkouts.len();
@@ -327,17 +420,20 @@ pub(super) fn build(
             let last = c + 1 == n;
             let (key, label) = checkout.unwrap_or_default();
             tree.indent
-                .push(if last { "└─ " } else { "├─ " }.to_string());
-            let folded = heading(&mut tree, key, label, 1, &members);
+                .push(format!("{rail}{}", if last { "└─ " } else { "├─ " }));
+            let folded = heading(tree, key, label, depth + 1, &members);
             if let Some(g) = tree.groups.last_mut() {
                 g.branch = columns::branch_of(&sessions[members[0]]);
             }
             if !folded {
-                leaves(&mut tree, &members, if last { "   " } else { "│  " });
+                leaves(
+                    tree,
+                    &members,
+                    &format!("{rail}{}", if last { "   " } else { "│  " }),
+                );
             }
         }
     }
-    tree
 }
 
 impl App {
@@ -391,9 +487,16 @@ impl App {
             return;
         };
         let p = place(s);
-        let mut changed = self.collapsed.remove(&p.repo);
-        if let Some((checkout, _)) = p.checkout {
-            changed |= self.collapsed.remove(&checkout);
+        // Every key the session could be folded under, with a user level and
+        // without: whether there is one depends on who else is on screen, which
+        // is not this session's to say.
+        let user = user_key(s);
+        let mut changed = self.collapsed.remove(&user);
+        let mut keys = vec![p.repo];
+        keys.extend(p.checkout.map(|(checkout, _)| checkout));
+        for key in keys {
+            changed |= self.collapsed.remove(&scoped(&user, key.clone()));
+            changed |= self.collapsed.remove(&key);
         }
         if changed {
             self.refilter();
@@ -754,6 +857,67 @@ mod tests {
         let key = app.sessions[0].key();
         app.reveal(&key);
         assert_eq!(app.visible.len(), 2);
+    }
+
+    /// With a second user on screen, each user heads their own subtree and the
+    /// repositories hang beneath them, railed like checkouts — so two people
+    /// in the same repository are two headings, folded separately.
+    #[test]
+    fn a_second_user_adds_a_level_above_the_repositories() {
+        let fx = Scratch::new("users");
+        let (x, y) = (fx.repo("x"), fx.repo("y"));
+        let mut app = test_app();
+        app.tree = true;
+        let mut ana_x = session("ana-x", true, &x);
+        ana_x.owner = Some("ana".into());
+        let mut ana_y = session("ana-y", true, &y);
+        ana_y.owner = Some("ana".into());
+        ana_y.last_active = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let mut mine = session("mine", true, &x);
+        mine.last_active = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        app.sessions = vec![ana_x, ana_y, mine];
+        app.refilter();
+
+        let groups = groups_of(&app);
+        let users: Vec<&str> = groups
+            .iter()
+            .filter(|g| g.0 == 0)
+            .map(|g| g.1.as_str())
+            .collect();
+        assert_eq!(
+            users,
+            ["ana", crate::config::MY_USER.as_str()],
+            "{groups:?}"
+        );
+        assert_eq!(
+            groups.iter().filter(|g| g.0 == 1).count(),
+            3,
+            "x and y under ana, x again under me: {groups:?}"
+        );
+        // ana's two repositories are railed as her children, their sessions
+        // one level further in.
+        let at = position(&app, "ana-x");
+        assert_eq!(app.indent[at - 1], "├─ ");
+        assert_eq!(app.indent[at], "│  └─ ");
+        assert_eq!(app.indent[position(&app, "ana-y")], "   └─ ");
+
+        // Folding ana's x leaves my x open: the keys are scoped per user.
+        app.selected = at - 1;
+        app.toggle_group();
+        let _ = position(&app, "mine");
+        assert!(
+            app.visible.iter().all(|r| r.session() != Some(0)),
+            "ana-x is folded away"
+        );
+
+        // A filter down to one user drops the level again.
+        app.search = "user:ana".into();
+        app.refilter();
+        assert!(
+            groups_of(&app).iter().all(|g| g.1 != "ana"),
+            "{:?}",
+            groups_of(&app)
+        );
     }
 
     /// A relative directory must not be looked up against cctop's own working

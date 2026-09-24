@@ -20,6 +20,53 @@ const SCAN_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Shortest query worth reading every transcript for.
 const MIN_SCAN_CHARS: usize = 3;
 
+/// A query split into its `user:` terms and the free text around them.
+///
+/// `user:` is a filter rather than a word to search for because a name is
+/// also a word: `ana` as free text finds Ana's sessions and every session
+/// titled "analysis", and on a machine root is watching the first is usually
+/// what was meant. The term is a substring of the name, like the rest of the
+/// query, so the rows narrow as the name is typed rather than vanishing until
+/// it is complete. Several terms are alternatives — `user:ana user:bo` is both
+/// of them — since one row can only have one owner and requiring all would
+/// match nothing.
+///
+/// Only the free text is scanned for in transcripts: no transcript says whose
+/// it is, and a scan for `user:ana` would find every one that mentions the
+/// literal string.
+pub(super) struct Query<'a> {
+    pub users: Vec<&'a str>,
+    pub text: String,
+}
+
+impl<'a> Query<'a> {
+    /// `query` must already be lowercase.
+    pub fn parse(query: &'a str) -> Self {
+        let mut users = Vec::new();
+        let mut text: Vec<&str> = Vec::new();
+        for word in query.split_whitespace() {
+            match word.strip_prefix("user:") {
+                Some(name) => users.push(name),
+                None => text.push(word),
+            }
+        }
+        // A query with no `user:` in it is left exactly as typed, spaces and
+        // all, so this changes nothing for anyone not using it.
+        let text = match users.is_empty() {
+            true => query.to_string(),
+            false => text.join(" "),
+        };
+        Query { users, text }
+    }
+
+    fn admits(&self, s: &Session) -> bool {
+        self.users.is_empty() || {
+            let name = crate::config::user_label(s.owner.as_deref());
+            self.users.iter().any(|u| contains_ascii_ci(name, u))
+        }
+    }
+}
+
 /// `haystack.to_ascii_lowercase().contains(needle)` without the allocation.
 ///
 /// Comparing bytes is safe on UTF-8 here: ASCII case folding never touches a
@@ -168,6 +215,11 @@ impl App {
     /// the metadata matches alone, which is a filter narrowing as you type
     /// rather than showing results for a query you have moved on from.
     pub(super) fn matches_query(&self, s: &Session, query: &str) -> bool {
+        let parsed = Query::parse(query);
+        if !parsed.admits(s) {
+            return false;
+        }
+        let query = parsed.text.as_str();
         if query.is_empty() {
             return true;
         }
@@ -203,7 +255,8 @@ impl App {
     /// The transcript text around the selected session's content match.
     pub fn selected_snippet(&self) -> Option<&str> {
         let s = self.selected_session()?;
-        (self.search_content && self.scan_query == self.search.to_ascii_lowercase())
+        let query = self.search.to_ascii_lowercase();
+        (self.search_content && self.scan_query == Query::parse(&query).text)
             .then(|| self.scan_hits.get(&s.key()))
             .flatten()
             .map(String::as_str)
@@ -242,7 +295,7 @@ impl App {
         if !self.search_content || self.scanning {
             return;
         }
-        let query = self.search.to_ascii_lowercase();
+        let query = Query::parse(&self.search.to_ascii_lowercase()).text;
         if query == self.scan_query {
             self.scan_typed_at = None;
             return;
@@ -412,6 +465,57 @@ mod tests {
     use super::*;
     use crate::ui::tests::{key, session, test_app};
     use ratatui::crossterm::event::KeyCode;
+
+    /// `user:` narrows by whose a row is, without the name also matching every
+    /// title that happens to contain it; the free text beside it still applies.
+    #[test]
+    fn a_user_term_filters_by_owner() {
+        let mut app = test_app();
+        let mut winshen = session("w", true, "/srv/app");
+        winshen.owner = Some("winshen".into());
+        let mut analysis = session("m", true, "/srv/app");
+        analysis.title = Some("winshen's analysis".into());
+        let mut bo = session("b", true, "/srv/other");
+        bo.owner = Some("bo".into());
+        app.sessions = vec![winshen, analysis, bo];
+        let shown = |app: &App| -> Vec<String> {
+            app.visible
+                .iter()
+                .filter_map(|r| r.session())
+                .map(|i| app.sessions[i].session_id.clone())
+                .collect()
+        };
+
+        app.search = "user:winshen".into();
+        app.refilter();
+        assert_eq!(shown(&app), ["w"]);
+
+        // Part of a name narrows as it is typed; two terms are either user.
+        app.search = "user:win".into();
+        app.refilter();
+        assert_eq!(shown(&app), ["w"]);
+        app.search = "user:winshen user:bo".into();
+        app.refilter();
+        assert_eq!(shown(&app).len(), 2);
+
+        // Free text beside it still has to match.
+        app.search = "user:bo other".into();
+        app.refilter();
+        assert_eq!(shown(&app), ["b"]);
+        app.search = "user:bo /srv/app".into();
+        app.refilter();
+        assert!(shown(&app).is_empty());
+
+        // This user's own rows answer to this user's own name.
+        app.search = format!("user:{}", crate::config::MY_USER.to_ascii_lowercase()).into();
+        app.refilter();
+        assert_eq!(shown(&app), ["m"]);
+
+        // Only the free text goes to the transcript scan.
+        assert_eq!(Query::parse("user:bo  needle").text, "needle");
+        assert_eq!(Query::parse("plain  query").text, "plain  query");
+    }
+
     #[test]
     fn live_filter_hides_stopped_sessions() {
         let mut app = test_app();
