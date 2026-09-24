@@ -215,11 +215,12 @@ pub struct Args {
     #[arg(long)]
     pub mcp: bool,
 
-    /// Add Claude accounts by token: walks through `claude setup-token` for
-    /// each one and stores what it prints in cctop's config (piped, reads one
-    /// token from stdin). Takes the first account's name; defaults to
-    /// `default`. Launch under one with `p` in the launcher, or `cctop as
-    /// <name> claude`
+    /// Add Claude accounts, asking of each whether it is a full login — its
+    /// own ~/.claude-<name> via `claude auth login`, everything works — or a
+    /// token from `claude setup-token`, which shares ~/.claude history but has
+    /// no Remote Control or claude.ai connectors. Piped, reads one token from
+    /// stdin. Takes the first account's name; defaults to `default`. Launch
+    /// under one with `p` in the launcher, or `cctop as <name> claude`
     #[arg(long, num_args = 0..=1, default_missing_value = "default", value_name = "PROFILE")]
     pub add_account: Option<String>,
 
