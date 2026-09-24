@@ -204,6 +204,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("s", "Type a line into its terminal"),
         item("O", "Hand its context off to a different agent"),
         item("i", "Read its conversation (works on remote rows)"),
+        item("  [ / ]  m", "In it: previous / next turn, markdown source"),
         item("y", "Copy resume command or transcript path"),
         item("e / E", "Show its subagents / all subagents"),
         item("d", "Delete it (only when it is not running)"),
@@ -2404,6 +2405,7 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     // Borders, plus a space of padding either side, is what the wrap below has
     // to agree with.
     let text_width = (box_area.width as usize).saturating_sub(4).max(1);
+    let mut laid = Chat::default();
     let body: Vec<Line> = match (&view.conversation, &view.error) {
         (None, None) => vec![
             Line::default(),
@@ -2419,18 +2421,26 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             Line::default(),
             Line::from(Span::styled(format!("  {why}"), theme::failed())),
         ],
-        (Some(conv), _) => chat_lines(&view.session, conv, text_width),
+        (Some(conv), _) => {
+            laid = chat_lines(&view.session, conv, text_width, view.raw);
+            std::mem::take(&mut laid.lines)
+        }
     };
 
+    let shown = match view.raw {
+        true => "m rendered",
+        false => "m source",
+    };
     let footer = match &view.conversation {
         _ if view.fetching => format!(
-            " ↑↓ scroll · {} loading earlier… · esc close ",
+            " ↑↓ scroll · [ ] turn · {shown} · {} loading earlier… · esc close ",
             share::spinner_frame()
         ),
-        Some(c) if c.earlier > 0 => {
-            format!(" ↑↓ scroll · u load {} earlier · esc close ", c.earlier)
-        }
-        _ => " ↑↓ scroll · esc close ".to_string(),
+        Some(c) if c.earlier > 0 => format!(
+            " ↑↓ scroll · [ ] turn · {shown} · u load {} earlier · esc close ",
+            c.earlier
+        ),
+        _ => format!(" ↑↓ scroll · [ ] turn · {shown} · esc close "),
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -2443,11 +2453,46 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     // The only place the wrapped height is known, so the furthest-back offset
     // is written here for the key handler to clamp against.
     view.max_back = (body.len().saturating_sub(visible)).min(u16::MAX as usize) as u16;
-    let top = body.len().saturating_sub(visible + view.back as usize);
+    let total = body.len();
+    let top = total.saturating_sub(visible + view.back as usize);
+    // Each turn's header, as the `back` that brings it to the top — clamped,
+    // so the last few turns, which cannot reach the top, all read as the end.
+    view.turn_backs = laid
+        .turns
+        .iter()
+        .map(|&start| {
+            (total.saturating_sub(visible).saturating_sub(start) as u16).min(view.max_back)
+        })
+        .collect();
     frame.render_widget(
         Paragraph::new(body).block(block).scroll((top as u16, 0)),
         box_area,
     );
+    // Links are laid over the cells the paragraph has just drawn, so they have
+    // to wait for it; one scrolled out of the box is simply not on screen.
+    let inner = box_area.inner(ratatui::layout::Margin::new(1, 1));
+    for link in &laid.links {
+        let Some(row) = link.line.checked_sub(top).filter(|r| *r < visible) else {
+            continue;
+        };
+        let start = inner.x + link.columns.start;
+        let end = (inner.x + link.columns.end).min(inner.right());
+        hyperlink::link(
+            frame.buffer_mut(),
+            inner.y + row as u16,
+            start..end,
+            &link.url,
+        );
+    }
+}
+
+/// A conversation laid out: its rows, where its links landed, and the row each
+/// turn starts on.
+#[derive(Default)]
+struct Chat {
+    lines: Vec<Line<'static>>,
+    links: Vec<super::markdown::Link>,
+    turns: Vec<usize>,
 }
 
 /// A conversation laid out as styled lines, wrapped to `width`.
@@ -2455,14 +2500,21 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
 /// Turns read like the report page's: a small header naming the speaker, the
 /// text at full width, and each tool call underneath it dimmed — a tool's work
 /// is context for the text, not the text itself.
+///
+/// The agent's own words are rendered as the markdown they were written in,
+/// unless `raw` asks for the source. What the user typed is not: a prompt is
+/// rarely markdown on purpose, and an asterisk in it should stay one. A tool's
+/// result keeps the colours its program printed it in (see [`super::ansi`]).
 fn chat_lines(
     session: &Session,
     conv: &crate::serve::chat::Conversation,
     width: usize,
-) -> Vec<Line<'static>> {
+    raw: bool,
+) -> Chat {
     let assistant = session.surface.label(session.provider).to_string();
     let now = chrono::Utc::now();
-    let mut out: Vec<Line> = Vec::new();
+    let mut chat = Chat::default();
+    let out = &mut chat.lines;
 
     if let Some(note) = &conv.note {
         for line in super::panels::wrap(note, width) {
@@ -2471,6 +2523,7 @@ fn chat_lines(
         out.push(Line::default());
     }
     for turn in &conv.turns {
+        chat.turns.push(out.len());
         if turn.kind.as_ref() == "compaction" {
             // A seam, not something said — drawn as a rule so the eye reads it
             // as one rather than hunting for a speaker.
@@ -2494,8 +2547,29 @@ fn chat_lines(
             Span::styled(format!("  {who}"), style),
             Span::styled(format!("  {when}"), theme::dim()),
         ]));
-        for line in super::panels::wrap(&turn.text, width) {
-            out.push(Line::styled(format!("  {line}"), text_style));
+        match turn.role.as_ref() == "assistant" && !raw {
+            true => {
+                // Rendered text sets its own weight, so the base is the ink
+                // without the bold — or `**this**` would have nothing to stand
+                // out from.
+                let base = text_style.remove_modifier(Modifier::BOLD);
+                let md = super::markdown::render(&turn.text, width, base);
+                let offset = out.len();
+                chat.links.extend(md.links.into_iter().map(|mut link| {
+                    link.line += offset;
+                    link.columns = link.columns.start + 2..link.columns.end + 2;
+                    link
+                }));
+                out.extend(md.lines.into_iter().map(|mut line| {
+                    line.spans.insert(0, Span::raw("  "));
+                    line
+                }));
+            }
+            false => {
+                for line in super::panels::wrap(&turn.text, width) {
+                    out.push(Line::styled(format!("  {line}"), text_style));
+                }
+            }
         }
         for tool in &turn.tools {
             let (mark, style) = match tool.failed {
@@ -2508,32 +2582,34 @@ fn chat_lines(
             };
             out.push(Line::from(vec![
                 Span::styled(format!("    {mark} {}", tool.name), style),
-                Span::styled(format!("  {}", tool.detail), theme::dim()),
+                Span::styled(
+                    format!("  {}", super::ansi::strip(&tool.detail)),
+                    theme::dim(),
+                ),
                 Span::styled(counts, theme::dim()),
             ]));
             // The full argument only exists where it says more than the
             // one-liner did — a long command, a whole file body.
             if let Some(full) = &tool.full {
-                for line in super::panels::wrap(full, width.saturating_sub(6)) {
-                    out.push(Line::styled(format!("      {line}"), theme::dim()));
-                }
+                out.extend(super::ansi::wrapped(full, theme::dim(), width, "      "));
             }
             if let Some(result) = &tool.result {
-                for line in super::panels::wrap(result, width.saturating_sub(6)) {
-                    out.push(Line::styled(format!("      {line}"), theme::dim()));
-                }
+                out.extend(super::ansi::wrapped(result, theme::dim(), width, "      "));
             }
             for line in &tool.diff {
                 let style = match line.starts_with('+') {
                     true => theme::value(),
                     false => theme::dim(),
                 };
-                out.push(Line::styled(format!("      {line}"), style));
+                out.push(Line::styled(
+                    format!("      {}", super::ansi::strip(line)),
+                    style,
+                ));
             }
         }
         out.push(Line::default());
     }
-    out
+    chat
 }
 
 #[cfg(test)]
@@ -2824,6 +2900,122 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("No tab by that name"), "silence: {text}");
+    }
+
+    /// The conversation view with one reply in markdown and one coloured tool
+    /// result, open and read in by the worker.
+    fn chat_app(text: &str, result: &str) -> App {
+        let mut app = crate::ui::tests::test_app();
+        app.sessions = vec![crate::ui::tests::session("a", true, "/repo")];
+        app.refilter();
+        app.selected = 0;
+        app.open_conversation();
+        let key = app.chat.as_ref().expect("the view opened").session.key();
+        let turn = |seq: usize, role: &'static str, text: &str| crate::serve::chat::Turn {
+            seq,
+            role: role.into(),
+            kind: "message".into(),
+            ts: String::new(),
+            text: text.into(),
+            clipped: false,
+            tools: Vec::new(),
+        };
+        let mut reply = turn(1, "assistant", text);
+        reply.tools.push(crate::serve::chat::ToolUse {
+            name: "Bash".into(),
+            detail: "cargo test".into(),
+            result: Some(result.into()),
+            ..Default::default()
+        });
+        let conv = crate::serve::chat::Conversation {
+            supported: true,
+            turns: vec![turn(0, "user", "**keep** my stars"), reply],
+            earlier: 0,
+            note: None,
+        };
+        app.got_chat(key, None, Ok(Box::new(conv)));
+        app
+    }
+
+    fn draw_chat(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
+        terminal
+            .draw(|frame| draw_conversation(frame, frame.area(), app))
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// A reply reads as rendered markdown with its link clickable, a user's
+    /// prompt keeps its characters, and a coloured result shows its colour and
+    /// none of its escape codes.
+    #[test]
+    fn the_conversation_renders_replies_and_colours_results() {
+        let mut app = chat_app(
+            "## Done\n\nRan **all** of it, see [the log](https://example.com/log).",
+            "\x1b[1m\x1b[32mtest result: ok\x1b[0m. 3 passed\x1b[2K",
+        );
+        let buf = draw_chat(&mut app, 100, 30);
+        let screen = hyperlink::visible(&buf);
+        assert!(screen.contains("Ran all of it, see the log."), "{screen}");
+        assert!(
+            !screen.contains("**all**") && !screen.contains("## "),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("**keep** my stars"),
+            "the prompt was rendered: {screen}"
+        );
+        assert!(screen.contains("test result: ok. 3 passed"), "{screen}");
+        assert!(
+            !screen.contains("[32m") && !screen.contains("[2K"),
+            "{screen}"
+        );
+
+        let green = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "t" && c.fg == ratatui::style::Color::Green);
+        assert!(green.is_some(), "the result lost its colour");
+        let targets: Vec<&str> = buf
+            .content()
+            .iter()
+            .filter_map(|c| hyperlink::target_of(c.symbol()))
+            .collect();
+        assert_eq!(targets, ["https://example.com/log"]);
+
+        // `m` shows the source instead, markers and all.
+        app.on_key(crate::ui::tests::key(KeyCode::Char('m')));
+        let screen = hyperlink::visible(&draw_chat(&mut app, 100, 30));
+        assert!(screen.contains("Ran **all** of it"), "{screen}");
+    }
+
+    /// `[` brings the previous turn's header to the top and `]` walks back
+    /// towards the end, which is where the view opened.
+    #[test]
+    fn brackets_step_through_the_turns() {
+        let long = (0..40).map(|i| format!("line {i}\n\n")).collect::<String>();
+        let mut app = chat_app(&long, "ok");
+        draw_chat(&mut app, 80, 20);
+        let view = app.chat.as_ref().expect("open");
+        assert_eq!(view.back, 0);
+        let backs = view.turn_backs.clone();
+        assert_eq!(backs.len(), 2);
+
+        app.on_key(crate::ui::tests::key(KeyCode::Char('[')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[1]));
+        let top = hyperlink::visible(&draw_chat(&mut app, 80, 20));
+        // The row under the box's top border is the reply's own header.
+        let under_border = top.lines().skip_while(|l| !l.contains('╭')).nth(1);
+        assert!(under_border.is_some_and(|l| l.contains("Claude")), "{top}");
+
+        app.on_key(crate::ui::tests::key(KeyCode::Char('[')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[0]));
+        app.on_key(crate::ui::tests::key(KeyCode::Char(']')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[1]));
+        app.on_key(crate::ui::tests::key(KeyCode::Char(']')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(0));
     }
 
     #[test]

@@ -6,7 +6,7 @@ The panel under the table describes whichever session the cursor is on. `←` an
 `→` move between panels, `1`–`7` jump to one, `Tab` reaches Context, and
 `Shift+↑`/`↓` scrolls inside the active one.
 
-Two of them repay a closer look.
+Two of them repay a closer look, and so does the conversation view `i` opens.
 
 ## Tool Activity
 
@@ -41,6 +41,32 @@ it tracks total context size rather than the size of any one call.
 Codex tools are decoded too: `apply_patch` shows the files it touched and its
 line counts, `update_plan` shows progress and the step in flight, and
 `write_stdin` distinguishes a real write from a poll for more output.
+
+## Reading the conversation
+
+The panels summarise what a session did; `i` shows what it said. It opens an
+overlay on the selected row's transcript — a remote row's too, read over the
+same ssh link — at the end, so the agent's last reply is the first thing on
+screen.
+
+- **Replies are rendered as markdown**: headings, bold and italic, inline code,
+  fenced blocks behind a gutter with their language named, lists, quotes,
+  tables and rules. Links are OSC 8 hyperlinks, so a click opens them even when
+  they wrap; on a terminal that cannot do that (`TERM=dumb` or `linux`) the URL
+  is printed after its label. What you typed is shown as you typed it.
+- **Tool output keeps its colours.** cargo's green, pytest's red and git's diff
+  colours come through, folded to sixteen colours on a terminal that has only
+  those and dropped under `NO_COLOR`. Anything else a program wrote — cursor
+  moves, line erases, window titles — is removed, so it cannot scribble over the
+  view. Expanded Tool Activity rows get the same treatment.
+
+| Key | In the conversation |
+|---|---|
+| `↑` `↓` `PgUp` `PgDn` `Home` `End` | Scroll |
+| `[` / `]` | Previous / next turn, header at the top |
+| `m` | Toggle between rendered markdown and its source |
+| `u` | Load earlier turns, when there are any |
+| `Esc` | Close |
 
 ## Context breakdown
 

@@ -11,6 +11,7 @@
 //! modes, the row type, construction and the toasts — that every one of
 //! them touches.
 
+mod ansi;
 mod batch;
 pub mod columns;
 mod dirs;
@@ -21,6 +22,7 @@ mod hyperlink;
 mod input;
 mod launch;
 mod launch_cwd;
+mod markdown;
 pub mod menu;
 mod modals;
 pub mod panels;
@@ -35,6 +37,7 @@ mod settings;
 mod share;
 mod signals;
 pub mod spark;
+mod styled;
 mod table;
 pub mod tabs;
 pub mod theme;
@@ -1049,6 +1052,8 @@ impl App {
             back: 0,
             max_back: 0,
             fetching: false,
+            raw: false,
+            turn_backs: Vec::new(),
         });
         self.mode = Mode::Conversation;
         self.fetch_chat(None);
@@ -1150,6 +1155,13 @@ pub struct ChatView {
     /// A fetch is in flight — the spinner's reason to keep turning, and what
     /// keeps a second `u` from asking for the page already coming.
     pub fetching: bool,
+    /// Replies shown as the markdown source they were written in, rather than
+    /// rendered — `m` flips it, for the times the exact characters matter.
+    pub raw: bool,
+    /// The `back` that puts each turn's header at the top of the view, oldest
+    /// first. Written by the draw, like `max_back`, and what `[` and `]` step
+    /// through.
+    pub turn_backs: Vec<u16>,
 }
 
 /// Columns the user has hidden outright, which win over the automatic
