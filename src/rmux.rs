@@ -1760,29 +1760,50 @@ mod tests {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         };
-        let first = wait_for(|| running().into_iter().find(|s| s.name == ours))
-            .and_then(|s| s.activity)
-            .expect("no activity reported for a session that is printing");
-        // Long enough that a clock which only moves on keystrokes has visibly
-        // stopped: the stale reading is what made the tab go quiet.
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        let later = running()
-            .into_iter()
-            .find(|s| s.name == ours)
-            .and_then(|s| s.activity);
+        let reading = || {
+            running()
+                .into_iter()
+                .find(|s| s.name == ours)
+                .and_then(|s| s.activity)
+        };
+        let first = wait_for(reading);
+
+        // Poll rather than sleep a fixed interval and sample once. Under a
+        // loaded `cargo test` the printing loop, the rmux call and even
+        // teardown can each take seconds, so a single reading after a fixed
+        // sleep flaked on scheduling rather than on the clock. What is waited
+        // for is still the whole claim: the clock has moved well past the
+        // first reading — more than the one bump a session's creation could
+        // give `session_activity` — *and* is current at the moment it was
+        // read. `now` is taken before asking, so a slow answer is not held
+        // against the reading it returns. A clock that only moves on
+        // keystrokes never gets there, however long the deadline.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut last = None;
+        let moved = first.and_then(|first| {
+            loop {
+                let asked_at = now();
+                let later = reading();
+                last = later.map(|later| (later, asked_at));
+                if let Some(later) = later
+                    && later >= first + 2
+                    && asked_at.saturating_sub(later) <= 2
+                {
+                    break Some(later);
+                }
+                if std::time::Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
         end_session(&ours);
 
-        let later = later.expect("the session stopped being listed");
+        let first = first.expect("no activity reported for a session that is printing");
         assert!(
-            later > first,
-            "the clock stood still while the agent printed: {first} then {later}"
-        );
-        // And it is current, not merely moving — the judgement made of it is
-        // "has this gone quiet in the last couple of seconds".
-        assert!(
-            now().saturating_sub(later) <= 2,
-            "reported {later}, now {}",
-            now()
+            moved.is_some(),
+            "the clock stood still or lagged while the agent printed: \
+             first {first}, last (reading, asked at) {last:?}"
         );
     }
 

@@ -120,24 +120,38 @@ jobs:
           if [ -n "$sha" ]; then
             body="$(git log --format=%b -n 1 "$sha")"
             # `%b` carries the commit's trailers, and every commit here has a
-            # `Co-Authored-By:` one — which was being published as the first
-            # thing an updater reads, and edited away by hand afterwards on
-            # every release so far. `--parse` names the trailer block git itself
-            # recognises, and only the attribution trailers at the end of it are
-            # dropped, so a closing paragraph that merely reads `Note: ...` is
-            # prose and stays.
-            trailers="$(printf '%s\n' "$body" | git interpret-trailers --parse)"
-            if [ -n "$trailers" ]; then
-              body="$(printf '%s\n' "$body" | awk -v n="$(printf '%s\n' "$trailers" | wc -l)" '
+            # `Co-Authored-By:` one — which was published as the first thing an
+            # updater reads. Git decides what the trailer block is: the last
+            # paragraph, when `--parse` finds trailers in it. It is asked about
+            # the whole message (`%B`), because git reads a message's first
+            # paragraph as its title and never as trailers — fed `%b` alone, a
+            # body that is nothing but `Co-Authored-By:` is that title, and
+            # 0.17.0 went out reading exactly that line. `--no-divider` because
+            # this is a commit and not a patch: a markdown `---` in the prose is
+            # not where the message ends.
+            #
+            # Within that block every `Token: value` line and its folded
+            # continuations go, not only a known list of attribution names;
+            # prose sharing the paragraph stays. ponytail: a closing paragraph
+            # that happens to read `Note: ...` is a trailer to git, and goes
+            # with them. A body with nothing left contributes nothing, and the
+            # release is the generated list alone.
+            if [ -n "$(git log --format=%B -n 1 "$sha" | git interpret-trailers --parse --no-divider)" ]; then
+              body="$(printf '%s\n' "$body" | awk '
                 { line[NR] = $0 }
                 END {
                   last = NR
                   while (last > 0 && line[last] ~ /^[[:space:]]*$/) last--
-                  block = last - n
-                  known = "^(co-authored-by|signed-off-by|acked-by|reviewed-by|tested-by|reported-by|suggested-by|helped-by|cc|change-id|fixes|closes|refs)[ \t]*:"
-                  while (last > block && tolower(line[last]) ~ known) last--
-                  while (last > 0 && line[last] ~ /^[[:space:]]*$/) last--
-                  for (i = 1; i <= last; i++) print line[i]
+                  start = last
+                  while (start > 1 && line[start - 1] !~ /^[[:space:]]*$/) start--
+                  for (i = start; i <= last; i++) {
+                    if (line[i] ~ /^[A-Za-z0-9-]+[[:space:]]*:/) cut = 1
+                    else if (line[i] !~ /^[[:space:]]/) cut = 0
+                    drop[i] = cut
+                  }
+                  for (i = 1; i <= last; i++) if (!drop[i]) kept[++n] = line[i]
+                  while (n > 0 && kept[n] ~ /^[[:space:]]*$/) n--
+                  for (i = 1; i <= n; i++) print kept[i]
                 }')"
             fi
             echo "notes from $(git log --format='%h %s' -n 1 "$sha")"

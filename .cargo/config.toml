@@ -1,0 +1,5 @@
+# Resolved to this checkout's absolute path, for build.rs to watch: see the
+# comment on `CCTOP_CHECKOUT` there for why cargo cannot tell two checkouts
+# sharing a target dir apart without it.
+[env]
+CCTOP_CHECKOUT = { value = "", relative = true }
