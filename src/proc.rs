@@ -229,6 +229,26 @@ fn is_claude_argv0(argv0: &str) -> bool {
         || argv0.contains("\\claude\\versions\\")
 }
 
+/// Whether `pid` is one cctop should treat as its user's.
+///
+/// Read from the owner of `/proc/<pid>`, which is the process's real uid and
+/// needs no permission to see — unlike its `cwd` or `environ`. A process that
+/// vanished between the scan and this check reads as not ours, which is the
+/// answer the next scan would give anyway.
+///
+/// Root, including under `sudo`, is the exception and sees every process:
+/// someone running cctop as root on a shared machine is asking what every
+/// agent on it is doing, and root can read each one's directory to say so.
+fn owned_by_us(pid: u32) -> bool {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    owned_by(pid, unsafe { libc::getuid() })
+}
+
+fn owned_by(pid: u32, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| uid == 0 || m.uid() == uid)
+}
+
 /// Cheap rejection test, run over every process on the machine before any
 /// command line is copied out of `sysinfo`.
 ///
@@ -421,6 +441,18 @@ impl Collector {
                 None => command_stem(&p.name().to_string_lossy()),
             });
             if !could_be_agent(&name, argv0.as_deref()) {
+                continue;
+            }
+            // On a shared machine every user's agents are in the process table,
+            // but only ours can own a row: their transcripts are under their own
+            // home, and their working directory is unreadable to us. Left in,
+            // each became a `$0.00` row in an `unknown` directory — someone
+            // else's session, shown as one of ours. They stay in `procs`, since
+            // an ancestor walk may still pass through another user's process.
+            // Root keeps them all; see `owned_by_us`.
+            // ponytail: root sees other users' agents as processes with their
+            // directories, not their transcripts — those are read from $HOME only.
+            if !owned_by_us(pid) {
                 continue;
             }
             let tokens = tokens_of(p);
@@ -951,6 +983,28 @@ mod tests {
     }
 
     const UUID: &str = "7026d578-8cba-4880-b464-9700f1b77b71";
+
+    /// Another user's agent can never own a row, so it is never a candidate —
+    /// unless cctop runs as root.
+    /// pid 1 is root's on any machine the suite runs on as a normal user.
+    #[test]
+    fn only_our_own_processes_can_be_agents() {
+        assert!(owned_by_us(std::process::id()));
+        if unsafe { libc::getuid() } != 0 {
+            assert!(!owned_by_us(1));
+        }
+        assert!(!owned_by_us(u32::MAX));
+    }
+
+    /// Root sees every user's agents; an ordinary user sees none but their own.
+    #[test]
+    fn root_sees_every_users_processes() {
+        let me = std::process::id();
+        assert!(owned_by(1, 0));
+        assert!(owned_by(me, 0));
+        assert!(!owned_by(1, 12345));
+        assert!(!owned_by(u32::MAX, 0));
+    }
 
     fn session_at(id: &str, started_at: &str, last_active: &str) -> Session {
         let mut s = Session::new(crate::pricing::Provider::Claude, id.to_string());
