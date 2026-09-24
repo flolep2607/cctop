@@ -565,10 +565,30 @@ fn remotes(hosts: &[String]) -> Section {
     let checks = crate::fleet::Host::collect(hosts)
         .iter()
         .map(|host| match host.poll() {
-            crate::fleet::Snapshot::Rows(rows) => ok(
-                host.target.clone(),
-                format!("{} session(s) via `{}`", rows.len(), host.command),
-            ),
+            crate::fleet::Snapshot::Rows(rows) => {
+                let read = format!("{} session(s) via `{}`", rows.len(), host.command);
+                // A host that reads fine but runs an older cctop is the case the
+                // table used to be silent about, so doctor names the version.
+                let probe = host.probe();
+                let theirs = match &probe {
+                    crate::fleet::Probe::Version(v) => format!(", cctop {v}"),
+                    _ => String::new(),
+                };
+                let local = crate::update::current_version();
+                match crate::fleet::skew(&probe, local) {
+                    Some(crate::fleet::Skew::Older(_)) => warn(
+                        host.target.clone(),
+                        format!("{read}{theirs}, older than this {local}"),
+                        "update it there with `cctop --update`, or from a remote row's menu",
+                    ),
+                    Some(crate::fleet::Skew::Newer(_)) => warn(
+                        host.target.clone(),
+                        format!("{read}{theirs}, newer than this {local}"),
+                        "this machine's cctop is behind: run `cctop --update` here",
+                    ),
+                    _ => ok(host.target.clone(), format!("{read}{theirs}")),
+                }
+            }
             crate::fleet::Snapshot::Failed(why) => {
                 fail(host.target.clone(), why.clone(), remote_hint(&why))
             }

@@ -19,6 +19,7 @@ mod effects;
 mod filter;
 mod hooks;
 mod hyperlink;
+mod idle;
 mod input;
 mod launch;
 mod launch_cwd;
@@ -83,6 +84,8 @@ pub enum Mode {
     ResumeConfirm,
     /// Confirming a quit that would take the hosted agent down with it.
     QuitConfirm,
+    /// Confirming `cctop --update` on the machine in `App::remote_update`.
+    RemoteUpdateConfirm,
     /// Explaining why a live session cannot be terminated locally.
     KillBlocked,
     /// Confirming a batch action over all marked sessions.
@@ -220,6 +223,10 @@ pub struct PastePreview {
 pub enum BatchKind {
     Delete,
     Kill,
+    /// Stop the idle view's sessions: the marked ones, or every one when none
+    /// is marked. Unlike [`BatchKind::Kill`] it skips rather than refuses —
+    /// see [`App::reclaim_plan`].
+    Reclaim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,6 +401,11 @@ pub struct App {
     pub age_filter: Option<AgeFilter>,
     pub age_cursor: usize,
     pub live_only: bool,
+    /// The idle view: only live sessions quiet for `idle_after`, biggest
+    /// first. See the `idle` module.
+    pub idle_only: bool,
+    /// The sort the idle view replaced, put back when it closes.
+    idle_sort: Option<(ColumnId, bool)>,
 
     /// Session keys the user has marked (Space) for a batch action.
     pub marked: HashSet<String>,
@@ -585,6 +597,18 @@ pub struct App {
     /// Shown rather than logged. A host that has quietly dropped out is worse
     /// than one that was never added: the totals still look complete.
     pub remote_errors: HashMap<String, String>,
+    /// What each host's `cctop --version` said, asked once per connection.
+    pub remote_versions: HashMap<String, crate::fleet::Probe>,
+    /// Hosts whose version skew has been toasted this run. Once per host: the
+    /// news is the same every poll, and a toast that comes back every fifteen
+    /// seconds is one people learn to stop reading.
+    pub remote_skew_told: std::collections::HashSet<String>,
+    /// The host an update is being confirmed for, in `RemoteUpdateConfirm`.
+    /// Held by name rather than read off the selection, which the table's
+    /// next refresh is free to move.
+    pub remote_update: Option<String>,
+    /// Hosts with a `--update` in flight, so the menu does not offer a second.
+    pub remote_updating: std::collections::HashSet<String>,
 
     /// Which live sessions are working the same ground, recomputed whenever
     /// rows move. The level also rides on each row so the table can sort by it;
@@ -857,6 +881,8 @@ impl App {
             age_filter,
             age_cursor,
             live_only: prefs.live_only,
+            idle_only: false,
+            idle_sort: None,
             marked: HashSet::new(),
             deleting: HashSet::new(),
             batch: BatchKind::Delete,
@@ -937,6 +963,10 @@ impl App {
             collisions: crate::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
+            remote_versions: HashMap::new(),
+            remote_skew_told: std::collections::HashSet::new(),
+            remote_update: None,
+            remote_updating: std::collections::HashSet::new(),
             update_available: None,
             toasts: toast::Toasts::default(),
             started_at: chrono::Utc::now().to_rfc3339(),

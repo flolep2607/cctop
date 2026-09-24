@@ -69,6 +69,15 @@ fn empty_lines(app: &App) -> Vec<Line<'static>> {
             theme::dim(),
         ))];
     }
+    if app.idle_only {
+        return vec![Line::from(Span::styled(
+            format!(
+                "No live session has been quiet for {}. I or Esc shows the rest.",
+                super::idle::threshold_label(app.settings.idle_after_ms())
+            ),
+            theme::dim(),
+        ))];
+    }
     if app.live_only {
         return vec![Line::from(Span::styled(
             "No running sessions. ` shows stopped ones too.",
@@ -123,6 +132,21 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     if app.tree {
         title.push_str(" — tree");
     }
+    // The view exists for this sentence, so it goes where the eye already is.
+    // Counted over what `K` would stop, not over the rows: a row left running
+    // because it is mid-turn is not memory anyone is getting back.
+    if app.idle_only {
+        let (n, bytes) = app.reclaimable();
+        title.push_str(&format!(
+            " — idle ≥{}: {n} session{}, {} reclaimable",
+            super::idle::threshold_label(app.settings.idle_after_ms()),
+            if n == 1 { "" } else { "s" },
+            match bytes {
+                0 => "nothing".to_string(),
+                b => util::compact_bytes(b),
+            }
+        ));
+    }
     let block = panel_block(&title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -130,7 +154,13 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     if inner.height == 0 {
         return;
     }
-    let cols = columns::visible_columns(inner.width, &app.hidden_columns);
+    let keep: &[ColumnId] = if app.idle_only {
+        &[ColumnId::Memory]
+    } else {
+        &[]
+    };
+    let hidden = columns::hidden_for(&app.hidden_columns, &app.sessions);
+    let cols = columns::visible_columns(inner.width, &hidden, keep);
     let widths = column_widths(&cols, inner.width);
 
     // Header, recording click spans as we go.
@@ -640,7 +670,12 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
         },
         // A remote row is dimmer throughout its identifying cells, so a table
         // spanning machines still reads as "here, plus elsewhere" at a glance.
-        ColumnId::Host => match s.remote {
+        ColumnId::Host => match &s.remote {
+            // Amber, the colour of something to get round to: an old cctop
+            // over there is not failing, only missing what came since.
+            Some(r) if matches!(r.skew, Some(crate::fleet::Skew::Older(_))) => {
+                theme::colors().cost_mid
+            }
             Some(_) => theme::colors().accent,
             None => theme::colors().dimmer,
         },
@@ -719,7 +754,7 @@ mod tests {
     fn column_widths_stay_positive_when_cramped() {
         // A narrow terminal must not produce a zero or wrapped-around width.
         for w in [10u16, 40, 80] {
-            let cols = columns::visible_columns(w, &[]);
+            let cols = columns::visible_columns(w, &[], &[]);
             let widths = column_widths(&cols, w);
             assert!(
                 widths.iter().all(|&x| x > 0),
@@ -790,7 +825,7 @@ mod tests {
     #[test]
     fn narrow_layouts_fit_inside_the_terminal() {
         for w in [40u16, 60, 80, 100, 132, 200] {
-            let cols = columns::visible_columns(w, &[]);
+            let cols = columns::visible_columns(w, &[], &[]);
             let widths = column_widths(&cols, w);
             let used: u16 = widths.iter().sum::<u16>() + (cols.len() - 1) as u16;
             assert!(used <= w, "width {w} used {used} cells");

@@ -153,6 +153,16 @@ impl App {
                 Ok(n) if n >= 1 => self.write_setting("settings", name, Some(n.into())),
                 _ => self.set_status("alert_error_calls is a whole number, 1 or more"),
             },
+            "idle_after" => match text.parse::<f64>() {
+                Ok(h) if h.is_finite() && h > 0.0 => {
+                    let value = match h.fract() == 0.0 && h < i64::MAX as f64 {
+                        true => toml_edit::Value::from(h as i64),
+                        false => toml_edit::Value::from(h),
+                    };
+                    self.write_setting("settings", name, Some(value))
+                }
+                _ => self.set_status("idle_after is a number of hours, more than 0"),
+            },
             alert if alert.starts_with("alert_") => match text.parse::<f64>() {
                 Ok(v) if v.is_finite() && v >= 0.0 && (alert != "alert_errors" || v <= 100.0) => {
                     // A whole number is written as one, so the file reads

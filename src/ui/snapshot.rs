@@ -424,3 +424,20 @@ fn delete_confirm() {
     app.mode = Mode::DeleteConfirm;
     snap("delete_confirm", &mut app);
 }
+
+/// The idle view, with one session to stop and one it will not: `web` has been
+/// quiet for hours but its tree is still busy, `api` has been sitting for a
+/// day. The title carries the total, and `K` names both.
+#[test]
+fn idle_view_and_reclaim() {
+    let mut app = fixture();
+    app.sessions[0].last_active = ago(Age::hours(9));
+    app.sessions[1].last_active = ago(Age::hours(26));
+    app.toggle_idle_view();
+    // The toast opening it would otherwise cover the corner being pinned.
+    app.toasts = Default::default();
+    snap("idle_view", &mut app);
+    app.batch(super::BatchKind::Reclaim);
+    assert_eq!(app.mode, Mode::BatchConfirm);
+    snap("idle_reclaim", &mut app);
+}

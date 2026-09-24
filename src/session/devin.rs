@@ -24,19 +24,49 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Open a read-only connection to Devin's SQLite database.
-fn readonly_db() -> rusqlite::Result<Connection> {
+/// Open a read-only connection to a Devin SQLite database.
+fn readonly_db(path: &Path) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
-        &*config::DEVIN_SESSIONS_DB,
+        path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
 }
 
-/// Discover every persisted Devin session, newest activity first.
+/// The database that goes with `transcript`: `transcripts/<id>.json` sits
+/// beside `sessions.db`, in this user's home or, for root, in whoever's home
+/// the session was read from. Asking the session rather than the static is
+/// what keeps another user's row from being answered out of root's own
+/// database, where its id is simply absent.
+pub(crate) fn db_for(transcript: Option<&Path>) -> std::path::PathBuf {
+    transcript
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|cli| cli.join("sessions.db"))
+        .unwrap_or_else(|| config::DEVIN_SESSIONS_DB.clone())
+}
+
+/// Discover every persisted Devin session, newest activity first within each
+/// home.
 pub fn list_sessions() -> Vec<Session> {
     let mut sessions = Vec::new();
-    let Ok(db) = readonly_db() else {
-        return sessions;
+    for (i, cli) in config::devin_cli_dirs().iter().enumerate() {
+        // This user's own database honours `$CHISEL_SESSION_DB`; another
+        // home's can only be the conventional one.
+        let (db, transcripts) = match i {
+            0 => (
+                config::DEVIN_SESSIONS_DB.clone(),
+                config::DEVIN_TRANSCRIPTS_DIR.clone(),
+            ),
+            _ => (cli.join("sessions.db"), cli.join("transcripts")),
+        };
+        list_in(&db, &transcripts, &mut sessions);
+    }
+    sessions
+}
+
+fn list_in(db_path: &Path, transcripts: &Path, sessions: &mut Vec<Session>) {
+    let Ok(db) = readonly_db(db_path) else {
+        return;
     };
 
     let mut stmt = match db.prepare(
@@ -44,7 +74,7 @@ pub fn list_sessions() -> Vec<Session> {
          FROM sessions WHERE hidden = 0 ORDER BY last_activity_at DESC",
     ) {
         Ok(stmt) => stmt,
-        Err(_) => return sessions,
+        Err(_) => return,
     };
 
     let rows = match stmt.query_map([], |row| {
@@ -58,14 +88,14 @@ pub fn list_sessions() -> Vec<Session> {
         ))
     }) {
         Ok(rows) => rows,
-        Err(_) => return sessions,
+        Err(_) => return,
     };
 
     for row in rows {
         let Ok((session_id, working_dir, model, created_at, last_activity_at, title)) = row else {
             continue;
         };
-        let transcript = config::DEVIN_TRANSCRIPTS_DIR.join(format!("{session_id}.json"));
+        let transcript = transcripts.join(format!("{session_id}.json"));
         // Without the transcript there is nothing to extract; the row would be
         // a name with no metrics, which is worse than not listing it.
         if !transcript.exists() {
@@ -86,8 +116,6 @@ pub fn list_sessions() -> Vec<Session> {
         session.total_cost = None;
         sessions.push(session);
     }
-
-    sessions
 }
 
 /// Parse an ATIF transcript, enriched with tool outcomes from the database.
@@ -141,7 +169,10 @@ pub fn extract(path: &Path) -> SessionData {
     // Outcomes live in the database, not the transcript: one query maps each
     // call id to the status its update last reported, so a call still running
     // (no update row) is not mistaken for a failure.
-    let statuses = tool_statuses(transcript.get("session_id").and_then(Value::as_str));
+    let statuses = tool_statuses(
+        transcript.get("session_id").and_then(Value::as_str),
+        &db_for(Some(path)),
+    );
 
     // Tokens attributed to each model across the session's steps. One model is
     // spelled two ways in the same transcript — most steps record the slug the
@@ -327,12 +358,12 @@ fn canonical_model(name: &str) -> String {
 /// The transcript records that a call was made; the database records how it
 /// ended. Returns an empty map when the database cannot be read — a transcript
 /// without its database is still worth extracting.
-pub(crate) fn tool_statuses(session_id: Option<&str>) -> HashMap<String, String> {
+pub(crate) fn tool_statuses(session_id: Option<&str>, db: &Path) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let Some(session_id) = session_id else {
         return out;
     };
-    let Ok(db) = readonly_db() else {
+    let Ok(db) = readonly_db(db) else {
         return out;
     };
     let Ok(mut stmt) = db.prepare(
@@ -370,7 +401,7 @@ pub fn delete(session: &Session) -> std::io::Result<()> {
     {
         std::fs::remove_file(path)?;
     }
-    if let Ok(db) = Connection::open(&*config::DEVIN_SESSIONS_DB) {
+    if let Ok(db) = Connection::open(db_for(session.data_file.as_deref())) {
         let _ = db.execute(
             "UPDATE sessions SET hidden = 1 WHERE id = ?1",
             [&session.session_id],
@@ -381,7 +412,7 @@ pub fn delete(session: &Session) -> std::io::Result<()> {
 
 /// Name of the most recently invoked tool, from the database's call ledger.
 pub fn extract_last_tool(session: &Session) -> String {
-    let Ok(db) = readonly_db() else {
+    let Ok(db) = readonly_db(&db_for(session.data_file.as_deref())) else {
         return String::new();
     };
     db.query_row(
@@ -423,13 +454,13 @@ pub fn extract_last_tool(session: &Session) -> String {
 /// message means the agent owes a reply, and an assistant message is the end
 /// of the turn unless its tool calls are still in flight. `agent_mode` on the
 /// session row answers the second question `live_state` asks.
-pub fn live_state(session_id: &str) -> (ActivityState, Option<crate::hook::Permission>) {
-    let Ok(db) = readonly_db() else {
+pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Permission>) {
+    let Ok(db) = readonly_db(&db_for(session.data_file.as_deref())) else {
         return (ActivityState::Working, None);
     };
     (
-        activity_state(&db, session_id),
-        permission_mode(&db, session_id),
+        activity_state(&db, &session.session_id),
+        permission_mode(&db, &session.session_id),
     )
 }
 
@@ -497,7 +528,7 @@ fn permission_mode(db: &Connection, session_id: &str) -> Option<crate::hook::Per
 /// size comes from the model table, and a model it does not know simply has
 /// no context figure to show.
 pub fn extract_context(session: &Session) -> Option<crate::session::ContextUsage> {
-    let db = readonly_db().ok()?;
+    let db = readonly_db(&db_for(session.data_file.as_deref())).ok()?;
     let used = db
         .query_row(
             "SELECT metadata FROM message_nodes \

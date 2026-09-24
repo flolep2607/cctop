@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰────────╭ Stop idle sessions? ───────────────────────────────────────╮────────╯
+╭ Session│  Stop 1 idle session, freeing 180.0M                       │────────╮
+│    LAST│                                                            │        │
+│●     9h│    · api                                    1d  180.0M     │ checko…│
+│●     1d│                                                            │        │
+╰────────│  Left running (1):                                         │────────╯
+╭ Info  P│    · Fix the checkout redirect loop — busy (12% CPU)       │ Context╮
+│Root /us│                                                            │        │
+│    PID │  Each is sent SIGTERM and exits cleanly; R resumes it.     │        │
+│   4101 │  A prompt typed into one and not sent is lost.             │        │
+│   4188 │                                                            │        │
+│   4290 │  [y] stop 1    [n / Esc] cancel                            │        │
+│        ╰────────────────────────────────────────────────────────────╯        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter K Stop idle Space Mark I Back  Idle≥6h       ⧉ share

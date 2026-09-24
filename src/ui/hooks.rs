@@ -167,6 +167,7 @@ mod tests {
         app.sessions[0].remote = Some(crate::session::Remote {
             host: "elsewhere".into(),
             branch: None,
+            ..Default::default()
         });
         assert!(!app.codex_hooks_heard());
 

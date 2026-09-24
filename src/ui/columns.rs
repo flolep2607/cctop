@@ -212,7 +212,7 @@ pub const COLUMNS: &[Column] = &[
         // row twice — but the branch identifies it more sharply.
         priority: 67,
         right_align: false,
-        desc: "Machine the session is on, for rows read from another over ssh (--host).\nlocal for this one. Hidden unless a --host is configured.",
+        desc: "Machine the session is on, for rows read from another over ssh (--host).\nlocal for this one. Hidden unless a --host is configured.\n↑ that machine runs an older cctop; Enter on the row offers to update it.",
     },
     Column {
         id: ColumnId::User,
@@ -223,7 +223,7 @@ pub const COLUMNS: &[Column] = &[
         // repository are otherwise the same row twice.
         priority: 67,
         right_align: false,
-        desc: "User whose home the session was read from, when cctop is watching\nevery user (running as root, or $CCTOP_ALL_USERS). Blank for your own.\nHidden when only your own sessions are in view.",
+        desc: "User whose home the session was read from, when cctop is watching\nevery user (running as root, or $CCTOP_ALL_USERS). Shown only while\nmore than one user's sessions are in view. Filter with user:<name>.",
     },
     Column {
         id: ColumnId::Profile,
@@ -302,6 +302,40 @@ pub fn parse_hidden(list: &str) -> Vec<ColumnId> {
         .collect()
 }
 
+/// How many users' sessions are in `sessions`, this user counting as one.
+///
+/// What decides whether USER is drawn and whether the tree gets a user level.
+/// Asked of the data rather than of [`crate::config::OTHER_HOMES`], because a
+/// root that reads eight homes, of which only one holds any sessions, has one
+/// user on screen — and a column naming that one on every row answers nothing.
+pub fn users_in_view<'a>(sessions: impl IntoIterator<Item = &'a Session>) -> usize {
+    let mut seen: Vec<Option<&str>> = Vec::new();
+    for s in sessions {
+        let owner = s.owner.as_deref();
+        if !seen.contains(&owner) {
+            seen.push(owner);
+            // Two is the whole question; counting on is a walk for nothing.
+            if seen.len() > 1 {
+                break;
+            }
+        }
+    }
+    seen.len()
+}
+
+/// `hidden` plus the columns the data itself has nothing to put in.
+///
+/// Separate from the list the user and `$CCTOP_COLUMNS_HIDE` control, because
+/// it changes as sessions come and go: another user's first session, landing
+/// mid-run, has to bring USER in without anyone asking.
+pub fn hidden_for(hidden: &[ColumnId], sessions: &[Session]) -> Vec<ColumnId> {
+    let mut out = hidden.to_vec();
+    if users_in_view(sessions) < 2 && !out.contains(&ColumnId::User) {
+        out.push(ColumnId::User);
+    }
+    out
+}
+
 /// The columns to draw in `total` cells of width, widest-first casualties last.
 ///
 /// Every fixed column costs its width plus a gutter whether or not it fits, so
@@ -309,7 +343,12 @@ pub fn parse_hidden(list: &str) -> Vec<ColumnId> {
 /// terminal — which is how MODEL, HARNESS, BRANCH and PROJECT used to vanish
 /// together and leave rows no one could tell apart. Dropping by priority
 /// instead means the columns that name a row are the last to go.
-pub fn visible_columns(total: u16, hidden: &[ColumnId]) -> Vec<&'static Column> {
+///
+/// `keep` is dropped last whatever its priority, for a view that exists to
+/// show one figure: the idle view is sorted by memory, and MEM is among the
+/// first columns a narrow table gives up. A column the user hid stays hidden —
+/// `keep` outranks width, not their choice.
+pub fn visible_columns(total: u16, hidden: &[ColumnId], keep: &[ColumnId]) -> Vec<&'static Column> {
     let mut cols: Vec<&'static Column> =
         COLUMNS.iter().filter(|c| !hidden.contains(&c.id)).collect();
 
@@ -319,7 +358,7 @@ pub fn visible_columns(total: u16, hidden: &[ColumnId]) -> Vec<&'static Column> 
             .iter()
             .enumerate()
             // Later columns lose ties, so the drop order stays predictable.
-            .min_by_key(|(i, c)| (c.priority, std::cmp::Reverse(*i)))
+            .min_by_key(|(i, c)| (keep.contains(&c.id), c.priority, std::cmp::Reverse(*i)))
             .map(|(i, _)| i);
         match victim {
             Some(i) => cols.remove(i),
@@ -460,14 +499,21 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
             Some(crate::collide::Overlap::Directory) => "·".into(),
             None => String::new(),
         },
+        // The marker leads rather than trails: the column is ten cells wide
+        // and a host name long enough to be cut would take a trailing one
+        // with it. Only a host that is behind is marked — it is the one with
+        // something to do, from the row's menu.
         ColumnId::Host => match &s.remote {
+            Some(r) if matches!(r.skew, Some(crate::fleet::Skew::Older(_))) => {
+                format!("↑{}", r.host)
+            }
             Some(r) => r.host.clone(),
             None => "local".into(),
         },
-        // Blank for your own rows: repeating the operator's own name down the
-        // table says nothing, and the point of the column is the ones that
-        // are not theirs.
-        ColumnId::User => s.owner.clone().unwrap_or_default(),
+        // Named for your own rows too. The column is only drawn once a second
+        // user is in view (see `users_in_view`), and there a blank reads as
+        // "nobody" rather than "you" — root's own rows most of all.
+        ColumnId::User => crate::config::user_label(s.owner.as_deref()).to_string(),
         // Blank rather than a dash for a provider with no profiles: the column
         // is about Claude's config directories, and every other harness is not
         // missing one so much as not having the idea.
@@ -832,9 +878,10 @@ mod tests {
     /// say *which session this is* rather than how it is doing.
     #[test]
     fn columns_drop_by_priority_as_width_shrinks() {
-        assert_eq!(visible_columns(200, &[]).len(), COLUMNS.len());
+        assert_eq!(visible_columns(200, &[], &[]).len(), COLUMNS.len());
 
-        let ids = |w| -> Vec<ColumnId> { visible_columns(w, &[]).iter().map(|c| c.id).collect() };
+        let ids =
+            |w| -> Vec<ColumnId> { visible_columns(w, &[], &[]).iter().map(|c| c.id).collect() };
         let narrow = ids(90);
         assert!(narrow.len() < COLUMNS.len(), "90 cells must drop something");
         for keep in [ColumnId::Status, ColumnId::Last, ColumnId::Project] {
@@ -857,11 +904,42 @@ mod tests {
         let hidden = parse_hidden("cpu, mem,nonsense");
         assert_eq!(hidden, vec![ColumnId::Cpu, ColumnId::Memory]);
         // Hidden at any width, including one where everything else fits.
-        let ids: Vec<ColumnId> = visible_columns(500, &hidden).iter().map(|c| c.id).collect();
+        let ids: Vec<ColumnId> = visible_columns(500, &hidden, &[])
+            .iter()
+            .map(|c| c.id)
+            .collect();
         assert_eq!(ids.len(), COLUMNS.len() - 2);
         assert!(!ids.contains(&ColumnId::Cpu));
         // The flexible column can't be hidden: it has no width to give back.
         assert!(parse_hidden("project").is_empty());
+    }
+
+    /// USER comes and goes with the data: one user in view hides it, a second
+    /// user's session brings it in, and your own rows then carry your name.
+    #[test]
+    fn the_user_column_shows_only_with_two_users_in_view() {
+        let mine = session("a");
+        let mut theirs = session("b");
+        theirs.owner = Some("winshen".into());
+
+        let only_mine = [mine.clone(), mine.clone()];
+        assert_eq!(users_in_view(&only_mine), 1);
+        assert!(hidden_for(&[], &only_mine).contains(&ColumnId::User));
+        // Somebody else's sessions alone are still one user.
+        assert!(hidden_for(&[], std::slice::from_ref(&theirs)).contains(&ColumnId::User));
+
+        let both = [mine.clone(), theirs.clone()];
+        assert_eq!(users_in_view(&both), 2);
+        assert!(!hidden_for(&[], &both).contains(&ColumnId::User));
+        // An explicit hide still wins.
+        assert!(hidden_for(&[ColumnId::User], &both).contains(&ColumnId::User));
+
+        let now = Utc::now();
+        assert_eq!(render_cell(ColumnId::User, &theirs, &now), "winshen");
+        assert_eq!(
+            render_cell(ColumnId::User, &mine, &now),
+            crate::config::MY_USER.as_str()
+        );
     }
 
     #[test]

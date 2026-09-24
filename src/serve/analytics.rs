@@ -359,6 +359,7 @@ mod tests {
         s.remote = Some(Remote {
             host: "buildbox".into(),
             branch: Some("main".into()),
+            ..Default::default()
         });
         s.total_cost = Some(4.2);
         s.input_tokens = 4_000;

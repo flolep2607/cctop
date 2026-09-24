@@ -247,7 +247,10 @@ fn read_devin(path: &Path, sink: &mut Sink) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     // A call's outcome is not in the transcript — the step records the call,
     // the database records how it ended.
-    let statuses = devin::tool_statuses(doc.get("session_id").and_then(Value::as_str));
+    let statuses = devin::tool_statuses(
+        doc.get("session_id").and_then(Value::as_str),
+        &devin::db_for(Some(path)),
+    );
     if let Some(steps) = doc.get("steps").and_then(Value::as_array) {
         for step in steps {
             sink.devin(step, &statuses);

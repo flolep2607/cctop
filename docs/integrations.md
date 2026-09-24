@@ -273,6 +273,45 @@ A host that stops answering keeps its last rows and says so in the footer
 (`⚠ devbox: Permission denied`). Blanking them would be the stronger claim —
 those agents have not stopped, cctop has merely lost sight of them.
 
+### Keeping the far side up to date
+
+The two ends are separate installs, and nothing ties their versions together —
+a server can sit on 0.17.4 for months while the laptop moves on, still sending
+rows, just without whatever came since. So each time cctop connects to a host
+(once at the first read, and again after the host comes back from being
+unreachable) it also runs `ssh <host> cctop --version`, over the same options
+as the poll. Every cctop ever released answers that, which is why it is a
+separate round trip rather than a field in `--json`: the remote that matters is
+the old one, and the old one would not know to send it.
+
+When the versions differ you hear about it once per host per run:
+
+| The far side is… | What cctop shows |
+|---|---|
+| **older** | a toast; `↑devbox` in amber in the HOST column; a `cctop` line in Info; and **Update cctop on its host** in the row menu (Enter) |
+| **newer** | a toast and an Info line saying it is *this* machine's cctop that is behind — `cctop --update` here |
+| **missing** | a toast saying there is no cctop where ssh looks, and how to name one with `--host host:/path/to/cctop` |
+
+**Update cctop on its host** is only offered for a host known to be behind, and
+only ever runs after you say yes to a confirmation that shows the command:
+
+```bash
+ssh devbox -- cctop --update
+```
+
+It runs with no terminal (`ssh -T`, `BatchMode=yes`, a closed stdin), and
+`--update` asks questions only on a terminal — so the far side never waits on a
+prompt nobody can see. If the binary there sits in a directory only root can
+write (the `/usr/local/bin` install), the update fails and cctop says so, with
+the command to run yourself:
+
+```bash
+ssh -t devbox sudo cctop --update
+```
+
+cctop does not run sudo on another machine for you. The same comparison is in
+`cctop doctor --host devbox`, which warns when either side is behind.
+
 ## Every user on the machine
 
 Run cctop as root and it reads every user's sessions, not root's own — which on
@@ -288,16 +327,39 @@ CCTOP_HOMES=/export/people/ana:/export/people/bo cctop   # homes discovery canno
 ```
 
 Homes come from `/etc/passwd` — root and the login accounts, service accounts
-skipped — plus whatever sits under `/home` (or `/Users`), which catches users
-served by LDAP or SSSD rather than the local file. `$CCTOP_HOMES` names any the
-machine keeps somewhere else entirely, `:`-separated as a `PATH` is.
+skipped — plus whatever sits under `/home`, which catches users served by LDAP
+or SSSD rather than the local file. `$CCTOP_HOMES` names any the machine keeps
+somewhere else entirely, `:`-separated as a `PATH` is. Each home is read for
+every harness cctop knows — Claude Code and its profiles, Codex, Cursor, Gemini,
+OpenCode, Pi, Windsurf and Devin — so another user's session has its cost,
+tokens and context like your own, not a `$0.00` row.
 
-Rows gain a **USER** column naming whose session each one is, blank for your own
-and hidden entirely when only your own homes are in view. The name is also
-searchable, so `/ana` filters the table to that person's sessions.
+Their running agents are matched to their transcripts the ordinary way, by
+resume id or working directory, but only ever to *their* transcripts: a process
+is tied to a user by its uid, and a session by the home it was read from. Two
+people with a checkout at the same path — a shared `/srv/app` — never have one's
+agent credited to the other's session. An agent whose owner has no home cctop
+can read shows as a row of its own.
 
-What cctop *does* stays privileged in the ordinary way: as root, `k` really will
-kill someone else's agent and `d` really will delete their transcript. The one
-thing it declines to guess is identity — the Account line and the `account`
-field in `--json` are read from your own credentials, so they are left off
-another user's row rather than stamped with your email.
+Rows gain a **USER** column naming whose session each one is, your own included.
+It appears only while more than one user's sessions are on the table, and goes
+again when they are not. `/user:ana` filters the table to that person's
+sessions, and the [tree view](the-table.md#the-tree-view) puts a heading per user
+above the repositories.
+
+### Root mode is read-only for everyone else
+
+cctop reads other users' homes and never writes to them. Its cache, UI
+preferences, logs, recordings, hooks and shell aliases all go in root's own
+home (`/root/.cache/cctop` and so on), and `d` on another user's session is
+refused rather than deleting their transcript. That holds under a `sudo` that
+kept your `$HOME` or `$XDG_*` variables, too: root's home is read from
+`/etc/passwd`, an inherited directory pointing into someone else's home is
+ignored, and that home is read as theirs, under their name. Stopping an agent
+(`Ctrl-k`, confirmed first) is the one action that still reaches another user's
+session: it signals a process and touches no file, and stopping a runaway
+process is what root is for.
+
+The one thing cctop declines to guess is identity — the Account line and the
+`account` field in `--json` are read from your own credentials, so they are left
+off another user's row rather than stamped with your email.

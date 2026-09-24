@@ -34,7 +34,7 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `PERM` | `perm` | How much it asks before acting — see below |
 | `!` | `conflict` | Another agent is on the same ground — see below |
 | `HOST` | `host` | Which machine, when [reading more than one](integrations.md#more-than-one-machine). Hidden otherwise |
-| `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Blank for your own, hidden otherwise |
+| `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Shown only while more than one user's sessions are on the table |
 | `BRANCH` | `branch` | Branch checked out in the working directory, `@<commit>` when detached, `─` when not a repository |
 | `PROJECT` | `project` | The session's title if it has one, otherwise its working directory |
 
@@ -206,6 +206,12 @@ cell that matched is underlined, so it is clear *why* a row survived the filter.
 `n` and `N` step through matches, `Esc` clears, and `↑`/`↓` inside the prompt
 bring back a search you ran before — the last twenty are remembered across runs.
 
+`user:<name>` narrows to one person's sessions when cctop is
+[watching every user](integrations.md#every-user-on-the-machine), without the
+name also matching every title that happens to contain it. Part of a name is
+enough, the rest of the query still applies (`user:ana flaky test`), and two
+`user:` terms show either user's rows.
+
 `Tab` widens the search to the transcripts themselves, which is how you find the
 session where something was actually discussed rather than one whose name
 happens to mention it. Transcript matches are added to the metadata matches
@@ -225,7 +231,10 @@ up to 64 MiB.
 
 `T` groups the table the way htop's tree mode groups processes: each
 repository gets a heading, each checkout of it a heading beneath that, and the
-sessions hang off the checkout they were started in.
+sessions hang off the checkout they were started in. When the rows shown belong
+to more than one user — root [watching every user](integrations.md#every-user-on-the-machine)
+— each user gets a heading above their repositories, so two people in the same
+repository are two groups that fold separately.
 
 ```
    LAST       $  BRANCH  PROJECT
@@ -265,6 +274,48 @@ and groups are ordered by their best-placed session — a cost sort puts the
 repository with the dearest session first — without a group ever being split.
 `b` unfolds whatever is hiding the session that rang. The view and the folds
 are remembered across runs.
+
+## Idle sessions, and the memory they hold
+
+An agent left open keeps its whole process tree: a `claude` process is a few
+hundred megabytes, and an MCP server it started is often another hundred. On a
+shared machine that is where the RAM goes — twenty sessions a few days old is
+ten gigabytes that nobody is typing into.
+
+`I` narrows the table to those: sessions that still have a process but have
+written nothing for `idle_after` hours (6 unless `,` says otherwise). They are
+sorted by the memory of their process tree, the root and every child — the
+figure the Processes panel adds up — and the MEM column stays on screen however
+narrow the terminal. `LAST` is how long each has been quiet. The table's title
+says what a stop would give back:
+
+```
+╭ Sessions (14/340) — idle ≥6h: 12 sessions, 5.4G reclaimable ──────╮
+```
+
+`K` in this view stops them. With rows marked it stops the marked ones; with
+none marked it stops every one the view shows, since the view is already the
+selection. A confirmation lists each with its idle time and memory, and the
+total. Some are left running, and are named with the reason:
+
+- **working** — its own hooks say a turn is under way;
+- **asking a question** — a permission prompt or an elicitation is waiting on
+  you;
+- **busy (N% CPU)** — nothing in the transcript, but the process tree is using
+  at least 5% of a core, which is what a long build or a background shell
+  looks like from outside;
+- **on host** — a row from another machine, which cctop reads and does not
+  signal.
+
+Stopping is SIGTERM to the agent, the same as `Ctrl+K`, never SIGKILL: the
+agent writes its transcript out and takes its children with it, so `R` resumes
+any of them later. What cctop cannot see is a prompt typed into one and not
+sent, which goes with it — the confirmation says so.
+
+`I` again, or `Esc`, puts the table back the way it was sorted. When a stop
+would give back more than a gigabyte the overview says so beside the agents'
+total, as `Agent mem 10035 MB · 5.4G idle (I)`, so the view does not have to be
+remembered to be found.
 
 ## The row menu
 
@@ -325,13 +376,14 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `#` | Cost floor: only sessions costing ≥ `$X` |
 | `,` | Settings and keybinds (see below) |
 | `` ` `` | Show only running sessions |
+| `I` | Idle view: live sessions quiet for `idle_after` hours, most memory first (see above) |
 | `[`, `]` | Move through the Tool Activity tool filter |
 | `v` | Toggle inline diffs for edits |
 | `L` | Toggle the Tool Activity live filter |
 | `T` | Tree view: group by repository and worktree (see above) |
 | `+`, `-`, `=` | Speed up / slow down / reset refresh interval |
 | `Space` | Mark / unmark the selected session |
-| `D`, `K` | Delete / terminate all marked sessions (with confirmation) |
+| `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |
 | `U` | Clear all marks |
 | `h` or `F8` | Agent integration: what reports to cctop, and install it |
 | `y` | Copy resume command or transcript path |
@@ -396,6 +448,7 @@ tokens, and only what you changed is written:
 theme = "light"          # auto / light / dark / mono
 notify = true
 compact_threshold = 90   # context % the agent compacts at
+idle_after = 12          # hours quiet before `I` counts a live session idle
 
 [keys]
 quit = "x"

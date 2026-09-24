@@ -89,11 +89,6 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // The conversations and serves that reach back to a remote row ask the
     // `Host`, not the row — the row only knows the machine's name.
     app.remote_hosts = hosts;
-    // Likewise USER: with only this user's homes in view, every row's owner is
-    // the person reading the screen.
-    if crate::config::OTHER_HOMES.is_empty() {
-        app.hidden_columns.push(ColumnId::User);
-    }
     // And PROFILE, which most machines have exactly one of. A column repeating
     // `default` down every row is a column that answers nothing.
     if crate::config::profile_count() <= 1 {
@@ -304,8 +299,13 @@ fn restore_terminal() {
 /// keyboard's refresh. One wedged host must cost only itself.
 fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
     std::thread::spawn(move || {
+        let mut handshake = crate::fleet::Handshake::default();
         loop {
             let snapshot = host.poll();
+            // Asked of the snapshot before it is sent away, and the probe sent
+            // after it: the rows are the news, and the version is a footnote
+            // that can wait the one extra round trip it costs.
+            let ask = handshake.after(&snapshot);
             if tx
                 .send(Response::Remote {
                     host: host.target.clone(),
@@ -315,6 +315,17 @@ fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
             {
                 // The UI has gone; so should this.
                 return;
+            }
+            let probe = match ask {
+                crate::fleet::Ask::Nothing => None,
+                crate::fleet::Ask::Probe => Some(host.probe()),
+                crate::fleet::Ask::Missing => Some(crate::fleet::Probe::Missing),
+            };
+            if let Some(probe) = probe {
+                let _ = tx.send(Response::RemoteVersion {
+                    host: host.target.clone(),
+                    probe,
+                });
             }
             std::thread::sleep(crate::fleet::POLL);
         }
@@ -612,6 +623,14 @@ fn event_loop(
                     app.merge_remotes();
                     rows_changed = true;
                 }
+                Ok(Response::RemoteVersion { host, probe }) => {
+                    app.got_remote_version(host, probe);
+                    // The HOST cell's marker rides on the rows, which are
+                    // stamped as they are merged back in.
+                    app.merge_remotes();
+                    rows_changed = true;
+                }
+                Ok(Response::RemoteUpdated { host, result }) => app.remote_updated(host, result),
                 Ok(Response::Scanned { query, hits }) => app.scanned(query, hits),
                 Ok(Response::Insight(text)) => {
                     app.insight = Some(text);
@@ -650,6 +669,10 @@ fn event_loop(
         if rows_changed {
             app.check_bells();
         }
+        // After everything this pass could have queued a bell for — the rows
+        // above, a quota window freed while draining — so a moment that
+        // brought several kinds of news rings once and says all of them.
+        app.notify.ring_pending();
         // The page gets what the table has, and only when it changed. This is
         // also what wakes a browser: its event stream is parked on the version
         // this bumps, so a page updates when the table does rather than on a

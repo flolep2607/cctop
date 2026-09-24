@@ -204,7 +204,9 @@ trade, not a stronger one.
 
 Each run generates an access token and puts it in the URL it prints. Every
 request needs it, including the ones that only return HTML, so a wrong token
-cannot be used to find out which routes exist.
+cannot be used to find out which routes exist. The one exception is
+`GET /metrics`, which carries no transcript and answers without one — see
+[Scraping it](#scraping-it-with-prometheus).
 
 The URL being the whole credential is deliberate: it makes the link shareable
 over whatever channel you already trust, and it is why `--no-token` is a thing to
@@ -212,7 +214,49 @@ justify rather than a convenience. Without it, every process and every user on
 the machine can read your sessions — and a later `--bind` exposes them to the
 network with no gate at all.
 
-Restarting `cctop serve` mints a new token and invalidates the old link.
+Restarting `cctop serve` mints a new token and invalidates the old link —
+unless `--token-file` keeps them, [below](#keeping-them-across-restarts).
+
+Either token is accepted in three places, all checked by the same gate: the
+`?t=` query parameter a link carries, the cookie a page hands back so a reload
+still gets in, and an `Authorization: Bearer <token>` header — for a script or
+an HTTP client, and it keeps the token out of the URL they log and display.
+
+### Keeping them across restarts
+
+A token minted per run is right for a link that can type at your agents, and
+wrong for a bookmarked dashboard or a read-only link pinned to a status board,
+which then break on every restart. `--token-file` is the opt-in:
+
+```bash
+cctop serve --token-file ~/.config/cctop/serve-tokens
+```
+
+```
+cctop: new tokens written to /home/you/.config/cctop/serve-tokens — they outlive this run; --rotate-token replaces them
+```
+
+When the file exists its tokens are served; when it does not, fresh ones are
+minted and written to it — created with `O_EXCL` and mode `600`, so there is no
+moment at which they sit in a file someone else can read. The next run says
+`tokens from …` and every link from the last one still works.
+
+A file that is not plainly yours is refused rather than repaired:
+
+- **readable or writable by group or others** — anyone who could read it
+  already holds the credential, and tightening the mode now does not un-leak it;
+- **owned by another user** — they can rewrite it, and a token someone else
+  chose is one they know;
+- **a symlink, or not a regular file** — the file checked has to be the file
+  read, and a link can be repointed in between.
+
+Each refusal says so and names the way out. **Rotating** is
+`cctop serve --token-file <path> --rotate-token`, or deleting the file: both
+mint new tokens and revoke every link built on the old ones. The directories above the file are not checked, so put it somewhere only
+you can write.
+
+The dashboard's `B` never reads a token file: stopping that serve still revokes
+every link it handed out.
 
 ## Several machines at once
 
@@ -248,6 +292,8 @@ these flags — the route says so with a 502 rather than an empty page.
 | `--delay <SECS>` | Seconds between refreshes. Default `2` |
 | `--host <HOST>` | Also serve another machine's sessions. Repeatable |
 | `--notify <URL>` | POST a JSON event when a session crosses into waiting or asking. Also read from `CCTOP_NOTIFY_URL`, including by a dashboard-hosted serve |
+| `--token-file <PATH>` | Keep the tokens across restarts: read them from PATH, or mint them and write it with mode `600`. Refuses a file others can read or do not own, and `--no-token` — see [the token](#keeping-them-across-restarts) |
+| `--rotate-token` | With `--token-file`: replace the tokens in it, revoking every link built on the old ones |
 
 ## What it serves
 
@@ -261,7 +307,7 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /api/hosts` | Which `--host` machines could not be read, and why |
 | `GET /api/quota` | Each account's rate-limit status and windows — `{"claude":[…],"codex":[…]}`, each profile with `status`, `detail`, `plan` and `windows` |
 | `GET /api/search?q=<query>` | Both search tiers over every session: `{"hits":[{key, session_id, snippet, score}]}`. Literal matches carry the matching text; topical-only hits carry `~NN% ` plus the chunk head |
-| `GET /metrics` | The same table as Prometheus text exposition — see [Scraping it](#scraping-it-with-prometheus) |
+| `GET /metrics` | The same table as Prometheus text exposition. **Needs no token** — see [Scraping it](#scraping-it-with-prometheus) |
 | `GET /insight/optimize` | The text `cctop optimize` prints, as `text/plain` |
 | `GET /insight/compare` | The text `cctop compare` prints, as `text/plain` |
 | `GET /favicon.svg` | The page's icon |
@@ -288,10 +334,19 @@ pays — they are asked for, not polled.
 ## Scraping it with Prometheus
 
 `/metrics` is the snapshot every other route serves, summed into gauges in the
-Prometheus text format. It sits behind the same token as everything else, and
-the read-only link opens it too — it says nothing `/api/sessions` does not, and
-leaves out titles, prompts and full paths on purpose, since a metrics store
-keeps what it is sent for months and shows it to anyone with a dashboard login.
+Prometheus text format. It says nothing `/api/sessions` does not, and leaves
+out titles, prompts and full paths on purpose, since a metrics store keeps what
+it is sent for months and shows it to anyone with a dashboard login.
+
+**It is the one route that needs no token.** What is left is aggregate counts,
+costs, model names, project directory names and eight-character session ids —
+nothing a token would be protecting — and a scrape config is the file that gets
+copied into config repositories and Helm values, which is the last place a
+credential that also opens your transcripts should live. It also means a
+restart never breaks the scrape. Every other route keeps its check, and only
+`GET` (or `HEAD`) is answered. The cost: whoever can reach the port can read
+the numbers — this machine's users on the default loopback bind, your network
+under `--bind`, and anyone with the hostname under `--tunnel`.
 
 | Metric | Labels | |
 |---|---|---|
@@ -330,14 +385,10 @@ scrape_configs:
     scrape_interval: 30s
     static_configs:
       - targets: ["127.0.0.1:7777"]
-    params:
-      t: ["71b02ee4…"]   # the read-only token from the second line cctop printed
 ```
 
-The token is minted per run, so a restart means updating `params.t`. For a
-Prometheus on the same machine, `cctop serve --no-token --no-actions` on the
-default loopback bind is the trade that removes that step — at the cost the
-token section spells out: any local process or user can then read the page.
+No `authorization:` and no `params:` — a plain `cctop serve` is scrapeable as
+it is, and stays so across restarts.
 
 ## Notes
 

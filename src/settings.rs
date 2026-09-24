@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 12] = [
+pub const SETTINGS: [(&str, &str, &str); 13] = [
     (
         "theme",
         "\"auto\"",
@@ -72,7 +72,17 @@ pub const SETTINGS: [(&str, &str, &str); 12] = [
         "false",
         "Tell an agent when a live peer just wrote its file",
     ),
+    (
+        "idle_after",
+        "6",
+        "Hours quiet before a live session counts as idle (I)",
+    ),
 ];
+
+/// `idle_after`'s default, in hours: long enough that nobody's lunch break
+/// counts, short enough that yesterday's forgotten sessions do. The number
+/// [`SETTINGS`] spells for it must agree, which a test holds it to.
+pub const IDLE_AFTER_HOURS: f64 = 6.0;
 
 /// Every dashboard action a `[keys]` entry can rebind: its name, the key it is
 /// on by default, and what it does.
@@ -82,7 +92,7 @@ pub const SETTINGS: [(&str, &str, &str); 12] = [
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 48] = [
+pub const BINDINGS: [(&str, &str, &str); 49] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "This settings panel"),
@@ -122,6 +132,7 @@ pub const BINDINGS: [(&str, &str, &str); 48] = [
     ("sort", "S", "Sort by a column"),
     ("cost_floor", "#", "Only sessions costing at least $X"),
     ("running_only", "`", "Show only running sessions"),
+    ("idle", "I", "Live sessions left idle, biggest first"),
     ("new_tab", "t", "New tab"),
     ("open_hosted", "A", "Open the agent this cctop launched"),
     ("notify", "w", "Toggle alerts"),
@@ -162,6 +173,9 @@ pub struct Settings {
     /// says otherwise, because it is the one thing that makes the hook write
     /// to the agent's stdout on a tool call.
     pub warn_agents: Option<bool>,
+    /// Hours without activity before a live session is idle — see
+    /// [`Settings::idle_after_ms`].
+    pub idle_after: Option<f64>,
     /// `(action, key)` as written, in file order.
     pub keys: Vec<(String, String)>,
     /// Everything that was written and could not be used, said in a sentence.
@@ -211,6 +225,13 @@ impl Settings {
                     "alert_burn" => amount(item).map(|v| out.alert_burn = Some(v)).is_none(),
                     "alert_today" => amount(item).map(|v| out.alert_today = Some(v)).is_none(),
                     "alert_stall" => amount(item).map(|v| out.alert_stall = Some(v)).is_none(),
+                    // Zero would make every live session idle the moment it
+                    // stopped typing, which is a list of everything, not of
+                    // what was forgotten.
+                    "idle_after" => amount(item)
+                        .filter(|h| *h > 0.0)
+                        .map(|v| out.idle_after = Some(v))
+                        .is_none(),
                     "alert_errors" => amount(item)
                         .filter(|p| *p <= 100.0)
                         .map(|v| out.alert_errors = Some(v))
@@ -271,6 +292,7 @@ impl Settings {
             "alert_errors" => self.alert_errors.map(|v| v.to_string()),
             "alert_error_calls" => self.alert_error_calls.map(|v| v.to_string()),
             "alert_stall" => self.alert_stall.map(|v| v.to_string()),
+            "idle_after" => self.idle_after.map(|v| v.to_string()),
             _ => None,
         };
         match set {
@@ -306,6 +328,11 @@ impl Settings {
                 std::time::Duration::from_secs_f64(m * 60.0)
             }),
         }
+    }
+
+    /// How long a live session has to have been quiet to count as idle.
+    pub fn idle_after_ms(&self) -> i64 {
+        (self.idle_after.unwrap_or(IDLE_AFTER_HOURS) * 3_600_000.0) as i64
     }
 }
 
@@ -601,6 +628,18 @@ mod tests {
             map.remap.is_empty(),
             "a default rebound onto itself is no change"
         );
+    }
+
+    #[test]
+    fn idle_after_is_hours_and_refuses_zero() {
+        let default = SETTINGS.iter().find(|s| s.0 == "idle_after").unwrap().1;
+        assert_eq!(default.parse::<f64>().unwrap(), IDLE_AFTER_HOURS);
+        assert_eq!(Settings::default().idle_after_ms(), 6 * 3_600_000);
+        let s = Settings::parse("[settings]\nidle_after = 1.5\n");
+        assert_eq!(s.idle_after_ms(), 90 * 60_000);
+        let s = Settings::parse("[settings]\nidle_after = 0\n");
+        assert_eq!(s.idle_after, None);
+        assert_eq!(s.problems.len(), 1, "{:?}", s.problems);
     }
 
     #[test]

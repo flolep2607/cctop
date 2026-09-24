@@ -323,6 +323,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Serve => modals::draw_serve(frame, area, app),
         Mode::ShareQr => modals::draw_share_qr(frame, area, app, &mut layout),
         Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
+        Mode::RemoteUpdateConfirm => {
+            modals::draw_remote_update_confirm(frame, area, app, &mut layout)
+        }
         Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app, &mut layout),
         Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app, &mut layout),
         Mode::BatchDeleteBlocked => modals::draw_batch_blocked(frame, area, app, true, &mut layout),
@@ -1163,18 +1166,30 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{:<r_label_w$}", "Agent mem"), theme::label()),
             Span::styled(format!("{mem_mb:.0} MB"), theme::value()),
         ];
-        push_while_fits(
-            &mut mem_spans,
-            vec![vec![Span::styled(
-                format!(
-                    " · {} in / {} out",
-                    util::compact_tokens(stats.total_input),
-                    util::compact_tokens(stats.total_output)
+        // Beside the total it is a share of, and only past a gigabyte: under
+        // that it would be on screen most of the time and worth little when
+        // it was. First in the queue, so a narrow panel keeps it over tokens.
+        let (idle_n, idle_bytes) = app.reclaimable();
+        let mut mem_groups = Vec::new();
+        if idle_n > 0 && idle_bytes >= super::idle::HINT_BYTES {
+            mem_groups.push(vec![
+                Span::styled(" · ", theme::dim()),
+                Span::styled(
+                    format!("{} idle", util::compact_bytes(idle_bytes)),
+                    Style::default().fg(theme::colors().cost_mid),
                 ),
-                theme::dim(),
-            )]],
-            right_w,
-        );
+                Span::styled(" (I)", theme::dim()),
+            ]);
+        }
+        mem_groups.push(vec![Span::styled(
+            format!(
+                " · {} in / {} out",
+                util::compact_tokens(stats.total_input),
+                util::compact_tokens(stats.total_output)
+            ),
+            theme::dim(),
+        )]);
+        push_while_fits(&mut mem_spans, mem_groups, right_w);
         let right_lines = vec![
             Line::from(model_spans),
             Line::from(session_spans),
@@ -1963,7 +1978,20 @@ fn list_hints(app: &App) -> Vec<Hint> {
         hints.push(hint("↵", "Actions"));
     }
     hints.push(hint("/", "Filter"));
-    if app.marked.is_empty() {
+    if app.idle_only {
+        // The view's whole purpose is one key, and it does not mean here what
+        // it means elsewhere: it stops the view, not only the marks.
+        hints.push(hint(
+            "K",
+            if app.marked.is_empty() {
+                "Stop idle"
+            } else {
+                "Stop marked"
+            },
+        ));
+        hints.push(hint("Space", "Mark"));
+        hints.push(hint("I", "Back"));
+    } else if app.marked.is_empty() {
         hints.push(hint("Space", "Mark"));
     } else {
         // Marking is done; what is unobvious now is how to act on the marks.
@@ -2001,6 +2029,15 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::styled(
             " click q again to quit ",
             Style::default().fg(theme::colors().cost_high),
+        ));
+    }
+    if app.idle_only {
+        spans.push(Span::styled(
+            format!(
+                " Idle≥{} ",
+                super::idle::threshold_label(app.settings.idle_after_ms())
+            ),
+            Style::default().fg(theme::colors().panel_title),
         ));
     }
     if let Some(age) = app.age_filter {

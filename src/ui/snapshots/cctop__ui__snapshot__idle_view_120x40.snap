@@ -9,12 +9,12 @@ expression: screen
 │This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Sessions (4) ────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│   LAST▲    DUR         $   CTX%  CPU% MODEL          HARNESS    PERM   ! HOST       PROFILE   BRANCH       PROJECT   │
-│●    now     1h    $18.42    90%  12.5 opus-4-1       ─          ─        local                ─            Fix the c…│
-│●     7m     2h     $2.87    29%   0.4 sonnet-4-5     ─          ─        local                ─            api       │
-│○     3h     1h     $0.19      ─     ─ haiku-4-5      ─          ─        local                ─            docs      │
-│○     2d    12h     $7.03      ─     ─ gpt-5-codex    ─          ─        local                ─            infra     │
+╭ Sessions (2/4) — idle ≥6h: 1 session, 180.0M reclaimable ────────────────────────────────────────────────────────────╮
+│    LAST    DUR         $   CTX%   MEM▼ MODEL          HARNESS    PERM   ! HOST       PROFILE   BRANCH       PROJECT  │
+│●     9h     0s    $18.42    90% 412.0M opus-4-1       ─          ─        local                ─            Fix the …│
+│●     1d     0s     $2.87    29% 180.0M sonnet-4-5     ─          ─        local                ─            api      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -41,4 +41,4 @@ expression: screen
 ╭ Limits ─────────────────────────────────────────────────────────────────────────────────────────────────── + account ╮
 │Claude checking…                                            Codex checking…                                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share
+↑↓ Move ↵ Actions / Filter K Stop idle Space Mark I Back Esc Clear filter a Attach R Resume ? Help  Idle≥6h     ⧉ share

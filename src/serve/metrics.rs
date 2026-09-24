@@ -8,15 +8,24 @@
 //! a client crate would be a registry, a global and a dependency tree bought to
 //! produce exactly that.
 //!
-//! # It says nothing `/api/sessions` does not
+//! # It needs no token
 //!
 //! Every figure here is one the session document already carries — the row's
 //! state, its recorded cost and tokens, its tool counts, its context window —
-//! summed. It sits behind the same gate as every other route, and either of the
-//! run's tokens opens it, because the read-only link already reads all of this.
-//! Titles, prompts, paths beyond a project's own directory name, and anything
-//! from the transcript's text are absent on purpose: a metrics store keeps what
-//! it is sent for months and shows it to whoever has a Grafana login.
+//! summed. Titles, prompts, paths beyond a project's own directory name, and
+//! anything from the transcript's text are absent on purpose: a metrics store
+//! keeps what it is sent for months and shows it to whoever has a Grafana
+//! login. What is left is aggregate counts, costs, model names and short
+//! session ids, which is to say nothing a token would be protecting.
+//!
+//! So `GET /metrics` is answered in front of the gate every other route sits
+//! behind. A scrape config is the credential that gets copied around — into a
+//! config repository, a Helm values file, a file the `prometheus` user reads —
+//! and asking it to hold a secret that also opens the pages would put a way
+//! into the transcripts somewhere nobody guards it. A restart no longer breaks
+//! the scrape, either. The cost is that anyone who can reach the port can read
+//! the numbers, which on the default loopback bind means this machine's users,
+//! and under `--tunnel` means anyone with the hostname.
 //!
 //! # Cardinality is bounded by construction
 //!
@@ -838,9 +847,8 @@ mod tests {
         );
     }
 
-    /// The route through the real gate: `serve_connection` on a socket, so
-    /// the token check `/metrics` sits behind is the one every page does and
-    /// not a copy that could drift from it.
+    /// The route through the real router: `serve_connection` on a socket, so
+    /// the bypass under test is the one that runs and not a copy of it.
     fn fetch(target: &str) -> String {
         use super::super::{Shared, Snapshot, quota, search, serve_connection};
         use std::io::{Read, Write};
@@ -880,11 +888,16 @@ mod tests {
     }
 
     #[test]
-    fn the_route_honours_the_same_tokens_as_every_page() {
-        assert!(fetch("/metrics").starts_with("HTTP/1.1 403"));
-        assert!(fetch("/metrics?t=wrong").starts_with("HTTP/1.1 403"));
-        for token in ["full", "view"] {
-            let raw = fetch(&format!("/metrics?t={token}"));
+    fn the_route_answers_whatever_token_is_or_is_not_presented() {
+        // Every other route on the same run still wants one.
+        assert!(fetch("/api/sessions").starts_with("HTTP/1.1 403"));
+        for target in [
+            "/metrics",
+            "/metrics?t=wrong",
+            "/metrics?t=full",
+            "/metrics?t=view",
+        ] {
+            let raw = fetch(target);
             assert!(raw.starts_with("HTTP/1.1 200"), "{raw}");
             assert!(raw.contains(CONTENT_TYPE), "{raw}");
             let body = raw.split_once("\r\n\r\n").unwrap().1;

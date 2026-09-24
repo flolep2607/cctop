@@ -75,9 +75,7 @@ const MAX_PEERS: usize = 16;
 /// it — so a second cctop was deaf, and the events it missed were exactly the
 /// ones it existed to show. A directory lets the hook fan out instead.
 pub(crate) fn socket_dir() -> Option<PathBuf> {
-    dirs::runtime_dir()
-        .or_else(dirs::cache_dir)
-        .map(|d| d.join("cctop").join("hooks.d"))
+    Some(crate::config::runtime_base().join("cctop").join("hooks.d"))
 }
 
 /// Where the process trees the agents reported are kept between runs.

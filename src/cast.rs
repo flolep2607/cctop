@@ -26,10 +26,7 @@ use std::time::Instant;
 /// recorded — and a pane onto a shell or someone else's session has no cwd
 /// cctop knows at all.
 pub fn dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| crate::config::HOME.join(".local").join("share"))
-        .join("cctop")
-        .join("casts")
+    crate::config::data_base().join("cctop").join("casts")
 }
 
 /// A cast file for `label`, created and empty: `<label>-<stamp>.cast` in

@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::loader::Stats;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 impl App {
     /// The footer's warning that two live agents have written the same file.
@@ -56,8 +57,14 @@ impl App {
             return;
         }
         self.sessions.retain(|s| s.remote.is_none());
-        for rows in self.remotes.values() {
-            self.sessions.extend(rows.iter().cloned());
+        for (host, rows) in &self.remotes {
+            let skew = self.skew_of(host);
+            self.sessions.extend(rows.iter().cloned().map(|mut s| {
+                if let Some(r) = s.remote.as_mut() {
+                    r.skew = skew.clone();
+                }
+                s
+            }));
         }
         self.stats = crate::loader::compute_stats(&self.sessions);
         self.refilter();
@@ -124,6 +131,135 @@ impl App {
     pub fn selected_is_remote(&self) -> bool {
         self.selected_session().is_some_and(|s| s.remote.is_some())
     }
+
+    /// How `host`'s cctop stands against this one, if it has said.
+    pub fn skew_of(&self, host: &str) -> Option<crate::fleet::Skew> {
+        crate::fleet::skew(
+            self.remote_versions.get(host)?,
+            crate::update::current_version(),
+        )
+    }
+
+    /// Take a host's answer to `--version`, and say so once if it differs.
+    ///
+    /// A server left on an old cctop while the laptop moved on is exactly the
+    /// thing nobody notices: the rows keep arriving, just without whatever the
+    /// newer build would have sent. So a mismatch is said out loud, once per
+    /// host per run, and then left to the HOST column's marker and the Info
+    /// panel — which stay true for as long as it does.
+    pub fn got_remote_version(&mut self, host: String, probe: crate::fleet::Probe) {
+        use crate::fleet::Skew;
+        self.remote_versions.insert(host.clone(), probe);
+        let Some(skew) = self.skew_of(&host) else {
+            return;
+        };
+        if !self.remote_skew_told.insert(host.clone()) {
+            return;
+        }
+        let local = crate::update::current_version();
+        self.set_status(match skew {
+            Skew::Older(v) => format!(
+                "{host} runs cctop {v}, older than this {local} — Enter on one of its rows \
+                 offers to update it"
+            ),
+            Skew::Newer(v) => format!(
+                "{host} runs cctop {v}, newer than this {local} — `cctop --update` here \
+                 to catch up"
+            ),
+            Skew::Missing => format!(
+                "{host} has no cctop where ssh looks — install it there, or name the binary \
+                 with --host {host}:/path/to/cctop"
+            ),
+        });
+    }
+
+    /// Why the selected row's machine cannot be offered `--update`, naming
+    /// it; `None` when it can.
+    ///
+    /// Only a host known to be *behind* is offered one. Level is nothing to
+    /// do, ahead is this machine's problem, and unknown is a guess — running a
+    /// self-replacing binary on someone's server on a guess is not a thing to
+    /// put one keypress away.
+    pub fn remote_update_refusal(&self, host: &str) -> Option<String> {
+        use crate::fleet::Skew;
+        if self.remote_updating.contains(host) {
+            return Some(format!("an update of {host} is already under way"));
+        }
+        match self.skew_of(host) {
+            Some(Skew::Older(_)) => None,
+            Some(Skew::Newer(v)) => Some(format!(
+                "{host} runs {v}, newer than this cctop — update this one instead"
+            )),
+            Some(Skew::Missing) => Some(format!("{host} has no cctop to update")),
+            None => Some(match self.remote_versions.get(host) {
+                Some(crate::fleet::Probe::Version(v)) => format!("{host} already runs {v}"),
+                _ => format!("{host}'s cctop version is not known yet"),
+            }),
+        }
+    }
+
+    /// Ask before running `cctop --update` on the selected row's machine.
+    pub(super) fn confirm_remote_update(&mut self) {
+        let Some(host) = self
+            .selected_session()
+            .and_then(|s| s.remote.as_ref())
+            .map(|r| r.host.clone())
+        else {
+            return;
+        };
+        if let Some(why) = self.remote_update_refusal(&host) {
+            self.set_status(why);
+            return;
+        }
+        self.remote_update = Some(host);
+        self.mode = Mode::RemoteUpdateConfirm;
+    }
+
+    /// The `Host` behind a name, command and all — what the confirmation shows
+    /// and what the update runs.
+    pub fn remote_host(&self, target: &str) -> Option<&crate::fleet::Host> {
+        self.remote_hosts.iter().find(|h| h.target == target)
+    }
+
+    /// The answer to the confirmation. Anything but `y` is a no.
+    pub(super) fn on_key_remote_update(&mut self, key: KeyEvent) {
+        self.mode = Mode::List;
+        let Some(target) = self.remote_update.take() else {
+            return;
+        };
+        if key.code != KeyCode::Char('y') {
+            return;
+        }
+        let Some(host) = self.remote_host(&target).cloned() else {
+            return;
+        };
+        self.remote_updating.insert(target.clone());
+        let _ = self.tx.send(Request::UpdateRemote(host));
+        self.set_status(format!("Updating cctop on {target}…"));
+    }
+
+    /// How a remote `--update` went.
+    ///
+    /// A root-owned install is said as such, with the command to run: cctop
+    /// will run a self-replacing binary on another machine when asked, but it
+    /// will not type a password into sudo there, and a bare "permission
+    /// denied" would leave the user to work out which half refused.
+    pub fn remote_updated(
+        &mut self,
+        host: String,
+        result: Result<String, crate::fleet::UpdateFailure>,
+    ) {
+        use crate::fleet::UpdateFailure;
+        self.remote_updating.remove(&host);
+        self.set_status(match result {
+            Ok(said) => format!("{host}: {said}"),
+            Err(UpdateFailure::NeedsRoot(manual)) => format!(
+                "Could not update {host}: its cctop is in a directory only root can write. \
+                 Run it yourself: {manual}"
+            ),
+            Err(UpdateFailure::Other(why)) => format!("Could not update {host}: {why}"),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +321,7 @@ mod tests {
         away.remote = Some(crate::session::Remote {
             host: "box".into(),
             branch: Some("main".into()),
+            ..Default::default()
         });
         away.total_cost = Some(3.0);
         app.remotes.insert("box".into(), vec![away]);
@@ -231,13 +368,103 @@ mod tests {
         assert!(footer.contains("Permission denied"), "{footer}");
     }
 
+    /// A server left behind the laptop: said once, marked on its rows, and
+    /// updated only through a confirmation that names the command.
+    #[test]
+    fn an_older_remote_is_said_once_marked_and_offered_an_update() {
+        use crate::fleet::{Host, Probe, UpdateFailure};
+        let (tx, rx) = channel();
+        let mut app = App::new(Plan::Retail, tx);
+        let host = Host::parse("box").expect("a host");
+        app.remote_hosts = vec![host.clone()];
+        let mut s = session("away", true, "/srv/work");
+        s.remote = Some(crate::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        app.remotes.insert("box".into(), vec![s]);
+        app.merge_remotes();
+
+        // Before it has said, nothing is claimed and nothing is offered.
+        let refusal = app.remote_update_refusal("box").expect("not yet");
+        assert!(refusal.contains("not known"), "{refusal}");
+
+        app.got_remote_version("box".into(), Probe::Version("0.0.1".into()));
+        app.merge_remotes();
+        let said: Vec<String> = app.toasts.iter().map(|t| t.text.clone()).collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("box runs cctop 0.0.1"), "{}", said[0]);
+
+        // A reconnect answers the same; the toast is not said twice.
+        app.got_remote_version("box".into(), Probe::Version("0.0.1".into()));
+        assert_eq!(app.toasts.iter().count(), 1);
+
+        // The marker rides on the row into the HOST cell.
+        app.selected = 0;
+        let row = app.selected_session().expect("the row").clone();
+        let cell = columns::render_cell(ColumnId::Host, &row, &chrono::Utc::now());
+        assert_eq!(cell, "↑box");
+
+        // The menu offers it, and choosing it stops at the confirmation.
+        let items = menu::items(&app);
+        let entry = items
+            .iter()
+            .find(|i| i.action == menu::Action::UpdateRemote)
+            .expect("an update entry");
+        assert!(entry.enabled(), "{:?}", entry.blocked);
+        app.confirm_remote_update();
+        assert_eq!(app.mode, Mode::RemoteUpdateConfirm);
+
+        // Anything but y is a no, and sends nothing.
+        app.on_key_remote_update(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(app.mode, Mode::List);
+        assert!(rx.try_recv().is_err(), "a no must not reach the worker");
+
+        app.confirm_remote_update();
+        app.on_key_remote_update(KeyEvent::from(KeyCode::Char('y')));
+        let sent = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|r| match r {
+                Request::UpdateRemote(h) => Some(h),
+                _ => None,
+            })
+            .expect("the update went to the worker");
+        assert_eq!(sent, host);
+        // While it runs, a second is not offered.
+        assert!(app.remote_update_refusal("box").is_some());
+
+        // A root-owned binary is said as such, with the command to run by hand.
+        app.remote_updated(
+            "box".into(),
+            Err(UpdateFailure::NeedsRoot(host.sudo_update_command())),
+        );
+        let last = app.toasts.iter().next().expect("a toast").text.clone();
+        assert!(last.contains("only root can write"), "{last}");
+        assert!(last.contains("ssh -t box sudo cctop --update"), "{last}");
+    }
+
+    /// A remote that is ahead means this machine is the stale one.
+    #[test]
+    fn a_newer_remote_points_at_this_machine() {
+        let mut app = test_app();
+        app.got_remote_version("box".into(), crate::fleet::Probe::Version("999.0.0".into()));
+        let said = app.toasts.iter().next().expect("a toast").text.clone();
+        assert!(said.contains("cctop --update` here"), "{said}");
+        let why = app.remote_update_refusal("box").expect("refused");
+        assert!(why.contains("update this one"), "{why}");
+
+        // And a host with no cctop at all is told how to point at one.
+        app.got_remote_version("bare".into(), crate::fleet::Probe::Missing);
+        let said = app.toasts.iter().next().expect("a toast").text.clone();
+        assert!(said.contains("--host bare:/path/to/cctop"), "{said}");
+    }
+
     /// With no host configured the column is one repeated word down every row,
     /// so it is hidden — through the user's own mechanism, so the two cannot
     /// disagree about what is on screen.
     #[test]
     fn the_host_column_stays_off_a_single_machine() {
         let ids = |hidden: &[ColumnId]| -> Vec<ColumnId> {
-            columns::visible_columns(300, hidden)
+            columns::visible_columns(300, hidden, &[])
                 .iter()
                 .map(|c| c.id)
                 .collect()
@@ -255,6 +482,7 @@ mod tests {
         s.remote = Some(crate::session::Remote {
             host: "devbox".into(),
             branch: None,
+            ..Default::default()
         });
         app.sessions = vec![s];
         app.refilter();

@@ -9,6 +9,7 @@ use super::share;
 use super::theme;
 use super::{AGE_OPTIONS, AccountKind, App, BatchKind, LaunchInto, tabs};
 use crate::session::Session;
+use crate::util;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -245,6 +246,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("U", "Clear all marks"),
         item("D", "Delete all marked sessions"),
         item("K", "Terminate all marked live sessions"),
+        item("I", "Idle view: live sessions quiet for idle_after"),
+        item("", "(6h by default), the biggest memory first"),
+        item("  K", "In it: stop the marked ones, or all of them,"),
+        item("", "skipping any that are working or asking"),
         Line::default(),
         section("Filter and sort"),
         item("/  F3", "Filter by label, project, branch, model, id"),
@@ -1679,6 +1684,67 @@ pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App, layout
 
 const QUIT_KEYS: &str = "  [y] quit anyway    [n / Esc] stay    [A] back to the agent";
 
+/// Ask before running `cctop --update` on another machine.
+///
+/// The command is shown as it will run, because this is the one key in cctop
+/// that changes something that is not on this computer: someone saying yes to
+/// it should be able to read, in full, what they are saying yes to.
+pub(super) fn draw_remote_update_confirm(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut Layout,
+) {
+    let Some(host) = app
+        .remote_update
+        .as_deref()
+        .and_then(|t| app.remote_host(t))
+    else {
+        return;
+    };
+    let theirs = match app.remote_versions.get(&host.target) {
+        Some(crate::fleet::Probe::Version(v)) => v.clone(),
+        _ => "an unknown version".to_string(),
+    };
+    let lines = vec![
+        Line::from(Span::styled(format!("  {}", host.target), theme::value())),
+        Line::from(Span::styled(
+            format!(
+                "  runs cctop {theirs}; this one is {}",
+                crate::update::current_version()
+            ),
+            theme::dim(),
+        )),
+        Line::default(),
+        Line::from(Span::raw("  Run this, to fetch the newest release there:")),
+        Line::from(Span::styled(
+            format!("    {}", host.shown_command(&["--update"])),
+            Style::default().fg(theme::colors().cost_mid),
+        )),
+        Line::default(),
+        Line::from(Span::raw(
+            "  It replaces the binary on that machine. Nothing is asked there: if it",
+        )),
+        Line::from(Span::raw(
+            "  needs root, cctop says so and shows the sudo command to run yourself.",
+        )),
+        Line::default(),
+        Line::from(Span::styled(REMOTE_UPDATE_KEYS, theme::dim())),
+    ];
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Update cctop over there?", lines, 78);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        REMOTE_UPDATE_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
+}
+
+const REMOTE_UPDATE_KEYS: &str = "  [y] update    [n / Esc] cancel";
+
 pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
@@ -1709,11 +1775,12 @@ pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App, layout
 }
 
 pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
-    let ms = app.marked_sessions();
     let (verb, noun) = match app.batch {
         BatchKind::Delete => ("delete", "sessions"),
         BatchKind::Kill => ("terminate", "live sessions"),
+        BatchKind::Reclaim => return draw_reclaim_confirm(frame, area, app, layout),
     };
+    let ms = app.marked_sessions();
     let mut lines = vec![
         Line::from(Span::styled(
             format!("  {} marked {noun}", ms.len()),
@@ -1737,7 +1804,9 @@ pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App, layou
     lines.push(Line::from(Span::styled(
         match app.batch {
             BatchKind::Delete => "  This permanently removes their transcripts from disk.",
-            BatchKind::Kill => "  Unsaved work in the agents may be interrupted.",
+            BatchKind::Kill | BatchKind::Reclaim => {
+                "  Unsaved work in the agents may be interrupted."
+            }
         },
         Style::default().fg(theme::colors().cost_mid),
     )));
@@ -1746,6 +1815,111 @@ pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App, layou
     lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
     let last = lines.len() as u16 - 1;
     let (outer, inner) = modal(frame, area, &format!("{verb} all?"), lines, 62);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        &hint,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
+}
+
+/// The idle view's `K`: what will be stopped, how much memory that gives
+/// back, and — named, not counted — what is being left running and why.
+///
+/// The skipped ones are listed because the count alone would read as cctop
+/// having failed at them; a reason per row says it chose not to.
+fn draw_reclaim_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    const SHOWN: usize = 8;
+    const KEPT_SHOWN: usize = 4;
+    let plan = app.reclaim_plan();
+    let now = chrono::Utc::now();
+    let n = plan.stop.len();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "  Stop {n} idle session{}, freeing {}",
+                if n == 1 { "" } else { "s" },
+                util::compact_bytes(plan.bytes)
+            ),
+            theme::value(),
+        )),
+        Line::default(),
+    ];
+    // Label, then how long it has been quiet and what it holds, in the table's
+    // own spellings so the two can be read against each other.
+    for s in plan.stop.iter().take(SHOWN) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("    · {:<36}", util::truncate(s.display_label(), 36)),
+                theme::dim(),
+            ),
+            Span::styled(
+                format!(
+                    "{:>5}",
+                    util::relative_age(super::idle::quiet_since(s), &now)
+                ),
+                theme::dim(),
+            ),
+            Span::styled(
+                format!("{:>8}", util::compact_bytes(super::idle::tree_memory(s))),
+                theme::value(),
+            ),
+        ]));
+    }
+    if n > SHOWN {
+        let rest: u64 = plan.stop[SHOWN..]
+            .iter()
+            .map(|s| super::idle::tree_memory(s))
+            .sum();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "    … and {} more, {}",
+                n - SHOWN,
+                util::compact_bytes(rest)
+            ),
+            theme::dim(),
+        )));
+    }
+    if !plan.keep.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::raw(format!(
+            "  Left running ({}):",
+            plan.keep.len()
+        ))));
+        for (s, why) in plan.keep.iter().take(KEPT_SHOWN) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "    · {} — {}",
+                    util::truncate(s.display_label(), 30),
+                    why.reason()
+                ),
+                theme::dim(),
+            )));
+        }
+        if plan.keep.len() > KEPT_SHOWN {
+            lines.push(Line::from(Span::styled(
+                format!("    … and {} more", plan.keep.len() - KEPT_SHOWN),
+                theme::dim(),
+            )));
+        }
+    }
+    lines.push(Line::default());
+    let warn = Style::default().fg(theme::colors().cost_mid);
+    lines.push(Line::from(Span::styled(
+        "  Each is sent SIGTERM and exits cleanly; R resumes it.",
+        warn,
+    )));
+    lines.push(Line::from(Span::styled(
+        "  A prompt typed into one and not sent is lost.",
+        warn,
+    )));
+    lines.push(Line::default());
+    let hint = format!("  [y] stop {n}    [n / Esc] cancel");
+    lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Stop idle sessions?", lines, 62);
     confirm_chips(
         layout,
         outer,
@@ -1770,7 +1944,7 @@ pub(super) fn draw_batch_blocked(
             "running — stop the agent first",
             ms.iter().find(|s| s.is_running()),
         ),
-        BatchKind::Kill => (
+        BatchKind::Kill | BatchKind::Reclaim => (
             "has no locally controllable process",
             ms.iter().find(|s| s.root_pid().is_none()),
         ),

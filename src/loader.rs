@@ -323,6 +323,7 @@ impl Loader {
             s.started_at = now.clone();
             s.last_active = now;
             s.label_source = cwd;
+            s.owner = orphan.owner.clone();
             s.process = Some(pm.clone());
             s.harness = harness_from_process(&s, &pm.command).into();
             sessions.push(s);
