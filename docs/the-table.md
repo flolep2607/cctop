@@ -172,6 +172,51 @@ transcripts store their text as JSON, so a phrase containing a quote or a
 newline is escaped on disk and will not match; and a single session is scanned
 up to 64 MiB.
 
+## The tree view
+
+`T` groups the table the way htop's tree mode groups processes: each
+repository gets a heading, each checkout of it a heading beneath that, and the
+sessions hang off the checkout they were started in.
+
+```
+   LAST       $  BRANCH  PROJECT
+●    4s  $18.40          ▾ ~/cctop  4 sessions, 1 waiting
+●    4s  $11.02  main    ├─ ▾ cctop (main)  2 sessions, 1 waiting
+●    4s   $9.10  main    │  ├─ Improve super cctop
+○    3h   $1.92  main    │  └─ Release 0.17.8
+●   12s   $7.38  tree    └─ ▾ .claude/worktrees/agent-a9c7  2 sessions
+●   12s   $5.01  tree       ├─ Tree view for the table
+●    1m   $2.37  tree       └─ Search tiers
+```
+
+The glyphs are drawn in the PROJECT column, so every other column stays under
+its header and sorting by one still works.
+
+A repository is recognised by its git common directory, which every worktree
+of it shares — so a linked worktree lands under the repository it was taken
+from rather than as a stranger. A repository seen through only one checkout
+skips the second level. A directory outside any repository is a group of its
+own, and a row from another machine is grouped by host and directory, since
+the far filesystem is not there to ask.
+
+A heading carries what adds up: how many sessions are under it and how many of
+those are waiting on you, their total cost, the latest activity, and for a
+checkout the branch it has out. Its dot is the loudest state beneath it, so a
+folded heading still shows red when something inside is asking a question.
+
+`Enter`, `Space` or `e` on a heading folds and unfolds it. They do nothing else
+there — a heading has no menu and cannot be marked — while `←`/`→` stay on the
+bottom panels on every row, heading or not. Subagents still expand under their
+session with `e`, one level further in. Sessions are never nested under each
+other: no harness records that one session started another.
+
+Filtering shows the sessions that match with the headings above them, and a
+heading's totals count only what is shown. The sort applies inside each group,
+and groups are ordered by their best-placed session — a cost sort puts the
+repository with the dearest session first — without a group ever being split.
+`b` unfolds whatever is hiding the session that rang. The view and the folds
+are remembered across runs.
+
 ## The row menu
 
 Every action below has a key, and the keys are worth learning. But you have to
@@ -226,7 +271,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `Shift+Home`/`End` | Jump to the top / bottom of that panel |
 | `f` | Follow mode: keep the selection centered |
 | `/` or `F3` | Filter sessions by text (see below) |
-| `F6`, `>`, `<` | Sort-by panel |
+| `S`, `F6`, `>`, `<` | Sort-by panel |
 | `F7` | Filter by age (1d / 1w / 1mo) |
 | `#` | Cost floor: only sessions costing ≥ `$X` |
 | `,` | Settings and keybinds (see below) |
@@ -234,8 +279,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `[`, `]` | Move through the Tool Activity tool filter |
 | `v` | Toggle inline diffs for edits |
 | `L` | Toggle the Tool Activity live filter |
-| `P` / `M` / `T` | Sort by status / memory / cost |
-| `H` / `X` / `S` | Sort by harness / context / tools |
+| `T` | Tree view: group by repository and worktree (see above) |
 | `+`, `-`, `=` | Speed up / slow down / reset refresh interval |
 | `Space` | Mark / unmark the selected session |
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation) |

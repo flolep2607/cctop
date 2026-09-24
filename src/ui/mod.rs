@@ -40,6 +40,7 @@ pub mod tabs;
 pub mod theme;
 mod toast;
 mod torn;
+mod tree;
 mod worker;
 
 pub use runloop::run;
@@ -276,7 +277,8 @@ pub const AGE_OPTIONS: [Option<AgeFilter>; 4] = [
 // Application state
 // ---------------------------------------------------------------------------
 
-/// One line of the table: a session, or a subagent shown beneath its parent.
+/// One line of the table: a session, a subagent shown beneath its parent, or
+/// in the tree view a heading for the sessions of one repository or checkout.
 ///
 /// Rows rather than session indices, because an expanded session occupies
 /// several lines and everything that walks the table — scrolling, the cursor,
@@ -290,17 +292,24 @@ pub enum Row {
         parent: usize,
         index: usize,
     },
+    /// An index into [`App::groups`].
+    Group(usize),
 }
 
 impl Row {
     /// The session this row belongs to, which for a child is its parent.
     ///
     /// Actions are addressed to sessions — a subagent has no process to signal
-    /// and no transcript of its own to delete — so every row resolves to one.
-    pub fn session(self) -> usize {
+    /// and no transcript of its own to delete — so a child resolves to its
+    /// parent. A group heading resolves to nothing: it stands for several
+    /// sessions, and an action aimed at "one of them" would be aimed at a row
+    /// nobody pointed at. Every action already bails on no session, which is
+    /// what makes the heading inert without a guard per key.
+    pub fn session(self) -> Option<usize> {
         match self {
-            Row::Session(i) => i,
-            Row::Subagent { parent, .. } => parent,
+            Row::Session(i) => Some(i),
+            Row::Subagent { parent, .. } => Some(parent),
+            Row::Group(_) => None,
         }
     }
 
@@ -330,6 +339,18 @@ pub struct App {
     /// every walk, which would leave an index pointing at whatever sorted into
     /// that slot next.
     pub expanded: std::collections::HashSet<String>,
+    /// Whether the table is drawn as a tree of repositories and checkouts.
+    pub tree: bool,
+    /// Keys of the tree groups that are folded.
+    pub collapsed: std::collections::HashSet<String>,
+    /// The tree's headings, which `Row::Group` indexes. Rebuilt with `visible`.
+    pub groups: Vec<tree::Group>,
+    /// The tree glyphs leading each row's label, aligned with `visible`. Empty
+    /// when the tree is off.
+    pub indent: Vec<String>,
+    /// How many sessions passed the filters, which is not `visible.len()` once
+    /// rows can be headings, children, or folded away.
+    pub matched: usize,
     pub stats: Stats,
     pub selected: usize,
     pub scroll: usize,
@@ -798,6 +819,11 @@ impl App {
                 .iter()
                 .cloned()
                 .collect::<std::collections::HashSet<_>>(),
+            tree: prefs.tree,
+            collapsed: prefs.collapsed_groups.iter().cloned().collect(),
+            groups: Vec::new(),
+            indent: Vec::new(),
+            matched: 0,
             stats: Stats::default(),
             selected: 0,
             scroll: 0,
@@ -961,6 +987,10 @@ impl App {
         let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();
         expanded.sort();
         self.prefs.expanded = expanded;
+        self.prefs.tree = self.tree;
+        let mut collapsed: Vec<String> = self.collapsed.iter().cloned().collect();
+        collapsed.sort();
+        self.prefs.collapsed_groups = collapsed;
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;

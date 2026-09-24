@@ -1225,11 +1225,19 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     );
 
     if app.selected_session().is_none() {
+        // A heading is a place, not a session: say which and how to open it
+        // rather than implying the cursor is on nothing.
+        let said = match app.selected_group() {
+            Some(g) => format!(
+                "{} — {} session{}. Enter folds or unfolds it.",
+                g.label,
+                g.sessions,
+                if g.sessions == 1 { "" } else { "s" }
+            ),
+            None => "No session selected".to_string(),
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "No session selected",
-                theme::dim(),
-            ))),
+            Paragraph::new(Line::from(Span::styled(said, theme::dim()))),
             inner,
         );
         return;

@@ -51,7 +51,7 @@ impl App {
             .filter_map(|row| match row {
                 // Child rows would list their parent a second time.
                 Row::Session(i) => self.sessions.get(*i),
-                Row::Subagent { .. } => None,
+                Row::Subagent { .. } | Row::Group(_) => None,
             })
             .filter(|s| self.marked.contains(&s.key()))
             .collect()
@@ -174,7 +174,10 @@ mod tests {
         let row = |app: &App, id: &str| {
             app.visible
                 .iter()
-                .position(|&r| app.sessions[r.session()].session_id == id)
+                .position(|&r| {
+                    r.session()
+                        .is_some_and(|i| app.sessions[i].session_id == id)
+                })
                 .expect("fixture is visible")
         };
         app.selected = row(&app, "a");

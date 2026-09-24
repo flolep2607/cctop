@@ -21,7 +21,7 @@ impl App {
     pub fn selected_session(&self) -> Option<&Session> {
         self.visible
             .get(self.selected)
-            .and_then(|row| self.sessions.get(row.session()))
+            .and_then(|row| self.sessions.get(row.session()?))
     }
 
     /// The highlighted row, whatever kind it is.
@@ -32,7 +32,7 @@ impl App {
     /// The highlighted subagent, when the cursor is on a child row.
     pub fn selected_subagent(&self) -> Option<&crate::session::Subagent> {
         match self.selected_row()? {
-            Row::Session(_) => None,
+            Row::Session(_) | Row::Group(_) => None,
             Row::Subagent { parent, index } => self.sessions.get(parent)?.subagents.get(index),
         }
     }
@@ -62,7 +62,7 @@ impl App {
         let Some(row) = self.selected_row() else {
             return;
         };
-        let Some(session) = self.sessions.get(row.session()) else {
+        let Some(session) = row.session().and_then(|i| self.sessions.get(i)) else {
             return;
         };
         if session.subagents.is_empty() {
@@ -105,11 +105,18 @@ impl App {
     /// alone cannot tell a parent from its children, so the cursor is anchored
     /// on the pair.
     pub(super) fn row_key(&self, row: Row) -> String {
-        let Some(session) = self.sessions.get(row.session()) else {
+        if let Row::Group(g) = row {
+            // Prefixed so a heading can never share a key with a session.
+            return match self.groups.get(g) {
+                Some(g) => format!("group:{}", g.key),
+                None => String::new(),
+            };
+        }
+        let Some(session) = row.session().and_then(|i| self.sessions.get(i)) else {
             return String::new();
         };
         match row {
-            Row::Session(_) => session.key(),
+            Row::Session(_) | Row::Group(_) => session.key(),
             Row::Subagent { index, .. } => match session.subagents.get(index) {
                 Some(sub) => format!("{}/{}", session.key(), sub.agent_id),
                 None => session.key(),
@@ -124,7 +131,7 @@ impl App {
     /// worker, cache, every panel — reads it without knowing the difference, and
     /// the panels describe the subagent rather than the parent it ran under.
     pub(super) fn panel_subject(&self, row: Row) -> Option<Session> {
-        let session = self.sessions.get(row.session())?;
+        let session = self.sessions.get(row.session()?)?;
         let Row::Subagent { index, .. } = row else {
             return Some(session.clone());
         };

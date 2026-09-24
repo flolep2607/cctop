@@ -223,6 +223,11 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("F7", "Filter by age (1d / 1w / 1mo)"),
         item("#", "Cost floor: only sessions costing ≥ $X"),
         item("`", "Show only running sessions"),
+        item("T", "Tree view: group by repository and worktree"),
+        item(
+            "  Enter / Space",
+            "Fold or unfold the group under the cursor",
+        ),
         item("Esc", "Clear one filter layer per press"),
         Line::from(Span::styled(
             "  Clicking a column header sorts by it too.",
@@ -449,7 +454,7 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(
             format!(
                 " {} of {} session{}",
-                app.visible.len(),
+                app.matched,
                 app.sessions.len(),
                 if app.sessions.len() == 1 { "" } else { "s" }
             ),

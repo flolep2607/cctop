@@ -97,11 +97,12 @@ impl App {
             return;
         };
         let key = rang.key.clone();
+        self.reveal(&key);
         // The parent row, not a child of it: the bell rang for the session.
         match self
             .visible
             .iter()
-            .position(|&r| !r.is_subagent() && self.sessions[r.session()].key() == key)
+            .position(|&r| matches!(r, Row::Session(i) if self.sessions[i].key() == key))
         {
             Some(row) => {
                 self.selected = row;

@@ -1413,6 +1413,15 @@ impl App {
                     "Follow mode off"
                 });
             }
+            // On a tree heading the keys that open or pick a row fold it
+            // instead: a heading has no menu and cannot be marked, so none of
+            // them has anything else to do there. ←/→ stay on the bottom
+            // panels — a key that switched meaning as the cursor crossed a
+            // heading would move the panels on one row and fold on the next.
+            KeyCode::Enter | KeyCode::Char(' ' | 'e') if self.on_group() => self.toggle_group(),
+            // htop's tree key is `t`, which is the new tab here, and `F5`,
+            // which refreshes; capital `T` is the nearest free spelling.
+            KeyCode::Char('T') => self.toggle_tree(),
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('e') => self.toggle_expanded(),
             KeyCode::Char('E') => self.toggle_expanded_all(),

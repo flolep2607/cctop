@@ -54,7 +54,7 @@ pub const SETTINGS: [(&str, &str, &str); 5] = [
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 47] = [
+pub const BINDINGS: [(&str, &str, &str); 48] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "This settings panel"),
@@ -83,6 +83,7 @@ pub const BINDINGS: [(&str, &str, &str); 47] = [
     ("copy", "y", "Copy resume command or transcript path"),
     ("expand", "e", "Show its subagents"),
     ("expand_all", "E", "Show all subagents"),
+    ("tree", "T", "Tree view: group by repository and worktree"),
     ("delete", "d", "Delete it"),
     ("terminate", "ctrl+k", "Terminate it"),
     ("mark", "space", "Mark / unmark it"),
