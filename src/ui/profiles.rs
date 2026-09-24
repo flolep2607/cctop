@@ -16,31 +16,78 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// The name is in: start `claude setup-token` inside the popup.
-    pub(super) fn start_setup_token(&mut self) {
+    /// The name is in: check it, and ask which kind of account it is.
+    pub(super) fn accept_account_name(&mut self) {
         let name = self.add_account.name.trim().to_string();
         if !crate::quota::valid_account_name(&name) {
             self.set_status("An account name is letters, digits, - _ and . only");
             return;
         }
         self.add_account.name = name;
-        let argv = ["claude".to_string(), "setup-token".to_string()];
-        match tabs::Pane::launch(&argv, None, tabs::Own::Cctop) {
-            Ok(pane) => self.add_account.pane = Some(pane),
+        self.add_account.named = true;
+        self.needs_redraw = true;
+    }
+
+    /// Start the kind of account that was picked, in the popup's terminal.
+    pub(super) fn start_add_account(&mut self, kind: AccountKind) {
+        let flow = &mut self.add_account;
+        let (argv, cwd, what) = match kind {
+            AccountKind::Token => (
+                vec!["claude".to_string(), "setup-token".to_string()],
+                None,
+                "claude setup-token",
+            ),
+            AccountKind::Login => {
+                let dir = crate::config::claude_login_dir(&flow.name);
+                if crate::quota::login_landed(&dir) {
+                    flow.outcome = Some(Err(format!(
+                        "{} is already logged in — it is in the launcher as {}.",
+                        crate::util::tildify(&dir.to_string_lossy()),
+                        flow.name
+                    )));
+                    self.needs_redraw = true;
+                    return;
+                }
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    flow.outcome = Some(Err(format!("Could not create {}: {e}", dir.display())));
+                    self.needs_redraw = true;
+                    return;
+                }
+                // `env` in the argv rather than on the child, the way every
+                // other account launch is spelled: see `argv_under_profile`.
+                (
+                    vec![
+                        "env".to_string(),
+                        format!("CLAUDE_CONFIG_DIR={}", dir.display()),
+                        "claude".to_string(),
+                        "auth".to_string(),
+                        "login".to_string(),
+                        "--claudeai".to_string(),
+                    ],
+                    Some(dir),
+                    "claude auth login",
+                )
+            }
+        };
+        flow.kind = Some(kind);
+        match tabs::Pane::launch(&argv, cwd.as_deref(), tabs::Own::Cctop) {
+            Ok(pane) => flow.pane = Some(pane),
             // A `claude` that cannot be started here: the command-line
-            // walkthrough does the same job and says what went wrong.
+            // walkthrough does the token half of the same job.
             Err(e) => {
-                self.add_account.outcome = Some(Err(format!(
-                    "Could not run `claude setup-token` here ({e}). In a terminal, \
-                     `cctop --add-account {}` walks through the same steps.",
-                    self.add_account.name
+                flow.outcome = Some(Err(format!(
+                    "Could not run `{what}` here ({e}). In a terminal, \
+                     `cctop --add-account {}` adds it as a token.",
+                    flow.name
                 )))
             }
         }
         self.needs_redraw = true;
     }
 
-    /// Feed the popup's terminal, and take the token the moment it is printed.
+    /// Feed the popup's terminal, and notice the moment the account exists: a
+    /// token when it is printed, a login when its process ends having written
+    /// its credentials.
     pub(super) fn pump_add_account(&mut self) {
         let flow = &mut self.add_account;
         let Some(pane) = flow.pane.as_mut() else {
@@ -55,7 +102,9 @@ impl App {
             if let Some(link) = crate::quota::link_on_screen(screen) {
                 flow.link = Some(link);
             }
-            if let Some(token) = crate::quota::token_on_screen(screen) {
+            if flow.kind == Some(AccountKind::Token)
+                && let Some(token) = crate::quota::token_on_screen(screen)
+            {
                 // Its job is done, and a process holding a fresh token has no
                 // reason to outlive the popup that asked for it.
                 flow.pane = None;
@@ -67,14 +116,26 @@ impl App {
                 return;
             }
         }
-        // Left on screen rather than dropped: whatever it said before it went
-        // is the explanation.
-        if flow.outcome.is_none() && pane.view.closed() {
-            self.needs_redraw = true;
-            flow.outcome = Some(Err(
-                "`claude setup-token` ended without printing a token.".to_string()
-            ));
+        if flow.outcome.is_some() || !pane.view.closed() {
+            return;
         }
+        self.needs_redraw = true;
+        flow.outcome = Some(match flow.kind {
+            Some(AccountKind::Login)
+                if crate::quota::login_landed(&crate::config::claude_login_dir(&flow.name)) =>
+            {
+                // Gone, not left on screen: it succeeded, and the popup's
+                // outcome says so better than its last frame.
+                flow.pane = None;
+                Ok(flow.name.clone())
+            }
+            // Left on screen rather than dropped: whatever it said before it
+            // went is the explanation.
+            Some(AccountKind::Login) => {
+                Err("`claude auth login` ended without logging in.".to_string())
+            }
+            _ => Err("`claude setup-token` ended without printing a token.".to_string()),
+        });
     }
 
     /// The profile a launch would use, or `None` when the highlighted command
@@ -156,6 +217,38 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+    /// The name, then the question: Enter on a good name asks which kind of
+    /// account rather than starting anything, Backspace goes back to the name,
+    /// and a bad name is refused where it was typed.
+    #[test]
+    fn the_add_account_popup_asks_which_kind_after_the_name() {
+        let mut app = crate::ui::tests::test_app();
+        app.open_add_account();
+        for c in "work 2".chars() {
+            app.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.add_account.named, "a name with a space was accepted");
+
+        app.add_account.name = "work2".into();
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.add_account.named);
+        assert!(
+            app.add_account.pane.is_none(),
+            "something started before the choice"
+        );
+        assert_eq!(app.add_account.kind, None);
+
+        app.on_key(KeyEvent::from(KeyCode::Backspace));
+        assert!(
+            !app.add_account.named,
+            "Backspace did not go back to the name"
+        );
+        assert_eq!(app.add_account.name, "work2", "going back lost the name");
+        assert_eq!(app.mode, Mode::AddAccount);
+    }
     /// Which harness an argv names, and so which variable may be put in front
     /// of it. Getting this wrong is not a cosmetic error: `CODEX_HOME` in front
     /// of `claude` is ignored, and the agent then runs as an account the pane
