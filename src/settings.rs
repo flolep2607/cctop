@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 5] = [
+pub const SETTINGS: [(&str, &str, &str); 11] = [
     (
         "theme",
         "\"auto\"",
@@ -43,6 +43,29 @@ pub const SETTINGS: [(&str, &str, &str); 5] = [
         "hide_columns",
         "\"\"",
         "Columns to hide, e.g. \"tok_rate,mem\". On restart",
+    ),
+    // The alerts, each off at 0. See `crate::alert` for what each one reads.
+    ("alert_cost", "0", "Alert when a session's cost passes $X"),
+    (
+        "alert_burn",
+        "0",
+        "Alert when a session burns over $X an hour",
+    ),
+    ("alert_today", "0", "Alert when today's spend passes $X"),
+    (
+        "alert_errors",
+        "0",
+        "Alert when X% of 10m of tool calls fail (try 25)",
+    ),
+    (
+        "alert_error_calls",
+        "10",
+        "…counting only once there are this many calls",
+    ),
+    (
+        "alert_stall",
+        "0",
+        "Alert when a working agent writes nothing for X min (try 10)",
     ),
 ];
 
@@ -119,6 +142,15 @@ pub struct Settings {
     /// to.
     pub compact_threshold: Option<f64>,
     pub hide_columns: Option<String>,
+    /// The alert thresholds, as the file spells them — dollars, a percentage,
+    /// minutes. [`Settings::alert_rules`] turns them into what
+    /// [`crate::alert`] compares against.
+    pub alert_cost: Option<f64>,
+    pub alert_burn: Option<f64>,
+    pub alert_today: Option<f64>,
+    pub alert_errors: Option<f64>,
+    pub alert_error_calls: Option<u64>,
+    pub alert_stall: Option<f64>,
     /// `(action, key)` as written, in file order.
     pub keys: Vec<(String, String)>,
     /// Everything that was written and could not be used, said in a sentence.
@@ -163,6 +195,20 @@ impl Settings {
                         .as_str()
                         .map(|v| out.hide_columns = Some(v.into()))
                         .is_none(),
+                    "alert_cost" => amount(item).map(|v| out.alert_cost = Some(v)).is_none(),
+                    "alert_burn" => amount(item).map(|v| out.alert_burn = Some(v)).is_none(),
+                    "alert_today" => amount(item).map(|v| out.alert_today = Some(v)).is_none(),
+                    "alert_stall" => amount(item).map(|v| out.alert_stall = Some(v)).is_none(),
+                    "alert_errors" => amount(item)
+                        .filter(|p| *p <= 100.0)
+                        .map(|v| out.alert_errors = Some(v))
+                        .is_none(),
+                    "alert_error_calls" => item
+                        .as_integer()
+                        .and_then(|n| u64::try_from(n).ok())
+                        .filter(|n| *n >= 1)
+                        .map(|v| out.alert_error_calls = Some(v))
+                        .is_none(),
                     _ => {
                         out.problems
                             .push(format!("[settings] {name}: no such setting"));
@@ -206,6 +252,12 @@ impl Settings {
             "auto_update" => self.auto_update.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),
+            "alert_cost" => self.alert_cost.map(|v| v.to_string()),
+            "alert_burn" => self.alert_burn.map(|v| v.to_string()),
+            "alert_today" => self.alert_today.map(|v| v.to_string()),
+            "alert_errors" => self.alert_errors.map(|v| v.to_string()),
+            "alert_error_calls" => self.alert_error_calls.map(|v| v.to_string()),
+            "alert_stall" => self.alert_stall.map(|v| v.to_string()),
             _ => None,
         };
         match set {
@@ -214,6 +266,32 @@ impl Settings {
                 let default = SETTINGS.iter().find(|s| s.0 == name).map_or("", |s| s.1);
                 (default.to_string(), false)
             }
+        }
+    }
+}
+
+/// A threshold as the file may spell it: a number, whole or not, and never
+/// negative — a limit below zero would be a limit everything is always over.
+fn amount(item: &toml_edit::Item) -> Option<f64> {
+    item.as_float()
+        .or_else(|| item.as_integer().map(|i| i as f64))
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+impl Settings {
+    /// The alert thresholds in force, in the units [`crate::alert`] compares:
+    /// a fraction rather than a percentage, a duration rather than minutes.
+    pub fn alert_rules(&self) -> crate::alert::Rules {
+        let default = crate::alert::Rules::default();
+        crate::alert::Rules {
+            session_cost: self.alert_cost.unwrap_or(default.session_cost),
+            burn_rate: self.alert_burn.unwrap_or(default.burn_rate),
+            daily_spend: self.alert_today.unwrap_or(default.daily_spend),
+            error_rate: self.alert_errors.map_or(default.error_rate, |p| p / 100.0),
+            error_calls: self.alert_error_calls.unwrap_or(default.error_calls),
+            stall: self.alert_stall.map_or(default.stall, |m| {
+                std::time::Duration::from_secs_f64(m * 60.0)
+            }),
         }
     }
 }
@@ -637,5 +715,29 @@ mod tests {
         let (_, problems) = Keymap::build(&s);
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert_eq!(Settings::parse("not toml [").problems.len(), 1);
+    }
+
+    /// The file speaks in the units a person thinks in — dollars, a
+    /// percentage, minutes — and the rules in the ones they are compared in.
+    #[test]
+    fn alert_thresholds_read_in_the_files_units() {
+        let s = Settings::parse(
+            "[settings]\nalert_cost = 20\nalert_burn = 7.5\nalert_errors = 25\nalert_error_calls = 6\nalert_stall = 10\n",
+        );
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        let rules = s.alert_rules();
+        assert_eq!(rules.session_cost, 20.0);
+        assert_eq!(rules.burn_rate, 7.5);
+        assert_eq!(rules.daily_spend, 0.0, "unset is off");
+        assert_eq!(rules.error_rate, 0.25);
+        assert_eq!(rules.error_calls, 6);
+        assert_eq!(rules.stall, std::time::Duration::from_secs(600));
+        assert_eq!(s.value_of("alert_cost"), ("20".to_string(), true));
+
+        let bad = Settings::parse(
+            "[settings]\nalert_cost = -1\nalert_errors = 120\nalert_error_calls = 0\nalert_stall = \"10m\"\n",
+        );
+        assert_eq!(bad.problems.len(), 4, "{:?}", bad.problems);
+        assert_eq!(bad.alert_rules(), crate::alert::Rules::default());
     }
 }
