@@ -30,6 +30,7 @@ mod qr;
 mod remote;
 pub mod render;
 mod runloop;
+mod scrollbar;
 mod select;
 mod settings;
 mod share;

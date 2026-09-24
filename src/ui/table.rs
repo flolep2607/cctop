@@ -61,8 +61,11 @@ fn provider_is_listed(p: crate::pricing::Provider) -> bool {
 /// What to say when there is nothing to draw.
 fn empty_lines(app: &App) -> Vec<Line<'static>> {
     if !app.loaded {
+        // The first scan reads every transcript on the machine, which can take
+        // long enough that a still line reads as a hang. The spinner is the
+        // one the other waits turn, on the same clock.
         return vec![Line::from(Span::styled(
-            "Scanning for sessions…",
+            format!("{} Scanning for sessions…", super::share::spinner_frame()),
             theme::dim(),
         ))];
     }
@@ -229,6 +232,14 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
         .collect();
 
     frame.render_widget(Paragraph::new(lines), list_area);
+    // Beside the rows and not the header, which never scrolls.
+    super::scrollbar::draw(
+        frame,
+        super::scrollbar::right_border(area, list_area.y, list_area.height),
+        app.visible.len(),
+        height,
+        app.scroll,
+    );
 }
 
 /// Split a cell around the active query, so the matching run can be picked out.
@@ -538,6 +549,48 @@ mod tests {
 
     fn all_columns() -> Vec<&'static columns::Column> {
         COLUMNS.iter().collect()
+    }
+
+    /// More sessions than rows puts a bar on the table's right border; as many
+    /// as fit leaves the border as it was.
+    #[test]
+    fn the_table_has_a_scrollbar_only_when_it_overflows() {
+        use crate::ui::scrollbar::tests::thumb_cells;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let draw = |count: usize| {
+            let mut app = crate::ui::tests::test_app();
+            app.sessions = (0..count)
+                .map(|i| crate::ui::tests::session(&format!("s{i}"), false, "x"))
+                .collect();
+            app.loaded = true;
+            app.refilter();
+            let mut terminal = Terminal::new(TestBackend::new(120, 12)).expect("backend");
+            let mut layout = Layout::default();
+            terminal
+                .draw(|frame| draw_table(frame, frame.area(), &mut app, &mut layout))
+                .expect("draw");
+            terminal.backend().buffer().clone()
+        };
+        assert_eq!(thumb_cells(&draw(5)), 0);
+        assert!(thumb_cells(&draw(40)) > 0, "no scrollbar over 40 rows in 9");
+    }
+
+    /// The first scan's placeholder turns, so a slow cold parse reads as work.
+    #[test]
+    fn the_first_scan_turns_a_spinner() {
+        let app = crate::ui::tests::test_app();
+        assert!(!app.loaded);
+        let text: String = empty_lines(&app)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("Scanning for sessions"), "{text}");
+        assert!(
+            text.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)),
+            "no spinner frame: {text}"
+        );
     }
 
     #[test]

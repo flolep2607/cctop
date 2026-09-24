@@ -6,7 +6,7 @@ use super::modals;
 use super::spark;
 use super::table;
 use super::theme::{self, Gradient};
-use super::{App, Mode, effects, panels, tabs, toast};
+use super::{App, Mode, effects, panels, scrollbar, tabs, toast};
 use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
@@ -1339,7 +1339,11 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     } else {
         scroll.min(max_scroll)
     };
+    let total = lines.len();
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), target);
+    // Shift+↑/↓ scrolls every one of these, and without the bar a panel cut
+    // off at its last visible row looks exactly like one that ended there.
+    scrollbar::on_border(frame, area, total, target.height as usize, scroll as usize);
 }
 
 const TOOL_SIDEBAR_W: u16 = 18;
@@ -1410,6 +1414,19 @@ fn draw_tool_sidebar(
             width: 1,
             ..inner
         },
+    );
+    // The divider is the sidebar's own right border, so its bar goes there
+    // rather than on the panel's, which belongs to the log beside it.
+    scrollbar::draw(
+        frame,
+        Rect {
+            x: inner.x + TOOL_SIDEBAR_W,
+            width: 1,
+            ..inner
+        },
+        tabs.len(),
+        inner.height as usize,
+        first,
     );
 
     panels::tool_activity(
@@ -3617,5 +3634,37 @@ mod tests {
             right_half.starts_with("│RIGHT-AGENT"),
             "the right agent is not in the right half: {split_row:?}"
         );
+    }
+
+    /// The Info panel cut off by a short bottom pane carries a bar on its right
+    /// border, and the same panel given room to finish carries none.
+    #[test]
+    fn a_bottom_panel_has_a_scrollbar_only_when_it_overflows() {
+        use crate::ui::scrollbar::tests::thumb_cells;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let draw = |rows: u16| {
+            let mut app = crate::ui::tests::test_app();
+            app.sessions = vec![crate::ui::tests::session("a", false, "x")];
+            app.loaded = true;
+            app.refilter();
+            app.bottom_tab = 0;
+            // An empty extraction is still one: without it Info is "Loading…".
+            app.panel_data = Some(Default::default());
+            let mut terminal = Terminal::new(TestBackend::new(120, rows)).expect("backend");
+            let mut layout = Layout::default();
+            terminal
+                .draw(|frame| draw_bottom(frame, frame.area(), &mut app, &mut layout))
+                .expect("draw");
+            (terminal.backend().buffer().clone(), app.panel_max_scroll)
+        };
+        let (buf, max) = draw(5);
+        assert!(max > 0, "Info fits in three rows now");
+        assert!(thumb_cells(&buf) > 0, "no scrollbar on a clipped panel");
+
+        let (buf, max) = draw(100);
+        assert_eq!(max, 0);
+        assert_eq!(thumb_cells(&buf), 0);
     }
 }

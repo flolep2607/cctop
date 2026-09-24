@@ -160,6 +160,13 @@ fn scrollable_modal(
             .style(theme::canvas()),
         inner,
     );
+    super::scrollbar::on_border(
+        frame,
+        rect,
+        total as usize,
+        inner.height as usize,
+        scroll as usize,
+    );
     max_scroll
 }
 
@@ -1346,6 +1353,15 @@ pub(super) fn draw_launch(
     };
     let (outer, inner) = modal(frame, area, title, lines, WIDTH);
     layout.modal_rect = Some(outer);
+    // Beside the list rows only: the footer below them never scrolls, and a
+    // track running past the list would make it look as if it did.
+    super::scrollbar::draw(
+        frame,
+        super::scrollbar::right_border(outer, inner.y, shown as u16),
+        total,
+        shown,
+        offset,
+    );
     // Clickable for the same reason the choices are: the list is there to be
     // read, and a path you can see but not click reads as decoration.
     layout.launch_cwd_rows = hit_lines
@@ -2016,8 +2032,19 @@ pub(super) fn draw_switch_tab(
         theme::dim(),
     )));
 
-    let (outer, _) = modal(frame, area, "Go to tab", lines, WIDTH);
+    let (outer, inner) = modal(frame, area, "Go to tab", lines, WIDTH);
     layout.modal_rect = Some(outer);
+    // Down the rows the window covers, "… above" and "… below" included, and
+    // not the query line or the keys: those stay put while the list slides.
+    let list_rows =
+        usize::from(start > 0) + shown.len() + usize::from(start + shown.len() < matches.len());
+    super::scrollbar::draw(
+        frame,
+        super::scrollbar::right_border(outer, inner.y + 2, list_rows as u16),
+        matches.len(),
+        ROWS,
+        start,
+    );
 }
 
 /// Where on `screen` `link` is drawn: `(row, columns)` for the row it starts on
@@ -2365,12 +2392,13 @@ pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
     // no way to tell it is still open.
     let visible = box_area.height.saturating_sub(2);
     let max_scroll = (body.len() as u16).saturating_sub(visible);
+    let scroll = app.insight_scroll.min(max_scroll);
+    let total = body.len();
     frame.render_widget(
-        Paragraph::new(body)
-            .block(block)
-            .scroll((app.insight_scroll.min(max_scroll), 0)),
+        Paragraph::new(body).block(block).scroll((scroll, 0)),
         box_area,
     );
+    super::scrollbar::on_border(frame, box_area, total, visible as usize, scroll as usize);
 }
 
 /// The selected session's conversation, read-only — the terminal half of what
@@ -2444,10 +2472,12 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     // is written here for the key handler to clamp against.
     view.max_back = (body.len().saturating_sub(visible)).min(u16::MAX as usize) as u16;
     let top = body.len().saturating_sub(visible + view.back as usize);
+    let total = body.len();
     frame.render_widget(
         Paragraph::new(body).block(block).scroll((top as u16, 0)),
         box_area,
     );
+    super::scrollbar::on_border(frame, box_area, total, visible, top);
 }
 
 /// A conversation laid out as styled lines, wrapped to `width`.
@@ -2681,6 +2711,66 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(text.contains("Home / End Jump"), "{text}");
+    }
+
+    /// The help is taller than a small terminal, and the bar on its border is
+    /// what says so; on a screen it fits, there is no bar to misread.
+    #[test]
+    fn the_help_has_a_scrollbar_only_when_it_overflows() {
+        use crate::ui::scrollbar::tests::thumb_cells;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        let mut short = Terminal::new(TestBackend::new(100, 20)).expect("backend");
+        short
+            .draw(|frame| draw_help(frame, frame.area(), &mut app))
+            .expect("draw");
+        assert!(app.help_max_scroll > 0, "the help fits in 20 rows now");
+        assert!(thumb_cells(short.backend().buffer()) > 0, "no scrollbar");
+
+        let mut tall = Terminal::new(TestBackend::new(100, 200)).expect("backend");
+        tall.draw(|frame| draw_help(frame, frame.area(), &mut app))
+            .expect("draw");
+        assert_eq!(app.help_max_scroll, 0);
+        assert_eq!(thumb_cells(tall.backend().buffer()), 0);
+    }
+
+    /// A report longer than its box gets a bar that follows the scroll: at the
+    /// top of the border first, at the bottom once scrolled to the end.
+    #[test]
+    fn a_long_report_has_a_scrollbar_that_follows_the_scroll() {
+        use crate::ui::scrollbar::{THUMB, tests::thumb_cells};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.mode = crate::ui::Mode::Insight;
+        let draw = |app: &App| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+            terminal
+                .draw(|frame| draw_insight(frame, frame.area(), app))
+                .expect("draw");
+            terminal.backend().buffer().clone()
+        };
+
+        app.insight = Some("a short report\n".repeat(5));
+        assert_eq!(thumb_cells(&draw(&app)), 0, "a report that fits has a bar");
+
+        app.insight = Some("line\n".repeat(200));
+        let buf = draw(&app);
+        assert!(
+            thumb_cells(&buf) > 0,
+            "no scrollbar on an overflowing report"
+        );
+        // The box is centred with two columns of margin: its right border is
+        // column 77, and its first inner row is 3.
+        assert_eq!(buf[(77, 3)].symbol(), THUMB);
+
+        app.insight_scroll = u16::MAX;
+        let buf = draw(&app);
+        assert_eq!(buf[(77, 3)].symbol(), "│");
+        assert_eq!(buf[(77, 20)].symbol(), THUMB);
     }
 
     /// The picker row draws every swatch, brackets the pick, and spells its
