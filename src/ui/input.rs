@@ -167,6 +167,7 @@ impl App {
             }
             Mode::Serve => self.on_key_serve(key),
             Mode::QuitConfirm => self.on_key_quit(key),
+            Mode::RemoteUpdateConfirm => self.on_key_remote_update(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
                 self.on_key_batch(key)
             }
@@ -1336,6 +1337,7 @@ impl App {
             Action::Mark => self.toggle_mark(),
             Action::Terminate => self.confirm_terminate(),
             Action::Delete => self.delete_selected(),
+            Action::UpdateRemote => self.confirm_remote_update(),
         }
     }
 

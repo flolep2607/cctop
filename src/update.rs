@@ -114,7 +114,7 @@ fn agent() -> ureq::Agent {
 
 /// Compare dotted numeric versions. Anything unparseable sorts as zero, so a
 /// malformed tag can never masquerade as an upgrade.
-fn is_newer(candidate: &str, current: &str) -> bool {
+pub(crate) fn is_newer(candidate: &str, current: &str) -> bool {
     fn parts(v: &str) -> Vec<u64> {
         v.trim()
             .trim_start_matches('v')

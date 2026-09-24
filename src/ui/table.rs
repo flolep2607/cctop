@@ -640,7 +640,12 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
         },
         // A remote row is dimmer throughout its identifying cells, so a table
         // spanning machines still reads as "here, plus elsewhere" at a glance.
-        ColumnId::Host => match s.remote {
+        ColumnId::Host => match &s.remote {
+            // Amber, the colour of something to get round to: an old cctop
+            // over there is not failing, only missing what came since.
+            Some(r) if matches!(r.skew, Some(crate::fleet::Skew::Older(_))) => {
+                theme::colors().cost_mid
+            }
             Some(_) => theme::colors().accent,
             None => theme::colors().dimmer,
         },

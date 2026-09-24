@@ -212,7 +212,7 @@ pub const COLUMNS: &[Column] = &[
         // row twice — but the branch identifies it more sharply.
         priority: 67,
         right_align: false,
-        desc: "Machine the session is on, for rows read from another over ssh (--host).\nlocal for this one. Hidden unless a --host is configured.",
+        desc: "Machine the session is on, for rows read from another over ssh (--host).\nlocal for this one. Hidden unless a --host is configured.\n↑ that machine runs an older cctop; Enter on the row offers to update it.",
     },
     Column {
         id: ColumnId::User,
@@ -460,7 +460,14 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
             Some(crate::collide::Overlap::Directory) => "·".into(),
             None => String::new(),
         },
+        // The marker leads rather than trails: the column is ten cells wide
+        // and a host name long enough to be cut would take a trailing one
+        // with it. Only a host that is behind is marked — it is the one with
+        // something to do, from the row's menu.
         ColumnId::Host => match &s.remote {
+            Some(r) if matches!(r.skew, Some(crate::fleet::Skew::Older(_))) => {
+                format!("↑{}", r.host)
+            }
             Some(r) => r.host.clone(),
             None => "local".into(),
         },
