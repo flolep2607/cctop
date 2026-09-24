@@ -671,6 +671,28 @@ impl App {
                     view.back = 0;
                 }
             }
+            // A turn at a time: the reply you opened on is usually one `[`
+            // away, however much tool output sits under it.
+            KeyCode::Char('[') => {
+                if let Some(view) = &mut self.chat {
+                    let older = view.turn_backs.iter().copied().filter(|&b| b > view.back);
+                    if let Some(back) = older.min() {
+                        view.back = back;
+                    }
+                }
+            }
+            KeyCode::Char(']') => {
+                if let Some(view) = &mut self.chat {
+                    let newer = view.turn_backs.iter().copied().filter(|&b| b < view.back);
+                    view.back = newer.max().unwrap_or(0);
+                }
+            }
+            // The source, for when what matters is the exact characters.
+            KeyCode::Char('m') => {
+                if let Some(view) = &mut self.chat {
+                    view.raw = !view.raw;
+                }
+            }
             // `u` for "earlier": the window grows at the top, which a
             // bottom-anchored scroll survives without moving a line.
             KeyCode::Char('u') => {
