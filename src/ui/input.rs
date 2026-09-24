@@ -2303,7 +2303,7 @@ mod tests {
         );
 
         app.resume_selected();
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("Nothing to resume"), "{status}");
     }
 
@@ -2365,7 +2365,7 @@ mod tests {
         app.tab = 1;
         app.on_key(key(KeyCode::F(5)));
         assert_eq!(app.tab, 1, "refreshing must not leave the agent");
-        assert!(app.status.is_some(), "the refresh said nothing");
+        assert!(app.status().is_some(), "the refresh said nothing");
         app.on_key(key(KeyCode::F(12)));
         assert_eq!(app.tab, 0);
 

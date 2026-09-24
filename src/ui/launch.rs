@@ -1187,7 +1187,7 @@ mod tests {
         app.restart_pane();
 
         assert_eq!(app.tabs[0].panes.len(), 1, "the view was closed");
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("not cctop's"), "{status}");
         assert!(child.try_wait().unwrap().is_none(), "the agent was ended");
 
@@ -1209,7 +1209,7 @@ mod tests {
         app.restart_pane();
 
         assert_eq!(app.tabs[0].panes.len(), 1, "the pane was dropped");
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("No session found"), "{status}");
     }
 
@@ -1263,7 +1263,7 @@ mod tests {
 
         app.restart_all();
 
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert_eq!(status, "Restarted nothing, skipped 2 with no session yet");
         assert_eq!(app.tabs.len(), 4, "a tab was closed");
         for (tab, pid) in app.tabs.iter().zip(pids) {
@@ -1279,7 +1279,7 @@ mod tests {
     fn restarting_every_tab_with_none_open_says_there_are_none() {
         let mut app = test_app();
         app.restart_all();
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert_eq!(status, "No agent tabs to restart");
     }
 
@@ -1317,7 +1317,7 @@ mod tests {
             Some("it is not running in a tab here")
         );
         app.restart_selected();
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("not running in a tab here"), "{status}");
         assert_eq!(app.tabs[0].panes.len(), 1, "the unrelated pane was touched");
 
@@ -1351,7 +1351,7 @@ mod tests {
             "a second agent was put on one transcript"
         );
         assert_eq!(app.tab, 1, "the tab already holding it was not shown");
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("Already open"), "{status}");
 
         let _ = child.kill();

@@ -8,7 +8,7 @@
 //! filesystem work and [`runloop`] the terminal and the event loop. They are
 //! `impl App` blocks in sibling modules, so nothing here had to become public
 //! to make the split; what stays is the state itself and the few things — the
-//! modes, the row type, construction and the status line — that every one of
+//! modes, the row type, construction and the toasts — that every one of
 //! them touches.
 
 mod batch;
@@ -35,6 +35,7 @@ pub mod spark;
 mod table;
 pub mod tabs;
 pub mod theme;
+mod toast;
 mod torn;
 mod worker;
 
@@ -393,7 +394,7 @@ pub struct App {
     /// spelling it — `~` and all, expanded only when it is accepted.
     pub launch_cwd_input: String,
     /// Set when the typed directory does not name one, so the field can say so
-    /// where it is rather than behind the modal that covers the status line.
+    /// where it is being typed rather than in a toast across the screen.
     pub launch_cwd_bad: bool,
     /// Directories agents are already known to have run in, newest first, as of
     /// the moment the field opened.
@@ -520,7 +521,9 @@ pub struct App {
     pub quota: Quota,
     /// Version of a newer published release, when one exists.
     pub update_available: Option<String>,
-    pub status: Option<(String, Instant)>,
+    /// What cctop has said lately, held until each has been up long enough to
+    /// read. See [`toast`].
+    pub toasts: toast::Toasts,
     /// When cctop started, used by the tool-activity "live" filter.
     pub started_at: String,
     /// The same moment as an `Instant`, which is what the tab-bar blink is
@@ -883,7 +886,7 @@ impl App {
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
             update_available: None,
-            status: None,
+            toasts: toast::Toasts::default(),
             started_at: chrono::Utc::now().to_rfc3339(),
             started: Instant::now(),
             prefs,
@@ -955,9 +958,17 @@ impl App {
         self.prefs.save();
     }
 
+    /// Say something. It goes up as a toast, alongside whatever else was said
+    /// in the last few seconds rather than in place of it.
     fn set_status(&mut self, msg: impl Into<String>) {
-        self.status = Some((msg.into(), Instant::now()));
+        self.toasts.push(msg.into());
         self.needs_redraw = true;
+    }
+
+    /// The last thing said, while it is still on screen.
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> Option<&str> {
+        self.toasts.latest()
     }
 
     /// Open `optimize` or `compare` over the table.

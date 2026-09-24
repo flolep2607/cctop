@@ -5,7 +5,7 @@ use super::modals;
 use super::spark;
 use super::table;
 use super::theme::{self, Gradient};
-use super::{App, Mode, panels, tabs};
+use super::{App, Mode, panels, tabs, toast};
 use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
@@ -272,6 +272,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
             _ => {}
         }
+        draw_toasts(frame, chunks[0], app);
         return layout;
     }
 
@@ -342,7 +343,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     // Over everything, modals included: a few seconds of confirmation for a
     // key that has already acted, in a corner nothing else owns.
     draw_paste_preview(frame, area, app);
+    // A terminal too short for the Overview still gets told things, on the
+    // top row of what is there instead.
+    let overview = match chunks[0].height {
+        0 => Rect { height: 1, ..area },
+        _ => chunks[0],
+    };
+    draw_toasts(frame, overview, app);
     layout
+}
+
+/// What cctop has said lately, over the Overview's right-hand side.
+///
+/// Over modals too, drawn last: a failure reported while a modal is up is the
+/// one most likely to be about that modal, and the status line it replaces was
+/// hidden behind every one of them.
+fn draw_toasts(frame: &mut Frame, overview: Rect, app: &App) {
+    // Inside the border, when there is one, so the panel still reads as a panel.
+    let region = match overview.height > 2 {
+        true => Block::bordered().inner(overview),
+        false => overview,
+    };
+    toast::draw(frame.buffer_mut(), region, &app.toasts);
 }
 
 /// The image a paste just filed, held in the bottom-right corner briefly.
@@ -2167,18 +2189,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     layout.share_corner = Some((area.y, x, x + width as u16));
 }
 
+/// The footer's key hints, which are always there.
+///
+/// Messages used to take this row over for a few seconds, which cost the keys
+/// they covered and was lost to the next message anyway. They are toasts now
+/// — see [`super::toast`] — and the footer stays a legend.
 fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
-    if let Some((msg, _)) = &app.status {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                msg.clone(),
-                Style::default().fg(theme::colors().cost_low),
-            ))),
-            area,
-        );
-        return;
-    }
-
     let total = area.width as usize;
     let (hints, badges) = if app.tab > 0 {
         // A terminal tab has no dashboard selection, filters or panels to act
@@ -3298,6 +3314,80 @@ mod tests {
             screen.contains('▀'),
             "no halfblock was drawn for the image: {screen}"
         );
+    }
+
+    /// A message goes up over the Overview and the footer keeps its keys — the
+    /// row the old status line used to take over for a few seconds.
+    #[test]
+    fn a_message_is_a_toast_over_the_overview_and_the_footer_keeps_its_keys() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.set_status("Restarted 3 tabs, skipped 1 mid-turn");
+        app.set_status("Tab renamed to api");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+        let screen = screen(&terminal, 100, 30);
+
+        // Row 0 is the tab bar and row 1 the Overview's top border.
+        assert!(
+            screen[2].contains("Tab renamed to api"),
+            "the newest message is not at the top of the stack: {screen:#?}"
+        );
+        assert!(
+            screen[3].contains("Restarted 3 tabs, skipped 1 mid-turn"),
+            "the earlier message was not kept under it: {screen:#?}"
+        );
+        assert!(
+            !screen[29].contains("Tab renamed"),
+            "the footer still carries the message: {:?}",
+            screen[29]
+        );
+        assert!(
+            !layout.key_hits.is_empty(),
+            "the footer lost its keys to the message"
+        );
+    }
+
+    /// Inside a tab the bottom of the frame is the agent's, so a toast has to
+    /// land on cctop's Overview and leave the agent's screen alone.
+    #[test]
+    fn a_toast_in_a_tab_stays_off_the_agents_screen() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut child, pid, pane) = test_pane("HELLO-FROM-AGENT");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.tabs.push(super::super::tabs::Tab::new(pane));
+        app.tab = 1;
+        app.set_status("Pasted paste-20260922-120000.png");
+
+        let (cols, rows) = (100u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        terminal
+            .draw(|frame| {
+                draw(frame, &mut app);
+            })
+            .expect("draw");
+        let screen = screen(&terminal, cols, rows);
+
+        app.tabs.clear();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+
+        let at = screen
+            .iter()
+            .position(|row| row.contains("Pasted paste-20260922-120000.png"))
+            .unwrap_or_else(|| panic!("the toast was not drawn: {screen:#?}"));
+        assert_eq!(at, 2, "the toast is not on the Overview: {screen:#?}");
     }
 
     /// A tab keeps you inside cctop: the tab bar, the Overview and the footer

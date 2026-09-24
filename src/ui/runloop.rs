@@ -724,13 +724,8 @@ fn event_loop(
         }
         last_blink = phase;
 
-        // Expire the transient status line.
-        if let Some((_, at)) = &app.status
-            && at.elapsed() > Duration::from_secs(3)
-        {
-            app.status = None;
-            app.needs_redraw = true;
-        }
+        // Toasts go on their own clocks, and a frame is owed when one goes.
+        app.needs_redraw |= app.toasts.expire(Instant::now());
 
         // A pasted image's corner preview expires on the same terms, a touch
         // longer — it is the confirmation that *that* image went.
