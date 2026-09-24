@@ -148,6 +148,50 @@ And a Codex `apply_patch` covering several files summarises as
 Agents can ask this themselves through `check_conflicts` — see
 [Letting agents see each other](integrations.md#letting-agents-see-each-other).
 
+### Telling the second agent
+
+The `!` column warns *you*, and by the time you look the second agent has
+usually made its edit. With the hooks installed, cctop can tell that agent
+instead, at the moment it reaches for the file. It is off by default; turn it on
+in the settings panel (`,`) or in `config.toml`:
+
+```toml
+[settings]
+warn_agents = true
+```
+
+From then on every file write a hook sees is noted in a small ledger beside the
+hook sockets — which file, which session, when, and the agent process that made
+it. When a session is about to write a file that a *different* agent, still
+running, wrote in the last 30 minutes, its hook answers with a note the model
+reads:
+
+```
+cctop: another agent that is still running on this machine wrote this file recently.
+- /home/you/proj/src/ui.rs — 3m12s ago, by Claude Code session 1a2b3c4d working in /home/you/proj
+Two agents editing one file do not merge: whichever writes last silently replaces
+the other's work. Re-read the file before changing it again, and settle who finishes
+first — or move one of you into a separate git worktree.
+```
+
+| harness | told on | through |
+|---|---|---|
+| Claude Code | `PreToolUse` of `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `additionalContext`, which reaches the model with the tool result |
+| Gemini CLI | `AfterTool` of `write_file`, `replace` | `additionalContext` — `BeforeTool` has no way to add context |
+| Codex | not told | its `apply_patch` writes are recorded, so the others hear about them |
+
+It is advice and nothing more: the answer carries no permission decision, so it
+cannot block, prompt or deny, and the hook still exits 0 inside its 250ms
+deadline. Anything that goes wrong on the way — no ledger yet, a mangled one,
+another hook holding its lock — is the same silence as the setting being off.
+
+It needs no cctop running: the hooks keep the ledger between themselves. It
+makes the same exemption as the `!` column (prose and lock files are never
+mentioned), a session is never warned about its own writes, and a writer whose
+process has exited no longer counts. Codex is recorded but never answered, and
+Cursor neither, because neither documents what it does with a hook's JSON on a
+tool call — a guess there is how a monitor becomes an error on every edit.
+
 ## Finding a session
 
 `/` filters the table as you type, on everything a row is: its label or title,

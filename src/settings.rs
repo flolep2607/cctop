@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 5] = [
+pub const SETTINGS: [(&str, &str, &str); 6] = [
     (
         "theme",
         "\"auto\"",
@@ -43,6 +43,11 @@ pub const SETTINGS: [(&str, &str, &str); 5] = [
         "hide_columns",
         "\"\"",
         "Columns to hide, e.g. \"tok_rate,mem\". On restart",
+    ),
+    (
+        "warn_agents",
+        "false",
+        "Tell an agent when a live peer just wrote its file",
     ),
 ];
 
@@ -119,6 +124,11 @@ pub struct Settings {
     /// to.
     pub compact_threshold: Option<f64>,
     pub hide_columns: Option<String>,
+    /// Whether `cctop hook` answers a file write with the other live sessions
+    /// that wrote the same file — see [`crate::advise`]. Off unless the file
+    /// says otherwise, because it is the one thing that makes the hook write
+    /// to the agent's stdout on a tool call.
+    pub warn_agents: Option<bool>,
     /// `(action, key)` as written, in file order.
     pub keys: Vec<(String, String)>,
     /// Everything that was written and could not be used, said in a sentence.
@@ -153,6 +163,7 @@ impl Settings {
                     "theme" => item.as_str().map(|v| out.theme = Some(v.into())).is_none(),
                     "notify" => item.as_bool().map(|v| out.notify = Some(v)).is_none(),
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
+                    "warn_agents" => item.as_bool().map(|v| out.warn_agents = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
                         .or_else(|| item.as_integer().map(|i| i as f64))
@@ -204,6 +215,7 @@ impl Settings {
             "theme" => self.theme.as_ref().map(|v| format!("{v:?}")),
             "notify" => self.notify.map(|v| v.to_string()),
             "auto_update" => self.auto_update.map(|v| v.to_string()),
+            "warn_agents" => self.warn_agents.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),
             _ => None,
