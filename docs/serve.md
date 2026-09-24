@@ -261,6 +261,7 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /api/hosts` | Which `--host` machines could not be read, and why |
 | `GET /api/quota` | Each account's rate-limit status and windows — `{"claude":[…],"codex":[…]}`, each profile with `status`, `detail`, `plan` and `windows` |
 | `GET /api/search?q=<query>` | Both search tiers over every session: `{"hits":[{key, session_id, snippet, score}]}`. Literal matches carry the matching text; topical-only hits carry `~NN% ` plus the chunk head |
+| `GET /metrics` | The same table as Prometheus text exposition — see [Scraping it](#scraping-it-with-prometheus) |
 | `GET /insight/optimize` | The text `cctop optimize` prints, as `text/plain` |
 | `GET /insight/compare` | The text `cctop compare` prints, as `text/plain` |
 | `GET /favicon.svg` | The page's icon |
@@ -283,6 +284,60 @@ unloadable index simply means the literal tier answered alone.
 
 The insight routes re-parse every transcript on request, the same cost the CLI
 pays — they are asked for, not polled.
+
+## Scraping it with Prometheus
+
+`/metrics` is the snapshot every other route serves, summed into gauges in the
+Prometheus text format. It sits behind the same token as everything else, and
+the read-only link opens it too — it says nothing `/api/sessions` does not, and
+leaves out titles, prompts and full paths on purpose, since a metrics store
+keeps what it is sent for months and shows it to anyone with a dashboard login.
+
+| Metric | Labels | |
+|---|---|---|
+| `cctop_build_info` | `version` | Always 1 |
+| `cctop_remote_hosts_unreadable` | | `--host` machines that could not be read |
+| `cctop_sessions` | `provider`, `state` | `state` is `working`, `waiting`, `asking`, `error`, or `idle` for a session with no live process. Every state is present, at 0 when empty, so an alert on `waiting` always evaluates |
+| `cctop_cost_usd` | `provider`, `included` | Estimated cost at retail rates of every session in the table |
+| `cctop_cost_today_usd`, `cctop_cost_this_hour_usd` | `provider`, `included` | Since local midnight, and in the current local hour |
+| `cctop_cost_burn_usd_per_hour` | `provider`, `included` | The smoothed live spend rate |
+| `cctop_model_cost_usd`, `cctop_model_cost_today_usd` | `provider`, `model`, `included` | The same, by model |
+| `cctop_tokens` | `provider`, `model`, `kind` | `kind` is `input`, `output`, `cache_read` or `cache_write` |
+| `cctop_tool_calls`, `cctop_tool_call_errors` | `provider` | Errors only for providers whose transcripts record a per-call outcome — a zero elsewhere would claim "nothing failed" |
+| `cctop_context_used_tokens`, `cctop_context_max_tokens`, `cctop_context_fill_ratio` | `session`, `project`, `provider` | **Live sessions only** |
+
+Cost is reported whatever the plan, with `included="true"` marking usage the
+plan bundles — a retail equivalent rather than money spent, as the analytics
+page labels it `incl`.
+
+Everything is a gauge, even the totals. They are sums over the sessions in the
+table, and a session can leave it — a host goes dark, a transcript is deleted —
+which a counter would report as a reset and `rate()` would turn into a spike.
+
+**Cardinality is bounded.** Labels take values from small, closed sets —
+provider, state, model, token kind. The one exception is the context window,
+which only means anything per session: those series carry the id's first eight
+characters and the project's directory name, and exist only while the session
+is live. A session that ends drops out of the next scrape instead of leaving a
+series behind for every session ever run.
+
+A remote row's transcript is not on this machine, so its tokens and cost are
+filed under the model it is on, with its input kinds folded into `input`.
+
+```yaml
+scrape_configs:
+  - job_name: cctop
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["127.0.0.1:7777"]
+    params:
+      t: ["71b02ee4…"]   # the read-only token from the second line cctop printed
+```
+
+The token is minted per run, so a restart means updating `params.t`. For a
+Prometheus on the same machine, `cctop serve --no-token --no-actions` on the
+default loopback bind is the trade that removes that step — at the cost the
+token section spells out: any local process or user can then read the page.
 
 ## Notes
 
