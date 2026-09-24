@@ -219,6 +219,11 @@ impl App {
                 serde_json::json!({
                     "session": event.session_id,
                     "signal": format!("{:?}", event.reported.signal),
+                    // Which subagent spoke, if one did: a question the tab
+                    // failed to show is only diagnosable from which agent
+                    // asked and which sibling spoke over it.
+                    "agent": event.agent.as_deref().unwrap_or_default(),
+                    "provisional": event.reported.provisional,
                     "pids": event.pids.len(),
                     "cwd": &event.reported.cwd,
                 }),
