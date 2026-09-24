@@ -104,6 +104,25 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// A pane labelled `label` with no process behind it, for tests elsewhere
+    /// that draw one: the fields that own a process are private to this module.
+    #[cfg(test)]
+    pub(crate) fn for_test(label: &str) -> Pane {
+        Pane {
+            hosted: None,
+            rmux: None,
+            resumed: None,
+            profile: None,
+            pid: 4321,
+            agent: None,
+            asked_at: None,
+            label: label.into(),
+            is_agent: true,
+            view: crate::attach::Attach::for_test(),
+            drew_at: Instant::now(),
+        }
+    }
+
     /// Whether the agent has gone quiet long enough to count as waiting for you.
     fn idle(&self) -> bool {
         self.drew_at.elapsed() >= QUIET_IS_IDLE

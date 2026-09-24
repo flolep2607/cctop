@@ -459,7 +459,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                     true => theme::Fill::Selected,
                     false => theme::Fill::Rest,
                 };
-                let fill = Style::default().bg(hue.fill(strength)).fg(strength.ink());
+                let fill = hue.wash(strength);
                 let fill = match watched {
                     true => fill.add_modifier(Modifier::UNDERLINED),
                     false => fill,
@@ -470,8 +470,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                     // unmistakably *that* tab while it is.
                     Some(tabs::Attention::NeedsInput) => match on {
                         true => fill
-                            .bg(hue.fill(theme::Fill::Alert))
-                            .fg(theme::Fill::Alert.ink())
+                            .patch(hue.wash(theme::Fill::Alert))
                             .add_modifier(Modifier::BOLD),
                         false => fill.add_modifier(Modifier::BOLD),
                     },
@@ -643,17 +642,24 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
 
     let focus = tab.focus;
     // The tab's colour, read before the panes are borrowed: a painted tab
-    // tints the title on every border it owns, which is where the mark is
-    // visible while the bar is a row you are not looking at. A hue that
-    // resolves to nothing under `NO_COLOR` tints nothing either.
+    // carries its mark onto the title of every border it owns, which is where
+    // it is visible while the bar is a row you are not looking at.
+    //
+    // The title wears the tab's own wash — the fill and ink it has in the bar,
+    // at the watched strength, since a tab whose panes are on screen is the
+    // watched one — so it reads as that tab continued down into the pane. The
+    // saturated ink it used to be in was a different colour from the tab
+    // above it, and said "related" where it should have said "the same".
+    //
+    // The border line itself is left alone. Its colour is already spoken for:
+    // `border_hi` is how you tell which pane has the keyboard. And a fill is
+    // made to sit behind text, not to be a line — the pale set drawn as a
+    // one-cell rule on a white ground all but disappears. A hue that resolves
+    // to nothing under `NO_COLOR` tints nothing either.
     let tint = tab
         .color
         .filter(|hue| hue.color() != Color::Reset)
-        .map(|hue| {
-            Style::default()
-                .fg(hue.color())
-                .add_modifier(Modifier::BOLD)
-        });
+        .map(|hue| hue.wash(theme::Fill::Selected).add_modifier(Modifier::BOLD));
     let now = chrono::Utc::now().timestamp();
     for (i, pane) in tab.panes.iter_mut().enumerate() {
         let mut block = panel_block_titled(&pane.label, tint.unwrap_or_else(theme::title));
@@ -2415,6 +2421,10 @@ mod tests {
         let at = col(&text, "2:one").expect("the painted tab is not in the bar");
         let cell = buf.cell((at, 0)).unwrap();
         assert_eq!(cell.bg, theme::Hue::Violet.fill(theme::Fill::Selected));
+        // Its own strength's text, not the resting one's: on the light set the
+        // two differ, and a mismatched pair is how a label vanishes into its
+        // tab.
+        assert_eq!(cell.fg, theme::Fill::Selected.ink());
         assert_ne!(
             cell.bg, violet,
             "the watched tab is no brighter than the rest"
@@ -2440,6 +2450,67 @@ mod tests {
             layout.workspace_spans[1], width_busy,
             "the tab changed width"
         );
+    }
+
+    /// A painted tab's panes carry its colour as the bar does: the title on the
+    /// border is filled with the watched tab's wash, padding and all, so it is
+    /// the tab continued down rather than a label in a related ink. The border
+    /// line keeps saying which pane has the keyboard, and an unpainted tab's
+    /// title is the plain one it always was.
+    #[test]
+    fn a_painted_tab_wears_its_colour_on_its_panes() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use crate::ui::tabs::{Pane, Tab};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        let mut painted = Tab::new(Pane::for_test("claude"));
+        painted.color = Some(theme::Hue::Violet);
+        app.tabs = vec![painted, Tab::new(Pane::for_test("codex"))];
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).expect("backend");
+        // The top border of the tab at `index`: `╭`, then the title's leading
+        // pad, then its first letter.
+        let mut top = |app: &mut App, index: usize| {
+            app.tab = index;
+            terminal
+                .draw(|frame| draw_panes(frame, frame.area(), app, &mut Layout::default()))
+                .expect("draw");
+            let buf = terminal.backend().buffer();
+            (0..3)
+                .map(|x| buf.cell((x, 0)).unwrap().clone())
+                .collect::<Vec<_>>()
+        };
+
+        let cells = top(&mut app, 1);
+        let wash = theme::Hue::Violet.wash(theme::Fill::Selected);
+        assert_eq!(cells[2].symbol(), "c", "the title is not where it was");
+        for cell in &cells[1..=2] {
+            assert_eq!(
+                cell.bg,
+                wash.bg.unwrap(),
+                "the title is not on the tab's fill"
+            );
+            assert_eq!(
+                cell.fg,
+                wash.fg.unwrap(),
+                "the title's text is not the tab's ink"
+            );
+        }
+        assert_eq!(
+            cells[0].fg,
+            theme::colors().border_hi,
+            "the focused pane's border lost its focus colour"
+        );
+
+        // The unpainted tab: the plain title, on no fill at all.
+        let cell = top(&mut app, 2).remove(2);
+        assert_eq!(cell.symbol(), "c");
+        assert_eq!(cell.fg, theme::title().fg.unwrap());
+        assert_ne!(cell.bg, wash.bg.unwrap());
     }
 
     /// The corner is drawn in the corner: last row, hard against the right
