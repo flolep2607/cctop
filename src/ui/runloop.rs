@@ -43,7 +43,9 @@ const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 /// so `cctop claude` gets you back to your shell the way `claude` would.
 pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i32> {
     // Before anything draws, and once: the palette is read by every widget and
-    // must not change under them mid-run.
+    // must not change under them mid-run. Before `ratatui::init` too, because
+    // `auto` asks the terminal for its background and reads the answer off
+    // stdin, which nothing else may be reading yet.
     theme::init_from_env(crate::settings::Settings::load().theme.as_deref());
 
     let (req_tx, req_rx) = channel::<Request>();

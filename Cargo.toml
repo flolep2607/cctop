@@ -82,6 +82,15 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"
+# How many colours the terminal can show, read from the environment the way
+# `TERM`/`COLORTERM`/`FORCE_COLOR` conventions intend, and the 256→16 table the
+# palette is folded through when the answer is sixteen (see `ui::theme`).
+# `convert` and `ratatui` add nothing new to the tree: anstyle, palette and
+# ratatui-core are already here under clap, ratatui-image and ratatui. Left out
+# on purpose: `query-detect`, whose DECRQSS probe only tells truecolor from 256
+# — a difference cctop never draws — and `terminfo`, which reads a database the
+# static musl build cannot count on finding.
+termprofile = { version = "0.2.4", default-features = false, features = ["convert", "ratatui"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 toml_edit = "0.25.13"
 # The multiplexer, as an API rather than as a command line: `rmux-sdk` talks the
