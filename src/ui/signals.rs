@@ -1092,6 +1092,6 @@ mod tests {
         app.selected = 0;
         app.jump_to_bell();
         assert_eq!(app.selected, 0);
-        assert!(app.status.is_some());
+        assert!(app.status().is_some());
     }
 }

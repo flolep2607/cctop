@@ -635,11 +635,7 @@ mod tests {
             true => assert_eq!(app.tab, 1, "the press did not show the tab"),
             false => {
                 assert_eq!(app.tab, 0, "a tab that cannot be attached moved the view");
-                let status = app
-                    .status
-                    .as_ref()
-                    .map(|(s, _)| s.clone())
-                    .unwrap_or_default();
+                let status = app.status().unwrap_or_default().to_owned();
                 assert!(status.contains("Could not open"), "silently: {status:?}");
             }
         }
@@ -799,7 +795,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::List);
         assert_eq!(app.tabs[0].color, Some(theme::Hue::ALL[2]));
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains(theme::Hue::ALL[2].name()), "{status}");
 
         // The pick opens where the tab already stands — three stops in — so
@@ -849,7 +845,7 @@ mod tests {
 
         // The window is gone, the agent is not, and the status says which.
         assert!(app.tabs.is_empty(), "the view outlived its close");
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("not cctop's to stop"), "{status}");
         assert!(
             child.try_wait().ok().flatten().is_none(),
@@ -894,7 +890,7 @@ mod tests {
         );
         // And the view followed it back rather than pointing past the end.
         assert_eq!(app.tab, 0);
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("Improve super cctop"), "{status}");
     }
 
@@ -945,7 +941,7 @@ mod tests {
         // Nothing asking: the key has to say so rather than go nowhere quiet.
         app.tabs = vec![shared("a", Some(crate::hook::Signal::Busy))];
         app.next_waiting_tab();
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("Nothing is waiting"), "{status}");
     }
 
