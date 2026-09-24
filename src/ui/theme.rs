@@ -560,19 +560,41 @@ pub fn init_from_env(configured: Option<&str>) {
 /// a question whose answer cctop draws identically either way — and under rmux
 /// `tmux` is a shim for a different multiplexer.
 ///
-/// ponytail: a bare `TERM=xterm` reads as sixteen colours, which is what its
-/// terminfo entry says, though PuTTY and many other emulators that send it can
-/// show 256. The environment has no way to tell those apart, and a folded
-/// palette is still a readable one. `FORCE_COLOR=ansi256` (or a `TERM` that
-/// says `256color`) is how such a terminal gets the full palette back.
+/// Sixteen colours only for a terminal *known* to be limited to them. termprofile
+/// also reads a bare `TERM=xterm`, and `CI` being set, as sixteen — and PuTTY
+/// and most emulators send `xterm` while showing 256 perfectly well, so taking
+/// that at its word folded a working palette for the many to spare the few. A
+/// terminal that really has sixteen names itself as one of [`SIXTEEN`].
 fn detect_depth(
     source: &impl termprofile::EnvVarSource,
     out: &impl termprofile::IsTerminal,
 ) -> Depth {
     let settings = termprofile::DetectorSettings::new().enable_tmux_info(false);
     let vars = termprofile::TermVars::from_source(source, out, settings);
-    Depth::of(TermProfile::detect_with_vars(vars))
+    match Depth::of(TermProfile::detect_with_vars(vars)) {
+        Depth::Ansi16 => {
+            let term = source.var("TERM").unwrap_or_default();
+            match SIXTEEN.contains(&term.as_str()) {
+                true => Depth::Ansi16,
+                false => Depth::Indexed,
+            }
+        }
+        depth => depth,
+    }
 }
+
+/// The `TERM`s that mean sixteen colours and no more: the kernel console, the
+/// serial terminals it descends from, and the entries that say so by name.
+const SIXTEEN: &[&str] = &[
+    "linux",
+    "vt100",
+    "vt102",
+    "vt220",
+    "ansi",
+    "cons25",
+    "xterm-16color",
+    "xterm-color",
+];
 
 /// `NO_COLOR` wins over any theme choice — it is a request for no colour, not
 /// for a different one — and a terminal that cannot show colour is the same
@@ -1724,7 +1746,12 @@ mod tests {
             Depth::Indexed
         );
         assert_eq!(depth(&[("TERM", "linux")], true), Depth::Ansi16);
-        assert_eq!(depth(&[("TERM", "xterm")], true), Depth::Ansi16);
+        // What PuTTY and most emulators send, while showing 256.
+        assert_eq!(depth(&[("TERM", "xterm")], true), Depth::Indexed);
+        assert_eq!(
+            depth(&[("TERM", "xterm-256color"), ("CI", "true")], true),
+            Depth::Indexed
+        );
         assert_eq!(
             depth(&[("TERM", "xterm"), ("FORCE_COLOR", "ansi256")], true),
             Depth::Indexed

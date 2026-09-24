@@ -230,6 +230,16 @@ fn id_for(url: &str) -> String {
     format!("cctop-{:x}", hasher.finish())
 }
 
+/// What one cell shows: the first character of a link's label for the cell that
+/// carries the link, and the cell's own symbol otherwise — never the URL.
+#[cfg(test)]
+pub(crate) fn shown_in(symbol: &str) -> String {
+    match label_of(symbol) {
+        Some(label) => label.chars().next().map(String::from).unwrap_or_default(),
+        None => symbol.to_string(),
+    }
+}
+
 /// What `buf` reads as on a screen: each link's label in place of its escape
 /// sequences, and the columns it covers not read twice.
 ///

@@ -729,7 +729,7 @@ fn event_loop(
         // Asked at most once a frame: inside a tab the loop wakes every 16ms
         // for the keyboard's sake, and a truecolor pulse sampled that often
         // would be sixty frames a second of a bar nobody reads at that rate.
-        if last_bar_at.elapsed() >= effects::FRAME {
+        if last_bar_at.elapsed() >= effects::frame_for(app.tab) {
             last_bar_at = Instant::now();
             let bar = match app.any_attention() {
                 true => render::bar_styles(app),
@@ -783,9 +783,11 @@ fn event_loop(
         // them only while it moves: once the last tab stops asking and the
         // last sweep is done, the wait is back to what it was, and the
         // dashboard is back to five wakes a second.
-        let idle_wait = match app.animating() {
-            true => idle_wait.min(effects::FRAME),
-            false => idle_wait,
+        let sweeping = (1..=app.tabs.len()).any(|i| app.restart_flash(i).is_some());
+        let idle_wait = match (sweeping, app.animating()) {
+            (true, _) => idle_wait.min(effects::FRAME),
+            (false, true) => idle_wait.min(effects::frame_for(app.tab)),
+            (false, false) => idle_wait,
         };
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())

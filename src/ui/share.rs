@@ -391,7 +391,7 @@ mod tests {
             .filter(|&y| !is_code_row(buf, y))
             .map(|y| {
                 (x0 + 1..x1)
-                    .map(|x| buf[(x, y)].symbol())
+                    .map(|x| crate::ui::hyperlink::shown_in(buf[(x, y)].symbol()))
                     .collect::<String>()
                     .replace("c hide QR", "c QR code")
                     .trim()

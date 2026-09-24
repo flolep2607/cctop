@@ -42,6 +42,23 @@ pub const FLASH: Duration = Duration::from_millis(450);
 /// frames nobody sees, drawn for a bar that is one row of the screen.
 pub const FRAME: Duration = Duration::from_millis(33);
 
+/// The same, for a pulse seen from the dashboard.
+///
+/// There a redraw is the whole table, not a pane's worth of cells, and a tab
+/// left waiting on you can wait for an hour — thirty full redraws a second for
+/// that long is a fan spinning for one row of the screen. Ten a second still
+/// reads as a pulse over its 1.2s breath. A restart sweep is short enough to
+/// keep [`FRAME`] wherever it runs.
+pub const DASHBOARD_FRAME: Duration = Duration::from_millis(100);
+
+/// How often the moving bar is sampled from where the view is now.
+pub fn frame_for(tab: usize) -> Duration {
+    match tab {
+        0 => DASHBOARD_FRAME,
+        _ => FRAME,
+    }
+}
+
 /// How far through the pulse the bar is at `elapsed`: `0.0` is the tab's
 /// resting look, `1.0` its alert tone.
 ///
