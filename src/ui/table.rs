@@ -772,6 +772,7 @@ mod tests {
             deleting: false,
             query: "",
             expand: None,
+            indent: "",
         };
         let looping = row(false, Some(crate::alert::Kind::Errors));
         let line = session_row(&s, &cols, &widths, &looping, &now);
@@ -941,6 +942,7 @@ mod tests {
                 selected: false,
                 marked: false,
                 rang: false,
+                alert: None,
                 deleting: false,
                 query: "",
                 expand: None,

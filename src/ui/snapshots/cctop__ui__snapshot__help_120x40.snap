@@ -1,20 +1,21 @@
 ---
 source: src/ui/snapshot.rs
+assertion_line: 346
 expression: screen
 ---
  1:Dashboard │ + Tab (t)
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │Live rate         $0.╭ Help ────────────────────────────────────────────────────────────────────╮onnet-4-5 32%        │
-│Today             $8.│Start here                                                                │                     │
-│This month        $0.│  Enter            Everything you can do to this row, in one menu         │                     │
-│All time         $28.│  ?  F1            This page                                              │                     │
-╰─────────────────────│  ,                Settings and keybinds, and the file that holds them    │─────────────────────╯
-╭ Sessions (4) ───────│  q  F10           Quit                                                   │─────────────────────╮
-│   LAST▲         $   │  +                Add a Claude account (runs claude setup-token)         │H       PROJECT      │
-│●    now    $18.42   │                                                                          │        Fix the chec…│
-│●     7m     $2.87   │Navigation                                                                │        api          │
-│○     3h     $0.19   │  ↑/k  ↓/j         Move between sessions                                  │        docs         │
-│○     2d     $7.03   │  PgUp / PgDn      Page through the list                                  │        infra        │
+│Today             $8.│Start here                                                                ┃                     │
+│This month        $0.│  Enter            Everything you can do to this row, in one menu         ┃                     │
+│All time         $28.│  ?  F1            This page                                              ┃                     │
+╰─────────────────────│  ,                Settings and keybinds, and the file that holds them    ┃─────────────────────╯
+╭ Sessions (4) ───────│  q  F10           Quit                                                   ┃─────────────────────╮
+│   LAST▲         $   │  +                Add a Claude account (runs claude setup-token)         ┃H       PROJECT      │
+│●    now    $18.42   │                                                                          ┃        Fix the chec…│
+│●     7m     $2.87   │Navigation                                                                ┃        api          │
+│○     3h     $0.19   │  ↑/k  ↓/j         Move between sessions                                  ┃        docs         │
+│○     2d     $7.03   │  PgUp / PgDn      Page through the list                                  ┃        infra        │
 │                     │  Ctrl+U / Ctrl+D  Half a page up / down                                  │                     │
 │                     │  g / G  Home / End Jump to first / last                                  │                     │
 │                     │  n / N            Next / previous search match (wraps)                   │                     │
@@ -27,18 +28,18 @@ expression: screen
 ╰─────────────────────│  s                Type a line into its terminal                          │─────────────────────╯
 ╭ Info  Performance  P│  O                Hand its context off to a different agent              │─────────────────────╮
 │Root /usr/bin/claude │  i                Read its conversation (works on remote rows)           │                     │
-│    PID    CPU%      │  y                Copy resume command or transcript path                 │                     │
-│   4101    9.8%    36│  e / E            Show its subagents / all subagents                     │                     │
-│   4188    2.4%     4│  d                Delete it (only when it is not running)                │                     │
-│   4290    0.3%      │  Ctrl+K           Terminate it                                           │                     │
+│    PID    CPU%      │    [ / ]  m       In it: previous / next turn, markdown source           │                     │
+│   4101    9.8%    36│  y                Copy resume command or transcript path                 │                     │
+│   4188    2.4%     4│  e / E            Show its subagents / all subagents                     │                     │
+│   4290    0.3%      │  d                Delete it (only when it is not running)                │                     │
+│                     │  Ctrl+K           Terminate it                                           │                     │
 │                     │                                                                          │                     │
 │                     │Several at once                                                           │                     │
 │                     │  Space            Mark / unmark the selected session                     │                     │
 │                     │  U                Clear all marks                                        │                     │
 │                     │  D                Delete all marked sessions                             │                     │
-│                     │  K                Terminate all marked live sessions                     │                     │
-╰─────────────────────│                                                                          │─────────────────────╯
-╭ Limits ─────────────│Filter and sort                                                           │────────── + account ╮
-│Claude checking…     │  /  F3            Filter by label, project, branch, model, id            │                     │
-╰─────────────────────╰ 1–35 of 117   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
+╰─────────────────────│  K                Terminate all marked live sessions                     │─────────────────────╯
+╭ Limits ─────────────│                                                                          │────────── + account ╮
+│Claude checking…     │Filter and sort                                                           │                     │
+╰─────────────────────╰ 1–35 of 122   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

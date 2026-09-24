@@ -1,5 +1,6 @@
 ---
 source: src/ui/snapshot.rs
+assertion_line: 346
 expression: screen
 ---
  1:Dashboard │ + Tab (t)
@@ -12,7 +13,7 @@ expression: screen
 ╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
 │   LAST▲╭ Delete session? ───────────────────────────────────────────╮JECT    │
 │●     7m│  docs                                                      │        │
-│○     3h│  33333333-cccc-4000-8000-000000000003                      │s       │
+│○     3h│  33333333-cccc-4000-8000-000000000003                      │s       ┃
 ╰────────│                                                            │────────╯
 ╭ Info  T│  This permanently removes the transcript from disk.        │────────╮
 │This tra│                                                            │        │

@@ -1,5 +1,6 @@
 ---
 source: src/ui/snapshot.rs
+assertion_line: 346
 expression: screen
 ---
  1:Dashboard │ + Tab (t)
@@ -26,12 +27,12 @@ expression: screen
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  ──────────────────────────────────────╮
-│Window  151.0K of 200.0K   90% to compaction   16.0K left                                                             │
-│                                                                                                                      │
-│█████████████████████████████████████████████████████████████████████████████████████████░░░░░░░░░░┊░░░░░░░░░░░░░░░░░░│
-│                                                                                                                      │
-│█ Tool output     71.0K  36%   █ Startup         24.0K  12%                                                           │
-│█ Assistant text  19.0K  10%   █ Tool input      12.0K   6%                                                           │
+│Window  151.0K of 200.0K   90% to compaction   16.0K left                                                             ┃
+│                                                                                                                      ┃
+│█████████████████████████████████████████████████████████████████████████████████████████░░░░░░░░░░┊░░░░░░░░░░░░░░░░░░┃
+│                                                                                                                      ┃
+│█ Tool output     71.0K  36%   █ Startup         24.0K  12%                                                           ┃
+│█ Assistant text  19.0K  10%   █ Tool input      12.0K   6%                                                           ┃
 │█ Your messages    6.0K   3%   █ Attachments      4.0K   2%                                                           │
 │█ Unaccounted     15.0K   8%   ░ Free            49.0K  25%                                                           │
 │                                                                                                                      │

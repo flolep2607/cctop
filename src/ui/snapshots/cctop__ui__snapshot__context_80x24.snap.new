@@ -16,12 +16,12 @@ expression: screen
 │●     7m     $2.87 sonnet-4-5     ─        local      ─            api        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context╮
-│Root /usr/bin/claude --model opus                                             │
-│    PID    CPU%       MEM  COMMAND                                            │
-│   4101    9.8%    360.0M  claude --model opus                                │
-│   4188    2.4%     44.0M  node mcp-server.js                                 │
-│   4290    0.3%      8.0M  bash -c npm test                                   │
+│Window  151.0K of 200.0K   90% to compaction   16.0K left                     ┃
+│                                                                              ┃
+│███████████████████████████████████████████████████████████░░░░░░┊░░░░░░░░░░░░│
 │                                                                              │
+│█ Tool output     71.0K  36%   █ Startup         24.0K  12%                   │
+│█ Assistant text  19.0K  10%   █ Tool input      12.0K   6%                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Limits ─────────────────────────────────────────────────────────── + account ╮
 │Claude checking…                        Codex checking…                       │
