@@ -232,7 +232,7 @@ pub fn profiles_in(home: &Path, provider: Provider) -> Vec<Profile> {
 
 /// Every profile of this user's, across every profiled harness, each one's env
 /// var included even when it points somewhere discovery would never have looked.
-pub static PROFILES: LazyLock<Vec<Profile>> = LazyLock::new(|| {
+fn discover_mine() -> Vec<Profile> {
     let mut out = Vec::new();
     for (provider, prefix, _) in PROFILED {
         let mut found = profiles_in(&HOME, provider);
@@ -252,7 +252,104 @@ pub static PROFILES: LazyLock<Vec<Profile>> = LazyLock::new(|| {
         out.extend(found);
     }
     out
+}
+
+/// Every profile in every other home cctop is sweeping.
+fn discover_others() -> Vec<Profile> {
+    let mut out = Vec::new();
+    for other in OTHER_HOMES.iter() {
+        for (provider, _, _) in PROFILED {
+            out.extend(profiles_in(&other.home, provider));
+        }
+    }
+    out
+}
+
+/// The profiles found as of the last [`refresh_profiles`].
+///
+/// Two lists because they answer different questions: `mine` is what the
+/// launcher can start an agent under, and `mine` then `others` is what
+/// attribution has to cover — every home the walk reaches, or a row read out
+/// of somebody else's `.claude-work` would come back unlabelled.
+#[derive(Clone, Copy)]
+struct Found {
+    mine: &'static [Profile],
+    others: &'static [Profile],
+}
+
+impl Found {
+    fn in_view(self) -> impl Iterator<Item = &'static Profile> {
+        self.mine.iter().chain(self.others)
+    }
+}
+
+/// Found once at startup, and again whenever [`refresh_profiles`] is asked.
+///
+/// Not a `LazyLock<Vec<_>>` alone, which is what it was: the popup makes
+/// `~/.claude-<name>` and logs it in while cctop runs, and a list fixed at
+/// startup left that account's sessions unlabelled, unresumable under it, and
+/// unwalked until a restart.
+///
+/// Leaked slices behind the lock rather than a `Vec`, because callers hold
+/// `&'static Profile`s and [`profile_for`] runs once per transcript path: a
+/// read is a shared lock and a copy of two pointers, and no caller iterates
+/// with the lock held. A slice is leaked only when a refresh finds something
+/// different, so the leak grows with accounts added and removed rather than
+/// with time, and the slice it replaces stays valid for whoever still holds a
+/// reference into it — the same bargain [`LAUNCHABLE`] makes.
+static FOUND: LazyLock<std::sync::RwLock<Found>> = LazyLock::new(|| {
+    std::sync::RwLock::new(Found {
+        mine: Box::leak(discover_mine().into_boxed_slice()),
+        others: Box::leak(discover_others().into_boxed_slice()),
+    })
 });
+
+fn found() -> Found {
+    // Poisoned only by a panic between two pointer stores, after which each
+    // pointer is still a whole, valid slice.
+    *FOUND
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Look for profiles again, so one created while cctop runs is labelled,
+/// resumable and walked without a restart.
+///
+/// Asked by the walk, through its roots, and by the limits poller. It costs a
+/// readdir of each home in view per harness and a stat per `.claude*` or
+/// `.codex*` entry — small beside the walk that follows, which reads every
+/// project directory under those same profiles.
+pub fn refresh_profiles() {
+    // Looked for outside the lock, so a slow home never stalls a reader.
+    let mine = discover_mine();
+    let others = discover_others();
+    let mut found = FOUND
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    adopt(&mut found.mine, mine);
+    adopt(&mut found.others, others);
+}
+
+/// Replace `slot` with `fresh`, keeping the order `slot` already had.
+///
+/// Profiles still present stay where they were and new ones go on the end, so
+/// a picker or a column never reshuffles under someone because an account was
+/// added. One no longer found is dropped, which is what a restart would do: a
+/// logged-out account must not go on being launched under. Answers whether
+/// anything changed — and leaks only when it did.
+fn adopt(slot: &mut &'static [Profile], fresh: Vec<Profile>) -> bool {
+    let mut next: Vec<Profile> = slot.iter().filter(|p| fresh.contains(p)).cloned().collect();
+    for profile in fresh {
+        if !next.contains(&profile) {
+            next.push(profile);
+        }
+    }
+    if next.as_slice() == *slot {
+        return false;
+    }
+    *slot = Box::leak(next.into_boxed_slice());
+    true
+}
 
 /// One named profile of this user's, when it still exists.
 ///
@@ -261,14 +358,19 @@ pub static PROFILES: LazyLock<Vec<Profile>> = LazyLock::new(|| {
 /// answers `None` for an account that has since been logged out of, so a stale
 /// name cannot start an agent under somebody else's subscription.
 pub fn profile_named(provider: Provider, name: &str) -> Option<&'static Profile> {
-    PROFILES
+    found()
+        .mine
         .iter()
         .find(|p| p.provider == provider && p.name == name)
 }
 
 /// This user's profiles for one harness, in the order the launcher offers them.
 pub fn profiles_for(provider: Provider) -> Vec<&'static Profile> {
-    PROFILES.iter().filter(|p| p.provider == provider).collect()
+    found()
+        .mine
+        .iter()
+        .filter(|p| p.provider == provider)
+        .collect()
 }
 
 /// Every account of `provider`'s the limits panel should report: the
@@ -280,22 +382,14 @@ pub fn profiles_for(provider: Provider) -> Vec<&'static Profile> {
 /// Its subscription is real all the same, and reporting how much of it is left
 /// is the whole reason the token was typed in.
 ///
-/// Read fresh rather than cached in a `LazyLock` like [`PROFILES`]: this is
-/// asked once per polling interval, on a file of a few lines, and the
-/// alternative is that an account added while cctop is running does not appear
-/// until it is restarted.
+/// Read fresh rather than held: this is asked once per polling interval, on a
+/// file of a few lines, and the alternative is that an account added while
+/// cctop is running does not appear until it is restarted.
 pub fn accounts_for(provider: Provider) -> Vec<Profile> {
-    let mut out: Vec<Profile> = profiles_for(provider).into_iter().cloned().collect();
     // Directories are looked for again too, for the same reason: the popup
     // makes `~/.claude-<name>` and logs it in while cctop runs.
-    //
-    // ponytail: [`PROFILES`] itself is not refreshed, so the sessions such an
-    // account starts are labelled with its name only once cctop restarts.
-    for found in profiles_in(&HOME, provider) {
-        if !out.iter().any(|p| p.dir == found.dir) {
-            out.push(found);
-        }
-    }
+    refresh_profiles();
+    let mut out: Vec<Profile> = profiles_for(provider).into_iter().cloned().collect();
     // Claude's alone: a token account is one `$CLAUDE_CODE_OAUTH_TOKEN` could
     // have named, and Codex has no such variable to make the same promise.
     if provider != Provider::Claude {
@@ -787,12 +881,23 @@ pub fn claude_config_dir_in(home: &Path) -> PathBuf {
 /// `leaf` is where the harness keeps them inside a profile — `projects` for
 /// Claude Code, `sessions` for Codex.
 fn profile_roots(provider: Provider, leaf: &str) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = profiles_for(provider)
+    // Here because the walk asks for its roots every time it runs, so an
+    // account made since the last walk is read on this one.
+    refresh_profiles();
+    let found = found();
+    let mut roots: Vec<PathBuf> = found
+        .mine
         .iter()
+        .filter(|p| p.provider == provider)
         .map(|p| p.dir.join(leaf))
         .collect();
     for other in OTHER_HOMES.iter() {
-        match profiles_in(&other.home, provider).as_slice() {
+        let theirs: Vec<&Profile> = found
+            .others
+            .iter()
+            .filter(|p| p.provider == provider && p.dir.parent() == Some(other.home.as_path()))
+            .collect();
+        match theirs.as_slice() {
             // A home cctop cannot read the inside of still has the one
             // conventional location worth trying.
             [] => {
@@ -883,23 +988,6 @@ pub fn owner_of(path: &Path) -> Option<&'static str> {
         .map(|o| o.user.as_str())
 }
 
-/// Every profile in view: this user's, and each other home's when cctop
-/// is sweeping them.
-///
-/// Separate from [`PROFILES`], which is this user's alone and is what
-/// the launcher offers to start an agent under. Attribution has to cover every
-/// home the walk reaches, or a row read out of somebody else's `.claude-work`
-/// would come back unlabelled.
-static PROFILES_IN_VIEW: LazyLock<Vec<Profile>> = LazyLock::new(|| {
-    let mut out = PROFILES.clone();
-    for other in OTHER_HOMES.iter() {
-        for (provider, _, _) in PROFILED {
-            out.extend(profiles_in(&other.home, provider));
-        }
-    }
-    out
-});
-
 /// Which Claude profile `path` was read out of.
 ///
 /// The counterpart of [`owner_of`] for the other axis a machine splits on: one
@@ -912,8 +1000,8 @@ static PROFILES_IN_VIEW: LazyLock<Vec<Profile>> = LazyLock::new(|| {
 /// would do; `$CLAUDE_CONFIG_DIR` can name a directory inside another one, and
 /// there the specific answer is the true one.
 pub fn profile_for(path: &Path) -> Option<&'static str> {
-    PROFILES_IN_VIEW
-        .iter()
+    found()
+        .in_view()
         .filter(|p| path.starts_with(&p.dir))
         .max_by_key(|p| p.dir.as_os_str().len())
         .map(|p| p.name.as_str())
@@ -931,8 +1019,8 @@ pub fn profile_count() -> usize {
     PROFILED
         .iter()
         .map(|(provider, _, _)| {
-            PROFILES_IN_VIEW
-                .iter()
+            found()
+                .in_view()
                 .filter(|p| p.provider == *provider)
                 .count()
         })
@@ -1196,6 +1284,45 @@ mod tests {
             .collect();
         assert_eq!(names, ["default", "alpha", "zeta"]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The bug this closes: the popup logged `~/.claude-work` in while cctop
+    /// ran, and its sessions stayed unlabelled until a restart because the
+    /// profile list was read once. A refresh has to find it, keep the order a
+    /// picker already showed, drop what was logged out of, and leave every
+    /// reference handed out before it pointing at the account it named.
+    #[test]
+    fn a_profile_made_while_running_is_adopted_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let login = |name: &str| {
+            let path = home.join(name);
+            std::fs::create_dir_all(&path).expect("mkdir");
+            std::fs::write(path.join(".credentials.json"), "{}").expect("write");
+        };
+        let names =
+            |slot: &[Profile]| -> Vec<String> { slot.iter().map(|p| p.name.clone()).collect() };
+        login(".claude");
+        let mut slot: &'static [Profile] = &[];
+        assert!(adopt(&mut slot, profiles_in(home, Provider::Claude)));
+        let default: &'static Profile = &slot[0];
+        // Nothing new is nothing leaked: the walk asks this every time.
+        assert!(!adopt(&mut slot, profiles_in(home, Provider::Claude)));
+
+        login(".claude-work");
+        login(".claude-alpha");
+        assert!(adopt(&mut slot, profiles_in(home, Provider::Claude)));
+        // Appended in discovery order, not re-sorted in among the rest.
+        assert_eq!(names(slot), ["default", "alpha", "work"]);
+        login(".claude-beta");
+        assert!(adopt(&mut slot, profiles_in(home, Provider::Claude)));
+        assert_eq!(names(slot), ["default", "alpha", "work", "beta"]);
+
+        std::fs::remove_file(home.join(".claude-work").join(".credentials.json")).expect("rm");
+        assert!(adopt(&mut slot, profiles_in(home, Provider::Claude)));
+        assert_eq!(names(slot), ["default", "alpha", "beta"]);
+        assert_eq!(default.name, "default");
+        assert_eq!(default.dir, home.join(".claude"));
     }
 
     /// The `[accounts]` table names the token-only accounts, and only the ones

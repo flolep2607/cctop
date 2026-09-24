@@ -184,6 +184,7 @@ nothing about why.
 ```
 ╭ Improve super cctop ─────────────────────────────────────╮
 │ Resume in a tab                                        R │
+│ Restart it in its tab    it is not running in a tab here │
 │ Attach to it                                           a │
 │ Type into it               no local process to type into │
 │ Hand off to another agent                              O │
@@ -245,6 +246,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `k` | Terminate the selected live session (with confirmation) |
 | `s` | Type a line into the selected session's terminal (see below) |
 | `R` | Resume the selected session in a tab of its own (see below) |
+| `Ctrl+R` | Restart every agent tab on the same session, skipping any mid-turn |
 | `O` | Hand the selected session's context off to a different agent (see below) |
 | `a` | Open that session's terminal in a tab and drive it |
 | `t` | New tab: run an agent or a shell (see below) |
@@ -265,6 +267,7 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+o` | Move focus to the next pane |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
+| `Alt+Shift+R` | Restart the pane's agent on the same session, after an update; on the dashboard, the selected row's tab |
 | `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
 

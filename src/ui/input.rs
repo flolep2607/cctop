@@ -478,6 +478,10 @@ impl App {
             KeyCode::Char('w') => self.close_pane(),
             // Shifted for the same reason as `W`, and because `r` renames: the
             // agent is ended and resumed, on whatever version is now installed.
+            // On the dashboard it restarts the selected row's tab, and only from
+            // the table itself: over a modal the selection is not what is on
+            // screen, and an agent must not be ended by a key aimed at a dialog.
+            KeyCode::Char('R') if self.tab == 0 && self.mode != Mode::List => {}
             KeyCode::Char('R') => self.restart_pane(),
             // Shifted, because it is the irreversible one: `w` on a rmux-backed
             // pane only detaches, and the key that ends the agent should not be
@@ -1263,6 +1267,7 @@ impl App {
         use super::menu::Action;
         match action {
             Action::Resume => self.resume_selected(),
+            Action::Restart => self.restart_selected(),
             Action::Attach => self.attach_selected(),
             Action::Send => self.send_prompt(),
             Action::Handoff => self.handoff_selected(),
@@ -1447,6 +1452,10 @@ impl App {
                     .unwrap_or(AGE_OPTIONS.len() - 1);
                 self.mode = Mode::AgeFilter;
             }
+            // Ctrl, because it stops agents — the same reasoning as Ctrl+K —
+            // and `r`, because Alt+Shift+R is the one-tab version and `R`
+            // already resumes. Above the refresh arm, which would take it.
+            KeyCode::Char('r') if ctrl => self.restart_all(),
             KeyCode::Char('r') | KeyCode::F(5) => {
                 let _ = self.tx.send(Request::Refresh);
                 self.set_status("Refreshing…");

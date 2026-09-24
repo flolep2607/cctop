@@ -330,17 +330,18 @@ fn stored_token(profile: &str) -> Option<String> {
     )
 }
 
-/// Add one or more token accounts, starting with `first`.
+/// Add one or more Claude accounts, starting with `first`.
 ///
-/// On a terminal this walks the user through it: sign in as the right account,
-/// let cctop run `claude setup-token`, paste what it printed, see that it
-/// works, and go again for the next one. The browser step is the one people
-/// get wrong — `setup-token` authorises whichever claude.ai login the browser
-/// already has, so a second account run straight after the first silently
-/// mints another token for the first.
+/// On a terminal this walks the user through it: pick a full login or a token,
+/// sign in as the right account, let cctop run `claude auth login` or `claude
+/// setup-token`, see that it works, and go again for the next one. The browser
+/// step is the one people get wrong — both commands authorise whichever
+/// claude.ai login the browser already has, so a second account run straight
+/// after the first silently signs in as the first again.
 ///
 /// Piped, it reads a single token from stdin and stores it, as it always has:
-/// `cctop --add-account work < token.txt` is a script's way in.
+/// `cctop --add-account work < token.txt` is a script's way in. A full login
+/// needs a browser and a person at it, so a script is not offered one.
 pub fn add_account(first: &str) -> anyhow::Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
@@ -352,40 +353,24 @@ pub fn add_account(first: &str) -> anyhow::Result<()> {
     }
     let mut name = first.to_string();
     for n in 1.. {
-        eprintln!(
-            "\nAdding Claude account '{name}'.\n\
-             \x20 1. In your browser, be signed in to claude.ai as that account{}.\n\
-             \x20 2. cctop runs `claude setup-token`: approve it in the browser, and it\n\
-             \x20    prints a token that lasts a year.\n\
-             \x20 3. Paste that token back here.",
-            if n > 1 {
-                " — not the one\n     you just added: sign out, or use a private window"
-            } else {
-                ""
-            }
-        );
-        eprint!("Press Enter to run `claude setup-token`, or paste a token you already have: ");
-        let mut token = read_line()?;
-        if token.is_empty() {
-            match std::process::Command::new("claude")
-                .arg("setup-token")
-                .status()
-            {
-                Ok(status) if !status.success() => {
-                    eprintln!("! `claude setup-token` exited with {status}.")
-                }
-                Ok(_) => {}
-                Err(e) => eprintln!("! Could not run `claude setup-token` ({e}); run it yourself."),
-            }
-            eprint!("\nPaste the token it printed: ");
-            token = read_line()?;
-        }
-        if token.is_empty() {
-            eprintln!("No token given; nothing written for '{name}'.");
+        let again = if n > 1 {
+            " — not the one\n     you just added: sign out, or use a private window"
         } else {
-            store_token(&name, &token)?;
-            eprintln!("  Checking it against the usage endpoint…");
-            eprintln!("  {}", describe(&cached(&token, || claude_usage(&token))));
+            ""
+        };
+        // Checked here and not for a piped token, which has always been taken
+        // as named: a full login's name becomes a directory under $HOME, and
+        // `cctop as <name>` has to survive a shell.
+        if !valid_account_name(&name) {
+            eprintln!(
+                "! '{name}' will not do: an account name is letters, digits, - _ and . only."
+            );
+        } else {
+            match ask_kind(&name)? {
+                Choice::Login => add_login(&name, again)?,
+                Choice::Token => add_token(&name, again)?,
+                Choice::Skip => eprintln!("Nothing added for '{name}'."),
+            }
         }
         eprint!("\nAdd another account? Name it, or press Enter to finish: ");
         name = read_line()?;
@@ -397,6 +382,174 @@ pub fn add_account(first: &str) -> anyhow::Result<()> {
         "Switch accounts in the launcher with `p`, or from a shell with\n\
          \x20 cctop as <name> claude"
     );
+    Ok(())
+}
+
+/// Which kind of account the walkthrough makes: the two the TUI's `+ account`
+/// popup offers, for the same reason — each keeps something the other gives up.
+#[derive(Debug, PartialEq, Eq)]
+enum Choice {
+    /// `claude auth login` into `~/.claude-<name>`.
+    Login,
+    /// `claude setup-token`, kept in cctop's config.
+    Token,
+    /// Neither, for now: an empty answer, which is also what a closed stdin
+    /// reads as, so it must not be asked again forever.
+    Skip,
+}
+
+/// An answer to [`ask_kind`], or `None` for one that is neither and wants
+/// asking again.
+fn parse_choice(answer: &str) -> Option<Choice> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" => Some(Choice::Skip),
+        "f" | "full" | "full login" | "login" => Some(Choice::Login),
+        "t" | "token" => Some(Choice::Token),
+        _ => None,
+    }
+}
+
+/// Ask which kind `name` is, in the popup's words, since the tradeoff is the
+/// whole of the choice.
+fn ask_kind(name: &str) -> anyhow::Result<Choice> {
+    eprintln!(
+        "\nAdding Claude account '{name}'. Which kind?\n\
+         \x20 [f] full login  its own ~/.claude-{name}, everything works\n\
+         \x20 [t] token       shares ~/.claude history, but no Remote Control\n\
+         \x20                 or claude.ai connectors"
+    );
+    loop {
+        eprint!("f or t (Enter to skip it): ");
+        let answer = read_line()?;
+        match parse_choice(&answer) {
+            Some(choice) => return Ok(choice),
+            None => eprintln!("! '{answer}' is neither."),
+        }
+    }
+}
+
+/// How a full login went.
+#[derive(Debug, PartialEq, Eq)]
+enum Login {
+    /// The directory had credentials before anything ran, so nothing did.
+    Already,
+    Landed,
+    /// The command ran and left no credentials behind.
+    Missed,
+}
+
+/// Log `dir` in with `run`, unless it already is.
+///
+/// Refusing an account that is already logged in, rather than logging in
+/// again, is the point: a second `auth login` into the same directory replaces
+/// its credentials with whichever account the browser holds now, which is
+/// usually not the one the directory was named for. `run` is the command, so a
+/// test can stand in for the browser.
+fn log_in(
+    dir: &Path,
+    again: &str,
+    run: impl FnOnce(&Path) -> std::io::Result<std::process::ExitStatus>,
+) -> anyhow::Result<Login> {
+    if login_landed(dir) {
+        return Ok(Login::Already);
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| anyhow::anyhow!("could not create {}: {e}", dir.display()))?;
+    eprintln!(
+        "  1. In your browser, be signed in to claude.ai as that account{again}.\n\
+         \x20 2. cctop runs `claude auth login` for {}: approve it in the browser.",
+        crate::util::tildify(&dir.to_string_lossy())
+    );
+    match run(dir) {
+        Ok(status) if !status.success() => {
+            eprintln!("! `claude auth login` exited with {status}.")
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("! Could not run `claude auth login` ({e})."),
+    }
+    // Judged by what it left behind rather than how it exited: the
+    // credentials file is the account, and nothing else says so afterwards.
+    Ok(if login_landed(dir) {
+        Login::Landed
+    } else {
+        Login::Missed
+    })
+}
+
+/// The full-login half of the walkthrough.
+fn add_login(name: &str, again: &str) -> anyhow::Result<()> {
+    // `--add-account` alone names `default`, and `~/.claude-default` would be
+    // discovered as a second account of that name beside `~/.claude`.
+    if name == "default" {
+        eprintln!(
+            "! `default` is ~/.claude itself; log that in with `claude auth login`,\n\
+             \x20 or name this account something else."
+        );
+        return Ok(());
+    }
+    let dir = config::claude_login_dir(name);
+    let shown = crate::util::tildify(&dir.to_string_lossy());
+    // The terminal inherited rather than captured: the command prints the
+    // sign-in link for when no browser opens, and can ask for a code back.
+    let outcome = log_in(&dir, again, |dir| {
+        std::process::Command::new("claude")
+            .args(["auth", "login", "--claudeai"])
+            .env("CLAUDE_CONFIG_DIR", dir)
+            .status()
+    })?;
+    match outcome {
+        Login::Already => {
+            eprintln!("{shown} is already logged in — it is in the launcher as {name}.")
+        }
+        Login::Missed => eprintln!(
+            "! `claude auth login` ended without logging in; nothing was added for '{name}'."
+        ),
+        Login::Landed => {
+            eprintln!("Logged in: {shown} is account '{name}', with a history of its own.");
+            eprintln!("  Checking it against the usage endpoint…");
+            let profile = config::Profile {
+                provider: crate::pricing::Provider::Claude,
+                name: name.to_string(),
+                dir,
+                source: config::AccountSource::Directory,
+            };
+            eprintln!("  {}", describe(&fetch_claude(&profile)));
+        }
+    }
+    Ok(())
+}
+
+/// The token half of the walkthrough.
+fn add_token(name: &str, again: &str) -> anyhow::Result<()> {
+    eprintln!(
+        "  1. In your browser, be signed in to claude.ai as that account{again}.\n\
+         \x20 2. cctop runs `claude setup-token`: approve it in the browser, and it\n\
+         \x20    prints a token that lasts a year.\n\
+         \x20 3. Paste that token back here."
+    );
+    eprint!("Press Enter to run `claude setup-token`, or paste a token you already have: ");
+    let mut token = read_line()?;
+    if token.is_empty() {
+        match std::process::Command::new("claude")
+            .arg("setup-token")
+            .status()
+        {
+            Ok(status) if !status.success() => {
+                eprintln!("! `claude setup-token` exited with {status}.")
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("! Could not run `claude setup-token` ({e}); run it yourself."),
+        }
+        eprint!("\nPaste the token it printed: ");
+        token = read_line()?;
+    }
+    if token.is_empty() {
+        eprintln!("No token given; nothing written for '{name}'.");
+    } else {
+        store_token(name, &token)?;
+        eprintln!("  Checking it against the usage endpoint…");
+        eprintln!("  {}", describe(&cached(&token, || claude_usage(&token))));
+    }
     Ok(())
 }
 
@@ -970,6 +1123,52 @@ fn codex_usage(token: &str) -> ProviderStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// The walkthrough's question takes the popup's keys and the words they
+    /// stand for, and an empty answer — a closed stdin reads as one — skips
+    /// rather than asking forever.
+    #[test]
+    fn the_kind_of_account_is_asked_in_the_popups_terms() {
+        use super::{Choice, parse_choice};
+        assert_eq!(parse_choice("f"), Some(Choice::Login));
+        assert_eq!(parse_choice(" Full Login "), Some(Choice::Login));
+        assert_eq!(parse_choice("T"), Some(Choice::Token));
+        assert_eq!(parse_choice("token"), Some(Choice::Token));
+        assert_eq!(parse_choice(""), Some(Choice::Skip));
+        assert_eq!(parse_choice("yes"), None);
+    }
+
+    /// Logging a directory in again would swap its credentials for whichever
+    /// account the browser holds now, so one already logged in is left alone —
+    /// and the command is never run to find that out.
+    #[test]
+    fn a_full_login_is_not_run_over_one_that_already_landed() {
+        use super::{Login, log_in};
+        use std::os::unix::process::ExitStatusExt;
+        let home = tempfile::tempdir().expect("tempdir");
+        let ok = || Ok(std::process::ExitStatus::from_raw(0));
+
+        let done = home.path().join(".claude-done");
+        std::fs::create_dir_all(&done).unwrap();
+        std::fs::write(done.join(".credentials.json"), "{}").unwrap();
+        let outcome = log_in(&done, "", |_| {
+            panic!("ran a login over a logged-in account")
+        });
+        assert_eq!(outcome.unwrap(), Login::Already);
+
+        // Made if missing, and judged by what the command left behind rather
+        // than by how it exited.
+        let fresh = home.path().join(".claude-fresh");
+        let outcome = log_in(&fresh, "", |dir| {
+            std::fs::write(dir.join(".credentials.json"), "{}")?;
+            ok()
+        });
+        assert_eq!(outcome.unwrap(), Login::Landed);
+
+        let abandoned = home.path().join(".claude-abandoned");
+        assert_eq!(log_in(&abandoned, "", |_| ok()).unwrap(), Login::Missed);
+        assert!(abandoned.is_dir());
+    }
 
     /// A login is done when its credentials are on disk, and not before: the
     /// directory is made first, so its existence says nothing.

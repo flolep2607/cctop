@@ -23,6 +23,12 @@ impl App {
             self.set_status("An account name is letters, digits, - _ and . only");
             return;
         }
+        // `~/.claude-default` would be found as a second `default` beside
+        // `~/.claude` — the same refusal `cctop --add-account` makes.
+        if name == "default" {
+            self.set_status("`default` is ~/.claude itself — name this account something else");
+            return;
+        }
         self.add_account.name = name;
         self.add_account.named = true;
         self.needs_redraw = true;

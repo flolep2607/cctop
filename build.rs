@@ -38,6 +38,20 @@ fn main() {
         // mentions yet — still re-runs this script.
         println!("cargo:rerun-if-changed={}", slash_path(path));
     }
+    // Which checkout is being built. Cargo names this script's output after
+    // the package and not after where it lives, and judges the lines above by
+    // mtime, relative to whichever package root is building — so two
+    // checkouts sharing a target dir share one output, and a checkout whose
+    // files are older than the other's last run takes that run's digest as
+    // fresh. (And the whole binary with it: `CARGO_MANIFEST_DIR` is not
+    // fingerprinted either.) The value is set by `.cargo/config.toml` to the
+    // checkout's own path, so switching checkouts changes a watched variable,
+    // which reruns this and so recompiles the crate once. The same checkout
+    // builds as incrementally as before.
+    //
+    // ponytail: only cargo run from inside the checkout reads that config, so
+    // one built with `--manifest-path` from elsewhere is not covered.
+    println!("cargo:rerun-if-env-changed=CCTOP_CHECKOUT");
     println!(
         "cargo:rustc-env=CCTOP_CACHE_HASH={:016x}",
         digest(&read_all(&files))

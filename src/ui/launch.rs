@@ -59,6 +59,39 @@ const HANDOFF_SETTLE: Duration = Duration::from_secs(3);
 /// much later is a new request, and is asked about again.
 pub(super) const RESTART_ARM: Duration = Duration::from_secs(4);
 
+/// What became of one restart: a single one says it, a bulk one counts it.
+///
+/// Each variant carries the tab's name, or the whole sentence where the reason
+/// is more than which tab it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Restart {
+    Done(String),
+    /// Mid-turn, and left running.
+    Working(String),
+    /// No session row claims the agent yet, so there is nothing to resume.
+    NoSession(String),
+    /// Refused before anything was stopped.
+    Declined(String),
+    /// Stopped, or tried to be, and then something went wrong.
+    Failed(String),
+}
+
+impl Restart {
+    /// The status line for a restart asked for on its own.
+    pub(super) fn sentence(&self) -> String {
+        match self {
+            Restart::Done(label) => format!("Restarted {label}"),
+            Restart::Working(label) => {
+                format!("{label} is mid-turn — Alt+Shift+R again to restart it anyway")
+            }
+            Restart::NoSession(label) => {
+                format!("No session found for {label} yet — nothing to resume it onto")
+            }
+            Restart::Declined(why) | Restart::Failed(why) => why.clone(),
+        }
+    }
+}
+
 /// The command that resumes `session`, under the account its transcript lives
 /// in, and that account.
 ///
@@ -299,109 +332,289 @@ impl App {
     /// In place rather than in a new tab: the pane keeps its slot in the split,
     /// its tab keeps its place in the bar, its name and its colour. A restart
     /// is not a different piece of work, so nothing on screen should say it is.
+    ///
+    /// On the dashboard there is no focused pane, and the key means the
+    /// selected row's tab instead — the same restart, reached from the table.
     pub(super) fn restart_pane(&mut self) {
-        let Some(pane) = self.active_tab().and_then(|tab| tab.panes.get(tab.focus)) else {
-            self.set_status("Nothing to restart — open the agent's tab first");
+        let Some(at) = self.tab.checked_sub(1) else {
+            self.restart_selected();
             return;
         };
-        let (owned, agent, label, on_rmux) = (
-            pane.owns_agent(),
-            pane.agent(),
-            pane.label.clone(),
-            pane.rmux.is_some(),
-        );
+        let Some(pane) = self.tabs.get(at).map(|tab| tab.focus) else {
+            return;
+        };
+        let outcome = self.restart_at(at, pane, true);
+        self.set_status(outcome.sentence());
+    }
+
+    /// Restart the selected session's agent in the tab it is already running
+    /// in, without going to that tab.
+    ///
+    /// Only an agent already in a tab here: one running in some other terminal
+    /// has no slot to be restarted *into*, and `R` is the key that gives it one.
+    pub(super) fn restart_selected(&mut self) {
+        if self.on_subagent() {
+            self.set_status("Restart the session, not one of its subagents");
+            return;
+        }
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        if let Some(why) = App::remote_refusal(session) {
+            self.set_status(why);
+            return;
+        }
+        let label = session.display_label().to_string();
+        let Some((at, pane)) = session.root_pid().and_then(|pid| self.tab_running(pid)) else {
+            self.set_status(format!(
+                "{label} is not running in a tab here — R resumes it in one"
+            ));
+            return;
+        };
+        let outcome = self.restart_at(at, pane, true);
+        self.set_status(outcome.sentence());
+    }
+
+    /// The tab, and the pane in it, that the agent running as `pid` is in.
+    ///
+    /// A pane matches on [`agent`](tabs::Pane::agent), which is what every
+    /// session row's process is keyed by; a tab standing for a session no
+    /// client of ours is on matches on the pid the sweep read off rmux, and
+    /// answers pane `0`, the slot [`Tab::attach`](tabs::Tab::attach) would put
+    /// it in. Both halves, as [`open_view`](Self::open_view) asks them, because
+    /// on the dashboard nearly every rmux-backed tab is the second kind.
+    pub(super) fn tab_running(&self, pid: u32) -> Option<(usize, usize)> {
+        self.tabs.iter().enumerate().find_map(|(at, tab)| {
+            if let Some(pane) = tab.panes.iter().position(|pane| pane.agent() == pid) {
+                return Some((at, pane));
+            }
+            tab.shared
+                .as_ref()
+                .is_some_and(|shared| shared.pid == Some(pid))
+                .then_some((at, 0))
+        })
+    }
+
+    /// Restart every agent in a tab here that can be restarted without losing
+    /// anything — the other half of `Restart to update`, for the morning after
+    /// `claude update` when every open tab is asking.
+    ///
+    /// An agent mid-turn is left alone rather than asked about. One at a time
+    /// the second press is a cheap question; across a dozen tabs it would be a
+    /// dozen of them, and the answer is the same every time: let the turn
+    /// finish, then press it again. Shells, editors and windows onto agents
+    /// cctop did not start are not what this is for, and are passed over
+    /// without a word — the count reports only what could have been restarted
+    /// and was not.
+    ///
+    /// Tabs standing for a session no client of ours is on are restarted too,
+    /// and stay that way: see [`App::restart_at`]. Leaving them out was the
+    /// other design, and it would have made this key restart almost nothing —
+    /// every single-pane rmux tab gives its client up the moment you switch
+    /// away from it, so from the dashboard they are the common case.
+    pub(super) fn restart_all(&mut self) {
+        // Collected by pid before anything is touched: a restart that fails can
+        // drop its tab, which moves every index after it, and a pid is the one
+        // name for an agent that a restart cannot collide with — the new agent
+        // has a different one.
+        let mut agents: Vec<u32> = Vec::new();
+        let mut fresh = 0;
+        for tab in &self.tabs {
+            if let Some(shared) = tab.shared.as_ref().filter(|_| tab.detached()) {
+                match (shared.is_agent(), shared.pid) {
+                    (true, Some(pid)) => agents.push(pid),
+                    // Too new for rmux to have said who the agent is, and so
+                    // too new to have written anything to resume.
+                    (true, None) => fresh += 1,
+                    (false, _) => {}
+                }
+                continue;
+            }
+            agents.extend(
+                tab.panes
+                    .iter()
+                    .filter(|pane| pane.owns_agent() && pane.is_agent())
+                    .map(tabs::Pane::agent),
+            );
+        }
+
+        let (mut done, mut working, mut declined) = (0, 0, 0);
+        let mut failed: Vec<String> = Vec::new();
+        for pid in agents {
+            let Some((at, pane)) = self.tab_running(pid) else {
+                continue;
+            };
+            match self.restart_at(at, pane, false) {
+                Restart::Done(_) => done += 1,
+                Restart::Working(_) => working += 1,
+                Restart::NoSession(_) => fresh += 1,
+                Restart::Declined(_) => declined += 1,
+                Restart::Failed(why) => failed.push(why),
+            }
+        }
+        if done + working + fresh + declined + failed.len() == 0 {
+            self.set_status("No agent tabs to restart");
+            return;
+        }
+        let tabs = |n: usize| if n == 1 { "tab" } else { "tabs" };
+        let mut said = match done {
+            0 => "Restarted nothing".to_string(),
+            n => format!("Restarted {n} {}", tabs(n)),
+        };
+        let skipped: Vec<String> = [
+            (working, "mid-turn"),
+            (fresh, "with no session yet"),
+            (declined, "that cannot be resumed"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, why)| format!("{n} {why}"))
+        .collect();
+        if !skipped.is_empty() {
+            said.push_str(&format!(", skipped {}", skipped.join(", ")));
+        }
+        // The first failure in full, since it is usually why the rest failed
+        // too — rmux gone, or the harness no longer on the PATH.
+        if let Some(first) = failed.first() {
+            said.push_str(&format!("; {} failed: {first}", failed.len()));
+        }
+        self.set_status(said);
+    }
+
+    /// End the agent in pane `pane` of tab `at` and resume its session in the
+    /// same slot, or say why not.
+    ///
+    /// The one restart every route shares — the key inside a pane, the row
+    /// menu, and the key that does every tab at once — so that none of them
+    /// has its own idea of when an agent may be stopped.
+    ///
+    /// `ask` is whether an agent mid-turn gets the second-press question. With
+    /// it the first request arms [`restart_arm`](App::restart_arm) and the
+    /// second goes ahead; without it a working agent is only reported, which is
+    /// what a bulk restart wants — it has nobody to ask.
+    ///
+    /// A tab standing for a session with no client of ours on it (see
+    /// [`Tab::detached`](tabs::Tab::detached)) is restarted without one: the
+    /// old session is killed and the new one started detached, with the name,
+    /// colour and account the tab had written onto it. Attaching first would
+    /// have been shorter, and would leave this cctop holding a client on a tab
+    /// nobody here is looking at — the one thing
+    /// [`go_to_tab`](App::go_to_tab) is careful never to do, because every
+    /// other cctop showing that tab then fights it over the window's size.
+    pub(super) fn restart_at(&mut self, at: usize, pane: usize, ask: bool) -> Restart {
+        let Some(tab) = self.tabs.get(at) else {
+            return Restart::Declined("That tab has closed".into());
+        };
+        // What the restart needs to know, from whichever of the two a tab is.
+        let detached = tab.detached();
+        let (owned, agent, label, on_rmux) = match (&tab.shared, tab.panes.get(pane)) {
+            (Some(shared), _) if detached => {
+                let Some(pid) = shared.pid else {
+                    return Restart::NoSession(shared.label.clone());
+                };
+                // Every such tab is a cctop-owned rmux session, which any
+                // cctop may end — Alt+w on one does exactly that.
+                (true, pid, shared.label.clone(), true)
+            }
+            (_, Some(pane)) => (
+                pane.owns_agent(),
+                pane.agent(),
+                pane.label.clone(),
+                pane.rmux.is_some(),
+            ),
+            _ => return Restart::Declined("That pane has closed".into()),
+        };
         // A window onto an agent started elsewhere: cctop can neither end it
         // nor put the new one where the old one was.
         if !owned {
-            self.set_status(format!("{label} is not cctop's to restart"));
-            return;
+            return Restart::Declined(format!("{label} is not cctop's to restart"));
         }
         // The row is found by the agent's pid, which is what every session's
         // process list is keyed by. A fresh agent that has not written a
-        // transcript yet has no row, and nothing to resume either.
+        // transcript yet has no row, and nothing to resume either — and nor
+        // does a row that exists only because the process does, whose `_pid_`
+        // id would be handed to `--resume` as if it named a conversation.
         let Some(session) = self
             .sessions
             .iter()
-            .find(|session| session.root_pid() == Some(agent))
+            .find(|session| session.root_pid() == Some(agent) && !session.process_only())
             .cloned()
         else {
-            self.set_status(format!(
-                "No session found for {label} yet — nothing to resume it onto"
-            ));
-            return;
+            return Restart::NoSession(label);
         };
         let Some((argv, profile)) = resume_under_profile(&session) else {
-            self.set_status(format!(
+            return Restart::Declined(format!(
                 "{} sessions cannot be resumed from a shell",
                 session.provider.as_str()
             ));
-            return;
         };
         if !crate::shim::is_command(&argv[0]) {
-            self.set_status(format!("{} is not installed on this machine", argv[0]));
-            return;
+            return Restart::Declined(format!("{} is not installed on this machine", argv[0]));
         }
         // Mid-turn, a restart throws the turn away. Asked once through the
-        // status line and answered by pressing the key again; see `restart_arm`.
-        let working = self.pane_signal(agent).is_some_and(|s| s.is_working());
-        let armed = self
-            .restart_arm
-            .take()
-            .is_some_and(|(pid, at)| pid == agent && at.elapsed() < RESTART_ARM);
-        if working && !armed {
-            self.restart_arm = Some((agent, Instant::now()));
-            self.set_status(format!(
-                "{label} is mid-turn — Alt+R again to restart it anyway"
-            ));
-            return;
+        // status line and answered by asking again; see `restart_arm`.
+        if self.pane_signal(agent).is_some_and(|s| s.is_working()) {
+            let armed = ask
+                && self
+                    .restart_arm
+                    .take()
+                    .is_some_and(|(pid, at)| pid == agent && at.elapsed() < RESTART_ARM);
+            if !armed {
+                if ask {
+                    self.restart_arm = Some((agent, Instant::now()));
+                }
+                return Restart::Working(label);
+            }
+        }
+
+        let resumed = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let cwd = session.work_dir();
+        let profile = profile.map(|p| p.name.clone());
+        if detached {
+            return self.restart_detached(at, &argv, cwd.as_deref(), resumed, label, profile);
         }
 
         // The old agent goes first, and completely: under rmux the new session
         // may carry the very name the old one had (a pane opened with `R`), and
         // `attach_or_create` finding it still there would reattach to the agent
         // being replaced. `kill` and dropping a hosted pty both wait for it.
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        let at = tab.focus;
-        let old = tab.panes.remove(at);
+        let tab = &mut self.tabs[at];
+        let focus = tab.focus;
+        let old = tab.panes.remove(pane);
         let stopped = old.kill_agent();
         drop(old);
         if let Err(error) = stopped {
             // Put back nothing: the pane is gone either way, and a tab left
             // standing with no pane would draw as an agent that exited.
             self.drop_empty_tabs();
-            self.set_status(format!("Could not stop {label}: {error}"));
-            return;
+            return Restart::Failed(format!("Could not stop {label}: {error}"));
         }
 
         // Where it lives stays what it was. A pane on cctop's own pty was the
         // user's choice, or rmux was not there, and neither is a reason to ask
         // about installing it now.
-        let resumed = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
         let own = match on_rmux {
             true => tabs::Own::Tmux(resumed.clone()),
             false => tabs::Own::Cctop,
         };
-        let mut pane = match tabs::Pane::launch(&argv, session.work_dir().as_deref(), own) {
-            Ok(pane) => pane,
+        let mut new = match tabs::Pane::launch(&argv, cwd.as_deref(), own) {
+            Ok(new) => new,
             Err(error) => {
                 self.drop_empty_tabs();
-                self.set_status(format!(
+                return Restart::Failed(format!(
                     "Stopped {label}, but could not start it again: {error}"
                 ));
-                return;
             }
         };
-        pane.resumed = Some(resumed);
-        pane.profile = profile.map(|p| p.name.clone());
-        pane.label = label.clone();
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        let at = at.min(tab.panes.len());
-        tab.panes.insert(at, pane);
-        tab.focus = at;
+        new.resumed = Some(resumed);
+        new.profile = profile;
+        new.label = label.clone();
+        let tab = &mut self.tabs[at];
+        let pane = pane.min(tab.panes.len());
+        tab.panes.insert(pane, new);
+        // Where it was, which is on the new pane if it was on the old one: a
+        // restart from the dashboard must not move a split's keyboard.
+        tab.focus = focus.min(tab.panes.len() - 1);
         // A new rmux session knows nothing of the old one's options, and the
         // colour and the bar position live there for every other cctop to read.
         let color = tab.color;
@@ -409,7 +622,60 @@ impl App {
             tab.recolor(color);
             self.save_tab_order();
         }
-        self.set_status(format!("Restarted {label}"));
+        Restart::Done(label)
+    }
+
+    /// The half of [`App::restart_at`] for a tab with no pane: swap the rmux
+    /// session it stands for, and stay detached.
+    ///
+    /// Everything a pane would have written onto its session once it found its
+    /// agent — the name, the account, the colour, the place in the bar — is
+    /// written here instead, because there is no pane to do it, and every
+    /// cctop, this one included the next time it attaches, reads the tab back
+    /// off the session.
+    fn restart_detached(
+        &mut self,
+        at: usize,
+        argv: &[String],
+        cwd: Option<&std::path::Path>,
+        resumed: String,
+        label: String,
+        profile: Option<String>,
+    ) -> Restart {
+        let Some(old) = self.tabs[at].shared.clone() else {
+            return Restart::Declined("That tab has closed".into());
+        };
+        if let Err(error) = crate::rmux::kill(&old.name) {
+            return Restart::Failed(format!("Could not stop {label}: {error}"));
+        }
+        if let Err(error) = crate::rmux::start_detached(argv, &resumed, cwd) {
+            // The session is gone and nothing replaced it; the next sweep
+            // retires the tab, as it does for any agent that ended.
+            return Restart::Failed(format!(
+                "Stopped {label}, but could not start it again: {error}"
+            ));
+        }
+        crate::rmux::quiet(&resumed);
+        crate::rmux::mouse(&resumed);
+        crate::rmux::set_label(&resumed, &label);
+        if let Some(profile) = &profile {
+            crate::rmux::set_profile(&resumed, profile);
+        }
+        let tab = &mut self.tabs[at];
+        tab.shared = Some(tabs::Shared {
+            pid: crate::rmux::agent_pid(&resumed),
+            name: resumed,
+            label: label.clone(),
+            // Nothing has been read off the new session yet; the next sweep
+            // fills both, as it does for a tab that has just been detached.
+            activity: None,
+            state: None,
+            profile,
+        });
+        let color = tab.color;
+        tab.recolor(color);
+        self.save_tab_order();
+        Restart::Done(label)
     }
 
     /// Where the agent about to start should live, offering to install rmux if
@@ -945,6 +1211,119 @@ mod tests {
         assert_eq!(app.tabs[0].panes.len(), 1, "the pane was dropped");
         let (status, _) = app.status.clone().expect("nothing was said");
         assert!(status.contains("No session found"), "{status}");
+    }
+
+    /// A pane that runs something named `claude`, so it counts as an agent,
+    /// without running Claude: a symlink to `sleep` under that name. A link
+    /// rather than a script, because a script just written can still be open
+    /// for writing in a thread forking next door, and exec then fails with
+    /// ETXTBSY one run in a hundred.
+    fn fake_agent(dir: &std::path::Path) -> tabs::Pane {
+        let claude = dir.join("claude");
+        std::os::unix::fs::symlink("/bin/sleep", &claude).expect("link");
+        let argv = vec![claude.display().to_string(), "30".to_string()];
+        let pane = tabs::Pane::launch(&argv, None, tabs::Own::Cctop).expect("launch");
+        assert!(pane.is_agent(), "{} is not taken for an agent", pane.label);
+        pane
+    }
+
+    /// A tab standing for a rmux session nobody here is attached to.
+    fn detached(name: &str, pid: u32) -> tabs::Tab {
+        tabs::Tab::shared(&crate::rmux::Running {
+            name: name.to_string(),
+            pid: Some(pid),
+            cwd: None,
+            attached: false,
+            activity: None,
+            label: None,
+            profile: None,
+            order: None,
+            state: None,
+            color: None,
+        })
+    }
+
+    /// The bulk restart stops nothing it cannot resume, and says what it left:
+    /// an agent with no session yet is counted, while a shell — in a pane or
+    /// behind a detached tab — is not what the key is for and goes unmentioned.
+    #[test]
+    fn restarting_every_tab_skips_what_has_no_session_and_says_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent = fake_agent(dir.path());
+        let shell_argv: Vec<String> = ["sh", "-c", "sleep 30"].map(String::from).to_vec();
+        let shell = tabs::Pane::launch(&shell_argv, None, tabs::Own::Cctop).expect("launch");
+        let pids = [agent.pid, shell.pid];
+
+        let mut app = test_app();
+        app.tabs.push(tabs::Tab::new(agent));
+        app.tabs.push(tabs::Tab::new(shell));
+        // Pids nothing is running as, and no session claims.
+        app.tabs.push(detached("cctop-claude-gone", u32::MAX - 1));
+        app.tabs.push(detached("cctop-zsh", u32::MAX - 2));
+
+        app.restart_all();
+
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert_eq!(status, "Restarted nothing, skipped 2 with no session yet");
+        assert_eq!(app.tabs.len(), 4, "a tab was closed");
+        for (tab, pid) in app.tabs.iter().zip(pids) {
+            assert_eq!(tab.panes.len(), 1, "a pane was dropped");
+            assert_eq!(tab.panes[0].pid, pid, "a pane was replaced");
+        }
+        assert!(app.tabs[2].detached() && app.tabs[3].detached());
+    }
+
+    /// With no agent in any tab there is nothing to count, and the key says so
+    /// rather than reporting that it restarted nothing out of nothing.
+    #[test]
+    fn restarting_every_tab_with_none_open_says_there_are_none() {
+        let mut app = test_app();
+        app.restart_all();
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert_eq!(status, "No agent tabs to restart");
+    }
+
+    /// The menu entry is for an agent already in a tab here — anywhere else
+    /// there is no slot to restart it into, and `R` is the key that makes one.
+    #[test]
+    fn restart_from_the_menu_needs_the_agent_in_a_tab_here() {
+        let argv: Vec<String> = ["sh", "-c", "sleep 30"].map(String::from).to_vec();
+        let pane = tabs::Pane::launch(&argv, None, tabs::Own::Cctop).expect("launch");
+        let in_tab = pane.agent();
+
+        let mut app = test_app();
+        app.tabs.push(tabs::Tab::new(pane));
+        let mut row = crate::ui::tests::session("abc", true, "/repo");
+        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+            pid: u32::MAX - 1,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        app.sessions = vec![row];
+        app.refilter();
+        app.selected = 0;
+
+        let restart = |app: &App| {
+            menu::items(app)
+                .into_iter()
+                .find(|i| i.action == menu::Action::Restart)
+                .expect("the menu always carries a Restart entry")
+        };
+        assert_eq!(
+            restart(&app).blocked.as_deref(),
+            Some("it is not running in a tab here")
+        );
+        app.restart_selected();
+        let (status, _) = app.status.clone().expect("nothing was said");
+        assert!(status.contains("not running in a tab here"), "{status}");
+        assert_eq!(app.tabs[0].panes.len(), 1, "the unrelated pane was touched");
+
+        // The same row, once its agent is the one in the tab.
+        app.sessions[0].process.as_mut().unwrap().process_list[0].pid = in_tab;
+        assert!(restart(&app).enabled(), "{:?}", restart(&app).blocked);
     }
 
     #[test]
