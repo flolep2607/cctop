@@ -61,6 +61,9 @@ pub fn terminate(pid: u32) -> Result<(), String> {
 pub struct Orphan {
     pub provider: crate::pricing::Provider,
     pub cwd: String,
+    /// Whose process it is, in [`Session::owner`]'s terms, so the row it
+    /// becomes is shown under the right user.
+    pub owner: Option<String>,
 }
 
 pub struct Collector {
@@ -229,24 +232,65 @@ fn is_claude_argv0(argv0: &str) -> bool {
         || argv0.contains("\\claude\\versions\\")
 }
 
-/// Whether `pid` is one cctop should treat as its user's.
-///
-/// Read from the owner of `/proc/<pid>`, which is the process's real uid and
-/// needs no permission to see — unlike its `cwd` or `environ`. A process that
-/// vanished between the scan and this check reads as not ours, which is the
-/// answer the next scan would give anyway.
-///
-/// Root, including under `sudo`, is the exception and sees every process:
-/// someone running cctop as root on a shared machine is asking what every
-/// agent on it is doing, and root can read each one's directory to say so.
-fn owned_by_us(pid: u32) -> bool {
-    // SAFETY: getuid has no preconditions and cannot fail.
-    owned_by(pid, unsafe { libc::getuid() })
+/// Who owns `pid`: the owner of `/proc/<pid>`, which is the process's real
+/// uid and needs no permission to see — unlike its `cwd` or `environ`. A
+/// process that vanished between the scan and this check has none, and is
+/// dropped, which is the answer the next scan would give anyway.
+fn proc_uid(pid: u32) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(format!("/proc/{pid}"))
+        .ok()
+        .map(|m| m.uid())
 }
 
-fn owned_by(pid: u32, uid: u32) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| uid == 0 || m.uid() == uid)
+/// Whether a process owned by `uid` is one cctop running as `me` should show.
+///
+/// Root, including under `sudo`, sees every process while it is sweeping every
+/// home ([`crate::config::OTHER_HOMES`]): someone running cctop as root on a
+/// shared machine is asking what every agent on it is doing, and root can read
+/// each one's directory and transcripts to say so. Everyone else — and root
+/// with the sweep turned off — sees their own, since without the owner's
+/// transcripts the process alone would be a `$0.00` row in an `unknown`
+/// directory.
+fn visible_to(uid: u32, me: u32, sweeping: bool) -> bool {
+    uid == me || (me == 0 && sweeping)
+}
+
+/// Sessions ranked for attribution, keyed by provider, owner and whatever a
+/// process would name to reach them — a working directory, or a resume id.
+///
+/// The owner is in the key because a directory is not an identity across
+/// users. Two people with `~/src/app` checked out at the same absolute path —
+/// a shared `/srv/app`, a container mounting one tree for everyone — would
+/// otherwise have root pair one user's agent with the other's transcript, and
+/// report the second user's spend as the first's CPU. A process's owner comes
+/// from its uid ([`crate::config::owner_for_uid`]) and a session's from the
+/// home its transcript was read out of, and only equal ones meet.
+///
+/// Most recently active first, since a directory usually holds many finished
+/// sessions and only the newest are plausibly live, and one resume id can lead
+/// to several sessions — the original and every one resumed from it.
+type Index<'a> = HashMap<(crate::pricing::Provider, Option<&'a str>, &'a str), Vec<&'a Session>>;
+
+fn index_by<'a>(
+    sessions: impl Iterator<Item = &'a Session>,
+    value: impl Fn(&'a Session) -> &'a str,
+) -> Index<'a> {
+    let mut index: Index<'a> = HashMap::new();
+    for s in sessions {
+        index
+            .entry((s.provider, s.owner.as_deref(), value(s)))
+            .or_default()
+            .push(s);
+    }
+    for candidates in index.values_mut() {
+        candidates.sort_by(|a, b| {
+            b.last_active
+                .cmp(&a.last_active)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+    }
+    index
 }
 
 /// Cheap rejection test, run over every process on the machine before any
@@ -409,11 +453,16 @@ impl Collector {
         /// the provider tests need.
         struct Candidate {
             pid: u32,
+            /// Whose sessions this process may be matched to; see [`Index`].
+            owner: Option<String>,
             name: String,
             tokens: Vec<String>,
             args: String,
         }
 
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let me = unsafe { libc::getuid() };
+        let sweeping = !crate::config::OTHER_HOMES.is_empty();
         let mut procs: HashMap<u32, Proc> = HashMap::with_capacity(sys.processes().len());
         let mut candidates: Vec<Candidate> = Vec::new();
         for (pid, p) in sys.processes() {
@@ -444,20 +493,16 @@ impl Collector {
                 continue;
             }
             // On a shared machine every user's agents are in the process table,
-            // but only ours can own a row: their transcripts are under their own
-            // home, and their working directory is unreadable to us. Left in,
-            // each became a `$0.00` row in an `unknown` directory — someone
-            // else's session, shown as one of ours. They stay in `procs`, since
-            // an ancestor walk may still pass through another user's process.
-            // Root keeps them all; see `owned_by_us`.
-            // ponytail: root sees other users' agents as processes with their
-            // directories, not their transcripts — those are read from $HOME only.
-            if !owned_by_us(pid) {
+            // but only ours can own a row unless we are root; see `visible_to`.
+            // The rest stay in `procs`, since an ancestor walk may still pass
+            // through another user's process.
+            let Some(uid) = proc_uid(pid).filter(|&uid| visible_to(uid, me, sweeping)) else {
                 continue;
-            }
+            };
             let tokens = tokens_of(p);
             candidates.push(Candidate {
                 pid,
+                owner: crate::config::owner_for_uid(uid),
                 name,
                 args: tokens.join(" "),
                 tokens,
@@ -489,48 +534,20 @@ impl Collector {
 
         // --- Identify agent root processes and attribute them to sessions ---
         let mut roots: HashMap<String, u32> = HashMap::new();
-        let mut unmatched: Vec<(u32, crate::pricing::Provider)> = Vec::new();
+        let mut unmatched: Vec<(u32, crate::pricing::Provider, Option<String>)> = Vec::new();
 
-        // Candidate sessions per working directory, most recently active first,
-        // for the cwd-based fallback. A directory usually holds many finished
-        // sessions and only the newest are plausibly live, but more than one can
-        // be running at once, so keep them all and rank rather than collapsing
-        // to a single winner.
-        let mut cwd_index: HashMap<(crate::pricing::Provider, &str), Vec<&Session>> =
-            HashMap::new();
-        for s in sessions.iter().filter(|s| !s.label_source.is_empty()) {
-            cwd_index
-                .entry((s.provider, s.label_source.as_str()))
-                .or_default()
-                .push(s);
-        }
-        for candidates in cwd_index.values_mut() {
-            candidates.sort_by(|a, b| {
-                b.last_active
-                    .cmp(&a.last_active)
-                    .then_with(|| a.session_id.cmp(&b.session_id))
-            });
-        }
+        // Candidate sessions per working directory, for the cwd-based
+        // fallback. More than one can be running at once, so keep them all and
+        // rank rather than collapsing to a single winner.
+        let cwd_index = index_by(
+            sessions.iter().filter(|s| !s.label_source.is_empty()),
+            |s| s.label_source.as_str(),
+        );
 
-        // Sessions by the id a process would name to reach them, most recently
-        // active first. A resume forks the transcript, so one id can lead to
-        // several sessions — the original and every session resumed from it —
-        // and the newest of those is the one the process is actually in.
-        let mut launched_index: HashMap<(crate::pricing::Provider, &str), Vec<&Session>> =
-            HashMap::new();
-        for s in sessions.iter() {
-            launched_index
-                .entry((s.provider, s.launched_as()))
-                .or_default()
-                .push(s);
-        }
-        for candidates in launched_index.values_mut() {
-            candidates.sort_by(|a, b| {
-                b.last_active
-                    .cmp(&a.last_active)
-                    .then_with(|| a.session_id.cmp(&b.session_id))
-            });
-        }
+        // Sessions by the id a process would name to reach them. A resume
+        // forks the transcript, and the newest of the sessions an id leads to
+        // is the one the process is actually in.
+        let launched_index = index_by(sessions.iter(), Session::launched_as);
 
         // Which agent a candidate process is, if it is one at all. Hoisted out
         // of the attribution loop because the hook claims below have to know it
@@ -621,7 +638,9 @@ impl Collector {
             }
 
             if let Some(uuid) = resume_uuid(&snap.tokens) {
-                let launched = launched_index.get(&(provider, uuid)).map(Vec::as_slice);
+                let launched = launched_index
+                    .get(&(provider, snap.owner.as_deref(), uuid))
+                    .map(Vec::as_slice);
                 let key = resumed_key(launched, provider, uuid, &roots);
                 // The subtle one, and the reason this record exists: the key is
                 // usually *not* the uuid on the command line. A resume forks.
@@ -643,9 +662,11 @@ impl Collector {
             // Claude for Mac resumes by title rather than UUID.
             if provider == crate::pricing::Provider::Claude
                 && let Some(title) = resume_title(&snap.tokens)
-                && let Some(session) = sessions
-                    .iter()
-                    .find(|s| s.surface.is_desktop() && s.title.as_deref() == Some(title.as_str()))
+                && let Some(session) = sessions.iter().find(|s| {
+                    s.surface.is_desktop()
+                        && s.owner == snap.owner
+                        && s.title.as_deref() == Some(title.as_str())
+                })
             {
                 found.push(Attribution {
                     pid,
@@ -658,7 +679,7 @@ impl Collector {
                 continue;
             }
 
-            unmatched.push((pid, provider));
+            unmatched.push((pid, provider, snap.owner.clone()));
         }
 
         // Fallback: match by working directory. Codex's app-server does not
@@ -669,8 +690,9 @@ impl Collector {
         // directory's processes as a group. Handling them one at a time pointed
         // every process in a directory at that directory's newest session, so a
         // second concurrent agent in the same checkout always looked stopped.
-        let mut by_cwd: HashMap<(crate::pricing::Provider, String), Vec<u32>> = HashMap::new();
-        for (pid, provider) in unmatched {
+        let mut by_cwd: HashMap<(crate::pricing::Provider, Option<String>, String), Vec<u32>> =
+            HashMap::new();
+        for (pid, provider, owner) in unmatched {
             // The Codex worker is often a child of `codex-linux-sandbox`; the
             // child has no useful cwd, while the parent carries the managed
             // workspace in `--command-cwd`. Walk ancestors so the PID still
@@ -705,22 +727,24 @@ impl Collector {
                 }
                 current = (s.ppid != 0).then_some(s.ppid);
             };
-            by_cwd.entry((provider, cwd)).or_default().push(pid);
+            by_cwd.entry((provider, owner, cwd)).or_default().push(pid);
         }
 
         // Map order is not stable, so fix it before attributing anything.
-        let mut groups: Vec<((crate::pricing::Provider, String), Vec<u32>)> =
-            by_cwd.into_iter().collect();
-        groups.sort_by(|a, b| (a.0.0.as_str(), &a.0.1).cmp(&(b.0.0.as_str(), &b.0.1)));
+        type Group = ((crate::pricing::Provider, Option<String>, String), Vec<u32>);
+        let mut groups: Vec<Group> = by_cwd.into_iter().collect();
+        groups.sort_by(|a, b| {
+            (a.0.0.as_str(), &a.0.1, &a.0.2).cmp(&(b.0.0.as_str(), &b.0.1, &b.0.2))
+        });
 
-        for ((provider, cwd), mut pids) in groups {
+        for ((provider, owner, cwd), mut pids) in groups {
             // Oldest process first, so it pairs with the session that started
             // first and each keeps its own CPU and memory.
             pids.sort_by_key(|pid| (procs.get(pid).map_or(0, |s| s.start_time), *pid));
 
             let mut claimed = 0;
             if !cwd.is_empty()
-                && let Some(candidates) = cwd_index.get(&(provider, cwd.as_str()))
+                && let Some(candidates) = cwd_index.get(&(provider, owner.as_deref(), cwd.as_str()))
             {
                 let live = live_sessions_for_group(candidates, pids.len(), &roots);
                 for (pid, session) in pids.iter().zip(&live) {
@@ -755,6 +779,7 @@ impl Collector {
                     Orphan {
                         provider,
                         cwd: cwd.clone(),
+                        owner: owner.clone(),
                     },
                 );
             }
@@ -984,26 +1009,75 @@ mod tests {
 
     const UUID: &str = "7026d578-8cba-4880-b464-9700f1b77b71";
 
-    /// Another user's agent can never own a row, so it is never a candidate —
-    /// unless cctop runs as root.
-    /// pid 1 is root's on any machine the suite runs on as a normal user.
+    /// The owner is read off `/proc`, and a process that is gone has none.
+    /// pid 1 is root's on any machine the suite runs on.
     #[test]
-    fn only_our_own_processes_can_be_agents() {
-        assert!(owned_by_us(std::process::id()));
-        if unsafe { libc::getuid() } != 0 {
-            assert!(!owned_by_us(1));
-        }
-        assert!(!owned_by_us(u32::MAX));
+    fn a_process_owner_is_read_from_proc() {
+        assert_eq!(
+            proc_uid(std::process::id()),
+            Some(unsafe { libc::getuid() })
+        );
+        assert_eq!(proc_uid(1), Some(0));
+        assert_eq!(proc_uid(u32::MAX), None);
     }
 
-    /// Root sees every user's agents; an ordinary user sees none but their own.
+    /// Root sees every user's agents while it reads every home; an ordinary
+    /// user sees none but their own, sweeping or not.
     #[test]
     fn root_sees_every_users_processes() {
-        let me = std::process::id();
-        assert!(owned_by(1, 0));
-        assert!(owned_by(me, 0));
-        assert!(!owned_by(1, 12345));
-        assert!(!owned_by(u32::MAX, 0));
+        assert!(visible_to(0, 0, true));
+        assert!(visible_to(1000, 0, true));
+        assert!(visible_to(1000, 1000, true));
+        assert!(!visible_to(0, 1000, true));
+        assert!(!visible_to(1001, 1000, true));
+        // `CCTOP_ALL_USERS=0`: root's own rows, and nobody else's processes to
+        // turn into transcript-less ones.
+        assert!(visible_to(0, 0, false));
+        assert!(!visible_to(1000, 0, false));
+    }
+
+    /// Two users with a checkout at the same absolute path: each one's agent
+    /// finds its own transcript and never the other's, and an agent whose
+    /// owner has no home in view finds nothing — rather than falling to the
+    /// operator's session in that directory.
+    #[test]
+    fn attribution_is_scoped_to_the_process_owner() {
+        use crate::config::{OtherHome, owner_among};
+        use crate::pricing::Provider;
+        let homes = [OtherHome {
+            home: "/home/ana".into(),
+            user: "ana".into(),
+            uid: Some(1001),
+        }];
+        // Root's own process, ana's, and a uid no home in view belongs to.
+        let mine = owner_among(0, 0, &homes);
+        let anas = owner_among(1001, 0, &homes);
+        let strangers = owner_among(1002, 0, &homes);
+        assert_eq!(mine, None);
+        assert_eq!(anas.as_deref(), Some("ana"));
+        assert_eq!(strangers.as_deref(), Some("uid 1002"));
+        // With no home in view a stranger is still a stranger, not this user.
+        assert_eq!(owner_among(1001, 0, &[]).as_deref(), Some("uid 1001"));
+
+        let mut root_s = Session::new(Provider::Claude, "root-s".into());
+        root_s.label_source = "/srv/app".into();
+        let mut ana_s = Session::new(Provider::Claude, "ana-s".into());
+        ana_s.label_source = "/srv/app".into();
+        ana_s.owner = Some("ana".into());
+        // Newer, so an unscoped index would rank it first for everyone.
+        ana_s.last_active = "2026-09-24T12:00:00Z".into();
+        let sessions = [root_s, ana_s];
+        let index = index_by(sessions.iter(), |s| s.label_source.as_str());
+
+        let found = |owner: &Option<String>| -> Vec<&str> {
+            index
+                .get(&(Provider::Claude, owner.as_deref(), "/srv/app"))
+                .map(|v| v.iter().map(|s| s.session_id.as_str()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(found(&mine), ["root-s"]);
+        assert_eq!(found(&anas), ["ana-s"]);
+        assert!(found(&strangers).is_empty());
     }
 
     fn session_at(id: &str, started_at: &str, last_active: &str) -> Session {

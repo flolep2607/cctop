@@ -10,8 +10,8 @@ expression: screen
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions (1/4) ──────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│   LAST▲         $   CTX% MODEL          HARNESS    PERM   ! HOST       USER      PROFILE   BRANCH       PROJECT      │
-│●    now    $18.42    90% opus-4-1       ─          ─        local                          ─            Fix the chec…│
+│   LAST▲    DUR         $   CTX%  CPU% MODEL          HARNESS    PERM   ! HOST       PROFILE   BRANCH       PROJECT   │
+│●    now     1h    $18.42    90%  12.5 opus-4-1       ─          ─        local                ─            Fix the c…│
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

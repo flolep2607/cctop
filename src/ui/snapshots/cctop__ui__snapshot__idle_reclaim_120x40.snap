@@ -10,9 +10,9 @@ expression: screen
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions (2/4) — idle ≥6h: 1 session, 180.0M reclaimable ────────────────────────────────────────────────────────────╮
-│    LAST         $   MEM▼ MODEL          HARNESS    PERM   ! HOST       USER      PROFILE   BRANCH       PROJECT      │
-│●     9h    $18.42 412.0M opus-4-1       ─          ─        local                          ─            Fix the chec…│
-│●     1d     $2.87 180.0M sonnet-4-5     ─          ─        local                          ─            api          │
+│    LAST    DUR         $   CTX%   MEM▼ MODEL          HARNESS    PERM   ! HOST       PROFILE   BRANCH       PROJECT  │
+│●     9h     0s    $18.42    90% 412.0M opus-4-1       ─          ─        local                ─            Fix the …│
+│●     1d     0s     $2.87    29% 180.0M sonnet-4-5     ─          ─        local                ─            api      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

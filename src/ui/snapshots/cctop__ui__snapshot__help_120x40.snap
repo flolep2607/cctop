@@ -10,11 +10,11 @@ expression: screen
 │All time         $28.│  ?  F1            This page                                              ┃                     │
 ╰─────────────────────│  ,                Settings and keybinds, and the file that holds them    ┃─────────────────────╯
 ╭ Sessions (4) ───────│  q  F10           Quit                                                   ┃─────────────────────╮
-│   LAST▲         $   │  +                Add a Claude account (runs claude setup-token)         ┃H       PROJECT      │
-│●    now    $18.42   │                                                                          ┃        Fix the chec…│
-│●     7m     $2.87   │Navigation                                                                ┃        api          │
-│○     3h     $0.19   │  ↑/k  ↓/j         Move between sessions                                  ┃        docs         │
-│○     2d     $7.03   │  PgUp / PgDn      Page through the list                                  ┃        infra        │
+│   LAST▲    DUR      │  +                Add a Claude account (runs claude setup-token)         ┃ANCH       PROJECT   │
+│●    now     1h    $1│                                                                          ┃           Fix the c…│
+│●     7m     2h     $│Navigation                                                                ┃           api       │
+│○     3h     1h     $│  ↑/k  ↓/j         Move between sessions                                  ┃           docs      │
+│○     2d    12h     $│  PgUp / PgDn      Page through the list                                  ┃           infra     │
 │                     │  Ctrl+U / Ctrl+D  Half a page up / down                                  │                     │
 │                     │  g / G  Home / End Jump to first / last                                  │                     │
 │                     │  n / N            Next / previous search match (wraps)                   │                     │

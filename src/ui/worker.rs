@@ -381,6 +381,25 @@ pub(super) fn spawn_worker(
                         let _ = tx.send(Response::Data(session.key(), Box::new(data)));
                     });
                 }
+                // Root reads other users' homes and never writes to them, and a
+                // delete is a write: it removes their transcript and, for some
+                // harnesses, rewrites a database they own. Refused here rather
+                // than at the key, so no path to a delete can get round it.
+                Request::Delete(session) if session.owner.is_some() => {
+                    let owner = session.owner.as_deref().unwrap_or_default();
+                    let result = Err(format!(
+                        "{owner}'s session is read-only: cctop never changes another user's files"
+                    ));
+                    if tx
+                        .send(Response::Deleted {
+                            session_key: session.key(),
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Request::Delete(session) => {
                     let result = match session.provider {
                         Provider::Claude => crate::session::claude::delete(&session)

@@ -1,6 +1,5 @@
 ---
 source: src/ui/snapshot.rs
-assertion_line: 346
 expression: screen
 ---
  1:Dashboard │ + Tab (t)
@@ -11,11 +10,11 @@ expression: screen
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions (4) ────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│   LAST▲         $   CTX% MODEL          HARNESS    PERM   ! HOST       USER      PROFILE   BRANCH       PROJECT      │
-│●    now    $18.42    90% opus-4-1       ─          ─        local                          ─            Fix the chec…│
-│●     7m     $2.87    29% sonnet-4-5     ─          ─        local                          ─            api          │
-│○     3h     $0.19      ─ haiku-4-5      ─          ─        local                          ─            docs         │
-│○     2d     $7.03      ─ gpt-5-codex    ─          ─        local                          ─            infra        │
+│   LAST▲    DUR         $   CTX%  CPU% MODEL          HARNESS    PERM   ! HOST       PROFILE   BRANCH       PROJECT   │
+│●    now     1h    $18.42    90%  12.5 opus-4-1       ─          ─        local                ─            Fix the c…│
+│●     7m     2h     $2.87    29%   0.4 sonnet-4-5     ─          ─        local                ─            api       │
+│○     3h     1h     $0.19      ─     ─ haiku-4-5      ─          ─        local                ─            docs      │
+│○     2d    12h     $7.03      ─     ─ gpt-5-codex    ─          ─        local                ─            infra     │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

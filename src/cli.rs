@@ -104,7 +104,9 @@ It carries counts and durations only: no session titles, project paths or\n  \
 file names, and cctop's own paths are spelled with `~`.\n\n\
 EVERY USER\n  \
 Run as root and cctop reads every user's sessions rather than root's own,\n  \
-naming whose each row is in the USER column. CCTOP_ALL_USERS=0 turns that\n  \
+naming whose each row is in the USER column; `/user:<name>` filters to one.\n  \
+Other homes are only read: cctop writes nothing into them, and refuses to\n  \
+delete another user's session. CCTOP_ALL_USERS=0 turns that\n  \
 off, =1 turns it on without root, and CCTOP_HOMES names homes that are\n  \
 neither in /etc/passwd nor under /home.\n\n\
 NOTES\n  \

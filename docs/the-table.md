@@ -34,7 +34,7 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `PERM` | `perm` | How much it asks before acting — see below |
 | `!` | `conflict` | Another agent is on the same ground — see below |
 | `HOST` | `host` | Which machine, when [reading more than one](integrations.md#more-than-one-machine). Hidden otherwise |
-| `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Blank for your own, hidden otherwise |
+| `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Shown only while more than one user's sessions are on the table |
 | `BRANCH` | `branch` | Branch checked out in the working directory, `@<commit>` when detached, `─` when not a repository |
 | `PROJECT` | `project` | The session's title if it has one, otherwise its working directory |
 
@@ -206,6 +206,12 @@ cell that matched is underlined, so it is clear *why* a row survived the filter.
 `n` and `N` step through matches, `Esc` clears, and `↑`/`↓` inside the prompt
 bring back a search you ran before — the last twenty are remembered across runs.
 
+`user:<name>` narrows to one person's sessions when cctop is
+[watching every user](integrations.md#every-user-on-the-machine), without the
+name also matching every title that happens to contain it. Part of a name is
+enough, the rest of the query still applies (`user:ana flaky test`), and two
+`user:` terms show either user's rows.
+
 `Tab` widens the search to the transcripts themselves, which is how you find the
 session where something was actually discussed rather than one whose name
 happens to mention it. Transcript matches are added to the metadata matches
@@ -225,7 +231,10 @@ up to 64 MiB.
 
 `T` groups the table the way htop's tree mode groups processes: each
 repository gets a heading, each checkout of it a heading beneath that, and the
-sessions hang off the checkout they were started in.
+sessions hang off the checkout they were started in. When the rows shown belong
+to more than one user — root [watching every user](integrations.md#every-user-on-the-machine)
+— each user gets a heading above their repositories, so two people in the same
+repository are two groups that fold separately.
 
 ```
    LAST       $  BRANCH  PROJECT

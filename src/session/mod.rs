@@ -612,7 +612,7 @@ pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Perm
     // per-line tail walk below would never parse a record out of it. The
     // conversation's newest node in the database says the same thing faster.
     if session.provider == crate::pricing::Provider::Devin {
-        return devin::live_state(&session.session_id);
+        return devin::live_state(session);
     }
     let Some(text) = crate::util::read_tail(file, 65_536) else {
         return (ActivityState::Working, None);
