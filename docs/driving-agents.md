@@ -72,6 +72,19 @@ transcript path instead. Resuming a session that is *still running* asks first �
 two agents appending to one transcript is not something the harnesses
 coordinate.
 
+## Stopping the sessions nobody is using
+
+The other end of resuming. An agent left open for days still holds its memory,
+and on a shared server those add up to gigabytes. `I` shows the live sessions
+that have been quiet for `idle_after` hours (6 by default), biggest first, with
+the total a stop would give back; `K` there stops them — the marked ones, or all
+of them — after a confirmation that names each, its idle time and its memory.
+
+It skips any session that is working, asking a question, or still using CPU, and
+says which and why. The stop is SIGTERM, so each agent exits cleanly and `R`
+brings it back whenever it is wanted again. See [idle
+sessions](the-table.md#idle-sessions-and-the-memory-they-hold) for the details.
+
 ## Tabs and splits
 
 The session table is tab 1. `t` opens another: pick an agent — whichever of

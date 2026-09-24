@@ -62,6 +62,8 @@ impl App {
         self.marked_sessions().iter().all(|s| match kind {
             BatchKind::Delete => !s.is_running(),
             BatchKind::Kill => s.root_pid().is_some(),
+            // Skips what it cannot stop rather than refusing the lot.
+            BatchKind::Reclaim => true,
         })
     }
 
@@ -75,6 +77,9 @@ impl App {
 
     /// Enter the batch-confirm modal if there's anything to do.
     pub(super) fn batch(&mut self, kind: BatchKind) {
+        if kind == BatchKind::Reclaim {
+            return self.confirm_reclaim();
+        }
         if self.marked_sessions().is_empty() {
             self.set_status("No sessions marked — press Space to mark");
             return;
@@ -85,7 +90,7 @@ impl App {
         } else {
             match kind {
                 BatchKind::Delete => Mode::BatchDeleteBlocked,
-                BatchKind::Kill => Mode::BatchKillBlocked,
+                BatchKind::Kill | BatchKind::Reclaim => Mode::BatchKillBlocked,
             }
         };
         self.needs_redraw = true;
@@ -94,6 +99,9 @@ impl App {
     /// Confirm and run the pending batch action over all marked sessions.
     pub(super) fn batch_execute(&mut self) {
         let kind = self.batch;
+        if kind == BatchKind::Reclaim {
+            return self.reclaim_execute();
+        }
         let marked: Vec<Session> = self.marked_sessions().into_iter().cloned().collect();
         let mut requested = 0;
         let mut acted_on: Vec<String> = Vec::new();
@@ -115,6 +123,8 @@ impl App {
                         failed += 1;
                     }
                 }
+                // Returned to `reclaim_execute` before the loop.
+                BatchKind::Reclaim => {}
                 BatchKind::Kill => match s.root_pid() {
                     Some(pid) => {
                         self.tx
@@ -140,6 +150,7 @@ impl App {
                     format!("Deleting {requested} session(s), {failed} failed to start")
                 }
             }
+            BatchKind::Reclaim => return,
             BatchKind::Kill => format!(
                 "Kill sent to {} session(s){}",
                 acted_on.len(),

@@ -1,6 +1,6 @@
 //! Which sessions the table shows, and the search that widens or narrows it.
 //!
-//! Four filters stack — live-only, age, cost floor and the query — and
+//! Five filters stack — live-only, idle, age, cost floor and the query — and
 //! [`App::refilter`] is the single place they are applied, because a row that
 //! two of them disagree about would otherwise flicker depending on which ran
 //! last. The content search sits here too rather than with the worker: the scan
@@ -50,6 +50,9 @@ impl App {
             .filter(|&i| {
                 let s = &self.sessions[i];
                 if self.live_only && !s.is_running() {
+                    return false;
+                }
+                if self.idle_only && !self.is_idle(s, now_ms) {
                     return false;
                 }
                 if let Some(age) = self.age_filter {
@@ -340,6 +343,7 @@ impl App {
     /// clear would be teaching a key that does nothing.
     pub(super) fn has_filter(&self) -> bool {
         !self.search.is_empty()
+            || self.idle_only
             || self.cost_floor > 0.0
             || self.live_only
             || self.age_filter.is_some()
@@ -351,6 +355,9 @@ impl App {
         let cleared = if !self.search.is_empty() {
             self.search.clear();
             "Search cleared"
+        } else if self.idle_only {
+            self.leave_idle_view();
+            "Idle view closed"
         } else if self.cost_floor > 0.0 {
             self.cost_floor = 0.0;
             "Cost floor cleared"
@@ -697,12 +704,14 @@ mod tests {
         app.live_only = true;
         app.age_filter = Some(AgeFilter::Day);
         app.tool_tab = 2;
+        app.idle_only = true;
         app.refilter();
 
-        for expected in 1..=5 {
+        for expected in 1..=6 {
             app.on_key(key(KeyCode::Esc));
             let left = [
                 !app.search.is_empty(),
+                app.idle_only,
                 app.cost_floor > 0.0,
                 app.live_only,
                 app.age_filter.is_some(),
@@ -713,11 +722,11 @@ mod tests {
             .count();
             assert_eq!(
                 left,
-                5 - expected,
+                6 - expected,
                 "press {expected} cleared the wrong count"
             );
         }
-        // A sixth press is harmless.
+        // A seventh press is harmless.
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.mode, Mode::List);
     }

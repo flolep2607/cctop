@@ -309,7 +309,12 @@ pub fn parse_hidden(list: &str) -> Vec<ColumnId> {
 /// terminal — which is how MODEL, HARNESS, BRANCH and PROJECT used to vanish
 /// together and leave rows no one could tell apart. Dropping by priority
 /// instead means the columns that name a row are the last to go.
-pub fn visible_columns(total: u16, hidden: &[ColumnId]) -> Vec<&'static Column> {
+///
+/// `keep` is dropped last whatever its priority, for a view that exists to
+/// show one figure: the idle view is sorted by memory, and MEM is among the
+/// first columns a narrow table gives up. A column the user hid stays hidden —
+/// `keep` outranks width, not their choice.
+pub fn visible_columns(total: u16, hidden: &[ColumnId], keep: &[ColumnId]) -> Vec<&'static Column> {
     let mut cols: Vec<&'static Column> =
         COLUMNS.iter().filter(|c| !hidden.contains(&c.id)).collect();
 
@@ -319,7 +324,7 @@ pub fn visible_columns(total: u16, hidden: &[ColumnId]) -> Vec<&'static Column> 
             .iter()
             .enumerate()
             // Later columns lose ties, so the drop order stays predictable.
-            .min_by_key(|(i, c)| (c.priority, std::cmp::Reverse(*i)))
+            .min_by_key(|(i, c)| (keep.contains(&c.id), c.priority, std::cmp::Reverse(*i)))
             .map(|(i, _)| i);
         match victim {
             Some(i) => cols.remove(i),
@@ -832,9 +837,10 @@ mod tests {
     /// say *which session this is* rather than how it is doing.
     #[test]
     fn columns_drop_by_priority_as_width_shrinks() {
-        assert_eq!(visible_columns(200, &[]).len(), COLUMNS.len());
+        assert_eq!(visible_columns(200, &[], &[]).len(), COLUMNS.len());
 
-        let ids = |w| -> Vec<ColumnId> { visible_columns(w, &[]).iter().map(|c| c.id).collect() };
+        let ids =
+            |w| -> Vec<ColumnId> { visible_columns(w, &[], &[]).iter().map(|c| c.id).collect() };
         let narrow = ids(90);
         assert!(narrow.len() < COLUMNS.len(), "90 cells must drop something");
         for keep in [ColumnId::Status, ColumnId::Last, ColumnId::Project] {
@@ -857,7 +863,10 @@ mod tests {
         let hidden = parse_hidden("cpu, mem,nonsense");
         assert_eq!(hidden, vec![ColumnId::Cpu, ColumnId::Memory]);
         // Hidden at any width, including one where everything else fits.
-        let ids: Vec<ColumnId> = visible_columns(500, &hidden).iter().map(|c| c.id).collect();
+        let ids: Vec<ColumnId> = visible_columns(500, &hidden, &[])
+            .iter()
+            .map(|c| c.id)
+            .collect();
         assert_eq!(ids.len(), COLUMNS.len() - 2);
         assert!(!ids.contains(&ColumnId::Cpu));
         // The flexible column can't be hidden: it has no width to give back.

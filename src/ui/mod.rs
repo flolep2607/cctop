@@ -19,6 +19,7 @@ mod effects;
 mod filter;
 mod hooks;
 mod hyperlink;
+mod idle;
 mod input;
 mod launch;
 mod launch_cwd;
@@ -220,6 +221,10 @@ pub struct PastePreview {
 pub enum BatchKind {
     Delete,
     Kill,
+    /// Stop the idle view's sessions: the marked ones, or every one when none
+    /// is marked. Unlike [`BatchKind::Kill`] it skips rather than refuses —
+    /// see [`App::reclaim_plan`].
+    Reclaim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,6 +399,11 @@ pub struct App {
     pub age_filter: Option<AgeFilter>,
     pub age_cursor: usize,
     pub live_only: bool,
+    /// The idle view: only live sessions quiet for `idle_after`, biggest
+    /// first. See the `idle` module.
+    pub idle_only: bool,
+    /// The sort the idle view replaced, put back when it closes.
+    idle_sort: Option<(ColumnId, bool)>,
 
     /// Session keys the user has marked (Space) for a batch action.
     pub marked: HashSet<String>,
@@ -857,6 +867,8 @@ impl App {
             age_filter,
             age_cursor,
             live_only: prefs.live_only,
+            idle_only: false,
+            idle_sort: None,
             marked: HashSet::new(),
             deleting: HashSet::new(),
             batch: BatchKind::Delete,
