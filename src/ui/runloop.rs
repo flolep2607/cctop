@@ -443,7 +443,9 @@ fn event_loop(
     let mut last_full_walk = Instant::now();
     let mut layout = render::Layout::default();
     let mut refresh_in_flight = true;
-    let mut last_blink = true;
+    // What the tab bar last looked like, while something on it was asking.
+    let mut last_bar: Vec<ratatui::style::Style> = Vec::new();
+    let mut last_bar_at = Instant::now();
 
     loop {
         // Drain everything the workers have produced.
@@ -715,14 +717,32 @@ fn event_loop(
         // the conversation view's.
         app.needs_redraw |= app.insight_loading() || app.chat_loading();
 
-        // A blinking tab is the one thing on screen that changes with no event
-        // behind it, so the loop has to ask for the frame itself — but only on
-        // the half-cycle it actually flips, not on every poll.
-        let phase = app.blink_on();
-        if phase != last_blink && app.any_attention() {
-            app.needs_redraw = true;
+        // A pulsing tab is the one thing on screen that changes with no event
+        // behind it, so the loop has to ask for the frame itself — but only
+        // when the bar actually looks different, not on every poll. That one
+        // test covers the pulse in truecolor, where nearly every wake moves
+        // it, the pulse snapped to 256 colours, where only a few a breath do,
+        // and the blink it falls back to, which flips twice a period.
+        //
+        // Asked at most once a frame: inside a tab the loop wakes every 16ms
+        // for the keyboard's sake, and a truecolor pulse sampled that often
+        // would be sixty frames a second of a bar nobody reads at that rate.
+        if last_bar_at.elapsed() >= effects::FRAME {
+            last_bar_at = Instant::now();
+            let bar = match app.any_attention() {
+                true => render::bar_styles(app),
+                false => Vec::new(),
+            };
+            if bar != last_bar {
+                app.needs_redraw = true;
+                last_bar = bar;
+            }
+            // A restart sweep is drawn over the bar rather than in its
+            // styles, so it asks for every frame of its short life outright.
+            if (1..=app.tabs.len()).any(|i| app.restart_flash(i).is_some()) {
+                app.needs_redraw = true;
+            }
         }
-        last_blink = phase;
 
         // Expire the transient status line.
         if let Some((_, at)) = &app.status
@@ -762,6 +782,14 @@ fn event_loop(
                 true => idle_wait.min(Duration::from_millis(100)),
                 false => idle_wait,
             };
+        // Anything in the bar moving wants frames at its own rate, and gets
+        // them only while it moves: once the last tab stops asking and the
+        // last sweep is done, the wait is back to what it was, and the
+        // dashboard is back to five wakes a second.
+        let idle_wait = match app.animating() {
+            true => idle_wait.min(effects::FRAME),
+            false => idle_wait,
+        };
         let wait = refresh_every
             .checked_sub(last_refresh.elapsed())
             .unwrap_or(Duration::ZERO)
