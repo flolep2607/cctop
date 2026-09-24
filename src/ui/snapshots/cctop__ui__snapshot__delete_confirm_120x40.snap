@@ -1,0 +1,44 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68% · claude-sonnet-4-5 32%        │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
+│This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (4) ────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   LAST▲         $   CTX% MODEL          HARNESS    PERM   ! HOST       USER      PROFILE   BRANCH       PROJECT      │
+│●    now    $18.42    90% opus-4-1       ─          ─        local                          ─            Fix the chec…│
+│●     7m     $2.87    29% sonnet-4-5     ─          ─        local                          ─            api          │
+│○     3h     $0.19      ─ haiku-4-5      ─          ─        local                          ─            docs         │
+│○     2d     $7.03      ─ gpt-5-codex    ─          ─        local                          ─            infra        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                            ╭ Delete session? ───────────────────────────────────────────╮                            │
+│                            │  docs                                                      │                            │
+│                            │  33333333-cccc-4000-8000-000000000003                      │                            │
+│                            │                                                            │                            │
+│                            │  This permanently removes the transcript from disk.        │                            │
+│                            │                                                            │                            │
+╰────────────────────────────│  [y] delete    [n / Esc] cancel                            │────────────────────────────╯
+╭ Info  Tool Activity  Subage╰────────────────────────────────────────────────────────────╯────────────────────────────╮
+│This transcript reports no per-request usage — nothing to break down.                                                 │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                                            Codex checking…                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

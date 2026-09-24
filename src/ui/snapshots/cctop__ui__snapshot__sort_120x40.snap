@@ -1,0 +1,44 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68% · claude-sonnet-4-5 32%        │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
+│This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
+│All time         $28.51 $0.00/da╭ Sort by ───────────────────────────────────────────╮72.3K out                       │
+╰────────────────────────────────│                                                    │────────────────────────────────╯
+╭ Sessions (4) ──────────────────│ LAST ▲                                             │────────────────────────────────╮
+│   LAST▲         $   CTX% MODEL │ DUR                                                │ILE   BRANCH       PROJECT      │
+│●    now    $18.42    90% opus-4│ $                                                  │      ─            Fix the chec…│
+│●     7m     $2.87    29% sonnet│ $/1H                                               │      ─            api          │
+│○     3h     $0.19      ─ haiku-│ $/24H                                              │      ─            docs         │
+│○     2d     $7.03      ─ gpt-5-│ CTX%                                               │      ─            infra        │
+│                                │ CPU%                                               │                                │
+│                                │ MEM                                                │                                │
+│                                │ TOOLS                                              │                                │
+│                                │ ERR%                                               │                                │
+│                                │ TOKENS                                             │                                │
+│                                │ TOK/m                                              │                                │
+│                                │ MODEL                                              │                                │
+│                                │ HARNESS                                            │                                │
+│                                │ PERM                                               │                                │
+╰────────────────────────────────│ !                                                  │────────────────────────────────╯
+╭ Info  Performance  Processes  T│ HOST                                               │────────────────────────────────╮
+│Root /usr/bin/claude --model opu│ USER                                               │                                │
+│    PID    CPU%       MEM  COMMA│ PROFILE                                            │                                │
+│   4101    9.8%    360.0M  claud│ BRANCH                                             │                                │
+│   4188    2.4%     44.0M  node │ PROJECT                                            │                                │
+│   4290    0.3%      8.0M  bash │                                                    │                                │
+│                                │ Status: ● working (green = fresh, greyer = idle),  │                                │
+│                                │amber ● awaiting input, red ● API error, ○ stopped; │                                │
+│                                │indented one cell for a subagent                    │                                │
+│                                │                                                    │                                │
+│                                │ Enter select   Esc cancel                          │                                │
+│                                ╰────────────────────────────────────────────────────╯                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                                            Codex checking…                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

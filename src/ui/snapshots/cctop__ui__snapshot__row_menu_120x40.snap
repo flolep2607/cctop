@@ -1,0 +1,44 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68% · claude-sonnet-4-5 32%        │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
+│This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (4) ────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   LAST▲         $   CTX% MODEL          HARNESS    PERM   ! HOST       USER      PROFILE   BRANCH       PROJECT      │
+│●    now    $18.42    90% opus-4-1       ─          ─        local                          ─            Fix the chec…│
+│●     7m     $2.87    29% sonnet-4-5     ─          ─        local                          ─            api          │
+│○     3h     $0.19      ─ haiku-4-5      ─          ─        local                          ─            docs         │
+│○     2d     $7.03      ─ gpt-5-codex    ─          ─        local                          ─            infra        │
+│                                                                                                                      │
+│                            ╭ Fix the checkout redirect loop ────────────────────────────╮                            │
+│                            │ Resume in a tab                                          R │                            │
+│                            │ Restart it in its tab      it is not running in a tab here │                            │
+│                            │ Attach to it                                             a │                            │
+│                            │ Type into it                                             s │                            │
+│                            │ Hand off to another agent                                O │                            │
+│                            │ Read the conversation                                    i │                            │
+│                            │ Show its subagents                                       e │                            │
+╰────────────────────────────│ Mark for a batch action                              space │────────────────────────────╯
+╭ Info  Performance  Processe│ ────────────────────────────────────────────────────────── │────────────────────────────╮
+│Root /usr/bin/claude --model│ Terminate the agent                                 ctrl+k │                            │
+│    PID    CPU%       MEM  C│ Delete the transcript                  it is still running │                            │
+│   4101    9.8%    360.0M  c╰ ↑↓ Enter · Esc ────────────────────────────────────────────╯                            │
+│   4188    2.4%     44.0M  node mcp-server.js                                                                         │
+│   4290    0.3%      8.0M  bash -c npm test                                                                           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                                            Codex checking…                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

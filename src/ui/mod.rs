@@ -35,6 +35,8 @@ mod select;
 mod settings;
 mod share;
 mod signals;
+#[cfg(test)]
+mod snapshot;
 pub mod spark;
 mod table;
 pub mod tabs;
