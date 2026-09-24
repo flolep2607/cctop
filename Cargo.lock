@@ -428,6 +428,8 @@ dependencies = [
  "toml_edit",
  "tui-qrcode",
  "tui-term",
+ "unicode-segmentation",
+ "unicode-width",
  "ureq",
  "vt100",
 ]

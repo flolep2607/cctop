@@ -136,6 +136,11 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 # draws with, so the musl release takes it as it is.
 tachyonfx = { version = "0.25.2", default-features = false, features = ["std"] }
 tui-term = "0.3.4"
+# The input boxes' editor (`ui::line_edit`) steps its cursor by grapheme and
+# measures its columns the way the terminal will draw them. Both crates are
+# already in the tree under ratatui, at these versions, so this adds nothing.
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
 # A QR code of a link meant for a phone, drawn in half-blocks inside the panel
 # that hands the link out (`ui::qr`). `qrcode` is the encoder the widget takes;
 # its default features are image rendering, which a terminal has no use for.

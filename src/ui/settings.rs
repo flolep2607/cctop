@@ -76,7 +76,7 @@ impl App {
                 let next = THEMES[at.map_or(0, |i| (i + 1) % THEMES.len())];
                 self.write_setting("settings", name, Some(next.into()));
             }
-            _ => self.settings_input = Some(current.trim_matches('"').to_string()),
+            _ => self.settings_input = Some(current.trim_matches('"').into()),
         }
     }
 
