@@ -650,6 +650,10 @@ fn event_loop(
         if rows_changed {
             app.check_bells();
         }
+        // After everything this pass could have queued a bell for — the rows
+        // above, a quota window freed while draining — so a moment that
+        // brought several kinds of news rings once and says all of them.
+        app.notify.ring_pending();
         // The page gets what the table has, and only when it changed. This is
         // also what wakes a browser: its event stream is parked on the version
         // this bumps, so a page updates when the table does rather than on a

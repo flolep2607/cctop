@@ -86,12 +86,15 @@ impl App {
         matured
     }
 
-    /// Let the notifier see this refresh, and ring if anything crossed.
+    /// Let the notifier see this refresh, and queue a bell for anything that
+    /// crossed or fired.
     ///
-    /// Called from the event loop only when the rows actually moved. It has to
-    /// run on this thread: the bell and the OSC 9 sequence go straight to
-    /// stdout, which ratatui owns, and only here is it certain that no frame is
-    /// halfway through being flushed.
+    /// Called from the event loop only when the rows actually moved, which
+    /// then rings once for the whole pass with
+    /// [`Notifier::ring_pending`](crate::notify::Notifier::ring_pending). That
+    /// has to run on this thread: the bell and the OSC 9 sequence go straight
+    /// to stdout, which ratatui owns, and only here is it certain that no
+    /// frame is halfway through being flushed.
     pub(super) fn check_bells(&mut self) {
         // The serve's link is what a webhook POST points at, so it is refreshed
         // with the crossings: starting `B` mid-run must not leave every future
@@ -113,21 +116,15 @@ impl App {
 
     /// Tell the user about the alerts that just fired: a toast each, whether
     /// or not `w` is on — the thresholds are the opt-in, and a toast is quiet —
-    /// and one bell for the lot when it is.
+    /// and one clause in the refresh's bell for the lot when it is.
     ///
-    /// One bell, as with the sessions that finish together: three rings in a
-    /// row is noise, and the toasts already name every one.
+    /// One clause, as with the sessions that finish together: three rings in
+    /// a row is noise, and the toasts already name every one.
     fn announce_alerts(&mut self, fired: Vec<crate::alert::Fired>) {
         let Some(first) = fired.first() else {
             return;
         };
-        if self.notify.enabled {
-            let more = match fired.len() - 1 {
-                0 => String::new(),
-                n => format!(" (+{n} more)"),
-            };
-            crate::notify::ring(&format!("cctop: {}{more}", first.text));
-        }
+        self.notify.chime(&first.text, fired.len() - 1);
         for alert in fired {
             crate::elog::event(
                 "alert",
@@ -148,9 +145,7 @@ impl App {
     pub(super) fn announce_quota_freed(&mut self, text: &str) {
         crate::elog::event("quota", "freed", serde_json::json!({ "text": text }));
         self.notify.post_event("quota-freed", text);
-        if self.notify.enabled {
-            crate::notify::ring(&format!("cctop: {text}"));
-        }
+        self.notify.chime(text, 0);
         self.set_status(text.to_string());
     }
 
@@ -1190,6 +1185,41 @@ mod tests {
         app.check_bells();
         assert_eq!(app.toasts.latest(), None, "still over is not news");
         assert_eq!(app.alerts.marker(&key), Some(crate::alert::Kind::Cost));
+    }
+
+    /// A session finishing its turn on the same refresh an alert fires is one
+    /// moment, and it used to be two bells and two desktop notifications. It
+    /// is one now, naming both.
+    #[test]
+    fn a_crossing_and_an_alert_on_one_refresh_ring_once() {
+        let mut app = test_app();
+        app.notify.enabled = true;
+        app.settings = crate::settings::Settings::parse("[settings]\nalert_cost = 5\n");
+        app.sessions = vec![session("a", true, "api"), session("b", true, "web")];
+        app.sessions[1].total_cost = Some(1.0);
+        app.check_bells();
+        app.notify.ring_pending();
+        assert!(
+            crate::notify::take_rung().is_empty(),
+            "nothing has happened"
+        );
+
+        app.sessions[0].activity_state = crate::session::ActivityState::WaitingForInput;
+        app.sessions[1].total_cost = Some(6.0);
+        app.check_bells();
+        app.notify.ring_pending();
+        let rung = crate::notify::take_rung();
+        assert_eq!(rung.len(), 1, "one refresh, one bell: {rung:?}");
+        assert!(
+            rung[0].starts_with("cctop: ") && rung[0].contains("waiting for input · "),
+            "{rung:?}"
+        );
+        assert!(rung[0].contains("$6.00"), "the alert went unsaid: {rung:?}");
+
+        // And the next pass, with nothing new, is silent.
+        app.check_bells();
+        app.notify.ring_pending();
+        assert!(crate::notify::take_rung().is_empty());
     }
 
     /// The stall alert reads the hooks' last word even once the row has
