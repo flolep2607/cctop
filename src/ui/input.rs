@@ -478,6 +478,10 @@ impl App {
             KeyCode::Char('w') => self.close_pane(),
             // Shifted for the same reason as `W`, and because `r` renames: the
             // agent is ended and resumed, on whatever version is now installed.
+            // On the dashboard it restarts the selected row's tab, and only from
+            // the table itself: over a modal the selection is not what is on
+            // screen, and an agent must not be ended by a key aimed at a dialog.
+            KeyCode::Char('R') if self.tab == 0 && self.mode != Mode::List => {}
             KeyCode::Char('R') => self.restart_pane(),
             // Shifted, because it is the irreversible one: `w` on a rmux-backed
             // pane only detaches, and the key that ends the agent should not be
