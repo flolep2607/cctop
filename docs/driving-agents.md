@@ -136,6 +136,35 @@ repaints constantly (a spinner's elapsed counter alone ticks every second), so
 two seconds of a still screen means the agent is waiting on you. That needs no
 per-harness parsing and works for anything you open in a tab, shells included.
 
+### Recording a pane
+
+`Alt+Shift+C` records the focused pane to an [asciinema](https://asciinema.org)
+v2 `.cast` file, and pressing it again stops and says where the file went. The
+tab carries a red `● REC` on the bar for as long as any of its panes is being
+recorded, so one left running is seen from every other tab. Closing the pane, or
+its agent exiting, stops the recording too, and says so the same way.
+
+Play one back with `asciinema play <file>`, or upload it to wherever asciinema
+casts go. What is recorded is the terminal's own output — the bytes the agent
+wrote to its pty, at the times it wrote them, before cctop's emulator read them —
+so a player redraws the pane exactly rather than cctop's rendering of it. The
+file opens on the screen as it stood when you pressed the key, since a recording
+started mid-session would otherwise begin blank and fill in only as the agent
+happened to repaint. The header carries the pane's size, and a resize — the
+window changing, a split opening beside it — is recorded as one, so the replay
+reflows where the pane did.
+
+Recordings go to `~/.local/share/cctop/casts` (`$XDG_DATA_HOME/cctop/casts`),
+named after the tab and the time. Not the cache directory, which
+`--clear-cache` empties, and not the session's own directory, which is usually a
+repository: a cast there turns up in `git status` and in the agent's own view of
+the project it recorded.
+
+In a split each pane is recorded on its own, because a cast is one terminal of
+one size. A tab that is being recorded keeps its rmux client when you switch
+away from it, rather than handing it back as tabs otherwise do — giving it up
+would end the recording.
+
 ### Tabs outlive cctop
 
 When [rmux](https://github.com/Helvesec/rmux) is installed, every tab's agent

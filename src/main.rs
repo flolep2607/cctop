@@ -3,6 +3,7 @@ mod alias;
 mod attach;
 mod burn;
 mod cache;
+mod cast;
 mod cli;
 mod clipboard;
 mod collide;

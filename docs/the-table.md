@@ -268,6 +268,7 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `Alt+Shift+R` | Restart the pane's agent on the same session, after an update; on the dashboard, the selected row's tab |
+| `Alt+Shift+C` | Record the focused pane to an asciinema `.cast`; again to stop (see [Recording a pane](driving-agents.md#recording-a-pane)) |
 | `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
 

@@ -572,6 +572,13 @@ impl Tab {
         let [pane] = &self.panes[..] else {
             return false;
         };
+        // A recording is fed by this client, so giving it up would end the
+        // recording — and switching tabs is not asking for that. The tab keeps
+        // its client until the recording is stopped, at the cost of rmux
+        // sizing the window for it meanwhile.
+        if pane.view.recording() {
+            return false;
+        }
         let Some(name) = pane.rmux.clone() else {
             return false;
         };
@@ -638,6 +645,11 @@ impl Tab {
                 .unwrap_or_default(),
             n => format!("{} +{}", self.panes[0].label, n - 1),
         }
+    }
+
+    /// Whether any pane of this tab is being recorded, for the bar to say so.
+    pub fn recording(&self) -> bool {
+        self.panes.iter().any(|pane| pane.view.recording())
     }
 
     pub fn focused_mut(&mut self) -> Option<&mut Pane> {
@@ -782,8 +794,19 @@ impl Tab {
     /// A detached tab is never nothing left: it holds no pane by design, and
     /// what becomes of it is the sync's to decide — the session it stands for
     /// outlives every client, this cctop's included.
-    pub fn reap(&mut self) -> bool {
-        self.panes.retain_mut(|pane| !pane.finished());
+    ///
+    /// A pane that goes while it is being recorded has its recording stopped
+    /// here, and where the file went is added to `saved` for the caller to say:
+    /// the agent exiting is the commonest way a recording ends, and the one
+    /// nobody pressed a key for.
+    pub fn reap(&mut self, saved: &mut Vec<(std::path::PathBuf, std::io::Result<()>)>) -> bool {
+        self.panes.retain_mut(|pane| {
+            if !pane.finished() {
+                return true;
+            }
+            saved.extend(pane.view.stop_recording());
+            false
+        });
         self.focus = self.focus.min(self.panes.len().saturating_sub(1));
         self.panes.is_empty() && self.shared.is_none()
     }
@@ -1308,10 +1331,13 @@ mod tests {
     #[test]
     fn a_detached_tab_is_not_reaped() {
         let mut tab = Tab::shared(&session("cctop-claude-a", None, 0));
-        assert!(!tab.reap(), "a shared tab was reaped for having no pane");
+        assert!(
+            !tab.reap(&mut Vec::new()),
+            "a shared tab was reaped for having no pane"
+        );
         // Once it stands for nothing, it is nothing.
         tab.shared = None;
-        assert!(tab.reap());
+        assert!(tab.reap(&mut Vec::new()));
     }
 
     /// A still-running agent in the launcher, as rmux would have described it.
