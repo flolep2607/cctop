@@ -54,7 +54,7 @@ pub const SETTINGS: [(&str, &str, &str); 5] = [
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 46] = [
+pub const BINDINGS: [(&str, &str, &str); 47] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "This settings panel"),
@@ -72,6 +72,11 @@ pub const BINDINGS: [(&str, &str, &str); 46] = [
     ("follow", "f", "Follow mode"),
     ("attach", "a", "Open its terminal in a tab"),
     ("resume", "R", "Resume it in a tab of its own"),
+    (
+        "restart_all",
+        "ctrl+r",
+        "Restart every agent tab (not mid-turn)",
+    ),
     ("send", "s", "Type a line into its terminal"),
     ("handoff", "O", "Hand its context to a different agent"),
     ("conversation", "i", "Read its conversation"),

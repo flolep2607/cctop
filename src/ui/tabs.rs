@@ -207,12 +207,13 @@ impl Pane {
     ///
     /// ponytail: a renamed pane on cctop's own pty answers with its new name.
     pub fn harness(&self) -> &str {
-        let name = self.rmux.as_deref().unwrap_or(self.label.as_str());
-        name.strip_prefix("cctop-")
-            .unwrap_or(name)
-            .split(['-', ' ', '·'])
-            .next()
-            .unwrap_or_default()
+        harness_of(self.rmux.as_deref().unwrap_or(self.label.as_str()))
+    }
+
+    /// Whether an agent is what this pane started, rather than a shell or an
+    /// editor — see the field of the same name.
+    pub fn is_agent(&self) -> bool {
+        self.is_agent
     }
 
     /// The key to actually send this pane's agent, once pane-specific
@@ -382,6 +383,18 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// Whether the session holds an agent rather than a shell.
+    ///
+    /// Read off the session name, the one thing about it that is never
+    /// rewritten — the same place [`Pane::harness`] looks — because a tab with
+    /// no pane has no argv left to ask [`starts_an_agent`] about.
+    pub fn is_agent(&self) -> bool {
+        let harness = harness_of(&self.name);
+        crate::alias::AGENTS
+            .split_whitespace()
+            .any(|agent| agent == harness)
+    }
+
     /// What the rmux session records about its agent, if it is still true.
     ///
     /// Aged out by the same asymmetric rule a live report is — see
@@ -840,6 +853,18 @@ pub fn label_of(argv: &[String]) -> String {
         .map(|arg| arg.rsplit('/').next().unwrap_or(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The harness a rmux session name or a pane label starts with, as one word.
+///
+/// `cctop-<harness>-…` is how every session is named at creation, whether it
+/// was launched fresh or resumed; a label is the command, so its first word.
+fn harness_of(name: &str) -> &str {
+    name.strip_prefix("cctop-")
+        .unwrap_or(name)
+        .split(['-', ' ', '·'])
+        .next()
+        .unwrap_or_default()
 }
 
 /// Whether `argv` starts one of the agents cctop knows about.

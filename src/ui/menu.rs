@@ -17,7 +17,7 @@
 //! the key handler uses, because a menu that disagreed with the keyboard about
 //! what is possible would be worse than no menu.
 //!
-//! ponytail: no submenus and no scrolling. Nine entries fit any terminal cctop
+//! ponytail: no submenus and no scrolling. Ten entries fit any terminal cctop
 //! will draw a table in, and a menu that needed either would be a sign the
 //! actions wanted grouping rather than nesting.
 
@@ -27,6 +27,7 @@ use super::App;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Resume,
+    Restart,
     Attach,
     Send,
     Handoff,
@@ -87,6 +88,28 @@ pub fn items(app: &App) -> Vec<Item> {
             label: "Resume in a tab",
             key: "R",
             blocked: far(pid_only.then(|| "no transcript claims this process".to_string())),
+            rule: false,
+        },
+        Item {
+            action: Action::Restart,
+            label: "Restart it in its tab",
+            // Not a table key: the same Alt chord that restarts a pane from
+            // inside it, which on the dashboard means the selected row's tab.
+            key: "alt+R",
+            blocked: far(match () {
+                _ if subagent => Some("restart the session, not a subagent".into()),
+                _ if !has_pid => Some("no local process to restart".into()),
+                _ => match session.root_pid().and_then(|pid| app.tab_running(pid)) {
+                    None => Some("it is not running in a tab here".into()),
+                    // A window opened with `a` finds the agent too, and is
+                    // exactly what `restart_at` declines: say so here first.
+                    Some((at, pane)) => app.tabs[at]
+                        .panes
+                        .get(pane)
+                        .filter(|pane| !pane.owns_agent())
+                        .map(|_| "that tab only looks at it".into()),
+                },
+            }),
             rule: false,
         },
         Item {

@@ -269,6 +269,43 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
         .output();
 }
 
+/// Start `argv` in a new session called `name` with no client on it at all.
+///
+/// For a tab this cctop stands for without watching — see
+/// `ui::tabs::Shared` — whose agent is being replaced. The
+/// launch path cannot be borrowed for it: that starts a client, and a client on
+/// a tab nobody here is looking at is the thing sharing tabs exists to avoid.
+///
+/// [`prepare`] first, so the session has cctop's options from its first pane
+/// just as a launched one does; it is best effort and may leave nothing
+/// behind, in which case the session is created the plain way.
+pub fn start_detached(argv: &[String], name: &str, cwd: Option<&Path>) -> Result<(), String> {
+    prepare(argv, name, cwd);
+    if exists(name) {
+        return Ok(());
+    }
+    let mut create = vec![
+        "new-session".to_string(),
+        "-d".to_string(),
+        "-s".to_string(),
+        name.to_string(),
+    ];
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+        create.push("-c".into());
+        create.push(dir.to_string_lossy().into_owned());
+    }
+    create.push("--".into());
+    create.extend(argv.iter().cloned());
+    let out = Command::new(BIN)
+        .args(&create)
+        .output()
+        .map_err(|e| format!("rmux: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
 /// The command that attaches to an existing rmux session and nothing else.
 ///
 /// Distinct from [`attach_or_create`] so that picking an agent from the

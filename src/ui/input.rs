@@ -1263,6 +1263,7 @@ impl App {
         use super::menu::Action;
         match action {
             Action::Resume => self.resume_selected(),
+            Action::Restart => self.restart_selected(),
             Action::Attach => self.attach_selected(),
             Action::Send => self.send_prompt(),
             Action::Handoff => self.handoff_selected(),
@@ -1447,6 +1448,10 @@ impl App {
                     .unwrap_or(AGE_OPTIONS.len() - 1);
                 self.mode = Mode::AgeFilter;
             }
+            // Ctrl, because it stops agents — the same reasoning as Ctrl+K —
+            // and `r`, because Alt+Shift+R is the one-tab version and `R`
+            // already resumes. Above the refresh arm, which would take it.
+            KeyCode::Char('r') if ctrl => self.restart_all(),
             KeyCode::Char('r') | KeyCode::F(5) => {
                 let _ = self.tx.send(Request::Refresh);
                 self.set_status("Refreshing…");
