@@ -675,7 +675,14 @@ fn event_loop(
         if let Some(note) = app.focused_pane().and_then(tabs::Pane::answer_bell) {
             app.set_status(note);
         }
-        let closed = app.tabs.iter_mut().fold(false, |any, tab| tab.reap() | any);
+        let mut saved = Vec::new();
+        let closed = app
+            .tabs
+            .iter_mut()
+            .fold(false, |any, tab| tab.reap(&mut saved) | any);
+        for (path, finished) in &saved {
+            app.set_status(crate::cast::stopped_message(path, finished));
+        }
         if closed {
             app.drop_empty_tabs();
         }

@@ -404,6 +404,9 @@ fn draw_paste_preview(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
+/// What a tab being recorded carries after its label on the bar.
+const REC: &str = "● REC ";
+
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let titles: Vec<String> = std::iter::once("Dashboard".to_string())
@@ -430,13 +433,21 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     let label_room = area.width.saturating_sub(new_tab.chars().count() as u16) as usize;
 
     let hues: Vec<Option<theme::Hue>> = (0..titles.len()).map(|i| tab_hue(app, i)).collect();
+    // A tab being recorded says so on the bar, where it is seen from every
+    // other tab: a recording left running is a file growing for as long as the
+    // agent draws, and the tab is the only place it could be noticed.
+    let recording: Vec<bool> = std::iter::once(false)
+        .chain(app.tabs.iter().map(tabs::Tab::recording))
+        .collect();
 
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
     // you can still count and click beats a bar that runs off the screen.
     // `titles.len()` columns go to the rules between labels — one between
     // every pair of tabs and one before the new-tab button.
-    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>() + titles.len();
+    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>()
+        + titles.len()
+        + recording.iter().filter(|&&r| r).count() * REC.chars().count();
     let cap = match natural <= label_room {
         true => usize::MAX,
         false => ((label_room.saturating_sub(titles.len())) / titles.len())
@@ -456,9 +467,20 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             pos += 1;
         }
         let text = format!(" {} ", elide(title, cap));
-        let width = text.chars().count() as u16;
+        let mut width = text.chars().count() as u16;
         let style = tab_style(app, i, hues[i]);
         spans.push(Span::styled(text, style));
+        // After the label rather than inside it, so it is never what the
+        // elision cuts, and part of the tab's click target like the label is.
+        if recording[i] {
+            spans.push(Span::styled(
+                REC,
+                Style::default()
+                    .fg(theme::colors().cost_high)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            width += REC.chars().count() as u16;
+        }
         layout.workspace_spans.push((pos, pos + width, i));
         pos += width;
     }

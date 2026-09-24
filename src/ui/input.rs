@@ -515,6 +515,11 @@ impl App {
             // pane only detaches, and the key that ends the agent should not be
             // the same key with a slip of a finger.
             KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::SHIFT) => self.kill_pane(),
+            // `c` for cast, shifted because a bare Alt+c is a word-capitalise
+            // in every readline a shell pane might be running. On the
+            // dashboard there is no terminal to record, so the key is not
+            // taken there.
+            KeyCode::Char('C') if self.tab > 0 => self.toggle_recording(),
             _ => return false,
         }
         true

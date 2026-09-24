@@ -288,6 +288,28 @@ impl App {
         self.needs_redraw |= !retired.is_empty() || arrived;
     }
 
+    /// Start recording the focused pane to a `.cast` file, or stop and say
+    /// where it went — `Alt+Shift+C`.
+    ///
+    /// The focused pane, not the whole tab: a split is two terminals of two
+    /// sizes, and a cast is one terminal. Each half can be recorded on its own.
+    pub fn toggle_recording(&mut self) {
+        let Some(pane) = self.focused_pane() else {
+            self.set_status("Recording is for a tab's terminal — open one first");
+            return;
+        };
+        if let Some((path, finished)) = pane.view.stop_recording() {
+            self.set_status(crate::cast::stopped_message(&path, &finished));
+            return;
+        }
+        let label = pane.label.clone();
+        let said = match pane.view.start_recording(&label) {
+            Ok(_) => format!("Recording {label} — Alt+Shift+C again to stop"),
+            Err(e) => format!("Could not start recording {label}: {e}"),
+        };
+        self.set_status(said);
+    }
+
     /// Close the focused pane, ending the agent behind it.
     ///
     /// Closing used to detach from a rmux-backed agent and leave it running,
@@ -323,12 +345,18 @@ impl App {
         }
         // Out of the tab first: for a cctop-owned pty, dropping the pane is the
         // kill, and it must happen either way rather than only when rmux agrees.
-        let pane = tab.panes.remove(tab.focus);
+        let mut pane = tab.panes.remove(tab.focus);
         tab.focus = tab.focus.min(tab.panes.len().saturating_sub(1));
         let label = pane.label.clone();
         let stopped = pane.owns_agent().then(|| pane.kill_agent());
+        // Stopped before the pane goes rather than left to its drop, so where
+        // the file went is said: closing is how most recordings will end.
+        let recorded = pane.view.stop_recording();
         drop(pane);
         self.drop_empty_tabs();
+        if let Some((path, finished)) = recorded {
+            self.set_status(crate::cast::stopped_message(&path, &finished));
+        }
 
         self.set_status(match stopped {
             Some(Err(error)) => format!("Closed {label}, but could not stop it: {error}"),

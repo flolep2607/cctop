@@ -271,6 +271,11 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("", "On the dashboard: the selected row's tab"),
         item("Ctrl+R", "On the dashboard: restart every agent tab,"),
         item("", "leaving the ones mid-turn alone"),
+        item(
+            "Alt+Shift+C",
+            "Record the pane to an asciinema .cast, or stop",
+        ),
+        item("", "and say where it went (~/.local/share/cctop/casts)"),
         item("F9", "Paste the clipboard's image as a file path"),
         item("Ctrl+V", "The same, in terminals that send it"),
         item("Home / End", "In a Claude pane: top / bottom of the chat"),
