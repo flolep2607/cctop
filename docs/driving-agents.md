@@ -317,6 +317,58 @@ finished its turn and is sitting at its prompt. In the transcript that looks
 the same as an agent still thinking, and a timer would fire in the middle of
 every long reasoning turn.
 
+### Alerts on spend, error loops and stalls
+
+The same machinery can watch a session's numbers as well as its state. Each
+alert is off until you give it a threshold in `[settings]` (or with `,`, where
+Enter on the row opens a field), and `0` turns it back off:
+
+```toml
+[settings]
+alert_cost = 20          # a session's COST passes $20
+alert_burn = 30          # a session burns more than $30 an hour
+alert_today = 100        # today's spend across every session passes $100
+alert_errors = 25        # 25% of its tool calls in the last 10 minutes failed…
+alert_error_calls = 10   # …once there are at least this many calls in them
+alert_stall = 10         # a working agent has written nothing for 10 minutes
+```
+
+When one fires, cctop says so in a toast, and — with `w` on — rings the bell and
+raises the desktop notification, one ring per refresh however many fired in it.
+With `$CCTOP_NOTIFY_URL` set, each is POSTed as `{"event": "alert", "text": …}`.
+The row takes a marker in place of its status dot for as long as the reading is
+still past the threshold: `$` for cost or burn rate, `!` in red for an error
+loop, `◌` for a stall. The day's spend has no row, so it is the toast alone.
+
+Each fires on the *crossing*, like the bell, and not on the refresh after. It
+can fire again only once the reading has come back below four-fifths of the
+threshold, so a burn rate hovering around its limit is one alert rather than
+one a refresh. A session already over a threshold when cctop starts — or when
+you lower the threshold under it — is marked but not rung for: nobody watched
+that crossing happen. The day's spend starts over at local midnight, and so
+does its alert.
+
+The error loop is measured over the last ten minutes, not the session's whole
+life: `ERR%` barely moves when a session that made three hundred good calls
+starts failing every one, so the alert takes the difference of the two counters
+the transcript already records across the window. The window only holds calls
+this cctop saw — it starts when cctop first sees the session.
+
+A stall needs the agent's hooks (`cctop hook --install`), and cctop will not
+guess without them. A transcript cannot tell three silences apart: a turn that
+is over, a tool call still running, and an agent that has stopped getting
+anywhere all leave the newest record where it was, and for most harnesses a
+finished turn reads as work in progress. So a stall is a session whose row and
+hooks both say it is working, with no tool call open, and no new record for the
+threshold — counting a running subagent's transcript, since a parent waiting on
+its subagent writes nothing of its own. A tool call that has not come back is
+never called a stall: a hung command and a half-hour build look identical from
+outside, and an alert on every long build is one people learn to ignore.
+
+Alerts only ever tell you. cctop never stops, pauses or signals a session for
+crossing one — an agent over budget may be a minute from finishing the job the
+budget paid for.
+
 ### When the agent is the one ringing
 
 That is cctop's own bell, rung about a session's state. An agent can also ring

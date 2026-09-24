@@ -45,6 +45,11 @@ response is waiting for your input, and red when the newest transcript event is
 an API error. A hollow grey dot is a stopped session, and a filled `◉` is the
 session that rang in the last 30 seconds.
 
+A session past one of the `alert_*` thresholds you have set wears that alert
+in place of its dot for as long as it stays past it: `$` for its cost or burn
+rate, a red `!` for an error loop, `◌` for a working agent that has written
+nothing for a while. See [alerts](driving-agents.md#alerts-on-spend-error-loops-and-stalls).
+
 ## `PERM` — how much a session asks
 
 **PERM** is how much a session asks before it acts: `ask`, `edits` (writes files

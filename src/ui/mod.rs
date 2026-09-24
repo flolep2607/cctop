@@ -539,6 +539,11 @@ pub struct App {
 
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
+    /// The `alert_*` thresholds' state: which have fired, and which rows are
+    /// still past theirs. Beside the notifier rather than inside it, because
+    /// the bell's question — is it my move? — is about a session's state and
+    /// these are about its numbers.
+    pub alerts: crate::alert::Alerts,
 
     /// The last snapshot from each machine named with `--host`, keyed by the
     /// target as the user spelled it.
@@ -895,6 +900,7 @@ impl App {
             global_spend: History::default(),
             quota: Quota::default(),
             notify: crate::notify::Notifier::new(prefs.notify),
+            alerts: crate::alert::Alerts::default(),
             collisions: crate::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),

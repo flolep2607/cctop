@@ -1,4 +1,5 @@
 mod access;
+mod alert;
 mod alias;
 mod attach;
 mod burn;

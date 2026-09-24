@@ -202,6 +202,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                         marked: app.marked.contains(&key),
                         deleting: app.deleting.contains(&key),
                         rang: app.notify.rang_recently(&key),
+                        alert: app.alerts.marker(&key),
                         query: &query,
                         // Only sessions that have subagents get a marker, so the
                         // glyph is an offer rather than decoration on every row.
@@ -270,6 +271,8 @@ struct RowState<'a> {
     marked: bool,
     /// This session rang the bell a moment ago.
     rang: bool,
+    /// The loudest `alert_*` threshold this session is still past.
+    alert: Option<crate::alert::Kind>,
     /// Its deletion has been accepted but not yet confirmed.
     deleting: bool,
     /// The active filter, lowercased, for marking the cells that matched.
@@ -289,6 +292,7 @@ fn session_row(
         selected,
         marked,
         rang,
+        alert,
         deleting,
         query,
         expand,
@@ -310,10 +314,19 @@ fn session_row(
         // every other session that has stopped. A pending delete outranks it:
         // that row is on its way out.
         let bell = rang && !deleting && c.id == ColumnId::Status;
+        // An alert takes the dot too, for as long as its threshold is still
+        // passed — the bell's marker first, since that one is about to go and
+        // the alert's is not. The dot rather than a column: a column would
+        // cost every row its width to serve the one row in twenty that has
+        // crossed something, and the dot is where the eye already goes to ask
+        // how a session is doing.
+        let alert = alert.filter(|_| !deleting && !bell && c.id == ColumnId::Status);
         let text = if deleting && c.id == ColumnId::Status {
             "…".to_string()
         } else if bell {
             "◉".to_string()
+        } else if let Some(kind) = alert {
+            kind.glyph().to_string()
         } else if c.id == ColumnId::Project {
             // Prefixed on the label rather than given a column of its own: one
             // more column costs every row two cells of width to serve the few
@@ -330,6 +343,14 @@ fn session_row(
         // one on the selected line.
         let style = if bell {
             base.fg(theme::colors().accent).add_modifier(Modifier::BOLD)
+        } else if let Some(kind) = alert {
+            // Red for a loop, which is money spent on nothing; amber for the
+            // rest, which are only worth a look.
+            let color = match kind {
+                crate::alert::Kind::Errors => theme::colors().cost_high,
+                _ => theme::colors().cost_mid,
+            };
+            base.fg(color).add_modifier(Modifier::BOLD)
         } else if selected {
             if c.id == ColumnId::Status {
                 theme::selected().fg(cell_color(c.id, s, age_secs))
@@ -575,6 +596,7 @@ mod tests {
             selected: false,
             marked: false,
             rang,
+            alert: None,
             deleting: false,
             query: "",
             expand: None,
@@ -584,6 +606,36 @@ mod tests {
         assert_eq!(quiet.spans[0].content, "○ ");
         assert_eq!(rang.spans[0].content, "◉ ");
         assert_eq!(rang.spans[0].style.fg, Some(theme::colors().accent));
+    }
+
+    /// A session past an alert threshold says so on its dot, by shape as
+    /// well as colour — and gives way to the bell, which is the fresher news.
+    #[test]
+    fn a_session_under_an_alert_wears_its_glyph() {
+        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        s.last_active = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let cols = all_columns();
+        let widths = column_widths(&cols, 200);
+        let row = |rang, alert| RowState {
+            selected: false,
+            marked: false,
+            rang,
+            alert,
+            deleting: false,
+            query: "",
+            expand: None,
+        };
+        let looping = row(false, Some(crate::alert::Kind::Errors));
+        let line = session_row(&s, &cols, &widths, &looping, &now);
+        assert_eq!(line.spans[0].content, "! ");
+        assert_eq!(line.spans[0].style.fg, Some(theme::colors().cost_high));
+        let spent = row(false, Some(crate::alert::Kind::Cost));
+        let line = session_row(&s, &cols, &widths, &spent, &now);
+        assert_eq!(line.spans[0].content, "$ ");
+        let both = row(true, Some(crate::alert::Kind::Stall));
+        let line = session_row(&s, &cols, &widths, &both, &now);
+        assert_eq!(line.spans[0].content, "◉ ");
     }
 
     /// The surviving columns must actually fit, or the drop was pointless.
@@ -643,6 +695,7 @@ mod tests {
                 selected: false,
                 marked: false,
                 rang: false,
+                alert: None,
                 deleting: false,
                 query: "",
                 expand: Some('▾'),
