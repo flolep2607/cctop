@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (2/4) — idle ≥6h: 1 session, 180.0M reclaimable ────────────────────╮
+│    LAST         $   MEM▼ MODEL          PERM   ! BRANCH       PROJECT        │
+│●     9h    $18.42 412.0M opus-4-1       ─        ─            Fix the checko…│
+│●     1d     $2.87 180.0M sonnet-4-5     ─        ─            api            │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context╮
+│Root /usr/bin/claude --model opus                                             │
+│    PID    CPU%       MEM  COMMAND                                            │
+│   4101    9.8%    360.0M  claude --model opus                                │
+│   4188    2.4%     44.0M  node mcp-server.js                                 │
+│   4290    0.3%      8.0M  bash -c npm test                                   │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter K Stop idle Space Mark I Back  Idle≥6h       ⧉ share

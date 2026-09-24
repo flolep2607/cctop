@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn the_host_column_stays_off_a_single_machine() {
         let ids = |hidden: &[ColumnId]| -> Vec<ColumnId> {
-            columns::visible_columns(300, hidden)
+            columns::visible_columns(300, hidden, &[])
                 .iter()
                 .map(|c| c.id)
                 .collect()

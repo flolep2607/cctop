@@ -1455,7 +1455,14 @@ impl App {
             KeyCode::Char('E') => self.toggle_expanded_all(),
             KeyCode::Char('U') => self.unmark_all(),
             KeyCode::Char('D') => self.batch(BatchKind::Delete),
+            // In the idle view `K` stops what the view found, skipping what is
+            // in use, rather than refusing the batch over one row: the view is
+            // the selection, and that is the question it was opened to answer.
+            KeyCode::Char('K') if self.idle_only => self.batch(BatchKind::Reclaim),
             KeyCode::Char('K') => self.batch(BatchKind::Kill),
+            // `I` for idle. Capital, like the other keys that can end in
+            // stopping agents.
+            KeyCode::Char('I') => self.toggle_idle_view(),
             KeyCode::Char('n') => self.cycle_matches(1),
             KeyCode::Char('N') => self.cycle_matches(-1),
             // `w` for the bell, not `n`: n/N is next/previous match everywhere
