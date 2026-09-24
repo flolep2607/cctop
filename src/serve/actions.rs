@@ -547,6 +547,7 @@ mod tests {
         session.remote = Some(crate::session::Remote {
             host: "build-box".into(),
             branch: None,
+            ..Default::default()
         });
         for (status, message) in [
             send(&session, "hello").unwrap_err(),

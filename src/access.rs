@@ -950,6 +950,7 @@ mod tests {
         session.remote = Some(crate::session::Remote {
             host: "build-box".into(),
             branch: Some("main".into()),
+            ..Default::default()
         });
         let access = build(&session, None);
         assert!(access.instructions.is_empty());

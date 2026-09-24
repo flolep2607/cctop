@@ -130,6 +130,86 @@ impl Host {
         }
     }
 
+    /// The ssh invocation that runs this host's cctop with `args`.
+    ///
+    /// Split out of [`Host::run`] so what is run and what a confirmation shows
+    /// are one list and cannot drift apart.
+    pub fn ssh_argv(&self, args: &[&str]) -> Vec<String> {
+        // `BatchMode` is the important one: without it a host whose key needs a
+        // passphrase, or one that is not in `known_hosts`, blocks on a prompt
+        // that has nowhere to appear — the poll thread would hang forever
+        // behind a question nobody can see.
+        //
+        // `-T` for the same reason from the other end: an ssh_config with
+        // `RequestTTY force` would hand the far cctop a terminal, and a cctop
+        // that sees one may ask a question (`--update` offers sudo) that nobody
+        // here can answer. With no pty, and `output()` giving ssh a closed
+        // stdin, every question the far side has is answered "no".
+        let mut argv: Vec<String> = [
+            "ssh",
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            &format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
+            "-o",
+            &format!("ServerAliveInterval={ALIVE_INTERVAL_SECS}"),
+            "-o",
+            &format!("ServerAliveCountMax={ALIVE_RETRIES}"),
+            &self.target,
+            "--",
+            &self.command,
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+        argv.extend(args.iter().map(|a| a.to_string()));
+        argv
+    }
+
+    /// The command a confirmation shows for running `args` on this host.
+    ///
+    /// The transport options are left out: they are the same on every call,
+    /// they would not fit a dialog, and none of them changes what happens on
+    /// the far side. What is shown is what the user would type to do it by
+    /// hand.
+    pub fn shown_command(&self, args: &[&str]) -> String {
+        let mut words = vec!["ssh", self.target.as_str(), "--", self.command.as_str()];
+        words.extend(args);
+        words.join(" ")
+    }
+
+    /// Ask the far side which cctop it is.
+    ///
+    /// A separate `--version` round trip rather than a field in `--json`,
+    /// because the remote that matters is the one that is *behind*: every
+    /// cctop ever released answers `--version`, and none of the old ones would
+    /// know to put a version in its snapshot. The bare array `--json` prints
+    /// has nowhere to put one either without breaking every older local cctop
+    /// that reads a newer remote. One extra ssh per connection is the price.
+    pub fn probe(&self) -> Probe {
+        probe_from(self.run(&["--version"]))
+    }
+
+    /// Run `cctop --update` over there.
+    ///
+    /// Only ever on a user's explicit yes (see the TUI's confirmation). It is
+    /// non-interactive by construction rather than by flag: `--update` asks
+    /// only when its stdin and stderr are terminals, and [`Host::run`] gives it
+    /// neither — so its sudo offer and its cargo offer both fall through to the
+    /// error that says what to do instead, which [`update_outcome`] reads.
+    pub fn update(&self) -> Result<String, UpdateFailure> {
+        update_outcome(self, self.run(&["--update"]))
+    }
+
+    /// The command to run by hand when the far binary is root's to replace.
+    ///
+    /// `-t` because sudo will want a password and needs a terminal to ask on;
+    /// this is for a person at a shell, which is exactly what cctop is not.
+    pub fn sudo_update_command(&self) -> String {
+        format!("ssh -t {} sudo {} --update", self.target, self.command)
+    }
+
     /// Run this host's cctop with `args`, returning its stdout.
     ///
     /// `--json` is the poll; `--report`, `--chat` and `--access` are how a
@@ -137,25 +217,9 @@ impl Host {
     /// has it. Both are the same `ssh target -- command …` with the same
     /// options — the flag differs, the transport does not.
     pub fn run(&self, args: &[&str]) -> Result<String, String> {
-        // `BatchMode` is the important one: without it a host whose key needs a
-        // passphrase, or one that is not in `known_hosts`, blocks on a prompt
-        // that has nowhere to appear — the poll thread would hang forever
-        // behind a question nobody can see.
-        let out = Command::new("ssh")
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                &format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
-                "-o",
-                &format!("ServerAliveInterval={ALIVE_INTERVAL_SECS}"),
-                "-o",
-                &format!("ServerAliveCountMax={ALIVE_RETRIES}"),
-                &self.target,
-                "--",
-                &self.command,
-            ])
-            .args(args)
+        let argv = self.ssh_argv(args);
+        let out = Command::new(&argv[0])
+            .args(&argv[1..])
             .output()
             .map_err(|e| format!("could not run ssh: {e}"))?;
 
@@ -171,6 +235,160 @@ impl Host {
             });
         }
         String::from_utf8(out.stdout).map_err(|_| "output was not UTF-8".to_string())
+    }
+}
+
+/// What the far side's `cctop --version` came back as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// It answered, with this version.
+    Version(String),
+    /// There is no cctop where the command points. Distinct from a host that
+    /// cannot be reached: this one can, and the fix is on it.
+    Missing,
+    /// It answered with something that is not a version, or not at all. Said
+    /// nothing about rather than guessed at — see [`skew`].
+    Unreadable(String),
+}
+
+/// How a remote's cctop stands against this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Skew {
+    /// The far side is behind, at this version: offer to update it.
+    Older(String),
+    /// The far side is ahead, at this version: it is *this* cctop that wants
+    /// `--update`.
+    Newer(String),
+    /// Nothing to run there at all.
+    Missing,
+}
+
+/// Compare a probe with the running version. `None` for a match, and for an
+/// answer that could not be read — a marker on a guess would be a claim.
+pub fn skew(probe: &Probe, local: &str) -> Option<Skew> {
+    match probe {
+        Probe::Missing => Some(Skew::Missing),
+        Probe::Unreadable(_) => None,
+        Probe::Version(v) if crate::update::is_newer(local, v) => Some(Skew::Older(v.clone())),
+        Probe::Version(v) if crate::update::is_newer(v, local) => Some(Skew::Newer(v.clone())),
+        Probe::Version(_) => None,
+    }
+}
+
+/// Whether an ssh failure says the command is not there, rather than that
+/// the machine is not.
+///
+/// Read off the remote shell's own words, which every shell spells nearly the
+/// same: bash's `cctop: command not found`, zsh's `command not found: cctop`,
+/// and `No such file or directory` for an absolute path that points nowhere.
+pub fn is_missing(why: &str) -> bool {
+    let lower = why.to_ascii_lowercase();
+    lower.contains("command not found") || lower.contains("no such file or directory")
+}
+
+/// Classify what a `--version` round trip produced.
+fn probe_from(result: Result<String, String>) -> Probe {
+    match result {
+        Ok(out) => match parse_version(&out) {
+            Some(v) => Probe::Version(v),
+            None => Probe::Unreadable(format!("unexpected --version output: {}", out.trim())),
+        },
+        Err(why) if is_missing(&why) => Probe::Missing,
+        Err(why) => Probe::Unreadable(why),
+    }
+}
+
+/// The version out of clap's `cctop 0.18.1`.
+///
+/// Only the first line, and only a last word that starts with a digit: a
+/// wrapper script that prints a banner first is not taken for a release.
+pub fn parse_version(out: &str) -> Option<String> {
+    let line = out.lines().find(|l| !l.trim().is_empty())?;
+    let word = line.split_whitespace().last()?.trim_start_matches('v');
+    word.starts_with(|c: char| c.is_ascii_digit())
+        .then(|| word.to_string())
+}
+
+/// Why a remote `--update` did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateFailure {
+    /// The binary sits where only root can write — the documented
+    /// `/usr/local/bin` install. Carries the command to run by hand: cctop
+    /// does not run sudo on another machine on anyone's behalf.
+    NeedsRoot(String),
+    /// Anything else, in the far side's own words.
+    Other(String),
+}
+
+/// Classify what a `--update` round trip produced.
+///
+/// On success, the one line worth a toast — "Updated 0.17.4 -> 0.18.1." or
+/// "Already on the newest version" — rather than the release notes after it.
+///
+/// A root-owned install is recognised by the far cctop's own wording ("is not
+/// writable by this user") or by the OS error it would have hit replacing the
+/// file. Not by a bare "Permission denied": that is also how ssh says a key
+/// was refused, and telling someone to reach for sudo over an ssh key would
+/// send them the wrong way.
+fn update_outcome(host: &Host, result: Result<String, String>) -> Result<String, UpdateFailure> {
+    match result {
+        Ok(out) => {
+            let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
+            let said = lines
+                .clone()
+                .find(|l| l.starts_with("Updated ") || l.starts_with("Already on"))
+                .or_else(|| lines.next_back())
+                .unwrap_or("updated");
+            Ok(said.to_string())
+        }
+        Err(why) if why.contains("not writable by this user") || why.contains("os error 13") => {
+            Err(UpdateFailure::NeedsRoot(host.sudo_update_command()))
+        }
+        Err(why) => Err(UpdateFailure::Other(
+            why.trim_start_matches("Error: ").to_string(),
+        )),
+    }
+}
+
+/// When a host's poll thread should ask the far side which cctop it is.
+///
+/// Once per connection: at the first snapshot, and again at the first one
+/// after the host stopped answering — a machine that went away may well have
+/// come back upgraded, and asking every poll would double the ssh traffic to
+/// learn nothing. A missing binary is reported the first time it is seen,
+/// without a probe, since the poll that failed has already said so.
+#[derive(Debug, Default)]
+pub struct Handshake {
+    probed: bool,
+    told_missing: bool,
+}
+
+/// What [`Handshake::after`] wants done.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ask {
+    Nothing,
+    Probe,
+    Missing,
+}
+
+impl Handshake {
+    pub fn after(&mut self, snapshot: &Snapshot) -> Ask {
+        match snapshot {
+            Snapshot::Rows(_) => {
+                self.told_missing = false;
+                match std::mem::replace(&mut self.probed, true) {
+                    true => Ask::Nothing,
+                    false => Ask::Probe,
+                }
+            }
+            Snapshot::Failed(why) => {
+                self.probed = false;
+                match is_missing(why) && !std::mem::replace(&mut self.told_missing, true) {
+                    true => Ask::Missing,
+                    false => Ask::Nothing,
+                }
+            }
+        }
     }
 }
 
@@ -208,6 +426,7 @@ fn row(host: &str, v: &Value) -> Option<Session> {
     s.remote = Some(Remote {
         host: host.to_string(),
         branch: v.get("branch").and_then(Value::as_str).map(str::to_string),
+        ..Default::default()
     });
     s.surface = match text(v, "surface") {
         "editor" => Surface::Editor,
@@ -462,6 +681,121 @@ mod tests {
         assert_eq!(rows[0].session_id, "x");
         assert!(!rows[0].is_running());
         assert!(crate::ui::columns::branch_of(&rows[0]).is_none());
+    }
+
+    /// The answers a real far side gives, as ssh hands them back.
+    #[test]
+    fn a_version_probe_reads_what_the_far_side_said() {
+        assert_eq!(
+            probe_from(Ok("cctop 0.17.4\n".into())),
+            Probe::Version("0.17.4".into())
+        );
+        // Every shell's way of saying the binary is not there, including an
+        // absolute path from `--host box:/opt/cctop` that points nowhere.
+        for why in [
+            "bash: line 1: cctop: command not found",
+            "zsh:1: command not found: cctop",
+            "bash: /opt/cctop: No such file or directory",
+        ] {
+            assert_eq!(probe_from(Err(why.into())), Probe::Missing, "{why}");
+        }
+        // A host that cannot be reached is not a host without cctop.
+        assert!(matches!(
+            probe_from(Err(
+                "ssh: connect to host box port 22: Connection refused".into()
+            )),
+            Probe::Unreadable(_)
+        ));
+        assert!(matches!(
+            probe_from(Ok("welcome to box!\n".into())),
+            Probe::Unreadable(_)
+        ));
+    }
+
+    #[test]
+    fn skew_is_a_version_comparison_not_a_string_one() {
+        let v = |s: &str| Probe::Version(s.into());
+        assert_eq!(
+            skew(&v("0.17.4"), "0.18.1"),
+            Some(Skew::Older("0.17.4".into()))
+        );
+        // 0.9 against 0.10 is where comparing strings gets it backwards.
+        assert_eq!(
+            skew(&v("0.10.0"), "0.9.3"),
+            Some(Skew::Newer("0.10.0".into()))
+        );
+        assert_eq!(skew(&v("0.18.1"), "0.18.1"), None);
+        assert_eq!(skew(&Probe::Missing, "0.18.1"), Some(Skew::Missing));
+        assert_eq!(skew(&Probe::Unreadable("?".into()), "0.18.1"), None);
+    }
+
+    /// Once per connection, and once more after the host comes back.
+    #[test]
+    fn the_version_is_asked_once_per_connection() {
+        let rows = || Snapshot::Rows(Vec::new());
+        let down = || Snapshot::Failed("Connection timed out".into());
+        let gone = || Snapshot::Failed("bash: cctop: command not found".into());
+
+        let mut h = Handshake::default();
+        assert_eq!(h.after(&rows()), Ask::Probe);
+        assert_eq!(h.after(&rows()), Ask::Nothing);
+        assert_eq!(h.after(&down()), Ask::Nothing);
+        assert_eq!(h.after(&rows()), Ask::Probe, "a reconnect asks again");
+
+        // A missing binary is said once, not every poll it stays missing.
+        assert_eq!(h.after(&gone()), Ask::Missing);
+        assert_eq!(h.after(&gone()), Ask::Nothing);
+        assert_eq!(h.after(&rows()), Ask::Probe, "installed since");
+    }
+
+    /// What the confirmation shows is the command that runs, less the
+    /// transport options, and the run is never given a terminal.
+    #[test]
+    fn the_update_runs_the_command_it_shows() {
+        let host = Host::parse("flo@box:/usr/local/bin/cctop").expect("a host");
+        assert_eq!(
+            host.shown_command(&["--update"]),
+            "ssh flo@box -- /usr/local/bin/cctop --update"
+        );
+        let argv = host.ssh_argv(&["--update"]);
+        assert_eq!(argv[0], "ssh");
+        assert!(argv.contains(&"-T".to_string()), "no pty: {argv:?}");
+        assert!(argv.contains(&"BatchMode=yes".to_string()));
+        assert_eq!(
+            &argv[argv.len() - 4..],
+            ["flo@box", "--", "/usr/local/bin/cctop", "--update"]
+        );
+    }
+
+    /// The far cctop's own words decide between "run sudo yourself" and
+    /// everything else — and an ssh key refusal is everything else.
+    #[test]
+    fn a_root_owned_remote_is_told_to_run_sudo_by_hand() {
+        let host = Host::parse("box").expect("a host");
+        let sudo = || {
+            Err(UpdateFailure::NeedsRoot(
+                "ssh -t box sudo cctop --update".into(),
+            ))
+        };
+        let root = "Error: /usr/local/bin is not writable by this user, so the new binary \
+                    cannot replace the old one: re-run it as `sudo cctop --update`.";
+        assert_eq!(update_outcome(&host, Err(root.into())), sudo());
+        assert_eq!(
+            update_outcome(&host, Err("Permission denied (os error 13)".into())),
+            sudo()
+        );
+        let key = "flo@box: Permission denied (publickey).";
+        assert_eq!(
+            update_outcome(&host, Err(key.into())),
+            Err(UpdateFailure::Other(key.into()))
+        );
+        // Success keeps the line that says what happened, not the notes.
+        let out = "Current version 0.17.4; checking for updates…\nDownloading x.tar.gz…\n\
+                   Updated 0.17.4 -> 0.18.1.\n\nWhat changed since 0.17.4:\n  0.18.0\n";
+        assert_eq!(
+            update_outcome(&host, Ok(out.into())),
+            Ok("Updated 0.17.4 -> 0.18.1.".into())
+        );
     }
 
     #[test]

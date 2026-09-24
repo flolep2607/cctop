@@ -304,8 +304,13 @@ fn restore_terminal() {
 /// keyboard's refresh. One wedged host must cost only itself.
 fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
     std::thread::spawn(move || {
+        let mut handshake = crate::fleet::Handshake::default();
         loop {
             let snapshot = host.poll();
+            // Asked of the snapshot before it is sent away, and the probe sent
+            // after it: the rows are the news, and the version is a footnote
+            // that can wait the one extra round trip it costs.
+            let ask = handshake.after(&snapshot);
             if tx
                 .send(Response::Remote {
                     host: host.target.clone(),
@@ -315,6 +320,17 @@ fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
             {
                 // The UI has gone; so should this.
                 return;
+            }
+            let probe = match ask {
+                crate::fleet::Ask::Nothing => None,
+                crate::fleet::Ask::Probe => Some(host.probe()),
+                crate::fleet::Ask::Missing => Some(crate::fleet::Probe::Missing),
+            };
+            if let Some(probe) = probe {
+                let _ = tx.send(Response::RemoteVersion {
+                    host: host.target.clone(),
+                    probe,
+                });
             }
             std::thread::sleep(crate::fleet::POLL);
         }
@@ -612,6 +628,14 @@ fn event_loop(
                     app.merge_remotes();
                     rows_changed = true;
                 }
+                Ok(Response::RemoteVersion { host, probe }) => {
+                    app.got_remote_version(host, probe);
+                    // The HOST cell's marker rides on the rows, which are
+                    // stamped as they are merged back in.
+                    app.merge_remotes();
+                    rows_changed = true;
+                }
+                Ok(Response::RemoteUpdated { host, result }) => app.remote_updated(host, result),
                 Ok(Response::Scanned { query, hits }) => app.scanned(query, hits),
                 Ok(Response::Insight(text)) => {
                     app.insight = Some(text);

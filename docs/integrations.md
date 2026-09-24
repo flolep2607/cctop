@@ -273,6 +273,45 @@ A host that stops answering keeps its last rows and says so in the footer
 (`⚠ devbox: Permission denied`). Blanking them would be the stronger claim —
 those agents have not stopped, cctop has merely lost sight of them.
 
+### Keeping the far side up to date
+
+The two ends are separate installs, and nothing ties their versions together —
+a server can sit on 0.17.4 for months while the laptop moves on, still sending
+rows, just without whatever came since. So each time cctop connects to a host
+(once at the first read, and again after the host comes back from being
+unreachable) it also runs `ssh <host> cctop --version`, over the same options
+as the poll. Every cctop ever released answers that, which is why it is a
+separate round trip rather than a field in `--json`: the remote that matters is
+the old one, and the old one would not know to send it.
+
+When the versions differ you hear about it once per host per run:
+
+| The far side is… | What cctop shows |
+|---|---|
+| **older** | a toast; `↑devbox` in amber in the HOST column; a `cctop` line in Info; and **Update cctop on its host** in the row menu (Enter) |
+| **newer** | a toast and an Info line saying it is *this* machine's cctop that is behind — `cctop --update` here |
+| **missing** | a toast saying there is no cctop where ssh looks, and how to name one with `--host host:/path/to/cctop` |
+
+**Update cctop on its host** is only offered for a host known to be behind, and
+only ever runs after you say yes to a confirmation that shows the command:
+
+```bash
+ssh devbox -- cctop --update
+```
+
+It runs with no terminal (`ssh -T`, `BatchMode=yes`, a closed stdin), and
+`--update` asks questions only on a terminal — so the far side never waits on a
+prompt nobody can see. If the binary there sits in a directory only root can
+write (the `/usr/local/bin` install), the update fails and cctop says so, with
+the command to run yourself:
+
+```bash
+ssh -t devbox sudo cctop --update
+```
+
+cctop does not run sudo on another machine for you. The same comparison is in
+`cctop doctor --host devbox`, which warns when either side is behind.
+
 ## Every user on the machine
 
 Run cctop as root and it reads every user's sessions, not root's own — which on

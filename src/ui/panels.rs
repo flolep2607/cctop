@@ -231,6 +231,26 @@ pub fn info(
             Span::raw("  "),
             dim("read over ssh; cctop acts only on this machine"),
         ]));
+        // Only when the two differ: a matching version is the expected state
+        // and a line saying so on every remote row would be read past, which
+        // is the one thing this line cannot afford.
+        let local = crate::update::current_version();
+        let skew = match &r.skew {
+            Some(crate::fleet::Skew::Older(v)) => Some(format!(
+                "{v} there, {local} here — Enter offers to update it"
+            )),
+            Some(crate::fleet::Skew::Newer(v)) => Some(format!(
+                "{v} there, {local} here — this one is behind; cctop --update"
+            )),
+            _ => None,
+        };
+        if let Some(text) = skew {
+            lines.push(Line::from(vec![
+                label(&format!("{:<9}", "cctop")),
+                Span::raw(" "),
+                Span::styled(text, Style::default().fg(theme::colors().cost_mid)),
+            ]));
+        }
     }
     if !session.harness.is_empty() {
         lines.push(field("Harness", session.harness.clone()));

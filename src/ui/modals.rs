@@ -1679,6 +1679,67 @@ pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App, layout
 
 const QUIT_KEYS: &str = "  [y] quit anyway    [n / Esc] stay    [A] back to the agent";
 
+/// Ask before running `cctop --update` on another machine.
+///
+/// The command is shown as it will run, because this is the one key in cctop
+/// that changes something that is not on this computer: someone saying yes to
+/// it should be able to read, in full, what they are saying yes to.
+pub(super) fn draw_remote_update_confirm(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut Layout,
+) {
+    let Some(host) = app
+        .remote_update
+        .as_deref()
+        .and_then(|t| app.remote_host(t))
+    else {
+        return;
+    };
+    let theirs = match app.remote_versions.get(&host.target) {
+        Some(crate::fleet::Probe::Version(v)) => v.clone(),
+        _ => "an unknown version".to_string(),
+    };
+    let lines = vec![
+        Line::from(Span::styled(format!("  {}", host.target), theme::value())),
+        Line::from(Span::styled(
+            format!(
+                "  runs cctop {theirs}; this one is {}",
+                crate::update::current_version()
+            ),
+            theme::dim(),
+        )),
+        Line::default(),
+        Line::from(Span::raw("  Run this, to fetch the newest release there:")),
+        Line::from(Span::styled(
+            format!("    {}", host.shown_command(&["--update"])),
+            Style::default().fg(theme::colors().cost_mid),
+        )),
+        Line::default(),
+        Line::from(Span::raw(
+            "  It replaces the binary on that machine. Nothing is asked there: if it",
+        )),
+        Line::from(Span::raw(
+            "  needs root, cctop says so and shows the sudo command to run yourself.",
+        )),
+        Line::default(),
+        Line::from(Span::styled(REMOTE_UPDATE_KEYS, theme::dim())),
+    ];
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Update cctop over there?", lines, 78);
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        REMOTE_UPDATE_KEYS,
+        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
+    );
+}
+
+const REMOTE_UPDATE_KEYS: &str = "  [y] update    [n / Esc] cancel";
+
 pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;

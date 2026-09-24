@@ -339,7 +339,7 @@ pub struct Session {
 }
 
 /// Where a row came from, when it did not come from this machine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Remote {
     /// The ssh target exactly as the user spelled it, which is what the HOST
     /// column shows and what any message about the row names.
@@ -348,6 +348,13 @@ pub struct Remote {
     /// the working directory is a path on *that* filesystem and reading it here
     /// would report whatever happens to live at the same path locally.
     pub branch: Option<String>,
+    /// How that machine's cctop stands against this one, once it has said.
+    ///
+    /// On the row rather than looked up at draw time, because the HOST cell is
+    /// drawn from the row alone — the same `render_cell` every surface uses —
+    /// and the TUI stamps it on as it merges the rows back in. `None` for a
+    /// match and for a version not yet known, which draw the same.
+    pub skew: Option<crate::fleet::Skew>,
 }
 
 /// Tool names that mean "this file was modified", across harnesses.
