@@ -42,6 +42,9 @@
 //!   Beside it a second token is minted — the read-only link. It opens every
 //!   page and every GET, and `/api/act/*` answers it 403: read-only is a
 //!   property of the credential, not a claim a request can make about itself.
+//!   A third opens `GET /metrics` and nothing else, so a scrape config does
+//!   not hold a credential that reads transcripts. `--token-file` keeps all
+//!   three across restarts; see [`tokens`].
 //! - **Nothing destructive.** No route stops an agent, kills a process or
 //!   deletes a transcript. Those stay in the terminal, where the confirmation
 //!   prompt is.
@@ -89,6 +92,8 @@ mod quota;
 /// answer for a remote row by running it on the machine that has the file.
 pub(crate) mod report;
 mod search;
+/// The run's credentials, and `--token-file`, which keeps them across runs.
+mod tokens;
 pub mod tunnel;
 
 use crate::cli;
@@ -215,6 +220,9 @@ struct Shared {
     /// This one opens every page and every GET, and `/api/act/*` answers it
     /// with 403. Empty under `--no-token`, which has nothing to withhold.
     readonly: String,
+    /// The scrape token: `GET /metrics` and nothing else. See [`tokens`] for
+    /// why a scrape config gets a credential of its own.
+    metrics: String,
     /// Whether the routes that act on a session answer at all.
     ///
     /// The token is what makes them safe to have, so `--no-token` turns them
@@ -312,6 +320,12 @@ OPTIONS:
   --notify <URL>   POST a JSON event to this URL when a session crosses into
                    waiting or asking — once per crossing, on a short deadline.
                    [env: CCTOP_NOTIFY_URL]
+  --token-file <PATH>
+                   Keep the tokens across restarts: read them from PATH, or
+                   mint them and write PATH (mode 600) when it does not exist.
+                   A file other users can read, or do not own, is refused
+  --rotate-token   With --token-file: replace the tokens in it, revoking every
+                   link and scrape config built on the old ones
   -h, --help       Print this help
 
 The page shows each session's conversation, what it edited, and what it can
@@ -353,6 +367,13 @@ pub struct Options {
     /// `None` still falls back to `CCTOP_NOTIFY_URL` inside [`start`], which is
     /// how a dashboard-hosted serve — no flag to have asked with — gets one.
     pub notify: Option<String>,
+    /// Credentials to serve with instead of minting fresh ones — `--token-file`
+    /// after [`tokens::load_or_create`] has read or written it.
+    ///
+    /// Loaded by the caller rather than here so `run` can say which of the two
+    /// happened, and so the dashboard, which never passes one, keeps meaning
+    /// "stopping it revokes every link".
+    pub tokens: Option<tokens::Tokens>,
     /// Whether the server scans for sessions itself.
     ///
     /// True for `cctop serve`, which is the only thing running. False for the
@@ -376,6 +397,7 @@ impl Default for Options {
             delay: Duration::from_secs(2),
             hosts: Vec::new(),
             notify: None,
+            tokens: None,
             scan: true,
         }
     }
@@ -397,6 +419,8 @@ pub struct Serving {
     /// out — the tunnel's when there is one. Empty when the run has no token,
     /// since a tokenless serve has nothing for a second credential to withhold.
     pub readonly: String,
+    /// The scrape URL, `/metrics` with the scrape token; empty with no token.
+    pub metrics: String,
     pub actions: bool,
     shared: Arc<Shared>,
     remotes: Arc<Mutex<Remotes>>,
@@ -486,16 +510,19 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
     if let Some(why) = tunnel_objection(options.tunnel, addr.ip().is_loopback(), options.no_token) {
         anyhow::bail!("{why}");
     }
-    let token = match options.no_token {
-        true => String::new(),
-        false => new_token(),
-    };
     // A second credential for the same pages minus the actions — see
-    // `Shared::readonly` for why read-only is a token rather than a flag.
-    let readonly = match token.is_empty() {
-        true => String::new(),
-        false => new_token(),
+    // `Shared::readonly` for why read-only is a token rather than a flag — and
+    // a third for `/metrics` alone.
+    let tokens = match (options.no_token, options.tokens) {
+        (true, Some(_)) => anyhow::bail!(
+            "--token-file with --no-token names tokens and then serves without them. \
+             Drop one of the two."
+        ),
+        (true, None) => tokens::Tokens::none(),
+        (false, Some(given)) => given,
+        (false, None) => tokens::Tokens::fresh(),
     };
+    let token = tokens.full;
     // The token is the whole authorisation story for an action, so there are no
     // actions without one. `--no-token` is already documented as "every process
     // and user on this machine can read your sessions"; letting that also mean
@@ -519,7 +546,8 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
 
     let shared = Arc::new(Shared {
         token: token.clone(),
-        readonly,
+        readonly: tokens.readonly,
+        metrics: tokens.metrics,
         actions,
         port: addr.port(),
         plan: options.plan,
@@ -602,11 +630,16 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         true => String::new(),
         false => format!("{origin}/?t={}", shared.readonly),
     };
+    let metrics_link = match shared.metrics.is_empty() {
+        true => String::new(),
+        false => format!("{origin}/metrics?t={}", shared.metrics),
+    };
 
     Ok(Serving {
         local: format!("http://127.0.0.1:{}/{query}", addr.port()),
         public: tunnel.as_ref().map(|t| format!("{}/{query}", t.url)),
         readonly: readonly_link,
+        metrics: metrics_link,
         actions,
         shared,
         remotes,
@@ -661,6 +694,8 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     // `None` here still honours CCTOP_NOTIFY_URL — the fallback lives in
     // `start`, so it also covers a dashboard, which has no flag to give.
     let mut notify = None;
+    let mut token_file: Option<std::path::PathBuf> = None;
+    let mut rotate_token = false;
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -701,6 +736,8 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
             }
             "--host" => hosts.push(value()?),
             "--notify" => notify = Some(value()?),
+            "--token-file" => token_file = Some(value()?.into()),
+            "--rotate-token" => rotate_token = true,
             other => anyhow::bail!("unknown option '{other}'\n\n{HELP}"),
         }
     }
@@ -709,6 +746,36 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     // second or more, and `serve` has nothing else on screen to show for it.
     // The dashboard, which calls the same code, has a spinner instead — see
     // [`tunnel::start`] for why that one must not print.
+    // Before the listener, so a refused file costs no socket and the reason is
+    // the only thing on screen.
+    let tokens = match &token_file {
+        // `start` refuses this too; asked here first so the answer is the
+        // contradiction, not whatever was wrong with the file.
+        Some(_) if no_token => anyhow::bail!(
+            "--token-file with --no-token names tokens and then serves without them. \
+             Drop one of the two."
+        ),
+        Some(path) => {
+            let (tokens, how) = tokens::load_or_create(path, rotate_token)?;
+            match how {
+                tokens::Loaded::Reused => eprintln!(
+                    "cctop: tokens from {} — links from earlier runs still work",
+                    path.display()
+                ),
+                tokens::Loaded::Created => eprintln!(
+                    "cctop: new tokens written to {} — they outlive this run; \
+                     --rotate-token replaces them",
+                    path.display()
+                ),
+            }
+            Some(tokens)
+        }
+        None if rotate_token => anyhow::bail!(
+            "--rotate-token rotates the tokens in a --token-file; without one, \
+             every run already mints new tokens"
+        ),
+        None => None,
+    };
     if want_tunnel {
         eprintln!("cctop: opening a trycloudflare tunnel…");
         let _ = std::io::stderr().flush();
@@ -724,6 +791,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         delay,
         hosts: fleet::Host::collect(&hosts),
         notify,
+        tokens,
         // The only thing in this process, so it does its own walking.
         scan: true,
     })?;
@@ -844,6 +912,9 @@ fn announce(serving: &Serving, bind: &str, no_token: bool) {
         if !serving.readonly.is_empty() {
             eprintln!("cctop: read-only link — no actions: {}", serving.readonly);
         }
+        if !serving.metrics.is_empty() {
+            eprintln!("cctop: scrape link — /metrics only: {}", serving.metrics);
+        }
         eprintln!(
             "cctop: that first link is on the public internet. Anyone who has it \
              can read every session on this machine — and, unless --no-actions, \
@@ -855,6 +926,9 @@ fn announce(serving: &Serving, bind: &str, no_token: bool) {
         eprintln!("cctop: serving on {}", serving.local);
         if !serving.readonly.is_empty() {
             eprintln!("cctop: read-only link — no actions: {}", serving.readonly);
+        }
+        if !serving.metrics.is_empty() {
+            eprintln!("cctop: scrape link — /metrics only: {}", serving.metrics);
         }
     }
     if bind != "127.0.0.1" && serving.public.is_none() {
@@ -1159,6 +1233,8 @@ enum Access {
     Full,
     /// The read-only link: everything but `/api/act/*`.
     ReadOnly,
+    /// The scrape token: `GET /metrics`, and a 403 for everything else.
+    Metrics,
 }
 
 /// The cookie a page hands back for the run's token. Named with the port
@@ -1180,6 +1256,9 @@ fn access_for(shared: &Shared, presented: &str) -> Option<Access> {
     if !shared.readonly.is_empty() && token_matches(&shared.readonly, presented) {
         return Some(Access::ReadOnly);
     }
+    if !shared.metrics.is_empty() && token_matches(&shared.metrics, presented) {
+        return Some(Access::Metrics);
+    }
     None
 }
 
@@ -1197,12 +1276,17 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // second visit: `?t=` gets a page in once, the page's `Set-Cookie` is what
     // a reload — which has no query left — presents instead. It adds no new
     // way in: the cookie only ever repeats a token that was already minted.
-    let Some(access) = access_for(shared, request.token()).or_else(|| {
-        access_for(
-            shared,
-            request.cookie(&cookie_name(shared.port)).unwrap_or(""),
-        )
-    }) else {
+    // `Authorization: Bearer` is the same credential again, in the form a
+    // scraper sends rather than a browser.
+    let Some(access) = access_for(shared, request.token())
+        .or_else(|| access_for(shared, request.bearer()))
+        .or_else(|| {
+            access_for(
+                shared,
+                request.cookie(&cookie_name(shared.port)).unwrap_or(""),
+            )
+        })
+    else {
         crate::elog::event(
             "http",
             "request",
@@ -1224,9 +1308,21 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             "access": match access {
                 Access::Full => "full",
                 Access::ReadOnly => "readonly",
+                Access::Metrics => "metrics",
             },
         }),
     );
+    // Here, beside the gate, rather than in each route: the scrape token is
+    // the one most likely to be copied somewhere it can leak, and every route
+    // but one must refuse it — including routes added after this line.
+    if access == Access::Metrics && request.path != "/metrics" {
+        return http::respond_error(
+            stream,
+            Some(&request),
+            403,
+            "this token only opens /metrics",
+        );
+    }
 
     // Before the router, so an armed fault covers every API route rather than
     // the handful somebody remembered to touch.
@@ -1475,7 +1571,7 @@ fn may_act(
     // Before every other guard, because it is not one: this is the link doing
     // what it was minted to do, and the answer names that rather than leaning
     // on a flag the read-only page never had.
-    if access == Access::ReadOnly {
+    if access != Access::Full {
         http::respond_error(stream, Some(request), 403, "this link is read-only");
         return None;
     }
@@ -1614,6 +1710,9 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str, 
     let (credential, actions) = match access {
         Access::Full => (shared.token.as_str(), shared.actions),
         Access::ReadOnly => (shared.readonly.as_str(), false),
+        // Refused before any page is reached; empty rather than the scrape
+        // token so a route that slipped past could not hand it on either.
+        Access::Metrics => ("", false),
     };
     // JSON-encoded rather than pasted between quotes: the token is hex today,
     // and a literal substituted into script is exactly the shape of bug that
@@ -1948,6 +2047,7 @@ mod tests {
         Shared {
             token: token.to_string(),
             readonly: readonly.to_string(),
+            metrics: String::new(),
             actions: true,
             port: 7777,
             plan: Plan::Retail,
@@ -2043,5 +2143,69 @@ mod tests {
         let _ = std::fs::remove_file(path);
         assert!(body.contains("\"session_id\":\"sess-1\""), "{body}");
         assert!(body.contains("flywheel"), "{body}");
+    }
+
+    /// A whole request through the router — gate, scope check and route — and
+    /// the status line it was answered with.
+    fn status_of(shared: &Shared, method: &str, target: &str, headers: &str) -> String {
+        use std::io::Read;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(format!("{method} {target} HTTP/1.1\r\n{headers}\r\n").as_bytes())
+            .unwrap();
+        serve_connection(shared, &mut server);
+        drop(server);
+        let mut raw = String::new();
+        client.read_to_string(&mut raw).unwrap();
+        raw.lines().next().unwrap_or_default().to_string()
+    }
+
+    fn scoped() -> Shared {
+        let mut guarded = shared("full", "view");
+        guarded.metrics = "scrape".to_string();
+        guarded
+    }
+
+    #[test]
+    fn the_scrape_token_opens_metrics_and_nothing_else() {
+        let guarded = scoped();
+        assert_eq!(access_for(&guarded, "scrape"), Some(Access::Metrics));
+        assert!(status_of(&guarded, "GET", "/metrics?t=scrape", "").contains(" 200 "));
+        // Everything a transcript could leak through, and the page that would
+        // hand the token on, is refused — as is acting, however it is asked.
+        for target in [
+            "/?t=scrape",
+            "/api/sessions?t=scrape",
+            "/api/report/x?t=scrape",
+            "/api/chat/x?t=scrape",
+            "/api/search?q=secret&t=scrape",
+            "/api/events?t=scrape",
+            "/session/x?t=scrape",
+        ] {
+            let status = status_of(&guarded, "GET", target, "");
+            assert!(status.contains(" 403 "), "{target}: {status}");
+        }
+        let act = status_of(
+            &guarded,
+            "POST",
+            "/api/launch?t=scrape",
+            "Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        );
+        assert!(act.contains(" 403 "), "{act}");
+    }
+
+    #[test]
+    fn a_bearer_header_is_the_same_check_as_the_query() {
+        let guarded = scoped();
+        let bearer = |token: &str| format!("Authorization: Bearer {token}\r\n");
+        assert!(status_of(&guarded, "GET", "/metrics", &bearer("scrape")).contains(" 200 "));
+        assert!(status_of(&guarded, "GET", "/metrics", &bearer("view")).contains(" 200 "));
+        assert!(status_of(&guarded, "GET", "/api/hosts", &bearer("full")).contains(" 200 "));
+        // Same scopes whichever way the token arrives.
+        assert!(status_of(&guarded, "GET", "/api/hosts", &bearer("scrape")).contains(" 403 "));
+        assert!(status_of(&guarded, "GET", "/metrics", &bearer("wrong")).contains(" 403 "));
+        assert!(status_of(&guarded, "GET", "/metrics", "").contains(" 403 "));
     }
 }

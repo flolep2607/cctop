@@ -103,6 +103,13 @@ pub struct Request {
     /// it, and `;`-splitting at the request layer would hold a map nobody else
     /// asks anything of.
     cookie_header: String,
+    /// The token an `Authorization: Bearer` header carried, empty when none
+    /// did.
+    ///
+    /// A third way to present the same credential, for clients that are not a
+    /// browser following a link: Prometheus's `authorization:` block sends
+    /// exactly this, and keeps the token out of the scrape URL its UI shows.
+    bearer: String,
 }
 
 impl Request {
@@ -172,6 +179,7 @@ impl Request {
         let mut length: Option<usize> = None;
         let mut json_content_type = false;
         let mut cookie_header = String::new();
+        let mut bearer = String::new();
         loop {
             let mut header = String::new();
             match reader.read_line(&mut header) {
@@ -205,6 +213,15 @@ impl Request {
                         // once and the page hands the cookie back, so a reload
                         // — which has no query to present — still gets in.
                         cookie_header = value.to_string();
+                    } else if name.eq_ignore_ascii_case("authorization") {
+                        // Safe to honour on an action as well as a read: a page
+                        // on another origin can only send this header after a
+                        // CORS preflight, and an `OPTIONS` is answered 405.
+                        if let Some((scheme, token)) = value.split_once(' ')
+                            && scheme.eq_ignore_ascii_case("bearer")
+                        {
+                            bearer = token.trim().to_string();
+                        }
                     }
                 }
                 // Hitting the `take` limit surfaces here, as does a header that
@@ -242,6 +259,7 @@ impl Request {
             json_content_type,
             received: std::time::Instant::now(),
             cookie_header,
+            bearer,
         })
     }
 
@@ -267,6 +285,11 @@ impl Request {
     /// The `t` query parameter, which is where the access token lives.
     pub fn token(&self) -> &str {
         self.query.get("t").map_or("", String::as_str)
+    }
+
+    /// The `Authorization: Bearer` token, or empty.
+    pub fn bearer(&self) -> &str {
+        &self.bearer
     }
 
     /// One cookie's value by name, or `None` — cookies arrive as one header
@@ -576,5 +599,25 @@ mod tests {
         assert_eq!(req.cookie("cctop_access"), None);
         assert_eq!(req.cookie("theme"), Some("dark"));
         assert_eq!(req.cookie("absent"), None);
+    }
+
+    /// Prometheus sends `Authorization: Bearer <token>`; the scheme is
+    /// case-insensitive by RFC 9110, and any other scheme is not a token.
+    #[test]
+    fn a_bearer_token_is_read_from_the_authorization_header() {
+        let parse = |header: &str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            use std::io::Write;
+            client
+                .write_all(format!("GET /metrics HTTP/1.1\r\n{header}\r\n\r\n").as_bytes())
+                .unwrap();
+            Request::parse(&server).unwrap().bearer().to_string()
+        };
+        assert_eq!(parse("Authorization: Bearer abc123"), "abc123");
+        assert_eq!(parse("authorization: bearer  abc123 "), "abc123");
+        assert_eq!(parse("Authorization: Basic YWJjOmRlZg=="), "");
+        assert_eq!(parse("X-Other: 1"), "");
     }
 }
