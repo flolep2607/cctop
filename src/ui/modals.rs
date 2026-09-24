@@ -1,6 +1,7 @@
 //! Modal overlays: help, filters, and the confirmation dialogs.
 
 use super::columns::COLUMNS;
+use super::hyperlink;
 use super::render::Layout;
 use super::share;
 use super::theme;
@@ -548,24 +549,37 @@ pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
     // The manager goes in the title rather than the footer: naming it inline
     // takes that line past the 60 columns the box has, and a footer that wraps
     // pushes itself out through the bottom border.
-    modal(
+    let (_, inner) = modal(
         frame,
         area,
         &format!("Install rmux with {}?", install.manager),
         lines,
         62,
     );
+    // The install script's URL, when that is the route, opens from where it is
+    // printed: reading a script before piping it into `sh` is the one check
+    // this prompt can make easy, and it is a click rather than a retype.
+    let url = command
+        .split_whitespace()
+        .find(|word| word.starts_with("https://"));
+    if let Some(url) = url {
+        hyperlink::link_shown(frame.buffer_mut(), inner, inner.y, url, url);
+    }
 }
 
 /// Whether this cctop is serving its table to a browser, and on what.
 ///
-/// The links are drawn as their origin and made clickable, rather than printed
+/// The links are drawn as their origin and made clickable — an OSC 8 hyperlink
+/// to the whole URL, token and all, laid over the origin — rather than printed
 /// in full. A served link carries the token that opens it, so the full text is
 /// something to hand over deliberately — `y` puts it on the clipboard — and not
 /// something to leave on screen. It also does not fit: a tunnel hostname plus a
 /// token is most of a hundred columns.
 pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
+    // `(what is drawn, where it goes)`, top to bottom, for the hyperlinks laid
+    // over the drawn origins once the paragraph has placed them.
+    let mut links: Vec<(String, String)> = Vec::new();
 
     match &app.serving {
         None => {
@@ -578,14 +592,20 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
             // A free function rather than a closure: it appends to `lines`,
             // and a closure that captures it mutably shuts out every other push
             // in this arm.
-            fn show(lines: &mut Vec<Line<'static>>, what: &str, url: &str) {
+            fn show(
+                lines: &mut Vec<Line<'static>>,
+                links: &mut Vec<(String, String)>,
+                what: &str,
+                url: &str,
+            ) {
                 lines.push(Line::from(Span::styled(format!(" {what}"), theme::dim())));
                 lines.push(Line::from(Span::styled(
                     format!("  {}", origin_of(url)),
                     Style::default().fg(theme::colors().accent),
                 )));
+                links.push((origin_of(url), url.to_string()));
             }
-            show(&mut lines, "This machine", &serving.local);
+            show(&mut lines, &mut links, "This machine", &serving.local);
             match &serving.public {
                 None => {
                     lines.push(Line::default());
@@ -596,7 +616,7 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
                 }
                 Some(public) => {
                     lines.push(Line::default());
-                    show(&mut lines, "The internet", public);
+                    show(&mut lines, &mut links, "The internet", public);
                     lines.push(Line::default());
                     // The one thing to understand before sending this to
                     // anybody, said where the link is being looked at.
@@ -620,6 +640,7 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::default());
                 show(
                     &mut lines,
+                    &mut links,
                     "Read-only — watches, never acts",
                     &serving.readonly,
                 );
@@ -658,7 +679,15 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
     let width = widest
         .saturating_add(3)
         .clamp(56, area.width.saturating_sub(4).max(24));
-    modal(frame, area, "Serve this table to a browser", lines, width);
+    let (_, inner) = modal(frame, area, "Serve this table to a browser", lines, width);
+    // Searched for in order, each below the last: the read-only link has the
+    // same origin as the local one, and only its place says which token it is.
+    let mut from = inner.y;
+    for (shown, url) in &links {
+        if let Some(row) = hyperlink::link_shown(frame.buffer_mut(), inner, from, shown, url) {
+            from = row + 1;
+        }
+    }
 }
 
 /// `http://127.0.0.1:7778/?t=abc` → `http://127.0.0.1:7778`.
@@ -1831,21 +1860,58 @@ pub(super) fn draw_switch_tab(
     layout.modal_rect = Some(outer);
 }
 
-/// The rows of `screen` that `link` is drawn across, from the one it starts on
-/// to the last one that carries a piece of it.
-fn link_rows(screen: &vt100::Screen, link: &str) -> Vec<u16> {
-    let (_, width) = screen.size();
-    let rows: Vec<String> = screen.rows(0, width).collect();
-    let Some(first) = rows.iter().position(|row| row.contains("https://")) else {
+/// Where on `screen` `link` is drawn: `(row, columns)` for the row it starts on
+/// and each row after that carries a piece of it.
+///
+/// Columns and not only rows, because the rows are shared: the first has
+/// whatever the command printed before the URL, and a hyperlink laid over that
+/// would make the prompt text open the sign-in page too.
+fn link_cells(screen: &vt100::Screen, link: &str) -> Vec<(u16, std::ops::Range<u16>)> {
+    let (rows, width) = screen.size();
+    // One char per column, so an index into the text is a column. The URL is
+    // ASCII, so nothing it is matched against is lost by keeping only the
+    // first char of a cell; a wide glyph's second column reads as a blank.
+    let text = |row: u16| -> Vec<char> {
+        (0..width)
+            .map(|col| {
+                screen
+                    .cell(row, col)
+                    .and_then(|cell| cell.contents().chars().next())
+                    .unwrap_or(' ')
+            })
+            .collect()
+    };
+    // The run of non-blank columns from `start`.
+    let run = |chars: &[char], start: usize| -> std::ops::Range<u16> {
+        let len = chars[start..].iter().take_while(|c| **c != ' ').count();
+        start as u16..(start + len) as u16
+    };
+    let Some((first, start)) = (0..rows).find_map(|row| {
+        let chars = text(row);
+        let at = chars
+            .windows(8)
+            .position(|w| w.iter().copied().eq("https://".chars()))?;
+        Some((row, run(&chars, at)))
+    }) else {
         return Vec::new();
     };
-    let mut out = vec![first as u16];
-    for (i, row) in rows.iter().enumerate().skip(first + 1) {
-        let piece = row.trim();
-        if piece.is_empty() || !link.contains(piece) {
+    let mut out = vec![(first, start)];
+    for row in first + 1..rows {
+        let chars = text(row);
+        let Some(at) = chars.iter().position(|c| *c != ' ') else {
+            break;
+        };
+        let piece = run(&chars, at);
+        let shown: String = chars[piece.start as usize..piece.end as usize]
+            .iter()
+            .collect();
+        // Blanks after the piece that are not the end of the row mean more text
+        // on it, which the URL does not have.
+        let rest_blank = chars[piece.end as usize..].iter().all(|c| *c == ' ');
+        if !rest_blank || !link.contains(&shown) {
             break;
         }
-        out.push(i as u16);
+        out.push((row, piece));
     }
     out
 }
@@ -2041,9 +2107,21 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
     // Every row the link is wrapped over is one target. The terminal's own
     // link detection sees only the row under the pointer, so a click there
     // opened the first line of the URL — a sign-in page that cannot work.
+    //
+    // Two targets, in fact, for two kinds of click. cctop holds the mouse, so a
+    // plain click is cctop's and copies the link. The cells are also an OSC 8
+    // hyperlink to the whole URL, for the click a terminal keeps for itself —
+    // Ctrl or Shift and a click, depending on the terminal — which now opens
+    // the page it means from any row of it.
     if let Some(link) = &flow.link {
-        for y in link_rows(pane.view.parser.screen(), link) {
+        for (y, columns) in link_cells(pane.view.parser.screen(), link) {
             if y < screen.height {
+                hyperlink::link(
+                    frame.buffer_mut(),
+                    screen.y + y,
+                    screen.x + columns.start..screen.x + columns.end.min(screen.width),
+                    link,
+                );
                 layout.key_hits.push((
                     screen.y + y,
                     screen.x,
@@ -2309,7 +2387,120 @@ mod tests {
         let mut parser = vt100::Parser::new(6, 20, 0);
         let link = "https://claude.com/cai/oauth/authorize?code=true";
         parser.process(format!("Sign in:\r\n{link}\r\n\r\nPaste code:").as_bytes());
-        assert_eq!(link_rows(parser.screen(), link), vec![1, 2, 3]);
+        assert_eq!(
+            link_cells(parser.screen(), link),
+            vec![(1, 0..20), (2, 0..20), (3, 0..8)]
+        );
+    }
+
+    /// The prompt in front of the URL is not part of the link, and neither is
+    /// a row that only starts like a piece of it.
+    #[test]
+    fn the_link_is_its_own_columns_and_not_the_row() {
+        let mut parser = vt100::Parser::new(6, 20, 0);
+        let link = "https://a.io/abc";
+        // "abc later" starts with a piece of it, but carries on past one.
+        parser.process(format!("Go: {link}\r\nabc later").as_bytes());
+        assert_eq!(link_cells(parser.screen(), link), vec![(0, 4..20)]);
+    }
+
+    /// The popup's sign-in link, wrapped over rows by the terminal that printed
+    /// it, is one hyperlink to the whole URL on every one of them — and the
+    /// screen reads, cell for cell, as it did before the link was laid over it.
+    #[test]
+    fn a_wrapped_sign_in_link_opens_the_whole_url_from_every_row() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let link = format!(
+            "https://claude.com/cai/oauth/authorize?code=true&client_id={}&state={}",
+            "c".repeat(60),
+            "s".repeat(70)
+        );
+        let draw = |with_link: bool| {
+            let mut app = crate::ui::tests::test_app();
+            let mut pane = crate::ui::tabs::Pane::for_test("claude");
+            pane.view.parser.process(
+                format!(
+                    "Browser didn't open? Use the url below:\r\n\r\n{link}\r\n\r\nPaste code > "
+                )
+                .as_bytes(),
+            );
+            app.add_account = crate::ui::AddAccount {
+                name: "work".into(),
+                kind: Some(AccountKind::Token),
+                named: true,
+                pane: Some(pane),
+                link: with_link.then(|| link.clone()),
+                outcome: None,
+            };
+            let mut layout = Layout::default();
+            let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("backend");
+            terminal
+                .draw(|frame| draw_add_account(frame, frame.area(), &mut app, &mut layout))
+                .expect("draw");
+            (terminal.backend().buffer().clone(), layout)
+        };
+        let (linked, layout) = draw(true);
+        let (plain, _) = draw(false);
+
+        // Every cell that opens a link opens this one, and read in order the
+        // linked cells spell it exactly: nothing of it left plain, nothing
+        // around it swept in.
+        let mut rows = Vec::new();
+        let mut spelled = String::new();
+        let mut skip = 0u16;
+        for (i, cell) in linked.content().iter().enumerate() {
+            let (x, y) = linked.pos_of(i);
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            if let Some(target) = hyperlink::target_of(cell.symbol()) {
+                assert_eq!(target, link, "a cell links somewhere else");
+                let ratatui::buffer::CellDiffOption::ForcedWidth(width) = cell.diff_option else {
+                    panic!("a link cell at ({x}, {y}) with no forced width");
+                };
+                let label = cell
+                    .symbol()
+                    .split_once("\x1b\\")
+                    .and_then(|(_, rest)| rest.strip_suffix("\x1b]8;;\x1b\\"))
+                    .expect("a closed link");
+                assert_eq!(label.chars().count(), width.get() as usize);
+                spelled.push_str(label);
+                skip = width.get() - 1;
+                if rows.last() != Some(&y) {
+                    rows.push(y);
+                }
+            }
+        }
+        assert_eq!(spelled, link);
+        assert!(rows.len() >= 3, "the URL was meant to wrap: {rows:?}");
+
+        // What is on screen has not moved a column: the text is the same, row
+        // for row, as the frame drawn without the link — the bottom border
+        // aside, whose hint only offers the copy when there is a link.
+        let bottom = rows[rows.len() - 1] + 4;
+        let text = |buf: &ratatui::buffer::Buffer| -> Vec<String> {
+            hyperlink::visible(buf)
+                .lines()
+                .take(bottom as usize)
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(text(&linked), text(&plain));
+
+        // And a plain click on any of those rows is still cctop's, and copies.
+        let copy = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        for y in rows {
+            assert!(
+                layout
+                    .key_hits
+                    .iter()
+                    .any(|(row, _, _, key)| *row == y && *key == copy),
+                "row {y} is not a click target"
+            );
+        }
     }
 
     #[test]

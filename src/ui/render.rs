@@ -1,6 +1,7 @@
 //! Frame layout, drawing, and mouse hit-testing.
 
 use super::columns::ColumnId;
+use super::hyperlink;
 use super::modals;
 use super::spark;
 use super::table;
@@ -10,7 +11,6 @@ use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
 use ratatui::Frame;
-use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::crossterm::event;
 use ratatui::layout::{Constraint, Layout as RLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -2058,54 +2058,6 @@ fn shorten_host(host: &str) -> String {
 /// has the priorities backwards.
 const LINK_MIN_HINTS: usize = 26;
 
-/// Draw `label` at `(x, y)` as an OSC 8 hyperlink to `url`.
-///
-/// A terminal that understands OSC 8 — Ghostty, kitty, WezTerm, iTerm2, VTE,
-/// Windows Terminal — makes the label itself clickable and shows the target on
-/// hover. One that does not swallows the sequence and prints the label. Either
-/// way the columns spent are the label's.
-///
-/// The whole link goes in **one** cell — opening sequence, label and closing
-/// sequence together — with [`CellDiffOption::ForcedWidth`] telling the diff how
-/// many columns that cell actually paints. That option is ratatui/ratatui#1605,
-/// and it is what lets an escape sequence live in a symbol at all: without it
-/// the diff measures the sequence as text and skips the columns after it.
-///
-/// One cell rather than two, because the pair has to be atomic. Split across the
-/// first and last column, a redraw that emitted a changed opening cell and left
-/// the unchanged closing one alone would leave the hyperlink *open*, and every
-/// cell written after it, anywhere on screen, would join the link.
-///
-/// The columns the label covers are then filled with its own characters, which
-/// the diff will never draw — `ForcedWidth` skips them for as long as the link
-/// is there. They are for the frame after it goes: the diff erases what the
-/// previous buffer said was on screen, and columns it believed were blank are
-/// columns it does not bother to erase.
-fn draw_hyperlink(buf: &mut Buffer, x: u16, y: u16, label: &str, url: &str, style: Style) {
-    // An ESC or a BEL inside the URL would end the sequence early and hand the
-    // remainder to the terminal as commands. Nothing here builds such a URL —
-    // it is Cloudflare's hostname and cctop's own token — which is exactly the
-    // kind of assumption that stops being true without anyone noticing.
-    let url: String = url.chars().filter(|c| !c.is_control()).collect();
-    // Every character of the label is one column wide (a host name and one
-    // glyph), so counting them is counting columns.
-    let Some(width) = std::num::NonZeroU16::new(label.chars().count() as u16) else {
-        return;
-    };
-    let Some(cell) = buf.cell_mut((x, y)) else {
-        return;
-    };
-    cell.set_symbol(&format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\"))
-        .set_style(style)
-        .set_diff_option(CellDiffOption::ForcedWidth(width));
-    for (i, ch) in label.chars().enumerate().skip(1) {
-        let mut utf8 = [0u8; 4];
-        if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
-            cell.set_symbol(ch.encode_utf8(&mut utf8)).set_style(style);
-        }
-    }
-}
-
 /// The footer, with the share link in its right-hand corner when one exists.
 ///
 /// The link takes its columns before the hints and badges do, and is drawn after
@@ -2138,7 +2090,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     // label that ends there also reads as if it had been cut off.
     let x = area.right() - width as u16 - 1;
     match &corner {
-        Corner::Link(label, url) => draw_hyperlink(
+        Corner::Link(label, url) => hyperlink::draw(
             frame.buffer_mut(),
             x,
             area.y,
@@ -2280,6 +2232,7 @@ fn osc52(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
 
     fn window(label: &'static str, pct: u32, resets_at: i64) -> crate::quota::Window {
         crate::quota::Window {
@@ -2305,10 +2258,9 @@ mod tests {
         assert!(long.chars().count() <= LINK_MAX + 2, "{long:?}");
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
-        draw_hyperlink(&mut buf, 2, 0, &link_label(url), url, Style::default());
+        hyperlink::draw(&mut buf, 2, 0, &link_label(url), url, Style::default());
         let opening = buf.cell((2, 0)).unwrap();
-        assert!(opening.symbol().contains(url), "{:?}", opening.symbol());
-        assert!(opening.symbol().starts_with("\x1b]8;;"));
+        assert_eq!(hyperlink::target_of(opening.symbol()), Some(url));
         assert!(opening.symbol().ends_with("\x1b]8;;\x1b\\"));
     }
 
@@ -2321,7 +2273,7 @@ mod tests {
         let label = link_label(url);
 
         let mut linked = Buffer::empty(Rect::new(0, 0, 40, 1));
-        draw_hyperlink(&mut linked, 2, 0, &label, url, Style::default());
+        hyperlink::draw(&mut linked, 2, 0, &label, url, Style::default());
         // The columns the label covers hold its characters, not its escapes.
         assert_eq!(linked.cell((3, 0)).unwrap().symbol(), " ");
         assert_eq!(linked.cell((4, 0)).unwrap().symbol(), "f");
@@ -2329,15 +2281,15 @@ mod tests {
         // Drawing it twice writes nothing: the forced width keeps the covered
         // columns out of the diff entirely.
         let mut again = Buffer::empty(Rect::new(0, 0, 40, 1));
-        draw_hyperlink(&mut again, 2, 0, &label, url, Style::default());
+        hyperlink::draw(&mut again, 2, 0, &label, url, Style::default());
         assert!(linked.diff(&again).is_empty());
 
         // And when the tunnel goes, every column it painted is erased rather
-        // than left holding half a hostname. The label's own blank column is
-        // the exception, and only because a blank is what would be drawn there.
+        // than left holding half a hostname — the label's own blank column
+        // too, since a blank the terminal printed inside the link still opens it.
         let blank = Buffer::empty(Rect::new(0, 0, 40, 1));
         let erased: Vec<u16> = linked.diff(&blank).iter().map(|(x, _, _)| *x).collect();
-        for (i, ch) in label.chars().enumerate().filter(|(_, c)| *c != ' ') {
+        for (i, ch) in label.chars().enumerate() {
             let x = 2 + i as u16;
             assert!(
                 erased.contains(&x),

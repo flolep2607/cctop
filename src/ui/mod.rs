@@ -16,6 +16,7 @@ pub mod columns;
 mod dirs;
 mod filter;
 mod hooks;
+mod hyperlink;
 mod input;
 mod launch;
 mod launch_cwd;
