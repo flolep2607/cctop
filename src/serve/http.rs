@@ -107,8 +107,8 @@ pub struct Request {
     /// did.
     ///
     /// A third way to present the same credential, for clients that are not a
-    /// browser following a link: Prometheus's `authorization:` block sends
-    /// exactly this, and keeps the token out of the scrape URL its UI shows.
+    /// browser following a link — a script, curl, a status board — and it keeps
+    /// the token out of the URL such a client logs and displays.
     bearer: String,
 }
 
