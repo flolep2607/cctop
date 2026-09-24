@@ -1,6 +1,7 @@
 //! Modal overlays: help, filters, and the confirmation dialogs.
 
 use super::columns::COLUMNS;
+use super::qr;
 use super::render::Layout;
 use super::share;
 use super::theme;
@@ -43,12 +44,7 @@ fn modal(
     // the line count is a box one line too short for every line that wrapped —
     // which is how content ends up drawn through the bottom border instead of
     // inside it.
-    let inner_width = width.saturating_sub(2).max(1);
-    let height = lines
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(inner_width as usize) as u16)
-        .sum::<u16>()
-        + 2;
+    let height = wrapped_rows(&lines, width.saturating_sub(2)) + 2;
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
@@ -65,6 +61,54 @@ fn modal(
         inner,
     );
     (rect, inner)
+}
+
+/// The rows `lines` take once wrapped to `width` columns — an empty line still
+/// being one.
+fn wrapped_rows(lines: &[Line], width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width) as u16)
+        .sum()
+}
+
+/// Make room for `qr` at line `at` of a modal `width` wide, if it fits.
+///
+/// Room is blank lines, so the code sits inside the same paragraph as the text
+/// around it and the box grows by exactly its height; the row it starts on is
+/// returned, for drawing over those lines once the box is up. `None`, and the
+/// lines untouched, when the box would then be taller than the screen or too
+/// narrow for the code and a column either side of it: the panel is drawn as it
+/// would have been without one, rather than with a code `centered` has cut.
+fn make_room_for_qr(
+    area: Rect,
+    width: u16,
+    lines: &mut Vec<Line<'static>>,
+    at: usize,
+    qr: &qr::Qr,
+) -> Option<u16> {
+    let inner = width.min(area.width.saturating_sub(2)).saturating_sub(2);
+    // The box with the code in it: the text, the code and the borders. It has
+    // to fit in the rows `centered` allows, which keeps one off each edge of
+    // the screen.
+    let rows = wrapped_rows(lines, inner) + qr.height + 2;
+    if !qr.fits(inner.saturating_sub(2), u16::MAX) || rows > area.height.saturating_sub(2) {
+        return None;
+    }
+    let row = wrapped_rows(&lines[..at], inner);
+    lines.splice(at..at, (0..qr.height).map(|_| Line::default()));
+    Some(row)
+}
+
+/// Draw `qr` over the room [`make_room_for_qr`] left at `row` of `inner`.
+fn draw_qr(frame: &mut Frame, inner: Rect, row: u16, qr: &qr::Qr) {
+    let area = Rect {
+        y: inner.y + row,
+        height: qr.height,
+        ..inner
+    };
+    qr.draw(area.intersection(inner), frame.buffer_mut());
 }
 
 /// A modal whose content may be taller than the screen.
@@ -564,8 +608,18 @@ pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
 /// something to hand over deliberately — `y` puts it on the clipboard — and not
 /// something to leave on screen. It also does not fit: a tunnel hostname plus a
 /// token is most of a hundred columns.
+///
+/// The tunnel link can also be drawn as a QR code, with `c`, for a phone to
+/// open it. Only the tunnel's: the loopback link is the one thing a phone
+/// cannot reach, and it is the only other link this panel has — the dashboard
+/// binds nothing but `127.0.0.1`, so there is no LAN address to offer either.
+/// The code encodes what `y` copies, token and all, which is why it waits to be
+/// asked for rather than appearing with the link; see [`qr`].
 pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
+    // Where the code goes if there is one to draw: under the warning that says
+    // what holding it grants, so the two are read together.
+    let mut qr_at = None;
 
     match &app.serving {
         None => {
@@ -611,6 +665,10 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
                         },
                         Style::default().fg(theme::colors().cost_mid),
                     )));
+                    if app.serve_qr {
+                        lines.push(Line::default());
+                        qr_at = Some((lines.len(), qr::encode(public)));
+                    }
                 }
             }
             // The same origin as whichever link is handed out, but a different
@@ -642,23 +700,125 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::colors().cost_high),
         )));
     }
+    let tunnelled = app.serving.as_ref().is_some_and(|s| s.public.is_some());
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        match app.serving.is_some() {
-            true => " o open · y copy · l local · t + tunnel · x stop",
-            false => " l this machine only · t also a public tunnel",
+        match (app.serving.is_some(), tunnelled, app.serve_qr) {
+            (true, true, false) => " o open · y copy · c QR code · l local · t + tunnel · x stop",
+            (true, true, true) => " o open · y copy · c hide QR · l local · t + tunnel · x stop",
+            (true, false, _) => " o open · y copy · l local · t + tunnel · x stop",
+            (false, ..) => " l this machine only · t also a public tunnel",
         },
         theme::dim(),
     )));
 
     // Sized to the longest line, so a tunnel hostname is one line and not two,
     // and capped to the screen, where it wraps instead — into a box now tall
-    // enough for it.
+    // enough for it. A code asked for widens it to the code, when the screen
+    // has the columns. `max` then `min` and not `clamp`: on a screen narrower
+    // than the floor the cap is below it, and `clamp` panics on that.
     let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let code_width = match &qr_at {
+        Some((_, Some(qr))) => qr.width + 4,
+        _ => 0,
+    };
     let width = widest
         .saturating_add(3)
-        .clamp(56, area.width.saturating_sub(4).max(24));
-    modal(frame, area, "Serve this table to a browser", lines, width);
+        .max(code_width)
+        .max(56)
+        .min(area.width.saturating_sub(4).max(24));
+    let room = match &qr_at {
+        Some((at, Some(qr))) => make_room_for_qr(area, width, &mut lines, *at, qr),
+        _ => None,
+    };
+    // `c` was pressed and there is no code to show for it. Said, because a key
+    // that visibly does nothing reads as a dead one; and said as the thing to
+    // do about it, which is nearly always a taller terminal.
+    if let (Some((at, _)), None) = (&qr_at, room) {
+        lines.insert(
+            *at,
+            Line::from(Span::styled(
+                " No room here for a QR code — try a taller terminal.",
+                theme::dim(),
+            )),
+        );
+    }
+    let (_, inner) = modal(frame, area, "Serve this table to a browser", lines, width);
+    if let (Some((_, Some(qr))), Some(row)) = (&qr_at, room) {
+        draw_qr(frame, inner, row, qr);
+    }
+}
+
+/// A terminal `W` has just shared off this machine, as a code a phone can scan.
+///
+/// The operator link is a credential for a live agent — whoever opens it types
+/// into it — and it is otherwise kept off the screen entirely; see
+/// [`App::share_selected`](super::App) for the one reason it is drawn here.
+/// The warning sits directly under the code for that reason, and the PIN beside
+/// it because the browser asks for it once the link has opened.
+///
+/// Without the rows or columns for the code the panel still opens, saying so:
+/// `W` was pressed to hand the terminal over, and the clipboard has done that
+/// whether or not the code could be drawn.
+pub(super) fn draw_share_qr(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    let Some(share) = &app.share_qr else {
+        return;
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(" {}", crate::util::truncate(&share.label, 50)),
+            theme::value(),
+        )),
+        Line::default(),
+    ];
+    let at = lines.len();
+    lines.push(Line::default());
+    if let Some(pin) = &share.pin {
+        lines.push(Line::from(vec![
+            Span::raw(" Pairing code "),
+            Span::styled(pin.clone(), theme::value()),
+            Span::styled(" — asked for once the link opens.", theme::dim()),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        " Whoever holds this link can type at the agent.",
+        Style::default().fg(theme::colors().cost_mid),
+    )));
+    lines.push(Line::from(Span::styled(
+        " It is on your clipboard as well.",
+        theme::dim(),
+    )));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(DISMISS_KEYS, theme::dim())));
+
+    let code = qr::encode(&share.link);
+    let width = code
+        .as_ref()
+        .map_or(0, |qr| qr.width + 4)
+        .max(56)
+        .min(area.width.saturating_sub(4).max(24));
+    let room = code
+        .as_ref()
+        .and_then(|qr| make_room_for_qr(area, width, &mut lines, at, qr));
+    if room.is_none() {
+        lines[at] = Line::from(Span::styled(
+            " No room here for a QR code — try a taller terminal.",
+            theme::dim(),
+        ));
+    }
+    let last = lines.len() as u16 - 1;
+    let (outer, inner) = modal(frame, area, "Open this terminal elsewhere", lines, width);
+    if let (Some(qr), Some(row)) = (&code, room) {
+        draw_qr(frame, inner, row, qr);
+    }
+    confirm_chips(
+        layout,
+        outer,
+        inner,
+        last,
+        DISMISS_KEYS,
+        &[("[any key]", dismiss())],
+    );
 }
 
 /// `http://127.0.0.1:7778/?t=abc` → `http://127.0.0.1:7778`.

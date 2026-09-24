@@ -113,6 +113,13 @@ safetensors = "0.6"
 # already carry. `fancy-regex` is the pure-Rust path through the same crate.
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 tui-term = "0.3.4"
+# A QR code of a link meant for a phone, drawn in half-blocks inside the panel
+# that hands the link out (`ui::qr`). `qrcode` is the encoder the widget takes;
+# its default features are image rendering, which a terminal has no use for.
+# The widget also drags in `color-eyre` — a normal dependency though only its
+# example uses it. Pure Rust all the way down, so the musl builds are unmoved.
+qrcode = { version = "0.14", default-features = false }
+tui-qrcode = "0.2.6"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"
 # The corner preview of a pasted image. Only its halfblocks are used — sixel
