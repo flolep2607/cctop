@@ -16,6 +16,14 @@
 //! nothing does, the Esc and whatever was held behind it go through exactly as
 //! typed. An Esc pressed on purpose — the key that interrupts Claude — arrives
 //! [`WINDOW`] later than it used to, which nobody can feel.
+//!
+//! The report's tail is caught on its own too, with no Esc in front of it. Over
+//! ssh the two halves of a split read can land further apart than any window a
+//! person would accept on their Esc key, and then the Esc has already gone
+//! through by the time `[<35;141;17M` arrives as typing. A `[` is held until
+//! the next key says whether a `<` follows it; nobody types `[<` then three
+//! numbers and an `M`, and everything else is released the moment it cannot be
+//! a report.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
@@ -23,10 +31,11 @@ use std::time::{Duration, Instant};
 /// How long an Esc waits for the rest of a report before it is taken to be an
 /// Esc.
 ///
-/// The second half of a split read comes from the same burst of input, so it
-/// lands within a few milliseconds even over ssh; this is several times that,
-/// and still well under anything a person pressing Esc could notice.
-pub const WINDOW: Duration = Duration::from_millis(50);
+/// The second half of a split read usually lands within a few milliseconds; this
+/// allows for an ssh hop that holds it for longer, and is still under what a
+/// person pressing Esc would notice. A tail later than this is still caught,
+/// without its Esc — see the module docs.
+pub const WINDOW: Duration = Duration::from_millis(100);
 
 /// Keys held back from a pane while they might still be a torn mouse report.
 #[derive(Default)]
@@ -43,7 +52,9 @@ impl Torn {
     /// and this one once it clearly is not a report.
     pub fn feed(&mut self, key: KeyEvent, now: Instant) -> Vec<KeyEvent> {
         if self.held.is_empty() {
-            if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            let opens = (key.code == KeyCode::Esc || key.code == KeyCode::Char('['))
+                && key.modifiers.is_empty();
+            if opens {
                 self.held.push(key);
                 self.since = Some(now);
                 return Vec::new();
@@ -52,7 +63,13 @@ impl Torn {
         }
         self.held.push(key);
         self.since = Some(now);
-        match shape(&self.held[1..]) {
+        // Measured from after the Esc when there is one, so a report reads the
+        // same whether or not its Esc was the half that arrived.
+        let after = match self.held[0].code {
+            KeyCode::Esc => &self.held[1..],
+            _ => &self.held[..],
+        };
+        match shape(after) {
             Shape::Report => {
                 crate::elog::event("tui", "torn-mouse-report", serde_json::json!({}));
                 self.held.clear();
@@ -191,6 +208,19 @@ mod tests {
         // Esc Esc: the first is plainly typed, the second is held in its turn.
         assert_eq!(run(&mut torn, "\x1b\x1b", now), keys("\x1b"));
         assert_eq!(torn.expire(now + WINDOW), keys("\x1b"));
+    }
+
+    /// The Esc already gone through on its own — the halves of the read landed
+    /// further apart than the window — and the tail arriving as typing: still
+    /// caught, while a `[` that opens nothing is typed at once.
+    #[test]
+    fn a_report_tail_without_its_esc_is_dropped_too() {
+        let mut torn = Torn::default();
+        let now = Instant::now();
+        assert!(run(&mut torn, "[<35;141;17M[<0;97;19m", now).is_empty());
+        assert_eq!(run(&mut torn, "a[b]", now), keys("a[b]"));
+        assert_eq!(run(&mut torn, "[", now), Vec::<KeyEvent>::new());
+        assert_eq!(torn.expire(now + WINDOW), keys("["));
     }
 
     /// A report with a field missing or too many is not one, and is typed.

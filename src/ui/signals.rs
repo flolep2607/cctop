@@ -156,6 +156,7 @@ impl App {
                 // signal behind would have the row claim a state forever.
                 crate::hook::Signal::Ended => {
                     self.hooked.remove(&event.session_id);
+                    self.asking_agents.remove(&event.session_id);
                     moved |= self.hook_pids.remove(&event.session_id).is_some();
                 }
                 _ => {
@@ -165,7 +166,9 @@ impl App {
                         self.hook_pids.insert(event.session_id.clone(), event.pids);
                         moved = true;
                     }
-                    self.hooked.insert(event.session_id, event.reported);
+                    let reported =
+                        self.still_asking(&event.session_id, event.agent, event.reported);
+                    self.hooked.insert(event.session_id, reported);
                 }
             }
         }
@@ -190,6 +193,53 @@ impl App {
         self.apply_finished_agents();
         self.apply_reports();
         (changed, lifecycle)
+    }
+
+    /// What a session should be taken to be doing after `reported`, given the
+    /// questions its subagents are still waiting on.
+    ///
+    /// A subagent's question stands until *that* subagent says something else —
+    /// its tool running, or being denied, or it stopping — however busy the
+    /// agents beside it are. While any stands, the session is asking: the most
+    /// recent open question is what it reports, so the tab stays lit and the
+    /// bell's grace period is the question's own.
+    fn still_asking(
+        &mut self,
+        session: &str,
+        agent: Option<String>,
+        reported: crate::hook::Reported,
+    ) -> crate::hook::Reported {
+        let open = self.asking_agents.entry(session.to_string()).or_default();
+        match agent {
+            Some(agent) => match reported.signal {
+                crate::hook::Signal::NeedsInput => {
+                    open.insert(agent, reported.clone());
+                }
+                _ => {
+                    open.remove(&agent);
+                }
+            },
+            // The session's own turn ending. A subagent it was waiting on cannot
+            // still be asking once it has — a prompt dismissed with Esc ends the
+            // turn and sends nothing from the subagent — and a question kept
+            // past that would light the tab for good, since a question is never
+            // aged out.
+            //
+            // ponytail: a *background* subagent asking across its parent's
+            // `Stop` is taken to have been answered.
+            None if reported.signal == crate::hook::Signal::Idle => open.clear(),
+            None => {}
+        }
+        if reported.signal == crate::hook::Signal::NeedsInput {
+            return reported;
+        }
+        match open.values().max_by_key(|asked| asked.at) {
+            Some(asked) => asked.clone(),
+            None => {
+                self.asking_agents.remove(session);
+                reported
+            }
+        }
     }
 
     /// Tell the worker which processes the agents say they are running under.
@@ -464,6 +514,59 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One hook event for session `a`, from `agent` when it is a subagent's.
+    fn heard(signal: crate::hook::Signal, agent: Option<&str>) -> crate::hook::Event {
+        crate::hook::Event {
+            session_id: "a".into(),
+            pids: Vec::new(),
+            reported: crate::hook::Reported {
+                signal,
+                cwd: "/w/proj".into(),
+                permission: None,
+                at: std::time::Instant::now(),
+                provisional: false,
+            },
+            finished_agent: None,
+            agent: agent.map(str::to_string),
+        }
+    }
+
+    /// The bug: two subagents running side by side, one stopped on a
+    /// permission prompt — and the other's next tool call overwrote the
+    /// question, so the parent's tab stopped asking while the prompt was still
+    /// up. The question stands until the subagent that asked it moves on.
+    #[test]
+    fn a_subagents_question_outlives_what_its_sibling_does_next() {
+        use crate::hook::Signal::{Acting, Busy, Idle, NeedsInput};
+        let mut app = test_app();
+        let now = |app: &App| app.hooked.get("a").map(|r| r.signal);
+
+        app.apply_hooks(vec![heard(NeedsInput, Some("sub-1"))]);
+        app.apply_hooks(vec![heard(Acting, Some("sub-2"))]);
+        assert_eq!(
+            now(&app),
+            Some(NeedsInput),
+            "a sibling's tool call hid the question"
+        );
+        app.apply_hooks(vec![heard(Busy, None)]);
+        assert_eq!(
+            now(&app),
+            Some(NeedsInput),
+            "the parent's own work hid the question"
+        );
+
+        // Answered: the subagent that asked runs its tool.
+        app.apply_hooks(vec![heard(Busy, Some("sub-1"))]);
+        assert_eq!(now(&app), Some(Busy));
+
+        // Dismissed with Esc, which sends nothing from the subagent: the
+        // parent's turn ending is what closes it.
+        app.apply_hooks(vec![heard(NeedsInput, Some("sub-1"))]);
+        app.apply_hooks(vec![heard(Idle, None)]);
+        assert_eq!(now(&app), Some(Idle), "a dismissed question stayed up");
+        assert!(!app.asking_agents.contains_key("a"));
+    }
     use crate::ui::tests::{session, test_app};
     /// What gets written onto a session, and — mostly — what does not.
     ///
@@ -519,6 +622,7 @@ mod tests {
                 provisional: false,
             },
             finished_agent: None,
+            agent: None,
         }]);
 
         assert_eq!(
@@ -566,6 +670,7 @@ mod tests {
                 provisional: false,
             },
             finished_agent: None,
+            agent: None,
         }]);
         assert!(
             app.states_to_publish(&[agent(recorded(crate::hook::Signal::Busy, 30))], now)
@@ -601,6 +706,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            agent: None,
         };
         let mut app = test_app();
         app.sessions = vec![session("a", true, "proj")];
@@ -646,6 +752,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            agent: None,
         };
         let mut app = test_app();
 
@@ -696,6 +803,7 @@ mod tests {
             // This test is about the session's own state; subagent events are
             // covered where subagents are.
             finished_agent: None,
+            agent: None,
         };
         let mut app = test_app();
 
@@ -751,6 +859,7 @@ mod tests {
                 at: std::time::Instant::now() - std::time::Duration::from_secs(60 * 60),
             },
             finished_agent: None,
+            agent: None,
         };
         let mut app = test_app();
 
@@ -791,6 +900,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            agent: None,
         }]);
 
         assert_eq!(
@@ -843,6 +953,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            agent: None,
         }]);
         assert_eq!(
             app.hooked_signal("a"),
@@ -865,6 +976,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            agent: None,
         }]);
         app.mark_answered(8);
         assert_eq!(
@@ -889,6 +1001,7 @@ mod tests {
             session_id: "a".to_string(),
             pids: Vec::new(),
             finished_agent: None,
+            agent: None,
             reported: Reported {
                 signal,
                 cwd: String::new(),

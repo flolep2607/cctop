@@ -380,8 +380,9 @@ fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
         }),
-        // Only a subagent finishing carries one, and it is the id cctop's own
-        // subagent transcripts are named after. Cursor spells it `subagent_id`.
+        // Every event fired inside a subagent carries it, and it is the id
+        // cctop's own subagent transcripts are named after. Cursor spells it
+        // `subagent_id`.
         "agent_id": first(&["agent_id", "subagent_id"]).unwrap_or_default(),
         // Which of the many things `Notification` means — see
         // [`notification_signal`]. Absent on every other event, and on a Claude
@@ -555,6 +556,11 @@ pub struct Event {
     /// started, not that it finished — so a transcript alone cannot tell a
     /// working subagent from a finished one.
     pub finished_agent: Option<String>,
+    /// The subagent this event came from, on any event fired inside one.
+    ///
+    /// What lets a question one subagent is waiting on outlive the next thing
+    /// a sibling does: see `App::apply_hooks`.
+    pub agent: Option<String>,
 }
 
 /// The last thing a session reported, kept per session.
@@ -998,6 +1004,11 @@ fn parse(line: &str) -> Option<Event> {
         .flatten()
         .filter(|id| !id.is_empty())
         .map(str::to_string),
+        agent: value
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
         reported: Reported {
             // The prompt that auto mode may answer on your behalf, and the only
             // one worth holding: an MCP elicitation and a plain notification

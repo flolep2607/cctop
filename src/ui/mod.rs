@@ -572,6 +572,14 @@ pub struct App {
     /// absent entry is the ordinary case and means "fall back to the transcript"
     /// rather than "nothing is happening".
     pub hooked: HashMap<String, crate::hook::Reported>,
+    /// The questions a session's subagents are waiting on, by subagent id.
+    ///
+    /// `hooked` holds one report per session and every event replaces it, so a
+    /// subagent's permission prompt was overwritten by whatever a sibling
+    /// running beside it did next — and the tab stopped asking while the
+    /// question was still on screen. A question is kept here until the
+    /// subagent that asked it says something else. See `App::apply_hooks`.
+    pub asking_agents: HashMap<String, HashMap<String, crate::hook::Reported>>,
     /// The process tree each session's hooks reported running under, keyed by
     /// session id.
     ///
@@ -885,6 +893,7 @@ impl App {
             shared_at: None,
             drag_tab: None,
             hooked: HashMap::new(),
+            asking_agents: HashMap::new(),
             // Loaded rather than started empty, because the row most likely to
             // want a tab blinking is the one blocked on a question — and that
             // is exactly the row that sends nothing until it is answered. See
