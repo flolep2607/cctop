@@ -7,7 +7,6 @@ cctop serve
 ```
 cctop: serving on http://127.0.0.1:7777/?t=9f3ac1de…
 cctop: read-only link — no actions: http://127.0.0.1:7777/?t=71b02ee4…
-cctop: scrape link — /metrics only: http://127.0.0.1:7777/metrics?t=4c2e90b7…
 ```
 
 Open that link and you get the table cctop draws in the terminal, streamed live,
@@ -164,7 +163,6 @@ cctop: opening a trycloudflare tunnel…
 cctop: serving on https://particular-words-here.trycloudflare.com/?t=9f3ac1de…
 cctop: also on http://127.0.0.1:7777/?t=9f3ac1de…
 cctop: read-only link — no actions: https://particular-words-here.trycloudflare.com/?t=71b02ee4…
-cctop: scrape link — /metrics only: https://particular-words-here.trycloudflare.com/metrics?t=4c2e90b7…
 cctop: that first link is on the public internet. Anyone who has it can read
        every session on this machine — and, unless --no-actions, type at your
        agents, which runs commands as you. Cloudflare carries the traffic and
@@ -206,7 +204,9 @@ trade, not a stronger one.
 
 Each run generates an access token and puts it in the URL it prints. Every
 request needs it, including the ones that only return HTML, so a wrong token
-cannot be used to find out which routes exist.
+cannot be used to find out which routes exist. The one exception is
+`GET /metrics`, which carries no transcript and answers without one — see
+[Scraping it](#scraping-it-with-prometheus).
 
 The URL being the whole credential is deliberate: it makes the link shareable
 over whatever channel you already trust, and it is why `--no-token` is a thing to
@@ -217,32 +217,16 @@ network with no gate at all.
 Restarting `cctop serve` mints a new token and invalidates the old link —
 unless `--token-file` keeps them, [below](#keeping-them-across-restarts).
 
-The same token is accepted in three places, all checked by the same gate: the
+Either token is accepted in three places, all checked by the same gate: the
 `?t=` query parameter a link carries, the cookie a page hands back so a reload
-still gets in, and an `Authorization: Bearer <token>` header — which is what
-Prometheus and most HTTP clients send, and which keeps the token out of the URL
-they log and display.
-
-### Three tokens, three scopes
-
-| Printed as | Opens |
-|---|---|
-| `serving on` | Every page, every `GET`, and the actions unless `--no-actions` |
-| `read-only link` | Every page and every `GET`; `/api/act/*` answers `403` |
-| `scrape link` | `GET /metrics` alone; every other route answers `403` |
-
-The scrape token exists because a scrape config is the credential most likely
-to be copied somewhere: a Prometheus config repository, a file the `prometheus`
-user can read, a Helm values file. The read-only token would scrape just as well,
-and it also opens every transcript on the machine. The scrape token leaks, at
-worst, what `/metrics` already sends to whoever can log in to the dashboard it
-feeds.
+still gets in, and an `Authorization: Bearer <token>` header — for a script or
+an HTTP client, and it keeps the token out of the URL they log and display.
 
 ### Keeping them across restarts
 
 A token minted per run is right for a link that can type at your agents, and
-wrong for a scrape config or a bookmarked status board, which then break on
-every restart. `--token-file` is the opt-in:
+wrong for a bookmarked dashboard or a read-only link pinned to a status board,
+which then break on every restart. `--token-file` is the opt-in:
 
 ```bash
 cctop serve --token-file ~/.config/cctop/serve-tokens
@@ -268,8 +252,7 @@ A file that is not plainly yours is refused rather than repaired:
 
 Each refusal says so and names the way out. **Rotating** is
 `cctop serve --token-file <path> --rotate-token`, or deleting the file: both
-mint three new tokens and revoke every link and scrape config built on the old
-ones. The directories above the file are not checked, so put it somewhere only
+mint new tokens and revoke every link built on the old ones. The directories above the file are not checked, so put it somewhere only
 you can write.
 
 The dashboard's `B` never reads a token file: stopping that serve still revokes
@@ -324,7 +307,7 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /api/hosts` | Which `--host` machines could not be read, and why |
 | `GET /api/quota` | Each account's rate-limit status and windows — `{"claude":[…],"codex":[…]}`, each profile with `status`, `detail`, `plan` and `windows` |
 | `GET /api/search?q=<query>` | Both search tiers over every session: `{"hits":[{key, session_id, snippet, score}]}`. Literal matches carry the matching text; topical-only hits carry `~NN% ` plus the chunk head |
-| `GET /metrics` | The same table as Prometheus text exposition — see [Scraping it](#scraping-it-with-prometheus) |
+| `GET /metrics` | The same table as Prometheus text exposition. **Needs no token** — see [Scraping it](#scraping-it-with-prometheus) |
 | `GET /insight/optimize` | The text `cctop optimize` prints, as `text/plain` |
 | `GET /insight/compare` | The text `cctop compare` prints, as `text/plain` |
 | `GET /favicon.svg` | The page's icon |
@@ -351,11 +334,19 @@ pays — they are asked for, not polled.
 ## Scraping it with Prometheus
 
 `/metrics` is the snapshot every other route serves, summed into gauges in the
-Prometheus text format. It sits behind the same gate as everything else, and
-all three tokens open it — the scrape token opens nothing else. It says
-nothing `/api/sessions` does not, and
-leaves out titles, prompts and full paths on purpose, since a metrics store
-keeps what it is sent for months and shows it to anyone with a dashboard login.
+Prometheus text format. It says nothing `/api/sessions` does not, and leaves
+out titles, prompts and full paths on purpose, since a metrics store keeps what
+it is sent for months and shows it to anyone with a dashboard login.
+
+**It is the one route that needs no token.** What is left is aggregate counts,
+costs, model names, project directory names and eight-character session ids —
+nothing a token would be protecting — and a scrape config is the file that gets
+copied into config repositories and Helm values, which is the last place a
+credential that also opens your transcripts should live. It also means a
+restart never breaks the scrape. Every other route keeps its check, and only
+`GET` (or `HEAD`) is answered. The cost: whoever can reach the port can read
+the numbers — this machine's users on the default loopback bind, your network
+under `--bind`, and anyone with the hostname under `--tunnel`.
 
 | Metric | Labels | |
 |---|---|---|
@@ -388,41 +379,16 @@ series behind for every session ever run.
 A remote row's transcript is not on this machine, so its tokens and cost are
 filed under the model it is on, with its input kinds folded into `input`.
 
-Run cctop with a token file so the scrape token survives restarts, and hand
-Prometheus that one token — not the file, which also holds the token that can
-type at your agents:
-
-```bash
-cctop serve --token-file ~/.config/cctop/serve-tokens
-# The scrape token alone, somewhere the prometheus user can read it.
-sudo install -m 640 -g prometheus /dev/null /etc/prometheus/cctop.token
-awk '$1 == "metrics" { print $2 }' ~/.config/cctop/serve-tokens \
-  | sudo tee /etc/prometheus/cctop.token > /dev/null
-```
-
 ```yaml
 scrape_configs:
   - job_name: cctop
     scrape_interval: 30s
     static_configs:
       - targets: ["127.0.0.1:7777"]
-    authorization:
-      type: Bearer
-      credentials_file: /etc/prometheus/cctop.token
 ```
 
-`authorization:` sends `Authorization: Bearer <token>`, which keeps the token
-out of the scrape URL the Prometheus UI shows on its targets page. A scraper
-that can only set query parameters can use `params: { t: ["4c2e90b7…"] }`
-instead; it is the same check.
-
-Without `--token-file` the tokens are minted per run, and a restart means
-updating the credential. `--rotate-token` is the same step on purpose: rotating
-revokes the scrape token too, so re-run the `awk` line after it.
-
-For a Prometheus on the same machine, `cctop serve --no-token --no-actions` on
-the default loopback bind removes the token altogether — at the cost the token
-section spells out: any local process or user can then read the page.
+No `authorization:` and no `params:` — a plain `cctop serve` is scrapeable as
+it is, and stays so across restarts.
 
 ## Notes
 

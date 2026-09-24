@@ -1,22 +1,14 @@
-//! The run's three credentials, and `--token-file`, which lets them outlive it.
+//! The run's two credentials, and `--token-file`, which lets them outlive it.
 //!
 //! By default every `cctop serve` mints fresh tokens, and a restart revokes
 //! every link handed out — the right default for a link that can type at your
-//! agents. It is the wrong one for a Prometheus scrape config or a bookmarked
-//! status board, which break on every restart and have to be edited by hand.
-//! `--token-file` is the opt-in: the tokens are read from the file when it
-//! exists, and minted and written to it when it does not.
+//! agents. It is the wrong one for a bookmarked dashboard, or a read-only link
+//! pinned to a status board, which break on every restart and have to be
+//! handed out again. `--token-file` is the opt-in: the tokens are read from the
+//! file when it exists, and minted and written to it when it does not.
 //!
-//! # Three scopes, not two
-//!
-//! A scrape config is exactly the credential that gets copied around: into a
-//! Prometheus config repository, into a file the `prometheus` user can read,
-//! into a Helm values file. The read-only token would do the job, and it would
-//! also open every transcript on the machine — the conversations, the files
-//! they edited, the prompts. So a third token is minted beside the other two
-//! that opens `GET /metrics` and nothing else. What it leaks, if it leaks, is
-//! what `/metrics` already publishes to whoever can log in to the dashboard it
-//! feeds: counts, costs, model names and project directory names.
+//! A Prometheus scrape is not one of the reasons: `/metrics` answers without a
+//! token at all — see [`super::metrics`].
 //!
 //! # Why the file is refused rather than repaired
 //!
@@ -51,17 +43,14 @@ pub struct Tokens {
     pub full: String,
     /// Every page and every GET, never an action.
     pub readonly: String,
-    /// `GET /metrics`, and nothing else.
-    pub metrics: String,
 }
 
 impl Tokens {
-    /// Three tokens minted for this run and forgotten when it ends.
+    /// Two tokens minted for this run and forgotten when it ends.
     pub fn fresh() -> Tokens {
         Tokens {
             full: super::new_token(),
             readonly: super::new_token(),
-            metrics: super::new_token(),
         }
     }
 
@@ -70,7 +59,6 @@ impl Tokens {
         Tokens {
             full: String::new(),
             readonly: String::new(),
-            metrics: String::new(),
         }
     }
 }
@@ -220,12 +208,12 @@ fn create(path: &Path) -> anyhow::Result<Option<Tokens>> {
 fn render(tokens: &Tokens) -> String {
     format!(
         "# cctop serve --token-file. Whoever reads the `full` line can type at your agents.\n\
-         full {}\nreadonly {}\nmetrics {}\n",
-        tokens.full, tokens.readonly, tokens.metrics
+         full {}\nreadonly {}\n",
+        tokens.full, tokens.readonly
     )
 }
 
-/// The three tokens back out of [`render`]'s text, or why not.
+/// The two tokens back out of [`render`]'s text, or why not.
 ///
 /// Strict rather than forgiving, because the forgiving readings are the
 /// dangerous ones: a missing `readonly` line quietly served as no read-only
@@ -244,7 +232,9 @@ fn parse(text: &str) -> Result<Tokens, String> {
         let slot = match scope {
             "full" => &mut tokens.full,
             "readonly" => &mut tokens.readonly,
-            "metrics" => &mut tokens.metrics,
+            // A scrape scope existed on the branch that introduced this file,
+            // before `/metrics` left the gate; a file written then still loads.
+            "metrics" => continue,
             other => return Err(format!("`{other}` is not a token scope")),
         };
         if token.len() != super::TOKEN_BYTES * 2 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -255,20 +245,13 @@ fn parse(text: &str) -> Result<Tokens, String> {
         }
         *slot = token.to_string();
     }
-    for (scope, token) in [
-        ("full", &tokens.full),
-        ("readonly", &tokens.readonly),
-        ("metrics", &tokens.metrics),
-    ] {
+    for (scope, token) in [("full", &tokens.full), ("readonly", &tokens.readonly)] {
         if token.is_empty() {
             return Err(format!("it has no {scope} token"));
         }
     }
-    if tokens.full == tokens.readonly
-        || tokens.full == tokens.metrics
-        || tokens.readonly == tokens.metrics
-    {
-        return Err("two of its scopes share a token, which would grant the wider one".into());
+    if tokens.full == tokens.readonly {
+        return Err("its two scopes share a token, which would grant the wider one".into());
     }
     Ok(tokens)
 }
@@ -303,7 +286,6 @@ mod tests {
         assert_eq!(how, Loaded::Created);
         assert_ne!(old.full, new.full);
         assert_ne!(old.readonly, new.readonly);
-        assert_ne!(old.metrics, new.metrics);
         assert_eq!(load_or_create(&path, false).unwrap().0, new);
     }
 
@@ -352,16 +334,27 @@ mod tests {
     #[test]
     fn a_malformed_file_is_refused_rather_than_half_used() {
         let t = |c: char| c.to_string().repeat(super::super::TOKEN_BYTES * 2);
-        let good = format!("full {}\nreadonly {}\nmetrics {}\n", t('a'), t('b'), t('c'));
-        assert!(parse(&good).is_ok());
-        assert!(parse(&render(&parse(&good).unwrap())).is_ok());
+        let good = format!("full {}\nreadonly {}\n", t('a'), t('b'));
+        let tokens = parse(&good).unwrap();
+        assert_eq!((tokens.full, tokens.readonly), (t('a'), t('b')));
 
-        let missing = format!("full {}\nmetrics {}\n", t('a'), t('c'));
+        let missing = format!("full {}\n", t('a'));
         assert!(parse(&missing).unwrap_err().contains("readonly"));
-        let shared = format!("full {}\nreadonly {}\nmetrics {}\n", t('a'), t('a'), t('c'));
+        let shared = format!("full {}\nreadonly {}\n", t('a'), t('a'));
         assert!(parse(&shared).unwrap_err().contains("share"));
-        let short = format!("full abc\nreadonly {}\nmetrics {}\n", t('b'), t('c'));
+        let short = format!("full abc\nreadonly {}\n", t('b'));
         assert!(parse(&short).is_err());
         assert!(parse("admin 00\n").is_err());
+    }
+
+    #[test]
+    fn the_file_round_trips_both_scopes() {
+        let tokens = Tokens::fresh();
+        let text = render(&tokens);
+        assert_eq!(parse(&text).unwrap(), tokens);
+        assert!(!text.contains("metrics"), "{text}");
+        // A file from before `/metrics` left the gate still loads.
+        let legacy = format!("{text}metrics {}\n", super::super::new_token());
+        assert_eq!(parse(&legacy).unwrap(), tokens);
     }
 }
