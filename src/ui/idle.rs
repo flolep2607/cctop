@@ -359,6 +359,7 @@ mod tests {
         far.remote = Some(crate::session::Remote {
             host: "box".into(),
             branch: None,
+            ..Default::default()
         });
         app.sessions = vec![
             live("done", 10, 500),
