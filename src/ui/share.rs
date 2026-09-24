@@ -292,14 +292,18 @@ mod tests {
         terminal
             .draw(|frame| layout = render::draw(frame, &mut app))
             .expect("draw");
-        let screen: String = terminal
+        // What is on screen, which is the label of each link and not the URL
+        // behind it — the token is meant to be in there, and not in view.
+        let screen = crate::ui::hyperlink::visible(terminal.backend().buffer());
+        let linked = terminal
             .backend()
             .buffer()
             .content()
             .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+            .filter_map(|cell| crate::ui::hyperlink::target_of(cell.symbol()))
+            .any(|url| url.ends_with(&token));
 
+        assert!(linked, "the drawn origin does not open the page");
         assert!(
             screen.contains("http://127.0.0.1:"),
             "the panel never said where the page is:\n{screen}"
