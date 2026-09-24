@@ -8,14 +8,16 @@
 //! filesystem work and [`runloop`] the terminal and the event loop. They are
 //! `impl App` blocks in sibling modules, so nothing here had to become public
 //! to make the split; what stays is the state itself and the few things — the
-//! modes, the row type, construction and the status line — that every one of
+//! modes, the row type, construction and the toasts — that every one of
 //! them touches.
 
 mod batch;
 pub mod columns;
 mod dirs;
+mod effects;
 mod filter;
 mod hooks;
+mod hyperlink;
 mod input;
 mod launch;
 mod launch_cwd;
@@ -24,6 +26,7 @@ mod modals;
 pub mod panels;
 mod panes;
 mod profiles;
+mod qr;
 mod remote;
 pub mod render;
 mod runloop;
@@ -35,11 +38,12 @@ pub mod spark;
 mod table;
 pub mod tabs;
 pub mod theme;
+mod toast;
 mod torn;
 mod worker;
 
 pub use runloop::run;
-use share::Opening;
+use share::{Opening, ShareQr};
 use worker::Request;
 
 use crate::cache::UiPrefs;
@@ -110,6 +114,9 @@ pub enum Mode {
     /// The browser panel: whether this cctop is serving its table to one, on
     /// what links, and whether they leave the machine.
     Serve,
+    /// A terminal just shared with `W`, as a code a phone can scan. See
+    /// [`ShareQr`].
+    ShareQr,
     /// What `config.toml` sets and what it could set, keybinds included.
     Settings,
     /// Adding a Claude account: naming it, then `claude setup-token` in a
@@ -393,7 +400,7 @@ pub struct App {
     /// spelling it — `~` and all, expanded only when it is accepted.
     pub launch_cwd_input: String,
     /// Set when the typed directory does not name one, so the field can say so
-    /// where it is rather than behind the modal that covers the status line.
+    /// where it is being typed rather than in a toast across the screen.
     pub launch_cwd_bad: bool,
     /// Directories agents are already known to have run in, newest first, as of
     /// the moment the field opened.
@@ -520,7 +527,9 @@ pub struct App {
     pub quota: Quota,
     /// Version of a newer published release, when one exists.
     pub update_available: Option<String>,
-    pub status: Option<(String, Instant)>,
+    /// What cctop has said lately, held until each has been up long enough to
+    /// read. See [`toast`].
+    pub toasts: toast::Toasts,
     /// When cctop started, used by the tool-activity "live" filter.
     pub started_at: String,
     /// The same moment as an `Instant`, which is what the tab-bar blink is
@@ -674,6 +683,13 @@ pub struct App {
     /// happening now, and one left standing from ten minutes ago is exactly the
     /// stray click it exists to prevent.
     pub share_arm: bool,
+    /// Whether the Serve panel is showing its tunnel link as a QR code.
+    ///
+    /// Off each time the panel opens, and on only for `c`: the code is the link,
+    /// and the panel is opened to check on a serve as often as to hand one out.
+    pub serve_qr: bool,
+    /// The terminal share `W` just made, while `Mode::ShareQr` is up.
+    pub share_qr: Option<ShareQr>,
     /// A restart asked for while the agent was mid-turn: which agent, and when.
     ///
     /// Restarting kills the agent, and a turn in flight dies with it. The key
@@ -883,7 +899,7 @@ impl App {
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
             update_available: None,
-            status: None,
+            toasts: toast::Toasts::default(),
             started_at: chrono::Utc::now().to_rfc3339(),
             started: Instant::now(),
             prefs,
@@ -920,6 +936,8 @@ impl App {
             serve_error: None,
             share_opening: None,
             share_arm: false,
+            serve_qr: false,
+            share_qr: None,
             restart_arm: None,
             torn: torn::Torn::default(),
             pending_brief: None,
@@ -955,9 +973,17 @@ impl App {
         self.prefs.save();
     }
 
+    /// Say something. It goes up as a toast, alongside whatever else was said
+    /// in the last few seconds rather than in place of it.
     fn set_status(&mut self, msg: impl Into<String>) {
-        self.status = Some((msg.into(), Instant::now()));
+        self.toasts.push(msg.into());
         self.needs_redraw = true;
+    }
+
+    /// The last thing said, while it is still on screen.
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> Option<&str> {
+        self.toasts.latest()
     }
 
     /// Open `optimize` or `compare` over the table.

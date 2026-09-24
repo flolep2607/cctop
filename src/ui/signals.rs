@@ -479,9 +479,35 @@ impl App {
         (1..=self.tabs.len()).any(|i| self.tab_attention(i) == Some(tabs::Attention::NeedsInput))
     }
 
-    /// Which half of the blink cycle we are in.
+    /// Which half of the blink cycle we are in. The pulse's fallback, for the
+    /// tabs whose colours cannot be eased between — see [`effects`].
     pub fn blink_on(&self) -> bool {
         (self.started.elapsed().as_millis() / BLINK_MS).is_multiple_of(2)
+    }
+
+    /// Where the needs-you pulse is, `0.0` at rest to `1.0` at its alert tone.
+    /// On the same clock as the blink, so every tab asking pulses in step.
+    pub fn pulse_level(&self) -> f32 {
+        effects::pulse_level(self.started.elapsed())
+    }
+
+    /// How long ago tab `index` (in [`App::tab`]'s numbering) was restarted,
+    /// while its sweep is still running.
+    pub fn restart_flash(&self, index: usize) -> Option<Duration> {
+        let tab = self.tabs.get(index.checked_sub(1)?)?;
+        let since = tab.restarted?.elapsed();
+        (since < effects::FLASH && !theme::no_color()).then_some(since)
+    }
+
+    /// Whether anything in the tab bar is moving, and the loop should be
+    /// producing frames rather than waiting on input.
+    ///
+    /// Without colour there is nothing to ease: the pulse is the blink again,
+    /// which asks for its own frames on the half-cycle it flips, and a restart
+    /// is said by the status line alone.
+    pub fn animating(&self) -> bool {
+        (1..=self.tabs.len()).any(|i| self.restart_flash(i).is_some())
+            || (!theme::no_color() && self.any_attention())
     }
 
     /// What a still-running agent in the launcher is doing, if it has said.
@@ -1066,6 +1092,6 @@ mod tests {
         app.selected = 0;
         app.jump_to_bell();
         assert_eq!(app.selected, 0);
-        assert!(app.status.is_some());
+        assert!(app.status().is_some());
     }
 }

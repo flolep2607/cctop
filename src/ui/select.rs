@@ -532,7 +532,7 @@ mod tests {
         app.toggle_expanded();
 
         assert!(app.expanded.is_empty());
-        assert!(app.status.is_some(), "the refusal has to be visible");
+        assert!(app.status().is_some(), "the refusal has to be visible");
     }
 
     #[test]

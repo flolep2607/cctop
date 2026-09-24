@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.17.7"
+version = "0.17.8"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -82,6 +82,15 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"
+# How many colours the terminal can show, read from the environment the way
+# `TERM`/`COLORTERM`/`FORCE_COLOR` conventions intend, and the 256→16 table the
+# palette is folded through when the answer is sixteen (see `ui::theme`).
+# `convert` and `ratatui` add nothing new to the tree: anstyle, palette and
+# ratatui-core are already here under clap, ratatui-image and ratatui. Left out
+# on purpose: `query-detect`, whose DECRQSS probe only tells truecolor from 256
+# — a difference cctop never draws — and `terminfo`, which reads a database the
+# static musl build cannot count on finding.
+termprofile = { version = "0.2.4", default-features = false, features = ["convert", "ratatui"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 toml_edit = "0.25.13"
 # The multiplexer, as an API rather than as a command line: `rmux-sdk` talks the
@@ -112,7 +121,19 @@ safetensors = "0.6"
 # C++, and a C++ toolchain is the one dependency class the musl release does not
 # already carry. `fancy-regex` is the pure-Rust path through the same crate.
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+# The tab bar's attention pulse and restart flash. Only its colour
+# interpolation, timers and one-shot effects are used — not the DSL, whose
+# parser the bar has no use for. Pure Rust, on the same `ratatui-core` cctop
+# draws with, so the musl release takes it as it is.
+tachyonfx = { version = "0.25.2", default-features = false, features = ["std"] }
 tui-term = "0.3.4"
+# A QR code of a link meant for a phone, drawn in half-blocks inside the panel
+# that hands the link out (`ui::qr`). `qrcode` is the encoder the widget takes;
+# its default features are image rendering, which a terminal has no use for.
+# The widget also drags in `color-eyre` — a normal dependency though only its
+# example uses it. Pure Rust all the way down, so the musl builds are unmoved.
+qrcode = { version = "0.14", default-features = false }
+tui-qrcode = "0.2.6"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 vt100 = "0.16.2"
 # The corner preview of a pasted image. Only its halfblocks are used — sixel

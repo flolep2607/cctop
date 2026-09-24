@@ -158,6 +158,12 @@ impl App {
             Mode::Help => self.on_key_help(key),
             Mode::Settings => self.on_key_settings(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
+            // Any key, like the other panels that only have something to say;
+            // and the link let go of with it, there being nothing left to draw.
+            Mode::ShareQr => {
+                self.mode = Mode::List;
+                self.share_qr = None;
+            }
             Mode::List => {
                 self.reload_settings();
                 if let Some(key) = self.keymap.apply(key) {
@@ -712,6 +718,12 @@ impl App {
             KeyCode::Char('l') => self.start_serving(false),
             KeyCode::Char('t') => self.start_serving(true),
             KeyCode::Char('x') => self.stop_serving(),
+            // Only a tunnel's link is worth a code: the loopback one is the
+            // link a phone cannot open.
+            KeyCode::Char('c') => match self.serving.as_ref().is_some_and(|s| s.public.is_some()) {
+                true => self.serve_qr = !self.serve_qr,
+                false => self.set_status("A QR code is for the tunnel's link — t opens one"),
+            },
             KeyCode::Char('o') => match self.serving.as_ref().map(|s| s.best().to_string()) {
                 Some(link) => match crate::serve::open_in_browser(&link) {
                     true => self.set_status("Opening the page in your browser"),
@@ -1423,7 +1435,10 @@ impl App {
             // `B` for browser, beside the two keys that are also about reaching
             // this machine from somewhere else. `W` puts one agent's terminal
             // in a browser; this puts the whole table in one.
-            KeyCode::Char('B') => self.mode = Mode::Serve,
+            KeyCode::Char('B') => {
+                self.mode = Mode::Serve;
+                self.serve_qr = false;
+            }
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
                     format!("{:.2}", self.cost_floor)
@@ -2303,7 +2318,7 @@ mod tests {
         );
 
         app.resume_selected();
-        let (status, _) = app.status.clone().expect("nothing was said");
+        let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("Nothing to resume"), "{status}");
     }
 
@@ -2365,7 +2380,7 @@ mod tests {
         app.tab = 1;
         app.on_key(key(KeyCode::F(5)));
         assert_eq!(app.tab, 1, "refreshing must not leave the agent");
-        assert!(app.status.is_some(), "the refresh said nothing");
+        assert!(app.status().is_some(), "the refresh said nothing");
         app.on_key(key(KeyCode::F(12)));
         assert_eq!(app.tab, 0);
 

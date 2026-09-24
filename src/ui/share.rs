@@ -43,6 +43,20 @@ pub(super) fn spinner_frame() -> char {
     FRAMES[(start.elapsed().as_millis() / 100) as usize % FRAMES.len()]
 }
 
+/// A terminal share, held for the panel that shows it as a QR code.
+///
+/// Only a share that reaches off this machine gets one. The code exists to be
+/// scanned by a phone, and a loopback link scanned by a phone opens nothing —
+/// the status line saying "this machine only" is the whole answer there.
+pub struct ShareQr {
+    /// The agent's label, for the panel's first line.
+    pub label: String,
+    /// The operator link. A credential; see [`App::share_selected`] for why it
+    /// may be drawn here at all.
+    pub link: String,
+    pub pin: Option<String>,
+}
+
 impl App {
     /// Open the selected agent's terminal in a browser, via the multiplexer.
     ///
@@ -56,6 +70,13 @@ impl App {
     /// whoever is behind you and survives into a screenshot; the clipboard is
     /// where the user was going to put it anyway. The pairing code is shown,
     /// since it is worth nothing without the link.
+    ///
+    /// The one exception is the QR code, which is the link in a form a camera
+    /// reads: a tunnelled share opens a panel with it, because a phone is where
+    /// a link that leaves the machine is usually headed. It is drawn only here,
+    /// right after `W` has already handed the same link over, and only until
+    /// the panel is closed — the key press is the deliberate act, and the panel
+    /// says beside the code what holding it grants.
     pub(super) fn share_selected(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
@@ -102,6 +123,14 @@ impl App {
                 self.set_status(format!(
                     "Sharing {label} — operator link copied{pin}{reach}"
                 ));
+                if reachable {
+                    self.share_qr = Some(ShareQr {
+                        label,
+                        link: operator.to_string(),
+                        pin: share.pin.clone(),
+                    });
+                    self.mode = Mode::ShareQr;
+                }
             }
             Err(error) => self.set_status(format!("Could not share {label}: {error}")),
         }
@@ -263,14 +292,18 @@ mod tests {
         terminal
             .draw(|frame| layout = render::draw(frame, &mut app))
             .expect("draw");
-        let screen: String = terminal
+        // What is on screen, which is the label of each link and not the URL
+        // behind it — the token is meant to be in there, and not in view.
+        let screen = crate::ui::hyperlink::visible(terminal.backend().buffer());
+        let linked = terminal
             .backend()
             .buffer()
             .content()
             .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+            .filter_map(|cell| crate::ui::hyperlink::target_of(cell.symbol()))
+            .any(|url| url.ends_with(&token));
 
+        assert!(linked, "the drawn origin does not open the page");
         assert!(
             screen.contains("http://127.0.0.1:"),
             "the panel never said where the page is:\n{screen}"
@@ -279,5 +312,235 @@ mod tests {
             !screen.contains(&token),
             "the token was drawn on screen:\n{screen}"
         );
+    }
+
+    use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// A serve with a tunnel link on it, without dialling Cloudflare: the
+    /// panel reads `public` and nothing else of the tunnel.
+    fn tunnelled_app() -> (App, String) {
+        let mut app = test_app();
+        let mut serving = crate::serve::start(crate::serve::Options {
+            port_given: false,
+            scan: false,
+            ..Default::default()
+        })
+        .expect("a loopback server");
+        let token = serving
+            .local
+            .split_once("?t=")
+            .map(|(_, token)| token.to_string())
+            .expect("a tokenised link");
+        serving.public = Some(format!(
+            "https://tribute-resistance-resolved-moscow.trycloudflare.com/?t={token}"
+        ));
+        app.serving = Some(serving);
+        app.mode = Mode::Serve;
+        (app, token)
+    }
+
+    fn draw(app: &mut App, width: u16, height: u16) -> (Buffer, render::Layout) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
+        let mut layout = render::Layout::default();
+        terminal
+            .draw(|frame| layout = render::draw(frame, app))
+            .expect("draw");
+        (terminal.backend().buffer().clone(), layout)
+    }
+
+    /// Whether a row holds any of a code's cells, which are the only ones on
+    /// screen painted on the code's white.
+    fn is_code_row(buf: &Buffer, y: u16) -> bool {
+        (0..buf.area.width).any(|x| buf[(x, y)].bg == ratatui::style::Color::Indexed(231))
+    }
+
+    fn code_rows(buf: &Buffer) -> usize {
+        (0..buf.area.height)
+            .filter(|&y| is_code_row(buf, y))
+            .count()
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// The text inside the panel titled `title`, row by row, with the code's
+    /// rows and blank rows left out — what has to read the same with a code in
+    /// it as without.
+    fn text_rows(buf: &Buffer, title: &str) -> Vec<String> {
+        let top = format!("╭ {title} ");
+        let (y0, x0) = (0..buf.area.height)
+            .find_map(|y| {
+                let row = row_text(buf, y);
+                row.find(&top)
+                    .map(|at| (y, row[..at].chars().count() as u16))
+            })
+            .expect("the panel is on screen");
+        let x1 = (x0 + 1..buf.area.width)
+            .find(|&x| buf[(x, y0)].symbol() == "╮")
+            .expect("the panel's right edge");
+        (y0 + 1..buf.area.height)
+            .take_while(|&y| buf[(x0, y)].symbol() != "╰")
+            .filter(|&y| !is_code_row(buf, y))
+            .map(|y| {
+                (x0 + 1..x1)
+                    .map(|x| crate::ui::hyperlink::shown_in(buf[(x, y)].symbol()))
+                    .collect::<String>()
+                    .replace("c hide QR", "c QR code")
+                    .trim()
+                    .to_string()
+            })
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    const SERVE: &str = "Serve this table to a browser";
+    const SHARE: &str = "Open this terminal elsewhere";
+
+    /// `c` draws the tunnel link as a code when the screen has room for it, and
+    /// the panel's text is the same text either way — the code is added to the
+    /// panel, not swapped in for any of it.
+    #[test]
+    fn the_serve_panel_draws_the_tunnel_link_as_a_code_on_request() {
+        let (mut app, token) = tunnelled_app();
+        let expected = crate::ui::qr::encode(app.serving.as_ref().unwrap().best())
+            .expect("encodes")
+            .height as usize;
+
+        let (plain, _) = draw(&mut app, 120, 50);
+        assert_eq!(code_rows(&plain), 0, "a code before anyone asked for one");
+
+        app.on_key(key('c'));
+        assert!(app.serve_qr);
+        let (coded, _) = draw(&mut app, 120, 50);
+        assert_eq!(code_rows(&coded), expected, "the whole code, and only it");
+        assert_eq!(text_rows(&coded, SERVE), text_rows(&plain, SERVE));
+        // In the panel, that is: the footer's link carries it in an escape,
+        // which is not text anyone reads.
+        assert!(
+            !text_rows(&coded, SERVE)
+                .iter()
+                .any(|row| row.contains(&token)),
+            "the token was drawn as text"
+        );
+
+        // And `c` again takes it away.
+        app.on_key(key('c'));
+        let (again, _) = draw(&mut app, 120, 50);
+        assert_eq!(code_rows(&again), 0);
+    }
+
+    /// On a screen too short for it the code is not drawn at all, and the panel
+    /// says why instead of answering `c` with nothing.
+    #[test]
+    fn the_serve_panel_leaves_the_code_out_where_it_does_not_fit() {
+        let (mut app, _) = tunnelled_app();
+        let (plain, _) = draw(&mut app, 120, 30);
+        app.serve_qr = true;
+        let (squeezed, _) = draw(&mut app, 120, 30);
+        assert_eq!(code_rows(&squeezed), 0);
+        let mut said = text_rows(&squeezed, SERVE);
+        let note = said
+            .iter()
+            .position(|row| row.starts_with("No room here for a QR code"))
+            .expect("the panel said nothing about the code");
+        said.remove(note);
+        assert_eq!(said, text_rows(&plain, SERVE));
+        // Too narrow is the same answer as too short.
+        let (narrow, _) = draw(&mut app, 50, 60);
+        assert_eq!(code_rows(&narrow), 0);
+    }
+
+    /// Without a tunnel there is no link a phone could open, so no code.
+    #[test]
+    fn a_loopback_serve_has_no_code_to_offer() {
+        let (mut app, _) = tunnelled_app();
+        app.serving.as_mut().unwrap().public = None;
+        app.on_key(key('c'));
+        assert!(!app.serve_qr);
+        app.serve_qr = true;
+        let (buf, _) = draw(&mut app, 120, 50);
+        assert_eq!(code_rows(&buf), 0);
+    }
+
+    /// Reopening the panel starts without the code, whatever it was left with.
+    #[test]
+    fn the_serve_panel_opens_without_a_code() {
+        let (mut app, _) = tunnelled_app();
+        app.serve_qr = true;
+        app.mode = Mode::List;
+        app.on_key(key('B'));
+        assert_eq!(app.mode, Mode::Serve);
+        assert!(!app.serve_qr);
+    }
+
+    fn shared_app() -> App {
+        let mut app = test_app();
+        app.share_qr = Some(ShareQr {
+            label: "fix the flaky test".to_string(),
+            link: format!(
+                "https://abcdef0123456789.lhr.life/s/{}#t={}&k={}",
+                "0123456789abcdef",
+                "fedcba9876543210".repeat(2),
+                "00112233445566778899aabbccddeeff"
+            ),
+            pin: Some("482913".to_string()),
+        });
+        app.mode = Mode::ShareQr;
+        app
+    }
+
+    /// A terminal shared with `W` comes up as a code when there is room, with
+    /// the pairing code beside it and its dismiss chip still a click target.
+    #[test]
+    fn a_shared_terminal_is_offered_as_a_code() {
+        let mut app = shared_app();
+        let link = app.share_qr.as_ref().unwrap().link.clone();
+        let expected = crate::ui::qr::encode(&link).expect("encodes").height as usize;
+        let (buf, layout) = draw(&mut app, 120, 50);
+        assert_eq!(code_rows(&buf), expected);
+        let text = text_rows(&buf, SHARE);
+        assert!(text.iter().any(|row| row.contains("482913")), "{text:#?}");
+        assert!(
+            !text.iter().any(|row| row.contains("fedcba98")),
+            "the link drawn as text: {text:#?}"
+        );
+
+        let (row, x) = (0..buf.area.height)
+            .find_map(|y| {
+                let line = row_text(&buf, y);
+                line.find("[any key]")
+                    .map(|at| (y, line[..at].chars().count() as u16))
+            })
+            .expect("a dismiss chip");
+        let chip = layout.key_at(x + 1, row).expect("the chip is clickable");
+        app.on_key(chip);
+        assert_eq!(app.mode, Mode::List);
+        assert!(app.share_qr.is_none(), "the link outlived its panel");
+    }
+
+    /// Too short for the code: the panel still opens — the share happened —
+    /// and says the code is what is missing.
+    #[test]
+    fn a_shared_terminal_without_the_room_says_so_instead() {
+        let mut app = shared_app();
+        let (buf, layout) = draw(&mut app, 120, 24);
+        assert_eq!(code_rows(&buf), 0);
+        let text = text_rows(&buf, SHARE);
+        assert!(
+            text.iter()
+                .any(|row| row.starts_with("No room here for a QR code")),
+            "{text:#?}"
+        );
+        assert!(text.iter().any(|row| row.contains("482913")));
+        assert!(layout.modal_rect.is_some());
+        assert!(!layout.key_hits.is_empty());
     }
 }

@@ -1,16 +1,16 @@
 //! Frame layout, drawing, and mouse hit-testing.
 
 use super::columns::ColumnId;
+use super::hyperlink;
 use super::modals;
 use super::spark;
 use super::table;
 use super::theme::{self, Gradient};
-use super::{App, Mode, panels, tabs};
+use super::{App, Mode, effects, panels, tabs, toast};
 use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
 use ratatui::Frame;
-use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::crossterm::event;
 use ratatui::layout::{Constraint, Layout as RLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -272,6 +272,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
             _ => {}
         }
+        draw_toasts(frame, chunks[0], app);
         return layout;
     }
 
@@ -320,6 +321,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app, &mut layout),
         Mode::TmuxInstall => modals::draw_rmux_install(frame, area, app),
         Mode::Serve => modals::draw_serve(frame, area, app),
+        Mode::ShareQr => modals::draw_share_qr(frame, area, app, &mut layout),
         Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
         Mode::KillBlocked => modals::draw_kill_blocked(frame, area, app, &mut layout),
         Mode::BatchConfirm => modals::draw_batch_confirm(frame, area, app, &mut layout),
@@ -342,7 +344,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     // Over everything, modals included: a few seconds of confirmation for a
     // key that has already acted, in a corner nothing else owns.
     draw_paste_preview(frame, area, app);
+    // A terminal too short for the Overview still gets told things, on the
+    // top row of what is there instead.
+    let overview = match chunks[0].height {
+        0 => Rect { height: 1, ..area },
+        _ => chunks[0],
+    };
+    draw_toasts(frame, overview, app);
     layout
+}
+
+/// What cctop has said lately, over the Overview's right-hand side.
+///
+/// Over modals too, drawn last: a failure reported while a modal is up is the
+/// one most likely to be about that modal, and the status line it replaces was
+/// hidden behind every one of them.
+fn draw_toasts(frame: &mut Frame, overview: Rect, app: &App) {
+    // Inside the border, when there is one, so the panel still reads as a panel.
+    let region = match overview.height > 2 {
+        true => Block::bordered().inner(overview),
+        false => overview,
+    };
+    toast::draw(frame.buffer_mut(), region, &app.toasts);
 }
 
 /// The image a paste just filed, held in the bottom-right corner briefly.
@@ -393,7 +416,6 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             _ => title,
         })
         .collect();
-    let on = app.blink_on();
     let mut spans = Vec::new();
     let mut pos = area.x;
     // The new-tab button is the one thing the bar exists for, so its room is
@@ -407,17 +429,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     };
     let label_room = area.width.saturating_sub(new_tab.chars().count() as u16) as usize;
 
-    // Each tab's painted hue. A hue that resolves to nothing — under
-    // `NO_COLOR` or the mono palette — leaves the tab drawn as an unpainted
-    // one, or every painted tab would be a block of the terminal's default.
-    let hues: Vec<Option<theme::Hue>> = (0..titles.len())
-        .map(|i| {
-            i.checked_sub(1)
-                .and_then(|t| app.tabs.get(t))
-                .and_then(|tab| tab.color)
-                .filter(|hue| hue.color() != Color::Reset)
-        })
-        .collect();
+    let hues: Vec<Option<theme::Hue>> = (0..titles.len()).map(|i| tab_hue(app, i)).collect();
 
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
@@ -445,65 +457,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         }
         let text = format!(" {} ", elide(title, cap));
         let width = text.chars().count() as u16;
-        let attention = app.tab_attention(i);
-        let style = match hues[i] {
-            // A painted tab is filled with its colour the way a browser fills a
-            // tab group: the whole cell between the rules, not the ink of the
-            // label, so it reads as *that* tab from across the room. Attention
-            // is said on top of the fill rather than instead of it — an idle
-            // agent is the normal state of a tab, and a colour that vanished
-            // every time its agent finished a turn would not be a mark at all.
-            Some(hue) => {
-                let watched = i == app.tab;
-                let strength = match watched {
-                    true => theme::Fill::Selected,
-                    false => theme::Fill::Rest,
-                };
-                let fill = hue.wash(strength);
-                let fill = match watched {
-                    true => fill.add_modifier(Modifier::UNDERLINED),
-                    false => fill,
-                };
-                match attention {
-                    // The flash is the tab's own colour at full strength and
-                    // back: loud enough to be seen from another tab, and still
-                    // unmistakably *that* tab while it is.
-                    Some(tabs::Attention::NeedsInput) => match on {
-                        true => fill
-                            .patch(hue.wash(theme::Fill::Alert))
-                            .add_modifier(Modifier::BOLD),
-                        false => fill.add_modifier(Modifier::BOLD),
-                    },
-                    // Bold rather than green ink, which on a green or cyan fill
-                    // would say nothing — and rather than a glyph, which made the
-                    // tab look like it carried a second label.
-                    Some(tabs::Attention::Idle) => fill.add_modifier(Modifier::BOLD),
-                    None => fill,
-                }
-            }
-            // A tab wanting something outranks the plain selected/unselected
-            // look: the whole point of the colour is to be seen while you are
-            // reading a different tab.
-            None => match attention {
-                // Blinking by hand rather than with `Modifier::SLOW_BLINK`, which
-                // many terminals quietly drop — an attention cue that only works
-                // on some emulators is worse than none, because you stop
-                // trusting it.
-                Some(tabs::Attention::NeedsInput) => match on {
-                    true => theme::attention_lit(theme::colors().cost_mid),
-                    false => Style::default()
-                        .fg(theme::colors().cost_mid)
-                        .add_modifier(Modifier::BOLD),
-                },
-                // A quiet agent is useful context, not an alarm. Keep its green
-                // label visible without repeatedly pulling attention from work.
-                Some(tabs::Attention::Idle) => Style::default()
-                    .fg(theme::colors().cost_low)
-                    .add_modifier(Modifier::BOLD),
-                None if i == app.tab => theme::selected(),
-                None => Style::default().fg(theme::colors().dim),
-            },
-        };
+        let style = tab_style(app, i, hues[i]);
         spans.push(Span::styled(text, style));
         layout.workspace_spans.push((pos, pos + width, i));
         pos += width;
@@ -528,6 +482,137 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    // A restart is confirmed on the tab that took it, drawn over the label
+    // once the bar is down so the sweep eases into what the tab really is.
+    // Painted tabs sweep in from their own full hue, so the tab is still
+    // *that* tab while it says so; a plain one from the accent.
+    for &(left, right, i) in &layout.workspace_spans {
+        let Some(since) = app.restart_flash(i) else {
+            continue;
+        };
+        let wash = match hues[i] {
+            Some(hue) => hue.fill(theme::Fill::Alert),
+            None => theme::colors().accent,
+        };
+        let rect = Rect::new(left, area.y, right.saturating_sub(left), 1);
+        effects::restart_sweep(
+            frame.buffer_mut(),
+            rect,
+            since,
+            wash,
+            theme::ground_rgb(),
+            theme::truecolor(),
+        );
+    }
+}
+
+/// Tab `i`'s painted hue, in [`App::tab`]'s numbering. A hue that resolves to
+/// nothing — under `NO_COLOR` or the mono palette — leaves the tab drawn as an
+/// unpainted one, or every painted tab would be a block of the terminal's
+/// default.
+fn tab_hue(app: &App, i: usize) -> Option<theme::Hue> {
+    i.checked_sub(1)
+        .and_then(|t| app.tabs.get(t))
+        .and_then(|tab| tab.color)
+        .filter(|hue| hue.color() != Color::Reset)
+}
+
+/// How tab `i` of the bar is drawn at this moment: its fill or its plain ink,
+/// and whatever its agent is saying on top.
+fn tab_style(app: &App, i: usize, hue: Option<theme::Hue>) -> Style {
+    let attention = app.tab_attention(i);
+    match hue {
+        // A painted tab is filled with its colour the way a browser fills a
+        // tab group: the whole cell between the rules, not the ink of the
+        // label, so it reads as *that* tab from across the room. Attention
+        // is said on top of the fill rather than instead of it — an idle
+        // agent is the normal state of a tab, and a colour that vanished
+        // every time its agent finished a turn would not be a mark at all.
+        Some(hue) => {
+            let watched = i == app.tab;
+            let strength = match watched {
+                true => theme::Fill::Selected,
+                false => theme::Fill::Rest,
+            };
+            let fill = hue.wash(strength);
+            let fill = match watched {
+                true => fill.add_modifier(Modifier::UNDERLINED),
+                false => fill,
+            };
+            match attention {
+                // The pulse is the tab's own colour swelling to full strength
+                // and back: loud enough to be seen from another tab, and still
+                // unmistakably *that* tab while it is.
+                Some(tabs::Attention::NeedsInput) => needs_you(
+                    app,
+                    fill.add_modifier(Modifier::BOLD),
+                    fill.patch(hue.wash(theme::Fill::Alert))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                // Bold rather than green ink, which on a green or cyan fill
+                // would say nothing — and rather than a glyph, which made the
+                // tab look like it carried a second label.
+                Some(tabs::Attention::Idle) => fill.add_modifier(Modifier::BOLD),
+                None => fill,
+            }
+        }
+        // A tab wanting something outranks the plain selected/unselected
+        // look: the whole point of the colour is to be seen while you are
+        // reading a different tab.
+        None => match attention {
+            // Animated by hand rather than with `Modifier::SLOW_BLINK`, which
+            // many terminals quietly drop — an attention cue that only works
+            // on some emulators is worse than none, because you stop
+            // trusting it.
+            Some(tabs::Attention::NeedsInput) => needs_you(
+                app,
+                Style::default()
+                    .fg(theme::colors().cost_mid)
+                    .add_modifier(Modifier::BOLD),
+                theme::attention_lit(theme::colors().cost_mid),
+            ),
+            // A quiet agent is useful context, not an alarm. Keep its green
+            // label visible without repeatedly pulling attention from work.
+            Some(tabs::Attention::Idle) => Style::default()
+                .fg(theme::colors().cost_low)
+                .add_modifier(Modifier::BOLD),
+            None if i == app.tab => theme::selected(),
+            None => Style::default().fg(theme::colors().dim),
+        },
+    }
+}
+
+/// A needs-you tab between its `rest` and `lit` looks: eased along the pulse
+/// where the two have colours to ease between, and the hard blink where they
+/// do not — under `NO_COLOR`, whose lit half is reverse video and has no
+/// halfway, or on a colour the terminal's theme owns.
+fn needs_you(app: &App, rest: Style, lit: Style) -> Style {
+    let eased = match theme::no_color() {
+        true => None,
+        false => effects::pulse(
+            rest,
+            lit,
+            theme::ground_rgb(),
+            app.pulse_level(),
+            theme::truecolor(),
+        ),
+    };
+    eased.unwrap_or(match app.blink_on() {
+        true => lit,
+        false => rest,
+    })
+}
+
+/// Every tab's look in the bar, as [`draw_workspace_bar`] would draw it now.
+///
+/// What the run loop compares frame to frame to decide whether the bar has
+/// moved: a pulse snapped to 256 colours changes only a handful of times a
+/// breath, and a frame between two identical ones is work for nothing.
+pub(super) fn bar_styles(app: &App) -> Vec<Style> {
+    (0..=app.tabs.len())
+        .map(|i| tab_style(app, i, tab_hue(app, i)))
+        .collect()
 }
 
 /// `text`, clipped to `max` columns with an ellipsis when it does not fit.
@@ -2058,54 +2143,6 @@ fn shorten_host(host: &str) -> String {
 /// has the priorities backwards.
 const LINK_MIN_HINTS: usize = 26;
 
-/// Draw `label` at `(x, y)` as an OSC 8 hyperlink to `url`.
-///
-/// A terminal that understands OSC 8 — Ghostty, kitty, WezTerm, iTerm2, VTE,
-/// Windows Terminal — makes the label itself clickable and shows the target on
-/// hover. One that does not swallows the sequence and prints the label. Either
-/// way the columns spent are the label's.
-///
-/// The whole link goes in **one** cell — opening sequence, label and closing
-/// sequence together — with [`CellDiffOption::ForcedWidth`] telling the diff how
-/// many columns that cell actually paints. That option is ratatui/ratatui#1605,
-/// and it is what lets an escape sequence live in a symbol at all: without it
-/// the diff measures the sequence as text and skips the columns after it.
-///
-/// One cell rather than two, because the pair has to be atomic. Split across the
-/// first and last column, a redraw that emitted a changed opening cell and left
-/// the unchanged closing one alone would leave the hyperlink *open*, and every
-/// cell written after it, anywhere on screen, would join the link.
-///
-/// The columns the label covers are then filled with its own characters, which
-/// the diff will never draw — `ForcedWidth` skips them for as long as the link
-/// is there. They are for the frame after it goes: the diff erases what the
-/// previous buffer said was on screen, and columns it believed were blank are
-/// columns it does not bother to erase.
-fn draw_hyperlink(buf: &mut Buffer, x: u16, y: u16, label: &str, url: &str, style: Style) {
-    // An ESC or a BEL inside the URL would end the sequence early and hand the
-    // remainder to the terminal as commands. Nothing here builds such a URL —
-    // it is Cloudflare's hostname and cctop's own token — which is exactly the
-    // kind of assumption that stops being true without anyone noticing.
-    let url: String = url.chars().filter(|c| !c.is_control()).collect();
-    // Every character of the label is one column wide (a host name and one
-    // glyph), so counting them is counting columns.
-    let Some(width) = std::num::NonZeroU16::new(label.chars().count() as u16) else {
-        return;
-    };
-    let Some(cell) = buf.cell_mut((x, y)) else {
-        return;
-    };
-    cell.set_symbol(&format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\"))
-        .set_style(style)
-        .set_diff_option(CellDiffOption::ForcedWidth(width));
-    for (i, ch) in label.chars().enumerate().skip(1) {
-        let mut utf8 = [0u8; 4];
-        if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
-            cell.set_symbol(ch.encode_utf8(&mut utf8)).set_style(style);
-        }
-    }
-}
-
 /// The footer, with the share link in its right-hand corner when one exists.
 ///
 /// The link takes its columns before the hints and badges do, and is drawn after
@@ -2138,7 +2175,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     // label that ends there also reads as if it had been cut off.
     let x = area.right() - width as u16 - 1;
     match &corner {
-        Corner::Link(label, url) => draw_hyperlink(
+        Corner::Link(label, url) => hyperlink::draw(
             frame.buffer_mut(),
             x,
             area.y,
@@ -2167,18 +2204,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     layout.share_corner = Some((area.y, x, x + width as u16));
 }
 
+/// The footer's key hints, which are always there.
+///
+/// Messages used to take this row over for a few seconds, which cost the keys
+/// they covered and was lost to the next message anyway. They are toasts now
+/// — see [`super::toast`] — and the footer stays a legend.
 fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
-    if let Some((msg, _)) = &app.status {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                msg.clone(),
-                Style::default().fg(theme::colors().cost_low),
-            ))),
-            area,
-        );
-        return;
-    }
-
     let total = area.width as usize;
     let (hints, badges) = if app.tab > 0 {
         // A terminal tab has no dashboard selection, filters or panels to act
@@ -2280,6 +2311,7 @@ fn osc52(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
 
     fn window(label: &'static str, pct: u32, resets_at: i64) -> crate::quota::Window {
         crate::quota::Window {
@@ -2305,10 +2337,9 @@ mod tests {
         assert!(long.chars().count() <= LINK_MAX + 2, "{long:?}");
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
-        draw_hyperlink(&mut buf, 2, 0, &link_label(url), url, Style::default());
+        hyperlink::draw(&mut buf, 2, 0, &link_label(url), url, Style::default());
         let opening = buf.cell((2, 0)).unwrap();
-        assert!(opening.symbol().contains(url), "{:?}", opening.symbol());
-        assert!(opening.symbol().starts_with("\x1b]8;;"));
+        assert_eq!(hyperlink::target_of(opening.symbol()), Some(url));
         assert!(opening.symbol().ends_with("\x1b]8;;\x1b\\"));
     }
 
@@ -2321,7 +2352,7 @@ mod tests {
         let label = link_label(url);
 
         let mut linked = Buffer::empty(Rect::new(0, 0, 40, 1));
-        draw_hyperlink(&mut linked, 2, 0, &label, url, Style::default());
+        hyperlink::draw(&mut linked, 2, 0, &label, url, Style::default());
         // The columns the label covers hold its characters, not its escapes.
         assert_eq!(linked.cell((3, 0)).unwrap().symbol(), " ");
         assert_eq!(linked.cell((4, 0)).unwrap().symbol(), "f");
@@ -2329,15 +2360,15 @@ mod tests {
         // Drawing it twice writes nothing: the forced width keeps the covered
         // columns out of the diff entirely.
         let mut again = Buffer::empty(Rect::new(0, 0, 40, 1));
-        draw_hyperlink(&mut again, 2, 0, &label, url, Style::default());
+        hyperlink::draw(&mut again, 2, 0, &label, url, Style::default());
         assert!(linked.diff(&again).is_empty());
 
         // And when the tunnel goes, every column it painted is erased rather
-        // than left holding half a hostname. The label's own blank column is
-        // the exception, and only because a blank is what would be drawn there.
+        // than left holding half a hostname — the label's own blank column
+        // too, since a blank the terminal printed inside the link still opens it.
         let blank = Buffer::empty(Rect::new(0, 0, 40, 1));
         let erased: Vec<u16> = linked.diff(&blank).iter().map(|(x, _, _)| *x).collect();
-        for (i, ch) in label.chars().enumerate().filter(|(_, c)| *c != ' ') {
+        for (i, ch) in label.chars().enumerate() {
             let x = 2 + i as u16;
             assert!(
                 erased.contains(&x),
@@ -2449,6 +2480,105 @@ mod tests {
         assert_eq!(
             layout.workspace_spans[1], width_busy,
             "the tab changed width"
+        );
+    }
+
+    /// A tab whose agent is asking pulses between its resting fill and its
+    /// alert tone rather than switching: at rest it is exactly its resting
+    /// self, at the peak exactly the alert the blink used to show, and in
+    /// between a ground that is neither, under the ink of whichever end it is
+    /// nearer. The unpainted tab beside it does the same toward amber.
+    #[test]
+    fn a_tab_that_needs_you_pulses_between_its_fill_and_its_alert() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::time::{Duration, Instant};
+
+        let asking = |name: &str, color: Option<&str>| {
+            crate::ui::tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: Some(crate::rmux::State {
+                    signal: crate::hook::Signal::NeedsInput,
+                    at: crate::rmux::now_secs(),
+                }),
+                color: color.map(str::to_string),
+            })
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.tabs = vec![asking("one", Some("violet")), asking("two", None)];
+        app.tab = 0;
+        assert_eq!(
+            app.tab_attention(1),
+            Some(tabs::Attention::NeedsInput),
+            "the fixture is not asking"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("backend");
+        // The bar `ms` into the pulse: the first cell of each tab's label.
+        let mut at = |app: &mut App, ms: u64| {
+            app.started = Instant::now()
+                .checked_sub(Duration::from_millis(ms))
+                .expect("the clock is younger than the phase");
+            let mut layout = Layout::default();
+            terminal
+                .draw(|frame| draw_workspace_bar(frame, frame.area(), app, &mut layout))
+                .expect("draw");
+            let buf = terminal.backend().buffer();
+            let cell = |i: usize| {
+                let (left, _, _) = layout.workspace_spans[i];
+                buf.cell((left + 1, 0)).unwrap().clone()
+            };
+            (cell(1), cell(2))
+        };
+        let violet = theme::Hue::Violet;
+        let amber = theme::colors().cost_mid;
+
+        let (painted, plain) = at(&mut app, 0);
+        assert_eq!(painted.bg, violet.fill(theme::Fill::Rest));
+        assert_eq!(painted.fg, theme::Fill::Rest.ink());
+        assert!(painted.modifier.contains(Modifier::BOLD));
+        assert_eq!(plain.fg, amber);
+        assert_ne!(plain.bg, amber, "the plain tab is lit at rest");
+
+        let (painted, plain) = at(&mut app, effects::PULSE_PERIOD.as_millis() as u64 / 2);
+        assert_eq!(painted.bg, violet.fill(theme::Fill::Alert));
+        assert_eq!(painted.fg, theme::Fill::Alert.ink());
+        assert_eq!(plain.bg, amber, "the plain tab never lights up");
+
+        // A quarter period in, and the three-quarter mark on the way down:
+        // halfway in level, so a ground that is neither end — on the ink of
+        // one end or the other, never a third.
+        for ms in [300, 900] {
+            let (painted, _) = at(&mut app, ms);
+            assert_ne!(painted.bg, violet.fill(theme::Fill::Rest), "{ms}ms");
+            assert_ne!(painted.bg, violet.fill(theme::Fill::Alert), "{ms}ms");
+            assert!(
+                [theme::Fill::Rest.ink(), theme::Fill::Alert.ink()].contains(&painted.fg),
+                "{ms}ms: {:?}",
+                painted.fg
+            );
+        }
+
+        // And the restart sweep: over the tab while it runs, gone after.
+        app.tabs[0].restarted = Some(Instant::now());
+        let (painted, _) = at(&mut app, 0);
+        assert_ne!(painted.bg, violet.fill(theme::Fill::Rest), "no sweep");
+        app.tabs[0].restarted = Instant::now().checked_sub(effects::FLASH * 2);
+        let (painted, _) = at(&mut app, 0);
+        assert_eq!(
+            painted.bg,
+            violet.fill(theme::Fill::Rest),
+            "the sweep stayed"
         );
     }
 
@@ -3298,6 +3428,80 @@ mod tests {
             screen.contains('▀'),
             "no halfblock was drawn for the image: {screen}"
         );
+    }
+
+    /// A message goes up over the Overview and the footer keeps its keys — the
+    /// row the old status line used to take over for a few seconds.
+    #[test]
+    fn a_message_is_a_toast_over_the_overview_and_the_footer_keeps_its_keys() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.set_status("Restarted 3 tabs, skipped 1 mid-turn");
+        app.set_status("Tab renamed to api");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+        let screen = screen(&terminal, 100, 30);
+
+        // Row 0 is the tab bar and row 1 the Overview's top border.
+        assert!(
+            screen[2].contains("Tab renamed to api"),
+            "the newest message is not at the top of the stack: {screen:#?}"
+        );
+        assert!(
+            screen[3].contains("Restarted 3 tabs, skipped 1 mid-turn"),
+            "the earlier message was not kept under it: {screen:#?}"
+        );
+        assert!(
+            !screen[29].contains("Tab renamed"),
+            "the footer still carries the message: {:?}",
+            screen[29]
+        );
+        assert!(
+            !layout.key_hits.is_empty(),
+            "the footer lost its keys to the message"
+        );
+    }
+
+    /// Inside a tab the bottom of the frame is the agent's, so a toast has to
+    /// land on cctop's Overview and leave the agent's screen alone.
+    #[test]
+    fn a_toast_in_a_tab_stays_off_the_agents_screen() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut child, pid, pane) = test_pane("HELLO-FROM-AGENT");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.tabs.push(super::super::tabs::Tab::new(pane));
+        app.tab = 1;
+        app.set_status("Pasted paste-20260922-120000.png");
+
+        let (cols, rows) = (100u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        terminal
+            .draw(|frame| {
+                draw(frame, &mut app);
+            })
+            .expect("draw");
+        let screen = screen(&terminal, cols, rows);
+
+        app.tabs.clear();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+
+        let at = screen
+            .iter()
+            .position(|row| row.contains("Pasted paste-20260922-120000.png"))
+            .unwrap_or_else(|| panic!("the toast was not drawn: {screen:#?}"));
+        assert_eq!(at, 2, "the toast is not on the Overview: {screen:#?}");
     }
 
     /// A tab keeps you inside cctop: the tab bar, the Overview and the footer

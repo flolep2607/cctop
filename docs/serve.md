@@ -42,7 +42,8 @@ has no business typing at your agents.
 the wrong shape when you want the page *and* the dashboard. **`B` in the TUI
 serves the same page while cctop keeps running.** `l` puts it on this machine,
 `t` also opens a tunnel, `o` opens it in your browser, `y` copies the link, and
-`x` stops it.
+`x` stops it. With a tunnel up, `c` draws the tunnel link as a QR code for a
+phone to scan.
 
 ```
 ╭ Serve this table to a browser ─────────────────────────────╮
@@ -58,13 +59,16 @@ serves the same page while cctop keeps running.** `l` puts it on this machine,
 │ Read-only — watches, never acts                            │
 │  https://supplemental-belt-spare-reflect.trycloudflare.com │
 │                                                            │
-│ o open · y copy · l local · t + tunnel · x stop            │
+│ o open · y copy · c QR code · l local · t + tunnel · x stop│
 ╰────────────────────────────────────────────────────────────╯
 ```
 
 The panel shows each link as its origin and not in full, because the full link
 carries the token — a credential that would otherwise be sitting in every
-screenshot of the panel. `o` and `y` use the whole thing.
+screenshot of the panel. `o` and `y` use the whole thing, and so does `c`: a QR
+code is the link in a form a camera reads, so it waits to be asked for, goes
+when the panel closes, and is not drawn at all on a terminal too small to hold
+all of it — the panel says so instead.
 
 It is the same server, reached differently, with one difference worth knowing:
 it does not scan for sessions. The dashboard already walks them several times a
