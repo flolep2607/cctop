@@ -57,9 +57,11 @@ which `-D warnings` rejects.
 
 `cctop hook` runs inside someone's coding session, many times a minute. Claude
 Code reads its exit code as a *decision*: non-zero blocks the tool call and
-feeds stderr back to the model. So it exits 0 always, writes nothing to stdout,
-and returns inside a deadline — by construction, not by care. See the module
-docs in `src/hook.rs`.
+feeds stderr back to the model. So it exits 0 always, writes nothing to stdout
+that could read as a decision, and returns inside a deadline — by construction,
+not by care. The one thing it may print is the opt-in `warn_agents` context,
+which carries no decision; see "The one answer that is not silence" in the
+module docs of `src/hook.rs`.
 
 A hook that fell through to clap would exit non-zero on every fire, so the
 `hook` dispatch in `main.rs` is never gated behind anything.
