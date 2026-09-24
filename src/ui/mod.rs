@@ -11,6 +11,7 @@
 //! modes, the row type, construction and the toasts — that every one of
 //! them touches.
 
+mod ansi;
 mod batch;
 pub mod columns;
 mod dirs;
@@ -21,6 +22,8 @@ mod hyperlink;
 mod input;
 mod launch;
 mod launch_cwd;
+mod line_edit;
+mod markdown;
 pub mod menu;
 mod modals;
 pub mod panels;
@@ -30,16 +33,21 @@ mod qr;
 mod remote;
 pub mod render;
 mod runloop;
+mod scrollbar;
 mod select;
 mod settings;
 mod share;
 mod signals;
+#[cfg(test)]
+mod snapshot;
 pub mod spark;
+mod styled;
 mod table;
 pub mod tabs;
 pub mod theme;
 mod toast;
 mod torn;
+mod tree;
 mod worker;
 
 pub use runloop::run;
@@ -150,7 +158,7 @@ pub enum AccountKind {
 /// the one question. `cctop --add-account` still says it.
 #[derive(Default)]
 pub struct AddAccount {
-    pub name: String,
+    pub name: line_edit::LineEdit,
     /// Which kind of account, once the name is in and the choice is made.
     /// `None` with a name accepted is the popup asking.
     pub kind: Option<AccountKind>,
@@ -276,7 +284,8 @@ pub const AGE_OPTIONS: [Option<AgeFilter>; 4] = [
 // Application state
 // ---------------------------------------------------------------------------
 
-/// One line of the table: a session, or a subagent shown beneath its parent.
+/// One line of the table: a session, a subagent shown beneath its parent, or
+/// in the tree view a heading for the sessions of one repository or checkout.
 ///
 /// Rows rather than session indices, because an expanded session occupies
 /// several lines and everything that walks the table — scrolling, the cursor,
@@ -290,17 +299,24 @@ pub enum Row {
         parent: usize,
         index: usize,
     },
+    /// An index into [`App::groups`].
+    Group(usize),
 }
 
 impl Row {
     /// The session this row belongs to, which for a child is its parent.
     ///
     /// Actions are addressed to sessions — a subagent has no process to signal
-    /// and no transcript of its own to delete — so every row resolves to one.
-    pub fn session(self) -> usize {
+    /// and no transcript of its own to delete — so a child resolves to its
+    /// parent. A group heading resolves to nothing: it stands for several
+    /// sessions, and an action aimed at "one of them" would be aimed at a row
+    /// nobody pointed at. Every action already bails on no session, which is
+    /// what makes the heading inert without a guard per key.
+    pub fn session(self) -> Option<usize> {
         match self {
-            Row::Session(i) => i,
-            Row::Subagent { parent, .. } => parent,
+            Row::Session(i) => Some(i),
+            Row::Subagent { parent, .. } => Some(parent),
+            Row::Group(_) => None,
         }
     }
 
@@ -330,6 +346,18 @@ pub struct App {
     /// every walk, which would leave an index pointing at whatever sorted into
     /// that slot next.
     pub expanded: std::collections::HashSet<String>,
+    /// Whether the table is drawn as a tree of repositories and checkouts.
+    pub tree: bool,
+    /// Keys of the tree groups that are folded.
+    pub collapsed: std::collections::HashSet<String>,
+    /// The tree's headings, which `Row::Group` indexes. Rebuilt with `visible`.
+    pub groups: Vec<tree::Group>,
+    /// The tree glyphs leading each row's label, aligned with `visible`. Empty
+    /// when the tree is off.
+    pub indent: Vec<String>,
+    /// How many sessions passed the filters, which is not `visible.len()` once
+    /// rows can be headings, children, or folded away.
+    pub matched: usize,
     pub stats: Stats,
     pub selected: usize,
     pub scroll: usize,
@@ -340,7 +368,7 @@ pub struct App {
     pub sort_asc: bool,
     pub sortby_cursor: usize,
 
-    pub search: String,
+    pub search: line_edit::LineEdit,
     /// Search the transcripts as well as the columns.
     ///
     /// Off by default, and deliberately: the metadata filter answers instantly
@@ -395,10 +423,10 @@ pub struct App {
     /// [`menu::step`].
     pub menu_cursor: usize,
     /// Raw digits being typed into the cost-floor modal.
-    pub cost_input: String,
+    pub cost_input: line_edit::LineEdit,
     /// The directory being typed into the launcher, spelled as the user is
     /// spelling it — `~` and all, expanded only when it is accepted.
-    pub launch_cwd_input: String,
+    pub launch_cwd_input: line_edit::LineEdit,
     /// Set when the typed directory does not name one, so the field can say so
     /// where it is being typed rather than in a toast across the screen.
     pub launch_cwd_bad: bool,
@@ -417,7 +445,7 @@ pub struct App {
     /// `None` means the field is being typed in, and Enter takes what is typed.
     pub launch_cwd_pick: Option<usize>,
     /// Line being typed into the selected session's terminal.
-    pub send_input: String,
+    pub send_input: line_edit::LineEdit,
     /// The new name being typed for a tab, and which tab it is for.
     ///
     /// The title as it stood when the rename opened is kept alongside the
@@ -425,7 +453,7 @@ pub struct App {
     /// retired mid-typing and every index after it shifts down one. Checking
     /// the title back means a rename either lands on the tab it was aimed at or
     /// is dropped, rather than renaming whichever tab slid into the slot.
-    pub rename_input: String,
+    pub rename_input: line_edit::LineEdit,
     pub rename_tab: usize,
     pub rename_was: String,
     /// The colour the rename modal is offering for the tab.
@@ -444,7 +472,7 @@ pub struct App {
     pub rename_opened_by_click: Option<Instant>,
     /// What has been typed into the tab switcher, and which row of the
     /// narrowed list the cursor is on. See `App::switch_matches`.
-    pub switch_filter: String,
+    pub switch_filter: line_edit::LineEdit,
     pub switch_cursor: usize,
     /// Whether the footer's `q Quit` has been clicked once already.
     ///
@@ -484,7 +512,7 @@ pub struct App {
     /// Waiting for the key the cursor's action should move to.
     pub settings_capture: bool,
     /// A setting's value being typed, for the ones that are not a toggle.
-    pub settings_input: Option<String>,
+    pub settings_input: Option<line_edit::LineEdit>,
 
     pub bottom_tab: usize,
     pub panel_data: Option<SessionData>,
@@ -539,6 +567,11 @@ pub struct App {
 
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
+    /// The `alert_*` thresholds' state: which have fired, and which rows are
+    /// still past theirs. Beside the notifier rather than inside it, because
+    /// the bell's question — is it my move? — is about a session's state and
+    /// these are about its numbers.
+    pub alerts: crate::alert::Alerts,
 
     /// The last snapshot from each machine named with `--host`, keyed by the
     /// target as the user spelled it.
@@ -798,6 +831,11 @@ impl App {
                 .iter()
                 .cloned()
                 .collect::<std::collections::HashSet<_>>(),
+            tree: prefs.tree,
+            collapsed: prefs.collapsed_groups.iter().cloned().collect(),
+            groups: Vec::new(),
+            indent: Vec::new(),
+            matched: 0,
             stats: Stats::default(),
             selected: 0,
             scroll: 0,
@@ -808,7 +846,7 @@ impl App {
             sort_col: ColumnId::Last,
             sort_asc: true,
             sortby_cursor: 0,
-            search: String::new(),
+            search: Default::default(),
             search_content: false,
             scan_query: String::new(),
             scan_hits: HashMap::new(),
@@ -845,14 +883,14 @@ impl App {
             })
             .collect(),
             menu_cursor: 0,
-            cost_input: String::new(),
-            send_input: String::new(),
-            rename_input: String::new(),
+            cost_input: Default::default(),
+            send_input: Default::default(),
+            rename_input: Default::default(),
             rename_tab: 0,
             rename_was: String::new(),
             rename_color: None,
             rename_opened_by_click: None,
-            switch_filter: String::new(),
+            switch_filter: Default::default(),
             switch_cursor: 0,
             quit_arm: false,
             list_height: 0,
@@ -895,6 +933,7 @@ impl App {
             global_spend: History::default(),
             quota: Quota::default(),
             notify: crate::notify::Notifier::new(prefs.notify),
+            alerts: crate::alert::Alerts::default(),
             collisions: crate::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
@@ -922,7 +961,7 @@ impl App {
             launch_into: LaunchInto::Tab,
             launch_root: std::env::current_dir().ok(),
             launch_cwd: None,
-            launch_cwd_input: String::new(),
+            launch_cwd_input: Default::default(),
             launch_cwd_bad: false,
             launch_cwd_known: Vec::new(),
             launch_cwd_hits: Vec::new(),
@@ -961,6 +1000,10 @@ impl App {
         let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();
         expanded.sort();
         self.prefs.expanded = expanded;
+        self.prefs.tree = self.tree;
+        let mut collapsed: Vec<String> = self.collapsed.iter().cloned().collect();
+        collapsed.sort();
+        self.prefs.collapsed_groups = collapsed;
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;
@@ -1049,6 +1092,8 @@ impl App {
             back: 0,
             max_back: 0,
             fetching: false,
+            raw: false,
+            turn_backs: Vec::new(),
         });
         self.mode = Mode::Conversation;
         self.fetch_chat(None);
@@ -1150,6 +1195,13 @@ pub struct ChatView {
     /// A fetch is in flight — the spinner's reason to keep turning, and what
     /// keeps a second `u` from asking for the page already coming.
     pub fetching: bool,
+    /// Replies shown as the markdown source they were written in, rather than
+    /// rendered — `m` flips it, for the times the exact characters matter.
+    pub raw: bool,
+    /// The `back` that puts each turn's header at the top of the view, oldest
+    /// first. Written by the draw, like `max_back`, and what `[` and `]` step
+    /// through.
+    pub turn_backs: Vec<u16>,
 }
 
 /// Columns the user has hidden outright, which win over the automatic

@@ -31,6 +31,20 @@
 //! panic hook turns even an unexpected unwind into a silent success. cctop being
 //! absent, stopped, or mid-crash is the *ordinary* case, not an error worth
 //! reporting.
+//!
+//! # The one answer that is not silence
+//!
+//! Two events answer on stdout at all. `Stop` and `SubagentStop` get the
+//! documented no-op `{"continue": true}` (see [`answer`]). And, only with
+//! `[settings] warn_agents = true`, a file write another live session has
+//! recently made to the same file gets the harness's *context* channel —
+//! `hookSpecificOutput.additionalContext`, and nothing beside it. That is the
+//! one place stdout carries content, and it is shaped so it cannot be a
+//! decision: no `permissionDecision`, no `decision`, no `continue`, so the
+//! harness proceeds exactly as it would have with no output. It is computed on
+//! the same abandonable thread under the same deadline, and any failure on the
+//! way — a ledger that will not parse, a lock another hook holds, a deadline
+//! that runs out — is the ordinary silence. [`crate::advise`] has the rest.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -41,7 +55,7 @@ use std::path::{Path, PathBuf};
 /// be generous: a local socket with a reader attached answers in microseconds
 /// (measured at 1–2ms including the process spawn), and anything slower than
 /// this is a cctop that cannot keep up, whose events are better dropped.
-const DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Cap on a single event, so a pathological payload cannot be read forever.
 /// A hook's input is a small object; a transcript never comes through here,
@@ -60,7 +74,7 @@ const MAX_PEERS: usize = 16;
 /// A single well-known address would be simpler, but only one process can bind
 /// it — so a second cctop was deaf, and the events it missed were exactly the
 /// ones it existed to show. A directory lets the hook fan out instead.
-fn socket_dir() -> Option<PathBuf> {
+pub(crate) fn socket_dir() -> Option<PathBuf> {
     dirs::runtime_dir()
         .or_else(dirs::cache_dir)
         .map(|d| d.join("cctop").join("hooks.d"))
@@ -154,15 +168,30 @@ pub fn emit(args: &[String]) -> i32 {
     crate::elog::event("hook", "fire", serde_json::json!({ "name": event }));
     let args = args.to_vec();
     let (tx, rx) = std::sync::mpsc::channel();
+    // Its own channel, because the advice is ready before delivery starts and
+    // must not be lost to a cctop that is slow to accept.
+    let (advice_tx, advice_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = std::panic::catch_unwind(|| forward(&args));
+        let _ = std::panic::catch_unwind(|| forward(&args, &advice_tx));
         let _ = tx.send(());
     });
     // Returning exits the process, which takes the thread with it wherever it
     // got to. A dropped event is a cheaper failure than a stalled agent.
-    let _ = rx.recv_timeout(DEADLINE);
-    answer(&event);
+    answer(&event, settle(&rx, &advice_rx));
     0
+}
+
+/// Wait for the worker until it finishes or the deadline passes, then take
+/// whatever advice it had made by then.
+///
+/// Nothing it had not: an answer still being worked out at the deadline is no
+/// answer, and one made before a delivery that wedged is still good.
+fn settle(
+    done: &std::sync::mpsc::Receiver<()>,
+    advice: &std::sync::mpsc::Receiver<Option<String>>,
+) -> Option<String> {
+    let _ = done.recv_timeout(DEADLINE);
+    advice.try_recv().ok().flatten()
 }
 
 /// The one thing `cctop hook` ever writes to stdout, and only where staying
@@ -179,8 +208,12 @@ pub fn emit(args: &[String]) -> i32 {
 /// is the documented default in both Codex and Claude Code, so writing it says
 /// exactly what saying nothing was meant to. Every other event still gets
 /// silence, because for them stdout is content the model may act on.
-fn answer(event: &str) {
-    let Some(line) = answer_for(event) else {
+///
+/// `advice` is the other exception, and is `None` unless the user turned
+/// `warn_agents` on — see the module docs. The two never meet: advice is only
+/// ever made for a file write, and the no-op only for the end of a turn.
+fn answer(event: &str, advice: Option<String>) {
+    let Some(line) = advice.or_else(|| answer_for(event).map(str::to_string)) else {
         return;
     };
     // `println!` panics on a closed stdout, which would exit 101 — the one exit
@@ -199,7 +232,11 @@ fn answer_for(event: &str) -> Option<&'static str> {
 }
 
 /// Read the event however this agent hands it over, and deliver it.
-fn forward(args: &[String]) {
+///
+/// The advice for this fire, if any, is sent on `advice` before delivery
+/// begins, so a wedged cctop can cost the agent its events but not its
+/// warning.
+fn forward(args: &[String], advice: &std::sync::mpsc::Sender<Option<String>>) {
     // Claude Code, Gemini CLI and Cursor all write the event to stdin, and cctop
     // names it on the command line. Codex runs its `notify` program with the
     // JSON as the last argument and nothing on stdin at all, and cctop's
@@ -224,7 +261,9 @@ fn forward(args: &[String]) {
         }
     };
 
-    let Some(line) = envelope(&name, &payload, &ancestry()) else {
+    let chain = ancestry();
+    let _ = advice.send(crate::advise::consider(&name, &payload, &chain));
+    let Some(line) = envelope(&name, &payload, &chain) else {
         return;
     };
     deliver(&line);
@@ -3531,6 +3570,46 @@ mod tests {
         ] {
             assert_eq!(answer_for(quiet), None, "{quiet} wrote to stdout");
         }
+    }
+
+    /// The advice is bounded by the same deadline as everything else: made
+    /// in time, it survives a delivery that then wedges; still being worked
+    /// out at the deadline, it is dropped and the agent hears nothing.
+    #[test]
+    fn advice_is_kept_only_if_it_beat_the_deadline() {
+        use std::sync::mpsc::channel;
+        use std::time::Instant;
+
+        // Advice made, then a delivery that never returns.
+        let (done_tx, done) = channel::<()>();
+        let (advice_tx, advice) = channel();
+        std::thread::spawn(move || {
+            let _ = advice_tx.send(Some("{}".to_string()));
+            std::thread::sleep(DEADLINE * 8);
+            drop(done_tx);
+        });
+        let started = Instant::now();
+        assert_eq!(settle(&done, &advice).as_deref(), Some("{}"));
+        assert!(started.elapsed() < DEADLINE * 2, "{:?}", started.elapsed());
+
+        // A ledger stuck past the deadline: silence, on time.
+        let (done_tx, done) = channel::<()>();
+        let (advice_tx, advice) = channel::<Option<String>>();
+        std::thread::spawn(move || {
+            std::thread::sleep(DEADLINE * 8);
+            let _ = advice_tx.send(Some("late".to_string()));
+            drop(done_tx);
+        });
+        let started = Instant::now();
+        assert_eq!(settle(&done, &advice), None);
+        assert!(started.elapsed() < DEADLINE * 2, "{:?}", started.elapsed());
+
+        // And a worker that panicked before advising is the ordinary silence.
+        let (done_tx, done) = channel::<()>();
+        let (advice_tx, advice) = channel::<Option<String>>();
+        drop(advice_tx);
+        let _ = done_tx.send(());
+        assert_eq!(settle(&done, &advice), None);
     }
 
     /// With no cctop listening at all — the ordinary case, on every tool call of

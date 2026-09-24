@@ -687,7 +687,9 @@ pub fn tool_activity(
         }
         let trailing_w: usize = trailing.iter().map(|sp| sp.content.chars().count()).sum();
 
-        let text = util::tildify(&d.d);
+        // A command can carry escape codes of its own; in a one-line cell they
+        // could only be litter.
+        let text = util::tildify(&super::ansi::strip(&d.d));
         let detail_w = width.saturating_sub(used + trailing_w).max(8);
         spans.push(value(format!(
             "{:<detail_w$}",
@@ -705,14 +707,9 @@ pub fn tool_activity(
         // Expanded: show the untruncated argument, wrapped.
         if is_open {
             let full = d.full.as_deref().unwrap_or(&d.d);
-            for line in wrap(full, width.saturating_sub(10)) {
-                out.push(
-                    Line::from(vec![
-                        Span::raw("        "),
-                        Span::styled(line, Style::default().fg(theme::gray(252))),
-                    ])
-                    .style(row_style),
-                );
+            let ink = Style::default().fg(theme::gray(252));
+            for line in super::ansi::wrapped(full, ink, width.saturating_sub(2), "        ") {
+                out.push(line.style(row_style));
                 owners.push(Some(key.clone()));
             }
         }

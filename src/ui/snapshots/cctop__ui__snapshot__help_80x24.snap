@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│L╭ Help ────────────────────────────────────────────────────────────────────╮ │
+│T│Start here                                                                ┃ │
+│T│  Enter            Everything you can do to this row, in one menu         ┃ │
+│A│  ?  F1            This page                                              ┃ │
+╰─│  ,                Settings and keybinds, and the file that holds them    │─╯
+╭ │  q  F10           Quit                                                   │─╮
+│ │  +                Add a Claude account (runs claude setup-token)         │ │
+│●│                                                                          │…┃
+│●│Navigation                                                                │ │
+╰─│  ↑/k  ↓/j         Move between sessions                                  │─╯
+╭ │  PgUp / PgDn      Page through the list                                  │t╮
+│R│  Ctrl+U / Ctrl+D  Half a page up / down                                  │ │
+│ │  g / G  Home / End Jump to first / last                                  │ │
+│ │  n / N            Next / previous search match (wraps)                   │ │
+│ │  b                Jump to the session that rang last                     │ │
+│ │  f                Follow mode: keep the selection centered               │ │
+│ │                                                                          │ │
+╰─│Acting on the selected session                                            │─╯
+╭ │  a                Open its terminal in a tab                             │ ╮
+│C│  R                Resume it in a tab of its own                          │ │
+╰─╰ 1–19 of 122   ↑↓ scroll ─────────────────────────────────────────────────╯─╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

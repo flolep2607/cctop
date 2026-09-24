@@ -671,6 +671,15 @@ pub struct UiPrefs {
     /// Recent `/` queries, newest first, so a search worth running twice does
     /// not have to be typed twice. Capped at [`MAX_SEARCH_HISTORY`].
     pub search_history: Vec<String>,
+    /// The table is drawn as a tree of repositories and their checkouts.
+    ///
+    /// Persisted, unlike the sort: it is a key pressed on purpose to change how
+    /// the whole table reads, and someone who works that way works that way
+    /// every launch.
+    pub tree: bool,
+    /// Keys of the tree's folded groups. Kept even while the tree is off, so
+    /// turning it back on restores the shape it was left in.
+    pub collapsed_groups: Vec<String>,
 }
 
 /// How many past queries are remembered.
@@ -700,6 +709,8 @@ impl Default for UiPrefs {
             claude_profile: None,
             codex_profile: None,
             search_history: Vec::new(),
+            tree: false,
+            collapsed_groups: Vec::new(),
         }
     }
 }

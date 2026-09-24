@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.17.8"
+version = "0.18.0"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -69,6 +69,15 @@ crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
 notify = { version = "8.2.0", default-features = false }
+# The conversation view reads an assistant's replies as the markdown they are
+# written in (`ui::markdown`). Only the parser: its defaults are an HTML writer
+# and a command-line option parser, neither of which a TUI has use for. What is
+# left is pure Rust and brings one crate (`unicase`) the tree did not have.
+# `tui-markdown` was the ready-made alternative, and was not taken: it carries
+# `rstest` and `pretty_assertions` as ordinary dependencies, highlights code
+# through syntect's multi-megabyte syntax dumps, and draws links as text with
+# no way to make them OSC 8 — which is why the renderer is cctop's own.
+pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
 rayon = "1.12.0"
 regex = "1.13.1"
@@ -127,6 +136,11 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 # draws with, so the musl release takes it as it is.
 tachyonfx = { version = "0.25.2", default-features = false, features = ["std"] }
 tui-term = "0.3.4"
+# The input boxes' editor (`ui::line_edit`) steps its cursor by grapheme and
+# measures its columns the way the terminal will draw them. Both crates are
+# already in the tree under ratatui, at these versions, so this adds nothing.
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
 # A QR code of a link meant for a phone, drawn in half-blocks inside the panel
 # that hands the link out (`ui::qr`). `qrcode` is the encoder the widget takes;
 # its default features are image rendering, which a terminal has no use for.
@@ -147,3 +161,9 @@ ratatui-image = { version = "11.0.8", default-features = false }
 # the same set the sniff accepts (clipboard::format_of): a JPEG or WebP that
 # could not preview would still paste, but the toast would go silently missing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+[dev-dependencies]
+# Whole-screen snapshots of the TUI (`ui::snapshot`). The `.snap` files are
+# committed, so CI compares against them and needs no insta CLI; CLAUDE.md
+# says how to accept a change.
+insta = "1.48.0"

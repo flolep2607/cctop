@@ -2,6 +2,7 @@
 
 use super::columns::COLUMNS;
 use super::hyperlink;
+use super::line_edit::LineEdit;
 use super::qr;
 use super::render::Layout;
 use super::share;
@@ -29,6 +30,28 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width: w,
         height: h,
     }
+}
+
+/// The typing style every one-line box shares, and the cursor's.
+fn input_styles() -> (Style, Style) {
+    (
+        Style::default()
+            .fg(theme::colors().value)
+            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme::colors().accent),
+    )
+}
+
+/// A box's ` > ` row, with the cursor drawn where it is in the text.
+///
+/// Not windowed: the modals these sit in wrap, so a line longer than the box
+/// goes onto a second row rather than off its edge, and all of it stays
+/// readable — which the send box, at up to five hundred characters, needs.
+fn input_line(field: &LineEdit) -> Line<'static> {
+    let (text, cursor) = input_styles();
+    let mut spans = vec![Span::raw(" > ")];
+    spans.extend(field.spans(usize::MAX, text, cursor, "█"));
+    Line::from(spans)
 }
 
 /// Draws the overlay and returns `(outer, inner)`: the frame it covers, which is
@@ -160,6 +183,13 @@ fn scrollable_modal(
             .style(theme::canvas()),
         inner,
     );
+    super::scrollbar::on_border(
+        frame,
+        rect,
+        total as usize,
+        inner.height as usize,
+        scroll as usize,
+    );
     max_scroll
 }
 
@@ -204,6 +234,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("s", "Type a line into its terminal"),
         item("O", "Hand its context off to a different agent"),
         item("i", "Read its conversation (works on remote rows)"),
+        item("  [ / ]  m", "In it: previous / next turn, markdown source"),
         item("y", "Copy resume command or transcript path"),
         item("e / E", "Show its subagents / all subagents"),
         item("d", "Delete it (only when it is not running)"),
@@ -223,6 +254,11 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("F7", "Filter by age (1d / 1w / 1mo)"),
         item("#", "Cost floor: only sessions costing ≥ $X"),
         item("`", "Show only running sessions"),
+        item("T", "Tree view: group by repository and worktree"),
+        item(
+            "  Enter / Space",
+            "Fold or unfold the group under the cursor",
+        ),
         item("Esc", "Clear one filter layer per press"),
         Line::from(Span::styled(
             "  Clicking a column header sorts by it too.",
@@ -264,6 +300,11 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("", "On the dashboard: the selected row's tab"),
         item("Ctrl+R", "On the dashboard: restart every agent tab,"),
         item("", "leaving the ones mid-turn alone"),
+        item(
+            "Alt+Shift+C",
+            "Record the pane to an asciinema .cast, or stop",
+        ),
+        item("", "and say where it went (~/.local/share/cctop/casts)"),
         item("F9", "Paste the clipboard's image as a file path"),
         item("Ctrl+V", "The same, in terminals that send it"),
         item("Home / End", "In a Claude pane: top / bottom of the chat"),
@@ -366,27 +407,37 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
                         set: bool,
                         what: &str| {
         let here = row == app.settings_cursor;
-        let value = match here {
-            true if app.settings_capture => "press a key… (Esc cancels)".to_string(),
-            true if app.settings_input.is_some() => {
-                format!("{}█", app.settings_input.as_deref().unwrap_or_default())
-            }
-            _ => value,
-        };
         let accent = Style::default().fg(theme::colors().accent);
-        let mut line = Line::from(vec![
-            Span::raw(format!("  {name:<18}")),
-            Span::styled(
-                format!("{value:<14}"),
-                if set {
-                    accent.add_modifier(Modifier::BOLD)
-                } else {
-                    accent
-                },
-            ),
-            Span::styled(if set { " * " } else { "   " }, theme::dim()),
-            Span::styled(what.to_string(), theme::dim()),
-        ]);
+        let style = if set {
+            accent.add_modifier(Modifier::BOLD)
+        } else {
+            accent
+        };
+        let value = match (here, &app.settings_input) {
+            (true, _) if app.settings_capture => {
+                vec![Span::styled(
+                    format!("{:<14}", "press a key… (Esc cancels)"),
+                    style,
+                )]
+            }
+            (true, Some(input)) => {
+                let mut spans = input.spans(usize::MAX, style, accent, "█");
+                // Padded to the column the other rows fill, so the `*` and
+                // the description do not shift as the value is typed.
+                let used: usize = spans.iter().map(Span::width).sum();
+                spans.push(Span::raw(" ".repeat(14usize.saturating_sub(used))));
+                spans
+            }
+            _ => vec![Span::styled(format!("{value:<14}"), style)],
+        };
+        let mut line = Line::from_iter(
+            std::iter::once(Span::raw(format!("  {name:<18}")))
+                .chain(value)
+                .chain([
+                    Span::styled(if set { " * " } else { "   " }, theme::dim()),
+                    Span::styled(what.to_string(), theme::dim()),
+                ]),
+        );
         if here {
             cursor_line = lines.len();
             line = line.style(theme::selected());
@@ -436,20 +487,11 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
     let text_w = WIDTH as usize - 4;
 
     let mut lines = vec![
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.search.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        input_line(&app.search),
         Line::from(Span::styled(
             format!(
                 " {} of {} session{}",
-                app.visible.len(),
+                app.matched,
                 app.sessions.len(),
                 if app.sessions.len() == 1 { "" } else { "s" }
             ),
@@ -1228,27 +1270,33 @@ pub(super) fn draw_launch(
         // The field, in place of the line it replaces. Editing here rather than
         // in a modal of its own keeps the list of agents on screen: which agent
         // is picked is half of what the directory is being chosen for.
-        Line::from(vec![
-            Span::styled(" in ", Style::default().fg(theme::colors().label)),
-            Span::styled(
-                // The tail, when a long path outgrows the box. The end is the
-                // part being typed, and a field that showed the start would
-                // hide the cursor as soon as it mattered.
-                tail(&app.launch_cwd_input, WIDTH as usize - 8),
+        Line::from_iter(
+            std::iter::once(Span::styled(
+                " in ",
+                Style::default().fg(theme::colors().label),
+            ))
+            // Windowed around the cursor when a long path outgrows the box,
+            // which at the end is its tail: the end is the part being typed,
+            // and a field that showed the start would hide the cursor as soon
+            // as it mattered.
+            .chain(app.launch_cwd_input.spans(
+                // The cursor's cell is in this, where it used to follow it.
+                WIDTH as usize - 7,
                 match app.launch_cwd_bad {
                     true => Style::default().fg(theme::colors().cost_high),
                     false => theme::value(),
                 },
-            ),
-            Span::styled("▏", theme::value()),
-            Span::styled(
+                theme::value(),
+                "▏",
+            ))
+            .chain(std::iter::once(Span::styled(
                 match app.launch_cwd_bad {
                     true => "  no such directory",
                     false => "",
                 },
                 Style::default().fg(theme::colors().cost_high),
-            ),
-        ])
+            ))),
+        )
     } else {
         Line::from(Span::styled(
             match (picked, &app.launch_cwd) {
@@ -1346,6 +1394,15 @@ pub(super) fn draw_launch(
     };
     let (outer, inner) = modal(frame, area, title, lines, WIDTH);
     layout.modal_rect = Some(outer);
+    // Beside the list rows only: the footer below them never scrolls, and a
+    // track running past the list would make it look as if it did.
+    super::scrollbar::draw(
+        frame,
+        super::scrollbar::right_border(outer, inner.y, shown as u16),
+        total,
+        shown,
+        offset,
+    );
     // Clickable for the same reason the choices are: the list is there to be
     // read, and a path you can see but not click reads as decoration.
     layout.launch_cwd_rows = hit_lines
@@ -1761,25 +1818,20 @@ pub(super) fn draw_batch_blocked(
 }
 
 pub(super) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
-    let mut input = app.cost_input.clone();
-    if input.is_empty() {
-        input = "0.00".to_string();
+    let (text, cursor) = input_styles();
+    // An empty floor shows the zero it means, with the cursor after it as it
+    // always was — it is a hint, not text the cursor can move through.
+    let mut input = vec![Span::raw(" $ ")];
+    match app.cost_input.is_empty() {
+        true => input.extend([Span::styled("0.00", text), Span::styled("█", cursor)]),
+        false => input.extend(app.cost_input.spans(usize::MAX, text, cursor, "█")),
     }
     let lines = vec![
         Line::from(Span::styled(
             " Only show sessions whose total cost is at least:",
             theme::dim(),
         )),
-        Line::from(vec![
-            Span::raw(" $ "),
-            Span::styled(
-                input,
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        Line::from(input),
         Line::default(),
         Line::from(Span::styled(
             " 0 clears the filter   Enter apply   Esc cancel",
@@ -1807,16 +1859,7 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
             theme::dim(),
         )),
         Line::default(),
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.send_input.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        input_line(&app.send_input),
         Line::default(),
         Line::from(Span::styled(
             " Enter send   F9 paste an image   Esc cancel",
@@ -1877,16 +1920,7 @@ pub(super) fn draw_rename_tab(
             theme::dim(),
         )),
         Line::default(),
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.rename_input.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
+        input_line(&app.rename_input),
         Line::default(),
         Line::from(swatches),
         Line::default(),
@@ -1925,19 +1959,7 @@ pub(super) fn draw_switch_tab(
         .min(matches.len().saturating_sub(ROWS));
     let shown = &matches[start..matches.len().min(start + ROWS)];
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::styled(
-                app.switch_filter.clone(),
-                Style::default()
-                    .fg(theme::colors().value)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(theme::colors().accent)),
-        ]),
-        Line::default(),
-    ];
+    let mut lines = vec![input_line(&app.switch_filter), Line::default()];
     if start > 0 {
         lines.push(Line::from(Span::styled(
             format!("    … {start} above"),
@@ -2016,8 +2038,19 @@ pub(super) fn draw_switch_tab(
         theme::dim(),
     )));
 
-    let (outer, _) = modal(frame, area, "Go to tab", lines, WIDTH);
+    let (outer, inner) = modal(frame, area, "Go to tab", lines, WIDTH);
     layout.modal_rect = Some(outer);
+    // Down the rows the window covers, "… above" and "… below" included, and
+    // not the query line or the keys: those stay put while the list slides.
+    let list_rows =
+        usize::from(start > 0) + shown.len() + usize::from(start + shown.len() < matches.len());
+    super::scrollbar::draw(
+        frame,
+        super::scrollbar::right_border(outer, inner.y + 2, list_rows as u16),
+        matches.len(),
+        ROWS,
+        start,
+    );
 }
 
 /// Where on `screen` `link` is drawn: `(row, columns)` for the row it starts on
@@ -2173,16 +2206,7 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
         let hint = " [Enter] next   [Esc] cancel";
         let lines = vec![
             Line::from(Span::styled(" What is it called?", theme::dim())),
-            Line::from(vec![
-                Span::raw(" > "),
-                Span::styled(
-                    flow.name.clone(),
-                    Style::default()
-                        .fg(theme::colors().value)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("█", Style::default().fg(theme::colors().accent)),
-            ]),
+            input_line(&flow.name),
             Line::default(),
             Line::from(Span::styled(hint, theme::dim())),
         ];
@@ -2365,12 +2389,13 @@ pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
     // no way to tell it is still open.
     let visible = box_area.height.saturating_sub(2);
     let max_scroll = (body.len() as u16).saturating_sub(visible);
+    let scroll = app.insight_scroll.min(max_scroll);
+    let total = body.len();
     frame.render_widget(
-        Paragraph::new(body)
-            .block(block)
-            .scroll((app.insight_scroll.min(max_scroll), 0)),
+        Paragraph::new(body).block(block).scroll((scroll, 0)),
         box_area,
     );
+    super::scrollbar::on_border(frame, box_area, total, visible as usize, scroll as usize);
 }
 
 /// The selected session's conversation, read-only — the terminal half of what
@@ -2404,6 +2429,7 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     // Borders, plus a space of padding either side, is what the wrap below has
     // to agree with.
     let text_width = (box_area.width as usize).saturating_sub(4).max(1);
+    let mut laid = Chat::default();
     let body: Vec<Line> = match (&view.conversation, &view.error) {
         (None, None) => vec![
             Line::default(),
@@ -2419,18 +2445,26 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             Line::default(),
             Line::from(Span::styled(format!("  {why}"), theme::failed())),
         ],
-        (Some(conv), _) => chat_lines(&view.session, conv, text_width),
+        (Some(conv), _) => {
+            laid = chat_lines(&view.session, conv, text_width, view.raw);
+            std::mem::take(&mut laid.lines)
+        }
     };
 
+    let shown = match view.raw {
+        true => "m rendered",
+        false => "m source",
+    };
     let footer = match &view.conversation {
         _ if view.fetching => format!(
-            " ↑↓ scroll · {} loading earlier… · esc close ",
+            " ↑↓ scroll · [ ] turn · {shown} · {} loading earlier… · esc close ",
             share::spinner_frame()
         ),
-        Some(c) if c.earlier > 0 => {
-            format!(" ↑↓ scroll · u load {} earlier · esc close ", c.earlier)
-        }
-        _ => " ↑↓ scroll · esc close ".to_string(),
+        Some(c) if c.earlier > 0 => format!(
+            " ↑↓ scroll · [ ] turn · {shown} · u load {} earlier · esc close ",
+            c.earlier
+        ),
+        _ => format!(" ↑↓ scroll · [ ] turn · {shown} · esc close "),
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -2443,11 +2477,47 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     // The only place the wrapped height is known, so the furthest-back offset
     // is written here for the key handler to clamp against.
     view.max_back = (body.len().saturating_sub(visible)).min(u16::MAX as usize) as u16;
-    let top = body.len().saturating_sub(visible + view.back as usize);
+    let total = body.len();
+    let top = total.saturating_sub(visible + view.back as usize);
+    // Each turn's header, as the `back` that brings it to the top — clamped,
+    // so the last few turns, which cannot reach the top, all read as the end.
+    view.turn_backs = laid
+        .turns
+        .iter()
+        .map(|&start| {
+            (total.saturating_sub(visible).saturating_sub(start) as u16).min(view.max_back)
+        })
+        .collect();
     frame.render_widget(
         Paragraph::new(body).block(block).scroll((top as u16, 0)),
         box_area,
     );
+    super::scrollbar::on_border(frame, box_area, total, visible, top);
+    // Links are laid over the cells the paragraph has just drawn, so they have
+    // to wait for it; one scrolled out of the box is simply not on screen.
+    let inner = box_area.inner(ratatui::layout::Margin::new(1, 1));
+    for link in &laid.links {
+        let Some(row) = link.line.checked_sub(top).filter(|r| *r < visible) else {
+            continue;
+        };
+        let start = inner.x + link.columns.start;
+        let end = (inner.x + link.columns.end).min(inner.right());
+        hyperlink::link(
+            frame.buffer_mut(),
+            inner.y + row as u16,
+            start..end,
+            &link.url,
+        );
+    }
+}
+
+/// A conversation laid out: its rows, where its links landed, and the row each
+/// turn starts on.
+#[derive(Default)]
+struct Chat {
+    lines: Vec<Line<'static>>,
+    links: Vec<super::markdown::Link>,
+    turns: Vec<usize>,
 }
 
 /// A conversation laid out as styled lines, wrapped to `width`.
@@ -2455,14 +2525,21 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
 /// Turns read like the report page's: a small header naming the speaker, the
 /// text at full width, and each tool call underneath it dimmed — a tool's work
 /// is context for the text, not the text itself.
+///
+/// The agent's own words are rendered as the markdown they were written in,
+/// unless `raw` asks for the source. What the user typed is not: a prompt is
+/// rarely markdown on purpose, and an asterisk in it should stay one. A tool's
+/// result keeps the colours its program printed it in (see [`super::ansi`]).
 fn chat_lines(
     session: &Session,
     conv: &crate::serve::chat::Conversation,
     width: usize,
-) -> Vec<Line<'static>> {
+    raw: bool,
+) -> Chat {
     let assistant = session.surface.label(session.provider).to_string();
     let now = chrono::Utc::now();
-    let mut out: Vec<Line> = Vec::new();
+    let mut chat = Chat::default();
+    let out = &mut chat.lines;
 
     if let Some(note) = &conv.note {
         for line in super::panels::wrap(note, width) {
@@ -2471,6 +2548,7 @@ fn chat_lines(
         out.push(Line::default());
     }
     for turn in &conv.turns {
+        chat.turns.push(out.len());
         if turn.kind.as_ref() == "compaction" {
             // A seam, not something said — drawn as a rule so the eye reads it
             // as one rather than hunting for a speaker.
@@ -2494,8 +2572,29 @@ fn chat_lines(
             Span::styled(format!("  {who}"), style),
             Span::styled(format!("  {when}"), theme::dim()),
         ]));
-        for line in super::panels::wrap(&turn.text, width) {
-            out.push(Line::styled(format!("  {line}"), text_style));
+        match turn.role.as_ref() == "assistant" && !raw {
+            true => {
+                // Rendered text sets its own weight, so the base is the ink
+                // without the bold — or `**this**` would have nothing to stand
+                // out from.
+                let base = text_style.remove_modifier(Modifier::BOLD);
+                let md = super::markdown::render(&turn.text, width, base);
+                let offset = out.len();
+                chat.links.extend(md.links.into_iter().map(|mut link| {
+                    link.line += offset;
+                    link.columns = link.columns.start + 2..link.columns.end + 2;
+                    link
+                }));
+                out.extend(md.lines.into_iter().map(|mut line| {
+                    line.spans.insert(0, Span::raw("  "));
+                    line
+                }));
+            }
+            false => {
+                for line in super::panels::wrap(&turn.text, width) {
+                    out.push(Line::styled(format!("  {line}"), text_style));
+                }
+            }
         }
         for tool in &turn.tools {
             let (mark, style) = match tool.failed {
@@ -2508,32 +2607,34 @@ fn chat_lines(
             };
             out.push(Line::from(vec![
                 Span::styled(format!("    {mark} {}", tool.name), style),
-                Span::styled(format!("  {}", tool.detail), theme::dim()),
+                Span::styled(
+                    format!("  {}", super::ansi::strip(&tool.detail)),
+                    theme::dim(),
+                ),
                 Span::styled(counts, theme::dim()),
             ]));
             // The full argument only exists where it says more than the
             // one-liner did — a long command, a whole file body.
             if let Some(full) = &tool.full {
-                for line in super::panels::wrap(full, width.saturating_sub(6)) {
-                    out.push(Line::styled(format!("      {line}"), theme::dim()));
-                }
+                out.extend(super::ansi::wrapped(full, theme::dim(), width, "      "));
             }
             if let Some(result) = &tool.result {
-                for line in super::panels::wrap(result, width.saturating_sub(6)) {
-                    out.push(Line::styled(format!("      {line}"), theme::dim()));
-                }
+                out.extend(super::ansi::wrapped(result, theme::dim(), width, "      "));
             }
             for line in &tool.diff {
                 let style = match line.starts_with('+') {
                     true => theme::value(),
                     false => theme::dim(),
                 };
-                out.push(Line::styled(format!("      {line}"), style));
+                out.push(Line::styled(
+                    format!("      {}", super::ansi::strip(line)),
+                    style,
+                ));
             }
         }
         out.push(Line::default());
     }
-    out
+    chat
 }
 
 #[cfg(test)]
@@ -2683,6 +2784,66 @@ mod tests {
         assert!(text.contains("Home / End Jump"), "{text}");
     }
 
+    /// The help is taller than a small terminal, and the bar on its border is
+    /// what says so; on a screen it fits, there is no bar to misread.
+    #[test]
+    fn the_help_has_a_scrollbar_only_when_it_overflows() {
+        use crate::ui::scrollbar::tests::thumb_cells;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        let mut short = Terminal::new(TestBackend::new(100, 20)).expect("backend");
+        short
+            .draw(|frame| draw_help(frame, frame.area(), &mut app))
+            .expect("draw");
+        assert!(app.help_max_scroll > 0, "the help fits in 20 rows now");
+        assert!(thumb_cells(short.backend().buffer()) > 0, "no scrollbar");
+
+        let mut tall = Terminal::new(TestBackend::new(100, 200)).expect("backend");
+        tall.draw(|frame| draw_help(frame, frame.area(), &mut app))
+            .expect("draw");
+        assert_eq!(app.help_max_scroll, 0);
+        assert_eq!(thumb_cells(tall.backend().buffer()), 0);
+    }
+
+    /// A report longer than its box gets a bar that follows the scroll: at the
+    /// top of the border first, at the bottom once scrolled to the end.
+    #[test]
+    fn a_long_report_has_a_scrollbar_that_follows_the_scroll() {
+        use crate::ui::scrollbar::{THUMB, tests::thumb_cells};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.mode = crate::ui::Mode::Insight;
+        let draw = |app: &App| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
+            terminal
+                .draw(|frame| draw_insight(frame, frame.area(), app))
+                .expect("draw");
+            terminal.backend().buffer().clone()
+        };
+
+        app.insight = Some("a short report\n".repeat(5));
+        assert_eq!(thumb_cells(&draw(&app)), 0, "a report that fits has a bar");
+
+        app.insight = Some("line\n".repeat(200));
+        let buf = draw(&app);
+        assert!(
+            thumb_cells(&buf) > 0,
+            "no scrollbar on an overflowing report"
+        );
+        // The box is centred with two columns of margin: its right border is
+        // column 77, and its first inner row is 3.
+        assert_eq!(buf[(77, 3)].symbol(), THUMB);
+
+        app.insight_scroll = u16::MAX;
+        let buf = draw(&app);
+        assert_eq!(buf[(77, 3)].symbol(), "│");
+        assert_eq!(buf[(77, 20)].symbol(), THUMB);
+    }
+
     /// The picker row draws every swatch, brackets the pick, and spells its
     /// name — under NO_COLOR the name is the only thing there is to read.
     #[test]
@@ -2810,7 +2971,7 @@ mod tests {
         assert!(text.contains("›"), "no cursor on the pick: {text}");
 
         // A filter that matches nothing says so rather than listing air.
-        app.switch_filter = "zzz".to_string();
+        app.switch_filter = "zzz".into();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
         let mut layout = crate::ui::render::Layout::default();
         terminal
@@ -2824,6 +2985,122 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("No tab by that name"), "silence: {text}");
+    }
+
+    /// The conversation view with one reply in markdown and one coloured tool
+    /// result, open and read in by the worker.
+    fn chat_app(text: &str, result: &str) -> App {
+        let mut app = crate::ui::tests::test_app();
+        app.sessions = vec![crate::ui::tests::session("a", true, "/repo")];
+        app.refilter();
+        app.selected = 0;
+        app.open_conversation();
+        let key = app.chat.as_ref().expect("the view opened").session.key();
+        let turn = |seq: usize, role: &'static str, text: &str| crate::serve::chat::Turn {
+            seq,
+            role: role.into(),
+            kind: "message".into(),
+            ts: String::new(),
+            text: text.into(),
+            clipped: false,
+            tools: Vec::new(),
+        };
+        let mut reply = turn(1, "assistant", text);
+        reply.tools.push(crate::serve::chat::ToolUse {
+            name: "Bash".into(),
+            detail: "cargo test".into(),
+            result: Some(result.into()),
+            ..Default::default()
+        });
+        let conv = crate::serve::chat::Conversation {
+            supported: true,
+            turns: vec![turn(0, "user", "**keep** my stars"), reply],
+            earlier: 0,
+            note: None,
+        };
+        app.got_chat(key, None, Ok(Box::new(conv)));
+        app
+    }
+
+    fn draw_chat(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
+        terminal
+            .draw(|frame| draw_conversation(frame, frame.area(), app))
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// A reply reads as rendered markdown with its link clickable, a user's
+    /// prompt keeps its characters, and a coloured result shows its colour and
+    /// none of its escape codes.
+    #[test]
+    fn the_conversation_renders_replies_and_colours_results() {
+        let mut app = chat_app(
+            "## Done\n\nRan **all** of it, see [the log](https://example.com/log).",
+            "\x1b[1m\x1b[32mtest result: ok\x1b[0m. 3 passed\x1b[2K",
+        );
+        let buf = draw_chat(&mut app, 100, 30);
+        let screen = hyperlink::visible(&buf);
+        assert!(screen.contains("Ran all of it, see the log."), "{screen}");
+        assert!(
+            !screen.contains("**all**") && !screen.contains("## "),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("**keep** my stars"),
+            "the prompt was rendered: {screen}"
+        );
+        assert!(screen.contains("test result: ok. 3 passed"), "{screen}");
+        assert!(
+            !screen.contains("[32m") && !screen.contains("[2K"),
+            "{screen}"
+        );
+
+        let green = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "t" && c.fg == ratatui::style::Color::Green);
+        assert!(green.is_some(), "the result lost its colour");
+        let targets: Vec<&str> = buf
+            .content()
+            .iter()
+            .filter_map(|c| hyperlink::target_of(c.symbol()))
+            .collect();
+        assert_eq!(targets, ["https://example.com/log"]);
+
+        // `m` shows the source instead, markers and all.
+        app.on_key(crate::ui::tests::key(KeyCode::Char('m')));
+        let screen = hyperlink::visible(&draw_chat(&mut app, 100, 30));
+        assert!(screen.contains("Ran **all** of it"), "{screen}");
+    }
+
+    /// `[` brings the previous turn's header to the top and `]` walks back
+    /// towards the end, which is where the view opened.
+    #[test]
+    fn brackets_step_through_the_turns() {
+        let long = (0..40).map(|i| format!("line {i}\n\n")).collect::<String>();
+        let mut app = chat_app(&long, "ok");
+        draw_chat(&mut app, 80, 20);
+        let view = app.chat.as_ref().expect("open");
+        assert_eq!(view.back, 0);
+        let backs = view.turn_backs.clone();
+        assert_eq!(backs.len(), 2);
+
+        app.on_key(crate::ui::tests::key(KeyCode::Char('[')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[1]));
+        let top = hyperlink::visible(&draw_chat(&mut app, 80, 20));
+        // The row under the box's top border is the reply's own header.
+        let under_border = top.lines().skip_while(|l| !l.contains('╭')).nth(1);
+        assert!(under_border.is_some_and(|l| l.contains("Claude")), "{top}");
+
+        app.on_key(crate::ui::tests::key(KeyCode::Char('[')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[0]));
+        app.on_key(crate::ui::tests::key(KeyCode::Char(']')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[1]));
+        app.on_key(crate::ui::tests::key(KeyCode::Char(']')));
+        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(0));
     }
 
     #[test]

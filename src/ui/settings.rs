@@ -60,7 +60,7 @@ impl App {
         };
         let (current, _) = self.settings.value_of(name);
         match *name {
-            "notify" | "auto_update" => {
+            "notify" | "auto_update" | "warn_agents" => {
                 let on = current != "true";
                 self.write_setting("settings", name, Some(on.into()));
                 // The one setting with a live switch of its own, so the file
@@ -76,7 +76,7 @@ impl App {
                 let next = THEMES[at.map_or(0, |i| (i + 1) % THEMES.len())];
                 self.write_setting("settings", name, Some(next.into()));
             }
-            _ => self.settings_input = Some(current.trim_matches('"').to_string()),
+            _ => self.settings_input = Some(current.trim_matches('"').into()),
         }
     }
 
@@ -148,6 +148,22 @@ impl App {
                     self.write_setting("settings", name, Some(p.into()))
                 }
                 _ => self.set_status("compact_threshold is a percentage, 1 to 100"),
+            },
+            "alert_error_calls" => match text.parse::<i64>() {
+                Ok(n) if n >= 1 => self.write_setting("settings", name, Some(n.into())),
+                _ => self.set_status("alert_error_calls is a whole number, 1 or more"),
+            },
+            alert if alert.starts_with("alert_") => match text.parse::<f64>() {
+                Ok(v) if v.is_finite() && v >= 0.0 && (alert != "alert_errors" || v <= 100.0) => {
+                    // A whole number is written as one, so the file reads
+                    // `alert_cost = 20` rather than `20.0`.
+                    let value = match v.fract() == 0.0 && v < i64::MAX as f64 {
+                        true => toml_edit::Value::from(v as i64),
+                        false => toml_edit::Value::from(v),
+                    };
+                    self.write_setting("settings", name, Some(value))
+                }
+                _ => self.set_status(format!("{alert} is a number, 0 to turn it off")),
             },
             _ => self.write_setting("settings", name, Some(text.into())),
         }

@@ -24,6 +24,47 @@ fn gemini_id_tail(session_id: &str) -> Option<&str> {
     (tail.len() == 8 && tail.chars().all(|c| c.is_ascii_alphanumeric())).then_some(tail)
 }
 
+/// The report a session's hooks last made, however old, if they made one.
+fn hook_report<'a>(
+    hooked: &'a HashMap<String, crate::hook::Reported>,
+    session_id: &str,
+) -> Option<&'a crate::hook::Reported> {
+    if let Some(reported) = hooked.get(session_id) {
+        return Some(reported);
+    }
+    // Gemini CLI reports a full session id, but names the chat file it
+    // writes — which is the only identity cctop's rows have, because
+    // resuming reuses the id across disjoint files — after the *first eight
+    // characters* of it. Without this last step every Gemini event lands on
+    // no row at all.
+    let tail = gemini_id_tail(session_id)?;
+    hooked
+        .iter()
+        .find(|(id, _)| id.starts_with(tail))
+        .map(|(_, reported)| reported)
+}
+
+/// What the stall alert needs from a session's hooks.
+///
+/// Read off the last report whether or not it is still believed. A working
+/// claim lapses after a quarter of an hour of silence so that the row stops
+/// saying "busy" about a session nobody is running — but for the stall alert
+/// that silence is the finding, not a reason to stop looking. The row's own
+/// state, which does honour the lapse, is checked beside it.
+fn stall_view(
+    hooked: &HashMap<String, crate::hook::Reported>,
+    session_id: &str,
+) -> crate::alert::Hooked {
+    use crate::alert::Hooked;
+    use crate::hook::Signal;
+    match hook_report(hooked, session_id).map(|r| r.signal) {
+        None => Hooked::Unknown,
+        Some(Signal::Busy | Signal::Started) => Hooked::Working,
+        Some(Signal::Acting | Signal::Compacting) => Hooked::InFlight,
+        Some(Signal::NeedsInput | Signal::Idle | Signal::Ended) => Hooked::Quiet,
+    }
+}
+
 impl App {
     /// Promote every held permission prompt whose grace has expired, and say
     /// whether any had.
@@ -57,6 +98,45 @@ impl App {
         // notification saying there is nowhere to look.
         self.notify.link_base = self.serving.as_ref().map(|s| s.best().to_string());
         self.notify.observe(&self.sessions);
+
+        let hooked = &self.hooked;
+        let fired = self.alerts.observe(
+            &self.settings.alert_rules(),
+            &self.sessions,
+            self.stats.spend_today,
+            |s| stall_view(hooked, &s.session_id),
+            Instant::now(),
+            chrono::Utc::now(),
+        );
+        self.announce_alerts(fired);
+    }
+
+    /// Tell the user about the alerts that just fired: a toast each, whether
+    /// or not `w` is on — the thresholds are the opt-in, and a toast is quiet —
+    /// and one bell for the lot when it is.
+    ///
+    /// One bell, as with the sessions that finish together: three rings in a
+    /// row is noise, and the toasts already name every one.
+    fn announce_alerts(&mut self, fired: Vec<crate::alert::Fired>) {
+        let Some(first) = fired.first() else {
+            return;
+        };
+        if self.notify.enabled {
+            let more = match fired.len() - 1 {
+                0 => String::new(),
+                n => format!(" (+{n} more)"),
+            };
+            crate::notify::ring(&format!("cctop: {}{more}", first.text));
+        }
+        for alert in fired {
+            crate::elog::event(
+                "alert",
+                alert.kind_name(),
+                serde_json::json!({ "text": alert.text, "session": alert.key }),
+            );
+            self.notify.post_event("alert", &alert.text);
+            self.set_status(alert.text);
+        }
     }
 
     /// A quota window that just opened back up.
@@ -97,11 +177,12 @@ impl App {
             return;
         };
         let key = rang.key.clone();
+        self.reveal(&key);
         // The parent row, not a child of it: the bell rang for the session.
         match self
             .visible
             .iter()
-            .position(|&r| !r.is_subagent() && self.sessions[r.session()].key() == key)
+            .position(|&r| matches!(r, Row::Session(i) if self.sessions[i].key() == key))
         {
             Some(row) => {
                 self.selected = row;
@@ -331,21 +412,9 @@ impl App {
         // Checked here as well as in the sweep: the sweep runs when an event
         // arrives, and a session that has gone silent is precisely the one that
         // sends none — so between events the map still holds the stale claim.
-        if let Some(reported) = self.hooked.get(session_id) {
-            let show = reported.is_current() && reported.is_settled();
-            return show.then_some(reported.signal);
-        }
-        // Gemini CLI reports a full session id, but names the chat file it
-        // writes — which is the only identity cctop's rows have, because
-        // resuming reuses the id across disjoint files — after the *first eight
-        // characters* of it. Without this last step every Gemini event lands on
-        // no row at all.
-        let tail = gemini_id_tail(session_id)?;
-        self.hooked
-            .iter()
-            .find(|(id, _)| id.starts_with(tail))
-            .filter(|(_, reported)| reported.is_current() && reported.is_settled())
-            .map(|(_, reported)| reported.signal)
+        hook_report(&self.hooked, session_id)
+            .filter(|reported| reported.is_current() && reported.is_settled())
+            .map(|reported| reported.signal)
     }
 
     /// What has been reported about the agent running as `pid`, if anything.
@@ -1093,5 +1162,56 @@ mod tests {
         app.jump_to_bell();
         assert_eq!(app.selected, 0);
         assert!(app.status().is_some());
+    }
+
+    /// An alert reaches the user as a toast on the refresh that sees the
+    /// crossing, and the row keeps its marker after the toast has gone — but
+    /// the next refresh, still over, says nothing new.
+    #[test]
+    fn an_alert_crossing_is_toasted_once_and_marked_while_it_holds() {
+        let mut app = test_app();
+        app.settings = crate::settings::Settings::parse("[settings]\nalert_cost = 5\n");
+        app.sessions = vec![session("a", true, "proj")];
+        app.sessions[0].total_cost = Some(1.0);
+        app.check_bells();
+        assert_eq!(app.toasts.latest(), None);
+
+        app.sessions[0].total_cost = Some(6.0);
+        app.check_bells();
+        let said = app.toasts.latest().map(str::to_string);
+        assert!(
+            said.as_deref().is_some_and(|t| t.contains("$6.00")),
+            "{said:?}"
+        );
+        let key = app.sessions[0].key();
+        assert_eq!(app.alerts.marker(&key), Some(crate::alert::Kind::Cost));
+
+        app.toasts = toast::Toasts::default();
+        app.check_bells();
+        assert_eq!(app.toasts.latest(), None, "still over is not news");
+        assert_eq!(app.alerts.marker(&key), Some(crate::alert::Kind::Cost));
+    }
+
+    /// The stall alert reads the hooks' last word even once the row has
+    /// stopped believing it, and a finished turn is never a stall.
+    #[test]
+    fn a_stall_reads_the_last_hook_report_however_old() {
+        use crate::alert::Hooked;
+        use crate::hook::Signal;
+        let report = |signal, age| crate::hook::Reported {
+            signal,
+            cwd: String::new(),
+            permission: None,
+            at: Instant::now() - std::time::Duration::from_secs(age),
+            provisional: false,
+        };
+        let mut hooked = HashMap::new();
+        assert_eq!(stall_view(&hooked, "a"), Hooked::Unknown);
+        hooked.insert("a".to_string(), report(Signal::Busy, 3_600));
+        assert_eq!(stall_view(&hooked, "a"), Hooked::Working);
+        hooked.insert("a".to_string(), report(Signal::Acting, 0));
+        assert_eq!(stall_view(&hooked, "a"), Hooked::InFlight);
+        hooked.insert("a".to_string(), report(Signal::Idle, 0));
+        assert_eq!(stall_view(&hooked, "a"), Hooked::Quiet);
     }
 }

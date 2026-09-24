@@ -29,7 +29,7 @@ impl App {
             self.set_status("`default` is ~/.claude itself — name this account something else");
             return;
         }
-        self.add_account.name = name;
+        self.add_account.name = name.into();
         self.add_account.named = true;
         self.needs_redraw = true;
     }
@@ -116,7 +116,7 @@ impl App {
                 flow.pane = None;
                 flow.outcome = Some(
                     crate::quota::save_token(&flow.name, &token)
-                        .map(|()| flow.name.clone())
+                        .map(|()| flow.name.to_string())
                         .map_err(|e| format!("Could not save the token: {e}")),
                 );
                 return;
@@ -133,7 +133,7 @@ impl App {
                 // Gone, not left on screen: it succeeded, and the popup's
                 // outcome says so better than its last frame.
                 flow.pane = None;
-                Ok(flow.name.clone())
+                Ok(flow.name.to_string())
             }
             // Left on screen rather than dropped: whatever it said before it
             // went is the explanation.

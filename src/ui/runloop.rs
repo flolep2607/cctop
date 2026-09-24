@@ -675,7 +675,14 @@ fn event_loop(
         if let Some(note) = app.focused_pane().and_then(tabs::Pane::answer_bell) {
             app.set_status(note);
         }
-        let closed = app.tabs.iter_mut().fold(false, |any, tab| tab.reap() | any);
+        let mut saved = Vec::new();
+        let closed = app
+            .tabs
+            .iter_mut()
+            .fold(false, |any, tab| tab.reap(&mut saved) | any);
+        for (path, finished) in &saved {
+            app.set_status(crate::cast::stopped_message(path, finished));
+        }
         if closed {
             app.drop_empty_tabs();
         }
@@ -715,9 +722,10 @@ fn event_loop(
         // a channel nothing polls but this, and until it does the corner has a
         // spinner to turn.
         app.needs_redraw |= app.tick_share();
-        // The insight report's spinner turns on the same terms, and so does
-        // the conversation view's.
-        app.needs_redraw |= app.insight_loading() || app.chat_loading();
+        // The insight report's spinner turns on the same terms, and so do
+        // the conversation view's and the empty table's during the first scan.
+        let scanning = !app.loaded && app.tab == 0;
+        app.needs_redraw |= app.insight_loading() || app.chat_loading() || scanning;
 
         // A pulsing tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only
@@ -774,11 +782,14 @@ fn event_loop(
         };
         // A spinner that advances five times a second reads as a stutter. While
         // one is turning the loop wakes at its frame rate instead.
-        let idle_wait =
-            match app.share_opening.is_some() || app.insight_loading() || app.chat_loading() {
-                true => idle_wait.min(Duration::from_millis(100)),
-                false => idle_wait,
-            };
+        let idle_wait = match app.share_opening.is_some()
+            || app.insight_loading()
+            || app.chat_loading()
+            || scanning
+        {
+            true => idle_wait.min(Duration::from_millis(100)),
+            false => idle_wait,
+        };
         // Anything in the bar moving wants frames at its own rate, and gets
         // them only while it moves: once the last tab stops asking and the
         // last sweep is done, the wait is back to what it was, and the

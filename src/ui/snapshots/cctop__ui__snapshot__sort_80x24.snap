@@ -1,0 +1,29 @@
+---
+source: src/ui/snapshot.rs
+assertion_line: 346
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate   ╭ Sort by ───────────────────────────────────────────╮            │
+│Today       │                                                    │ 4 · 2 live │
+│This month  │ LAST ▲                                             │   3.2%     │
+│All time    │ DUR                                                │ 592 MB     │
+╰────────────│ $                                                  │────────────╯
+╭ Sessions (4│ $/1H                                               │────────────╮
+│   LAST▲    │ $/24H                                              │ PROJECT    │
+│●    now    │ CTX%                                               │ Fix the ch…┃
+│●     7m    │ CPU%                                               │ api        │
+╰────────────│ MEM                                                │────────────╯
+╭ Info  Perfo│ TOOLS                                              │fig  Context╮
+│Root /usr/bi│ ERR%                                               │            │
+│    PID    C│ TOKENS                                             │            │
+│   4101    9│ TOK/m                                              │            │
+│   4188    2│ MODEL                                              │            │
+│   4290    0│ HARNESS                                            │            │
+│            │ PERM                                               │            │
+╰────────────│ !                                                  │────────────╯
+╭ Limits ────│ HOST                                               │─ + account ╮
+│Claude check│ USER                                               │            │
+╰────────────╰────────────────────────────────────────────────────╯────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

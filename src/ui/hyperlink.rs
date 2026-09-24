@@ -199,7 +199,7 @@ pub(super) fn link_shown(
 /// console knows only the palette commands under `ESC ]`, and anything else
 /// drops it back to printing — so the URL would land on screen as text, over
 /// whatever was drawn after the link.
-fn supported() -> bool {
+pub(super) fn supported() -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUPPORTED.get_or_init(|| supported_by(std::env::var("TERM").ok().as_deref()))
 }

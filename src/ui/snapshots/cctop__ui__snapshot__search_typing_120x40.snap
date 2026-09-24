@@ -1,0 +1,44 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68% · claude-sonnet-4-5 32%        │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
+│This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (1/4) ──────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   LAST▲         $   CTX% MODEL          HARNESS    PERM   ! HOST       USER      PROFILE   BRANCH       PROJECT      │
+│●     7m     $2.87    29% sonnet-4-5     ─          ─        local                          ─            api          │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                            ╭ Filter sessions ───────────────────────────────────────────╮                            │
+│                            │ > ap█                                                      │                            │
+│                            │ 1 of 4 sessions                                            │                            │
+│                            │ ○ Columns only — Tab also searches transcripts             │                            │
+│                            │ Enter apply   Esc cancel                                   │                            │
+╰────────────────────────────╰────────────────────────────────────────────────────────────╯────────────────────────────╯
+╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  ──────────────────────────────────────╮
+│Root /usr/bin/claude                                                                                                  │
+│    PID    CPU%       MEM  COMMAND                                                                                    │
+│   5120    0.4%    180.0M  claude                                                                                     │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                                            Codex checking…                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark Esc Clear filter a Attach R Resume ? Help t New tab  Filter: ap           ⧉ share

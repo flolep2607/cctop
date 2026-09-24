@@ -168,11 +168,18 @@ since that is a second install and not a fault.
 
 **`cctop hook` cannot break your session.** An agent reads a hook's exit code as
 a decision — exit 2 blocks the tool call — so this one exits 0 unconditionally,
-writes nothing to stdout, and is bounded by a 250ms deadline covering the whole
-exchange, on a thread the process abandons if it overruns. No cctop running, a
+writes nothing to stdout that could be read as a decision, and is bounded by a
+250ms deadline covering the whole exchange, on a thread the process abandons if
+it overruns. No cctop running, a
 stale socket, malformed input, a wedged cctop, an outright panic: every one of
 them is a silent, prompt success. Dropping an event is always cheaper than
 stalling an agent.
+
+Its stdout stays empty but for two answers that decide nothing: the documented
+no-op `{"continue": true}` for `Stop` and `SubagentStop`, and — only if you turn
+on `warn_agents` — a note on a file write that another running agent wrote the
+same file moments ago. See
+[Telling the second agent](the-table.md#telling-the-second-agent).
 
 ## Letting agents see each other
 
