@@ -22,6 +22,10 @@ pub(super) const TAB_NAME_MAX: usize = 64;
 /// is matched against, minus the need to store it anywhere.
 const SWITCH_FILTER_MAX: usize = 64;
 
+/// Longest query the help filter takes. Its longest line is well under this;
+/// a query past it cannot match anything, so it would only be a paste.
+const HELP_FILTER_MAX: usize = 80;
+
 /// Longest line the send box takes: a prompt, not a document — anything
 /// longer belongs in the agent's own composer, where it can be read back.
 const SEND_MAX: usize = 500;
@@ -110,8 +114,15 @@ impl App {
         // too few to also carry the splits.
         // Except while the settings panel waits for a key to bind: then Alt+n
         // is the answer, not a new tab.
+        //
+        // And except for the letters readline gives Alt, while a field is being
+        // typed in: Alt+B there is a word back, not the next tab that rang —
+        // which is still a keystroke away once Enter or Esc puts the field
+        // down.
+        let readline = matches!(key.code, KeyCode::Char('b' | 'f' | 'd'));
         if key.modifiers.contains(KeyModifiers::ALT)
             && !self.settings_capture
+            && !(readline && self.typing())
             && self.on_key_workspace(key)
         {
             return;
@@ -352,6 +363,15 @@ impl App {
                     paste_into(input, text, SETTING_MAX);
                 }
             }
+            // A paste into the help is a paste into its filter, typing or not:
+            // nothing else on the page could want text.
+            Mode::Help => {
+                let pasted = paste_into(&mut self.help_filter, text, HELP_FILTER_MAX);
+                self.help_typing |= pasted;
+                if pasted {
+                    self.help_scroll = 0;
+                }
+            }
             _ => {}
         }
     }
@@ -496,6 +516,26 @@ impl App {
     /// The multiplexer keys, live everywhere including inside a pane. Returns
     /// false for an Alt- combination that means nothing here, so it still
     /// reaches the agent.
+    /// Whether the keyboard is going into a text field just now, rather than
+    /// driving a list — the question behind giving readline its Alt letters.
+    pub(super) fn typing(&self) -> bool {
+        match self.mode {
+            Mode::Search
+            | Mode::CostFilter
+            | Mode::SendKeys
+            | Mode::RenameTab
+            | Mode::SwitchTab
+            | Mode::LaunchCwd => true,
+            Mode::AddAccount => {
+                let flow = &self.add_account;
+                flow.pane.is_none() && flow.outcome.is_none() && !flow.named
+            }
+            Mode::Settings => self.settings_input.is_some() && !self.settings_capture,
+            Mode::Help => self.help_typing,
+            _ => false,
+        }
+    }
+
     fn on_key_workspace(&mut self, key: KeyEvent) -> bool {
         match key.code {
             // Shifted, the arrows carry the tab instead of moving between them
@@ -523,6 +563,9 @@ impl App {
                 None => return false,
             },
             KeyCode::Char('w') => self.close_pane(),
+            // Not taken on the dashboard, where there is no pane to zoom, so
+            // it still reaches whatever would have read it there.
+            KeyCode::Char('z') if self.tab > 0 => self.toggle_zoom(),
             // Shifted for the same reason as `W`, and because `r` renames: the
             // agent is ended and resumed, on whatever version is now installed.
             // On the dashboard it restarts the selected row's tab, and only from
@@ -641,94 +684,6 @@ impl App {
         }
     }
 
-    /// Scroll the conversation, page further back into it, or close it.
-    ///
-    /// Like the insight overlay there is nothing here that can touch the
-    /// session: it is a transcript being read, not a terminal being driven.
-    /// `back` is a distance from the end rather than a position from the top,
-    /// so a turn landing mid-read does not shift the text under the cursor.
-    fn on_key_conversation(&mut self, key: KeyEvent) {
-        const PAGE: u16 = 20;
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::List;
-                self.chat = None;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.back.saturating_sub(1);
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = (view.back + 1).min(view.max_back);
-                }
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.back.saturating_sub(PAGE);
-                }
-            }
-            KeyCode::PageUp => {
-                if let Some(view) = &mut self.chat {
-                    view.back = (view.back + PAGE).min(view.max_back);
-                }
-            }
-            // Home is the transcript's start, End the live edge it opened on.
-            KeyCode::Home => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.max_back;
-                }
-            }
-            KeyCode::End => {
-                if let Some(view) = &mut self.chat {
-                    view.back = 0;
-                }
-            }
-            // A turn at a time: the reply you opened on is usually one `[`
-            // away, however much tool output sits under it.
-            KeyCode::Char('[') => {
-                if let Some(view) = &mut self.chat {
-                    let older = view.turn_backs.iter().copied().filter(|&b| b > view.back);
-                    if let Some(back) = older.min() {
-                        view.back = back;
-                    }
-                }
-            }
-            KeyCode::Char(']') => {
-                if let Some(view) = &mut self.chat {
-                    let newer = view.turn_backs.iter().copied().filter(|&b| b < view.back);
-                    view.back = newer.max().unwrap_or(0);
-                }
-            }
-            // The source, for when what matters is the exact characters.
-            KeyCode::Char('m') => {
-                if let Some(view) = &mut self.chat {
-                    view.raw = !view.raw;
-                }
-            }
-            // `u` for "earlier": the window grows at the top, which a
-            // bottom-anchored scroll survives without moving a line.
-            KeyCode::Char('u') => {
-                let wants = self.chat.as_ref().is_some_and(|v| {
-                    !v.fetching && v.conversation.as_ref().is_some_and(|c| c.earlier > 0)
-                });
-                if wants {
-                    let before = self
-                        .chat
-                        .as_ref()
-                        .and_then(|v| v.conversation.as_ref())
-                        .and_then(|c| c.turns.first().map(|t| t.seq));
-                    if let Some(seq) = before {
-                        self.fetch_chat(Some(seq));
-                    }
-                }
-            }
-            _ => {}
-        }
-        self.needs_redraw = true;
-    }
-
     fn on_key_hooks(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
@@ -817,12 +772,37 @@ impl App {
     }
 
     /// The help text is longer than most terminals are tall, so the navigation
-    /// keys scroll it and everything else still dismisses it.
+    /// keys scroll it, `/` narrows it, and everything else still dismisses it.
+    ///
+    /// Esc peels: a filter first, then the page. Closing on the Esc that was
+    /// meant to clear a query would throw away the page you had just found
+    /// your way to; clearing it on the way out costs one more press.
     fn on_key_help(&mut self, key: KeyEvent) {
         let step = |app: &mut App, delta: i32| {
             app.help_scroll =
                 (app.help_scroll as i32 + delta).clamp(0, app.help_max_scroll as i32) as u16;
         };
+        if self.help_typing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.help_filter.clear();
+                    self.help_typing = false;
+                    self.help_scroll = 0;
+                }
+                // Done typing, filter kept: the letters scroll again.
+                KeyCode::Enter => self.help_typing = false,
+                KeyCode::Up => step(self, -1),
+                KeyCode::Down => step(self, 1),
+                KeyCode::PageUp => step(self, -(PAGE as i32)),
+                KeyCode::PageDown => step(self, PAGE as i32),
+                _ => {
+                    if self.help_filter.key(key, HELP_FILTER_MAX).changed() {
+                        self.help_scroll = 0;
+                    }
+                }
+            }
+            return;
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => step(self, -1),
             KeyCode::Down | KeyCode::Char('j') => step(self, 1),
@@ -830,9 +810,18 @@ impl App {
             KeyCode::PageDown | KeyCode::Char(' ') => step(self, PAGE as i32),
             KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.help_scroll = self.help_max_scroll,
+            // Back into the query that is there, with the cursor at its end,
+            // rather than a fresh one: `/` after Enter is how a filter gets
+            // refined.
+            KeyCode::Char('/') => self.help_typing = true,
+            KeyCode::Esc if !self.help_filter.is_empty() => {
+                self.help_filter.clear();
+                self.help_scroll = 0;
+            }
             _ => {
                 self.mode = Mode::List;
                 self.help_scroll = 0;
+                self.help_filter.clear();
             }
         }
     }
@@ -1064,8 +1053,9 @@ impl App {
     /// The tab-rename field, which is also the tab-colour field.
     ///
     /// The arrows were the colour row's before the name had a cursor, and they
-    /// still are: the name moves with Home and End, Ctrl+A and Ctrl+E, and by
-    /// word with Ctrl+← and Ctrl+→, while a plain arrow paints. Enter applies
+    /// still are: the name moves with Ctrl+B and Ctrl+F, Home and End, Ctrl+A
+    /// and Ctrl+E, and by word with Ctrl+← and Ctrl+→, while a plain arrow
+    /// paints. Enter applies
     /// whichever half changed; an empty name is still not a name, so pressing
     /// it with nothing typed only ever moved the colour, never blanks the tab.
     fn on_key_rename(&mut self, key: KeyEvent) {
@@ -1226,6 +1216,12 @@ impl App {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Up => self.step_switch(-1),
             KeyCode::Down => self.step_switch(1),
+            // The state filter, the one thing here that is not spelled. Back
+            // to the top for the same reason as a change to the name.
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.switch_state = self.switch_state.step(key.code == KeyCode::BackTab);
+                self.switch_cursor = 0;
+            }
             KeyCode::Enter => {
                 self.mode = Mode::List;
                 if let Some(&tab) = self.switch_matches().get(self.switch_cursor) {
@@ -1258,6 +1254,9 @@ impl App {
     /// the tab it is already on.
     fn switch_prompt(&mut self) {
         self.switch_filter.clear();
+        // Every tab, every time it opens: a state filter left over from last
+        // time would be tabs missing from a list that looks like the bar.
+        self.switch_state = Default::default();
         self.switch_cursor = self
             .switch_matches()
             .iter()
@@ -1752,11 +1751,28 @@ impl App {
         // so it answers the mouse itself: the wheel reads it and a click puts
         // it away. Over a pane this is what keeps a click from reaching the
         // agent the sheet is drawn on top of.
+        // The reader covers the whole screen, so the wheel is its wherever
+        // the pointer is.
+        if self.mode == Mode::Conversation {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.on_wheel_conversation(true),
+                MouseEventKind::ScrollDown => self.on_wheel_conversation(false),
+                _ => {}
+            }
+            return;
+        }
         if self.mode == Mode::Help {
             match ev.kind {
                 MouseEventKind::ScrollUp => self.on_key_help(KeyEvent::from(KeyCode::Up)),
                 MouseEventKind::ScrollDown => self.on_key_help(KeyEvent::from(KeyCode::Down)),
-                MouseEventKind::Down(_) => self.on_key_help(KeyEvent::from(KeyCode::Esc)),
+                // Away in one click, filter or not: Esc peels a filter off
+                // first, but a click has no second click it is the first of.
+                MouseEventKind::Down(_) => {
+                    self.mode = Mode::List;
+                    self.help_scroll = 0;
+                    self.help_filter.clear();
+                    self.help_typing = false;
+                }
                 _ => {}
             }
             return;
@@ -1989,6 +2005,12 @@ impl App {
                     }
                 }
             }
+            // A press or a drag on a scrollbar goes where it points: the
+            // table's to that row, a panel's to that part of its text. The
+            // drag is what makes the bar a handle, so it is answered on the
+            // track alone — a drag that wanders off it asks for nothing.
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+                if self.on_scrollbar(ev.column, ev.row, layout) => {}
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.bottom_tab == 3
                     && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
@@ -2015,6 +2037,33 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Answer a press on the table's or the active panel's scrollbar, if
+    /// `(col, row)` is on one. False when it is not, so the click falls through
+    /// to whatever else is under it.
+    ///
+    /// The table's bar moves the selection rather than the view, because the
+    /// view follows the selection: a scroll that left the cursor behind would
+    /// be undone by the next frame.
+    fn on_scrollbar(&mut self, col: u16, row: u16, layout: &render::Layout) -> bool {
+        use super::scrollbar;
+        if let Some(track) = scrollbar::hit(layout.table_track, col, row) {
+            let last = self.visible.len().saturating_sub(1);
+            self.selected = scrollbar::position_at(track, row, last);
+            self.ensure_available_tab();
+            self.needs_redraw = true;
+            return true;
+        }
+        if let Some(track) = scrollbar::hit(layout.panel_track, col, row) {
+            let target = scrollbar::position_at(track, row, self.panel_max_scroll as usize);
+            // From the top, so the step is the target itself; the panel's own
+            // clamp and Tool Activity's follow pin then behave as for a key.
+            self.scroll_active_panel(i32::MIN);
+            self.scroll_active_panel(target as i32);
+            return true;
+        }
+        false
     }
 }
 
@@ -2216,6 +2265,54 @@ mod tests {
         );
         assert_eq!(app.selected, 2, "a click cannot reach the row it landed on");
         assert_eq!(app.mode, Mode::Search, "the click closed the search box");
+    }
+
+    /// A press on the table's bar picks the row at that point of the list and a
+    /// drag carries it along; a press on a panel's bar scrolls the panel. Beside
+    /// the bar the same click is an ordinary row click.
+    #[test]
+    fn a_click_on_a_scrollbar_goes_where_it_points() {
+        use ratatui::layout::Rect;
+        let mut app = test_app();
+        for i in 0..30 {
+            app.sessions.push(crate::session::Session::new(
+                Provider::Claude,
+                format!("s{i}"),
+            ));
+        }
+        app.visible = (0..30).map(Row::Session).collect();
+        app.panel_max_scroll = 40;
+        app.bottom_tab = 0;
+        let layout = render::Layout {
+            rows_start: 7,
+            rows_end: 17,
+            bottom_start: 20,
+            table_track: Some(Rect::new(79, 7, 1, 10)),
+            panel_track: Some(Rect::new(79, 21, 1, 5)),
+            ..Default::default()
+        };
+        let at = |kind, column, row| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let press = event::MouseEventKind::Down(event::MouseButton::Left);
+        let drag = event::MouseEventKind::Drag(event::MouseButton::Left);
+
+        app.on_mouse(at(press, 79, 16), &layout);
+        assert_eq!(app.selected, 29, "the bottom of the bar is the last row");
+        app.on_mouse(at(drag, 79, 7), &layout);
+        assert_eq!(app.selected, 0, "dragged back to the top");
+        app.on_mouse(at(drag, 40, 12), &layout);
+        assert_eq!(app.selected, 0, "a drag off the bar asks for nothing");
+        app.on_mouse(at(press, 40, 9), &layout);
+        assert_eq!(app.selected, 2, "beside the bar a click is a row click");
+
+        app.on_mouse(at(press, 79, 25), &layout);
+        assert_eq!(app.info_scroll, 40);
+        app.on_mouse(at(press, 79, 21), &layout);
+        assert_eq!(app.info_scroll, 0);
     }
 
     /// Regression: `launch_prompt` set the mode and nothing asked for a frame, so
@@ -2556,10 +2653,14 @@ mod tests {
             app.on_key(key(KeyCode::Char(digit)));
             assert_eq!(app.bottom_tab, i, "key {digit} must select panel {i}");
         }
-        // One past the end changes nothing rather than selecting a phantom tab.
-        let past = char::from_digit(panels::TABS.len() as u32 + 1, 10).unwrap();
-        let before = app.bottom_tab;
-        app.on_key(key(KeyCode::Char(past)));
-        assert_eq!(app.bottom_tab, before);
+        // Nine panels spend every digit; a tenth would have no key of its own.
+        assert!(panels::TABS.len() <= 9, "a panel past 9 has no number key");
+        // One past the end changes nothing rather than selecting a phantom tab —
+        // asked while there is a digit past the end to press.
+        if let Some(past) = char::from_digit(panels::TABS.len() as u32 + 1, 10) {
+            let before = app.bottom_tab;
+            app.on_key(key(KeyCode::Char(past)));
+            assert_eq!(app.bottom_tab, before);
+        }
     }
 }

@@ -1,10 +1,11 @@
 ---
 source: src/ui/snapshot.rs
+assertion_line: 352
 expression: screen
 ---
  1:Dashboard │ + Tab (t)
 ╭ Overview ────────────────────────────────────────────────────────────────────╮
-│L╭ Help ────────────────────────────────────────────────────────────────────╮ │
+│L╭ Help ────────────────────────────────────────── cctop VERSION            ╮ │
 │T│Start here                                                                ┃ │
 │T│  Enter            Everything you can do to this row, in one menu         ┃ │
 │A│  ?  F1            This page                                              ┃ │
@@ -24,5 +25,5 @@ expression: screen
 ╰─│Acting on the selected session                                            │─╯
 ╭ │  a                Open its terminal in a tab                             │ ╮
 │C│  R                Resume it in a tab of its own                          │ │
-╰─╰ 1–19 of 126   ↑↓ scroll ─────────────────────────────────────────────────╯─╯
+╰─╰ 1–19 of 140   ↑↓ scroll ─────────────────────────────────────────────────╯─╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

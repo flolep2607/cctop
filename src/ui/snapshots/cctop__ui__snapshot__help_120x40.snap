@@ -1,10 +1,11 @@
 ---
 source: src/ui/snapshot.rs
+assertion_line: 352
 expression: screen
 ---
  1:Dashboard │ + Tab (t)
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Live rate         $0.╭ Help ────────────────────────────────────────────────────────────────────╮onnet-4-5 32%        │
+│Live rate         $0.╭ Help ────────────────────────────────────────── cctop VERSION            ╮claude-sonnet-4-5 32%│
 │Today             $8.│Start here                                                                ┃                     │
 │This month        $0.│  Enter            Everything you can do to this row, in one menu         ┃                     │
 │All time         $28.│  ?  F1            This page                                              ┃                     │
@@ -14,7 +15,7 @@ expression: screen
 │●    now     1h    $1│                                                                          ┃           Fix the c…│
 │●     7m     2h     $│Navigation                                                                ┃           api       │
 │○     3h     1h     $│  ↑/k  ↓/j         Move between sessions                                  ┃           docs      │
-│○     2d    12h     $│  PgUp / PgDn      Page through the list                                  ┃           infra     │
+│○     2d    12h     $│  PgUp / PgDn      Page through the list                                  │           infra     │
 │                     │  Ctrl+U / Ctrl+D  Half a page up / down                                  │                     │
 │                     │  g / G  Home / End Jump to first / last                                  │                     │
 │                     │  n / N            Next / previous search match (wraps)                   │                     │
@@ -27,18 +28,18 @@ expression: screen
 ╰─────────────────────│  s                Type a line into its terminal                          │─────────────────────╯
 ╭ Info  Performance  P│  O                Hand its context off to a different agent              │─────────────────────╮
 │Root /usr/bin/claude │  i                Read its conversation (works on remote rows)           │                     │
-│    PID    CPU%      │    [ / ]  m       In it: previous / next turn, markdown source           │                     │
-│   4101    9.8%    36│  y                Copy resume command or transcript path                 │                     │
-│   4188    2.4%     4│  e / E            Show its subagents / all subagents                     │                     │
-│   4290    0.3%      │  d                Delete it (only when it is not running)                │                     │
+│    PID    CPU%      │    / n N  [ ]     In it: search, next / previous hit, turn by turn       │                     │
+│   4101    9.8%    36│    ↵ t  m         In it: this turn's tools / all tools, source           │                     │
+│   4188    2.4%     4│  y                Copy resume command or transcript path                 │                     │
+│   4290    0.3%      │  e / E            Show its subagents / all subagents                     │                     │
+│                     │  d                Delete it (only when it is not running)                │                     │
 │                     │  Ctrl+K           Terminate it                                           │                     │
 │                     │                                                                          │                     │
 │                     │Several at once                                                           │                     │
 │                     │  Space            Mark / unmark the selected session                     │                     │
 │                     │  U                Clear all marks                                        │                     │
-│                     │  D                Delete all marked sessions                             │                     │
-╰─────────────────────│  K                Terminate all marked live sessions                     │─────────────────────╯
-╭ Limits ─────────────│  I                Idle view: live sessions quiet for idle_after          │────────── + account ╮
-│Claude checking…     │                   (6h by default), the biggest memory first              │                     │
-╰─────────────────────╰ 1–35 of 126   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
+╰─────────────────────│  D                Delete all marked sessions                             │─────────────────────╯
+╭ Limits ─────────────│  K                Terminate all marked live sessions                     │────────── + account ╮
+│Claude checking…     │  I                Idle view: live sessions quiet for idle_after          │                     │
+╰─────────────────────╰ 1–35 of 140   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

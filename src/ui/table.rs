@@ -254,6 +254,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                         deleting: app.deleting.contains(&key),
                         rang: app.notify.rang_recently(&key),
                         alert: app.alerts.marker(&key),
+                        done: app.seen.is_done(&key),
                         query: &query,
                         // Only sessions that have subagents get a marker, so the
                         // glyph is an offer rather than decoration on every row.
@@ -284,7 +285,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
 
     frame.render_widget(Paragraph::new(lines), list_area);
     // Beside the rows and not the header, which never scrolls.
-    super::scrollbar::draw(
+    layout.table_track = super::scrollbar::draw(
         frame,
         super::scrollbar::right_border(area, list_area.y, list_area.height),
         app.visible.len(),
@@ -334,6 +335,8 @@ struct RowState<'a> {
     rang: bool,
     /// The loudest `alert_*` threshold this session is still past.
     alert: Option<crate::alert::Kind>,
+    /// Its turn ended while you were not looking — see [`seen`](super::seen).
+    done: bool,
     /// Its deletion has been accepted but not yet confirmed.
     deleting: bool,
     /// The active filter, lowercased, for marking the cells that matched.
@@ -356,6 +359,7 @@ fn session_row(
         marked,
         rang,
         alert,
+        done,
         deleting,
         query,
         expand,
@@ -385,12 +389,18 @@ fn session_row(
         // crossed something, and the dot is where the eye already goes to ask
         // how a session is doing.
         let alert = alert.filter(|_| !deleting && !bell && c.id == ColumnId::Status);
+        // A finished turn you have not read yet, last of the dot's overrides:
+        // every one above is either leaving or a threshold with money on it,
+        // and this one keeps until you look.
+        let done = done && !deleting && !bell && alert.is_none() && c.id == ColumnId::Status;
         let text = if deleting && c.id == ColumnId::Status {
             "…".to_string()
         } else if bell {
             "◉".to_string()
         } else if let Some(kind) = alert {
             kind.glyph().to_string()
+        } else if done {
+            "✓".to_string()
         } else if c.id == ColumnId::Project {
             // Prefixed on the label rather than given a column of its own: one
             // more column costs every row two cells of width to serve the few
@@ -415,6 +425,8 @@ fn session_row(
                 _ => theme::colors().cost_mid,
             };
             base.fg(color).add_modifier(Modifier::BOLD)
+        } else if done {
+            base.fg(theme::colors().accent).add_modifier(Modifier::BOLD)
         } else if selected {
             if c.id == ColumnId::Status {
                 theme::selected().fg(cell_color(c.id, s, age_secs))
@@ -514,9 +526,9 @@ fn subagent_row(
 /// Bold where a session row is plain, and carrying only the columns a group
 /// has an answer for — its total cost, its latest activity, the branch a
 /// checkout has out. Averaging CPU or context across unrelated agents would be
-/// a figure that describes none of them. The count and how many are waiting go
-/// in the label, since no column is a count, and "two of these need you" is the
-/// thing worth reading off a folded heading.
+/// a figure that describes none of them. The count, how many are running and
+/// how many are waiting go in the label, since no column is a count, and "two
+/// of these need you" is the thing worth reading off a folded heading.
 fn group_row(
     g: &super::tree::Group,
     cols: &[&'static columns::Column],
@@ -556,8 +568,15 @@ fn group_row(
                     "sessions"
                 };
                 let mut label = format!("{indent}{fold} {}  {} {noun}", g.label, g.sessions);
+                // Waiting before running: a narrow PROJECT column truncates
+                // from the right, and "needs you" is the part worth keeping.
                 if g.waiting > 0 {
                     label.push_str(&format!(", {} waiting", g.waiting));
+                }
+                // Left out when none are, like the waiting count: a group of
+                // finished sessions says so by its hollow dot already.
+                if g.running > 0 {
+                    label.push_str(&format!(", {} running", g.running));
                 }
                 (label, None)
             }
@@ -778,6 +797,7 @@ mod tests {
             marked: false,
             rang,
             alert: None,
+            done: false,
             deleting: false,
             query: "",
             expand: None,
@@ -788,6 +808,39 @@ mod tests {
         assert_eq!(quiet.spans[0].content, "○ ");
         assert_eq!(rang.spans[0].content, "◉ ");
         assert_eq!(rang.spans[0].style.fg, Some(theme::colors().accent));
+    }
+
+    /// A turn that ended unseen has a dot of its own, told from the amber of
+    /// every other finished turn by shape — and it gives way to an alert,
+    /// which has money on it.
+    #[test]
+    fn a_turn_that_ended_unseen_wears_a_check() {
+        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        s.last_active = chrono::Utc::now().to_rfc3339();
+        s.process = Some(crate::proc::ProcInfo::default());
+        s.activity_state = crate::session::ActivityState::WaitingForInput;
+        let now = chrono::Utc::now();
+        let cols = all_columns();
+        let widths = column_widths(&cols, 200);
+        let row = |done, alert| RowState {
+            selected: false,
+            marked: false,
+            rang: false,
+            alert,
+            done,
+            deleting: false,
+            query: "",
+            expand: None,
+            indent: "",
+        };
+        let seen = session_row(&s, &cols, &widths, &row(false, None), &now);
+        assert_eq!(seen.spans[0].content, "● ");
+        let unseen = session_row(&s, &cols, &widths, &row(true, None), &now);
+        assert_eq!(unseen.spans[0].content, "✓ ");
+        assert_eq!(unseen.spans[0].style.fg, Some(theme::colors().accent));
+        let both = row(true, Some(crate::alert::Kind::Cost));
+        let line = session_row(&s, &cols, &widths, &both, &now);
+        assert_eq!(line.spans[0].content, "$ ");
     }
 
     /// A session past an alert threshold says so on its dot, by shape as
@@ -804,6 +857,7 @@ mod tests {
             marked: false,
             rang,
             alert,
+            done: false,
             deleting: false,
             query: "",
             expand: None,
@@ -879,6 +933,7 @@ mod tests {
                 marked: false,
                 rang: false,
                 alert: None,
+                done: false,
                 deleting: false,
                 query: "",
                 expand: Some('▾'),
@@ -978,6 +1033,7 @@ mod tests {
                 marked: false,
                 rang: false,
                 alert: None,
+                done: false,
                 deleting: false,
                 query: "",
                 expand: None,
@@ -991,6 +1047,17 @@ mod tests {
 
         let text: String = heading.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("▾ ~/r  3 sessions, 1 waiting"), "{text}");
+        let project: Vec<_> = COLUMNS
+            .iter()
+            .filter(|c| c.id == ColumnId::Project)
+            .collect();
+        let wide = column_widths(&project, 80);
+        let alone = group_row(&g, &project, &wide, false, "", &now);
+        let label: String = alone.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            label.contains("3 sessions, 1 waiting, 2 running"),
+            "{label}"
+        );
         assert!(text.contains("$4.20"), "{text}");
         // Waiting outranks working in the heading's dot, as it does on a row.
         assert_eq!(heading.spans[0].style.fg, Some(theme::colors().cost_mid));

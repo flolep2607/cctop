@@ -42,6 +42,10 @@ const FIND_AGENT_EVERY: Duration = Duration::from_millis(500);
 pub enum Attention {
     /// The agent has stopped drawing: its turn is over and the prompt is yours.
     Idle,
+    /// [`Attention::Idle`], on a turn this cctop watched end while you were
+    /// not looking at it — news, where plain idle is only context. See
+    /// [`seen`](super::seen).
+    Done,
     /// The agent has explicitly asked something and is blocked on the answer.
     NeedsInput,
 }
@@ -475,6 +479,14 @@ pub struct Tab {
     /// swaps the pane or the `Shared` underneath, and the one thing still
     /// standing afterwards is the tab.
     pub restarted: Option<Instant>,
+    /// Whether the focused pane is drawn over the whole tab — `Alt+z`.
+    ///
+    /// A mode of the tab rather than a mark on one pane, so it follows the
+    /// keyboard: `Alt+o` while zoomed shows the next pane zoomed, the way
+    /// flipping through full-screen terminals should feel, and `Alt+b`'s walk
+    /// through a split lands on the pane that asked with it on screen. See
+    /// [`Tab::zoomed`] for why it is read through a method.
+    zoom: bool,
 }
 
 impl Tab {
@@ -486,6 +498,7 @@ impl Tab {
             shared: None,
             color: None,
             restarted: None,
+            zoom: false,
         }
     }
 
@@ -500,6 +513,7 @@ impl Tab {
             // not know means nothing was painted, never a guess at a colour.
             color: agent.color.as_deref().and_then(Hue::from_name),
             restarted: None,
+            zoom: false,
             shared: Some(Shared {
                 label: agent.label.clone().unwrap_or_else(|| {
                     // No label recorded: an agent from a cctop older than this,
@@ -656,6 +670,39 @@ impl Tab {
         self.panes.get_mut(self.focus)
     }
 
+    /// Whether one pane is filling the tab.
+    ///
+    /// Only while there is more than one: zooming a lone pane changes nothing
+    /// on screen, and a marker in the bar that says otherwise would be a lie
+    /// — nor should closing a split down to one leave the flag set for the
+    /// next split to inherit as a surprise.
+    pub fn zoomed(&self) -> bool {
+        self.zoom && self.panes.len() > 1
+    }
+
+    /// Zoom the focused pane, or put the split back. Returns whether it is
+    /// zoomed now; `None` when there is nothing to zoom it over.
+    pub fn toggle_zoom(&mut self) -> Option<bool> {
+        if self.panes.len() < 2 {
+            self.zoom = false;
+            return None;
+        }
+        self.zoom = !self.zoom;
+        Some(self.zoom)
+    }
+
+    /// Add a pane to the split and give it the keyboard.
+    ///
+    /// Unzooms: asking for a split is asking to see both halves of it, and a
+    /// new pane born hidden behind a zoom would be an agent started out of
+    /// sight.
+    pub fn split(&mut self, pane: Pane, stacked: bool) {
+        self.stacked = stacked;
+        self.panes.push(pane);
+        self.focus = self.panes.len() - 1;
+        self.zoom = false;
+    }
+
     /// Move the keyboard to the next pane, wrapping.
     pub fn cycle_focus(&mut self) {
         if !self.panes.is_empty() {
@@ -787,6 +834,22 @@ impl Tab {
             // A held question outranks a finished turn: one of them is blocking
             // an agent, the other is only waiting on you when you get to it.
             .max_by_key(|a| matches!(a, Attention::NeedsInput))
+    }
+
+    /// The agents this tab speaks for in the bar: every pane's but the one you
+    /// are looking straight at, which is the same exclusion
+    /// [`Tab::attention`] makes. A detached tab speaks for the agent its
+    /// session carries.
+    pub fn unwatched_agents(&self, focused: bool) -> Vec<u32> {
+        if let Some(shared) = &self.shared {
+            return shared.pid.into_iter().collect();
+        }
+        self.panes
+            .iter()
+            .enumerate()
+            .filter(|(i, pane)| pane.is_agent && !(focused && *i == self.focus))
+            .map(|(_, pane)| pane.agent())
+            .collect()
     }
 
     /// Drop the panes whose agents have exited. True once nothing is left.

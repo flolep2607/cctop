@@ -336,7 +336,13 @@ fn styles(buffer: &Buffer) -> String {
 /// Snapshot `app` at both sizes, named `<name>_<cols>x<rows>`.
 fn snap(name: &str, app: &mut App) {
     for size in [LARGE, SMALL] {
-        let screen = text(&draw(app, size));
+        // The build on the help's border changes with every commit, which
+        // no snapshot can hold; the same width of placeholder keeps the frame.
+        let label = super::modals::build_label();
+        let screen = text(&draw(app, size)).replace(
+            &label,
+            &format!("{:<w$}", "cctop VERSION", w = label.chars().count()),
+        );
         // Caught here rather than in review: a frame that read this machine's
         // account passes locally, is committed, and fails on every other one.
         assert!(

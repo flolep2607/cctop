@@ -45,6 +45,22 @@ response is waiting for your input, and red when the newest transcript event is
 an API error. A hollow grey dot is a stopped session, and a filled `◉` is the
 session that rang in the last 30 seconds.
 
+A live session whose turn ended while you were not looking at it wears a `✓`
+in the accent colour instead of its amber dot: *done, unseen*. Amber says the
+prompt is yours, which is true of most agents most of the time; the check says
+this one has news since you last looked. It is cleared by looking, which means
+one of two things — its row is the selected one while the dashboard is on
+screen, or its pane is the focused pane of the tab you are on. A split's other
+pane does not count, for the same reason it still lights up the tab bar: you
+are not reading it. The tab bar carries the same `✓` after the tab's label,
+and `Alt+b` goes there once nothing is blocked on a question.
+
+The mark belongs to this cctop alone. A tab's name and colour follow it into
+every cctop on the machine, but having read a reply on your laptop says
+nothing about the cctop on your phone, so seen-ness is kept in memory and not
+written anywhere. It also only marks a turn it watched end: a cctop started
+after an agent went quiet has no news to report about it.
+
 A session past one of the `alert_*` thresholds you have set wears that alert
 in place of its dot for as long as it stays past it: `$` for its cost or burn
 rate, a red `!` for an error loop, `◌` for a working agent that has written
@@ -238,11 +254,11 @@ repository are two groups that fold separately.
 
 ```
    LAST       $  BRANCH  PROJECT
-●    4s  $18.40          ▾ ~/cctop  4 sessions, 1 waiting
-●    4s  $11.02  main    ├─ ▾ cctop (main)  2 sessions, 1 waiting
+●    4s  $18.40          ▾ ~/cctop  4 sessions, 1 waiting, 3 running
+●    4s  $11.02  main    ├─ ▾ cctop (main)  2 sessions, 1 waiting, 1 running
 ●    4s   $9.10  main    │  ├─ Improve super cctop
 ○    3h   $1.92  main    │  └─ Release 0.17.8
-●   12s   $7.38  tree    └─ ▾ .claude/worktrees/agent-a9c7  2 sessions
+●   12s   $7.38  tree    └─ ▾ .claude/worktrees/agent-a9c7  2 sessions, 2 running
 ●   12s   $5.01  tree       ├─ Tree view for the table
 ●    1m   $2.37  tree       └─ Search tiers
 ```
@@ -257,8 +273,8 @@ skips the second level. A directory outside any repository is a group of its
 own, and a row from another machine is grouped by host and directory, since
 the far filesystem is not there to ask.
 
-A heading carries what adds up: how many sessions are under it and how many of
-those are waiting on you, their total cost, the latest activity, and for a
+A heading carries what adds up: how many sessions are under it, how many of
+those are waiting on you and how many are running, their total cost, the latest activity, and for a
 checkout the branch it has out. Its dot is the loudest state beneath it, so a
 folded heading still shows red when something inside is asking a question.
 
@@ -270,8 +286,12 @@ other: no harness records that one session started another.
 
 Filtering shows the sessions that match with the headings above them, and a
 heading's totals count only what is shown. The sort applies inside each group,
-and groups are ordered by their best-placed session — a cost sort puts the
-repository with the dearest session first — without a group ever being split.
+and groups are ordered by the same column applied to the group. Where the
+column adds up — `$`, `$/1H`, `$/24H`, `TOKENS`, `TOK/m`, `TOOLS`, `CPU%`, `MEM` —
+that is the group's total, so a cost sort puts the repository that has cost
+the most first, three $4 agents ahead of one $9 one. Where it does not — age,
+context, a model name — it is the group's best-placed session. Either way a
+group is never split.
 `b` unfolds whatever is hiding the session that rang. The view and the folds
 are remembered across runs.
 
@@ -366,7 +386,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `W` | Share the agent's terminal to a browser (needs rmux, see [Driving agents](driving-agents.md)) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
-| `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
+| `1`–`9` | Jump to a panel directly; `9` is Preview, the selected row's tab live (see [The bottom panels](panels.md#preview)) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
 | `Shift+Home`/`End` | Jump to the top / bottom of that panel |
 | `f` | Follow mode: keep the selection centered |
@@ -386,6 +406,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |
 | `U` | Clear all marks |
 | `h` or `F8` | Agent integration: what reports to cctop, and install it |
+| `i` | Read the conversation, full-screen (see [Panels](panels.md#reading-the-conversation)) |
 | `y` | Copy resume command or transcript path |
 | `d` | Delete the selected session (not running) |
 | `k` | Terminate the selected live session (with confirmation) |
@@ -396,6 +417,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `a` | Open that session's terminal in a tab and drive it |
 | `t` | New tab: run an agent or a shell (see below) |
 | `Esc` | Clear the active filter |
+| `?` or `F1` | Help: every key on one page, as `[keys]` has bound them, with the version and commit on its border; `/` in it narrows the page (see below) |
 | `q` or `F10` | Quit |
 
 Tabs and splits, from anywhere including inside a running agent:
@@ -406,16 +428,26 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+v` / `Alt+s` | Split the current tab right / down |
 | `Alt+←` / `Alt+→` | Previous / next tab |
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
-| `Alt+t` | Pick a tab from a list, typing to narrow it |
-| `Alt+b` | Jump to the next tab whose agent needs you |
+| `Alt+t` | Pick a tab from a list, typing to narrow it and `Tab` to pick by state (see below) |
+| `Alt+b` | Jump to the next tab whose agent needs you, then to one whose turn ended unseen (`✓`) |
 | `Alt+r` | Rename or recolour the tab you are on |
 | `Alt+o` | Move focus to the next pane |
+| `Alt+z` | Zoom the focused pane to fill the tab, or put the split back (see below) |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `Alt+Shift+R` | Restart the pane's agent on the same session, after an update; on the dashboard, the selected row's tab |
 | `Alt+Shift+C` | Record the focused pane to an asciinema `.cast`; again to stop (see [Recording a pane](driving-agents.md#recording-a-pane)) |
 | `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
+
+`Alt+z` zooms the focused pane over the whole tab, and the bar marks the tab
+`⤢` while it is. The other panes keep running out of sight — their output is
+still read, so none of them stalls — but they are not resized: each agent goes
+on at the size it had in the split, so zooming costs the hidden ones no
+redraw. Only the zoomed agent is resized, once each way. `Alt+o` while zoomed
+moves the zoom to the next pane; splitting again unzooms, so a new agent is
+never started out of sight. An agent another cctop is also showing is drawn at
+the smaller of the two sizes, as always, so zooming cannot grow it past that.
 
 Every function key is cctop's, inside a pane as much as on the dashboard: none
 of them is passed to the agent. `F10` (quit) and `F5` (refresh) act where you
@@ -426,9 +458,63 @@ or a sort order over a pane would be drawn on a screen the agent is repainting.
 An unbound function key does nothing rather than reaching the agent as an escape
 sequence.
 
+The `Alt+t` picker narrows two ways at once. Whatever is typed matches tab
+names — every printable key is the name's, `j` and `k` included — and `Tab`
+cycles which tabs are listed by what their agents are doing: all of them, the
+ones that need you, the ones working, the ones idle; `Shift+Tab` goes back. The
+state in force is in the picker's title (`Go to tab · needs you`), and it opens
+on all of them every time. The tab you are on is filed by what it is doing too,
+though the bar leaves it uncoloured, because with the picker over it you are not
+looking at it. The dashboard is only listed under all.
+
+In the help, `/` starts a filter: the page narrows as you type to the entries
+that mention it, under their headings, with the query on the top border. It is
+a plain case-insensitive match that takes in the key column, so `ctrl+u` finds
+keys and `half a page` finds what they do; a heading that matches keeps its
+whole section. `Enter` stops typing and keeps the filter, so the arrows and
+`j`/`k` scroll the narrowed page, and `/` again goes back to editing it. `Esc`
+takes the filter off first and the page away second.
+
+### Typing in a box
+
+Every box that takes text — the `/` filter, the cost floor, the `s` send box,
+the tab name, the launcher's directory, the add-account name, a setting being
+changed, the `Alt+t` picker and the help filter — edits the way a shell prompt
+does, with readline's keys:
+
+| Key | Does |
+|---|---|
+| `←` / `→`, `Ctrl+B` / `Ctrl+F` | Move a character |
+| `Ctrl+←` / `Ctrl+→`, `Alt+B` / `Alt+F` | Move a word |
+| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | To the start / end |
+| `Backspace` or `Ctrl+H`, `Delete` or `Ctrl+D` | Delete a character before / after the cursor |
+| `Ctrl+W`, `Alt+Backspace` | Cut the word before the cursor |
+| `Alt+D`, `Ctrl+Delete` | Cut the word after it |
+| `Ctrl+U` / `Ctrl+K` | Cut to the start / to the end |
+| `Ctrl+Y` | Put the last cut back at the cursor |
+
+A word is letters, digits and `_`, so in a path each component is one. Cuts in a
+row add up — `Ctrl+W` twice and `Ctrl+Y` gives both words back — and they go to
+the box's own slot, not the system clipboard, so cutting never loses what you
+copied to paste. A paste goes in at the cursor, with its line breaks flattened
+to spaces. The cursor steps over an accented letter or an emoji as one thing,
+and a value wider than its box scrolls to keep the cursor in view, with `…`
+where it runs off.
+
+These keys are the box's only while one is open: on the table `Ctrl+U` and
+`Ctrl+D` still page, and `Alt+B` still jumps to the tab that needs you. Each box
+keeps the keys it already had — `↑`/`↓` for search history, `Tab` to complete a
+directory, the plain arrows to pick a colour in the rename box (its name moves
+by `Ctrl+B`/`Ctrl+F`, `Home`/`End` and `Ctrl+←`/`→` instead), digits only in the cost floor.
+
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+Anything that scrolls shows a scrollbar on its right border while it has more
+than fits, and only then. Click or drag along the table's bar to jump the
+selection to that point of the list, top to first row and bottom to last; the
+bottom panel's bar does the same for the panel's text.
 
 ### Settings and keybinds
 
@@ -457,6 +543,12 @@ bottom = "shift+down"    # ctrl+, alt+ and shift+ all work
 
 Only the session table's keys move. A modal's keys are the letters on its own
 buttons, and inside a pane the keyboard is the agent's.
+
+The help page follows what you bind: a moved key is shown where it now is, and
+an action whose key you gave to something else, without giving it another,
+reads `unbound` rather than naming a key that now does something different.
+A line the file has but cctop could not use — listed as a problem at the top of
+the `,` panel — moved nothing, and the help says so by not moving either.
 
 ### Pasting an image
 

@@ -28,10 +28,18 @@ pub(super) const THUMB: &str = "┃";
 /// Draw a scrollbar over `track` — one column, one cell per visible row — for
 /// `total` rows of which `visible` are shown from `offset`.
 ///
-/// Nothing is drawn when everything fits.
-pub(super) fn draw(frame: &mut Frame, track: Rect, total: usize, visible: usize, offset: usize) {
+/// Nothing is drawn when everything fits. Returns the track when a bar was
+/// drawn, for the caller to record as somewhere a click means "go here": a
+/// bar that answered clicks while invisible would be a trap on every border.
+pub(super) fn draw(
+    frame: &mut Frame,
+    track: Rect,
+    total: usize,
+    visible: usize,
+    offset: usize,
+) -> Option<Rect> {
     if total <= visible || visible == 0 || track.height == 0 || track.width == 0 {
-        return;
+        return None;
     }
     let max_offset = total - visible;
     // Positions, not rows: ratatui sizes the thumb as `viewport` over
@@ -47,6 +55,31 @@ pub(super) fn draw(frame: &mut Frame, track: Rect, total: usize, visible: usize,
         .thumb_symbol(THUMB)
         .thumb_style(Style::default().fg(theme::colors().accent));
     frame.render_stateful_widget(bar, track, &mut state);
+    Some(track)
+}
+
+/// The position a click on `track` at screen row `row` asks for, out of
+/// `0..=last`: the top cell is the first, the bottom cell the last, and the
+/// cells between share the rest evenly.
+///
+/// A jump to the spot rather than a page towards it, because the thumb is the
+/// share shown: pointing at where it should be is the one gesture the bar can
+/// answer exactly, and a page is already `PgUp`/`PgDn`. Rounded to the nearest
+/// so the middle cell of an odd track lands on the middle of the content.
+pub(super) fn position_at(track: Rect, row: u16, last: usize) -> usize {
+    let span = track.height.saturating_sub(1) as usize;
+    let at = row
+        .saturating_sub(track.y)
+        .min(track.height.saturating_sub(1)) as usize;
+    if span == 0 {
+        return 0;
+    }
+    (at * last + span / 2) / span
+}
+
+/// Whether the screen cell `(col, row)` is on `track`.
+pub(super) fn hit(track: Option<Rect>, col: u16, row: u16) -> Option<Rect> {
+    track.filter(|t| t.contains(ratatui::layout::Position::new(col, row)))
 }
 
 /// The right border of the bordered box `outer`, between its corners, from
@@ -70,9 +103,9 @@ pub(super) fn on_border(
     total: usize,
     visible: usize,
     offset: usize,
-) {
+) -> Option<Rect> {
     let track = right_border(outer, outer.y + 1, outer.height.saturating_sub(2));
-    draw(frame, track, total, visible, offset);
+    draw(frame, track, total, visible, offset)
 }
 
 #[cfg(test)]
@@ -94,10 +127,27 @@ pub(super) mod tests {
             .draw(|frame| {
                 let outer = frame.area();
                 frame.render_widget(Block::bordered(), outer);
-                on_border(frame, outer, total, 10, offset);
+                let _ = on_border(frame, outer, total, 10, offset);
             })
             .expect("draw");
         terminal.backend().buffer().clone()
+    }
+
+    /// The ends of the track are the ends of the content, whatever its length,
+    /// and a click off the track is clamped to it rather than past it.
+    #[test]
+    fn a_click_on_the_track_asks_for_its_share_of_the_content() {
+        let track = Rect::new(19, 1, 1, 10);
+        assert_eq!(position_at(track, 1, 99), 0);
+        assert_eq!(position_at(track, 10, 99), 99);
+        assert_eq!(position_at(track, 30, 99), 99);
+        assert_eq!(position_at(track, 0, 99), 0);
+        let mid = position_at(track, 5, 99);
+        assert!((40..=50).contains(&mid), "{mid}");
+        assert_eq!(position_at(Rect::new(0, 4, 1, 1), 4, 7), 0);
+        assert!(hit(Some(track), 19, 3).is_some());
+        assert!(hit(Some(track), 18, 3).is_none());
+        assert!(hit(None, 19, 3).is_none());
     }
 
     #[test]

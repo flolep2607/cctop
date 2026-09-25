@@ -3,10 +3,10 @@
 [← back to the README](../README.md)
 
 The panel under the table describes whichever session the cursor is on. `←` and
-`→` move between panels, `1`–`7` jump to one, `Tab` reaches Context, and
+`→` move between panels, `1`–`9` jump to one, `Tab` cycles through them, and
 `Shift+↑`/`↓` scrolls inside the active one.
 
-Two of them repay a closer look, and so does the conversation view `i` opens.
+Three of them repay a closer look, and so does the conversation view `i` opens.
 
 ## Tool Activity
 
@@ -44,29 +44,51 @@ line counts, `update_plan` shows progress and the step in flight, and
 
 ## Reading the conversation
 
-The panels summarise what a session did; `i` shows what it said. It opens an
-overlay on the selected row's transcript — a remote row's too, read over the
-same ssh link — at the end, so the agent's last reply is the first thing on
-screen.
+The panels summarise what a session did; `i` shows what it said — or `Enter`
+and **Read the conversation**. It opens the selected row's transcript
+full-screen, a remote row's too (read over the same ssh link), at the end, so
+the agent's last reply is the first thing on screen. It reads what `cctop
+serve`'s conversation page reads, so every harness that page shows is here, for
+the times you are on ssh with no browser to open.
 
+- **Each turn is headed by who spoke and when**: you in the accent colour, the
+  agent in its harness's, with the local time (and the date, for an older turn)
+  and how long ago. What you typed sits behind a bar in that same colour, so a
+  prompt is easy to find in a page of replies. Thinking is dim and italic; a
+  compaction is a rule across the page.
 - **Replies are rendered as markdown**: headings, bold and italic, inline code,
-  fenced blocks behind a gutter with their language named, lists, quotes,
+  fenced blocks on a shaded ground with their language named, lists, quotes,
   tables and rules. Links are OSC 8 hyperlinks, so a click opens them even when
   they wrap; on a terminal that cannot do that (`TERM=dumb` or `linux`) the URL
-  is printed after its label. What you typed is shown as you typed it.
+  is printed after its label. What you typed is shown as you typed it. Code is
+  not syntax-highlighted.
+- **Tool calls are one line each** until you open them: the tool, its argument,
+  and how many lines opening it would add. `Enter` opens the calls of the turn
+  you are reading; `t` opens every one.
 - **Tool output keeps its colours.** cargo's green, pytest's red and git's diff
   colours come through, folded to sixteen colours on a terminal that has only
   those and dropped under `NO_COLOR`. Anything else a program wrote — cursor
   moves, line erases, window titles — is removed, so it cannot scribble over the
   view. Expanded Tool Activity rows get the same treatment.
 
+A session paged back far with `u` can run to thousands of turns. It is laid
+out once for the terminal's width, and scrolling it lays nothing out again.
+
 | Key | In the conversation |
 |---|---|
-| `↑` `↓` `PgUp` `PgDn` `Home` `End` | Scroll |
+| `↑` `↓` / `j` `k` | Scroll a line (the wheel scrolls three) |
+| `PgUp` `PgDn` / `b` `Space` | Scroll a page |
+| `Ctrl+U` `Ctrl+D` | Half a page |
+| `g` `G` / `Home` `End` | The start / the end |
 | `[` / `]` | Previous / next turn, header at the top |
+| `/` | Search as you type; `Enter` keeps it, `Esc` goes back to where you were |
+| `n` / `N` | Next / previous match (wraps) |
+| `Enter` or `x` | Open or fold the tool calls of the turn at the top |
+| `t` | Open or fold every tool call |
 | `m` | Toggle between rendered markdown and its source |
 | `u` | Load earlier turns, when there are any |
-| `Esc` | Close |
+| `Esc` | Clear the search; with none, close |
+| `q` | Close |
 
 ## Context breakdown
 
@@ -120,6 +142,18 @@ When the estimate overshoots the window there is no gap to draw, and the panel
 says so instead of clamping: it means the harness has dropped context that the
 transcript still holds.
 
+Given the height, the bar folds into a **block map**, like a memory map of the
+window: the same cells in the same order, filling rows left to right and top to
+bottom, a quarter of the panel's rows and up to six. One row of eighty cells
+spends 2.5K of a 200K window per cell; four rows spend 625 tokens, which is the
+difference between a small category showing and vanishing. The footnote says
+what a cell is worth. Every category in the window gets at least one cell
+however small its share, so nothing in the legend is missing from the map. On
+the map, the free space past the auto-compaction threshold is drawn as `·`
+rather than a lone `┊`, because that is a region — room the harness reclaims
+before it is ever reached — and one marker cell is lost in a grid. A panel too
+short to spare the rows keeps the one-row bar.
+
 Under the bar, **How it filled** charts the window across every request the
 session made. The bar answers "what is in there"; the chart answers "how did it
 get that full", which is the part that changes what you do next. A window that
@@ -129,3 +163,26 @@ A sawtooth is a session living on compactions, paying to rebuild its context
 over and over. The chart spans the whole session rather than the live segment,
 because a compaction is the most interesting thing that can happen to a context
 window and it is the only view that can show one.
+
+## Preview
+
+The last panel, `9`, is the selected row's tab, watched from the dashboard: the
+agent's screen as it is right now, updating while you look, without leaving the
+table to see whether it has finished or is asking you something.
+
+It is a window, not a way in. Nothing typed on the dashboard reaches the agent,
+and the pane is not resized to fit the panel — the agent keeps drawing at the
+size its tab gave it, and the panel shows as much of that as fits. When the
+screen is taller than the panel, the bottom of what the agent has drawn is what
+stays, because that is where its prompt and its questions are. The bottom border
+names the tab and the key that goes to it, `Alt+2` onwards.
+
+A tab you have switched away from gives up its rmux client, so there is no
+screen of cctop's own to show. The panel asks rmux for the screen instead, twice
+a second and only while the panel is on show; that is a read, and rmux resizes
+nothing for it.
+
+A row with no tab says so in one line: `a` opens a running session's terminal in
+one, `R` resumes a stopped session in one, and either then shows here live. A
+row from [another machine](integrations.md#more-than-one-machine) has no tab
+here to show.

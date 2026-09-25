@@ -23,6 +23,12 @@
 //! are measured with `unicode-width`, so a wide character takes the two cells
 //! the terminal gives it.
 //!
+//! The keys are readline's, since that is the line editor the people using
+//! this have their fingers trained on: Ctrl+B and Ctrl+F by character, Alt+B
+//! and Alt+F by word, Ctrl+A and Ctrl+E to the ends, Ctrl+H and Ctrl+D either
+//! side of the cursor, Ctrl+W, Alt+D, Ctrl+U and Ctrl+K to cut, and Ctrl+Y
+//! to put the last cut back.
+//!
 //! ponytail: one line only. Every box is drawn in one strip, and a paste has
 //! its line breaks flattened before it gets here (see `input::flatten`) —
 //! including the send box's, whose Enter is what submits.
@@ -39,12 +45,39 @@ use unicode_width::UnicodeWidthStr;
 /// enforces it, and keeping it out of here is what lets a test, or the code
 /// that recalls history, assign a field with `"text".into()` without having to
 /// know it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct LineEdit {
     text: String,
     /// A byte offset into `text`, always on a grapheme boundary.
     cursor: usize,
+    /// What the last cut took, for Ctrl+Y to put back.
+    ///
+    /// This field's own, not the system clipboard: a cut is how a word gets
+    /// moved within a line, and one that also overwrote the clipboard would
+    /// lose whatever was copied to be pasted here in the first place. Kept
+    /// across [`LineEdit::clear`] and [`LineEdit::set`], as readline keeps
+    /// its kill ring across lines — the search box cleared and reopened can
+    /// still have back what was cut from it.
+    ///
+    /// ponytail: one slot, not a ring. Alt+Y cycling through older cuts is a
+    /// readline feature nobody reaches for in a box one line long.
+    kill: String,
+    /// The last key was a cut. A run of them adds up into one slot — Ctrl+W
+    /// twice yanks back both words — which is readline's rule, and the only
+    /// one under which cutting a phrase a word at a time is not a way to lose
+    /// all but its last word.
+    killing: bool,
 }
+
+/// Equal when they would draw the same: the cut slot is not part of what a
+/// field says.
+impl PartialEq for LineEdit {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.cursor == other.cursor
+    }
+}
+
+impl Eq for LineEdit {}
 
 /// What a key did to the field, for the callers that react to a change — the
 /// filter re-runs on one, the directory box re-suggests — and not to a move.
@@ -80,7 +113,11 @@ impl From<String> for LineEdit {
     /// The cursor at the end, where it is after typing the text.
     fn from(text: String) -> Self {
         let cursor = text.len();
-        LineEdit { text, cursor }
+        LineEdit {
+            text,
+            cursor,
+            ..Default::default()
+        }
     }
 }
 
@@ -128,9 +165,18 @@ impl LineEdit {
         self.cursor
     }
 
+    /// Empty the field. What was cut from it stays to be yanked back.
     pub(super) fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
+        self.set(String::new());
+    }
+
+    /// Replace the text, with the cursor at its end — where a recalled search
+    /// or a completed path leaves it. Unlike assigning a fresh field, this
+    /// keeps the cut slot.
+    pub(super) fn set(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor = self.text.len();
+        self.killing = false;
     }
 
     /// How many more characters fit under `cap`.
@@ -150,6 +196,8 @@ impl LineEdit {
     pub(super) fn insert_str(&mut self, s: &str, cap: usize) -> bool {
         let room = self.room(cap);
         let end = s.char_indices().nth(room).map_or(s.len(), |(i, _)| i);
+        // Anything typed or pasted between two cuts makes them two cuts.
+        self.killing = false;
         if end == 0 {
             return false;
         }
@@ -170,6 +218,7 @@ impl LineEdit {
     pub(super) fn key(&mut self, key: KeyEvent, cap: usize) -> Edit {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let killing = std::mem::take(&mut self.killing);
         let before = self.text.len();
         let moved = |to: usize, this: &mut Self| {
             this.cursor = to;
@@ -186,16 +235,31 @@ impl LineEdit {
             KeyCode::Char('f') if alt => moved(self.word_right(), self),
             KeyCode::Left => moved(self.prev_boundary(), self),
             KeyCode::Right => moved(self.next_boundary(), self),
+            KeyCode::Char('b') if ctrl => moved(self.prev_boundary(), self),
+            KeyCode::Char('f') if ctrl => moved(self.next_boundary(), self),
             // Ctrl+Backspace too: it is the word delete in every editor that
             // is not a terminal, and terminals that can tell it apart send it.
-            KeyCode::Backspace if ctrl || alt => self.delete_to(self.word_left()),
-            KeyCode::Char('w') if ctrl => self.delete_to(self.word_left()),
+            KeyCode::Backspace if ctrl || alt => self.kill_to(self.word_left(), killing),
+            KeyCode::Char('w') if ctrl => self.kill_to(self.word_left(), killing),
+            // Ctrl+H is what Backspace is on a terminal that sends BS rather
+            // than DEL, and crossterm reports it as the letter.
             KeyCode::Backspace => self.delete_to(self.prev_boundary()),
-            KeyCode::Delete if ctrl || alt => self.delete_to(self.word_right()),
-            KeyCode::Char('d') if alt => self.delete_to(self.word_right()),
+            KeyCode::Char('h') if ctrl => self.delete_to(self.prev_boundary()),
+            KeyCode::Delete if ctrl || alt => self.kill_to(self.word_right(), killing),
+            KeyCode::Char('d') if alt => self.kill_to(self.word_right(), killing),
             KeyCode::Delete => self.delete_to(self.next_boundary()),
-            KeyCode::Char('u') if ctrl => self.delete_to(0),
-            KeyCode::Char('k') if ctrl => self.delete_to(self.text.len()),
+            // Only ever reaches here from inside a field: on the table Ctrl+D
+            // is half a page down, and that is the table's handler, not this.
+            KeyCode::Char('d') if ctrl => self.delete_to(self.next_boundary()),
+            KeyCode::Char('u') if ctrl => self.kill_to(0, killing),
+            KeyCode::Char('k') if ctrl => self.kill_to(self.text.len(), killing),
+            KeyCode::Char('y') if ctrl => {
+                let kill = self.kill.clone();
+                match self.insert_str(&kill, cap) {
+                    true => Edit::Changed,
+                    false => Edit::Unchanged,
+                }
+            }
             // A letter with Ctrl or Alt held is a command this editor does not
             // have, not a letter: typing `w` into the box on a Ctrl+W that
             // meant something elsewhere is how a field fills with junk.
@@ -222,6 +286,29 @@ impl LineEdit {
         self.text.replace_range(from..to, "");
         self.cursor = from;
         Edit::Changed
+    }
+
+    /// [`delete_to`](Self::delete_to), keeping what went for Ctrl+Y.
+    ///
+    /// `after_kill` is whether the key before this one was a cut too, which
+    /// makes this one add to the slot rather than replace it: in front of it
+    /// for a cut backwards, behind it for one forwards, so the slot reads in
+    /// the order the text did.
+    fn kill_to(&mut self, to: usize, after_kill: bool) -> Edit {
+        let (from, upto) = (self.cursor.min(to), self.cursor.max(to));
+        let cut = &self.text[from..upto];
+        match (after_kill, to < self.cursor) {
+            // A cut of nothing leaves the slot alone: Ctrl+U on an empty box
+            // is not a reason to lose what Ctrl+Y would have given back.
+            (false, _) if cut.is_empty() => {}
+            (false, _) => self.kill = cut.to_string(),
+            (true, true) => self.kill.insert_str(0, cut),
+            (true, false) => self.kill.push_str(cut),
+        }
+        // Still a run of cuts when this one found nothing: a Ctrl+W at the
+        // start of the line between two others should not break them up.
+        self.killing = true;
+        self.delete_to(to)
     }
 
     fn prev_boundary(&self) -> usize {
@@ -502,6 +589,119 @@ mod tests {
         // Shift is how a capital arrives, and it is typed.
         f.key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT), 64);
         assert_eq!(f, "xY");
+    }
+
+    #[test]
+    fn the_readline_control_keys_move_and_delete_by_character() {
+        let mut f = LineEdit::from("abcd");
+        f.key(ctrl(KeyCode::Char('b')), 64);
+        f.key(ctrl(KeyCode::Char('b')), 64);
+        assert_eq!(shown(&f), "ab|cd");
+        f.key(ctrl(KeyCode::Char('f')), 64);
+        assert_eq!(shown(&f), "abc|d");
+        assert!(f.key(ctrl(KeyCode::Char('h')), 64).changed());
+        assert_eq!(shown(&f), "ab|d");
+        assert!(f.key(ctrl(KeyCode::Char('d')), 64).changed());
+        assert_eq!(shown(&f), "ab|");
+        assert_eq!(f.key(ctrl(KeyCode::Char('d')), 64), Edit::Unchanged);
+        // At the ends they stop rather than wrap.
+        f.key(ctrl(KeyCode::Char('f')), 64);
+        assert_eq!(shown(&f), "ab|");
+        f.key(ctrl(KeyCode::Char('a')), 64);
+        f.key(ctrl(KeyCode::Char('b')), 64);
+        assert_eq!(shown(&f), "|ab");
+    }
+
+    #[test]
+    fn a_cut_is_yanked_back_at_the_cursor() {
+        let mut f = LineEdit::from("fix the bug");
+        f.key(ctrl(KeyCode::Char('w')), 64);
+        assert_eq!(shown(&f), "fix the |");
+        f.key(ctrl(KeyCode::Char('a')), 64);
+        assert!(f.key(ctrl(KeyCode::Char('y')), 64).changed());
+        assert_eq!(shown(&f), "bug|fix the ");
+        // Yanked again, the same text again: the slot is not used up.
+        f.key(ctrl(KeyCode::Char('y')), 64);
+        assert_eq!(shown(&f), "bugbug|fix the ");
+
+        // Each kind of cut fills it.
+        for (key, at_home, cut) in [
+            (ctrl(KeyCode::Char('k')), true, "one two"),
+            (ctrl(KeyCode::Char('u')), false, "one two"),
+            (alt(KeyCode::Char('d')), true, "one"),
+            (alt(KeyCode::Backspace), false, "two"),
+            (ctrl(KeyCode::Delete), true, "one"),
+        ] {
+            let mut f = LineEdit::from("one two");
+            if at_home {
+                f.key(press(KeyCode::Home), 64);
+            }
+            f.key(key, 64);
+            f.clear();
+            f.key(ctrl(KeyCode::Char('y')), 64);
+            assert_eq!(f, cut, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn cuts_in_a_row_add_up_in_the_order_the_text_was() {
+        let mut f = LineEdit::from("one two three");
+        f.key(ctrl(KeyCode::Char('w')), 64);
+        f.key(ctrl(KeyCode::Char('w')), 64);
+        assert_eq!(shown(&f), "one |");
+        f.key(ctrl(KeyCode::Char('y')), 64);
+        assert_eq!(shown(&f), "one two three|");
+
+        let mut f = LineEdit::from("one two three");
+        f.key(press(KeyCode::Home), 64);
+        f.key(alt(KeyCode::Char('d')), 64);
+        f.key(alt(KeyCode::Char('d')), 64);
+        f.key(press(KeyCode::End), 64);
+        f.key(ctrl(KeyCode::Char('y')), 64);
+        assert_eq!(f, " threeone two");
+
+        // Anything else between two cuts starts the slot over.
+        let mut f = LineEdit::from("one two three");
+        f.key(ctrl(KeyCode::Char('w')), 64);
+        f.key(press(KeyCode::Left), 64);
+        f.key(ctrl(KeyCode::Char('w')), 64);
+        f.key(press(KeyCode::End), 64);
+        f.key(ctrl(KeyCode::Char('y')), 64);
+        assert_eq!(f, "one  two");
+    }
+
+    #[test]
+    fn nothing_cut_leaves_the_slot_as_it_was() {
+        let mut f = LineEdit::from("keep");
+        f.key(ctrl(KeyCode::Char('u')), 64);
+        // More Ctrl+U on an empty box cuts nothing, and must not lose it.
+        f.key(ctrl(KeyCode::Char('u')), 64);
+        typed(&mut f, "x");
+        f.key(press(KeyCode::Backspace), 64);
+        f.key(ctrl(KeyCode::Char('u')), 64);
+        f.key(ctrl(KeyCode::Char('y')), 64);
+        assert_eq!(f, "keep");
+        let mut f = LineEdit::default();
+        assert_eq!(f.key(ctrl(KeyCode::Char('y')), 64), Edit::Unchanged);
+        assert_eq!(f.key(ctrl(KeyCode::Char('w')), 64), Edit::Unchanged);
+    }
+
+    #[test]
+    fn a_yank_is_held_to_the_cap_and_set_keeps_the_slot() {
+        let mut f = LineEdit::from("abcdef");
+        f.key(ctrl(KeyCode::Char('u')), 64);
+        typed(&mut f, "xy");
+        f.key(ctrl(KeyCode::Char('y')), 4);
+        assert_eq!(f, "xyab");
+        assert_eq!(f.key(ctrl(KeyCode::Char('y')), 4), Edit::Unchanged);
+        f.set("recalled");
+        assert_eq!(shown(&f), "recalled|");
+        f.key(ctrl(KeyCode::Char('y')), 64);
+        assert_eq!(f, "recalledabcdef");
+        // Equal is about what is drawn, not what could be yanked.
+        let mut g = f.clone();
+        g.set("same");
+        assert_eq!(g, LineEdit::from("same"));
     }
 
     fn drawn(f: &LineEdit, width: usize) -> String {

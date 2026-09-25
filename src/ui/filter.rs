@@ -155,7 +155,13 @@ impl App {
         };
         self.matched = visible.len();
         if self.tree {
-            let tree = super::tree::build(&self.sessions, &visible, &self.collapsed, children);
+            let tree = super::tree::build(
+                &self.sessions,
+                &visible,
+                &self.collapsed,
+                (col, asc),
+                children,
+            );
             self.visible = tree.rows;
             self.groups = tree.groups;
             self.indent = tree.indent;
@@ -371,10 +377,10 @@ impl App {
         // Stepping back past the newest entry restores the partial query, which
         // is the one thing the history itself cannot hold.
         if at < 0 {
-            self.search = typed.into();
+            self.search.set(typed);
         } else {
             let at = (at as usize).min(self.search_history.len() - 1);
-            self.search = self.search_history[at].as_str().into();
+            self.search.set(self.search_history[at].as_str());
             self.history_cursor = Some((at, typed));
         }
         self.scan_typed_at = Some(Instant::now());

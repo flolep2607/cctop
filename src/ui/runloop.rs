@@ -695,6 +695,7 @@ fn event_loop(
         for tab in &mut app.tabs {
             drawn |= tab.pump();
         }
+        drawn |= app.pump_preview();
         // An agent that said what it wanted says it once, to the person who
         // just looked: the tab colour is the alarm, this is the message. Here
         // rather than on the keypress that focused the pane — a bell arriving
@@ -740,6 +741,10 @@ fn event_loop(
                 last_refresh = Instant::now();
             }
         }
+
+        // After the rows and the hooks have both had their say this pass, and
+        // after any key that moved where you are looking.
+        app.needs_redraw |= app.observe_seen();
 
         // A brief for a just-launched agent comes due on a timer rather than an
         // event, so the loop is the only thing that can notice.

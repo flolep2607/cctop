@@ -17,6 +17,75 @@ use super::*;
 /// windows to look for it, and long enough that the subprocess is nothing.
 pub(super) const SHARE_EVERY: Duration = Duration::from_secs(2);
 
+/// Which tabs the switcher lists, by what their agents are doing.
+///
+/// Cycled with Tab rather than given letters, as herdr's picker gives them:
+/// here every printable key is already the name filter's, so a letter for
+/// "needs you" would be a letter nobody could search a tab name for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SwitchState {
+    #[default]
+    All,
+    NeedsYou,
+    Working,
+    Idle,
+}
+
+impl SwitchState {
+    /// The next stop, wrapping; `back` for Shift+Tab.
+    pub(super) fn step(self, back: bool) -> Self {
+        const ALL: [SwitchState; 4] = [
+            SwitchState::All,
+            SwitchState::NeedsYou,
+            SwitchState::Working,
+            SwitchState::Idle,
+        ];
+        let at = ALL.iter().position(|s| *s == self).unwrap_or(0);
+        let next = if back { at + ALL.len() - 1 } else { at + 1 };
+        ALL[next % ALL.len()]
+    }
+
+    /// The word for it in the picker's title and its empty-list line, or
+    /// `None` for listing everything, which needs no saying.
+    pub(super) fn word(self) -> Option<&'static str> {
+        match self {
+            SwitchState::All => None,
+            SwitchState::NeedsYou => Some("needs you"),
+            SwitchState::Working => Some("working"),
+            SwitchState::Idle => Some("idle"),
+        }
+    }
+
+    /// The word as a predicate, for the line that says nothing matched:
+    /// "no tab needs you", "no tab is idle".
+    pub(super) fn predicate(self) -> Option<&'static str> {
+        match self {
+            SwitchState::All => None,
+            SwitchState::NeedsYou => Some("needs you"),
+            SwitchState::Working => Some("is working"),
+            SwitchState::Idle => Some("is idle"),
+        }
+    }
+
+    /// Whether a tab in `state` is one this stop lists. The dashboard has no
+    /// state and is only listed under `All`: it is never what is waiting.
+    fn admits(self, dashboard: bool, state: Option<tabs::Attention>) -> bool {
+        match self {
+            SwitchState::All => true,
+            _ if dashboard => false,
+            SwitchState::NeedsYou => state == Some(tabs::Attention::NeedsInput),
+            // A turn that ended unseen is still a stopped agent; the `✓` says
+            // it is new, not that it is doing anything.
+            SwitchState::Idle => {
+                matches!(state, Some(tabs::Attention::Idle | tabs::Attention::Done))
+            }
+            // Not asking and not stopped is what the bar means by working:
+            // it is the tab it draws with neither colour.
+            SwitchState::Working => state.is_none(),
+        }
+    }
+}
+
 impl App {
     /// The tab on screen, or `None` on the dashboard.
     pub fn active_tab(&mut self) -> Option<&mut tabs::Tab> {
@@ -99,19 +168,39 @@ impl App {
         self.go_to_tab((self.tab as isize + delta).rem_euclid(count) as usize);
     }
 
-    /// The next bar position after the view whose agent is blocked on you,
-    /// wrapping — `None` when no tab is asking.
+    /// The next bar position after the view whose agent wants you, wrapping —
+    /// `None` when no tab does.
+    ///
+    /// Two passes, loudest first: every tab blocked on a question, and only
+    /// then a turn that finished while you were not looking. A question is an
+    /// agent standing still until you answer; a finished turn is news that
+    /// keeps. Plain `Idle` is never a jump — it is context the bar already
+    /// carries in green, and it is most tabs most of the time.
     ///
     /// The current tab is checked last rather than skipped: a split's other
     /// pane can be the one asking, and you cannot tell from the bar.
-    /// `NeedsInput` is the only state worth a jump — `Idle` is context the
-    /// bar already carries in green.
     fn next_waiting(&self) -> Option<usize> {
-        let waiting = |i: usize| self.tab_attention(i) == Some(tabs::Attention::NeedsInput);
-        (self.tab + 1..=self.tabs.len())
-            .find(|&i| waiting(i))
-            .or_else(|| (1..self.tab).find(|&i| waiting(i)))
-            .or_else(|| waiting(self.tab).then_some(self.tab))
+        let next = |want: tabs::Attention| {
+            let wants = |i: usize| self.tab_attention(i) == Some(want);
+            (self.tab + 1..=self.tabs.len())
+                .find(|&i| wants(i))
+                .or_else(|| (1..self.tab).find(|&i| wants(i)))
+                .or_else(|| wants(self.tab).then_some(self.tab))
+        };
+        next(tabs::Attention::NeedsInput).or_else(|| next(tabs::Attention::Done))
+    }
+
+    /// `Alt+z`: fill the tab with the focused pane, or put the split back.
+    pub fn toggle_zoom(&mut self) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        match tab.toggle_zoom() {
+            Some(true) => self.set_status("Zoomed — Alt+z puts the split back"),
+            Some(false) => self.set_status("Unzoomed"),
+            None => self.set_status("Only one pane — nothing to zoom it over"),
+        }
+        self.needs_redraw = true;
     }
 
     /// Jump the view to the next tab that wants you — `Alt+b`, beside the
@@ -132,8 +221,8 @@ impl App {
         }
     }
 
-    /// The bar positions the switcher's filter leaves standing, `0` for the
-    /// dashboard.
+    /// The bar positions the switcher's filters leave standing, `0` for the
+    /// dashboard: the typed name, and the state cycled with Tab.
     ///
     /// A plain substring, case-insensitive: the field is typed a letter or
     /// two at a time, and a scored fuzzy match is a ranking nobody asked
@@ -142,15 +231,31 @@ impl App {
         let needle = self.switch_filter.trim().to_lowercase();
         let matches = |title: &str| needle.is_empty() || title.to_lowercase().contains(&needle);
         let mut found = Vec::new();
-        if matches("Dashboard") {
+        if matches("Dashboard") && self.switch_state.admits(true, None) {
             found.push(0);
         }
         for (i, tab) in self.tabs.iter().enumerate() {
-            if matches(&tab.title()) {
+            if matches(&tab.title())
+                && self
+                    .switch_state
+                    .admits(false, self.switch_attention(i + 1))
+            {
                 found.push(i + 1);
             }
         }
         found
+    }
+
+    /// What tab `index` is doing, as the switcher shows and filters it.
+    ///
+    /// Unlike [`App::tab_attention`], the tab being watched is not let off:
+    /// the bar leaves it uncoloured because its pane is in front of you, but
+    /// with the picker drawn over it, "idle" is still worth knowing — and a
+    /// state filter that dropped the current tab from every stop but "all"
+    /// would be reporting where you are, not what it is doing.
+    pub(super) fn switch_attention(&self, index: usize) -> Option<tabs::Attention> {
+        let tab = self.tabs.get(index.checked_sub(1)?)?;
+        tab.attention(false, &|pid| self.pane_signal(pid))
     }
 
     /// Move to `want`, taking the rmux client with you.
@@ -973,6 +1078,121 @@ mod tests {
         assert!(status.contains("Nothing is waiting"), "{status}");
     }
 
+    /// A live row for the agent running as `pid`, doing `state`.
+    fn agent_row(id: &str, pid: u32, state: crate::session::ActivityState) -> Session {
+        let mut row = crate::ui::tests::session(id, true, id);
+        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+            pid,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        row.activity_state = state;
+        row
+    }
+
+    /// A tab no pane of this cctop's is attached to, for the agent `pid`.
+    fn detached_tab(name: &str, pid: u32, signal: Option<crate::hook::Signal>) -> tabs::Tab {
+        tabs::Tab::shared(&crate::rmux::Running {
+            name: format!("cctop-{name}"),
+            pid: Some(pid),
+            cwd: None,
+            attached: false,
+            activity: None,
+            label: Some(name.to_string()),
+            profile: None,
+            order: None,
+            state: signal.map(|signal| crate::rmux::State {
+                signal,
+                at: crate::rmux::now_secs(),
+            }),
+            color: None,
+        })
+    }
+
+    /// The whole of the unseen mark as the app sees it: a turn watched ending
+    /// off screen marks the row and its tab, `Alt+b` goes to a question
+    /// before it, and looking at the row takes the mark down.
+    #[test]
+    fn a_turn_that_ended_unseen_is_marked_and_visited_after_a_question() {
+        use crate::session::ActivityState::{Asking, WaitingForInput, Working};
+        let mut app = test_app();
+        app.sessions = vec![agent_row("a", 101, Working), agent_row("b", 202, Working)];
+        app.tabs = vec![detached_tab("a", 101, None), detached_tab("b", 202, None)];
+        app.tab = 0;
+        app.observe_seen();
+
+        // "a" finishes its turn; "b" stops on a question. Nobody is looking:
+        // the dashboard has no row selected until the table is filtered.
+        app.sessions[0].activity_state = WaitingForInput;
+        app.sessions[1].activity_state = Asking;
+        assert!(app.observe_seen(), "a new mark owed no frame");
+        assert!(app.seen.is_done(&app.sessions[0].key()));
+        assert!(
+            !app.seen.is_done(&app.sessions[1].key()),
+            "a question is not done"
+        );
+        assert_eq!(app.tab_attention(1), Some(tabs::Attention::Done));
+        assert_eq!(app.tab_attention(2), Some(tabs::Attention::NeedsInput));
+
+        // The question first, however the bar is ordered; the news after.
+        assert_eq!(app.next_waiting(), Some(2));
+        app.sessions[1].activity_state = Working;
+        assert_eq!(app.next_waiting(), Some(1), "a done tab was not a jump");
+
+        // Selecting its row on the dashboard is looking at it.
+        app.refilter();
+        let row = app
+            .visible
+            .iter()
+            .position(|r| matches!(r, crate::ui::Row::Session(0)))
+            .expect("the row is not in the table");
+        app.selected = row;
+        assert!(app.observe_seen(), "clearing the mark owed no frame");
+        assert!(!app.seen.is_done(&app.sessions[0].key()));
+        assert_eq!(app.tab_attention(1), Some(tabs::Attention::Idle));
+        assert_eq!(app.next_waiting(), None, "a read turn is still a jump");
+    }
+
+    /// `Alt+z` fills the tab with the focused pane and back, only where there
+    /// is something to fill it over, and a new split is never born hidden.
+    #[test]
+    fn zoom_toggles_only_over_a_split_and_a_new_split_unzooms() {
+        let mut app = test_app();
+        app.tabs = vec![tabs::Tab::new(tabs::Pane::for_test("one"))];
+        app.tab = 1;
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(!app.tabs[0].zoomed(), "a lone pane was zoomed");
+        let status = app.status().expect("nothing was said").to_owned();
+        assert!(status.contains("nothing to zoom"), "{status}");
+
+        app.tabs[0].split(tabs::Pane::for_test("two"), false);
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(app.tabs[0].zoomed());
+        // Focus moves under the zoom rather than ending it.
+        app.on_key(alt(KeyCode::Char('o')));
+        assert!(app.tabs[0].zoomed());
+        assert_eq!(app.tabs[0].focus, 0);
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(!app.tabs[0].zoomed());
+
+        app.on_key(alt(KeyCode::Char('z')));
+        app.tabs[0].split(tabs::Pane::for_test("three"), true);
+        assert!(
+            !app.tabs[0].zoomed(),
+            "the new pane was started out of sight"
+        );
+
+        // The dashboard has no pane to zoom, and does not claim the key.
+        app.tab = 0;
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(!app.tabs[0].zoomed());
+    }
+
     /// `Alt+r` opens the same rename the right-click does, on the tab being
     /// watched — the dashboard excepted, which is nobody's to name.
     #[test]
@@ -1062,5 +1282,91 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::List);
         assert_eq!(app.tab, 0, "Enter did not take the pick");
+    }
+
+    /// Tab cycles the switcher through what the tabs are doing, on top of the
+    /// name typed; Shift+Tab goes the other way, and it opens on all of them.
+    #[test]
+    fn tab_in_the_switcher_filters_by_state() {
+        use crate::hook::Signal;
+        let doing = |name: &str, signal: Signal| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: Some(crate::rmux::State {
+                    signal,
+                    at: crate::rmux::now_secs(),
+                }),
+                color: None,
+            })
+        };
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+
+        let mut app = test_app();
+        app.tabs = vec![
+            doing("asking", Signal::NeedsInput),
+            doing("busy", Signal::Busy),
+            doing("done", Signal::Idle),
+            doing("also-busy", Signal::Busy),
+        ];
+        app.on_key(alt(KeyCode::Char('t')));
+        assert_eq!(app.switch_matches(), vec![0, 1, 2, 3, 4]);
+
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_state, SwitchState::NeedsYou);
+        assert_eq!(app.switch_matches(), vec![1]);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_matches(), vec![2, 4], "working");
+        // And the name still narrows within the state.
+        app.on_key(key(KeyCode::Char('a')));
+        assert_eq!(app.switch_matches(), vec![4]);
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_matches(), vec![3], "idle");
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_state, SwitchState::All);
+        app.on_key(key(KeyCode::BackTab));
+        assert_eq!(app.switch_state, SwitchState::Idle);
+
+        // The tab being watched is filed by what it is doing, not left out
+        // of every state because you happen to be on it.
+        app.tab = 3;
+        assert_eq!(app.switch_matches(), vec![3]);
+
+        // Opened again, every tab again.
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(alt(KeyCode::Char('t')));
+        assert_eq!(app.switch_state, SwitchState::All);
+        assert_eq!(app.switch_matches().len(), 5);
+    }
+
+    /// Alt+B is a word back while a field is being typed in, and the next tab
+    /// that rang everywhere else.
+    #[test]
+    fn alt_b_in_a_field_is_the_editors() {
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+        let mut app = test_app();
+        app.on_key(key(KeyCode::Char('/')));
+        assert_eq!(app.mode, Mode::Search);
+        for c in "two words".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(alt(KeyCode::Char('b')));
+        app.on_key(key(KeyCode::Char('>')));
+        assert_eq!(app.search, "two >words");
+        assert_eq!(app.mode, Mode::Search);
+        app.on_key(alt(KeyCode::Char('d')));
+        assert_eq!(app.search, "two >");
+        app.on_key(event::KeyEvent::new(
+            KeyCode::Char('y'),
+            event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.search, "two >words");
     }
 }

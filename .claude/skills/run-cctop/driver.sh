@@ -24,6 +24,12 @@ SHOTS="${CCTOP_SHOTS:-/tmp/cctop-drive/shots}"
 BIN="$ROOT/target/debug/cctop"
 COLS="${CCTOP_COLS:-200}"
 ROWS="${CCTOP_ROWS:-50}"
+# An rmux daemon of our own for the agents cctop starts. Without it a resumed
+# fixture session landed on the operator's real daemon and outlived the driver
+# there, and `--spawn` adopted every real cctop-* session as a tab. Set
+# CCTOP_DRIVE_REAL_RMUX=1 when the point is to test against those sessions.
+RMUX_DIR="${CCTOP_RMUX_TMPDIR:-${SHOTS%/*}/rmux}"
+if [ -n "${CCTOP_DRIVE_REAL_RMUX:-}" ]; then RMUX_ENV=(); else RMUX_ENV=(-e "RMUX_TMPDIR=$RMUX_DIR"); fi
 
 say() { printf '\033[36m▶ %s\033[0m\n' "$*" >&2; }
 
@@ -115,15 +121,20 @@ cmd_up() {
     printf '#!/bin/sh\nunset TMUX TMUX_PANE RMUX RMUX_PANE\nexec %s --no-auto-update\n' "$BIN" > "$SHOTS/../nested.sh"
     chmod +x "$SHOTS/../nested.sh"
     launch=("$SHOTS/../nested.sh")
-    say "spawn mode: real tmux server, real sessions will appear as tabs"
+    if [ -n "${CCTOP_DRIVE_REAL_RMUX:-}" ]; then
+      say "spawn mode: real rmux daemon, real sessions will appear as tabs"
+    else
+      say "spawn mode: private rmux daemon under $RMUX_DIR"
+    fi
   fi
   "${TM[@]}" kill-session -t "$SESSION" 2>/dev/null || true
+  [ -n "${CCTOP_DRIVE_REAL_RMUX:-}" ] || mkdir -p -m 700 "$RMUX_DIR"
   say "launching ${launch[*]} on tmux socket '$SOCKET' (${COLS}x${ROWS})"
   # -e, not `HOME=x tmux new-session`: the pane inherits the *server's*
   # environment, and a server is usually already running, so a variable set on
   # the client command line silently does not reach the app.
   "${TM[@]}" new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
-    -e "HOME=$FIXTURE" -e "CI=1" -e "TERM=xterm-256color" "${launch[@]}"
+    -e "HOME=$FIXTURE" -e "CI=1" -e "TERM=xterm-256color" "${RMUX_ENV[@]}" "${launch[@]}"
   wait_for "Overview" 30
   # In --spawn mode cctop opens *onto* one of the adopted tabs, i.e. inside a
   # live agent's terminal, where every key but the function keys is forwarded
@@ -156,6 +167,18 @@ cmd_down() {
   "${TM[@]}" send-keys -t "$SESSION" F10 2>/dev/null || true
   sleep 0.5
   "${TM[@]}" kill-server 2>/dev/null || true
+  # The agents cctop started live on the private daemon, not in the driver's
+  # server; take them down with it rather than leave them running. Only by an
+  # explicit socket path under $RMUX_DIR, with the inherited variables gone: a
+  # bare `rmux kill-server` obeys $TMUX/$RMUX before RMUX_TMPDIR, and when the
+  # driver is run from inside an agent's own rmux pane that is the operator's
+  # real server — which is how this line once killed the session running it.
+  if [ -z "${CCTOP_DRIVE_REAL_RMUX:-}" ]; then
+    local sock="$RMUX_DIR/rmux-$(id -u)/default"
+    if [ -S "$sock" ]; then
+      env -u TMUX -u TMUX_PANE -u RMUX -u RMUX_PANE rmux -S "$sock" kill-server 2>/dev/null || true
+    fi
+  fi
   say "down"
 }
 

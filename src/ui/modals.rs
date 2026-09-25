@@ -8,7 +8,6 @@ use super::render::Layout;
 use super::share;
 use super::theme;
 use super::{AGE_OPTIONS, AccountKind, App, BatchKind, LaunchInto, tabs};
-use crate::session::Session;
 use crate::util;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -151,6 +150,21 @@ fn scrollable_modal(
     width: u16,
     scroll: u16,
 ) -> u16 {
+    let title = Line::from(Span::styled(format!(" {title} "), theme::title()));
+    scrollable_modal_titled(frame, area, vec![title], lines, width, scroll)
+}
+
+/// [`scrollable_modal`] with titles that are more than a word: the help's
+/// carry its filter and the build, which have to stay put on the border while
+/// the page under them scrolls. Each line keeps its own alignment.
+fn scrollable_modal_titled(
+    frame: &mut Frame,
+    area: Rect,
+    titles: Vec<Line<'static>>,
+    lines: Vec<Line<'static>>,
+    width: u16,
+    scroll: u16,
+) -> u16 {
     let total = lines.len() as u16;
     let rect = centered(area, width, total + 2);
     frame.render_widget(Clear, rect);
@@ -158,8 +172,10 @@ fn scrollable_modal(
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::colors().border_hi))
-        .style(theme::canvas())
-        .title(Span::styled(format!(" {title} "), theme::title()));
+        .style(theme::canvas());
+    for title in titles {
+        block = block.title(title);
+    }
 
     let inner_height = block.inner(rect).height;
     let max_scroll = total.saturating_sub(inner_height);
@@ -195,9 +211,24 @@ fn scrollable_modal(
 }
 
 pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
-    let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
+    let section = |t: &str| {
+        (
+            HelpRow::Section,
+            Line::from(Span::styled(t.to_string(), theme::title())),
+        )
+    };
+    let gap = || (HelpRow::Gap, Line::default());
+    let note = |line: Line<'static>| (HelpRow::More, line);
+    // The keys as they are bound now, not as they ship: `{action}` in a key
+    // column is whatever `[keys]` has put that action on.
+    let keymap = &app.keymap;
     let item = |k: &str, d: &str| {
-        Line::from(vec![
+        let k = bound_keys(k, keymap);
+        let row = match k.is_empty() {
+            true => HelpRow::More,
+            false => HelpRow::Entry,
+        };
+        let line = Line::from(vec![
             // The space after the padding is the floor: a key longer than the
             // column (`g / G  Home / End`) otherwise runs into its description
             // and reads as `EndJump`.
@@ -206,96 +237,144 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
                 Style::default().fg(theme::colors().accent),
             ),
             Span::raw(d.to_string()),
-        ])
+        ]);
+        (row, line)
     };
-    let lines = vec![
+    let rows = vec![
         // The order is what a reader needs first, not what the key handler
         // happens to match first: the row menu is the one entry that makes the
         // rest of this page optional, so it opens the help rather than sitting
         // under "Other" two screens down.
         section("Start here"),
         item("Enter", "Everything you can do to this row, in one menu"),
-        item("?  F1", "This page"),
-        item(",", "Settings and keybinds, and the file that holds them"),
-        item("q  F10", "Quit"),
+        item("{help}  F1", "This page"),
+        item(
+            "{settings}",
+            "Settings and keybinds, and the file that holds them",
+        ),
+        item("{quit}  F10", "Quit"),
         item("+", "Add a Claude account (runs claude setup-token)"),
-        Line::default(),
+        gap(),
         section("Navigation"),
-        item("↑/k  ↓/j", "Move between sessions"),
+        item("↑/{up}  ↓/{down}", "Move between sessions"),
         item("PgUp / PgDn", "Page through the list"),
         item("Ctrl+U / Ctrl+D", "Half a page up / down"),
-        item("g / G  Home / End", "Jump to first / last"),
-        item("n / N", "Next / previous search match (wraps)"),
-        item("b", "Jump to the session that rang last"),
-        item("f", "Follow mode: keep the selection centered"),
-        Line::default(),
+        item("{top} / {bottom}  Home / End", "Jump to first / last"),
+        item(
+            "{next_match} / {prev_match}",
+            "Next / previous search match (wraps)",
+        ),
+        item("{bell}", "Jump to the session that rang last"),
+        item("{follow}", "Follow mode: keep the selection centered"),
+        gap(),
         section("Acting on the selected session"),
-        item("a", "Open its terminal in a tab"),
-        item("R", "Resume it in a tab of its own"),
-        item("s", "Type a line into its terminal"),
-        item("O", "Hand its context off to a different agent"),
-        item("i", "Read its conversation (works on remote rows)"),
-        item("  [ / ]  m", "In it: previous / next turn, markdown source"),
-        item("y", "Copy resume command or transcript path"),
-        item("e / E", "Show its subagents / all subagents"),
-        item("d", "Delete it (only when it is not running)"),
-        item("Ctrl+K", "Terminate it"),
-        Line::default(),
+        item("{attach}", "Open its terminal in a tab"),
+        item("{resume}", "Resume it in a tab of its own"),
+        item("{send}", "Type a line into its terminal"),
+        item("{handoff}", "Hand its context off to a different agent"),
+        item(
+            "{conversation}",
+            "Read its conversation (works on remote rows)",
+        ),
+        item(
+            "  / n N  [ ]",
+            "In it: search, next / previous hit, turn by turn",
+        ),
+        item("  ↵ t  m", "In it: this turn's tools / all tools, source"),
+        item("{copy}", "Copy resume command or transcript path"),
+        item(
+            "{expand} / {expand_all}",
+            "Show its subagents / all subagents",
+        ),
+        item("{delete}", "Delete it (only when it is not running)"),
+        item("{terminate}", "Terminate it"),
+        gap(),
         section("Several at once"),
-        item("Space", "Mark / unmark the selected session"),
-        item("U", "Clear all marks"),
-        item("D", "Delete all marked sessions"),
-        item("K", "Terminate all marked live sessions"),
-        item("I", "Idle view: live sessions quiet for idle_after"),
+        item("{mark}", "Mark / unmark the selected session"),
+        item("{unmark_all}", "Clear all marks"),
+        item("{delete_marked}", "Delete all marked sessions"),
+        item("{kill_marked}", "Terminate all marked live sessions"),
+        item("{idle}", "Idle view: live sessions quiet for idle_after"),
         item("", "(6h by default), the biggest memory first"),
-        item("  K", "In it: stop the marked ones, or all of them,"),
+        item(
+            "  {kill_marked}",
+            "In it: stop the marked ones, or all of them,",
+        ),
         item("", "skipping any that are working or asking"),
-        Line::default(),
+        gap(),
         section("Filter and sort"),
-        item("/  F3", "Filter by label, project, branch, model, id"),
+        item(
+            "{search}  F3",
+            "Filter by label, project, branch, model, id",
+        ),
         item("  Tab", "Search inside the transcripts as well"),
         item("  ↑ / ↓", "Bring back an earlier search"),
-        item("S  F6  >  <", "Sort by any column"),
+        item("{sort}  F6  >  <", "Sort by any column"),
         item("F7", "Filter by age (1d / 1w / 1mo)"),
-        item("#", "Cost floor: only sessions costing ≥ $X"),
-        item("`", "Show only running sessions"),
-        item("T", "Tree view: group by repository and worktree"),
+        item("{cost_floor}", "Cost floor: only sessions costing ≥ $X"),
+        item("{running_only}", "Show only running sessions"),
+        item("{tree}", "Tree view: group by repository and worktree"),
         item(
             "  Enter / Space",
             "Fold or unfold the group under the cursor",
         ),
         item("Esc", "Clear one filter layer per press"),
-        Line::from(Span::styled(
+        note(Line::from(Span::styled(
             "  Clicking a column header sorts by it too.",
             theme::dim(),
-        )),
-        Line::default(),
+        ))),
+        gap(),
+        // Its own section rather than a line under search: every box on the
+        // dashboard takes these, and a reader looking for how to cut a word
+        // out of the send box would not look under the filter for it.
+        section("Typing in a box"),
+        item("←→  Ctrl+B / F", "Move a character"),
+        item("Alt+B / F", "Move a word (Ctrl+← / → too)"),
+        item("Ctrl+A / E", "To the start / end (Home / End too)"),
+        item("Ctrl+H / D", "Delete before / after (Backspace, Delete)"),
+        item("Ctrl+W  Alt+D", "Cut the word before / after the cursor"),
+        item("Ctrl+U / K", "Cut to the start / end"),
+        item("Ctrl+Y", "Put the last cut back"),
+        item("/", "In this page: filter it (Esc clears)"),
+        gap(),
         section("Bottom panels"),
         item("←  →", "Move between bottom panels"),
         item("Tab / Shift+Tab", "Same, either direction"),
         item("1 – 9", "Jump to a panel directly"),
-        item("Shift+↑ / ↓", "Scroll inside the active panel"),
-        item("Shift+Home / End", "Jump to the top / bottom of it"),
-        item("[ / ]", "Move through the Tool Activity filter"),
-        item("L", "Toggle the Tool Activity live filter"),
-        item("v", "Toggle inline diffs for edits"),
-        Line::default(),
+        item(
+            "{panel_up} / {panel_down}",
+            "Scroll inside the active panel",
+        ),
+        item(
+            "{panel_top} / {panel_bottom}",
+            "Jump to the top / bottom of it",
+        ),
+        item(
+            "{tool_filter_prev} / {tool_filter_next}",
+            "Move through the Tool Activity filter",
+        ),
+        item("{live_filter}", "Toggle the Tool Activity live filter"),
+        item("{diffs}", "Toggle inline diffs for edits"),
+        gap(),
         section("Tabs and splits"),
         item(
-            "t or Alt+n",
+            "{new_tab} or Alt+n",
             "New tab: an agent, a shell, or one still running",
         ),
         item("Alt+v / Alt+s", "Split the tab right / down"),
         item("Alt+← / →", "Previous / next tab"),
         item("Alt+1 – 9", "Jump to a tab (1 is the dashboard)"),
         item("Alt+t", "Pick a tab from a list, typing to narrow it"),
-        item("Alt+b", "Jump to the next tab that needs you"),
+        item("  Tab", "In it: all / needs you / working / idle"),
+        item("Alt+b", "Jump to the next tab that needs you,"),
+        item("", "then to one whose turn ended unseen (✓)"),
         item(
             "Alt+Shift+← / →",
             "Move this tab along the bar (or drag it with the mouse)",
         ),
         item("Right-click / Alt+r", "Rename or recolour a tab"),
         item("Alt+o", "Move focus to the next pane"),
+        item("Alt+z", "Zoom the pane to fill the tab, or unzoom"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
         item(
@@ -303,7 +382,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "Restart its agent on the same session (after an update)",
         ),
         item("", "On the dashboard: the selected row's tab"),
-        item("Ctrl+R", "On the dashboard: restart every agent tab,"),
+        item(
+            "{restart_all}",
+            "On the dashboard: restart every agent tab,",
+        ),
         item("", "leaving the ones mid-turn alone"),
         item(
             "Alt+Shift+C",
@@ -314,7 +396,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Ctrl+V", "The same, in terminals that send it"),
         item("Home / End", "In a Claude pane: top / bottom of the chat"),
         item("F12", "Back to the dashboard, leaving it running"),
-        Line::default(),
+        gap(),
         section("Pasting an image"),
         item("", "A terminal carries text, never a picture — so cctop"),
         item("", "writes the image to a file and types its path, which"),
@@ -334,25 +416,25 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("", "  wl-paste -t image/png | base64 -w0 | wl-copy"),
         item("", "  pngpaste - | base64 | pbcopy"),
         item("", "  PowerShell: see docs/the-table.md"),
-        Line::default(),
+        gap(),
         section("Mouse"),
         item("Right-click a row", "Its menu, as Enter opens it"),
         item("Click a footer hint", "Presses that key (q asks twice)"),
         item("Click [y] / [n]", "Answers a confirmation"),
-        Line::default(),
+        gap(),
         section("Elsewhere"),
-        item("A", "Open the agent this cctop launched"),
-        item("w", "Bell + desktop alert when a session needs you"),
-        item("W", "Share the agent's terminal to a browser"),
+        item("{open_hosted}", "Open the agent this cctop launched"),
+        item("{notify}", "Bell + desktop alert when a session needs you"),
+        item("{share}", "Share the agent's terminal to a browser"),
         item(
-            "B",
+            "{serve}",
             "Serve this table to a browser, with or without a tunnel",
         ),
-        item("o", "What was spent and not got back"),
-        item("c", "How each model did on the work you gave it"),
-        item("h  F8", "Agent integration: what reports to cctop"),
-        item("r  F5", "Refresh now"),
-        Line::default(),
+        item("{optimize}", "What was spent and not got back"),
+        item("{compare}", "How each model did on the work you gave it"),
+        item("{hooks}  F8", "Agent integration: what reports to cctop"),
+        item("{refresh}  F5", "Refresh now"),
+        gap(),
         section("Environment"),
         item("CCTOP_THEME", "light / dark / auto (default: auto)"),
         item("NO_COLOR", "Drop colour; shape and weight carry the state"),
@@ -360,26 +442,205 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "CCTOP_COLUMNS_HIDE",
             "Column keys to hide, e.g. tok_rate,mem",
         ),
-        Line::from(Span::styled(
+        note(Line::from(Span::styled(
             "  Columns also drop by priority on their own as the window narrows.",
             theme::dim(),
-        )),
-        Line::default(),
-        Line::from(Span::styled(
+        ))),
+        gap(),
+        note(Line::from(Span::styled(
             "  Costs are estimates from published per-token rates. Flat-rate plans",
             theme::dim(),
-        )),
-        Line::from(Span::styled(
+        ))),
+        note(Line::from(Span::styled(
             "  (Max, Pro, Team) bill differently, so these may not match your invoice.",
             theme::dim(),
-        )),
-        Line::default(),
-        Line::from(Span::styled(
-            "  ↑ / ↓ scroll   any other key returns",
-            theme::dim(),
-        )),
+        ))),
     ];
-    app.help_max_scroll = scrollable_modal(frame, area, "Help", lines, 76, app.help_scroll);
+
+    let query = app.help_filter.trim();
+    let mut lines = filter_help(rows, query);
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  Nothing in the help mentions “{query}”"),
+            theme::dim(),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        match (app.help_typing, query.is_empty()) {
+            (true, _) => "  Enter keeps the filter   Esc clears it",
+            (false, true) => "  ↑ / ↓ scroll   / filter   any other key returns",
+            (false, false) => "  ↑ / ↓ scroll   / edit the filter   Esc clears it",
+        },
+        theme::dim(),
+    )));
+
+    // On the border rather than as the page's first row, so it stays where it
+    // is typed while the page scrolls under it.
+    let mut title = vec![Span::styled(" Help ", theme::title())];
+    if app.help_typing || !app.help_filter.is_empty() {
+        let (text, cursor) = input_styles();
+        title.push(Span::styled("/ ", theme::dim()));
+        match app.help_typing {
+            true => title.extend(app.help_filter.spans(40, text, cursor, "█")),
+            false => title.push(Span::styled(app.help_filter.to_string(), text)),
+        }
+        title.push(Span::raw(" "));
+    }
+    // Which build this is, on the right of the same border: the page is where
+    // someone asking "is this the new one?" already is.
+    let build =
+        Line::from(Span::styled(format!(" {} ", build_label()), theme::dim())).right_aligned();
+    app.help_max_scroll = scrollable_modal_titled(
+        frame,
+        area,
+        vec![Line::from(title), build],
+        lines,
+        76,
+        app.help_scroll,
+    );
+}
+
+/// `cctop 0.19.2 (1a2b3c4d5)`: the version, and the commit it was built from
+/// when the build knew one (see `commit` in `build.rs`).
+///
+/// The commit rather than the version alone because the version is only
+/// bumped at a release: every build between two of them says the same number,
+/// and "which one is this" is the question the number cannot answer.
+pub(super) fn build_label() -> String {
+    match env!("CCTOP_COMMIT") {
+        "" => format!("cctop {}", env!("CARGO_PKG_VERSION")),
+        commit => format!("cctop {} ({commit})", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// A help key column with each `{action}` in it replaced by the key that
+/// action is on now, so a key moved in `[keys]` is where the help says it is.
+///
+/// Two keys joined by ` / ` that share their modifiers say them once —
+/// `Shift+Home / End` rather than `Shift+Home / Shift+End` — which is how the
+/// page was written by hand, and what keeps a pair inside the key column. An
+/// action nothing is bound to reads `unbound`, rather than the page quietly
+/// naming a key that now does something else or nothing at all.
+fn bound_keys(template: &str, keymap: &crate::settings::Keymap) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    // The modifiers of the key just written, while nothing but ` / ` has
+    // followed it.
+    let mut prefix: Option<String> = None;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}').map(|c| open + c) else {
+            break;
+        };
+        let between = &rest[..open];
+        let label = keymap
+            .key_of(&rest[open + 1..close])
+            .map(crate::settings::key_label)
+            .unwrap_or_else(|| "unbound".to_string());
+        let mods = label
+            .rfind('+')
+            .filter(|&i| i + 1 < label.len())
+            .map(|i| label[..=i].to_string());
+        out.push_str(between);
+        match (&prefix, &mods) {
+            (Some(p), Some(m)) if between == " / " && p == m => out.push_str(&label[m.len()..]),
+            _ => out.push_str(&label),
+        }
+        prefix = mods;
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What a row of the help is, for the filter to know what to keep together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelpRow {
+    /// A heading, kept whenever anything under it is.
+    Section,
+    /// A key and what it does: the unit the filter keeps or drops.
+    Entry,
+    /// The rest of the entry above it — a description wrapped by hand, or a
+    /// note under it. Kept or dropped with it, so a match on its second line
+    /// shows the key it is the second line of.
+    More,
+    /// Between sections.
+    Gap,
+}
+
+/// The help narrowed to the entries that mention `query`, each under its
+/// heading; the whole page when there is no query.
+///
+/// A plain substring, case-insensitive, over an entry's lines joined — the
+/// key column included, so `ctrl+u` finds the keys as well as `half a page`
+/// finds what they do. A heading that matches keeps its whole section: typing
+/// `tabs` is asking for the section called that, not for the entries that
+/// happen to say the word.
+///
+/// ponytail: the match is not highlighted. The page left is a few lines long,
+/// and the word typed is on the border above it.
+fn filter_help(rows: Vec<(HelpRow, Line<'static>)>, query: &str) -> Vec<Line<'static>> {
+    if query.is_empty() {
+        return rows.into_iter().map(|(_, line)| line).collect();
+    }
+    let needle = query.to_lowercase();
+    let text = |line: &Line| -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+            .to_lowercase()
+    };
+
+    // (heading, entries) in page order.
+    let mut sections: Vec<(Option<Line<'static>>, Vec<Vec<Line<'static>>>)> = Vec::new();
+    let mut open = false;
+    for (row, line) in rows {
+        match row {
+            HelpRow::Section => {
+                sections.push((Some(line), Vec::new()));
+                open = false;
+            }
+            HelpRow::Gap => open = false,
+            HelpRow::Entry | HelpRow::More => {
+                if sections.is_empty() {
+                    sections.push((None, Vec::new()));
+                }
+                let entries = &mut sections.last_mut().expect("pushed above").1;
+                match (row, open) {
+                    (HelpRow::More, true) => entries.last_mut().expect("open").push(line),
+                    _ => entries.push(vec![line]),
+                }
+                open = true;
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (heading, entries) in sections {
+        let whole = heading.as_ref().is_some_and(|h| text(h).contains(&needle));
+        let kept: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| {
+                whole
+                    || entry
+                        .iter()
+                        .map(text)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .contains(&needle)
+            })
+            .collect();
+        if kept.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(Line::default());
+        }
+        out.extend(heading);
+        out.extend(kept.into_iter().flatten());
+    }
+    out
 }
 
 /// Every setting and dashboard key at the value it has now, marked where
@@ -2150,8 +2411,9 @@ pub(super) fn draw_switch_tab(
         } else {
             String::new()
         };
-        let state = match app.tab_attention(i) {
+        let state = match app.switch_attention(i) {
             Some(tabs::Attention::NeedsInput) => Some(("needs you", theme::colors().cost_mid)),
+            Some(tabs::Attention::Done) => Some(("done ✓", theme::colors().accent)),
             Some(tabs::Attention::Idle) => Some(("idle", theme::colors().cost_low)),
             // Something to say about every row that asks nothing: the tab
             // you would land on by doing nothing at all.
@@ -2201,18 +2463,29 @@ pub(super) fn draw_switch_tab(
         )));
     }
     if matches.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "    No tab by that name",
-            theme::dim(),
-        )));
+        // Say which filter emptied it: a name that matches a tab that is
+        // merely not in this state is not a name that is wrong.
+        let empty = match (
+            app.switch_state.predicate(),
+            app.switch_filter.trim().is_empty(),
+        ) {
+            (None, _) => "    No tab by that name".to_string(),
+            (Some(state), true) => format!("    No tab {state}"),
+            (Some(state), false) => format!("    No tab by that name {state}"),
+        };
+        lines.push(Line::from(Span::styled(empty, theme::dim())));
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        " Enter go   ↑↓ choose   Esc cancel",
+        " Enter go   ↑↓ choose   Tab state   Esc cancel",
         theme::dim(),
     )));
 
-    let (outer, inner) = modal(frame, area, "Go to tab", lines, WIDTH);
+    let title = match app.switch_state.word() {
+        Some(state) => format!("Go to tab · {state}"),
+        None => "Go to tab".to_string(),
+    };
+    let (outer, inner) = modal(frame, area, &title, lines, WIDTH);
     layout.modal_rect = Some(outer);
     // Down the rows the window covers, "… above" and "… below" included, and
     // not the query line or the keys: those stay put while the list slides.
@@ -2572,245 +2845,6 @@ pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
     super::scrollbar::on_border(frame, box_area, total, visible as usize, scroll as usize);
 }
 
-/// The selected session's conversation, read-only — the terminal half of what
-/// the report page shows a browser, over the same `chat::build`.
-///
-/// `back` is scrolled from the end rather than the top: the document the user
-/// is reading can grow while they read it, and a position counted from the
-/// start would shift under them every time it does.
-pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
-    let Some(view) = &mut app.chat else {
-        return;
-    };
-
-    let title = match &view.session.remote {
-        // The host is worth the title room: a remote conversation is otherwise
-        // indistinguishable from a local one, and knowing which machine it was
-        // read off is the whole difference.
-        Some(remote) => format!(
-            " {} — conversation · on {} ",
-            view.session.display_label(),
-            remote.host
-        ),
-        None => format!(" {} — conversation ", view.session.display_label()),
-    };
-
-    let width = area.width.saturating_sub(4).min(110);
-    let height = area.height.saturating_sub(4);
-    let box_area = centered(area, width, height);
-    frame.render_widget(Clear, box_area);
-
-    // Borders, plus a space of padding either side, is what the wrap below has
-    // to agree with.
-    let text_width = (box_area.width as usize).saturating_sub(4).max(1);
-    let mut laid = Chat::default();
-    let body: Vec<Line> = match (&view.conversation, &view.error) {
-        (None, None) => vec![
-            Line::default(),
-            Line::from(vec![
-                Span::styled(format!("  {}", share::spinner_frame()), theme::title()),
-                match view.host.is_some() {
-                    true => Span::styled("  Reading it over ssh…", theme::value()),
-                    false => Span::styled("  Reading the transcript…", theme::value()),
-                },
-            ]),
-        ],
-        (None, Some(why)) => vec![
-            Line::default(),
-            Line::from(Span::styled(format!("  {why}"), theme::failed())),
-        ],
-        (Some(conv), _) => {
-            laid = chat_lines(&view.session, conv, text_width, view.raw);
-            std::mem::take(&mut laid.lines)
-        }
-    };
-
-    let shown = match view.raw {
-        true => "m rendered",
-        false => "m source",
-    };
-    let footer = match &view.conversation {
-        _ if view.fetching => format!(
-            " ↑↓ scroll · [ ] turn · {shown} · {} loading earlier… · esc close ",
-            share::spinner_frame()
-        ),
-        Some(c) if c.earlier > 0 => format!(
-            " ↑↓ scroll · [ ] turn · {shown} · u load {} earlier · esc close ",
-            c.earlier
-        ),
-        _ => format!(" ↑↓ scroll · [ ] turn · {shown} · esc close "),
-    };
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::colors().border_hi))
-        .style(theme::canvas())
-        .title(Span::styled(title, theme::title()))
-        .title_bottom(Span::styled(footer, theme::dim()));
-
-    let visible = box_area.height.saturating_sub(2) as usize;
-    // The only place the wrapped height is known, so the furthest-back offset
-    // is written here for the key handler to clamp against.
-    view.max_back = (body.len().saturating_sub(visible)).min(u16::MAX as usize) as u16;
-    let total = body.len();
-    let top = total.saturating_sub(visible + view.back as usize);
-    // Each turn's header, as the `back` that brings it to the top — clamped,
-    // so the last few turns, which cannot reach the top, all read as the end.
-    view.turn_backs = laid
-        .turns
-        .iter()
-        .map(|&start| {
-            (total.saturating_sub(visible).saturating_sub(start) as u16).min(view.max_back)
-        })
-        .collect();
-    frame.render_widget(
-        Paragraph::new(body).block(block).scroll((top as u16, 0)),
-        box_area,
-    );
-    super::scrollbar::on_border(frame, box_area, total, visible, top);
-    // Links are laid over the cells the paragraph has just drawn, so they have
-    // to wait for it; one scrolled out of the box is simply not on screen.
-    let inner = box_area.inner(ratatui::layout::Margin::new(1, 1));
-    for link in &laid.links {
-        let Some(row) = link.line.checked_sub(top).filter(|r| *r < visible) else {
-            continue;
-        };
-        let start = inner.x + link.columns.start;
-        let end = (inner.x + link.columns.end).min(inner.right());
-        hyperlink::link(
-            frame.buffer_mut(),
-            inner.y + row as u16,
-            start..end,
-            &link.url,
-        );
-    }
-}
-
-/// A conversation laid out: its rows, where its links landed, and the row each
-/// turn starts on.
-#[derive(Default)]
-struct Chat {
-    lines: Vec<Line<'static>>,
-    links: Vec<super::markdown::Link>,
-    turns: Vec<usize>,
-}
-
-/// A conversation laid out as styled lines, wrapped to `width`.
-///
-/// Turns read like the report page's: a small header naming the speaker, the
-/// text at full width, and each tool call underneath it dimmed — a tool's work
-/// is context for the text, not the text itself.
-///
-/// The agent's own words are rendered as the markdown they were written in,
-/// unless `raw` asks for the source. What the user typed is not: a prompt is
-/// rarely markdown on purpose, and an asterisk in it should stay one. A tool's
-/// result keeps the colours its program printed it in (see [`super::ansi`]).
-fn chat_lines(
-    session: &Session,
-    conv: &crate::serve::chat::Conversation,
-    width: usize,
-    raw: bool,
-) -> Chat {
-    let assistant = session.surface.label(session.provider).to_string();
-    let now = chrono::Utc::now();
-    let mut chat = Chat::default();
-    let out = &mut chat.lines;
-
-    if let Some(note) = &conv.note {
-        for line in super::panels::wrap(note, width) {
-            out.push(Line::styled(line, theme::dim()));
-        }
-        out.push(Line::default());
-    }
-    for turn in &conv.turns {
-        chat.turns.push(out.len());
-        if turn.kind.as_ref() == "compaction" {
-            // A seam, not something said — drawn as a rule so the eye reads it
-            // as one rather than hunting for a speaker.
-            out.push(Line::styled("  ── compacted ──", theme::dim()));
-            out.push(Line::default());
-            continue;
-        }
-        let (who, style) = match turn.role.as_ref() {
-            "user" => ("you".to_string(), theme::title()),
-            "assistant" => (assistant.clone(), theme::title()),
-            _ => ("system".to_string(), theme::dim()),
-        };
-        let when = crate::util::relative_age(&turn.ts, &now);
-        let text_style = match turn.kind.as_ref() {
-            // Reasoning is the agent thinking out loud: kept dim so the
-            // transcript's own hierarchy survives the small screen.
-            "reasoning" => theme::dim(),
-            _ => theme::value(),
-        };
-        out.push(Line::from(vec![
-            Span::styled(format!("  {who}"), style),
-            Span::styled(format!("  {when}"), theme::dim()),
-        ]));
-        match turn.role.as_ref() == "assistant" && !raw {
-            true => {
-                // Rendered text sets its own weight, so the base is the ink
-                // without the bold — or `**this**` would have nothing to stand
-                // out from.
-                let base = text_style.remove_modifier(Modifier::BOLD);
-                let md = super::markdown::render(&turn.text, width, base);
-                let offset = out.len();
-                chat.links.extend(md.links.into_iter().map(|mut link| {
-                    link.line += offset;
-                    link.columns = link.columns.start + 2..link.columns.end + 2;
-                    link
-                }));
-                out.extend(md.lines.into_iter().map(|mut line| {
-                    line.spans.insert(0, Span::raw("  "));
-                    line
-                }));
-            }
-            false => {
-                for line in super::panels::wrap(&turn.text, width) {
-                    out.push(Line::styled(format!("  {line}"), text_style));
-                }
-            }
-        }
-        for tool in &turn.tools {
-            let (mark, style) = match tool.failed {
-                true => ("✗", theme::failed()),
-                false => ("⚙", theme::dim()),
-            };
-            let counts = match (tool.added, tool.removed) {
-                (0, 0) => String::new(),
-                (a, r) => format!("  +{a} −{r}"),
-            };
-            out.push(Line::from(vec![
-                Span::styled(format!("    {mark} {}", tool.name), style),
-                Span::styled(
-                    format!("  {}", super::ansi::strip(&tool.detail)),
-                    theme::dim(),
-                ),
-                Span::styled(counts, theme::dim()),
-            ]));
-            // The full argument only exists where it says more than the
-            // one-liner did — a long command, a whole file body.
-            if let Some(full) = &tool.full {
-                out.extend(super::ansi::wrapped(full, theme::dim(), width, "      "));
-            }
-            if let Some(result) = &tool.result {
-                out.extend(super::ansi::wrapped(result, theme::dim(), width, "      "));
-            }
-            for line in &tool.diff {
-                let style = match line.starts_with('+') {
-                    true => theme::value(),
-                    false => theme::dim(),
-                };
-                out.push(Line::styled(
-                    format!("      {}", super::ansi::strip(line)),
-                    style,
-                ));
-            }
-        }
-        out.push(Line::default());
-    }
-    chat
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2979,6 +3013,155 @@ mod tests {
             .expect("draw");
         assert_eq!(app.help_max_scroll, 0);
         assert_eq!(thumb_cells(tall.backend().buffer()), 0);
+    }
+
+    fn help_text(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 200)).expect("backend");
+        terminal
+            .draw(|frame| draw_help(frame, frame.area(), app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `/` in the help narrows it to the entries that mention what is typed,
+    /// under their headings, with the query on the border; Enter keeps it,
+    /// and Esc takes the filter off before it takes the page away.
+    #[test]
+    fn slash_filters_the_help() {
+        use crate::ui::tests::key;
+        let mut app = crate::ui::tests::test_app();
+        app.mode = crate::ui::Mode::Help;
+        app.on_key(key(KeyCode::Char('/')));
+        assert!(app.help_typing);
+        // `j` and `k` are letters of the query now, not the scroll.
+        for c in "ctrl+k".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.help_filter, "ctrl+k");
+        let text = help_text(&mut app);
+        assert!(text.contains("Terminate it"), "{text}");
+        assert!(text.contains("Acting on the selected session"), "{text}");
+        assert!(text.contains("/ ctrl+k"), "the query is not shown: {text}");
+        assert!(
+            !text.contains("Move between sessions"),
+            "not narrowed: {text}"
+        );
+
+        // A match on an entry's second line keeps its first, key and all.
+        app.help_filter = "leaving the ones mid-turn".into();
+        let text = help_text(&mut app);
+        assert!(text.contains("Ctrl+R"), "{text}");
+        // A heading keeps its whole section.
+        app.help_filter = "several at once".into();
+        let text = help_text(&mut app);
+        assert!(text.contains("Clear all marks"), "{text}");
+        assert!(text.contains("skipping any that are working"), "{text}");
+        // And nothing matching says so.
+        app.help_filter = "zzzz".into();
+        let text = help_text(&mut app);
+        assert!(
+            text.contains("Nothing in the help mentions “zzzz”"),
+            "{text}"
+        );
+
+        // Enter keeps the filter and gives the letters back to the page.
+        app.help_filter = "tab".into();
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.help_typing);
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.mode, crate::ui::Mode::Help, "j closed the help");
+        assert_eq!(app.help_filter, "tab");
+        // Esc: the filter, then the page.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, crate::ui::Mode::Help);
+        assert!(app.help_filter.is_empty());
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, crate::ui::Mode::List);
+
+        // Esc while typing clears it and stays, too.
+        app.mode = crate::ui::Mode::Help;
+        app.on_key(key(KeyCode::Char('/')));
+        app.on_key(key(KeyCode::Char('x')));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, crate::ui::Mode::Help);
+        assert!(!app.help_typing && app.help_filter.is_empty());
+    }
+
+    /// The help names the keys as `[keys]` has them, not as they ship.
+    #[test]
+    fn the_help_shows_the_keys_as_bound() {
+        // A row as `item` lays it out: the key padded to its column.
+        let row = |k: &str, d: &str| format!("  {k:<16} {d}");
+        let mut app = crate::ui::tests::test_app();
+        let text = help_text(&mut app);
+        // And which build is saying so, on its top border.
+        let top = text.lines().find(|l| l.contains("╭ Help")).unwrap_or("");
+        assert!(top.contains(&build_label()), "{top}");
+        assert!(build_label().starts_with("cctop "), "{}", build_label());
+        assert!(text.contains(&row("Ctrl+K", "Terminate it")), "{text}");
+        assert!(text.contains("Shift+Home / End"), "{text}");
+        assert!(text.contains("↑/k  ↓/j"), "{text}");
+
+        let s = crate::settings::Settings::parse(
+            "[keys]\nterminate = \"ctrl+t\"\nhelp = \"H\"\nfollow = \"b\"\n",
+        );
+        app.keymap = crate::settings::Keymap::build(&s).0;
+        let text = help_text(&mut app);
+        assert!(text.contains(&row("Ctrl+T", "Terminate it")), "{text}");
+        assert!(text.contains("H  F1"), "{text}");
+        assert!(text.contains(&row("b", "Follow mode")), "{text}");
+        // `b` was the bell's, and nothing gave the bell another key.
+        assert!(
+            text.contains(&row("unbound", "Jump to the session that rang")),
+            "{text}"
+        );
+    }
+
+    /// The whole page with no query, and an unmatched heading hides nothing
+    /// that matched under it.
+    #[test]
+    fn filter_help_keeps_entries_under_their_headings() {
+        let line = |t: &str| Line::from(t.to_string());
+        let rows = vec![
+            (HelpRow::Section, line("Alpha")),
+            (HelpRow::Entry, line("a  first")),
+            (HelpRow::More, line("   and more of it")),
+            (HelpRow::Entry, line("b  second")),
+            (HelpRow::Gap, Line::default()),
+            (HelpRow::Section, line("Beta")),
+            (HelpRow::More, line("   a note with no key")),
+            (HelpRow::Entry, line("c  third, more")),
+        ];
+        let texts = |lines: Vec<Line<'static>>| -> Vec<String> {
+            lines.iter().map(|l| l.to_string()).collect()
+        };
+        assert_eq!(filter_help(rows.clone(), "").len(), rows.len());
+        assert_eq!(
+            texts(filter_help(rows.clone(), "MORE")),
+            vec![
+                "Alpha",
+                "a  first",
+                "   and more of it",
+                "",
+                "Beta",
+                "c  third, more"
+            ]
+        );
+        assert_eq!(
+            texts(filter_help(rows.clone(), "beta")),
+            vec!["Beta", "   a note with no key", "c  third, more"]
+        );
+        assert!(filter_help(rows, "nowhere").is_empty());
     }
 
     /// A report longer than its box gets a bar that follows the scroll: at the
@@ -3159,122 +3342,22 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("No tab by that name"), "silence: {text}");
-    }
 
-    /// The conversation view with one reply in markdown and one coloured tool
-    /// result, open and read in by the worker.
-    fn chat_app(text: &str, result: &str) -> App {
-        let mut app = crate::ui::tests::test_app();
-        app.sessions = vec![crate::ui::tests::session("a", true, "/repo")];
-        app.refilter();
-        app.selected = 0;
-        app.open_conversation();
-        let key = app.chat.as_ref().expect("the view opened").session.key();
-        let turn = |seq: usize, role: &'static str, text: &str| crate::serve::chat::Turn {
-            seq,
-            role: role.into(),
-            kind: "message".into(),
-            ts: String::new(),
-            text: text.into(),
-            clipped: false,
-            tools: Vec::new(),
-        };
-        let mut reply = turn(1, "assistant", text);
-        reply.tools.push(crate::serve::chat::ToolUse {
-            name: "Bash".into(),
-            detail: "cargo test".into(),
-            result: Some(result.into()),
-            ..Default::default()
-        });
-        let conv = crate::serve::chat::Conversation {
-            supported: true,
-            turns: vec![turn(0, "user", "**keep** my stars"), reply],
-            earlier: 0,
-            note: None,
-        };
-        app.got_chat(key, None, Ok(Box::new(conv)));
-        app
-    }
-
-    fn draw_chat(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
+        // Under a state filter, the title and the empty line both say which.
+        app.switch_state = crate::ui::panes::SwitchState::NeedsYou;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
         terminal
-            .draw(|frame| draw_conversation(frame, frame.area(), app))
+            .draw(|frame| draw_switch_tab(frame, frame.area(), &app, &mut layout))
             .expect("draw");
-        terminal.backend().buffer().clone()
-    }
-
-    /// A reply reads as rendered markdown with its link clickable, a user's
-    /// prompt keeps its characters, and a coloured result shows its colour and
-    /// none of its escape codes.
-    #[test]
-    fn the_conversation_renders_replies_and_colours_results() {
-        let mut app = chat_app(
-            "## Done\n\nRan **all** of it, see [the log](https://example.com/log).",
-            "\x1b[1m\x1b[32mtest result: ok\x1b[0m. 3 passed\x1b[2K",
-        );
-        let buf = draw_chat(&mut app, 100, 30);
-        let screen = hyperlink::visible(&buf);
-        assert!(screen.contains("Ran all of it, see the log."), "{screen}");
-        assert!(
-            !screen.contains("**all**") && !screen.contains("## "),
-            "{screen}"
-        );
-        assert!(
-            screen.contains("**keep** my stars"),
-            "the prompt was rendered: {screen}"
-        );
-        assert!(screen.contains("test result: ok. 3 passed"), "{screen}");
-        assert!(
-            !screen.contains("[32m") && !screen.contains("[2K"),
-            "{screen}"
-        );
-
-        let green = buf
+        let text = terminal
+            .backend()
+            .buffer()
             .content()
             .iter()
-            .find(|c| c.symbol() == "t" && c.fg == ratatui::style::Color::Green);
-        assert!(green.is_some(), "the result lost its colour");
-        let targets: Vec<&str> = buf
-            .content()
-            .iter()
-            .filter_map(|c| hyperlink::target_of(c.symbol()))
-            .collect();
-        assert_eq!(targets, ["https://example.com/log"]);
-
-        // `m` shows the source instead, markers and all.
-        app.on_key(crate::ui::tests::key(KeyCode::Char('m')));
-        let screen = hyperlink::visible(&draw_chat(&mut app, 100, 30));
-        assert!(screen.contains("Ran **all** of it"), "{screen}");
-    }
-
-    /// `[` brings the previous turn's header to the top and `]` walks back
-    /// towards the end, which is where the view opened.
-    #[test]
-    fn brackets_step_through_the_turns() {
-        let long = (0..40).map(|i| format!("line {i}\n\n")).collect::<String>();
-        let mut app = chat_app(&long, "ok");
-        draw_chat(&mut app, 80, 20);
-        let view = app.chat.as_ref().expect("open");
-        assert_eq!(view.back, 0);
-        let backs = view.turn_backs.clone();
-        assert_eq!(backs.len(), 2);
-
-        app.on_key(crate::ui::tests::key(KeyCode::Char('[')));
-        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[1]));
-        let top = hyperlink::visible(&draw_chat(&mut app, 80, 20));
-        // The row under the box's top border is the reply's own header.
-        let under_border = top.lines().skip_while(|l| !l.contains('╭')).nth(1);
-        assert!(under_border.is_some_and(|l| l.contains("Claude")), "{top}");
-
-        app.on_key(crate::ui::tests::key(KeyCode::Char('[')));
-        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[0]));
-        app.on_key(crate::ui::tests::key(KeyCode::Char(']')));
-        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(backs[1]));
-        app.on_key(crate::ui::tests::key(KeyCode::Char(']')));
-        assert_eq!(app.chat.as_ref().map(|v| v.back), Some(0));
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Go to tab · needs you"), "{text}");
+        assert!(text.contains("No tab by that name needs you"), "{text}");
     }
 
     #[test]

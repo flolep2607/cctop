@@ -4,7 +4,7 @@ expression: screen
 ---
  1:Dashboard │ + Tab (t)
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68% · claude-sonnet-4-5 32%        │
+│Live rate         $0.04                               ⡀  Models    █████████ claude-opus-4-1 68% claude-sonnet-4-5 32%│
 │Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
 │This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
 │All time         $28.51 $0.00/da╭ Sort by ───────────────────────────────────────────╮72.3K out                       │
@@ -25,7 +25,7 @@ expression: screen
 │                                │ HARNESS                                            │                                │
 │                                │ PERM                                               │                                │
 ╰────────────────────────────────│ !                                                  │────────────────────────────────╯
-╭ Info  Performance  Processes  T│ HOST                                               │────────────────────────────────╮
+╭ Info  Performance  Processes  T│ HOST                                               │w  ─────────────────────────────╮
 │Root /usr/bin/claude --model opu│ USER                                               │                                │
 │    PID    CPU%       MEM  COMMA│ PROFILE                                            │                                │
 │   4101    9.8%    360.0M  claud│ BRANCH                                             │                                │

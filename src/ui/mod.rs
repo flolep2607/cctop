@@ -29,12 +29,15 @@ pub mod menu;
 mod modals;
 pub mod panels;
 mod panes;
+mod preview;
 mod profiles;
 mod qr;
+mod reader;
 mod remote;
 pub mod render;
 mod runloop;
 mod scrollbar;
+mod seen;
 mod select;
 mod settings;
 mod share;
@@ -486,6 +489,8 @@ pub struct App {
     /// narrowed list the cursor is on. See `App::switch_matches`.
     pub switch_filter: line_edit::LineEdit,
     pub switch_cursor: usize,
+    /// Which tabs the switcher lists by what they are doing, cycled with Tab.
+    pub switch_state: panes::SwitchState,
     /// Whether the footer's `q Quit` has been clicked once already.
     ///
     /// The share corner's `share_arm` for the other irreversible thing a
@@ -504,6 +509,12 @@ pub struct App {
     pub help_scroll: u16,
     /// Last computed bottom of the help overlay, recorded during draw.
     pub help_max_scroll: u16,
+    /// What the help is narrowed to, typed after `/` in it.
+    pub help_filter: line_edit::LineEdit,
+    /// Whether keys are going into `help_filter` rather than moving the page.
+    /// Enter stops typing and keeps the filter, so `j` and `k` scroll the
+    /// narrowed page again instead of spelling more of the query.
+    pub help_typing: bool,
 
     /// `[settings]` and `[keys]` from `config.toml`, as last read.
     pub settings: crate::settings::Settings,
@@ -584,6 +595,8 @@ pub struct App {
     /// the bell's question — is it my move? — is about a session's state and
     /// these are about its numbers.
     pub alerts: crate::alert::Alerts,
+    /// Which finished turns have not been looked at yet — see [`seen`].
+    pub seen: seen::Seen,
 
     /// The last snapshot from each machine named with `--host`, keyed by the
     /// target as the user spelled it.
@@ -618,6 +631,9 @@ pub struct App {
 
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
+    /// The last screen the Preview panel read off a detached tab, kept between
+    /// captures so each one replays into the same parser.
+    preview: preview::Capture,
     /// Which tab is on screen: `0` is the dashboard, `1..=tabs.len()` index
     /// `tabs`. Zero-length `tabs` is the ordinary case: the bar still shows the
     /// dashboard and its new-tab button, so the feature is findable.
@@ -918,11 +934,14 @@ impl App {
             rename_opened_by_click: None,
             switch_filter: Default::default(),
             switch_cursor: 0,
+            switch_state: Default::default(),
             quit_arm: false,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
             help_max_scroll: 0,
+            help_filter: Default::default(),
+            help_typing: false,
             settings: Default::default(),
             keymap: Default::default(),
             settings_file: None,
@@ -960,6 +979,7 @@ impl App {
             quota: Quota::default(),
             notify: crate::notify::Notifier::new(prefs.notify),
             alerts: crate::alert::Alerts::default(),
+            seen: seen::Seen::default(),
             collisions: crate::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
@@ -974,6 +994,7 @@ impl App {
             prefs,
             tx,
             tabs: Vec::new(),
+            preview: preview::Capture::default(),
             tab: 0,
             shared_at: None,
             drag_tab: None,
@@ -1120,10 +1141,15 @@ impl App {
             conversation: None,
             error: None,
             back: 0,
-            max_back: 0,
             fetching: false,
             raw: false,
-            turn_backs: Vec::new(),
+            tools_open: false,
+            opened: std::collections::HashSet::new(),
+            search: reader::Search::default(),
+            laid: None,
+            visible: 0,
+            dirty: false,
+            hold: false,
         });
         self.mode = Mode::Conversation;
         self.fetch_chat(None);
@@ -1178,10 +1204,18 @@ impl App {
                         if current.note.is_none() {
                             current.note = page.note.take();
                         }
+                        // Only the new turns are laid out; the ones already
+                        // shown are kept (see [`reader`]).
+                        view.relayout(false);
                     }
                     None => view.conversation = Some(*page),
                 },
-                None => view.conversation = Some(*page),
+                None => {
+                    view.conversation = Some(*page);
+                    // A whole new document: a kept turn could be one whose
+                    // tool has since returned, so none of them are kept.
+                    view.laid = None;
+                }
             },
             Err(why) => view.error = Some(why),
         }
@@ -1200,7 +1234,7 @@ impl App {
     }
 }
 
-/// The state behind the conversation overlay.
+/// The state behind the conversation reader (see [`reader`]).
 pub struct ChatView {
     /// The session the view is about — kept because a page of older turns is
     /// asked for on the same row the view was opened on.
@@ -1214,24 +1248,36 @@ pub struct ChatView {
     pub conversation: Option<crate::serve::chat::Conversation>,
     /// Why the read failed, when it did.
     pub error: Option<String>,
-    /// Lines scrolled back from the bottom. A scrollback's zero is the end:
+    /// Rows scrolled back from the bottom. A scrollback's zero is the end:
     /// new turns arriving while it sits there must not move what you are
     /// reading, and a prepend of older turns leaves a distance from the end
     /// exactly where it was.
-    pub back: u16,
-    /// How far `back` can go, written by the draw — the only place the wrapped
-    /// line count is known.
-    pub max_back: u16,
+    pub back: usize,
     /// A fetch is in flight — the spinner's reason to keep turning, and what
     /// keeps a second `u` from asking for the page already coming.
     pub fetching: bool,
     /// Replies shown as the markdown source they were written in, rather than
     /// rendered — `m` flips it, for the times the exact characters matter.
     pub raw: bool,
-    /// The `back` that puts each turn's header at the top of the view, oldest
-    /// first. Written by the draw, like `max_back`, and what `[` and `]` step
-    /// through.
-    pub turn_backs: Vec<u16>,
+    /// Every tool call drawn in full rather than as its one line — `t`.
+    pub tools_open: bool,
+    /// Turns, by `seq`, whose tools are drawn the other way from `tools_open`
+    /// — what `Enter` flips, one turn at a time.
+    pub opened: std::collections::HashSet<usize>,
+    /// `/`: the query and the rows it is on.
+    pub search: reader::Search,
+    /// The conversation laid out at the last frame's width, kept so a frame
+    /// copies the rows it shows rather than rendering every reply again.
+    pub laid: Option<reader::Laid>,
+    /// Rows the last frame had for text, written by the draw — the only place
+    /// it is known — for the keys to page and clamp by.
+    pub visible: usize,
+    /// Something `laid` was built from has changed; the next frame lays out
+    /// again, keeping every turn it can.
+    pub dirty: bool,
+    /// The next layout keeps the top row in place even at the end; see
+    /// [`ChatView::relayout`].
+    pub hold: bool,
 }
 
 /// Columns the user has hidden outright, which win over the automatic

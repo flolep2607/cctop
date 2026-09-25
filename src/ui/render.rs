@@ -52,6 +52,10 @@ pub struct Layout {
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
     pub(super) tool_log: Option<(u16, u16, u16)>,
+    /// The session table's scrollbar track, while the table overflows.
+    pub(super) table_track: Option<Rect>,
+    /// The active bottom panel's scrollbar track, while it overflows.
+    pub(super) panel_track: Option<Rect>,
     /// Every place a key is written on screen as its own label, and the key it
     /// stands for: `(row, start_col, end_col, key)`.
     ///
@@ -343,7 +347,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::Insight => modals::draw_insight(frame, area, app),
-        Mode::Conversation => modals::draw_conversation(frame, area, app),
+        Mode::Conversation => super::reader::draw(frame, area, app),
         Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
         Mode::List => {}
     }
@@ -413,6 +417,16 @@ fn draw_paste_preview(frame: &mut Frame, area: Rect, app: &mut App) {
 /// What a tab being recorded carries after its label on the bar.
 const REC: &str = "● REC ";
 
+/// What a tab carries after its label while a turn in it ended unseen — see
+/// [`seen`](super::seen). A glyph as well as the label's own colour, because
+/// that colour is the idle green every finished tab already wears: the mark
+/// has to say "this one is new" to someone who cannot tell two greens apart.
+const DONE: &str = "✓ ";
+
+/// What a tab carries after its label while one of its panes is zoomed, so a
+/// split whose other panes have vanished says where they went.
+const ZOOM: &str = "⤢ ";
+
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let titles: Vec<String> = std::iter::once("Dashboard".to_string())
@@ -445,6 +459,18 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     let recording: Vec<bool> = std::iter::once(false)
         .chain(app.tabs.iter().map(tabs::Tab::recording))
         .collect();
+    let markers: Vec<String> = (0..titles.len())
+        .map(|i| {
+            let tab = i.checked_sub(1).and_then(|t| app.tabs.get(t));
+            let zoomed = tab.is_some_and(tabs::Tab::zoomed);
+            let done = app.tab_attention(i) == Some(tabs::Attention::Done);
+            format!(
+                "{}{}",
+                if done { DONE } else { "" },
+                if zoomed { ZOOM } else { "" }
+            )
+        })
+        .collect();
 
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
@@ -453,7 +479,8 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     // every pair of tabs and one before the new-tab button.
     let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>()
         + titles.len()
-        + recording.iter().filter(|&&r| r).count() * REC.chars().count();
+        + recording.iter().filter(|&&r| r).count() * REC.chars().count()
+        + markers.iter().map(|m| m.chars().count()).sum::<usize>();
     let cap = match natural <= label_room {
         true => usize::MAX,
         false => ((label_room.saturating_sub(titles.len())) / titles.len())
@@ -476,6 +503,15 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         let mut width = text.chars().count() as u16;
         let style = tab_style(app, i, hues[i]);
         spans.push(Span::styled(text, style));
+        // In the label's own style, so it reads as part of *that* tab rather
+        // than a second one, and bold so it is not lost against the fill.
+        if !markers[i].is_empty() {
+            spans.push(Span::styled(
+                markers[i].clone(),
+                style.add_modifier(Modifier::BOLD),
+            ));
+            width += markers[i].chars().count() as u16;
+        }
         // After the label rather than inside it, so it is never what the
         // elision cuts, and part of the tab's click target like the label is.
         if recording[i] {
@@ -581,7 +617,9 @@ fn tab_style(app: &App, i: usize, hue: Option<theme::Hue>) -> Style {
                 // Bold rather than green ink, which on a green or cyan fill
                 // would say nothing — and rather than a glyph, which made the
                 // tab look like it carried a second label.
-                Some(tabs::Attention::Idle) => fill.add_modifier(Modifier::BOLD),
+                Some(tabs::Attention::Idle | tabs::Attention::Done) => {
+                    fill.add_modifier(Modifier::BOLD)
+                }
                 None => fill,
             }
         }
@@ -604,6 +642,12 @@ fn tab_style(app: &App, i: usize, hue: Option<theme::Hue>) -> Style {
             // label visible without repeatedly pulling attention from work.
             Some(tabs::Attention::Idle) => Style::default()
                 .fg(theme::colors().cost_low)
+                .add_modifier(Modifier::BOLD),
+            // The accent, the ink of the table's own done mark, so the same
+            // news is the same colour in both places. Still, unlike a
+            // question: a finished turn waits for you without harm.
+            Some(tabs::Attention::Done) => Style::default()
+                .fg(theme::colors().accent)
                 .add_modifier(Modifier::BOLD),
             None if i == app.tab => theme::selected(),
             None => Style::default().fg(theme::colors().dim),
@@ -746,14 +790,24 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
     if tab.panes.is_empty() {
         return;
     }
-    let share = Constraint::Ratio(1, tab.panes.len() as u32);
-    let slots = match tab.stacked {
-        true => RLayout::vertical(vec![share; tab.panes.len()]),
-        false => RLayout::horizontal(vec![share; tab.panes.len()]),
-    }
-    .split(area);
-
     let focus = tab.focus;
+    let zoomed = tab.zoomed();
+    let share = Constraint::Ratio(1, tab.panes.len() as u32);
+    let slots: Vec<Rect> = match zoomed {
+        // The focused pane gets the whole tab; the rest get nothing and are
+        // skipped below. Not resized to nothing, and not resized at all: see
+        // [`hidden_by_zoom`].
+        true => (0..tab.panes.len())
+            .map(|i| if i == focus { area } else { Rect::default() })
+            .collect(),
+        false => match tab.stacked {
+            true => RLayout::vertical(vec![share; tab.panes.len()]),
+            false => RLayout::horizontal(vec![share; tab.panes.len()]),
+        }
+        .split(area)
+        .to_vec(),
+    };
+
     // The tab's colour, read before the panes are borrowed: a painted tab
     // carries its mark onto the title of every border it owns, which is where
     // it is visible while the bar is a row you are not looking at.
@@ -775,6 +829,13 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         .map(|hue| hue.wash(theme::Fill::Selected).add_modifier(Modifier::BOLD));
     let now = chrono::Utc::now().timestamp();
     for (i, pane) in tab.panes.iter_mut().enumerate() {
+        if hidden_by_zoom(zoomed, i, focus) {
+            // A placeholder, so a pane's rectangle is still found at its own
+            // index — the mouse maps a hit back to a pane by position — and
+            // an empty one, so no click ever lands on a pane you cannot see.
+            layout.pane_rects.push(Rect::default());
+            continue;
+        }
         let mut block = panel_block_titled(&pane.label, tint.unwrap_or_else(theme::title));
         // The border is long and empty, and the label has already told you which
         // agent this is; the quota is the other thing you want while it runs.
@@ -793,7 +854,13 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         if i == focus {
             block = block
                 .border_style(Style::default().fg(theme::colors().border_hi))
-                .title_bottom(Span::styled(" F12 back · Alt+w close ", theme::title()));
+                .title_bottom(Span::styled(
+                    match zoomed {
+                        true => " F12 back · Alt+z unzoom ",
+                        false => " F12 back · Alt+w close ",
+                    },
+                    theme::title(),
+                ));
         }
         // Scrolled back, this pane is showing history rather than the agent, and
         // there is nothing on a still screen to say so — the agent may well be
@@ -828,6 +895,24 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         );
         layout.pane_rects.push(screen);
     }
+}
+
+/// Whether pane `i` is off screen behind a zoomed one.
+///
+/// A hidden pane keeps running — its output is still pumped every tick, see
+/// [`Tab::pump`](tabs::Tab::pump) — but it is not drawn and, deliberately, not
+/// resized. Its agent goes on at the size it had in the split, so zooming in
+/// and out costs the hidden agents nothing: no `SIGWINCH`, no reflow of a
+/// screen nobody is reading, and no full repaint of a TUI that redraws its
+/// whole frame on every resize. Only the zoomed agent is resized, once each
+/// way, which is what tmux does too.
+///
+/// The one limit is rmux's, not this: an agent is drawn at the smallest size
+/// any client watching it asked for, so a pane another cctop is also showing
+/// at split size stays that size here, zoomed or not — the leftover is drawn
+/// blank, as for any grant smaller than the request.
+fn hidden_by_zoom(zoomed: bool, i: usize, focus: usize) -> bool {
+    zoomed && i != focus
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +1013,73 @@ fn push_while_fits(spans: &mut Vec<Span<'static>>, groups: Vec<Vec<Span<'static>
         used += w;
         spans.extend(group);
     }
+}
+
+/// Models that get a hue of their own in the spend bar; the rest share one.
+const CHARTED_MODELS: usize = 4;
+/// The fewest cells the spend bar is drawn in. Under this a cell is more than
+/// an eighth of the day, too coarse for a length to say more than the
+/// percentages beside it, so the bar leaves.
+const SPEND_BAR_MIN: usize = 8;
+const SPEND_BAR_MAX: usize = 16;
+
+/// The hue of the `rank`-th model in today's spend, largest first.
+///
+/// By rank rather than by vendor: [`theme::model_color`] paints every Claude
+/// model the same, and the mix worth seeing is usually opus against haiku. The
+/// slots are the palette's categorical ones, already folded to the terminal's
+/// depth, so a sixteen-colour screen gets sixteen-colour segments.
+fn model_hue(rank: usize) -> Color {
+    let p = theme::colors();
+    [p.accent, p.chart_hues[0], p.name_hue, p.chart_hues[1]]
+        .get(rank)
+        .copied()
+        .unwrap_or(p.dim)
+}
+
+/// Today's spend per model as one stacked bar, in whatever of `width` the
+/// names beside it leave.
+///
+/// A bar rather than more percentages because the row's question is the mix,
+/// and a mix is a proportion the eye reads off a length faster than it adds up
+/// numbers. Models past [`CHARTED_MODELS`] fold into one dim tail rather than
+/// being dropped, so the bar is always the whole of today.
+///
+/// The names come first and the bar takes what they leave: the percentages are
+/// what the row said before it had a bar, and a bar that pushed the second
+/// model's name off the row would have traded a number for a colour. Empty when
+/// that leaves fewer than [`SPEND_BAR_MIN`] cells — a squeezed bar is a smudge,
+/// and the names alone still answer the question.
+fn spend_bar(models: &[(String, f64)], width: usize) -> Vec<Span<'static>> {
+    let today: f64 = models.iter().map(|m| m.1).sum();
+    if models.is_empty() || today <= 0.0 {
+        return Vec::new();
+    }
+    // Each entry is drawn as ` name NN%` beside the bar; the two leading
+    // models must fit, the rest may fall off the end.
+    let entry = |(name, cost): &(String, f64)| {
+        name.chars().count() + format!(" {:.0}%", cost / today * 100.0).len() + 1
+    };
+    let names: usize = models.iter().take(2).map(entry).sum();
+    let bar_w = width.saturating_sub(names).min(SPEND_BAR_MAX);
+    if bar_w < SPEND_BAR_MIN {
+        return Vec::new();
+    }
+    let mut weights: Vec<u64> = models
+        .iter()
+        .take(CHARTED_MODELS)
+        .map(|(_, cost)| (cost.max(0.0) * 10_000.0).round() as u64)
+        .collect();
+    let rest: f64 = models.iter().skip(CHARTED_MODELS).map(|m| m.1).sum();
+    if rest > 0.0 {
+        weights.push((rest * 10_000.0).round() as u64);
+    }
+    panels::apportion(&weights, bar_w)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, n)| *n > 0)
+        .map(|(rank, n)| Span::styled("█".repeat(n), Style::default().fg(model_hue(rank))))
+        .collect()
 }
 
 fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
@@ -1113,12 +1265,26 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             // Percentages of today's spend, not a count of sessions ever seen:
             // the mix that is costing money is the one worth naming.
+            let bar = spend_bar(&stats.models_today, body_w);
+            let charted = !bar.is_empty();
+            model_spans.extend(bar);
             let mut groups = Vec::new();
-            for (i, (name, cost)) in stats.models_today.iter().take(3).enumerate() {
-                let sep = if i > 0 { " · " } else { "" };
+            for (i, (name, cost)) in stats
+                .models_today
+                .iter()
+                .take(if charted { CHARTED_MODELS } else { 3 })
+                .enumerate()
+            {
+                // Beside the bar each name wears its segment's hue, which is
+                // the legend; without one the plain dotted list is clearer.
+                let (sep, style) = match charted {
+                    true => (" ", Style::default().fg(model_hue(i))),
+                    false if i > 0 => (" · ", theme::value()),
+                    false => ("", theme::value()),
+                };
                 groups.push(vec![
                     Span::styled(sep, theme::dim()),
-                    Span::styled(name.clone(), theme::value()),
+                    Span::styled(name.clone(), style),
                 ]);
                 groups.push(vec![Span::styled(
                     format!(" {:.0}%", cost / today * 100.0),
@@ -1283,6 +1449,14 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         return;
     }
 
+    // Ahead of the remote note below, which speaks of a transcript: what the
+    // Preview panel lacks for a remote row is a tab, and it says so itself.
+    if app.bottom_tab == super::preview::TAB {
+        app.panel_max_scroll = 0;
+        super::preview::draw(frame, area, inner, app);
+        return;
+    }
+
     // A remote row carries what the table shows and nothing behind it: the
     // transcript that every other panel is a reading of is a file on the other
     // machine, and cctop never fetches it. Info is the exception, being built
@@ -1359,7 +1533,10 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
             ),
             5 => (panels::cost(session, data, app.plan), app.cost_scroll),
             6 => (panels::config(session), app.config_scroll),
-            _ => (panels::context(session, data, width), app.context_scroll),
+            _ => (
+                panels::context(session, data, width, inner.height as usize),
+                app.context_scroll,
+            ),
         }
     };
 
@@ -1391,7 +1568,8 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), target);
     // Shift+↑/↓ scrolls every one of these, and without the bar a panel cut
     // off at its last visible row looks exactly like one that ended there.
-    scrollbar::on_border(frame, area, total, target.height as usize, scroll as usize);
+    layout.panel_track =
+        scrollbar::on_border(frame, area, total, target.height as usize, scroll as usize);
 }
 
 const TOOL_SIDEBAR_W: u16 = 18;
@@ -3077,6 +3255,8 @@ mod tests {
             tab_spans: vec![(2, 6, 0), (8, 19, 1)],
             tool_sidebar: Some((18, 21, 0, 3)),
             tool_log: Some((19, 21, 4)),
+            table_track: None,
+            panel_track: None,
             modal_rect: Some(Rect::new(10, 8, 20, 6)),
             launch_rows: vec![(10, 0), (11, 1)],
             launch_cwd_rows: vec![(12, 0)],
@@ -3322,6 +3502,32 @@ mod tests {
             mine.contains("cctop --add-account") && !mine.contains("claude login"),
             "a token account was told to log in: {mine:?}"
         );
+    }
+
+    /// The spend bar fills the room the two leading names leave, up to a cap,
+    /// and every model spent on — the folded tail included — has a cell.
+    #[test]
+    fn the_spend_bar_takes_what_the_names_leave_and_hides_when_squeezed() {
+        let cells =
+            |spans: &[Span]| -> usize { spans.iter().map(|s| s.content.chars().count()).sum() };
+        let models: Vec<(String, f64)> = vec![
+            ("opus-5".into(), 90.0),
+            ("haiku-4-5".into(), 8.0),
+            ("a".into(), 1.0),
+            ("b".into(), 0.5),
+            ("c".into(), 0.3),
+            ("d".into(), 0.2),
+        ];
+        // ` opus-5 90%` and ` haiku-4-5 8%` take 24 columns.
+        let bar = spend_bar(&models, 34);
+        assert_eq!(cells(&bar), 10);
+        // Four hues and the folded tail, each at least a cell.
+        assert_eq!(bar.len(), CHARTED_MODELS + 1, "{bar:?}");
+        assert_eq!(cells(&spend_bar(&models, 200)), SPEND_BAR_MAX);
+        assert!(spend_bar(&models, 24 + SPEND_BAR_MIN - 1).is_empty());
+        assert!(spend_bar(&[], 200).is_empty());
+        // One model is still a mix worth drawing: all of today.
+        assert_eq!(spend_bar(&models[..1], 40).len(), 1);
     }
 
     /// The Overview earns its width or gives it up.
@@ -3651,6 +3857,54 @@ mod tests {
             !screen[rows as usize - 1].contains("Filter"),
             "the dashboard footer leaked into an agent tab: {:?}",
             screen[rows as usize - 1]
+        );
+    }
+
+    /// Zoomed, the focused pane is drawn over the whole tab and the other one
+    /// not at all — not even as a click target — and the bar says so.
+    #[test]
+    fn a_zoomed_pane_fills_the_tab_and_hides_the_rest() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        let mut tab = tabs::Tab::new(tabs::Pane::for_test("left"));
+        tab.split(tabs::Pane::for_test("right"), false);
+        assert_eq!(tab.toggle_zoom(), Some(true));
+        app.tabs.push(tab);
+        app.tab = 1;
+
+        let (cols, rows) = (80u16, 21u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+        let screen = screen(&terminal, cols, rows);
+
+        assert_eq!(layout.pane_rects.len(), 2, "a pane lost its index");
+        assert_eq!(
+            layout.pane_rects[0],
+            Rect::default(),
+            "the hidden pane is clickable"
+        );
+        assert!(
+            layout.pane_rects[1].width > cols / 2,
+            "the zoomed pane did not get the tab: {:?}",
+            layout.pane_rects[1]
+        );
+        assert!(
+            screen[0].contains(ZOOM.trim()),
+            "the bar does not say the tab is zoomed: {:?}",
+            screen[0]
+        );
+        // Below the bar, whose label is the tab's and may well name it.
+        assert!(
+            screen[1..].iter().all(|line| !line.contains("left")),
+            "the hidden pane's border was drawn: {screen:#?}"
         );
     }
 

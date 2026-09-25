@@ -197,7 +197,68 @@ impl App {
     /// in front of you, so blinking its title tells you nothing you cannot see.
     pub fn tab_attention(&self, index: usize) -> Option<tabs::Attention> {
         let tab = self.tabs.get(index.checked_sub(1)?)?;
-        tab.attention(index == self.tab, &|pid| self.pane_signal(pid))
+        let watched = index == self.tab;
+        match tab.attention(watched, &|pid| self.pane_signal(pid))? {
+            // Upgraded here rather than decided inside the tab: whether a turn
+            // has been seen is the app's memory, not anything a pane holds —
+            // see [`seen`](super::seen). Only a tab that already reads as idle
+            // is, so a disagreement between the row and the screen leaves the
+            // screen's answer standing.
+            tabs::Attention::Idle
+                if tab
+                    .unwatched_agents(watched)
+                    .into_iter()
+                    .any(|pid| self.pid_done(pid)) =>
+            {
+                Some(tabs::Attention::Done)
+            }
+            attention => Some(attention),
+        }
+    }
+
+    /// Whether the agent running as `pid` finished a turn you have not looked
+    /// at.
+    pub(super) fn pid_done(&self, pid: u32) -> bool {
+        self.sessions
+            .iter()
+            .filter(|session| session.root_pid() == Some(pid))
+            .any(|session| self.seen.is_done(&session.key()))
+    }
+
+    /// The session being looked at, as [`seen`](super::seen) counts looking:
+    /// the focused pane's agent in a tab, the selected row on the dashboard.
+    fn viewed_session(&self) -> Option<String> {
+        let pid = match self.tab {
+            0 => return self.selected_session().map(Session::key),
+            tab => {
+                let tab = self.tabs.get(tab - 1)?;
+                tab.panes.get(tab.focus)?.agent()
+            }
+        };
+        self.sessions
+            .iter()
+            .find(|session| session.root_pid() == Some(pid))
+            .map(Session::key)
+    }
+
+    /// Bring the unseen marks up to date with what the rows say and where you
+    /// are looking. Returns whether any mark came or went.
+    ///
+    /// Every pass of the loop rather than on refresh alone: looking is a
+    /// keypress, and a mark that outlived the look by a refresh interval would
+    /// be a mark on the thing you are reading.
+    pub(super) fn observe_seen(&mut self) -> bool {
+        let viewed = self.viewed_session();
+        let live: Vec<(String, seen::Phase)> = self
+            .sessions
+            .iter()
+            .filter(|session| session.is_running())
+            .map(|session| (session.key(), seen::Phase::of(session.activity_state)))
+            .collect();
+        self.seen.observe(
+            live.iter().map(|(key, phase)| (key.as_str(), *phase)),
+            viewed.as_deref(),
+        )
     }
 
     /// Fold in whatever the agents have reported.

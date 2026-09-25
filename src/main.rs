@@ -34,6 +34,7 @@ mod trace;
 mod ui;
 mod update;
 mod util;
+mod wait;
 mod watch;
 mod why;
 
@@ -132,6 +133,20 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if let Some(word @ ("optimize" | "compare")) = argv.get(1).map(String::as_str) {
             std::process::exit(insight::run(word, &argv[2..]));
+        }
+    }
+
+    // `cctop wait` alongside `doctor`, and for the same reason: a bare word
+    // with a positional of its own. Its flags are clap's, parsed from the rest
+    // — a usage error exits 2, which is also what an unknown session exits
+    // with, so a script has one code for "you asked about nothing".
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("wait") {
+            let args = cli::WaitArgs::parse_from(
+                std::iter::once("cctop wait".to_string()).chain(argv[2..].iter().cloned()),
+            );
+            std::process::exit(wait::run(&args));
         }
     }
 

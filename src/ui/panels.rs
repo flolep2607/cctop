@@ -12,7 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::{Path, PathBuf};
 
-pub const TABS: [&str; 8] = [
+pub const TABS: [&str; 9] = [
     "Info",
     "Performance",
     "Processes",
@@ -21,6 +21,7 @@ pub const TABS: [&str; 8] = [
     "Cost",
     "Config",
     "Context",
+    "Preview",
 ];
 
 fn label(text: &str) -> Span<'static> {
@@ -173,21 +174,7 @@ pub fn info(
     }
 
     let mut lines = Vec::new();
-    let provider_color = match session.surface {
-        Surface::DesktopCowork => theme::colors().desktop_cowork,
-        Surface::DesktopCode => theme::colors().desktop_code,
-        Surface::Editor => theme::colors().cursor,
-        Surface::Cli => match session.provider {
-            Provider::Claude => theme::colors().claude,
-            Provider::Codex => theme::colors().openai,
-            Provider::Cursor => theme::colors().cursor,
-            Provider::Devin => theme::colors().claude,
-            Provider::Gemini => theme::colors().gemini,
-            Provider::OpenCode => theme::colors().opencode,
-            Provider::Pi => theme::colors().pi,
-            Provider::Windsurf => theme::colors().windsurf,
-        },
-    };
+    let provider_color = provider_color(session);
     let model = if data.last_model.is_empty() {
         session.model.clone()
     } else {
@@ -541,6 +528,26 @@ pub fn tool_tabs(data: &SessionData) -> Vec<(String, u64)> {
 /// growing beneath it. Row indices shift as new entries arrive; ids don't.
 pub fn detail_key(d: &crate::session::ToolDetail) -> String {
     d.id.clone().unwrap_or_else(|| format!("{}|{}", d.ts, d.d))
+}
+
+/// The hue a session's harness is drawn in — the Summary's provider line, and
+/// the agent's name over each of its turns in the conversation reader.
+pub(super) fn provider_color(session: &Session) -> ratatui::style::Color {
+    match session.surface {
+        Surface::DesktopCowork => theme::colors().desktop_cowork,
+        Surface::DesktopCode => theme::colors().desktop_code,
+        Surface::Editor => theme::colors().cursor,
+        Surface::Cli => match session.provider {
+            Provider::Claude => theme::colors().claude,
+            Provider::Codex => theme::colors().openai,
+            Provider::Cursor => theme::colors().cursor,
+            Provider::Devin => theme::colors().claude,
+            Provider::Gemini => theme::colors().gemini,
+            Provider::OpenCode => theme::colors().opencode,
+            Provider::Pi => theme::colors().pi,
+            Provider::Windsurf => theme::colors().windsurf,
+        },
+    }
 }
 
 /// Wrap text to `width`, breaking on the last space that fits.
@@ -1106,7 +1113,24 @@ impl Slice {
 /// category holds, and separate bars make that a comparison between rows instead
 /// of something the eye reads off at once. It also leaves room for the window's
 /// unused remainder, which is the part a bar-per-row cannot show at all.
-pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> Vec<Line<'static>> {
+///
+/// Given the height, that bar grows into a block map — the same bar folded into
+/// rows, read left to right and top to bottom, so each cell stands for a fixed
+/// slice of the window the way a memory map's cells stand for pages. It replaces
+/// the one-row bar rather than sitting beside it or behind a key, because it
+/// *is* the bar at a finer grain: a single row of eighty cells spends 2.5K of a
+/// 200K window per cell, which is how a 1K category used to vanish, while four
+/// rows spend 625 tokens and show it. A toggle would put the better view one
+/// keypress away from the people who never press it, and a second copy above
+/// the list would say the same thing twice. On a panel too short to spare the
+/// rows it folds back to the single bar, since the legend underneath is the
+/// part that carries the numbers.
+pub fn context(
+    session: &Session,
+    data: Option<&SessionData>,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
     let Some(data) = data else {
         return note("Loading…");
     };
@@ -1154,17 +1178,21 @@ pub fn context(session: &Session, data: Option<&SessionData>, width: usize) -> V
         });
     }
 
-    let compaction = compaction_cell(session, &slices, b.superseded, width);
+    let rows = map_rows(height);
+    let cells = width.max(1) * rows;
+    let compaction = compaction_cell(session, &slices, b.superseded, cells);
     let mut lines = vec![context_header(session, &b)];
     lines.push(Line::default());
-    lines.push(stacked_bar(&slices, compaction, width));
+    lines.extend(block_map(&slices, compaction, width, rows));
     lines.push(Line::default());
     lines.extend(legend(&slices, width));
     lines.push(Line::default());
+    let scale = slices.iter().map(|s| s.tokens).sum::<u64>();
     lines.extend(context_footnotes(
         &b,
         unaccounted,
         compaction.is_some(),
+        (rows > 1).then(|| scale / cells as u64),
         width,
     ));
     lines.extend(context_timeline(session, data, width));
@@ -1284,7 +1312,7 @@ fn compaction_cell(
     session: &Session,
     slices: &[Slice],
     superseded: bool,
-    width: usize,
+    cells: usize,
 ) -> Option<usize> {
     let ctx = session.context?;
     let scale = slices.iter().map(|s| s.tokens).sum::<u64>();
@@ -1295,15 +1323,15 @@ fn compaction_cell(
         return None;
     }
     let compact_at = ctx.max as f64 * *crate::config::COMPACT_THRESHOLD;
-    let cell = (compact_at / scale as f64 * width as f64).round() as usize;
+    let cell = (compact_at / scale as f64 * cells as f64).round() as usize;
     // Only inside the free tail: elsewhere it would overwrite something held.
     let held: u64 = slices
         .iter()
         .filter(|s| s.name != "Free")
         .map(|s| s.tokens)
         .sum();
-    let free_starts = (held as f64 / scale as f64 * width as f64).round() as usize;
-    (cell > free_starts && cell < width).then_some(cell)
+    let free_starts = (held as f64 / scale as f64 * cells as f64).round() as usize;
+    (cell > free_starts && cell < cells).then_some(cell)
 }
 
 /// Window size, how full it is, and how much is left before auto-compaction.
@@ -1363,9 +1391,30 @@ fn context_header(session: &Session, b: &crate::session::ContextBreakdown) -> Li
     Line::from(spans)
 }
 
-/// Every category in one bar, in the legend's order, spanning the panel.
-fn stacked_bar(slices: &[Slice], compaction: Option<usize>, width: usize) -> Line<'static> {
-    let cells = width.max(1);
+/// How many rows the block map gets out of a panel `height` rows tall.
+///
+/// A quarter of the panel, so the legend and the footnotes that carry the
+/// numbers stay on screen beside it; one row is the plain stacked bar, which is
+/// what a panel too short to fold it gets.
+fn map_rows(height: usize) -> usize {
+    (height / 4).clamp(1, 6)
+}
+
+/// Every category in the legend's order, filling `rows` rows of the panel
+/// left to right and then top to bottom.
+///
+/// With one row this is the stacked bar, and the threshold is a single `┊`
+/// cell. With more, a lone marker cell is lost in the grid, so everything past
+/// the threshold is drawn as `·` instead: the room the harness will reclaim
+/// before it is ever reached reads as a region, which is what it is.
+fn block_map(
+    slices: &[Slice],
+    compaction: Option<usize>,
+    width: usize,
+    rows: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let cells = width * rows.max(1);
     let weights: Vec<u64> = slices.iter().map(|s| s.tokens).collect();
 
     // Laid out cell by cell so the threshold marker can replace one of them: a
@@ -1375,16 +1424,31 @@ fn stacked_bar(slices: &[Slice], compaction: Option<usize>, width: usize) -> Lin
         .zip(apportion(&weights, cells))
         .flat_map(|(slice, w)| std::iter::repeat_n((slice.fill, slice.color), w))
         .collect();
-    if let Some(at) = compaction
-        && let Some(cell) = cell_styles.get_mut(at)
-    {
-        *cell = ('┊', theme::colors().dim);
+    if let Some(at) = compaction {
+        let dim = theme::colors().dim;
+        match rows {
+            0 | 1 => {
+                if let Some(cell) = cell_styles.get_mut(at) {
+                    *cell = ('┊', dim);
+                }
+            }
+            // `compaction_cell` only ever lands inside the free tail, so
+            // everything from it on is free space.
+            _ => cell_styles
+                .iter_mut()
+                .skip(at)
+                .for_each(|cell| *cell = ('·', dim)),
+        }
     }
 
-    // Runs of one style become one span; a span per cell would allocate a String
-    // per column of the panel, on every frame.
+    cell_styles.chunks(width).map(styled_run).collect()
+}
+
+/// One row of cells as spans, a span per run of one style: a span per cell
+/// would allocate a String per column of the panel, on every frame.
+fn styled_run(cells: &[(char, ratatui::style::Color)]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (glyph, color) in cell_styles {
+    for &(glyph, color) in cells {
         match spans.last_mut() {
             Some(last) if last.style.fg == Some(color) => last.content.to_mut().push(glyph),
             _ => spans.push(Span::styled(glyph.to_string(), Style::default().fg(color))),
@@ -1399,7 +1463,14 @@ fn stacked_bar(slices: &[Slice], compaction: Option<usize>, width: usize) -> Lin
 /// leaves the bar a cell or two short of the panel width, and in a stacked bar
 /// that error lands on the boundary between two colours, which is exactly where
 /// the eye is already looking.
-fn apportion(weights: &[u64], cells: usize) -> Vec<usize> {
+///
+/// Every non-zero weight then gets at least one cell, taken from whichever
+/// share is largest at the time, while there are cells enough to go round. A
+/// category that is in the window but rounds to nothing would otherwise be in
+/// the legend and nowhere on the bar, which reads as the legend being wrong;
+/// a cell's worth of overstatement on the smallest share costs the largest one
+/// a sliver it will not visibly miss.
+pub(super) fn apportion(weights: &[u64], cells: usize) -> Vec<usize> {
     let scale: u64 = weights.iter().sum::<u64>().max(1);
     let exact: Vec<f64> = weights
         .iter()
@@ -1419,6 +1490,19 @@ fn apportion(weights: &[u64], cells: usize) -> Vec<usize> {
         }
         out[i] += 1;
         spare -= 1;
+    }
+
+    for i in 0..weights.len() {
+        if weights[i] == 0 || out[i] > 0 {
+            continue;
+        }
+        // A donor must keep a cell of its own, or visibility just moves.
+        let donor = (0..out.len())
+            .filter(|&j| out[j] > 1)
+            .max_by_key(|&j| (out[j], std::cmp::Reverse(j)));
+        let Some(donor) = donor else { break };
+        out[donor] -= 1;
+        out[i] = 1;
     }
     out
 }
@@ -1466,13 +1550,20 @@ fn context_footnotes(
     b: &crate::session::ContextBreakdown,
     unaccounted: i64,
     marked: bool,
+    per_cell: Option<u64>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let marker = if marked {
-        " ┊ on the bar is where auto-compaction triggers."
-    } else {
-        ""
+    let marker = match (marked, per_cell) {
+        (true, None) => " ┊ on the bar is where auto-compaction triggers.",
+        (true, Some(_)) => {
+            " · on the map is past auto-compaction: room the harness reclaims before it is reached."
+        }
+        (false, _) => "",
     };
+    // The grain, because a cell is only a unit once its size is said.
+    let grain = per_cell
+        .map(|n| format!(" Each cell is about {} tokens.", util::compact_tokens(n)))
+        .unwrap_or_default();
     let startup = if b.after_compaction {
         "Measured: Window, and Startup — this segment's first request (system prompt, tool schemas, CLAUDE.md, skills index, compaction summary), which the transcript cannot split further."
     } else {
@@ -1491,11 +1582,14 @@ fn context_footnotes(
     } else {
         ""
     };
-    [startup.to_string(), format!("{rest}{marker}{superseded}")]
-        .iter()
-        .flat_map(|note| wrap(note, width.max(20)))
-        .map(|l| Line::from(dim(l)))
-        .collect()
+    [
+        startup.to_string(),
+        format!("{rest}{marker}{grain}{superseded}"),
+    ]
+    .iter()
+    .flat_map(|note| wrap(note, width.max(20)))
+    .map(|l| Line::from(dim(l)))
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2285,6 +2379,100 @@ mod tests {
         }
     }
 
+    /// A category that is in the window is on the bar, however small: one in
+    /// the legend with no cell reads as the legend being wrong.
+    #[test]
+    fn a_tiny_share_still_gets_a_cell_of_its_own() {
+        assert_eq!(apportion(&[999_999, 1], 10), vec![9, 1]);
+        // Several tiny ones each take a cell, all from the dominant share.
+        assert_eq!(apportion(&[1_000_000, 1, 1, 1], 20), vec![17, 1, 1, 1]);
+        // Nothing is invented for a category that holds nothing.
+        assert_eq!(apportion(&[0, 5, 0], 7), vec![0, 7, 0]);
+        // Exact shares are left as they are.
+        assert_eq!(apportion(&[1, 1, 2], 8), vec![2, 2, 4]);
+    }
+
+    /// With fewer cells than categories nobody can be guaranteed a cell, and
+    /// the bar still has to be exactly the width it was given — not wider.
+    #[test]
+    fn more_categories_than_cells_still_fill_exactly() {
+        let parts = apportion(&[10, 1, 1, 1, 1], 3);
+        assert_eq!(parts.iter().sum::<usize>(), 3);
+        assert!(parts[0] >= 1, "the largest share keeps its cell: {parts:?}");
+        assert!(apportion(&[3, 4], 0).iter().all(|n| *n == 0));
+    }
+
+    /// The map is the bar folded into rows: the same cells in the same order,
+    /// every row the panel's width, and the tail past the threshold drawn as a
+    /// region rather than as one marker cell that a grid would lose.
+    #[test]
+    fn the_block_map_folds_the_bar_into_full_width_rows() {
+        let slices = vec![
+            Slice::held("A", 50, theme::colors().accent),
+            Slice::held("B", 1, theme::colors().name_hue),
+            Slice {
+                name: "Free",
+                tokens: 49,
+                color: theme::colors().dimmer,
+                fill: '░',
+            },
+        ];
+        let text = |lines: &[Line]| -> Vec<String> {
+            lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+                .collect()
+        };
+
+        let map = text(&block_map(&slices, Some(90), 20, 5));
+        assert_eq!(map.len(), 5);
+        assert!(map.iter().all(|r| r.chars().count() == 20), "{map:#?}");
+        let all: String = map.concat();
+        // 50 of 100 tokens over 100 cells, and B's 1% is a cell of its own.
+        assert_eq!(all.chars().filter(|c| *c == '█').count(), 51);
+        assert!(all.starts_with(&"█".repeat(50)), "{map:#?}");
+        assert_eq!(all.chars().filter(|c| *c == '·').count(), 10);
+        assert!(all.ends_with('·'), "{map:#?}");
+
+        // One row is the stacked bar, marker and all.
+        let bar = text(&block_map(&slices, Some(15), 20, 1));
+        assert_eq!(bar.len(), 1);
+        assert_eq!(bar[0].chars().filter(|c| *c == '┊').count(), 1);
+        assert!(!bar[0].contains('·'));
+    }
+
+    /// Height buys the map rows; a short panel keeps the single bar.
+    #[test]
+    fn the_map_takes_rows_only_from_a_panel_that_has_them() {
+        assert_eq!(map_rows(0), 1);
+        assert_eq!(map_rows(6), 1);
+        assert_eq!(map_rows(12), 3);
+        assert_eq!(map_rows(200), 6);
+
+        let mut s = Session::new(Provider::Claude, "x".into());
+        s.context = Some(ContextUsage {
+            used: 118_200,
+            max: 200_000,
+            compacted: false,
+        });
+        let data = SessionData {
+            context_breakdown: Some(breakdown()),
+            ..Default::default()
+        };
+        let lines: Vec<String> = context(&s, Some(&data), 80, 16)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        let map: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.chars().count() == 80 && !l.contains(' '))
+            .collect();
+        assert_eq!(map.len(), 4, "{lines:#?}");
+        let text = lines.join("\n");
+        assert!(text.contains("Each cell is about 625 tokens"), "{text}");
+        assert!(text.contains("past auto-compaction"), "{text}");
+    }
+
     fn breakdown() -> crate::session::ContextBreakdown {
         crate::session::ContextBreakdown {
             total: 118_200,
@@ -2300,7 +2488,7 @@ mod tests {
     }
 
     fn rendered(session: &Session, data: &SessionData, width: usize) -> Vec<String> {
-        context(session, Some(data), width)
+        context(session, Some(data), width, 0)
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
             .collect()
