@@ -39,6 +39,9 @@ struct StaticParts {
     cwd: String,
     started_at: String,
     ai_title: Option<String>,
+    /// Whether an `/effort` switch is among the first lines, before any
+    /// model has answered. See [`summarize`].
+    switched_effort: bool,
     /// The id this session was *launched* with, which is not its own once it
     /// has been resumed. See [`Session::launch_id`](crate::session::Session::launch_id).
     launch_id: String,
@@ -87,6 +90,16 @@ fn collect_static(transcript: &Path) -> StaticParts {
         {
             parts.launch_id = id.to_string();
         }
+        if item.get("type").and_then(Value::as_str) == Some("user")
+            && item
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_str)
+                .and_then(super::effort_switch)
+                .is_some()
+        {
+            parts.switched_effort = true;
+        }
         if item.get("type").and_then(Value::as_str) == Some("ai-title")
             && let Some(t) = item.get("aiTitle").and_then(Value::as_str)
         {
@@ -134,7 +147,15 @@ fn summarize(transcript: &Path) -> Option<Session> {
     let session_id = transcript.file_stem()?.to_string_lossy().to_string();
     let statics = collect_static(transcript);
     // An abandoned session that never reached the model has nothing to show.
-    if statics.model.is_empty() {
+    // Except one switched to or from ultracode, whose switch starts or ends
+    // the dashboard's party whether or not anything has been asked yet: see
+    // `ui::rave`. It is listed without a model, and the process running it
+    // can be matched to it rather than shown as a row of its own.
+    //
+    // ponytail: only a switch among the first lines is seen before the first
+    // answer. A session with nothing in it but slash commands is short, and
+    // once the model answers every line is read anyway.
+    if statics.model.is_empty() && !statics.switched_effort {
         return None;
     }
     let custom_title = scan_custom_title(transcript);
@@ -2408,6 +2429,31 @@ mod tests {
         assert_eq!(
             data.ultracode_off_at.as_deref(),
             Some("2026-09-25T05:00:00.000Z")
+        );
+    }
+
+    /// A session nobody has asked anything yet is not listed, unless it has
+    /// switched effort: that switch is what the dashboard's party follows.
+    #[test]
+    fn an_unanswered_session_is_listed_once_it_switches_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fresh.jsonl");
+        let open = r#"{"type":"user","timestamp":"2026-09-25T09:00:00.000Z","cwd":"/w","message":{"role":"user","content":"<command-name>/effort</command-name>"}}"#;
+        std::fs::write(&path, format!("{open}\n")).expect("write transcript");
+        assert!(
+            summarize(&path).is_none(),
+            "nothing asked, nothing switched"
+        );
+
+        let switch = r#"{"type":"user","timestamp":"2026-09-25T09:00:01.000Z","cwd":"/w","message":{"role":"user","content":"<local-command-stdout>Set effort level to ultracode (this session only): …</local-command-stdout>"}}"#;
+        std::fs::write(&path, format!("{open}\n{switch}\n")).expect("write transcript");
+        let session = summarize(&path).expect("a session that switched effort");
+        assert!(session.model.is_empty());
+        assert_eq!(session.label_source, "/w");
+        let data = extract(&path);
+        assert_eq!(
+            data.ultracode_at.as_deref(),
+            Some("2026-09-25T09:00:01.000Z")
         );
     }
 }
