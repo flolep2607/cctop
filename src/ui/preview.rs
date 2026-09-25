@@ -307,8 +307,15 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, inner: Rect, app: &App) {
     };
 
     let (rows, cols) = screen.size();
-    let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position().0);
+    // In the visible coordinates `last_drawn` counts in, which differ from the
+    // screen's own while the tab has been scrolled back through its history.
+    let cursor = (!screen.hide_cursor())
+        .then(|| tui_term::widget::Screen::cursor_position(screen).0)
+        .filter(|&row| row < rows);
     let top = first_row(rows, inner.height, cursor, last_drawn(screen));
+    // ponytail: a screen wider than the panel loses its right-hand columns.
+    // Text does not scale, and re-wrapping an agent's layout would draw a
+    // screen it never drew; the prompt it anchors to is on the left.
     let area_drawn = Rect {
         width: cols.min(inner.width),
         height: rows.saturating_sub(top).min(inner.height),
