@@ -1713,6 +1713,59 @@ mod tests {
         )
     }
 
+    /// A workflow's agents are a run directory below the ordinary subagents,
+    /// beside a journal that is the run's log rather than anyone's transcript.
+    /// Each agent is counted and listed under the name its sidecar gives it;
+    /// the journal is neither.
+    #[test]
+    fn a_workflows_agents_are_counted_and_its_journal_is_not() {
+        let main = temp_path("workflow").with_extension("jsonl");
+        let subagents = main.with_extension("").join("subagents");
+        let run = subagents.join("workflows").join("wf_1");
+        std::fs::create_dir_all(&run).expect("run dir");
+        let write = |path: &Path, lines: &[String]| {
+            std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write transcript");
+        };
+        let text = r#"{"type":"text","text":"ok"}"#;
+        write(&main, &[assistant("req_main", 100, text)]);
+        write(
+            &subagents.join("agent-plain.jsonl"),
+            &[assistant("req_plain", 100, text)],
+        );
+        write(
+            &run.join("agent-a1.jsonl"),
+            &[assistant("req_wf", 100, text)],
+        );
+        std::fs::write(
+            run.join("agent-a1.meta.json"),
+            r#"{"agentType":"transcriber","description":"transcribe the first","workflowPhase":"Transcribe"}"#,
+        )
+        .expect("meta");
+        write(
+            &run.join("journal.jsonl"),
+            &[assistant("req_journal", 100, text)],
+        );
+
+        let files = crate::session::transcript_files(&main);
+        let data = extract(&main);
+        let _ = std::fs::remove_dir_all(main.with_extension(""));
+        let _ = std::fs::remove_file(&main);
+
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert_eq!(
+            data.tokens.output, 15,
+            "main, plain and workflow agent, no journal"
+        );
+        let wf = data
+            .subagents
+            .iter()
+            .find(|s| s.agent_id == "agent-a1")
+            .expect("the workflow agent is listed");
+        assert_eq!(wf.agent_type, "transcriber");
+        assert_eq!(wf.description, "transcribe the first");
+        assert_eq!(data.subagents.len(), 2, "{:?}", data.subagents);
+    }
+
     /// The chart spans the session, not the live segment: a compaction is the
     /// most interesting thing that can happen to a context window, and the
     /// series is the only view that can show one. The point that opens the new

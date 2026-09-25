@@ -149,11 +149,14 @@ impl App {
         stand_in.harness = session.harness.clone();
         stand_in.title = Some(sub.description.clone()).filter(|d| !d.is_empty());
         stand_in.started_at = sub.started_at.clone().unwrap_or_default();
-        stand_in.data_file = session
-            .data_file
-            .as_ref()
-            .map(|f| f.with_extension("").join("subagents"))
-            .map(|dir| dir.join(format!("{}.jsonl", sub.agent_id)));
+        // Found among the session's transcripts rather than rebuilt from the
+        // id: a workflow's agents sit a run directory further down.
+        stand_in.data_file = session.data_file.as_ref().and_then(|f| {
+            crate::session::transcript_files(f)
+                .into_iter()
+                .skip(1)
+                .find(|t| t.file_stem().is_some_and(|s| *s == *sub.agent_id))
+        });
         // Its own mtime, so the panels refresh while the subagent is working and
         // not merely when its parent writes something.
         stand_in.last_active = stand_in

@@ -133,12 +133,18 @@ pub fn cache_key(path: &Path) -> Option<String> {
         crate::pricing::pricing_epoch()
     );
     let sub_dir = path.with_extension("").join("subagents");
-    if let Ok(rd) = std::fs::read_dir(&sub_dir) {
-        let newest = rd
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
-            .map(|e| config::file_mtime_ms(&e.path()))
+    if sub_dir.is_dir() {
+        // Every transcript a session has, workflow agents included, and every
+        // directory one could be removed from — a run's as well as the top's.
+        let newest = crate::session::transcript_files(path)[1..]
+            .iter()
+            .map(|f| config::file_mtime_ms(f))
             .chain(std::iter::once(config::file_mtime_ms(&sub_dir)))
+            .chain(
+                crate::session::workflow_run_dirs(&sub_dir)
+                    .iter()
+                    .map(|run| config::file_mtime_ms(run)),
+            )
             .max()
             .unwrap_or(0);
         key.push_str(&format!("|{newest}"));
@@ -946,6 +952,39 @@ mod tests {
         std::fs::write(&f, "one plus more").unwrap();
         let k2 = cache_key(&f).unwrap();
         assert_ne!(k1, k2, "size change must invalidate the key");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A workflow agent streams into its own file while the parent sits waiting
+    /// on the run, so its writes are what has to move the parent's key.
+    #[test]
+    fn cache_key_moves_when_a_workflow_agent_writes() {
+        let dir = std::env::temp_dir().join(format!("cctop-wf-{}", std::process::id()));
+        let f = dir.join("s.jsonl");
+        let run = dir
+            .join("s")
+            .join("subagents")
+            .join("workflows")
+            .join("wf_1");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(&f, "x").unwrap();
+        let agent = run.join("agent-a1.jsonl");
+        std::fs::write(&agent, "one").unwrap();
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let touch = |secs| {
+            std::fs::File::options()
+                .write(true)
+                .open(&agent)
+                .unwrap()
+                .set_modified(at(secs))
+                .unwrap()
+        };
+        // Both far in the future, past every directory's own mtime.
+        touch(4_000_000_000);
+        let k1 = cache_key(&f).unwrap();
+        touch(4_000_000_100);
+        let k2 = cache_key(&f).unwrap();
+        assert_ne!(k1, k2, "a workflow agent's write left the key as it was");
         std::fs::remove_dir_all(&dir).ok();
     }
 

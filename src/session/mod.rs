@@ -1907,19 +1907,42 @@ fn supersedes(a: &Session, b: &Session) -> bool {
     }
 }
 
-/// The main transcript plus any subagent sidechain transcripts.
+/// The main transcript plus any subagent sidechain transcripts — including the
+/// agents a workflow ran, which are one level further down.
+///
+/// A workflow writes each of its agents to
+/// `subagents/workflows/<run>/agent-<id>.jsonl`, beside a `journal.jsonl` that
+/// records the run's own progress and is not an agent's transcript at all. So
+/// inside a run directory only `agent-` files count, while at the top level
+/// every `.jsonl` still does, as it always has. A workflow can run hundreds of
+/// agents, and before this every one of them was missing from the session's
+/// spend, its subagent list, and the mtime that says it is still working.
 pub fn transcript_files(main: &Path) -> Vec<PathBuf> {
     let mut files = vec![main.to_path_buf()];
-    let stem = main.with_extension("");
-    let subagents_dir = stem.join("subagents");
-    if subagents_dir.is_dir() {
-        for entry in crate::config::list_dir(&subagents_dir) {
-            if entry.ends_with(".jsonl") {
-                files.push(subagents_dir.join(entry));
+    let subagents_dir = main.with_extension("").join("subagents");
+    for entry in crate::config::list_dir(&subagents_dir) {
+        if entry.ends_with(".jsonl") {
+            files.push(subagents_dir.join(entry));
+        }
+    }
+    for run in workflow_run_dirs(&subagents_dir) {
+        for entry in crate::config::list_dir(&run) {
+            if entry.starts_with("agent-") && entry.ends_with(".jsonl") {
+                files.push(run.join(entry));
             }
         }
     }
     files
+}
+
+/// Each workflow run's directory under a session's `subagents/`.
+pub fn workflow_run_dirs(subagents_dir: &Path) -> Vec<PathBuf> {
+    let workflows = subagents_dir.join("workflows");
+    crate::config::list_dir(&workflows)
+        .into_iter()
+        .map(|run| workflows.join(run))
+        .filter(|run| run.is_dir())
+        .collect()
 }
 
 /// Newest mtime across a session's transcripts.
