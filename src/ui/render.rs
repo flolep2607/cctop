@@ -290,7 +290,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
                 !app.raving(),
             );
         }
-        if let Some(t) = app.rave.elapsed() {
+        if let Some(t) = app.rave.elapsed().filter(|_| app.raving()) {
             rave::paint(frame.buffer_mut(), chunks[2], t, theme::truecolor());
         }
         if let Some(t) = app.drunk.elapsed() {
@@ -390,7 +390,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             !app.raving(),
         );
     }
-    if let Some(t) = app.rave.elapsed() {
+    if let Some(t) = app.rave.elapsed().filter(|_| app.raving()) {
         rave::paint(frame.buffer_mut(), chunks[4], t, theme::truecolor());
     }
     if let Some(t) = app.drunk.elapsed() {
