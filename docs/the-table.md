@@ -45,6 +45,22 @@ response is waiting for your input, and red when the newest transcript event is
 an API error. A hollow grey dot is a stopped session, and a filled `◉` is the
 session that rang in the last 30 seconds.
 
+A live session whose turn ended while you were not looking at it wears a `✓`
+in the accent colour instead of its amber dot: *done, unseen*. Amber says the
+prompt is yours, which is true of most agents most of the time; the check says
+this one has news since you last looked. It is cleared by looking, which means
+one of two things — its row is the selected one while the dashboard is on
+screen, or its pane is the focused pane of the tab you are on. A split's other
+pane does not count, for the same reason it still lights up the tab bar: you
+are not reading it. The tab bar carries the same `✓` after the tab's label,
+and `Alt+b` goes there once nothing is blocked on a question.
+
+The mark belongs to this cctop alone. A tab's name and colour follow it into
+every cctop on the machine, but having read a reply on your laptop says
+nothing about the cctop on your phone, so seen-ness is kept in memory and not
+written anywhere. It also only marks a turn it watched end: a cctop started
+after an agent went quiet has no news to report about it.
+
 A session past one of the `alert_*` thresholds you have set wears that alert
 in place of its dot for as long as it stays past it: `$` for its cost or burn
 rate, a red `!` for an error loop, `◌` for a working agent that has written
@@ -413,15 +429,25 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+←` / `Alt+→` | Previous / next tab |
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
 | `Alt+t` | Pick a tab from a list, typing to narrow it and `Tab` to pick by state (see below) |
-| `Alt+b` | Jump to the next tab whose agent needs you |
+| `Alt+b` | Jump to the next tab whose agent needs you, then to one whose turn ended unseen (`✓`) |
 | `Alt+r` | Rename or recolour the tab you are on |
 | `Alt+o` | Move focus to the next pane |
+| `Alt+z` | Zoom the focused pane to fill the tab, or put the split back (see below) |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `Alt+Shift+R` | Restart the pane's agent on the same session, after an update; on the dashboard, the selected row's tab |
 | `Alt+Shift+C` | Record the focused pane to an asciinema `.cast`; again to stop (see [Recording a pane](driving-agents.md#recording-a-pane)) |
 | `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
+
+`Alt+z` zooms the focused pane over the whole tab, and the bar marks the tab
+`⤢` while it is. The other panes keep running out of sight — their output is
+still read, so none of them stalls — but they are not resized: each agent goes
+on at the size it had in the split, so zooming costs the hidden ones no
+redraw. Only the zoomed agent is resized, once each way. `Alt+o` while zoomed
+moves the zoom to the next pane; splitting again unzooms, so a new agent is
+never started out of sight. An agent another cctop is also showing is drawn at
+the smaller of the two sizes, as always, so zooming cannot grow it past that.
 
 Every function key is cctop's, inside a pane as much as on the dashboard: none
 of them is passed to the agent. `F10` (quit) and `F5` (refresh) act where you

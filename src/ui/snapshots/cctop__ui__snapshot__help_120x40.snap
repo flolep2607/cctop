@@ -4,7 +4,7 @@ expression: screen
 ---
  1:Dashboard │ + Tab (t)
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Live rate         $0.╭ Help ────────────────────────────────────────── cctop VERSION            ╮onnet-4-5 32%        │
+│Live rate         $0.╭ Help ────────────────────────────────────────────────────────────────────╮onnet-4-5 32%        │
 │Today             $8.│Start here                                                                ┃                     │
 │This month        $0.│  Enter            Everything you can do to this row, in one menu         ┃                     │
 │All time         $28.│  ?  F1            This page                                              ┃                     │
@@ -14,7 +14,7 @@ expression: screen
 │●    now     1h    $1│                                                                          ┃           Fix the c…│
 │●     7m     2h     $│Navigation                                                                ┃           api       │
 │○     3h     1h     $│  ↑/k  ↓/j         Move between sessions                                  ┃           docs      │
-│○     2d    12h     $│  PgUp / PgDn      Page through the list                                  │           infra     │
+│○     2d    12h     $│  PgUp / PgDn      Page through the list                                  ┃           infra     │
 │                     │  Ctrl+U / Ctrl+D  Half a page up / down                                  │                     │
 │                     │  g / G  Home / End Jump to first / last                                  │                     │
 │                     │  n / N            Next / previous search match (wraps)                   │                     │
@@ -40,5 +40,5 @@ expression: screen
 ╰─────────────────────│  K                Terminate all marked live sessions                     │─────────────────────╯
 ╭ Limits ─────────────│  I                Idle view: live sessions quiet for idle_after          │────────── + account ╮
 │Claude checking…     │                   (6h by default), the biggest memory first              │                     │
-╰─────────────────────╰ 1–35 of 137   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
+╰─────────────────────╰ 1–35 of 128   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

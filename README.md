@@ -61,7 +61,9 @@ A tab is a real terminal: type into it, split it with `Alt+v`/`Alt+s`, drag it
 along the bar. Right-click a tab — or press `Alt+r` — to give it a name and a
 colour, which every cctop on the machine then shows. Once there are more tabs
 than digits, `Alt+t` picks one from a list you narrow by typing, and `Alt+b`
-jumps straight to whichever agent is waiting on you.
+jumps straight to whichever agent is waiting on you — or, when none is, to one
+whose turn ended while you were looking elsewhere. `Alt+z` zooms a pane over
+the whole tab and back.
 
 Then two commands worth running once:
 
@@ -84,7 +86,8 @@ of how the window filled across the whole session, compactions included.
 See [The bottom panels](docs/panels.md).
 
 **Which session needs you.** The status dot goes amber when an agent is waiting
-on input and red on an API error. `w` turns on the terminal bell and a desktop
+on input and red on an API error, and turns to a `✓` when a turn ended while
+you were looking at something else — the ones with news. `w` turns on the terminal bell and a desktop
 notification for the moment a session crosses into waiting.
 
 **Which sessions are stuck.** `ERR%` is the share of a session's tool calls that
