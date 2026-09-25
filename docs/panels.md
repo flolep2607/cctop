@@ -120,6 +120,18 @@ When the estimate overshoots the window there is no gap to draw, and the panel
 says so instead of clamping: it means the harness has dropped context that the
 transcript still holds.
 
+Given the height, the bar folds into a **block map**, like a memory map of the
+window: the same cells in the same order, filling rows left to right and top to
+bottom, a quarter of the panel's rows and up to six. One row of eighty cells
+spends 2.5K of a 200K window per cell; four rows spend 625 tokens, which is the
+difference between a small category showing and vanishing. The footnote says
+what a cell is worth. Every category in the window gets at least one cell
+however small its share, so nothing in the legend is missing from the map. On
+the map, the free space past the auto-compaction threshold is drawn as `·`
+rather than a lone `┊`, because that is a region — room the harness reclaims
+before it is ever reached — and one marker cell is lost in a grid. A panel too
+short to spare the rows keeps the one-row bar.
+
 Under the bar, **How it filled** charts the window across every request the
 session made. The bar answers "what is in there"; the chart answers "how did it
 get that full", which is the part that changes what you do next. A window that
