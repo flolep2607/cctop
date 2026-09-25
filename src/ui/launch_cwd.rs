@@ -21,12 +21,12 @@ impl App {
     /// the line already reads, and a field that changed what it showed the
     /// moment it became editable would look like it had lost the setting.
     pub(super) fn edit_launch_cwd(&mut self) {
-        self.launch_cwd_input = self
+        let prefill = self
             .launch_cwd
             .as_ref()
             .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
-            .unwrap_or_default()
-            .into();
+            .unwrap_or_default();
+        self.launch_cwd_input.set(prefill);
         self.launch_cwd_bad = false;
         self.launch_cwd_known = self.known_dirs();
         self.launch_cwd_suggest();
@@ -122,7 +122,7 @@ impl App {
         if filled.chars().count() > input::MAX_PATH_INPUT {
             return;
         }
-        self.launch_cwd_input = filled.into();
+        self.launch_cwd_input.set(filled);
         self.launch_cwd_bad = false;
         self.launch_cwd_suggest();
         self.needs_redraw = true;
