@@ -29,6 +29,7 @@ pub mod menu;
 mod modals;
 pub mod panels;
 mod panes;
+mod preview;
 mod profiles;
 mod qr;
 mod remote;
@@ -618,6 +619,9 @@ pub struct App {
 
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
+    /// The last screen the Preview panel read off a detached tab, kept between
+    /// captures so each one replays into the same parser.
+    preview: preview::Capture,
     /// Which tab is on screen: `0` is the dashboard, `1..=tabs.len()` index
     /// `tabs`. Zero-length `tabs` is the ordinary case: the bar still shows the
     /// dashboard and its new-tab button, so the feature is findable.
@@ -974,6 +978,7 @@ impl App {
             prefs,
             tx,
             tabs: Vec::new(),
+            preview: preview::Capture::default(),
             tab: 0,
             shared_at: None,
             drag_tab: None,

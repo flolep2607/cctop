@@ -25,7 +25,7 @@ expression: screen
 │                                │ HARNESS                                            │                                │
 │                                │ PERM                                               │                                │
 ╰────────────────────────────────│ !                                                  │────────────────────────────────╯
-╭ Info  Performance  Processes  T│ HOST                                               │────────────────────────────────╮
+╭ Info  Performance  Processes  T│ HOST                                               │w  ─────────────────────────────╮
 │Root /usr/bin/claude --model opu│ USER                                               │                                │
 │    PID    CPU%       MEM  COMMA│ PROFILE                                            │                                │
 │   4101    9.8%    360.0M  claud│ BRANCH                                             │                                │

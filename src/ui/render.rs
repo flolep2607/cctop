@@ -1283,6 +1283,14 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         return;
     }
 
+    // Ahead of the remote note below, which speaks of a transcript: what the
+    // Preview panel lacks for a remote row is a tab, and it says so itself.
+    if app.bottom_tab == super::preview::TAB {
+        app.panel_max_scroll = 0;
+        super::preview::draw(frame, area, inner, app);
+        return;
+    }
+
     // A remote row carries what the table shows and nothing behind it: the
     // transcript that every other panel is a reading of is a file on the other
     // machine, and cctop never fetches it. Info is the exception, being built

@@ -25,7 +25,7 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  ──────────────────────────────────────╮
+╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  Preview  ─────────────────────────────╮
 │Root /usr/bin/claude --model opus                                                                                     │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │

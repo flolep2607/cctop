@@ -2556,10 +2556,14 @@ mod tests {
             app.on_key(key(KeyCode::Char(digit)));
             assert_eq!(app.bottom_tab, i, "key {digit} must select panel {i}");
         }
-        // One past the end changes nothing rather than selecting a phantom tab.
-        let past = char::from_digit(panels::TABS.len() as u32 + 1, 10).unwrap();
-        let before = app.bottom_tab;
-        app.on_key(key(KeyCode::Char(past)));
-        assert_eq!(app.bottom_tab, before);
+        // Nine panels spend every digit; a tenth would have no key of its own.
+        assert!(panels::TABS.len() <= 9, "a panel past 9 has no number key");
+        // One past the end changes nothing rather than selecting a phantom tab —
+        // asked while there is a digit past the end to press.
+        if let Some(past) = char::from_digit(panels::TABS.len() as u32 + 1, 10) {
+            let before = app.bottom_tab;
+            app.on_key(key(KeyCode::Char(past)));
+            assert_eq!(app.bottom_tab, before);
+        }
     }
 }
