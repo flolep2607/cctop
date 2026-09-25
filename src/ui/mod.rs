@@ -488,6 +488,8 @@ pub struct App {
     /// narrowed list the cursor is on. See `App::switch_matches`.
     pub switch_filter: line_edit::LineEdit,
     pub switch_cursor: usize,
+    /// Which tabs the switcher lists by what they are doing, cycled with Tab.
+    pub switch_state: panes::SwitchState,
     /// Whether the footer's `q Quit` has been clicked once already.
     ///
     /// The share corner's `share_arm` for the other irreversible thing a
@@ -506,6 +508,12 @@ pub struct App {
     pub help_scroll: u16,
     /// Last computed bottom of the help overlay, recorded during draw.
     pub help_max_scroll: u16,
+    /// What the help is narrowed to, typed after `/` in it.
+    pub help_filter: line_edit::LineEdit,
+    /// Whether keys are going into `help_filter` rather than moving the page.
+    /// Enter stops typing and keeps the filter, so `j` and `k` scroll the
+    /// narrowed page again instead of spelling more of the query.
+    pub help_typing: bool,
 
     /// `[settings]` and `[keys]` from `config.toml`, as last read.
     pub settings: crate::settings::Settings,
@@ -923,11 +931,14 @@ impl App {
             rename_opened_by_click: None,
             switch_filter: Default::default(),
             switch_cursor: 0,
+            switch_state: Default::default(),
             quit_arm: false,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
             help_max_scroll: 0,
+            help_filter: Default::default(),
+            help_typing: false,
             settings: Default::default(),
             keymap: Default::default(),
             settings_file: None,

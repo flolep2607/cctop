@@ -17,6 +17,71 @@ use super::*;
 /// windows to look for it, and long enough that the subprocess is nothing.
 pub(super) const SHARE_EVERY: Duration = Duration::from_secs(2);
 
+/// Which tabs the switcher lists, by what their agents are doing.
+///
+/// Cycled with Tab rather than given letters, as herdr's picker gives them:
+/// here every printable key is already the name filter's, so a letter for
+/// "needs you" would be a letter nobody could search a tab name for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SwitchState {
+    #[default]
+    All,
+    NeedsYou,
+    Working,
+    Idle,
+}
+
+impl SwitchState {
+    /// The next stop, wrapping; `back` for Shift+Tab.
+    pub(super) fn step(self, back: bool) -> Self {
+        const ALL: [SwitchState; 4] = [
+            SwitchState::All,
+            SwitchState::NeedsYou,
+            SwitchState::Working,
+            SwitchState::Idle,
+        ];
+        let at = ALL.iter().position(|s| *s == self).unwrap_or(0);
+        let next = if back { at + ALL.len() - 1 } else { at + 1 };
+        ALL[next % ALL.len()]
+    }
+
+    /// The word for it in the picker's title and its empty-list line, or
+    /// `None` for listing everything, which needs no saying.
+    pub(super) fn word(self) -> Option<&'static str> {
+        match self {
+            SwitchState::All => None,
+            SwitchState::NeedsYou => Some("needs you"),
+            SwitchState::Working => Some("working"),
+            SwitchState::Idle => Some("idle"),
+        }
+    }
+
+    /// The word as a predicate, for the line that says nothing matched:
+    /// "no tab needs you", "no tab is idle".
+    pub(super) fn predicate(self) -> Option<&'static str> {
+        match self {
+            SwitchState::All => None,
+            SwitchState::NeedsYou => Some("needs you"),
+            SwitchState::Working => Some("is working"),
+            SwitchState::Idle => Some("is idle"),
+        }
+    }
+
+    /// Whether a tab in `state` is one this stop lists. The dashboard has no
+    /// state and is only listed under `All`: it is never what is waiting.
+    fn admits(self, dashboard: bool, state: Option<tabs::Attention>) -> bool {
+        match self {
+            SwitchState::All => true,
+            _ if dashboard => false,
+            SwitchState::NeedsYou => state == Some(tabs::Attention::NeedsInput),
+            SwitchState::Idle => state == Some(tabs::Attention::Idle),
+            // Not asking and not stopped is what the bar means by working:
+            // it is the tab it draws with neither colour.
+            SwitchState::Working => state.is_none(),
+        }
+    }
+}
+
 impl App {
     /// The tab on screen, or `None` on the dashboard.
     pub fn active_tab(&mut self) -> Option<&mut tabs::Tab> {
@@ -132,8 +197,8 @@ impl App {
         }
     }
 
-    /// The bar positions the switcher's filter leaves standing, `0` for the
-    /// dashboard.
+    /// The bar positions the switcher's filters leave standing, `0` for the
+    /// dashboard: the typed name, and the state cycled with Tab.
     ///
     /// A plain substring, case-insensitive: the field is typed a letter or
     /// two at a time, and a scored fuzzy match is a ranking nobody asked
@@ -142,15 +207,31 @@ impl App {
         let needle = self.switch_filter.trim().to_lowercase();
         let matches = |title: &str| needle.is_empty() || title.to_lowercase().contains(&needle);
         let mut found = Vec::new();
-        if matches("Dashboard") {
+        if matches("Dashboard") && self.switch_state.admits(true, None) {
             found.push(0);
         }
         for (i, tab) in self.tabs.iter().enumerate() {
-            if matches(&tab.title()) {
+            if matches(&tab.title())
+                && self
+                    .switch_state
+                    .admits(false, self.switch_attention(i + 1))
+            {
                 found.push(i + 1);
             }
         }
         found
+    }
+
+    /// What tab `index` is doing, as the switcher shows and filters it.
+    ///
+    /// Unlike [`App::tab_attention`], the tab being watched is not let off:
+    /// the bar leaves it uncoloured because its pane is in front of you, but
+    /// with the picker drawn over it, "idle" is still worth knowing — and a
+    /// state filter that dropped the current tab from every stop but "all"
+    /// would be reporting where you are, not what it is doing.
+    pub(super) fn switch_attention(&self, index: usize) -> Option<tabs::Attention> {
+        let tab = self.tabs.get(index.checked_sub(1)?)?;
+        tab.attention(false, &|pid| self.pane_signal(pid))
     }
 
     /// Move to `want`, taking the rmux client with you.
@@ -1062,5 +1143,91 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::List);
         assert_eq!(app.tab, 0, "Enter did not take the pick");
+    }
+
+    /// Tab cycles the switcher through what the tabs are doing, on top of the
+    /// name typed; Shift+Tab goes the other way, and it opens on all of them.
+    #[test]
+    fn tab_in_the_switcher_filters_by_state() {
+        use crate::hook::Signal;
+        let doing = |name: &str, signal: Signal| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: Some(crate::rmux::State {
+                    signal,
+                    at: crate::rmux::now_secs(),
+                }),
+                color: None,
+            })
+        };
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+
+        let mut app = test_app();
+        app.tabs = vec![
+            doing("asking", Signal::NeedsInput),
+            doing("busy", Signal::Busy),
+            doing("done", Signal::Idle),
+            doing("also-busy", Signal::Busy),
+        ];
+        app.on_key(alt(KeyCode::Char('t')));
+        assert_eq!(app.switch_matches(), vec![0, 1, 2, 3, 4]);
+
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_state, SwitchState::NeedsYou);
+        assert_eq!(app.switch_matches(), vec![1]);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_matches(), vec![2, 4], "working");
+        // And the name still narrows within the state.
+        app.on_key(key(KeyCode::Char('a')));
+        assert_eq!(app.switch_matches(), vec![4]);
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_matches(), vec![3], "idle");
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.switch_state, SwitchState::All);
+        app.on_key(key(KeyCode::BackTab));
+        assert_eq!(app.switch_state, SwitchState::Idle);
+
+        // The tab being watched is filed by what it is doing, not left out
+        // of every state because you happen to be on it.
+        app.tab = 3;
+        assert_eq!(app.switch_matches(), vec![3]);
+
+        // Opened again, every tab again.
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(alt(KeyCode::Char('t')));
+        assert_eq!(app.switch_state, SwitchState::All);
+        assert_eq!(app.switch_matches().len(), 5);
+    }
+
+    /// Alt+B is a word back while a field is being typed in, and the next tab
+    /// that rang everywhere else.
+    #[test]
+    fn alt_b_in_a_field_is_the_editors() {
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+        let mut app = test_app();
+        app.on_key(key(KeyCode::Char('/')));
+        assert_eq!(app.mode, Mode::Search);
+        for c in "two words".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(alt(KeyCode::Char('b')));
+        app.on_key(key(KeyCode::Char('>')));
+        assert_eq!(app.search, "two >words");
+        assert_eq!(app.mode, Mode::Search);
+        app.on_key(alt(KeyCode::Char('d')));
+        assert_eq!(app.search, "two >");
+        app.on_key(event::KeyEvent::new(
+            KeyCode::Char('y'),
+            event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.search, "two >words");
     }
 }

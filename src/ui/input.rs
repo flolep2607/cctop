@@ -22,6 +22,10 @@ pub(super) const TAB_NAME_MAX: usize = 64;
 /// is matched against, minus the need to store it anywhere.
 const SWITCH_FILTER_MAX: usize = 64;
 
+/// Longest query the help filter takes. Its longest line is well under this;
+/// a query past it cannot match anything, so it would only be a paste.
+const HELP_FILTER_MAX: usize = 80;
+
 /// Longest line the send box takes: a prompt, not a document — anything
 /// longer belongs in the agent's own composer, where it can be read back.
 const SEND_MAX: usize = 500;
@@ -110,8 +114,15 @@ impl App {
         // too few to also carry the splits.
         // Except while the settings panel waits for a key to bind: then Alt+n
         // is the answer, not a new tab.
+        //
+        // And except for the letters readline gives Alt, while a field is being
+        // typed in: Alt+B there is a word back, not the next tab that rang —
+        // which is still a keystroke away once Enter or Esc puts the field
+        // down.
+        let readline = matches!(key.code, KeyCode::Char('b' | 'f' | 'd'));
         if key.modifiers.contains(KeyModifiers::ALT)
             && !self.settings_capture
+            && !(readline && self.typing())
             && self.on_key_workspace(key)
         {
             return;
@@ -352,6 +363,15 @@ impl App {
                     paste_into(input, text, SETTING_MAX);
                 }
             }
+            // A paste into the help is a paste into its filter, typing or not:
+            // nothing else on the page could want text.
+            Mode::Help => {
+                let pasted = paste_into(&mut self.help_filter, text, HELP_FILTER_MAX);
+                self.help_typing |= pasted;
+                if pasted {
+                    self.help_scroll = 0;
+                }
+            }
             _ => {}
         }
     }
@@ -496,6 +516,26 @@ impl App {
     /// The multiplexer keys, live everywhere including inside a pane. Returns
     /// false for an Alt- combination that means nothing here, so it still
     /// reaches the agent.
+    /// Whether the keyboard is going into a text field just now, rather than
+    /// driving a list — the question behind giving readline its Alt letters.
+    pub(super) fn typing(&self) -> bool {
+        match self.mode {
+            Mode::Search
+            | Mode::CostFilter
+            | Mode::SendKeys
+            | Mode::RenameTab
+            | Mode::SwitchTab
+            | Mode::LaunchCwd => true,
+            Mode::AddAccount => {
+                let flow = &self.add_account;
+                flow.pane.is_none() && flow.outcome.is_none() && !flow.named
+            }
+            Mode::Settings => self.settings_input.is_some() && !self.settings_capture,
+            Mode::Help => self.help_typing,
+            _ => false,
+        }
+    }
+
     fn on_key_workspace(&mut self, key: KeyEvent) -> bool {
         match key.code {
             // Shifted, the arrows carry the tab instead of moving between them
@@ -729,12 +769,37 @@ impl App {
     }
 
     /// The help text is longer than most terminals are tall, so the navigation
-    /// keys scroll it and everything else still dismisses it.
+    /// keys scroll it, `/` narrows it, and everything else still dismisses it.
+    ///
+    /// Esc peels: a filter first, then the page. Closing on the Esc that was
+    /// meant to clear a query would throw away the page you had just found
+    /// your way to; clearing it on the way out costs one more press.
     fn on_key_help(&mut self, key: KeyEvent) {
         let step = |app: &mut App, delta: i32| {
             app.help_scroll =
                 (app.help_scroll as i32 + delta).clamp(0, app.help_max_scroll as i32) as u16;
         };
+        if self.help_typing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.help_filter.clear();
+                    self.help_typing = false;
+                    self.help_scroll = 0;
+                }
+                // Done typing, filter kept: the letters scroll again.
+                KeyCode::Enter => self.help_typing = false,
+                KeyCode::Up => step(self, -1),
+                KeyCode::Down => step(self, 1),
+                KeyCode::PageUp => step(self, -(PAGE as i32)),
+                KeyCode::PageDown => step(self, PAGE as i32),
+                _ => {
+                    if self.help_filter.key(key, HELP_FILTER_MAX).changed() {
+                        self.help_scroll = 0;
+                    }
+                }
+            }
+            return;
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => step(self, -1),
             KeyCode::Down | KeyCode::Char('j') => step(self, 1),
@@ -742,9 +807,18 @@ impl App {
             KeyCode::PageDown | KeyCode::Char(' ') => step(self, PAGE as i32),
             KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.help_scroll = self.help_max_scroll,
+            // Back into the query that is there, with the cursor at its end,
+            // rather than a fresh one: `/` after Enter is how a filter gets
+            // refined.
+            KeyCode::Char('/') => self.help_typing = true,
+            KeyCode::Esc if !self.help_filter.is_empty() => {
+                self.help_filter.clear();
+                self.help_scroll = 0;
+            }
             _ => {
                 self.mode = Mode::List;
                 self.help_scroll = 0;
+                self.help_filter.clear();
             }
         }
     }
@@ -976,8 +1050,9 @@ impl App {
     /// The tab-rename field, which is also the tab-colour field.
     ///
     /// The arrows were the colour row's before the name had a cursor, and they
-    /// still are: the name moves with Home and End, Ctrl+A and Ctrl+E, and by
-    /// word with Ctrl+← and Ctrl+→, while a plain arrow paints. Enter applies
+    /// still are: the name moves with Ctrl+B and Ctrl+F, Home and End, Ctrl+A
+    /// and Ctrl+E, and by word with Ctrl+← and Ctrl+→, while a plain arrow
+    /// paints. Enter applies
     /// whichever half changed; an empty name is still not a name, so pressing
     /// it with nothing typed only ever moved the colour, never blanks the tab.
     fn on_key_rename(&mut self, key: KeyEvent) {
@@ -1138,6 +1213,12 @@ impl App {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Up => self.step_switch(-1),
             KeyCode::Down => self.step_switch(1),
+            // The state filter, the one thing here that is not spelled. Back
+            // to the top for the same reason as a change to the name.
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.switch_state = self.switch_state.step(key.code == KeyCode::BackTab);
+                self.switch_cursor = 0;
+            }
             KeyCode::Enter => {
                 self.mode = Mode::List;
                 if let Some(&tab) = self.switch_matches().get(self.switch_cursor) {
@@ -1170,6 +1251,9 @@ impl App {
     /// the tab it is already on.
     fn switch_prompt(&mut self) {
         self.switch_filter.clear();
+        // Every tab, every time it opens: a state filter left over from last
+        // time would be tabs missing from a list that looks like the bar.
+        self.switch_state = Default::default();
         self.switch_cursor = self
             .switch_matches()
             .iter()
@@ -1678,7 +1762,14 @@ impl App {
             match ev.kind {
                 MouseEventKind::ScrollUp => self.on_key_help(KeyEvent::from(KeyCode::Up)),
                 MouseEventKind::ScrollDown => self.on_key_help(KeyEvent::from(KeyCode::Down)),
-                MouseEventKind::Down(_) => self.on_key_help(KeyEvent::from(KeyCode::Esc)),
+                // Away in one click, filter or not: Esc peels a filter off
+                // first, but a click has no second click it is the first of.
+                MouseEventKind::Down(_) => {
+                    self.mode = Mode::List;
+                    self.help_scroll = 0;
+                    self.help_filter.clear();
+                    self.help_typing = false;
+                }
                 _ => {}
             }
             return;
