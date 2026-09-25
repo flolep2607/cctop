@@ -473,6 +473,45 @@ pub fn key_name(key: KeyEvent) -> Option<String> {
     Some(out)
 }
 
+/// A key as the help page spells it: `Ctrl+K`, `Shift+↑`, `Space`, `F5`.
+///
+/// Not [`key_name`], which is the file's spelling and has to round-trip
+/// through [`parse_key`]; this one is for reading, in the notation the rest
+/// of the help page was written in — capitals after Ctrl, arrows as arrows.
+pub fn key_label((code, mods): Key) -> String {
+    let mut out = String::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        out.push_str("Ctrl+");
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        out.push_str("Alt+");
+    }
+    if mods.contains(KeyModifiers::SHIFT) || code == KeyCode::BackTab {
+        out.push_str("Shift+");
+    }
+    let chord = mods.contains(KeyModifiers::CONTROL);
+    let name = match code {
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) if chord => c.to_uppercase().to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::BackTab | KeyCode::Tab => "Tab".into(),
+        KeyCode::Enter => "Enter".into(),
+        KeyCode::Esc => "Esc".into(),
+        KeyCode::Up => "↑".into(),
+        KeyCode::Down => "↓".into(),
+        KeyCode::Left => "←".into(),
+        KeyCode::Right => "→".into(),
+        KeyCode::PageUp => "PgUp".into(),
+        KeyCode::PageDown => "PgDn".into(),
+        KeyCode::Home => "Home".into(),
+        KeyCode::End => "End".into(),
+        KeyCode::F(n) => format!("F{n}"),
+        other => format!("{other:?}"),
+    };
+    out.push_str(&name);
+    out
+}
+
 /// `"ctrl+k"`, `"G"`, `"f5"`, `"space"` as the key it names.
 pub fn parse_key(spec: &str) -> Option<Key> {
     let mut mods = KeyModifiers::NONE;
@@ -583,6 +622,26 @@ impl Keymap {
         (map, problems)
     }
 
+    /// The key that does `action` now, or `None` when nothing does.
+    ///
+    /// Read off the translation itself rather than off the file: an entry the
+    /// file has but [`Keymap::build`] refused — a typo, a key already bound —
+    /// changed nothing, and the help that is built from this must not claim
+    /// it did. `None` is an action whose default key was given to something
+    /// else and which was not given one back.
+    pub fn key_of(&self, action: &str) -> Option<Key> {
+        let (_, default, _) = BINDINGS.iter().find(|b| b.0 == action)?;
+        let (code, mods) = parse_key(default)?;
+        let default = normal(code, mods);
+        if let Some((from, _)) = self.remap.iter().find(|(_, to)| *to == default) {
+            return Some(*from);
+        }
+        match self.remap.iter().any(|(from, _)| *from == default) {
+            true => None,
+            false => Some(default),
+        }
+    }
+
     /// The key the dashboard should see for `key`, or `None` when it has been
     /// moved away and nothing took its place.
     pub fn apply(&self, key: KeyEvent) -> Option<KeyEvent> {
@@ -657,6 +716,34 @@ mod tests {
         );
         assert_eq!(s.key_for("quit"), "x");
         assert_eq!(s.key_for("help"), "?");
+    }
+
+    #[test]
+    fn the_keymap_says_which_key_does_what_now() {
+        let label = |map: &Keymap, action: &str| map.key_of(action).map(key_label);
+        let (map, _) = Keymap::build(&Settings::default());
+        assert_eq!(label(&map, "help").as_deref(), Some("?"));
+        assert_eq!(label(&map, "terminate").as_deref(), Some("Ctrl+K"));
+        assert_eq!(label(&map, "mark").as_deref(), Some("Space"));
+        assert_eq!(label(&map, "panel_up").as_deref(), Some("Shift+↑"));
+        assert_eq!(label(&map, "no_such_action"), None);
+
+        // Moved; swapped; and one whose key went to something else.
+        let s = Settings::parse(
+            "[keys]\nquit = \"ctrl+q\"\nup = \"j\"\ndown = \"k\"\nsearch = \"f\"\n",
+        );
+        let (map, _) = Keymap::build(&s);
+        assert_eq!(label(&map, "quit").as_deref(), Some("Ctrl+Q"));
+        assert_eq!(label(&map, "up").as_deref(), Some("j"));
+        assert_eq!(label(&map, "down").as_deref(), Some("k"));
+        assert_eq!(label(&map, "search").as_deref(), Some("f"));
+        assert_eq!(label(&map, "follow"), None, "f is search's now");
+
+        // A line the file has but the keymap refused moved nothing.
+        let s = Settings::parse("[keys]\nquit = \"hyper+q\"\n");
+        let (map, problems) = Keymap::build(&s);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(label(&map, "quit").as_deref(), Some("q"));
     }
 
     #[test]

@@ -396,6 +396,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `a` | Open that session's terminal in a tab and drive it |
 | `t` | New tab: run an agent or a shell (see below) |
 | `Esc` | Clear the active filter |
+| `?` or `F1` | Help: every key on one page, as `[keys]` has bound them, with the version and commit on its border; `/` in it narrows the page (see below) |
 | `q` or `F10` | Quit |
 
 Tabs and splits, from anywhere including inside a running agent:
@@ -406,7 +407,7 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+v` / `Alt+s` | Split the current tab right / down |
 | `Alt+←` / `Alt+→` | Previous / next tab |
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
-| `Alt+t` | Pick a tab from a list, typing to narrow it |
+| `Alt+t` | Pick a tab from a list, typing to narrow it and `Tab` to pick by state (see below) |
 | `Alt+b` | Jump to the next tab whose agent needs you |
 | `Alt+r` | Rename or recolour the tab you are on |
 | `Alt+o` | Move focus to the next pane |
@@ -425,6 +426,55 @@ bring the dashboard forward and then do what they do there, since a search box
 or a sort order over a pane would be drawn on a screen the agent is repainting.
 An unbound function key does nothing rather than reaching the agent as an escape
 sequence.
+
+The `Alt+t` picker narrows two ways at once. Whatever is typed matches tab
+names — every printable key is the name's, `j` and `k` included — and `Tab`
+cycles which tabs are listed by what their agents are doing: all of them, the
+ones that need you, the ones working, the ones idle; `Shift+Tab` goes back. The
+state in force is in the picker's title (`Go to tab · needs you`), and it opens
+on all of them every time. The tab you are on is filed by what it is doing too,
+though the bar leaves it uncoloured, because with the picker over it you are not
+looking at it. The dashboard is only listed under all.
+
+In the help, `/` starts a filter: the page narrows as you type to the entries
+that mention it, under their headings, with the query on the top border. It is
+a plain case-insensitive match that takes in the key column, so `ctrl+u` finds
+keys and `half a page` finds what they do; a heading that matches keeps its
+whole section. `Enter` stops typing and keeps the filter, so the arrows and
+`j`/`k` scroll the narrowed page, and `/` again goes back to editing it. `Esc`
+takes the filter off first and the page away second.
+
+### Typing in a box
+
+Every box that takes text — the `/` filter, the cost floor, the `s` send box,
+the tab name, the launcher's directory, the add-account name, a setting being
+changed, the `Alt+t` picker and the help filter — edits the way a shell prompt
+does, with readline's keys:
+
+| Key | Does |
+|---|---|
+| `←` / `→`, `Ctrl+B` / `Ctrl+F` | Move a character |
+| `Ctrl+←` / `Ctrl+→`, `Alt+B` / `Alt+F` | Move a word |
+| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | To the start / end |
+| `Backspace` or `Ctrl+H`, `Delete` or `Ctrl+D` | Delete a character before / after the cursor |
+| `Ctrl+W`, `Alt+Backspace` | Cut the word before the cursor |
+| `Alt+D`, `Ctrl+Delete` | Cut the word after it |
+| `Ctrl+U` / `Ctrl+K` | Cut to the start / to the end |
+| `Ctrl+Y` | Put the last cut back at the cursor |
+
+A word is letters, digits and `_`, so in a path each component is one. Cuts in a
+row add up — `Ctrl+W` twice and `Ctrl+Y` gives both words back — and they go to
+the box's own slot, not the system clipboard, so cutting never loses what you
+copied to paste. A paste goes in at the cursor, with its line breaks flattened
+to spaces. The cursor steps over an accented letter or an emoji as one thing,
+and a value wider than its box scrolls to keep the cursor in view, with `…`
+where it runs off.
+
+These keys are the box's only while one is open: on the table `Ctrl+U` and
+`Ctrl+D` still page, and `Alt+B` still jumps to the tab that needs you. Each box
+keeps the keys it already had — `↑`/`↓` for search history, `Tab` to complete a
+directory, the plain arrows to pick a colour in the rename box (its name moves
+by `Ctrl+B`/`Ctrl+F`, `Home`/`End` and `Ctrl+←`/`→` instead), digits only in the cost floor.
 
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
@@ -457,6 +507,12 @@ bottom = "shift+down"    # ctrl+, alt+ and shift+ all work
 
 Only the session table's keys move. A modal's keys are the letters on its own
 buttons, and inside a pane the keyboard is the agent's.
+
+The help page follows what you bind: a moved key is shown where it now is, and
+an action whose key you gave to something else, without giving it another,
+reads `unbound` rather than naming a key that now does something different.
+A line the file has but cctop could not use — listed as a problem at the top of
+the `,` panel — moved nothing, and the help says so by not moving either.
 
 ### Pasting an image
 
