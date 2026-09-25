@@ -261,11 +261,17 @@ fn scoped(scope: &str, key: String) -> String {
 /// Lay `ordered` out as a tree.
 ///
 /// `ordered` is the filtered sessions already sorted, and the tree keeps that
-/// order at every level: sessions within a checkout, checkouts within a
-/// repository and repositories themselves are each placed by their first
-/// member. So the sort still decides what is on top — the repository holding
-/// the most expensive session leads a cost sort — without ever splitting a
-/// group to honour it.
+/// order for the sessions within a checkout. Groups are ranked by what the
+/// sort column says about the group as a whole. For a column that adds up
+/// ([`summand`]) that is the group's total, so a cost sort leads with the
+/// repository that has cost the most rather than the one holding the single
+/// dearest session: ten $5 agents outrank one $20 one, which is the answer to
+/// "where is the money going". For every other column a group's aggregate
+/// *is* its best-placed member (the newest activity, the fullest context; a
+/// model name has no sum), so first-seen order already ranks it. Either way a
+/// group is never split to honour the sort.
+///
+/// `sort` is the column and direction `ordered` was sorted by.
 ///
 /// `children` is how many subagent rows follow a session, which is the flat
 /// table's business (whether it is expanded) and is asked rather than decided
@@ -274,6 +280,7 @@ pub(super) fn build(
     sessions: &[Session],
     ordered: &[usize],
     collapsed: &HashSet<String>,
+    sort: (ColumnId, bool),
     children: impl Fn(usize) -> usize,
 ) -> Tree {
     let mut tree = Tree {
@@ -283,7 +290,9 @@ pub(super) fn build(
     };
     let ordered_sessions = ordered.iter().map(|&i| &sessions[i]);
     if columns::users_in_view(ordered_sessions) < 2 {
-        repos(&mut tree, sessions, ordered, collapsed, &children, None);
+        repos(
+            &mut tree, sessions, ordered, collapsed, sort, &children, None,
+        );
         return tree;
     }
 
@@ -297,6 +306,7 @@ pub(super) fn build(
             None => users.push((key, vec![i])),
         }
     }
+    rank(&mut users, |(_, m)| m.clone(), sessions, sort);
     for (key, members) in users {
         let label = crate::config::user_label(sessions[members[0]].owner.as_deref()).to_string();
         tree.indent.push(String::new());
@@ -319,12 +329,85 @@ pub(super) fn build(
                 sessions,
                 &members,
                 collapsed,
+                sort,
                 &children,
                 Some(&key),
             );
         }
     }
     tree
+}
+
+/// Whether sort column `col` adds up across sessions, so that a group can be
+/// ranked by its total.
+///
+/// Only what sums to something meaningful: the money, the burn rates, the
+/// tokens, the tool calls and the machine the agents hold between them. A
+/// context percentage or an error *rate* summed over unrelated agents is a
+/// number that describes none of them, so a group sorted by one is ranked by
+/// its best member instead.
+fn adds_up(col: ColumnId) -> bool {
+    matches!(
+        col,
+        ColumnId::Cost
+            | ColumnId::CostHour
+            | ColumnId::CostToday
+            | ColumnId::TokenTotal
+            | ColumnId::TokenRate
+            | ColumnId::Tools
+            | ColumnId::Cpu
+            | ColumnId::Memory
+    )
+}
+
+/// One session's share of its group's total under a column that [`adds_up`].
+fn summand(col: ColumnId, s: &Session) -> f64 {
+    let cpu = s.process.as_ref().map_or(0.0, |p| p.cpu as f64);
+    let memory = s.process.as_ref().map_or(0.0, |p| p.memory as f64);
+    match col {
+        // An unpriced session adds nothing here, as it adds nothing to the
+        // heading's cost.
+        ColumnId::Cost if s.cost_available && !s.cost_is_free => s.total_cost.unwrap_or(0.0),
+        ColumnId::CostHour => s.cost_hour,
+        ColumnId::CostToday => s.cost_today,
+        ColumnId::TokenTotal => (s.input_tokens + s.output_tokens) as f64,
+        ColumnId::TokenRate => s.tokens_per_min,
+        ColumnId::Tools => s.tool_count as f64,
+        ColumnId::Cpu => cpu,
+        ColumnId::Memory => memory,
+        _ => 0.0,
+    }
+}
+
+/// Reorder `groups` by the total of their members under `sort` when the
+/// column [`adds_up`], and otherwise leave them in first-seen order, which is
+/// already the order of their best-placed members.
+///
+/// Stable, so groups that tie keep the order the session sort gave them.
+fn rank<T>(
+    groups: &mut Vec<T>,
+    members: impl Fn(&T) -> Vec<usize>,
+    sessions: &[Session],
+    (col, asc): (ColumnId, bool),
+) {
+    if !adds_up(col) {
+        return;
+    }
+    let mut keyed: Vec<(f64, T)> = std::mem::take(groups)
+        .into_iter()
+        .map(|g| {
+            let total = members(&g)
+                .iter()
+                .map(|&i| summand(col, &sessions[i]))
+                .sum();
+            (total, g)
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        let ord = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal);
+        if asc { ord } else { ord.reverse() }
+    });
+    groups.extend(keyed.into_iter().map(|(_, g)| g));
 }
 
 /// Lay out `ordered` as repositories and their checkouts.
@@ -337,6 +420,7 @@ fn repos(
     sessions: &[Session],
     ordered: &[usize],
     collapsed: &HashSet<String>,
+    sort: (ColumnId, bool),
     children: &impl Fn(usize) -> usize,
     user: Option<&str>,
 ) {
@@ -359,6 +443,17 @@ fn repos(
             Some((_, members)) => members.push(i),
             None => checkouts.push((p.checkout.clone(), vec![i])),
         }
+    }
+    // A repository is ranked by the same total its heading shows, which is
+    // its checkouts' together.
+    rank(
+        &mut repos,
+        |(_, checkouts)| checkouts.iter().flat_map(|(_, m)| m.clone()).collect(),
+        sessions,
+        sort,
+    );
+    for (_, checkouts) in &mut repos {
+        rank(checkouts, |(_, m)| m.clone(), sessions, sort);
     }
 
     let heading = |tree: &mut Tree, key: String, label: String, depth, members: &[usize]| {
@@ -720,6 +815,60 @@ mod tests {
         assert!(position(&app, "x-cheap") < position(&app, "y-mid"));
         assert_eq!(app.indent[position(&app, "x-dear")], "├─ ");
         assert_eq!(app.indent[position(&app, "x-cheap")], "└─ ");
+    }
+
+    /// Under a column that adds up, a group is ranked by its total, not its
+    /// best member: three $4 agents have cost more than one $9 one. Under one
+    /// that does not, the best member still decides, and ascending turns
+    /// either order around.
+    #[test]
+    fn groups_rank_by_their_total_when_the_column_adds_up() {
+        let fx = Scratch::new("rank");
+        let (many, one) = (fx.repo("many"), fx.repo("one"));
+        let mut app = test_app();
+        app.tree = true;
+        let priced = |id: &str, dir: &str, cost: f64| {
+            let mut s = session(id, true, dir);
+            s.cost_available = true;
+            s.total_cost = Some(cost);
+            s
+        };
+        app.sessions = vec![
+            priced("m1", &many, 4.0),
+            priced("m2", &many, 4.0),
+            priced("m3", &many, 4.0),
+            priced("o1", &one, 9.0),
+        ];
+        let first_repo = |app: &App| {
+            app.groups
+                .iter()
+                .find(|g| g.depth == 0)
+                .map(|g| g.label.clone())
+                .unwrap()
+        };
+
+        app.sort_col = ColumnId::Cost;
+        app.sort_asc = false;
+        app.refilter();
+        assert!(first_repo(&app).ends_with("many"), "{:?}", groups_of(&app));
+        // The group is still whole: every one of its sessions before `one`.
+        assert!(position(&app, "m3") < position(&app, "o1"));
+        assert!(position(&app, "m1") < position(&app, "o1"));
+
+        app.sort_asc = true;
+        app.refilter();
+        assert!(first_repo(&app).ends_with("one"), "{:?}", groups_of(&app));
+
+        // Context does not add up, so the fullest session's group leads.
+        app.sessions[3].context = Some(crate::session::ContextUsage {
+            used: 150_000,
+            max: 200_000,
+            compacted: false,
+        });
+        app.sort_col = ColumnId::Context;
+        app.sort_asc = false;
+        app.refilter();
+        assert!(first_repo(&app).ends_with("one"), "{:?}", groups_of(&app));
     }
 
     /// A filtered tree shows the matches with the headings they sit under, and

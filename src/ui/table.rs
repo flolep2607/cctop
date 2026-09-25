@@ -284,7 +284,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
 
     frame.render_widget(Paragraph::new(lines), list_area);
     // Beside the rows and not the header, which never scrolls.
-    super::scrollbar::draw(
+    layout.table_track = super::scrollbar::draw(
         frame,
         super::scrollbar::right_border(area, list_area.y, list_area.height),
         app.visible.len(),
@@ -514,9 +514,9 @@ fn subagent_row(
 /// Bold where a session row is plain, and carrying only the columns a group
 /// has an answer for — its total cost, its latest activity, the branch a
 /// checkout has out. Averaging CPU or context across unrelated agents would be
-/// a figure that describes none of them. The count and how many are waiting go
-/// in the label, since no column is a count, and "two of these need you" is the
-/// thing worth reading off a folded heading.
+/// a figure that describes none of them. The count, how many are running and
+/// how many are waiting go in the label, since no column is a count, and "two
+/// of these need you" is the thing worth reading off a folded heading.
 fn group_row(
     g: &super::tree::Group,
     cols: &[&'static columns::Column],
@@ -556,8 +556,15 @@ fn group_row(
                     "sessions"
                 };
                 let mut label = format!("{indent}{fold} {}  {} {noun}", g.label, g.sessions);
+                // Waiting before running: a narrow PROJECT column truncates
+                // from the right, and "needs you" is the part worth keeping.
                 if g.waiting > 0 {
                     label.push_str(&format!(", {} waiting", g.waiting));
+                }
+                // Left out when none are, like the waiting count: a group of
+                // finished sessions says so by its hollow dot already.
+                if g.running > 0 {
+                    label.push_str(&format!(", {} running", g.running));
                 }
                 (label, None)
             }
@@ -991,6 +998,17 @@ mod tests {
 
         let text: String = heading.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("▾ ~/r  3 sessions, 1 waiting"), "{text}");
+        let project: Vec<_> = COLUMNS
+            .iter()
+            .filter(|c| c.id == ColumnId::Project)
+            .collect();
+        let wide = column_widths(&project, 80);
+        let alone = group_row(&g, &project, &wide, false, "", &now);
+        let label: String = alone.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            label.contains("3 sessions, 1 waiting, 2 running"),
+            "{label}"
+        );
         assert!(text.contains("$4.20"), "{text}");
         // Waiting outranks working in the heading's dot, as it does on a row.
         assert_eq!(heading.spans[0].style.fg, Some(theme::colors().cost_mid));

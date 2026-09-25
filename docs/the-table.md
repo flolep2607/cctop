@@ -238,11 +238,11 @@ repository are two groups that fold separately.
 
 ```
    LAST       $  BRANCH  PROJECT
-●    4s  $18.40          ▾ ~/cctop  4 sessions, 1 waiting
-●    4s  $11.02  main    ├─ ▾ cctop (main)  2 sessions, 1 waiting
+●    4s  $18.40          ▾ ~/cctop  4 sessions, 1 waiting, 3 running
+●    4s  $11.02  main    ├─ ▾ cctop (main)  2 sessions, 1 waiting, 1 running
 ●    4s   $9.10  main    │  ├─ Improve super cctop
 ○    3h   $1.92  main    │  └─ Release 0.17.8
-●   12s   $7.38  tree    └─ ▾ .claude/worktrees/agent-a9c7  2 sessions
+●   12s   $7.38  tree    └─ ▾ .claude/worktrees/agent-a9c7  2 sessions, 2 running
 ●   12s   $5.01  tree       ├─ Tree view for the table
 ●    1m   $2.37  tree       └─ Search tiers
 ```
@@ -257,8 +257,8 @@ skips the second level. A directory outside any repository is a group of its
 own, and a row from another machine is grouped by host and directory, since
 the far filesystem is not there to ask.
 
-A heading carries what adds up: how many sessions are under it and how many of
-those are waiting on you, their total cost, the latest activity, and for a
+A heading carries what adds up: how many sessions are under it, how many of
+those are waiting on you and how many are running, their total cost, the latest activity, and for a
 checkout the branch it has out. Its dot is the loudest state beneath it, so a
 folded heading still shows red when something inside is asking a question.
 
@@ -270,8 +270,12 @@ other: no harness records that one session started another.
 
 Filtering shows the sessions that match with the headings above them, and a
 heading's totals count only what is shown. The sort applies inside each group,
-and groups are ordered by their best-placed session — a cost sort puts the
-repository with the dearest session first — without a group ever being split.
+and groups are ordered by the same column applied to the group. Where the
+column adds up — `$`, `$/1H`, `$/24H`, `TOKENS`, `TOK/m`, `TOOLS`, `CPU%`, `MEM` —
+that is the group's total, so a cost sort puts the repository that has cost
+the most first, three $4 agents ahead of one $9 one. Where it does not — age,
+context, a model name — it is the group's best-placed session. Either way a
+group is never split.
 `b` unfolds whatever is hiding the session that rang. The view and the folds
 are remembered across runs.
 
@@ -429,6 +433,11 @@ sequence.
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+Anything that scrolls shows a scrollbar on its right border while it has more
+than fits, and only then. Click or drag along the table's bar to jump the
+selection to that point of the list, top to first row and bottom to last; the
+bottom panel's bar does the same for the panel's text.
 
 ### Settings and keybinds
 
