@@ -168,8 +168,17 @@ cmd_down() {
   sleep 0.5
   "${TM[@]}" kill-server 2>/dev/null || true
   # The agents cctop started live on the private daemon, not in the driver's
-  # server; take them down with it rather than leave them running.
-  [ -n "${CCTOP_DRIVE_REAL_RMUX:-}" ] || RMUX_TMPDIR="$RMUX_DIR" rmux kill-server 2>/dev/null || true
+  # server; take them down with it rather than leave them running. Only by an
+  # explicit socket path under $RMUX_DIR, with the inherited variables gone: a
+  # bare `rmux kill-server` obeys $TMUX/$RMUX before RMUX_TMPDIR, and when the
+  # driver is run from inside an agent's own rmux pane that is the operator's
+  # real server — which is how this line once killed the session running it.
+  if [ -z "${CCTOP_DRIVE_REAL_RMUX:-}" ]; then
+    local sock="$RMUX_DIR/rmux-$(id -u)/default"
+    if [ -S "$sock" ]; then
+      env -u TMUX -u TMUX_PANE -u RMUX -u RMUX_PANE rmux -S "$sock" kill-server 2>/dev/null || true
+    fi
+  fi
   say "down"
 }
 
