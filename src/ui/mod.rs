@@ -27,6 +27,7 @@ pub mod panels;
 mod panes;
 mod profiles;
 mod qr;
+mod rave;
 mod remote;
 pub mod render;
 mod runloop;
@@ -536,6 +537,8 @@ pub struct App {
     /// phased against — a wall clock can jump, and a blink that stutters when
     /// NTP steps the clock looks like a bug.
     started: Instant,
+    /// The easter egg. See [`rave`].
+    rave: rave::Rave,
 
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
@@ -902,6 +905,7 @@ impl App {
             toasts: toast::Toasts::default(),
             started_at: chrono::Utc::now().to_rfc3339(),
             started: Instant::now(),
+            rave: rave::Rave::default(),
             prefs,
             tx,
             tabs: Vec::new(),
