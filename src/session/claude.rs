@@ -467,6 +467,8 @@ struct Extractor {
     last_main_model: String,
     custom_title: Option<String>,
     ai_title: Option<String>,
+    /// See [`SessionData::ultracode_at`].
+    ultracode_at: Option<String>,
     metrics: Metrics,
     seen_tool_ids: HashSet<String>,
     seen_urls: HashSet<String>,
@@ -748,6 +750,18 @@ impl Extractor {
                 }
             }
             _ => {}
+        }
+
+        // Typed by the person: not a skill's body or a slash command's
+        // expansion (`isMeta`), not a summary standing in for a compacted
+        // conversation, and not a subagent's brief — in its own file, or in an
+        // older transcript marked as a sidechain of this one.
+        let typed = is_main
+            && item.get("isSidechain").and_then(Value::as_bool) != Some(true)
+            && item.get("isMeta").and_then(Value::as_bool) != Some(true)
+            && item.get("isCompactSummary").and_then(Value::as_bool) != Some(true);
+        if typed && texts.iter().any(|t| super::says_ultracode(t)) {
+            super::latest(&mut self.ultracode_at, ts);
         }
 
         for text in texts {
@@ -1130,6 +1144,9 @@ pub fn extract(transcript: &Path) -> SessionData {
                 "No assistant usage records found in {}",
                 transcript.display()
             )),
+            // A prompt the agent has not answered yet is still one that was
+            // typed, and the moment it is typed is the moment to hear it.
+            ultracode_at: ext.ultracode_at,
             ..Default::default()
         };
     }
@@ -1216,6 +1233,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         context_breakdown,
         context_series: ext.ctx_series,
         compactions: ext.compactions,
+        ultracode_at: ext.ultracode_at,
         subagents,
         rates: None,
         error: None,
@@ -2352,5 +2370,23 @@ mod tests {
         let ctx = extract_context(&session).expect("usage past the first tail window");
         assert_eq!(ctx.used, 647_414);
         assert!(!ctx.compacted);
+    }
+
+    /// Only what the person typed counts: a skill's text (`isMeta`) or a
+    /// subagent's brief that mentions the word is the agent talking.
+    #[test]
+    fn a_typed_ultracode_is_heard_and_a_skill_saying_it_is_not() {
+        let data = extract_lines(
+            "ultracode",
+            &[
+                r#"{"type":"user","timestamp":"2026-09-25T01:00:00.000Z","message":{"role":"user","content":"please ultracode this"}}"#.to_string(),
+                r#"{"type":"user","isMeta":true,"timestamp":"2026-09-25T02:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"when ultracode is set, fan out"}]}}"#.to_string(),
+                r#"{"type":"user","isSidechain":true,"timestamp":"2026-09-25T03:00:00.000Z","message":{"role":"user","content":"ultracode"}}"#.to_string(),
+            ],
+        );
+        assert_eq!(
+            data.ultracode_at.as_deref(),
+            Some("2026-09-25T01:00:00.000Z")
+        );
     }
 }

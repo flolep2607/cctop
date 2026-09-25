@@ -664,6 +664,7 @@ fn event_loop(
             // it can still race anyone, and cheap enough to redo wholesale:
             // it compares paths already in memory and reads no transcript.
             app.collisions = crate::collide::apply(&mut app.sessions);
+            app.hear_ultracode();
         }
         if annotated_rows_changed {
             // A burst can contain hundreds of rows. Recompute and sort once
@@ -800,7 +801,7 @@ fn event_loop(
         }
 
         // The party is on no clock but its own.
-        app.needs_redraw |= app.raving();
+        app.needs_redraw |= app.raving() || app.reeling() || app.tripping();
 
         if app.needs_redraw {
             terminal.draw(|frame| layout = render::draw(frame, app))?;
@@ -831,7 +832,10 @@ fn event_loop(
         // last sweep is done, the wait is back to what it was, and the
         // dashboard is back to five wakes a second.
         let sweeping = (1..=app.tabs.len()).any(|i| app.restart_flash(i).is_some());
-        let idle_wait = match (sweeping || app.raving(), app.animating()) {
+        let idle_wait = match (
+            sweeping || app.raving() || app.reeling() || app.tripping(),
+            app.animating(),
+        ) {
             (true, _) => idle_wait.min(effects::FRAME),
             (false, true) => idle_wait.min(effects::frame_for(app.tab)),
             (false, false) => idle_wait,
