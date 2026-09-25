@@ -9,7 +9,7 @@ use crate::pricing::{self, Provider};
 use crate::util;
 use rayon::prelude::*;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -450,6 +450,9 @@ pub fn extract(path: &Path) -> SessionData {
     let mut counted_total: Option<Value> = None;
     let mut by_day: HashMap<String, RawBucket> = HashMap::new();
     let mut by_hour: HashMap<String, RawBucket> = HashMap::new();
+    // Not through `super::record_cost` like the other providers: Codex names
+    // its model after the usage it bills, so every bucket is priced at the end.
+    let mut by_minute: BTreeMap<i64, RawBucket> = BTreeMap::new();
     let mut metrics = Metrics::default();
     let mut seen_call_ids: HashSet<String> = HashSet::new();
     let mut seen_queries: HashSet<String> = HashSet::new();
@@ -513,6 +516,10 @@ pub fn extract(path: &Path) -> SessionData {
                     b.cached_input += cached;
                     b.output += out;
                 }
+                let b = by_minute.entry(super::unix_minute(&dt)).or_default();
+                b.input += inp;
+                b.cached_input += cached;
+                b.output += out;
             }
         }
 
@@ -698,15 +705,15 @@ pub fn extract(path: &Path) -> SessionData {
     };
     let total = costs.input + costs.cached_input + costs.output;
 
+    let price = |b: &RawBucket| {
+        let uncached = b.input.saturating_sub(b.cached_input);
+        util::token_cost(uncached, p.input)
+            + util::token_cost(b.cached_input, p.cached_input)
+            + util::token_cost(b.output, p.output)
+    };
     let finalize = |raw: HashMap<String, RawBucket>| -> HashMap<String, HashMap<String, f64>> {
         raw.into_iter()
-            .map(|(key, b)| {
-                let uncached = b.input.saturating_sub(b.cached_input);
-                let cost = util::token_cost(uncached, p.input)
-                    + util::token_cost(b.cached_input, p.cached_input)
-                    + util::token_cost(b.output, p.output);
-                (key, HashMap::from([(model.clone(), cost)]))
-            })
+            .map(|(key, b)| (key, HashMap::from([(model.clone(), price(&b))])))
             .collect()
     };
 
@@ -741,6 +748,7 @@ pub fn extract(path: &Path) -> SessionData {
         tokens_by_hour: finalize_tokens(&by_hour),
         costs_by_day: finalize(by_day),
         costs_by_hour: finalize(by_hour),
+        costs_by_minute: by_minute.iter().map(|(&m, b)| (m, price(b))).collect(),
         metrics,
         rates: Some(CodexRates {
             input: p.input,
@@ -1032,6 +1040,11 @@ const result = await tools.apply_patch(patch);"#;
         let data = extract(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(data.tokens.input_total, 1500);
+        // Priced at the end like the day buckets, so the two cannot disagree.
+        let minutes: f64 = data.costs_by_minute.values().sum();
+        let days: f64 = data.costs_by_day.values().flat_map(|m| m.values()).sum();
+        assert!((minutes - days).abs() < 1e-12);
+        assert_eq!(data.costs_by_minute.len(), 1);
     }
 
     #[test]

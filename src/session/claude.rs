@@ -11,7 +11,7 @@ use crate::util;
 use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -457,6 +457,7 @@ struct Extractor {
     costs_by_model: HashMap<String, Costs>,
     costs_by_day: HashMap<String, HashMap<String, f64>>,
     costs_by_hour: HashMap<String, HashMap<String, f64>>,
+    costs_by_minute: BTreeMap<i64, f64>,
     /// Same buckets as the cost maps, in tokens: a bundled plan or an unpriced
     /// model empties the dollar figures but not the usage underneath them.
     tokens_by_day: HashMap<String, HashMap<String, u64>>,
@@ -570,18 +571,14 @@ impl Extractor {
         cm.total += call_cost;
 
         if let Some(dt) = util::parse_ts(ts) {
-            *self
-                .costs_by_day
-                .entry(util::local_date_key(&dt))
-                .or_default()
-                .entry(model.to_string())
-                .or_insert(0.0) += call_cost;
-            *self
-                .costs_by_hour
-                .entry(util::local_hour_key(&dt))
-                .or_default()
-                .entry(model.to_string())
-                .or_insert(0.0) += call_cost;
+            super::record_cost(
+                &mut self.costs_by_day,
+                &mut self.costs_by_hour,
+                &mut self.costs_by_minute,
+                &dt,
+                model,
+                call_cost,
+            );
             // Everything this request was billed for, whatever the plan priced
             // it at.
             let billed = inp + cache_r + out + cw5m + cw1h;
@@ -1212,6 +1209,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         costs,
         costs_by_day: ext.costs_by_day,
         costs_by_hour: ext.costs_by_hour,
+        costs_by_minute: ext.costs_by_minute,
         tokens_by_day: ext.tokens_by_day,
         tokens_by_hour: ext.tokens_by_hour,
         metrics: ext.metrics,

@@ -14,7 +14,7 @@ pub mod windsurf;
 use crate::pricing::Provider;
 use crate::util;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Where a session is being driven from.
@@ -245,6 +245,9 @@ pub struct Session {
     /// Recorded usage has a zero total cost, as with a free model. This stays
     /// distinct from a session that simply has not recorded any usage yet.
     pub cost_is_free: bool,
+    /// Spend in the last 60 minutes, rolling, as of the last annotation; see
+    /// [`SessionData::cost_last_hour`]. A remote row carries its peer's figure,
+    /// which an older peer computed for the clock hour instead.
     pub cost_hour: f64,
     pub cost_today: f64,
     pub costs_by_day: HashMap<String, HashMap<String, f64>>,
@@ -419,6 +422,20 @@ fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<Strin
 }
 
 impl Session {
+    /// Spend in the local clock hour `now` falls in.
+    ///
+    /// Not what the table or the Cost panel show — they want the rolling
+    /// [`Session::cost_hour`]. This is for the outputs whose name already
+    /// promised the clock hour to someone reading them: `this_hour` in
+    /// `--json` and the `cctop_cost_this_hour_usd` gauge. Read from the hour
+    /// map because a remote row carries that and no minutes.
+    pub fn cost_clock_hour(&self, now: &chrono::DateTime<chrono::Utc>) -> f64 {
+        self.costs_by_hour
+            .get(&util::local_hour_key(now))
+            .map(|m| m.values().sum())
+            .unwrap_or(0.0)
+    }
+
     pub fn new(provider: Provider, session_id: String) -> Self {
         Session {
             provider,
@@ -793,6 +810,76 @@ fn is_input_request_tool(name: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn at(ts: &str) -> chrono::DateTime<chrono::Utc> {
+        util::parse_ts(ts).expect("valid timestamp")
+    }
+
+    /// The case that made the hour rolling: fifteen minutes of work before
+    /// midnight read as nothing two minutes after it.
+    #[test]
+    fn spend_before_the_hour_still_counts_after_it() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-10T23:47:00Z"), "m", 1.5);
+
+        assert_eq!(data.cost_last_hour(&at("2026-08-11T00:02:00Z")), 1.5);
+        // The day map still has it on the day it happened.
+        let day = util::local_date_key(&at("2026-08-10T23:47:00Z"));
+        assert_eq!(data.costs_by_day[&day]["m"], 1.5);
+    }
+
+    #[test]
+    fn spend_older_than_sixty_minutes_drops_out() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-11T09:00:30Z"), "m", 4.0); // 61 minutes back
+        data.record_cost(&at("2026-08-11T09:01:59Z"), "m", 2.0); // the minute 60 back
+        data.record_cost(&at("2026-08-11T09:02:00Z"), "m", 1.0); // 59 minutes back
+        data.record_cost(&at("2026-08-11T10:01:10Z"), "n", 0.5); // this minute
+
+        assert_eq!(data.cost_last_hour(&at("2026-08-11T10:01:30Z")), 1.5);
+        assert_eq!(data.cost_last_hour(&at("2026-08-11T12:00:00Z")), 0.0);
+    }
+
+    #[test]
+    fn finalize_keeps_a_day_of_minutes_behind_the_newest() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-10T10:00:00Z"), "m", 1.0);
+        data.record_cost(&at("2026-08-10T10:01:00Z"), "m", 1.0);
+        data.record_cost(&at("2026-08-11T10:00:00Z"), "m", 1.0);
+        data.finalize();
+
+        assert_eq!(
+            data.costs_by_minute.len(),
+            2,
+            "the minute a day back is gone"
+        );
+        // The day and hour maps are not trimmed: they are the lifetime record.
+        assert_eq!(data.costs_by_day.len(), 2);
+    }
+
+    /// A cache written before the minute map existed still loads, with the
+    /// rolling hour reading zero rather than the entry failing to parse.
+    #[test]
+    fn a_session_cached_without_minutes_still_loads() {
+        let mut value = serde_json::to_value(SessionData::default()).expect("serializes");
+        value
+            .as_object_mut()
+            .expect("an object")
+            .remove("costs_by_minute");
+        let data: SessionData = serde_json::from_value(value).expect("old shape loads");
+        assert!(data.costs_by_minute.is_empty());
+        assert_eq!(data.cost_last_hour(&chrono::Utc::now()), 0.0);
+    }
+
+    /// Integer map keys round-trip through JSON, which spells them as strings.
+    #[test]
+    fn minutes_survive_the_cache_round_trip() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-11T10:00:00Z"), "m", 0.25);
+        let text = serde_json::to_string(&data).expect("serializes");
+        let back: SessionData = serde_json::from_str(&text).expect("deserializes");
+        assert_eq!(back.costs_by_minute, data.costs_by_minute);
+    }
 
     /// A session reached through two overlapping roots is one session. It used
     /// to be two rows, and its cost was counted twice in every total on screen.
@@ -1405,6 +1492,23 @@ pub struct SessionData {
     pub costs_by_day: HashMap<String, HashMap<String, f64>>,
     /// `YYYY-MM-DDTHH` -> model -> USD.
     pub costs_by_hour: HashMap<String, HashMap<String, f64>>,
+    /// Unix minute (seconds / 60, UTC) -> USD, across every model.
+    ///
+    /// What "the last hour" is read from. The hour map above cannot answer it:
+    /// a clock hour empties at every `:00`, so a subagent that ran at 23:47
+    /// shows nothing at 00:02 — the spend is real and the figure reads as
+    /// broken. Minutes are fine enough that a rolling 60 is 60 buckets.
+    ///
+    /// Keyed by UTC minute rather than a local key because a window measured
+    /// back from now has no use for the time zone, and so cannot be skewed by
+    /// a DST change inside it. One sum rather than per model because nothing
+    /// asks the rolling window which model spent it.
+    ///
+    /// Bounded in [`SessionData::finalize`] to the day before the newest
+    /// minute, so a long session does not carry every minute it ever had into
+    /// the cache.
+    #[serde(default)]
+    pub costs_by_minute: BTreeMap<i64, f64>,
     /// `YYYY-MM-DD` -> model -> tokens billed that day: every input kind plus
     /// output, the same quantities [`Tokens::all_input`] and `output` total.
     ///
@@ -1532,6 +1636,61 @@ fn trim_tool_details(details: &mut HashMap<String, Vec<ToolDetail>>) {
     details.retain(|_, list| !list.is_empty());
 }
 
+/// Minutes of per-minute spend kept behind a session's newest one.
+///
+/// The rolling window needs only 60 of them; a day's worth leaves room for a
+/// longer window without re-parsing, and still caps a session at 1440 entries.
+const MINUTES_KEPT: i64 = 24 * 60;
+
+/// Drop per-minute spend more than [`MINUTES_KEPT`] before the newest minute.
+///
+/// Measured from the newest record and not from now, so the trim depends only
+/// on the transcript: a cached copy and a fresh parse keep the same minutes.
+fn trim_minutes(minutes: &mut BTreeMap<i64, f64>) {
+    if let Some((&newest, _)) = minutes.last_key_value() {
+        *minutes = minutes.split_off(&(newest - MINUTES_KEPT + 1));
+    }
+}
+
+/// The unix minute `dt` falls in.
+pub(crate) fn unix_minute(dt: &chrono::DateTime<chrono::Utc>) -> i64 {
+    dt.timestamp().div_euclid(60)
+}
+
+/// Sum of per-minute spend in the rolling hour ending at `now`; see
+/// [`SessionData::cost_last_hour`].
+pub fn last_hour(minutes: &BTreeMap<i64, f64>, now: &chrono::DateTime<chrono::Utc>) -> f64 {
+    // A fold from +0.0 and not `sum`: a float sum of nothing is -0.0, which
+    // `--json` would print as such for every idle session.
+    minutes
+        .range(unix_minute(now) - 59..)
+        .fold(0.0, |total, (_, c)| total + c)
+}
+
+/// Add one priced event to the day, hour and minute maps together.
+///
+/// A free function beside [`SessionData::record_cost`] for extractors that
+/// accumulate into their own maps before building a `SessionData`.
+pub(crate) fn record_cost(
+    by_day: &mut HashMap<String, HashMap<String, f64>>,
+    by_hour: &mut HashMap<String, HashMap<String, f64>>,
+    by_minute: &mut BTreeMap<i64, f64>,
+    dt: &chrono::DateTime<chrono::Utc>,
+    model: &str,
+    cost: f64,
+) {
+    for (map, key) in [
+        (&mut *by_day, util::local_date_key(dt)),
+        (&mut *by_hour, util::local_hour_key(dt)),
+    ] {
+        *map.entry(key)
+            .or_default()
+            .entry(model.to_string())
+            .or_insert(0.0) += cost;
+    }
+    *by_minute.entry(unix_minute(dt)).or_insert(0.0) += cost;
+}
+
 /// Truncate to at most `max` characters, never mid-character.
 fn truncate_chars(s: &mut String, max: usize) {
     if s.chars().count() <= max {
@@ -1550,15 +1709,37 @@ pub struct CodexRates {
 }
 
 impl SessionData {
-    /// Sum of a bucket map's per-model costs for one key.
-    fn bucket_total(map: &HashMap<String, HashMap<String, f64>>, key: &str) -> f64 {
-        map.get(key).map(|m| m.values().sum()).unwrap_or(0.0)
+    /// Spend in the 60 minutes up to `now`, rolling.
+    ///
+    /// Rolling rather than the current clock hour: see
+    /// [`SessionData::costs_by_minute`]. The window is the minute `now` falls
+    /// in and the 59 before it, so it spans between 59 and 60 minutes of wall
+    /// time — never more, which keeps a figure labelled "last 60 min" honest.
+    /// Minutes after `now` count too: a transcript stamped by a clock slightly
+    /// ahead of this one is still spend that just happened.
+    pub fn cost_last_hour(&self, now: &chrono::DateTime<chrono::Utc>) -> f64 {
+        last_hour(&self.costs_by_minute, now)
     }
 
-    /// Spend in the current local hour.
-    pub fn cost_this_hour(&self) -> f64 {
-        let key = crate::util::local_hour_key(&chrono::Utc::now());
-        Self::bucket_total(&self.costs_by_hour, &key)
+    /// Record one priced event in every time bucket at once.
+    ///
+    /// The day, hour and minute maps are three views of the same spend; filling
+    /// them from one place is what keeps "today" and "last 60 min" from
+    /// disagreeing about an event one of them forgot.
+    pub(crate) fn record_cost(
+        &mut self,
+        dt: &chrono::DateTime<chrono::Utc>,
+        model: &str,
+        cost: f64,
+    ) {
+        record_cost(
+            &mut self.costs_by_day,
+            &mut self.costs_by_hour,
+            &mut self.costs_by_minute,
+            dt,
+            model,
+            cost,
+        );
     }
 
     /// Bring freshly extracted data down to what is worth keeping.
@@ -1570,6 +1751,7 @@ impl SessionData {
     /// served from cache.
     pub fn finalize(&mut self) {
         trim_tool_details(&mut self.metrics.tool_details);
+        trim_minutes(&mut self.costs_by_minute);
         self.recent_writes = distil_recent_writes(&self.metrics.tool_details);
         self.complete = true;
     }

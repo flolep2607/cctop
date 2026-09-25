@@ -227,18 +227,7 @@ pub fn extract(path: &Path) -> SessionData {
             add_costs(model_costs, &costs);
 
             if let Some(dt) = util::parse_ts(&ts) {
-                *data
-                    .costs_by_day
-                    .entry(util::local_date_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
-                *data
-                    .costs_by_hour
-                    .entry(util::local_hour_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
+                data.record_cost(&dt, &model, costs.total);
                 // All input kinds plus output — and thinking, which Gemini
                 // bills as output. `total` is not reused because it folds in
                 // the unbilled `tool` bucket.

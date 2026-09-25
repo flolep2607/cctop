@@ -20,7 +20,7 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `LAST` | `active` | Time since the session last did anything |
 | `DUR` | `duration` | First to last activity |
 | `$` | `cost` | Estimated cost — see [What the cost figures mean](costs.md) |
-| `$/1H` | `cost_hour` | Estimated cost in the current clock hour |
+| `$/1H` | `cost_hour` | Estimated cost in the last 60 minutes, rolling |
 | `$/24H` | `cost_today` | Estimated cost since local midnight |
 | `CTX%` | `ctx` | Context window used, as a share of the auto-compact threshold. `COMPCT` while one is happening |
 | `CPU%` | `cpu` | CPU across the session's process tree |
