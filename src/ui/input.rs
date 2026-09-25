@@ -641,94 +641,6 @@ impl App {
         }
     }
 
-    /// Scroll the conversation, page further back into it, or close it.
-    ///
-    /// Like the insight overlay there is nothing here that can touch the
-    /// session: it is a transcript being read, not a terminal being driven.
-    /// `back` is a distance from the end rather than a position from the top,
-    /// so a turn landing mid-read does not shift the text under the cursor.
-    fn on_key_conversation(&mut self, key: KeyEvent) {
-        const PAGE: u16 = 20;
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::List;
-                self.chat = None;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.back.saturating_sub(1);
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = (view.back + 1).min(view.max_back);
-                }
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.back.saturating_sub(PAGE);
-                }
-            }
-            KeyCode::PageUp => {
-                if let Some(view) = &mut self.chat {
-                    view.back = (view.back + PAGE).min(view.max_back);
-                }
-            }
-            // Home is the transcript's start, End the live edge it opened on.
-            KeyCode::Home => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.max_back;
-                }
-            }
-            KeyCode::End => {
-                if let Some(view) = &mut self.chat {
-                    view.back = 0;
-                }
-            }
-            // A turn at a time: the reply you opened on is usually one `[`
-            // away, however much tool output sits under it.
-            KeyCode::Char('[') => {
-                if let Some(view) = &mut self.chat {
-                    let older = view.turn_backs.iter().copied().filter(|&b| b > view.back);
-                    if let Some(back) = older.min() {
-                        view.back = back;
-                    }
-                }
-            }
-            KeyCode::Char(']') => {
-                if let Some(view) = &mut self.chat {
-                    let newer = view.turn_backs.iter().copied().filter(|&b| b < view.back);
-                    view.back = newer.max().unwrap_or(0);
-                }
-            }
-            // The source, for when what matters is the exact characters.
-            KeyCode::Char('m') => {
-                if let Some(view) = &mut self.chat {
-                    view.raw = !view.raw;
-                }
-            }
-            // `u` for "earlier": the window grows at the top, which a
-            // bottom-anchored scroll survives without moving a line.
-            KeyCode::Char('u') => {
-                let wants = self.chat.as_ref().is_some_and(|v| {
-                    !v.fetching && v.conversation.as_ref().is_some_and(|c| c.earlier > 0)
-                });
-                if wants {
-                    let before = self
-                        .chat
-                        .as_ref()
-                        .and_then(|v| v.conversation.as_ref())
-                        .and_then(|c| c.turns.first().map(|t| t.seq));
-                    if let Some(seq) = before {
-                        self.fetch_chat(Some(seq));
-                    }
-                }
-            }
-            _ => {}
-        }
-        self.needs_redraw = true;
-    }
-
     fn on_key_hooks(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
@@ -1752,6 +1664,16 @@ impl App {
         // so it answers the mouse itself: the wheel reads it and a click puts
         // it away. Over a pane this is what keeps a click from reaching the
         // agent the sheet is drawn on top of.
+        // The reader covers the whole screen, so the wheel is its wherever
+        // the pointer is.
+        if self.mode == Mode::Conversation {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.on_wheel_conversation(true),
+                MouseEventKind::ScrollDown => self.on_wheel_conversation(false),
+                _ => {}
+            }
+            return;
+        }
         if self.mode == Mode::Help {
             match ev.kind {
                 MouseEventKind::ScrollUp => self.on_key_help(KeyEvent::from(KeyCode::Up)),

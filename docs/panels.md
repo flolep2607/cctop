@@ -44,29 +44,51 @@ line counts, `update_plan` shows progress and the step in flight, and
 
 ## Reading the conversation
 
-The panels summarise what a session did; `i` shows what it said. It opens an
-overlay on the selected row's transcript — a remote row's too, read over the
-same ssh link — at the end, so the agent's last reply is the first thing on
-screen.
+The panels summarise what a session did; `i` shows what it said — or `Enter`
+and **Read the conversation**. It opens the selected row's transcript
+full-screen, a remote row's too (read over the same ssh link), at the end, so
+the agent's last reply is the first thing on screen. It reads what `cctop
+serve`'s conversation page reads, so every harness that page shows is here, for
+the times you are on ssh with no browser to open.
 
+- **Each turn is headed by who spoke and when**: you in the accent colour, the
+  agent in its harness's, with the local time (and the date, for an older turn)
+  and how long ago. What you typed sits behind a bar in that same colour, so a
+  prompt is easy to find in a page of replies. Thinking is dim and italic; a
+  compaction is a rule across the page.
 - **Replies are rendered as markdown**: headings, bold and italic, inline code,
-  fenced blocks behind a gutter with their language named, lists, quotes,
+  fenced blocks on a shaded ground with their language named, lists, quotes,
   tables and rules. Links are OSC 8 hyperlinks, so a click opens them even when
   they wrap; on a terminal that cannot do that (`TERM=dumb` or `linux`) the URL
-  is printed after its label. What you typed is shown as you typed it.
+  is printed after its label. What you typed is shown as you typed it. Code is
+  not syntax-highlighted.
+- **Tool calls are one line each** until you open them: the tool, its argument,
+  and how many lines opening it would add. `Enter` opens the calls of the turn
+  you are reading; `t` opens every one.
 - **Tool output keeps its colours.** cargo's green, pytest's red and git's diff
   colours come through, folded to sixteen colours on a terminal that has only
   those and dropped under `NO_COLOR`. Anything else a program wrote — cursor
   moves, line erases, window titles — is removed, so it cannot scribble over the
   view. Expanded Tool Activity rows get the same treatment.
 
+A session paged back far with `u` can run to thousands of turns. It is laid
+out once for the terminal's width, and scrolling it lays nothing out again.
+
 | Key | In the conversation |
 |---|---|
-| `↑` `↓` `PgUp` `PgDn` `Home` `End` | Scroll |
+| `↑` `↓` / `j` `k` | Scroll a line (the wheel scrolls three) |
+| `PgUp` `PgDn` / `b` `Space` | Scroll a page |
+| `Ctrl+U` `Ctrl+D` | Half a page |
+| `g` `G` / `Home` `End` | The start / the end |
 | `[` / `]` | Previous / next turn, header at the top |
+| `/` | Search as you type; `Enter` keeps it, `Esc` goes back to where you were |
+| `n` / `N` | Next / previous match (wraps) |
+| `Enter` or `x` | Open or fold the tool calls of the turn at the top |
+| `t` | Open or fold every tool call |
 | `m` | Toggle between rendered markdown and its source |
 | `u` | Load earlier turns, when there are any |
-| `Esc` | Close |
+| `Esc` | Clear the search; with none, close |
+| `q` | Close |
 
 ## Context breakdown
 
