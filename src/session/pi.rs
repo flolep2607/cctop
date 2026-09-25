@@ -194,18 +194,7 @@ pub fn extract(path: &Path) -> SessionData {
 
         let ts = message_ts(item, message);
         if let Some(dt) = util::parse_ts(&ts) {
-            *data
-                .costs_by_day
-                .entry(util::local_date_key(&dt))
-                .or_default()
-                .entry(model.clone())
-                .or_insert(0.0) += costs.total;
-            *data
-                .costs_by_hour
-                .entry(util::local_hour_key(&dt))
-                .or_default()
-                .entry(model.clone())
-                .or_insert(0.0) += costs.total;
+            data.record_cost(&dt, &model, costs.total);
             // `billable` above is only a did-anything-happen check and skips
             // the 1h cache-write split; the bucket counts everything billed.
             let billed = tokens.all_input() + tokens.output;

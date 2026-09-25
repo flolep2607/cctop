@@ -97,7 +97,7 @@ pub const COLUMNS: &[Column] = &[
         width: Some(7),
         priority: 40,
         right_align: true,
-        desc: "Estimated cost in the current local clock hour",
+        desc: "Estimated cost in the last 60 minutes, rolling",
     },
     Column {
         id: ColumnId::CostToday,

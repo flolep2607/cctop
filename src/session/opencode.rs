@@ -398,18 +398,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             mt.total += tokens.total;
             mc.total += costs.total;
             if let Some(dt) = util::parse_ts(&ts) {
-                *data
-                    .costs_by_day
-                    .entry(util::local_date_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
-                *data
-                    .costs_by_hour
-                    .entry(util::local_hour_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
+                data.record_cost(&dt, &model, costs.total);
                 // Reasoning is already inside `output` here — billing it again
                 // would double-count, the same rule `FallbackRates` applies.
                 let billed = tokens.all_input() + tokens.output;

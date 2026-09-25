@@ -980,13 +980,15 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     )));
     lines.push(Line::default());
 
-    // Calendar-bucket spend windows.
+    // Spend windows: the days are calendar days, the hour is rolling. A clock
+    // hour empties at every `:00`, so work finished at 23:47 read as $0.00 by
+    // 00:02 — "today" can afford that reset, since a day is what it means, but
+    // an hour that forgets fifteen minutes ago reads as broken.
     let now = chrono::Utc::now();
     let midnight = util::local_midnight_today();
     let today = util::local_date_key(&midnight);
     let week = util::local_date_key(&(midnight - chrono::Duration::days(6)));
     let month = util::local_date_key(&(midnight - chrono::Duration::days(29)));
-    let hour = util::local_hour_key(&now);
 
     let sum_day = |from: &str| -> f64 {
         data.costs_by_day
@@ -995,20 +997,16 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
             .map(|(_, m)| m.values().sum::<f64>())
             .sum()
     };
-    let hour_cost: f64 = data
-        .costs_by_hour
-        .get(&hour)
-        .map(|m| m.values().sum())
-        .unwrap_or(0.0);
+    let hour_cost = data.cost_last_hour(&now);
 
     for (name, amount) in [
-        ("this hour", hour_cost),
+        ("last 60 min", hour_cost),
         ("today", sum_day(&today)),
         ("7 days", sum_day(&week)),
         ("30 days", sum_day(&month)),
     ] {
         lines.push(Line::from(vec![
-            label(&format!("  {name:<10}")),
+            label(&format!("  {name:<11}")),
             Span::styled(
                 format!("{:>10}", displayed_cost(amount, session.cost_is_free)),
                 cost_style(amount, session.cost_is_free),

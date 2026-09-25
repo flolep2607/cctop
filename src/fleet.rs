@@ -500,7 +500,13 @@ fn row(host: &str, v: &Value) -> Option<Session> {
             ),
         };
         s.cost_is_free = c.get("free").and_then(Value::as_bool).unwrap_or(false);
-        s.cost_hour = num(c, "this_hour");
+        // A peer older than `last_hour` sends only the clock hour. That is the
+        // nearest figure it has, and a row that under-reads until the peer
+        // updates beats one that says nothing.
+        s.cost_hour = c
+            .get("last_hour")
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| num(c, "this_hour"));
         s.cost_today = num(c, "today");
         s.cost_per_min = num(c, "per_min");
         s.costs_by_day = buckets(c.get("by_day"));
@@ -652,6 +658,8 @@ mod tests {
         assert_eq!(s.activity_state, ActivityState::WaitingForInput);
         assert_eq!(s.total_cost, Some(1.25));
         assert_eq!(s.cost_today, 1.25);
+        // This snapshot predates `last_hour`, so the clock hour stands in.
+        assert_eq!(s.cost_hour, 0.5);
         assert_eq!(s.tool_errors, 4);
         assert_eq!(s.error_rate(), Some(0.1));
         assert_eq!(s.compactions, 2);
@@ -660,6 +668,17 @@ mod tests {
         // The buckets have to survive, or a remote machine's spend would reach
         // the lifetime total and none of the overview's windows.
         assert_eq!(s.costs_by_day["2026-08-11"].values().sum::<f64>(), 1.25);
+    }
+
+    #[test]
+    fn a_newer_peer_rolling_hour_wins_over_its_clock_hour() {
+        let json = r#"[{
+            "provider": "claude", "session_id": "abc123",
+            "cost": {"available": true, "total": "$1.25", "included": false,
+                     "this_hour": 0.0, "last_hour": 0.75}
+        }]"#;
+        let rows = parse("box", json).expect("parses");
+        assert_eq!(rows[0].cost_hour, 0.75);
     }
 
     /// The far side is a different build. A row missing everything optional

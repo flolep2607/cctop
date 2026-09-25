@@ -390,7 +390,15 @@ pub struct JsonCost {
     /// Recorded usage that priced at nothing, as with a free model. Distinct
     /// from `available: false`, which is a provider that records no usage.
     free: bool,
+    /// Spend in the current local clock hour, which is what this key has
+    /// always meant; kept so older readers and peers go on getting it.
     this_hour: f64,
+    /// Spend in the last 60 minutes, rolling — the `$/1H` column's figure.
+    ///
+    /// A new key rather than a new meaning for `this_hour`: a peer reading an
+    /// older cctop finds this missing and falls back, where a changed meaning
+    /// would be read wrong without anything saying so.
+    last_hour: f64,
     today: f64,
     /// Smoothed live spend rate, USD per minute.
     per_min: f64,
@@ -724,6 +732,7 @@ pub fn json_sessions(
     let claude_account = crate::quota::claude_account();
     let codex_account = crate::quota::codex_account();
     let collisions = crate::collide::detect(sessions);
+    let now = chrono::Utc::now();
 
     sessions
         .iter()
@@ -791,7 +800,8 @@ pub fn json_sessions(
                     total: (s.cost_available && !included).then(|| util::money(data.costs.total)),
                     included,
                     free: s.cost_is_free,
-                    this_hour: s.cost_hour,
+                    this_hour: s.cost_clock_hour(&now),
+                    last_hour: s.cost_hour,
                     today: s.cost_today,
                     per_min: s.cost_per_min,
                     by_day: trimmed_buckets(&s.costs_by_day, JSON_DAYS),

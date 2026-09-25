@@ -354,7 +354,7 @@ under `--bind`, and anyone with the hostname under `--tunnel`.
 | `cctop_remote_hosts_unreadable` | | `--host` machines that could not be read |
 | `cctop_sessions` | `provider`, `state` | `state` is `working`, `waiting`, `asking`, `error`, or `idle` for a session with no live process. Every state is present, at 0 when empty, so an alert on `waiting` always evaluates |
 | `cctop_cost_usd` | `provider`, `included` | Estimated cost at retail rates of every session in the table |
-| `cctop_cost_today_usd`, `cctop_cost_this_hour_usd` | `provider`, `included` | Since local midnight, and in the current local hour |
+| `cctop_cost_today_usd`, `cctop_cost_this_hour_usd`, `cctop_cost_last_hour_usd` | `provider`, `included` | Since local midnight, in the current local clock hour, and in the last 60 minutes rolling |
 | `cctop_cost_burn_usd_per_hour` | `provider`, `included` | The smoothed live spend rate |
 | `cctop_model_cost_usd`, `cctop_model_cost_today_usd` | `provider`, `model`, `included` | The same, by model |
 | `cctop_tokens` | `provider`, `model`, `kind` | `kind` is `input`, `output`, `cache_read` or `cache_write` |
