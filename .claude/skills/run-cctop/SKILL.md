@@ -290,6 +290,11 @@ unrelated, and cctop cannot see the driver's tmux server at all.
   adoption, tab order, or the rmux options cctop writes has to go through
   `--spawn` — or be tested against the real daemon in `src/rmux.rs`, as
   `an_order_written_onto_a_session_survives_in_it` is.
+- **Agents cctop starts go to a private rmux daemon** (`RMUX_TMPDIR` under
+  `$CCTOP_SHOTS/../rmux`), which `down` kills. Before this, a resumed fixture
+  session landed on the operator's real daemon and outlived the driver. The
+  two gotchas below about real sessions now apply only with
+  `CCTOP_DRIVE_REAL_RMUX=1`, the opt-in for testing against them.
 - **cctop adopts every cctop-owned `rmux` session on the machine as a tab.**
   In `--spawn` mode the driver's own server is out of the way, but the
   operator's real sessions are not: one lands in tab 2 displayed and
