@@ -6,7 +6,7 @@ use super::modals;
 use super::spark;
 use super::table;
 use super::theme::{self, Gradient};
-use super::{App, Mode, effects, panels, scrollbar, tabs, toast};
+use super::{App, Mode, effects, panels, rave, scrollbar, tabs, toast};
 use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
@@ -354,6 +354,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     // Over everything, modals included: a few seconds of confirmation for a
     // key that has already acted, in a corner nothing else owns.
     draw_paste_preview(frame, area, app);
+    // Under the toasts, so what the code said when it was typed still reads.
+    if let Some(t) = app.rave.elapsed() {
+        rave::paint(frame.buffer_mut(), chunks[4], t, theme::truecolor());
+    }
     // A terminal too short for the Overview still gets told things, on the
     // top row of what is there instead.
     let overview = match chunks[0].height {

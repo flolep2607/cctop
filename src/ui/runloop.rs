@@ -799,6 +799,9 @@ fn event_loop(
             app.needs_redraw = true;
         }
 
+        // The party is on no clock but its own.
+        app.needs_redraw |= app.raving();
+
         if app.needs_redraw {
             terminal.draw(|frame| layout = render::draw(frame, app))?;
             app.needs_redraw = false;
@@ -828,7 +831,7 @@ fn event_loop(
         // last sweep is done, the wait is back to what it was, and the
         // dashboard is back to five wakes a second.
         let sweeping = (1..=app.tabs.len()).any(|i| app.restart_flash(i).is_some());
-        let idle_wait = match (sweeping, app.animating()) {
+        let idle_wait = match (sweeping || app.raving(), app.animating()) {
             (true, _) => idle_wait.min(effects::FRAME),
             (false, true) => idle_wait.min(effects::frame_for(app.tab)),
             (false, false) => idle_wait,
