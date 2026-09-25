@@ -17,6 +17,17 @@
 //!
 //! ponytail: no `notifications/*` beyond swallowing `initialized`, and no
 //! server-initiated messages. Nothing here changes without being asked.
+//!
+//! One tool blocks: `wait_for_session` is `cctop wait` behind a bounded
+//! timeout ([`MAX_WAIT`]), so one agent can hand off to another and pick up
+//! when it is done. It still only reads.
+//!
+//! ponytail: that wait does not bind a hook socket, so it hears an agent's
+//! own reports only once a transcript or a running cctop's record on the rmux
+//! session reflects them — a second or two later than `cctop wait` would. A
+//! socket here would outlive the call: its accept thread cannot be stopped,
+//! and one kept for the server's lifetime would pile up every event on the
+//! machine between calls, for a server that answers a handful of them.
 
 use crate::loader::Loader;
 use crate::pricing::Plan;
@@ -33,6 +44,16 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// sessions, and an agent reading this pays for every one. The default is the
 /// recent slice, and a caller that genuinely wants the tail asks for it.
 const DEFAULT_LIMIT: usize = 25;
+
+/// The longest `wait_for_session` blocks, whatever it is asked for.
+///
+/// A tool call holds the calling agent's turn, and most clients give up on a
+/// call long before this; an agent that needs longer calls again, and learns
+/// from the answer that it timed out rather than hanging on a pipe.
+const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What `wait_for_session` waits when not told.
+const DEFAULT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Serve MCP on stdin/stdout until stdin closes.
 ///
@@ -173,6 +194,38 @@ fn tool_schemas() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "wait_for_session",
+            "description": "Block until another agent's session stops working, then say what \
+                            it is doing. Use it to wait for an agent you handed work to, or \
+                            one you sent a prompt to, before reading its result. Returns JSON: \
+                            state (working, idle, waiting, error, ended), met, timed_out, \
+                            waited_secs. On a timeout, call it again.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "Session id or a unique prefix of one (as returned by \
+                                        list_sessions), a cctop tab name, or a pid.",
+                    },
+                    "until": {
+                        "type": "string",
+                        "enum": ["idle", "waiting", "done", "any-stop"],
+                        "description": "idle: its turn is over. waiting: it is blocked on a \
+                                        question. done: it worked since this call began and \
+                                        has stopped since. any-stop (default): it is not \
+                                        working, now or once it stops.",
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Give up after this many seconds. Defaults to 60; \
+                                        at most 300.",
+                    },
+                },
+                "required": ["session"],
+            },
+        }),
+        json!({
             "name": "search_sessions",
             "description": "Search the full text of every session transcript on this machine \
                             for a string, and return the sessions that mention it with a \
@@ -205,6 +258,13 @@ fn call_tool(params: Option<&Value>) -> Result<Value, String> {
         .ok_or("tools/call needs a tool name")?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
+    // Before the load below: the wait does its own, and then keeps refreshing
+    // it for as long as it blocks.
+    if name == "wait_for_session" {
+        let text = wait_for_session(&args)?;
+        return Ok(json!({"content": [{"type": "text", "text": text}]}));
+    }
+
     let mut loader = Loader::new();
     let sessions = loader.load(Plan::Retail);
 
@@ -221,6 +281,36 @@ fn call_tool(params: Option<&Value>) -> Result<Value, String> {
     loader.store().save();
 
     Ok(json!({"content": [{"type": "text", "text": text}]}))
+}
+
+/// `cctop wait`, bounded by [`MAX_WAIT`], answering in the CLI's `-j` shape.
+fn wait_for_session(args: &Value) -> Result<String, String> {
+    let target = args
+        .get("session")
+        .and_then(Value::as_str)
+        .ok_or("wait_for_session needs a session")?;
+    let until = match args.get("until").and_then(Value::as_str) {
+        None => crate::wait::Until::AnyStop,
+        Some(word) => crate::wait::Until::parse(word).ok_or_else(|| {
+            format!("until must be idle, waiting, done or any-stop, not '{word}'")
+        })?,
+    };
+    let timeout = args
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_WAIT, std::time::Duration::from_secs)
+        .min(MAX_WAIT);
+    match crate::wait::wait(target, until, Some(timeout), false) {
+        Ok(outcome) => Ok(outcome.json().to_string()),
+        Err(crate::wait::Unresolved::Unknown) => Err(format!(
+            "no session, tab or pid here is '{target}'; list_sessions shows them"
+        )),
+        Err(crate::wait::Unresolved::Ambiguous(ids)) => Err(format!(
+            "'{target}' matches {} sessions; give more of the id: {}",
+            ids.len(),
+            ids.join(", ")
+        )),
+    }
 }
 
 fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
@@ -492,5 +582,28 @@ mod tests {
         let response = handle(&request).expect("a reply");
         assert_eq!(response["id"], 7);
         assert!(response["error"]["message"].as_str().is_some());
+    }
+
+    /// The tool's `until` enum is exactly the words the wait understands, so
+    /// an agent choosing from the schema never picks one that is refused.
+    #[test]
+    fn the_wait_tool_offers_exactly_the_conditions_it_takes() {
+        let tool = tool_schemas()
+            .into_iter()
+            .find(|tool| tool["name"] == "wait_for_session")
+            .expect("the tool is listed");
+        let words = tool["inputSchema"]["properties"]["until"]["enum"]
+            .as_array()
+            .expect("an enum")
+            .clone();
+        for word in &words {
+            let word = word.as_str().expect("a word");
+            assert!(crate::wait::Until::parse(word).is_some(), "{word}");
+        }
+        assert_eq!(words.len(), 4);
+        // Refused before anything is read, rather than after a walk.
+        let bad = wait_for_session(&json!({"session": "x", "until": "never"}));
+        assert!(bad.unwrap_err().contains("until must be"));
+        assert!(wait_for_session(&json!({})).is_err());
     }
 }

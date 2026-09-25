@@ -20,6 +20,7 @@ use serde::Serialize;
                       cctop as <account> <agent> [args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop optimize | compare | burn\n       \
+                      cctop wait <session> [--until …] [--timeout …]\n       \
                       cctop doctor",
     // Shown by `-h` as well as `--help`: the long description is the only place
     // that mentioned launching agents, and nobody reads `--help` to find out a
@@ -44,6 +45,9 @@ one-shot rate, cost per file changed, cache hit.\n  \
 cctop burn             What your subscription windows were paid for and did\n                         \
 not use. A window is use-it-or-lose-it, and the\n                         \
 provider only ever reports the current figure.\n  \
+cctop wait <session>   Block until a session stops working — by id prefix, tab\n                         \
+name or pid. --until idle|waiting|done|any-stop; exits\n                         \
+124 on --timeout. For one agent to wait on another.\n  \
 cctop why [ID]         Why a row says a session is running, or is not: every\n                         \
 agent process, the session it was matched to, and the\n                         \
 rule that matched it.\n  \
@@ -239,6 +243,44 @@ pub struct Args {
     /// session titles, project paths or file names
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "FILE")]
     pub trace: Option<String>,
+}
+
+/// `cctop wait`'s own flags.
+///
+/// A parser of its own, like `serve`'s, because `wait` is a bare word and
+/// [`Args`] takes no positionals — `main` intercepts the word and hands the
+/// rest here. Derived rather than hand-rolled because this one is meant to be
+/// called from scripts, where a clap usage error that names the flag is worth
+/// more than the few lines saved.
+#[derive(Parser, Debug)]
+#[command(
+    name = "cctop wait",
+    about = "Block until a session stops working",
+    long_about = "Block until a session stops working, then exit.\n\n\
+Reads what the dashboard reads: the transcripts, the agents' own hooks \
+(heard live while waiting), and what a cctop recorded on the agent's rmux \
+session. Useful for one agent to wait on another, or for a script that has \
+just typed a prompt at one.",
+    after_help = "Exit status: 0 when the condition is met, 1 when the session ended \
+first without meeting it, 2 when the target names no session (or more than \
+one), 124 on timeout."
+)]
+pub struct WaitArgs {
+    /// The session: a prefix of its id, the name of its tab, or a pid in its
+    /// process tree
+    pub target: String,
+
+    /// What to wait for
+    #[arg(long, value_enum, default_value = "any-stop")]
+    pub until: crate::wait::Until,
+
+    /// Give up after this long: 90, 30s, 10m, 2h. 0 waits forever
+    #[arg(long, default_value = "10m", value_parser = crate::wait::parse_timeout)]
+    pub timeout: std::time::Duration,
+
+    /// Print the outcome as one line of JSON on stdout
+    #[arg(short, long)]
+    pub json: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {
@@ -855,6 +897,39 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Args::command().debug_assert();
+        WaitArgs::command().debug_assert();
+    }
+
+    /// `cctop wait`'s defaults are the ones a script wants without thinking:
+    /// any stop, ten minutes — and every flag takes the spelling the docs use.
+    #[test]
+    fn wait_parses_its_target_and_flags() {
+        use crate::wait::Until;
+        let parse = |argv: &[&str]| {
+            WaitArgs::try_parse_from(std::iter::once("cctop wait").chain(argv.iter().copied()))
+        };
+        let plain = parse(&["3f2a"]).expect("a bare target");
+        assert_eq!(plain.target, "3f2a");
+        assert_eq!(plain.until, Until::AnyStop);
+        assert_eq!(plain.timeout, std::time::Duration::from_secs(600));
+        assert!(!plain.json);
+
+        let full =
+            parse(&["reviewer", "--until", "done", "--timeout", "30s", "-j"]).expect("every flag");
+        assert_eq!(full.until, Until::Done);
+        assert_eq!(full.timeout, std::time::Duration::from_secs(30));
+        assert!(full.json);
+        assert_eq!(
+            parse(&["1", "--until", "any-stop"]).unwrap().until,
+            Until::AnyStop
+        );
+        assert!(parse(&["1", "--timeout", "0"]).unwrap().timeout.is_zero());
+
+        assert!(parse(&[]).is_err(), "no target");
+        assert!(parse(&["1", "--until", "never"]).is_err());
+        assert!(parse(&["1", "--timeout", "soon"]).is_err());
+        // A usage error exits 2, which is also an unknown session's code.
+        assert_eq!(parse(&[]).unwrap_err().exit_code(), 2);
     }
 
     #[test]

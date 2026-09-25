@@ -133,6 +133,20 @@ when it has explicitly asked a question and is blocked on the answer. Amber wins
 when a tab has both. The tab you are on never blinks, since its focused pane is
 already in front of you.
 
+Green is most tabs most of the time, so a turn that ended while you were
+somewhere else says so a second way: the label turns the accent colour and
+carries a `✓` until you focus that pane, or select its row on the dashboard.
+`Alt+b` walks every amber tab first and then the `✓` ones, so pressing it until
+it says "Nothing is waiting for you" is a round of everything with news. See
+[the status dot](the-table.md#the-status-dot) for what counts as looking, and
+why the mark is this cctop's own rather than shared with the others.
+
+`Alt+z` zooms the focused pane over the whole tab — for reading a long diff in
+one half of a split — and again puts the split back. The tab wears a `⤢` while
+it is zoomed. The panes you cannot see keep running and are not resized, so
+zooming costs their agents nothing; see
+[Every key](the-table.md#every-key) for the details.
+
 A tab holding the login shell rather than an agent is left alone. Both colours
 describe a turn, and a shell has no turns — it sits at its prompt drawing
 nothing, which is exactly the silence the green is read from, so a tab opened
@@ -330,6 +344,41 @@ terminal's theme follows the pane it is drawn in. The cursor position is
 deliberately not answered; the shim relays bytes rather than parsing them, so
 it does not know where the cursor is, and a made-up position would put an
 agent's first frame in the wrong place.
+
+## Waiting for an agent to finish
+
+```bash
+cctop wait 3f2a                     # a session id prefix
+cctop wait reviewer --until done    # a tab's name
+cctop wait 48213 -j --timeout 30m   # a pid anywhere in the agent's process tree
+```
+
+blocks until that session stops working, then exits — so a script, or another
+agent, can hand work to one agent and pick up when it is done. It reads what
+the dashboard reads: the transcripts, the agents' own hooks (it listens for them
+the way a running cctop does, so a finished turn is heard the moment it
+happens), and the state a cctop recorded on the agent's rmux session.
+
+| `--until` | Met when |
+|---|---|
+| `any-stop` (default) | it is not working — at once, if it already is not |
+| `idle` | its turn is over and the prompt is yours |
+| `waiting` | it is blocked on a question: a permission prompt, an MCP elicitation |
+| `done` | it has worked since the wait began, and stopped since — the one to use after typing it a prompt, which may not have landed yet |
+
+It exits 0 when the condition is met, 1 when the session ended first without
+meeting it, 2 when the target names no session or more than one, and 124 on
+`--timeout` (default `10m`; `0` waits forever), `timeout(1)`'s own code. `-j`
+prints the outcome as one line of JSON: `session`, `pid`, `label`, `state`,
+`until`, `met`, `timed_out`, `waited_secs`. An agent can ask the same thing
+over MCP with `wait_for_session` — see
+[Letting agents see each other](integrations.md#letting-agents-see-each-other).
+
+A Claude Code transcript cannot say that a turn is over — answering you and
+still thinking look the same on disk — so for Claude that answer comes from its
+hooks. Install them (`cctop --install-hooks`), or a Claude session that went
+quiet before the wait started reads as working until its next event, unless the
+agent is in a cctop tab and a running cctop recorded its state there.
 
 ## Getting pinged when a session needs you
 

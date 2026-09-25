@@ -196,7 +196,7 @@ server:
 {"mcpServers": {"cctop": {"command": "cctop", "args": ["--mcp"]}}}
 ```
 
-Four tools, all read-only:
+Five tools, all read-only:
 
 - **`list_sessions`** — every session, any harness: model, directory, branch,
   tokens, estimated cost, context occupancy, and whether it is still running.
@@ -211,6 +211,14 @@ Four tools, all read-only:
 - **`search_sessions`** — the full text of every transcript on the machine,
   with a snippet of each match. Where something was already discussed or
   attempted, in any harness.
+- **`wait_for_session`** — [`cctop wait`](driving-agents.md#waiting-for-an-agent-to-finish)
+  as a tool: blocks until a session stops working and answers with the same
+  JSON. For an agent that handed work to another and wants to pick up when it
+  is done. Capped at five minutes a call (60 seconds unless asked), since a
+  tool call holds the caller's turn; on a timeout it says so, and the agent
+  calls again. Unlike the command it does not listen for hooks itself, so it
+  hears a finished turn a second or two later, once a transcript or a running
+  cctop has it.
 
 Nothing here starts, stops, or types at anything. An agent that can *drive*
 other agents is a much larger proposition than one that can *see* them, and the
