@@ -31,6 +31,7 @@ pub mod panels;
 mod panes;
 mod profiles;
 mod qr;
+mod reader;
 mod remote;
 pub mod render;
 mod runloop;
@@ -1120,10 +1121,15 @@ impl App {
             conversation: None,
             error: None,
             back: 0,
-            max_back: 0,
             fetching: false,
             raw: false,
-            turn_backs: Vec::new(),
+            tools_open: false,
+            opened: std::collections::HashSet::new(),
+            search: reader::Search::default(),
+            laid: None,
+            visible: 0,
+            dirty: false,
+            hold: false,
         });
         self.mode = Mode::Conversation;
         self.fetch_chat(None);
@@ -1178,10 +1184,18 @@ impl App {
                         if current.note.is_none() {
                             current.note = page.note.take();
                         }
+                        // Only the new turns are laid out; the ones already
+                        // shown are kept (see [`reader`]).
+                        view.relayout(false);
                     }
                     None => view.conversation = Some(*page),
                 },
-                None => view.conversation = Some(*page),
+                None => {
+                    view.conversation = Some(*page);
+                    // A whole new document: a kept turn could be one whose
+                    // tool has since returned, so none of them are kept.
+                    view.laid = None;
+                }
             },
             Err(why) => view.error = Some(why),
         }
@@ -1200,7 +1214,7 @@ impl App {
     }
 }
 
-/// The state behind the conversation overlay.
+/// The state behind the conversation reader (see [`reader`]).
 pub struct ChatView {
     /// The session the view is about — kept because a page of older turns is
     /// asked for on the same row the view was opened on.
@@ -1214,24 +1228,36 @@ pub struct ChatView {
     pub conversation: Option<crate::serve::chat::Conversation>,
     /// Why the read failed, when it did.
     pub error: Option<String>,
-    /// Lines scrolled back from the bottom. A scrollback's zero is the end:
+    /// Rows scrolled back from the bottom. A scrollback's zero is the end:
     /// new turns arriving while it sits there must not move what you are
     /// reading, and a prepend of older turns leaves a distance from the end
     /// exactly where it was.
-    pub back: u16,
-    /// How far `back` can go, written by the draw — the only place the wrapped
-    /// line count is known.
-    pub max_back: u16,
+    pub back: usize,
     /// A fetch is in flight — the spinner's reason to keep turning, and what
     /// keeps a second `u` from asking for the page already coming.
     pub fetching: bool,
     /// Replies shown as the markdown source they were written in, rather than
     /// rendered — `m` flips it, for the times the exact characters matter.
     pub raw: bool,
-    /// The `back` that puts each turn's header at the top of the view, oldest
-    /// first. Written by the draw, like `max_back`, and what `[` and `]` step
-    /// through.
-    pub turn_backs: Vec<u16>,
+    /// Every tool call drawn in full rather than as its one line — `t`.
+    pub tools_open: bool,
+    /// Turns, by `seq`, whose tools are drawn the other way from `tools_open`
+    /// — what `Enter` flips, one turn at a time.
+    pub opened: std::collections::HashSet<usize>,
+    /// `/`: the query and the rows it is on.
+    pub search: reader::Search,
+    /// The conversation laid out at the last frame's width, kept so a frame
+    /// copies the rows it shows rather than rendering every reply again.
+    pub laid: Option<reader::Laid>,
+    /// Rows the last frame had for text, written by the draw — the only place
+    /// it is known — for the keys to page and clamp by.
+    pub visible: usize,
+    /// Something `laid` was built from has changed; the next frame lays out
+    /// again, keeping every turn it can.
+    pub dirty: bool,
+    /// The next layout keeps the top row in place even at the end; see
+    /// [`ChatView::relayout`].
+    pub hold: bool,
 }
 
 /// Columns the user has hidden outright, which win over the automatic

@@ -386,6 +386,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |
 | `U` | Clear all marks |
 | `h` or `F8` | Agent integration: what reports to cctop, and install it |
+| `i` | Read the conversation, full-screen (see [Panels](panels.md#reading-the-conversation)) |
 | `y` | Copy resume command or transcript path |
 | `d` | Delete the selected session (not running) |
 | `k` | Terminate the selected live session (with confirmation) |

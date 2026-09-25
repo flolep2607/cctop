@@ -613,7 +613,10 @@ mod tests {
     /// label and the prose around it carry none.
     #[test]
     fn a_fenced_block_sits_on_a_ground_to_the_full_width() {
-        let r = draw("Before.\n\n```sh\nls\ncargo build --release\n```\n\nAfter.", 30);
+        let r = draw(
+            "Before.\n\n```sh\nls\ncargo build --release\n```\n\nAfter.",
+            30,
+        );
         let ground = theme::gray(235);
         let grounds: Vec<bool> = r
             .lines
@@ -622,7 +625,15 @@ mod tests {
             .collect();
         assert_eq!(
             trimmed(&r),
-            ["Before.", "", "sh", "│ ls", "│ cargo build --release", "", "After."]
+            [
+                "Before.",
+                "",
+                "sh",
+                "│ ls",
+                "│ cargo build --release",
+                "",
+                "After."
+            ]
         );
         assert_eq!(grounds, [false, false, false, true, true, false, false]);
         for i in [3, 4] {
@@ -709,7 +720,10 @@ mod tests {
     #[test]
     fn a_numbered_list_counts_from_where_it_starts() {
         let r = draw("3. three\n4. four\n   1. sub\n   2. sub two", 30);
-        assert_eq!(rows(&r), ["3. three", "4. four", "   1. sub", "   2. sub two"]);
+        assert_eq!(
+            rows(&r),
+            ["3. three", "4. four", "   1. sub", "   2. sub two"]
+        );
     }
 
     /// Bullets and numbers are drawn, and a wrapped item's continuation lines

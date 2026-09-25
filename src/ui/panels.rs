@@ -173,21 +173,7 @@ pub fn info(
     }
 
     let mut lines = Vec::new();
-    let provider_color = match session.surface {
-        Surface::DesktopCowork => theme::colors().desktop_cowork,
-        Surface::DesktopCode => theme::colors().desktop_code,
-        Surface::Editor => theme::colors().cursor,
-        Surface::Cli => match session.provider {
-            Provider::Claude => theme::colors().claude,
-            Provider::Codex => theme::colors().openai,
-            Provider::Cursor => theme::colors().cursor,
-            Provider::Devin => theme::colors().claude,
-            Provider::Gemini => theme::colors().gemini,
-            Provider::OpenCode => theme::colors().opencode,
-            Provider::Pi => theme::colors().pi,
-            Provider::Windsurf => theme::colors().windsurf,
-        },
-    };
+    let provider_color = provider_color(session);
     let model = if data.last_model.is_empty() {
         session.model.clone()
     } else {
@@ -541,6 +527,26 @@ pub fn tool_tabs(data: &SessionData) -> Vec<(String, u64)> {
 /// growing beneath it. Row indices shift as new entries arrive; ids don't.
 pub fn detail_key(d: &crate::session::ToolDetail) -> String {
     d.id.clone().unwrap_or_else(|| format!("{}|{}", d.ts, d.d))
+}
+
+/// The hue a session's harness is drawn in — the Summary's provider line, and
+/// the agent's name over each of its turns in the conversation reader.
+pub(super) fn provider_color(session: &Session) -> ratatui::style::Color {
+    match session.surface {
+        Surface::DesktopCowork => theme::colors().desktop_cowork,
+        Surface::DesktopCode => theme::colors().desktop_code,
+        Surface::Editor => theme::colors().cursor,
+        Surface::Cli => match session.provider {
+            Provider::Claude => theme::colors().claude,
+            Provider::Codex => theme::colors().openai,
+            Provider::Cursor => theme::colors().cursor,
+            Provider::Devin => theme::colors().claude,
+            Provider::Gemini => theme::colors().gemini,
+            Provider::OpenCode => theme::colors().opencode,
+            Provider::Pi => theme::colors().pi,
+            Provider::Windsurf => theme::colors().windsurf,
+        },
+    }
 }
 
 /// Wrap text to `width`, breaking on the last space that fits.

@@ -343,7 +343,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::Insight => modals::draw_insight(frame, area, app),
-        Mode::Conversation => modals::draw_conversation(frame, area, app),
+        Mode::Conversation => super::reader::draw(frame, area, app),
         Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
         Mode::List => {}
     }

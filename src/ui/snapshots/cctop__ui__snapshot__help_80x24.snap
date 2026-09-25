@@ -24,5 +24,5 @@ expression: screen
 ╰─│Acting on the selected session                                            │─╯
 ╭ │  a                Open its terminal in a tab                             │ ╮
 │C│  R                Resume it in a tab of its own                          │ │
-╰─╰ 1–19 of 126   ↑↓ scroll ─────────────────────────────────────────────────╯─╯
+╰─╰ 1–19 of 127   ↑↓ scroll ─────────────────────────────────────────────────╯─╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share
