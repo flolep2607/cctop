@@ -1,5 +1,11 @@
 //! ↑ ↑ ↓ ↓ ← → ← → b a, anywhere. The same again to go home.
 //!
+//! Or type `ultracode` into a Claude Code or Codex session cctop is watching:
+//! the party starts itself, and goes home the same way. It is read from the
+//! transcript, so it needs no hook, and only a prompt newer than the last one
+//! heard — never one from before cctop started — starts it, so a session that
+//! said it last week does not throw a party every time the dashboard opens.
+//!
 //! Heard in every mode and on every tab, ahead of everything else that reads
 //! the keyboard: the arrows are what move you between panels and tabs, so a
 //! code only listened for in one place is carried out of it by its own keys.
@@ -30,7 +36,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 /// The code, as the keys it is typed with.
-const CODE: [KeyCode; 10] = [
+pub(super) const CODE: [KeyCode; 10] = [
     KeyCode::Up,
     KeyCode::Up,
     KeyCode::Down,
@@ -53,6 +59,10 @@ pub struct Rave {
     since: Option<Instant>,
     /// The music, while there is a party and something to play it with.
     sound: Option<sound::Sound>,
+    /// The newest `ultracode` prompt already answered, so one prompt starts
+    /// one party: going home is not undone by the next refresh reading the
+    /// same transcript again.
+    ultracode_heard: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// What a key was to the code.
@@ -113,19 +123,9 @@ impl App {
             Heard::Pass => false,
             Heard::Swallow => true,
             Heard::Toggle => {
-                match (self.rave.elapsed(), theme::no_color()) {
-                    (Some(_), true) => {
-                        self.rave = Rave::default();
-                        self.set_status("No colour, no party");
-                    }
-                    (Some(_), false) => {
-                        self.rave.sound = sound::Sound::start();
-                        self.set_status(format!(
-                            "♫ Rave mode, with {} if you are online. The same code again to go home",
-                            sound::STATION
-                        ))
-                    }
-                    (None, _) => {
+                match self.rave.since {
+                    Some(_) => self.start_rave("↑↑↓↓←→←→ba"),
+                    None => {
                         // Dropping it is what stops the player.
                         self.rave.sound = None;
                         self.set_status("Lights up. Back to work")
@@ -133,6 +133,54 @@ impl App {
                 }
                 true
             }
+        }
+    }
+
+    /// Start the music and say so, the lights having just come on for `why`.
+    fn start_rave(&mut self, why: &str) {
+        if theme::no_color() {
+            self.rave.since = None;
+            self.set_status("No colour, no party");
+            return;
+        }
+        self.rave.since.get_or_insert_with(Instant::now);
+        self.rave.sound = sound::Sound::start();
+        self.set_status(format!(
+            "♫ {why}: rave mode, with {} if you are online. ↑↑↓↓←→←→ba to go home",
+            sound::STATION
+        ));
+    }
+
+    /// Start the party when a Claude Code or Codex session has been asked for
+    /// `ultracode` since the last time one was — see the module docs.
+    ///
+    /// Called whenever the rows change. A party already going is left alone:
+    /// the word asks for the lights, it does not switch them off.
+    pub(super) fn hear_ultracode(&mut self) {
+        let parse = |ts: &str| {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|t| t.with_timezone(&chrono::Utc))
+        };
+        let Some(newest) = self
+            .sessions
+            .iter()
+            .filter(|s| matches!(s.provider, Provider::Claude | Provider::Codex))
+            .filter_map(|s| s.ultracode_at.as_deref().and_then(parse))
+            .max()
+        else {
+            return;
+        };
+        let since = self
+            .rave
+            .ultracode_heard
+            .or_else(|| parse(&self.started_at));
+        if since.is_some_and(|since| newest <= since) {
+            return;
+        }
+        self.rave.ultracode_heard = Some(newest);
+        if self.rave.since.is_none() {
+            self.start_rave("ultracode");
         }
     }
 
@@ -372,7 +420,7 @@ fn equaliser(buf: &mut Buffer, footer: Rect, beats: f32, thump: f32, build: f32,
 }
 
 /// `rgb` as this terminal can show it.
-fn snap(rgb: (u8, u8, u8), truecolor: bool) -> Color {
+pub(super) fn snap(rgb: (u8, u8, u8), truecolor: bool) -> Color {
     match truecolor {
         true => Color::Rgb(rgb.0, rgb.1, rgb.2),
         false => Color::Indexed(nearest_indexed(rgb)),
@@ -380,7 +428,7 @@ fn snap(rgb: (u8, u8, u8), truecolor: bool) -> Color {
 }
 
 /// Hue in degrees, saturation and value in `0..=1`, to RGB.
-fn hsv(hue: f32, saturation: f32, value: f32) -> (u8, u8, u8) {
+pub(super) fn hsv(hue: f32, saturation: f32, value: f32) -> (u8, u8, u8) {
     let c = value * saturation;
     let h = hue.rem_euclid(360.0) / 60.0;
     let x = c * (1.0 - (h % 2.0 - 1.0).abs());
@@ -511,5 +559,31 @@ mod tests {
             );
         }
         assert!(buf.content()[80..].iter().any(|c| c.symbol() != " "));
+    }
+
+    /// A session asked for `ultracode` after cctop started starts the party
+    /// once; one from before it started never does, and going home is not
+    /// undone by the same prompt being read again.
+    #[test]
+    fn ultracode_starts_the_party_once() {
+        let mut app = crate::ui::tests::test_app();
+        let mut before = crate::session::Session::new(Provider::Claude, "old".into());
+        before.ultracode_at = Some("2020-01-01T00:00:00.000Z".into());
+        app.sessions.push(before);
+        app.hear_ultracode();
+        assert!(!app.raving(), "a prompt from before cctop started");
+
+        let mut now = crate::session::Session::new(Provider::Codex, "new".into());
+        now.ultracode_at = Some(chrono::Utc::now().to_rfc3339());
+        app.sessions.push(now);
+        app.hear_ultracode();
+        assert!(app.raving() || theme::no_color());
+
+        for code in CODE {
+            app.on_key(crate::ui::tests::key(code));
+        }
+        assert!(!app.raving());
+        app.hear_ultracode();
+        assert!(!app.raving(), "the same prompt, read again");
     }
 }

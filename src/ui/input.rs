@@ -111,7 +111,9 @@ impl App {
         // Before anything else sees the key, in every mode and on every tab:
         // the arrows move things, and a code heard only on the dashboard is
         // lost to the first arrow that carries you off it.
-        if self.hear_rave(key) {
+        // Every code hears every key — `|`, not `||` — or one would lose its
+        // place each time another kept a letter.
+        if self.hear_rave(key) | self.hear_drunk(key) | self.hear_high(key) {
             return;
         }
 

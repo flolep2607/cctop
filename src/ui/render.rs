@@ -6,7 +6,7 @@ use super::modals;
 use super::spark;
 use super::table;
 use super::theme::{self, Gradient};
-use super::{App, Mode, effects, panels, rave, scrollbar, tabs, toast};
+use super::{App, Mode, drunk, effects, high, panels, rave, scrollbar, tabs, toast};
 use crate::pricing::Provider;
 use crate::session::Surface;
 use crate::util;
@@ -279,8 +279,29 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             Mode::Help => modals::draw_help(frame, area, app),
             _ => {}
         }
+        // Under the rave, whose floor covers it, and over nothing else: the
+        // trip is the ground, and the other two are drawn on top of it.
+        if let Some(t) = app.high.elapsed() {
+            high::paint(
+                frame.buffer_mut(),
+                chunks[2],
+                t,
+                theme::truecolor(),
+                !app.raving(),
+            );
+        }
         if let Some(t) = app.rave.elapsed() {
             rave::paint(frame.buffer_mut(), chunks[2], t, theme::truecolor());
+        }
+        if let Some(t) = app.drunk.elapsed() {
+            let colour = (!theme::no_color()).then(theme::truecolor);
+            drunk::paint(
+                frame.buffer_mut(),
+                chunks[2],
+                t,
+                colour,
+                !app.raving() && !app.tripping(),
+            );
         }
         draw_toasts(frame, chunks[0], app);
         return layout;
@@ -358,8 +379,29 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     // key that has already acted, in a corner nothing else owns.
     draw_paste_preview(frame, area, app);
     // Under the toasts, so what the code said when it was typed still reads.
+    // Under the rave, whose floor covers it, and over nothing else: the
+    // trip is the ground, and the other two are drawn on top of it.
+    if let Some(t) = app.high.elapsed() {
+        high::paint(
+            frame.buffer_mut(),
+            chunks[4],
+            t,
+            theme::truecolor(),
+            !app.raving(),
+        );
+    }
     if let Some(t) = app.rave.elapsed() {
         rave::paint(frame.buffer_mut(), chunks[4], t, theme::truecolor());
+    }
+    if let Some(t) = app.drunk.elapsed() {
+        let colour = (!theme::no_color()).then(theme::truecolor);
+        drunk::paint(
+            frame.buffer_mut(),
+            chunks[4],
+            t,
+            colour,
+            !app.raving() && !app.tripping(),
+        );
     }
     // A terminal too short for the Overview still gets told things, on the
     // top row of what is there instead.

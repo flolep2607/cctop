@@ -15,8 +15,10 @@ mod ansi;
 mod batch;
 pub mod columns;
 mod dirs;
+mod drunk;
 mod effects;
 mod filter;
+mod high;
 mod hooks;
 mod hyperlink;
 mod idle;
@@ -590,6 +592,10 @@ pub struct App {
     started: Instant,
     /// The easter egg. See [`rave`].
     rave: rave::Rave,
+    /// The other one. See [`drunk`].
+    drunk: drunk::Drunk,
+    /// And the third. See [`high`].
+    high: high::High,
 
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
@@ -995,6 +1001,8 @@ impl App {
             started_at: chrono::Utc::now().to_rfc3339(),
             started: Instant::now(),
             rave: rave::Rave::default(),
+            drunk: drunk::Drunk::default(),
+            high: high::High::default(),
             prefs,
             tx,
             tabs: Vec::new(),

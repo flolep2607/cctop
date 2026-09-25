@@ -207,6 +207,29 @@ impl ContextBreakdown {
     }
 }
 
+/// Whether a prompt says `ultracode`, as a word of its own and in any case.
+///
+/// A word rather than a substring, so a path or identifier that merely
+/// contains it (`ultracoder`, `my_ultracode_notes`) is not a request.
+pub fn says_ultracode(text: &str) -> bool {
+    const WORD: &str = "ultracode";
+    let lower = text.to_ascii_lowercase();
+    let word_char = |c: char| c.is_alphanumeric() || c == '_';
+    lower.match_indices(WORD).any(|(at, _)| {
+        let before = lower[..at].chars().next_back();
+        let after = lower[at + WORD.len()..].chars().next();
+        !before.is_some_and(word_char) && !after.is_some_and(word_char)
+    })
+}
+
+/// Keep the later of two transcript timestamps. Both are RFC 3339 in UTC as
+/// the harness wrote them, which sort as text.
+pub fn latest(held: &mut Option<String>, ts: &str) {
+    if !ts.is_empty() && held.as_deref().is_none_or(|h| h < ts) {
+        *held = Some(ts.to_string());
+    }
+}
+
 /// A discovered session plus everything annotated onto it for display.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -238,6 +261,9 @@ pub struct Session {
     /// them. Claude Code only, so `0` elsewhere means "not said" rather than
     /// "never happened".
     pub compactions: u32,
+    /// When the person last typed `ultracode` into this session: see
+    /// [`SessionData::ultracode_at`].
+    pub ultracode_at: Option<String>,
     /// `None` when the active plan bundles this provider's usage.
     pub total_cost: Option<f64>,
     /// False when the provider's transcript contains no billable usage data.
@@ -455,6 +481,7 @@ impl Session {
             tool_count: 0,
             tool_errors: 0,
             compactions: 0,
+            ultracode_at: None,
             total_cost: Some(0.0),
             cost_available: true,
             cost_is_free: false,
@@ -809,6 +836,16 @@ fn is_input_request_tool(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ultracode_is_a_word_not_a_substring() {
+        assert!(says_ultracode("ultracode"));
+        assert!(says_ultracode("Refactor the parser. ULTRACODE."));
+        assert!(says_ultracode("go (ultracode) now"));
+        assert!(!says_ultracode("ultracoder"));
+        assert!(!says_ultracode("see my_ultracode_notes.md"));
+        assert!(!says_ultracode("ultra code"));
+    }
     use serde_json::json;
 
     fn at(ts: &str) -> chrono::DateTime<chrono::Utc> {
@@ -1549,6 +1586,14 @@ pub struct SessionData {
     /// only transcript that says a compaction happened.
     #[serde(default)]
     pub compactions: u32,
+    /// The transcript timestamp of the newest prompt the person typed that says
+    /// `ultracode`, which is what starts the dashboard's party.
+    ///
+    /// Claude Code and Codex only, and only what was typed: a skill's text, a
+    /// compaction summary or a subagent's brief that mentions the word is the
+    /// agent talking, not someone asking for the lights.
+    #[serde(default)]
+    pub ultracode_at: Option<String>,
     /// Paths the session wrote lately, newest first, as the transcript spelled
     /// them — [`crate::loader`] resolves them against the session's cwd.
     ///
