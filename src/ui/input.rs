@@ -108,6 +108,13 @@ impl App {
         }
         self.needs_redraw = true;
 
+        // Before anything else sees the key, in every mode and on every tab:
+        // the arrows move things, and a code heard only on the dashboard is
+        // lost to the first arrow that carries you off it.
+        if self.hear_rave(key) {
+            return;
+        }
+
         // Moving between tabs and panes has to work from inside a pane, where
         // every other key belongs to the agent. Alt is the modifier left over:
         // Ctrl- is the agent's (Ctrl-C interrupts it), and the function keys are
@@ -163,10 +170,6 @@ impl App {
         // Ctrl-C quits from any mode.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.request_quit();
-            return;
-        }
-
-        if self.tab == 0 && self.mode == Mode::List && self.hear_rave(key) {
             return;
         }
 

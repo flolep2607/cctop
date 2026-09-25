@@ -1,10 +1,15 @@
-//! ↑ ↑ ↓ ↓ ← → ← → b a, on the dashboard. The same again to go home.
+//! ↑ ↑ ↓ ↓ ← → ← → b a, anywhere. The same again to go home.
+//!
+//! Heard in every mode and on every tab, ahead of everything else that reads
+//! the keyboard: the arrows are what move you between panels and tabs, so a
+//! code only listened for in one place is carried out of it by its own keys.
 //!
 //! An easter egg, and so built to cost nothing when it is not running: one
 //! counter advanced per key, and a paint pass that returns before touching the
-//! buffer. While it runs, the dashboard is repainted after it has been drawn —
-//! colours only, never a symbol, so every number on it still reads and every
-//! click still lands — plus an equaliser where the footer was.
+//! buffer. While it runs, the screen is repainted after it has been drawn —
+//! colours only, never a symbol, so every number and every agent's output
+//! still reads and every click still lands — plus an equaliser where the
+//! footer was.
 //!
 //! Like the rest of [`super::effects`], nothing is kept between frames: every
 //! frame is a pure function of how long the party has been going, so the same
@@ -51,8 +56,9 @@ pub struct Rave {
 pub enum Heard {
     /// Nothing to do with it: the key does what it always does.
     Pass,
-    /// Part of the code and not harmless alone — `b` jumps to a bell — so kept
-    /// from the table. The arrows pass through: moving the cursor is harmless.
+    /// Part of the code and not harmless alone — `b` jumps to a bell, and in a
+    /// pane both letters would be typed at the agent — so kept from whatever
+    /// else would have taken it. The arrows pass through: they only move.
     Swallow,
     /// The code is complete: the party starts, or ends.
     Toggle,
@@ -93,7 +99,7 @@ impl Rave {
 }
 
 impl App {
-    /// Feed a dashboard key to the code, `true` when it was the code's to keep.
+    /// Feed a key to the code, `true` when it was the code's to keep.
     pub(super) fn hear_rave(&mut self, key: crossterm::event::KeyEvent) -> bool {
         let code = match key.modifiers.is_empty() {
             true => key.code,
@@ -118,10 +124,10 @@ impl App {
         }
     }
 
-    /// Whether the dashboard is dancing, and wants a frame every
+    /// Whether the screen is dancing, and wants a frame every
     /// [`effects::FRAME`] to do it.
     pub fn raving(&self) -> bool {
-        self.tab == 0 && self.rave.since.is_some()
+        self.rave.since.is_some()
     }
 }
 
@@ -262,6 +268,19 @@ mod tests {
         assert_eq!(rave.heard, 2);
         let rest: Vec<_> = CODE[2..].iter().map(|&key| rave.hear(key)).collect();
         assert_eq!(rest.last(), Some(&Heard::Toggle));
+    }
+
+    /// Started over a modal the code is still heard, even though its own ←
+    /// closes help on the way: a key that moves you elsewhere halfway through
+    /// does not lose the rest of the code.
+    #[test]
+    fn the_code_is_heard_away_from_the_table() {
+        let mut app = crate::ui::tests::test_app();
+        app.mode = Mode::Help;
+        for code in CODE {
+            app.on_key(crate::ui::tests::key(code));
+        }
+        assert!(app.raving());
     }
 
     #[test]

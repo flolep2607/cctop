@@ -279,6 +279,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             Mode::Help => modals::draw_help(frame, area, app),
             _ => {}
         }
+        if let Some(t) = app.rave.elapsed() {
+            rave::paint(frame.buffer_mut(), chunks[2], t, theme::truecolor());
+        }
         draw_toasts(frame, chunks[0], app);
         return layout;
     }
