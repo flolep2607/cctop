@@ -176,6 +176,11 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     for fixed in crate::hook::repair(app.hook_project().as_deref()) {
         app.set_status(&fixed);
     }
+    // Once per launch: the Cost panel's "today" reading $0.00 for work done
+    // this morning is the symptom, and nothing on it says the clock is why.
+    if let Some(why) = crate::util::unzoned_over_ssh() {
+        app.set_status(why);
+    }
     // What repair deliberately would not touch: an install registering fewer
     // events than this cctop wants, or a settings file that will not parse.
     // Both look installed and quietly deliver less than they should, so they
