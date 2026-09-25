@@ -844,9 +844,11 @@ function render() {
 
   const totals = document.getElementById("totals");
   const today = sessions.reduce((sum, s) => sum + (s.cost.today || 0), 0);
-  const hour = sessions.reduce((sum, s) => sum + (s.cost.this_hour || 0), 0);
+  // Rolling, as the TUI's $/1H column is: the clock-hour `this_hour` reads
+  // $0.00 a minute after every :00, however busy the minutes before it were.
+  const hour = sessions.reduce((sum, s) => sum + (s.cost.last_hour || 0), 0);
   totals.replaceChildren();
-  for (const [label, value] of [["today", money(today)], ["this hour", money(hour)]]) {
+  for (const [label, value] of [["today", money(today)], ["last 60 min", money(hour)]]) {
     const box = el("span");
     box.appendChild(el("b", null, value));
     box.appendChild(document.createTextNode(" "));

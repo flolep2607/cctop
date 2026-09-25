@@ -145,7 +145,11 @@ struct Aggregate {
     /// (provider, included) -> USD.
     cost_total: BTreeMap<CostKey, f64>,
     cost_today: BTreeMap<CostKey, f64>,
+    /// The current local clock hour, which the gauge's name promised before
+    /// the table's hour went rolling; kept so no existing panel changes under
+    /// it. `cost_last_hour` beside it is the rolling figure.
     cost_hour: BTreeMap<CostKey, f64>,
+    cost_last_hour: BTreeMap<CostKey, f64>,
     burn: BTreeMap<CostKey, f64>,
     /// (provider, model, included) -> USD.
     model_total: BTreeMap<(&'static str, String, bool), f64>,
@@ -192,7 +196,8 @@ impl Aggregate {
             let key = (provider, included);
             *self.cost_total.entry(key).or_default() += s.total_cost.unwrap_or(data.costs.total);
             *self.cost_today.entry(key).or_default() += s.cost_today;
-            *self.cost_hour.entry(key).or_default() += s.cost_hour;
+            *self.cost_hour.entry(key).or_default() += s.cost_clock_hour(&chrono::Utc::now());
+            *self.cost_last_hour.entry(key).or_default() += s.cost_hour;
             *self.burn.entry(key).or_default() += s.cost_per_min * 60.0;
             self.add_model_costs(s, data, provider, included);
         }
@@ -344,6 +349,11 @@ impl Aggregate {
                 "cctop_cost_this_hour_usd",
                 "Estimated cost recorded in the current local hour, in USD.",
                 &self.cost_hour,
+            ),
+            (
+                "cctop_cost_last_hour_usd",
+                "Estimated cost recorded in the last 60 minutes, rolling, in USD.",
+                &self.cost_last_hour,
             ),
             (
                 "cctop_cost_burn_usd_per_hour",

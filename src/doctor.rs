@@ -283,13 +283,23 @@ fn environment() -> Section {
         "CCTOP_THEME",
         "CCTOP_SETTLE_MS",
     ];
-    let checks = VARS
+    let mut checks: Vec<Check> = VARS
         .iter()
         .filter_map(|name| {
             let value = std::env::var(name).ok()?;
             Some(ok(*name, value))
         })
         .collect();
+    // Not an override but the lack of one, and the one here whose absence
+    // makes numbers look wrong rather than missing: see `unzoned_over_ssh`.
+    if crate::util::unzoned_over_ssh().is_some() {
+        checks.push(warn(
+            "TZ",
+            "unset over ssh, and this machine's clock is UTC: \"today\" and \"this hour\" \
+             are cut at UTC midnight, not yours",
+            "export TZ=<your zone, e.g. Pacific/Auckland> in the shell rc on this machine",
+        ));
+    }
     Section {
         title: "Environment overrides",
         checks,
