@@ -293,10 +293,12 @@ impl Renderer {
             }
             TagEnd::CodeBlock => {
                 let code = self.code.take().unwrap_or_default();
+                let from = self.out.lines.len();
                 for line in code.trim_end_matches('\n').split('\n') {
                     self.push(line.replace('\t', "    "), code_style());
                     self.flush_with(Some(Span::styled("│ ", theme::dim())));
                 }
+                self.shade(from);
             }
             TagEnd::List(_) => {
                 self.flush();
@@ -423,6 +425,35 @@ impl Renderer {
         for c in &mut self.containers {
             if let Container::Item { shown, .. } = c {
                 *shown = true;
+            }
+        }
+    }
+
+    /// Lay a code block's ground behind the rows from `from` on, out to the
+    /// full width — a block of code reads as one when its right edge is
+    /// straight, not ragged with its lines.
+    ///
+    /// The ground starts at the gutter rather than the row's edge, so a block
+    /// inside a list or a quote keeps the marker's column and the quote's bar
+    /// in the colours they have everywhere else. Without colour there is no
+    /// ground to lay ([`theme::gray`] is `Reset`), and the gutter alone says
+    /// "code".
+    fn shade(&mut self, from: usize) {
+        let ground = theme::gray(235);
+        if ground == ratatui::style::Color::Reset {
+            return;
+        }
+        let (_, rest) = self.prefixes();
+        let skip = rest.len();
+        for line in &mut self.out.lines[from..] {
+            let used = line.width();
+            for span in line.spans.iter_mut().skip(skip) {
+                span.style = span.style.bg(ground);
+            }
+            let pad = self.width.saturating_sub(used);
+            if pad > 0 {
+                line.spans
+                    .push(Span::styled(" ".repeat(pad), Style::default().bg(ground)));
             }
         }
     }
@@ -567,7 +598,118 @@ mod tests {
     #[test]
     fn a_fenced_block_keeps_its_lines() {
         let r = draw("```rust\nfn main() {\n    run();\n}\n```", 40);
-        assert_eq!(rows(&r), ["rust", "│ fn main() {", "│     run();", "│ }"]);
+        assert_eq!(
+            trimmed(&r),
+            ["rust", "│ fn main() {", "│     run();", "│ }"]
+        );
+    }
+
+    fn trimmed(r: &Rendered) -> Vec<String> {
+        rows(r).iter().map(|l| l.trim_end().to_string()).collect()
+    }
+
+    /// Every row of a block, the language label aside, carries the code ground
+    /// out to the full width — so the block's right edge is straight — and the
+    /// label and the prose around it carry none.
+    #[test]
+    fn a_fenced_block_sits_on_a_ground_to_the_full_width() {
+        let r = draw("Before.\n\n```sh\nls\ncargo build --release\n```\n\nAfter.", 30);
+        let ground = theme::gray(235);
+        let grounds: Vec<bool> = r
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().any(|s| s.style.bg == Some(ground)))
+            .collect();
+        assert_eq!(
+            trimmed(&r),
+            ["Before.", "", "sh", "│ ls", "│ cargo build --release", "", "After."]
+        );
+        assert_eq!(grounds, [false, false, false, true, true, false, false]);
+        for i in [3, 4] {
+            assert_eq!(r.lines[i].width(), 30, "row {i} stops short");
+        }
+    }
+
+    /// A code line longer than the row wraps behind the gutter rather than
+    /// running off the edge, and keeps its indentation on the first row.
+    #[test]
+    fn a_long_code_line_wraps_behind_its_gutter() {
+        let r = draw("```\n    let total = alpha + beta + gamma;\n```", 20);
+        let rows = trimmed(&r);
+        assert!(rows.iter().all(|l| l.starts_with("│ ")), "{rows:?}");
+        assert!(rows[0].starts_with("│     let"), "{rows:?}");
+        assert!(rows.len() > 1, "{rows:?}");
+        assert!(r.lines.iter().all(|l| l.width() <= 20));
+    }
+
+    /// A code block inside a list item stays under the item's text, with the
+    /// marker in front of nothing but the item's own first row. (The blank line
+    /// makes it a loose list, so its items are set apart.)
+    #[test]
+    fn a_code_block_in_a_list_item_hangs_under_the_text() {
+        let r = draw("1. Run it:\n\n   ```\n   make\n   ```\n2. Done", 30);
+        assert_eq!(trimmed(&r), ["1. Run it:", "", "   │ make", "", "2. Done"]);
+    }
+
+    /// Emphasis inside emphasis carries both styles, and each ends where its
+    /// own marker does rather than where the outer one does.
+    #[test]
+    fn nested_emphasis_carries_both_styles() {
+        let r = draw("**bold *both* bold** and ***all*** then plain", 80);
+        assert_eq!(rows(&r), ["bold both bold and all then plain"]);
+        let both = span_of(&r, "both").style.add_modifier;
+        assert!(both.contains(Modifier::BOLD | Modifier::ITALIC), "{both:?}");
+        let all = span_of(&r, "all").style.add_modifier;
+        assert!(all.contains(Modifier::BOLD | Modifier::ITALIC), "{all:?}");
+        let plain = span_of(&r, " then plain").style.add_modifier;
+        assert!(!plain.intersects(Modifier::BOLD | Modifier::ITALIC));
+    }
+
+    /// Markers that never close are what they look like — characters — and do
+    /// not bleed a style over the rest of the reply.
+    #[test]
+    fn an_unclosed_marker_stays_a_character() {
+        let r = draw("a **dangling star and `half code", 80);
+        assert_eq!(rows(&r), ["a **dangling star and `half code"]);
+        assert!(
+            !span_of(&r, "dangling")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    /// Bold text wrapped over a row boundary is bold on both rows, and the
+    /// break falls at a space, never inside a word.
+    #[test]
+    fn emphasis_survives_a_wrap() {
+        let r = draw("x **one two three four** y", 10);
+        assert_eq!(rows(&r), ["x one two", "three four", "y"]);
+        for word in ["one", "three", "four"] {
+            assert!(
+                span_of(&r, word)
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD),
+                "{word} lost its weight"
+            );
+        }
+    }
+
+    /// A word longer than the row is cut, since there is no space to break it
+    /// at — and no row comes out wider than it was asked for.
+    #[test]
+    fn a_word_longer_than_the_row_is_cut() {
+        let r = draw("see abcdefghijklmnopqrstuvwxyz", 10);
+        assert_eq!(rows(&r), ["see", "abcdefghij", "klmnopqrst", "uvwxyz"]);
+    }
+
+    /// An ordered list keeps the number it started at, and a deeper list keeps
+    /// its own count.
+    #[test]
+    fn a_numbered_list_counts_from_where_it_starts() {
+        let r = draw("3. three\n4. four\n   1. sub\n   2. sub two", 30);
+        assert_eq!(rows(&r), ["3. three", "4. four", "   1. sub", "   2. sub two"]);
     }
 
     /// Bullets and numbers are drawn, and a wrapped item's continuation lines
