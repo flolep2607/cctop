@@ -1,10 +1,13 @@
 //! ↑ ↑ ↓ ↓ ← → ← → b a, anywhere. The same again to go home.
 //!
-//! Or type `ultracode` into a Claude Code or Codex session cctop is watching:
-//! the party starts itself, and goes home the same way. It is read from the
-//! transcript, so it needs no hook, and only a prompt newer than the last one
-//! heard — never one from before cctop started — starts it, so a session that
-//! said it last week does not throw a party every time the dashboard opens.
+//! Or switch a Claude Code session cctop is watching to ultracode, with
+//! `/effort`: the party starts itself, and when every session that started
+//! it has switched back to another effort, it goes home by itself too. Codex
+//! has no effort switch, so there it is a prompt that says `ultracode`, and
+//! only the code ends that party. All of it is read from the transcript, so
+//! it needs no hook. Only a switch newer than the last one heard, and never
+//! one from before cctop started, starts it, so a session left in ultracode
+//! last week does not throw a party every time the dashboard opens.
 //!
 //! Heard in every mode and on every tab, ahead of everything else that reads
 //! the keyboard: the arrows are what move you between panels and tabs, so a
@@ -63,6 +66,9 @@ pub struct Rave {
     /// one party: going home is not undone by the next refresh reading the
     /// same transcript again.
     ultracode_heard: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether ultracode started this party, and so may end it. A party
+    /// started with the code is the code's to end.
+    by_ultracode: bool,
 }
 
 /// What a key was to the code.
@@ -123,6 +129,7 @@ impl App {
             Heard::Pass => false,
             Heard::Swallow => true,
             Heard::Toggle => {
+                self.rave.by_ultracode = false;
                 match self.rave.since {
                     Some(_) => self.start_rave("↑↑↓↓←→←→ba"),
                     None => {
@@ -151,36 +158,44 @@ impl App {
         ));
     }
 
-    /// Start the party when a Claude Code or Codex session has been asked for
-    /// `ultracode` since the last time one was — see the module docs.
+    /// Start the party when a session has gone into ultracode since the last
+    /// time one did, and end it when ultracode started it and no session is
+    /// in ultracode any more. See the module docs.
     ///
-    /// Called whenever the rows change. A party already going is left alone:
-    /// the word asks for the lights, it does not switch them off.
+    /// Called whenever the rows change. A party already going is left alone
+    /// when another session switches: it asks for the lights, and they are on.
     pub(super) fn hear_ultracode(&mut self) {
         let parse = |ts: &str| {
             chrono::DateTime::parse_from_rfc3339(ts)
                 .ok()
                 .map(|t| t.with_timezone(&chrono::Utc))
         };
-        let Some(newest) = self
+        let start = parse(&self.started_at);
+        // Only switches since cctop started: one from before it is neither a
+        // reason to start nor to keep going.
+        let newest = self
             .sessions
             .iter()
             .filter(|s| matches!(s.provider, Provider::Claude | Provider::Codex))
-            .filter_map(|s| s.ultracode_at.as_deref().and_then(parse))
-            .max()
-        else {
-            return;
-        };
-        let since = self
-            .rave
-            .ultracode_heard
-            .or_else(|| parse(&self.started_at));
-        if since.is_some_and(|since| newest <= since) {
-            return;
-        }
-        self.rave.ultracode_heard = Some(newest);
-        if self.rave.since.is_none() {
-            self.start_rave("ultracode");
+            .filter_map(|s| s.in_ultracode().and_then(parse))
+            .filter(|on| start.is_none_or(|start| *on > start))
+            .max();
+        match newest {
+            Some(on) if self.rave.ultracode_heard.is_none_or(|heard| on > heard) => {
+                self.rave.ultracode_heard = Some(on);
+                if self.rave.since.is_none() {
+                    self.start_rave("ultracode");
+                    self.rave.by_ultracode = self.rave.since.is_some();
+                }
+            }
+            None if self.rave.by_ultracode && self.rave.since.is_some() => {
+                self.rave.by_ultracode = false;
+                self.rave.since = None;
+                // Dropping it is what stops the player.
+                self.rave.sound = None;
+                self.set_status("Ultracode off. Lights up");
+            }
+            _ => {}
         }
     }
 
@@ -561,9 +576,9 @@ mod tests {
         assert!(buf.content()[80..].iter().any(|c| c.symbol() != " "));
     }
 
-    /// A session asked for `ultracode` after cctop started starts the party
-    /// once; one from before it started never does, and going home is not
-    /// undone by the same prompt being read again.
+    /// A session switched into ultracode after cctop started starts the
+    /// party once; one from before it started never does, and going home
+    /// with the code is not undone by the same switch being read again.
     #[test]
     fn ultracode_starts_the_party_once() {
         let mut app = crate::ui::tests::test_app();
@@ -571,7 +586,7 @@ mod tests {
         before.ultracode_at = Some("2020-01-01T00:00:00.000Z".into());
         app.sessions.push(before);
         app.hear_ultracode();
-        assert!(!app.raving(), "a prompt from before cctop started");
+        assert!(!app.raving(), "a switch from before cctop started");
 
         let mut now = crate::session::Session::new(Provider::Codex, "new".into());
         now.ultracode_at = Some(chrono::Utc::now().to_rfc3339());
@@ -584,6 +599,44 @@ mod tests {
         }
         assert!(!app.raving());
         app.hear_ultracode();
-        assert!(!app.raving(), "the same prompt, read again");
+        assert!(!app.raving(), "the same switch, read again");
+    }
+
+    /// Switching away from ultracode ends the party ultracode started, once
+    /// every session that is in it has left, and never one the code started.
+    #[test]
+    fn leaving_ultracode_ends_its_party_and_only_its_own() {
+        if theme::no_color() {
+            return;
+        }
+        let at = |secs: i64| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339();
+        let mut app = crate::ui::tests::test_app();
+        for id in ["a", "b"] {
+            let mut s = crate::session::Session::new(Provider::Claude, id.into());
+            s.ultracode_at = Some(at(1));
+            app.sessions.push(s);
+        }
+        app.hear_ultracode();
+        assert!(app.raving());
+
+        app.sessions[0].ultracode_off_at = Some(at(2));
+        app.hear_ultracode();
+        assert!(app.raving(), "one session is still in ultracode");
+        app.sessions[1].ultracode_off_at = Some(at(2));
+        app.hear_ultracode();
+        assert!(!app.raving(), "every session has left it");
+
+        // Back in: the party comes back. Then the code takes it over, and
+        // leaving ultracode no longer ends it.
+        app.sessions[0].ultracode_at = Some(at(3));
+        app.hear_ultracode();
+        assert!(app.raving());
+        for code in CODE.into_iter().chain(CODE) {
+            app.on_key(crate::ui::tests::key(code));
+        }
+        assert!(app.raving());
+        app.sessions[0].ultracode_off_at = Some(at(4));
+        app.hear_ultracode();
+        assert!(app.raving(), "the code's party is the code's to end");
     }
 }

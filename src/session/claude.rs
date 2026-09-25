@@ -469,6 +469,7 @@ struct Extractor {
     ai_title: Option<String>,
     /// See [`SessionData::ultracode_at`].
     ultracode_at: Option<String>,
+    ultracode_off_at: Option<String>,
     metrics: Metrics,
     seen_tool_ids: HashSet<String>,
     seen_urls: HashSet<String>,
@@ -752,7 +753,7 @@ impl Extractor {
             _ => {}
         }
 
-        // Typed by the person: not a skill's body or a slash command's
+        // In the person's role: not a skill's body or a slash command's
         // expansion (`isMeta`), not a summary standing in for a compacted
         // conversation, and not a subagent's brief — in its own file, or in an
         // older transcript marked as a sidechain of this one.
@@ -760,8 +761,14 @@ impl Extractor {
             && item.get("isSidechain").and_then(Value::as_bool) != Some(true)
             && item.get("isMeta").and_then(Value::as_bool) != Some(true)
             && item.get("isCompactSummary").and_then(Value::as_bool) != Some(true);
-        if typed && texts.iter().any(|t| super::says_ultracode(t)) {
-            super::latest(&mut self.ultracode_at, ts);
+        if typed {
+            for text in &texts {
+                match super::effort_switch(text) {
+                    Some(true) => super::latest(&mut self.ultracode_at, ts),
+                    Some(false) => super::latest(&mut self.ultracode_off_at, ts),
+                    None => {}
+                }
+            }
         }
 
         for text in texts {
@@ -1147,6 +1154,7 @@ pub fn extract(transcript: &Path) -> SessionData {
             // A prompt the agent has not answered yet is still one that was
             // typed, and the moment it is typed is the moment to hear it.
             ultracode_at: ext.ultracode_at,
+            ultracode_off_at: ext.ultracode_off_at,
             ..Default::default()
         };
     }
@@ -1234,6 +1242,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         context_series: ext.ctx_series,
         compactions: ext.compactions,
         ultracode_at: ext.ultracode_at,
+        ultracode_off_at: ext.ultracode_off_at,
         subagents,
         rates: None,
         error: None,
@@ -2372,21 +2381,33 @@ mod tests {
         assert!(!ctx.compacted);
     }
 
-    /// Only what the person typed counts: a skill's text (`isMeta`) or a
-    /// subagent's brief that mentions the word is the agent talking.
+    /// The `/effort` switch is what counts, both ways, and nothing else that
+    /// says the word: not a prompt about it, not a skill's text, not a
+    /// subagent's brief.
     #[test]
-    fn a_typed_ultracode_is_heard_and_a_skill_saying_it_is_not() {
+    fn ultracode_follows_the_effort_switch() {
+        let stdout = |ts: &str, level: &str, extra: &str| {
+            format!(
+                r#"{{"type":"user",{extra}"timestamp":"{ts}","message":{{"role":"user","content":"<local-command-stdout>Set effort level to {level} (this session only): …</local-command-stdout>"}}}}"#
+            )
+        };
         let data = extract_lines(
             "ultracode",
             &[
-                r#"{"type":"user","timestamp":"2026-09-25T01:00:00.000Z","message":{"role":"user","content":"please ultracode this"}}"#.to_string(),
-                r#"{"type":"user","isMeta":true,"timestamp":"2026-09-25T02:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"when ultracode is set, fan out"}]}}"#.to_string(),
-                r#"{"type":"user","isSidechain":true,"timestamp":"2026-09-25T03:00:00.000Z","message":{"role":"user","content":"ultracode"}}"#.to_string(),
+                stdout("2026-09-25T01:00:00.000Z", "ultracode", ""),
+                r#"{"type":"user","timestamp":"2026-09-25T02:00:00.000Z","message":{"role":"user","content":"please ultracode this"}}"#.to_string(),
+                stdout("2026-09-25T03:00:00.000Z", "ultracode", r#""isMeta":true,"#),
+                stdout("2026-09-25T04:00:00.000Z", "ultracode", r#""isSidechain":true,"#),
+                stdout("2026-09-25T05:00:00.000Z", "xhigh", ""),
             ],
         );
         assert_eq!(
             data.ultracode_at.as_deref(),
             Some("2026-09-25T01:00:00.000Z")
+        );
+        assert_eq!(
+            data.ultracode_off_at.as_deref(),
+            Some("2026-09-25T05:00:00.000Z")
         );
     }
 }

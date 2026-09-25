@@ -222,6 +222,28 @@ pub fn says_ultracode(text: &str) -> bool {
     })
 }
 
+/// Whether a line is Claude Code reporting an `/effort` switch, and if so
+/// whether the switch was into ultracode.
+///
+/// The command's own output, which Claude Code writes into the transcript in
+/// the person's role:
+///
+/// ```text
+/// <local-command-stdout>Set effort level to ultracode (this session only): …
+/// ```
+///
+/// Anchored at the start of the line, so the same words pasted into a prompt
+/// (a screenshot of a terminal, say) are not read as a switch.
+pub fn effort_switch(text: &str) -> Option<bool> {
+    let level = text
+        .trim_start()
+        .strip_prefix("<local-command-stdout>")?
+        .trim_start()
+        .strip_prefix("Set effort level to ")?;
+    let level: String = level.chars().take_while(|c| c.is_alphanumeric()).collect();
+    (!level.is_empty()).then(|| level.eq_ignore_ascii_case("ultracode"))
+}
+
 /// Keep the later of two transcript timestamps. Both are RFC 3339 in UTC as
 /// the harness wrote them, which sort as text.
 pub fn latest(held: &mut Option<String>, ts: &str) {
@@ -261,9 +283,10 @@ pub struct Session {
     /// them. Claude Code only, so `0` elsewhere means "not said" rather than
     /// "never happened".
     pub compactions: u32,
-    /// When the person last typed `ultracode` into this session: see
-    /// [`SessionData::ultracode_at`].
+    /// When this session last went into ultracode, and last came out of it:
+    /// see [`SessionData::ultracode_at`].
     pub ultracode_at: Option<String>,
+    pub ultracode_off_at: Option<String>,
     /// `None` when the active plan bundles this provider's usage.
     pub total_cost: Option<f64>,
     /// False when the provider's transcript contains no billable usage data.
@@ -448,6 +471,15 @@ fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<Strin
 }
 
 impl Session {
+    /// When this session went into ultracode, while it is still in it.
+    pub fn in_ultracode(&self) -> Option<&str> {
+        let on = self.ultracode_at.as_deref()?;
+        match self.ultracode_off_at.as_deref() {
+            Some(off) if off >= on => None,
+            _ => Some(on),
+        }
+    }
+
     /// Spend in the local clock hour `now` falls in.
     ///
     /// Not what the table or the Cost panel show — they want the rolling
@@ -482,6 +514,7 @@ impl Session {
             tool_errors: 0,
             compactions: 0,
             ultracode_at: None,
+            ultracode_off_at: None,
             total_cost: Some(0.0),
             cost_available: true,
             cost_is_free: false,
@@ -836,6 +869,45 @@ fn is_input_request_tool(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_effort_switch_is_read_only_from_the_commands_own_output() {
+        let out = |level: &str| {
+            format!(
+                "<local-command-stdout>Set effort level to {level} (this session only): …</local-command-stdout>"
+            )
+        };
+        assert_eq!(effort_switch(&out("ultracode")), Some(true));
+        assert_eq!(effort_switch(&out("xhigh")), Some(false));
+        assert_eq!(
+            effort_switch(
+                "<local-command-stdout>Set effort level to medium (saved as your default for new sessions): …"
+            ),
+            Some(false)
+        );
+        // The same words pasted into a prompt, and a prompt about it.
+        assert_eq!(
+            effort_switch(&format!("look at this: {}", out("ultracode"))),
+            None
+        );
+        assert_eq!(effort_switch("turn ultracode off"), None);
+        assert_eq!(
+            effort_switch("<local-command-stdout>Cancelled</local-command-stdout>"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_session_leaves_ultracode_when_it_switches_away_later() {
+        let mut s = Session::new(Provider::Claude, "s".into());
+        assert_eq!(s.in_ultracode(), None);
+        s.ultracode_at = Some("2026-09-25T09:00:00.000Z".into());
+        assert_eq!(s.in_ultracode(), Some("2026-09-25T09:00:00.000Z"));
+        s.ultracode_off_at = Some("2026-09-25T09:05:00.000Z".into());
+        assert_eq!(s.in_ultracode(), None);
+        s.ultracode_at = Some("2026-09-25T09:10:00.000Z".into());
+        assert_eq!(s.in_ultracode(), Some("2026-09-25T09:10:00.000Z"));
+    }
 
     #[test]
     fn ultracode_is_a_word_not_a_substring() {
@@ -1586,14 +1658,20 @@ pub struct SessionData {
     /// only transcript that says a compaction happened.
     #[serde(default)]
     pub compactions: u32,
-    /// The transcript timestamp of the newest prompt the person typed that says
-    /// `ultracode`, which is what starts the dashboard's party.
+    /// When the session last went into ultracode, as its transcript stamps it.
+    /// What starts the dashboard's party.
     ///
-    /// Claude Code and Codex only, and only what was typed: a skill's text, a
-    /// compaction summary or a subagent's brief that mentions the word is the
-    /// agent talking, not someone asking for the lights.
+    /// For Claude Code, the last `/effort` switch into it: see
+    /// [`effort_switch`]. Not the word in a prompt, because a prompt saying
+    /// "turn ultracode off" says it too. For Codex, which has no effort
+    /// switch to read, a typed prompt that says the word.
     #[serde(default)]
     pub ultracode_at: Option<String>,
+    /// When the session last switched out of ultracode to another effort
+    /// level. Claude Code only. Later than [`SessionData::ultracode_at`] means
+    /// the session has left it, and the party it started goes home.
+    #[serde(default)]
+    pub ultracode_off_at: Option<String>,
     /// Paths the session wrote lately, newest first, as the transcript spelled
     /// them — [`crate::loader`] resolves them against the session's cwd.
     ///

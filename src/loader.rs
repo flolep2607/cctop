@@ -596,6 +596,7 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     s.tool_errors = m.tool_errors;
     s.compactions = data.compactions;
     s.ultracode_at = data.ultracode_at.clone();
+    s.ultracode_off_at = data.ultracode_off_at.clone();
     s.total_cost = (s.cost_available && !plan.includes(s.provider)).then_some(data.costs.total);
     s.cost_is_free = s.cost_available
         && data.costs.total == 0.0
