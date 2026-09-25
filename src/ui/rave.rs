@@ -20,6 +20,8 @@
 //! photosensitivity hazard, and its peak lifts the ground to at most a third of
 //! full brightness rather than flashing it white.
 
+mod sound;
+
 use super::effects::nearest_indexed;
 use super::*;
 use crossterm::event::KeyCode;
@@ -49,6 +51,8 @@ const BPM: f32 = 128.0;
 pub struct Rave {
     heard: usize,
     since: Option<Instant>,
+    /// The music, while there is a party and something to play it with.
+    sound: Option<sound::Sound>,
 }
 
 /// What a key was to the code.
@@ -115,9 +119,17 @@ impl App {
                         self.set_status("No colour, no party");
                     }
                     (Some(_), false) => {
-                        self.set_status("♫ Rave mode. The same code again to go home")
+                        self.rave.sound = sound::Sound::start();
+                        self.set_status(format!(
+                            "♫ Rave mode, with {} if you are online. The same code again to go home",
+                            sound::STATION
+                        ))
                     }
-                    (None, _) => self.set_status("Lights up. Back to work"),
+                    (None, _) => {
+                        // Dropping it is what stops the player.
+                        self.rave.sound = None;
+                        self.set_status("Lights up. Back to work")
+                    }
                 }
                 true
             }
@@ -131,19 +143,83 @@ impl App {
     }
 }
 
+/// Beats to a phrase: eight bars of four, the unit a DJ builds and drops on.
+const PHRASE: f32 = 32.0;
+
+/// The last this many beats of every phrase are the build.
+const BUILD: f32 = 8.0;
+
+/// How far into the build toward the next drop the party is at `beats`, `0.0`
+/// outside one and rising to `1.0` on the beat before the drop.
+///
+/// The first phrase has no build: the party starts on a drop, which is what
+/// typing the code is.
+fn build(beats: f32) -> f32 {
+    let into = beats.rem_euclid(PHRASE) - (PHRASE - BUILD);
+    (into / BUILD).clamp(0.0, 1.0)
+}
+
+/// Whether the drop is still landing: the first two beats of every phrase but
+/// the first, which never had a build to drop from.
+fn dropping(beats: f32) -> bool {
+    beats >= PHRASE && beats.rem_euclid(PHRASE) < 2.0
+}
+
 /// Repaint `buf` as the party is `t` in, with the equaliser across `footer`.
+///
+/// In layers, back to front: a ground that thumps on every beat and rises
+/// through each build, a ring spreading out from the middle on the beat, two
+/// pairs of lasers turning against each other, glints of a mirror ball on
+/// empty ground, and over all of it the rainbow the text is written in. Every
+/// layer moves the colours of a cell; only the glints write a symbol, and only
+/// where there was nothing to read.
 pub fn paint(buf: &mut Buffer, footer: Rect, t: Duration, truecolor: bool) {
     let secs = t.as_secs_f32();
     let beats = secs * BPM / 60.0;
     let beat = beats.floor();
+    let phase = beats - beat;
     // A sharp attack at each beat, decaying well before the next.
-    let thump = (-(beats - beat) * 5.0).exp();
+    let thump = (-phase * 5.0).exp();
+    let build = build(beats);
     // The ground takes a new colour every beat, a fifth of the wheel on so
-    // that consecutive beats never sit beside each other.
+    // that consecutive beats never sit beside each other; through a build it
+    // climbs, so the drop is felt as the release of something.
     let ground_hue = (beat * 72.0) % 360.0;
-    let ground = snap(hsv(ground_hue, 0.9, 0.08 + 0.24 * thump), truecolor);
+    let ground_value = 0.08 + 0.2 * thump + 0.12 * build;
+    // The rainbow rolls faster as the build climbs. Its extra travel is a
+    // whole number of turns by the drop, so where it resets the colours are
+    // exactly where they would have been.
+    let roll = secs * 180.0 + 720.0 * build * build * build;
 
     let area = buf.area;
+    let cx = f32::from(area.x) + f32::from(area.width) / 2.0;
+    let cy = f32::from(area.y) + f32::from(area.height) / 2.0;
+    // A cell is about twice as tall as it is wide, so distances are measured
+    // in rows with columns halved — or the ring would be an ellipse, and a
+    // laser at 45° would lie flatter than it should.
+    let reach = (f32::from(area.width) / 4.0).hypot(f32::from(area.height) / 2.0);
+    let ring_at = phase * reach * 1.2;
+    let ring_fade = 1.0 - phase;
+    let beams = [
+        (secs * 0.5, 120.0),
+        (secs * 0.5 + std::f32::consts::FRAC_PI_2, 120.0),
+        (-secs * 0.35 + 0.4, 300.0),
+        (-secs * 0.35 + 0.4 + std::f32::consts::FRAC_PI_2, 300.0),
+    ];
+
+    let glints = glints(buf, beats);
+    // Snapping to the 256-colour palette is a search, and a screen is ten
+    // thousand cells asking it twice each: in a debug build that alone was
+    // twice the frame. A frame has far fewer distinct colours than cells, so
+    // each is searched for once.
+    let mut palette: std::collections::HashMap<(u8, u8, u8), Color> =
+        std::collections::HashMap::new();
+    // In truecolor there is no search to save, and the lookup would cost more
+    // than the conversion it stands in for.
+    let mut snap = |rgb| match truecolor {
+        true => snap(rgb, true),
+        false => *palette.entry(rgb).or_insert_with(|| snap(rgb, false)),
+    };
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let Some(cell) = buf.cell_mut((x, y)) else {
@@ -154,30 +230,99 @@ pub fn paint(buf: &mut Buffer, footer: Rect, t: Duration, truecolor: bool) {
             if cell.diff_option == CellDiffOption::Skip {
                 continue;
             }
-            // A diagonal rainbow rolling across the screen, half a turn a
-            // second: two columns to a row, because a cell is twice as tall as
-            // it is wide and a 45° wave should look like one.
-            let hue = (f32::from(x) * 6.0 + f32::from(y) * 12.0 - secs * 180.0).rem_euclid(360.0);
-            cell.fg = snap(hsv(hue, 0.85, 1.0), truecolor);
-            cell.bg = ground;
+            let dx = (f32::from(x) - cx) / 2.0;
+            let dy = f32::from(y) - cy;
+
+            let ring = (-((dx.hypot(dy) - ring_at) / 1.5).powi(2)).exp() * ring_fade;
+            let (mut hue, mut value) = match ring > 0.05 {
+                // The complement of the ground, so the ring reads as a wave
+                // passing over it rather than the ground getting brighter.
+                true => ((ground_hue + 180.0) % 360.0, ground_value + 0.25 * ring),
+                false => (ground_hue, ground_value),
+            };
+            for (angle, beam_hue) in beams {
+                // Distance from the line through the middle at `angle`.
+                let off = (dx * angle.sin() - dy * angle.cos()).abs();
+                if off < 0.6 {
+                    hue = beam_hue;
+                    value = value.max(0.45 * (1.0 - off / 0.6) + 0.1);
+                }
+            }
+            cell.bg = snap(hsv(hue, 0.9, value.min(0.55)));
+
+            let hue = (f32::from(x) * 6.0 + f32::from(y) * 12.0 - roll).rem_euclid(360.0);
+            cell.fg = snap(hsv(hue, 0.85, 1.0));
         }
     }
-    equaliser(buf, footer.intersection(area), secs, thump, truecolor);
+    for (x, y, glint) in glints {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(glint);
+            cell.fg = snap(hsv(0.0, 0.0, 1.0));
+        }
+    }
+    equaliser(
+        buf,
+        footer.intersection(area),
+        beats,
+        thump,
+        build,
+        truecolor,
+    );
 }
 
-/// A bar per column, bouncing to the beat, with the way out across the middle.
-fn equaliser(buf: &mut Buffer, footer: Rect, secs: f32, thump: f32, truecolor: bool) {
+/// Where the mirror ball throws its light this half-beat, and with what.
+///
+/// Only on open ground: a blank cell with blanks either side, so a glint never
+/// lands between two words and reads as punctuation. Chosen before anything is
+/// written, because a glint is not blank and would close the ground beside it.
+fn glints(buf: &Buffer, beats: f32) -> Vec<(u16, u16, &'static str)> {
+    const GLINTS: [&str; 4] = ["✦", "✧", "·", "*"];
+    let tick = (beats * 2.0).floor() as u32;
+    let area = buf.area;
+    let blank = |x: u16, y: u16| {
+        buf.cell((x, y))
+            .is_some_and(|c| c.symbol() == " " && c.diff_option == CellDiffOption::None)
+    };
+    let mut out = Vec::new();
+    for y in area.top()..area.bottom() {
+        for x in area.left() + 1..area.right().saturating_sub(1) {
+            let roll = scatter(u32::from(x), u32::from(y), tick);
+            if roll % 1000 < 6 && blank(x - 1, y) && blank(x, y) && blank(x + 1, y) {
+                out.push((x, y, GLINTS[(roll / 1000) as usize % GLINTS.len()]));
+            }
+        }
+    }
+    out
+}
+
+/// A well-mixed number from a cell and a moment, so the glints land somewhere
+/// new every half-beat without anything being remembered between frames.
+fn scatter(x: u32, y: u32, tick: u32) -> u32 {
+    let mut h =
+        x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77) ^ tick.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h
+}
+
+/// A bar per column, bouncing to the beat, with the way out across the middle
+/// and a crowd either side of it.
+fn equaliser(buf: &mut Buffer, footer: Rect, beats: f32, thump: f32, build: f32, truecolor: bool) {
     const BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    const MOVES: [&str; 4] = ["\\o/", "\\o_", "_o/", "|o|"];
+    let secs = beats * 60.0 / BPM;
     let y = footer.y;
     for x in footer.left()..footer.right() {
         let fx = f32::from(x);
         // Three sines at unrelated rates, so the bars never fall into a
-        // pattern the eye can follow, all lifted together by the kick.
+        // pattern the eye can follow, all lifted together by the kick — and
+        // pushed toward the top as a build climbs.
         let level = 0.5
             + 0.2 * (fx * 0.9 + secs * 7.0).sin()
             + 0.15 * (fx * 0.37 - secs * 3.1).sin()
             + 0.15 * (fx * 1.7 + secs * 11.3).sin();
-        let level = (level * (0.55 + 0.45 * thump)).clamp(0.0, 0.999);
+        let level = (level * (0.55 + 0.45 * thump) + 0.5 * build).clamp(0.0, 0.999);
         let hue = (fx * 8.0 + secs * 90.0).rem_euclid(360.0);
         if let Some(cell) = buf.cell_mut((x, y)) {
             // A link in the footer was one wide cell standing for its whole
@@ -188,18 +333,41 @@ fn equaliser(buf: &mut Buffer, footer: Rect, secs: f32, thump: f32, truecolor: b
             cell.bg = Color::Indexed(16);
         }
     }
-    let label = " ♫  ↑↑↓↓←→←→ba to go home  ♫ ";
+
+    let label = match (dropping(beats), build > 0.0) {
+        (true, _) => " ♫  D R O P  ♫ ",
+        (false, true) => " ♫  here it comes…  ♫ ",
+        (false, false) => " ♫  ↑↑↓↓←→←→ba to go home  ♫ ",
+    };
     let width = label.chars().count() as u16;
-    if footer.width > width {
-        let x = footer.x + (footer.width - width) / 2;
-        let style = ratatui::style::Style::default()
-            .fg(Color::Indexed(16))
-            .bg(snap(
-                hsv((secs * 90.0).rem_euclid(360.0), 0.7, 1.0),
-                truecolor,
-            ))
-            .add_modifier(ratatui::style::Modifier::BOLD);
-        buf.set_string(x, y, label, style);
+    if footer.width <= width {
+        return;
+    }
+    let x = footer.x + (footer.width - width) / 2;
+    let style = ratatui::style::Style::default()
+        .fg(Color::Indexed(16))
+        .bg(snap(
+            hsv((secs * 90.0).rem_euclid(360.0), 0.7, 1.0),
+            truecolor,
+        ))
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    buf.set_string(x, y, label, style);
+
+    // Two dancers a side, each a beat out of step with the next, where the
+    // footer has room for them past the label.
+    const DANCER: u16 = 4;
+    if footer.width < width + 4 * DANCER + 2 {
+        return;
+    }
+    let dancer = ratatui::style::Style::default()
+        .fg(snap(hsv(0.0, 0.0, 1.0), truecolor))
+        .bg(Color::Indexed(16))
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    let beat = beats.floor() as usize;
+    let spots = [x - 2 * DANCER, x - DANCER, x + width, x + width + DANCER];
+    for (i, at) in spots.into_iter().enumerate() {
+        let step = MOVES[(beat + i) % MOVES.len()];
+        buf.set_string(at, y, format!(" {step}"), dancer);
     }
 }
 
@@ -281,6 +449,39 @@ mod tests {
             app.on_key(crate::ui::tests::key(code));
         }
         assert!(app.raving());
+    }
+
+    /// The party opens on a drop, builds through the last eight beats of
+    /// every phrase, and drops on the first beat of the next.
+    #[test]
+    fn a_phrase_builds_for_eight_beats_and_drops() {
+        assert_eq!(build(0.0), 0.0);
+        assert!(!dropping(0.5), "the first phrase has no build to drop from");
+        assert_eq!(build(23.9), 0.0);
+        assert!((build(28.0) - 0.5).abs() < 1e-4);
+        assert!(build(31.99) > 0.99);
+        assert_eq!(build(32.0), 0.0);
+        assert!(dropping(32.0) && dropping(33.9) && !dropping(34.0));
+    }
+
+    /// A glint lands only on open ground, never in the space between words,
+    /// and never over a letter.
+    #[test]
+    fn the_mirror_ball_keeps_off_the_text() {
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        for y in 0..20 {
+            buf.set_string(0, y, "a b c d e f g", ratatui::style::Style::default());
+        }
+        // Over enough half-beats that the ball has thrown light everywhere.
+        let mut seen = 0;
+        for tick in 0..64 {
+            for (x, y, _) in glints(&buf, tick as f32 / 2.0) {
+                assert!(x > 13, "a glint at ({x}, {y}) is inside the text");
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "the ball never threw any light");
     }
 
     #[test]
