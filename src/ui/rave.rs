@@ -69,6 +69,9 @@ pub struct Rave {
     /// Whether ultracode started this party, and so may end it. A party
     /// started with the code is the code's to end.
     by_ultracode: bool,
+    /// The agents in ultracode now, by the pid their row is running as: the
+    /// tabs showing them are where an ultracode party is shown.
+    ultracode_pids: Vec<u32>,
 }
 
 /// What a key was to the code.
@@ -173,13 +176,15 @@ impl App {
         let start = parse(&self.started_at);
         // Only switches since cctop started: one from before it is neither a
         // reason to start nor to keep going.
-        let newest = self
+        let live: Vec<(chrono::DateTime<chrono::Utc>, Option<u32>)> = self
             .sessions
             .iter()
             .filter(|s| matches!(s.provider, Provider::Claude | Provider::Codex))
-            .filter_map(|s| s.in_ultracode().and_then(parse))
-            .filter(|on| start.is_none_or(|start| *on > start))
-            .max();
+            .filter_map(|s| Some((s.in_ultracode().and_then(parse)?, s.root_pid())))
+            .filter(|(on, _)| start.is_none_or(|start| *on > start))
+            .collect();
+        self.rave.ultracode_pids = live.iter().filter_map(|(_, pid)| *pid).collect();
+        let newest = live.iter().map(|(on, _)| *on).max();
         match newest {
             Some(on) if self.rave.ultracode_heard.is_none_or(|heard| on > heard) => {
                 self.rave.ultracode_heard = Some(on);
@@ -201,8 +206,28 @@ impl App {
 
     /// Whether the screen is dancing, and wants a frame every
     /// [`effects::FRAME`] to do it.
+    ///
+    /// A party the code started is everywhere. One ultracode started is the
+    /// session's own, so it is shown only on the tab running that session,
+    /// and the rest of cctop carries on as it was. An agent in ultracode that
+    /// no tab here is running, in a terminal of its own, has no tab to be
+    /// shown on, so its party is everywhere instead: otherwise the switch
+    /// would do nothing at all that anyone could see.
     pub fn raving(&self) -> bool {
-        self.rave.since.is_some()
+        if self.rave.since.is_none() {
+            return false;
+        }
+        if !self.rave.by_ultracode {
+            return true;
+        }
+        let tabs: Vec<usize> = self
+            .rave
+            .ultracode_pids
+            .iter()
+            .filter_map(|&pid| self.tab_running(pid))
+            .map(|(at, _)| at + 1)
+            .collect();
+        tabs.is_empty() || tabs.contains(&self.tab)
     }
 }
 
@@ -638,5 +663,24 @@ mod tests {
         app.sessions[0].ultracode_off_at = Some(at(4));
         app.hear_ultracode();
         assert!(app.raving(), "the code's party is the code's to end");
+    }
+
+    /// A party ultracode started with no tab here running its agent is
+    /// shown everywhere, since there is nowhere else for it; the code's own
+    /// party is shown everywhere regardless.
+    #[test]
+    fn an_ultracode_party_with_no_tab_of_its_own_is_everywhere() {
+        if theme::no_color() {
+            return;
+        }
+        let mut app = crate::ui::tests::test_app();
+        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        s.ultracode_at = Some((chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339());
+        app.sessions.push(s);
+        app.hear_ultracode();
+        assert!(app.rave.by_ultracode);
+        assert!(app.raving(), "no tab runs it, so the dashboard shows it");
+        app.rave.ultracode_pids = vec![4242];
+        assert!(app.raving(), "a pid no tab is running changes nothing");
     }
 }
