@@ -76,10 +76,9 @@ impl SwitchState {
             SwitchState::NeedsYou => state == Some(tabs::Attention::NeedsInput),
             // A turn that ended unseen is still a stopped agent; the `✓` says
             // it is new, not that it is doing anything.
-            SwitchState::Idle => matches!(
-                state,
-                Some(tabs::Attention::Idle | tabs::Attention::Done)
-            ),
+            SwitchState::Idle => {
+                matches!(state, Some(tabs::Attention::Idle | tabs::Attention::Done))
+            }
             // Not asking and not stopped is what the bar means by working:
             // it is the tab it draws with neither colour.
             SwitchState::Working => state.is_none(),
