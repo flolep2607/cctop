@@ -523,6 +523,9 @@ impl App {
                 None => return false,
             },
             KeyCode::Char('w') => self.close_pane(),
+            // Not taken on the dashboard, where there is no pane to zoom, so
+            // it still reaches whatever would have read it there.
+            KeyCode::Char('z') if self.tab > 0 => self.toggle_zoom(),
             // Shifted for the same reason as `W`, and because `r` renames: the
             // agent is ended and resumed, on whatever version is now installed.
             // On the dashboard it restarts the selected row's tab, and only from

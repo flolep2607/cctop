@@ -289,13 +289,15 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Alt+← / →", "Previous / next tab"),
         item("Alt+1 – 9", "Jump to a tab (1 is the dashboard)"),
         item("Alt+t", "Pick a tab from a list, typing to narrow it"),
-        item("Alt+b", "Jump to the next tab that needs you"),
+        item("Alt+b", "Jump to the next tab that needs you,"),
+        item("", "then to one whose turn ended unseen (✓)"),
         item(
             "Alt+Shift+← / →",
             "Move this tab along the bar (or drag it with the mouse)",
         ),
         item("Right-click / Alt+r", "Rename or recolour a tab"),
         item("Alt+o", "Move focus to the next pane"),
+        item("Alt+z", "Zoom the pane to fill the tab, or unzoom"),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
         item(
@@ -2152,6 +2154,7 @@ pub(super) fn draw_switch_tab(
         };
         let state = match app.tab_attention(i) {
             Some(tabs::Attention::NeedsInput) => Some(("needs you", theme::colors().cost_mid)),
+            Some(tabs::Attention::Done) => Some(("done ✓", theme::colors().accent)),
             Some(tabs::Attention::Idle) => Some(("idle", theme::colors().cost_low)),
             // Something to say about every row that asks nothing: the tab
             // you would land on by doing nothing at all.

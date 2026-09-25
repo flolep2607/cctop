@@ -741,6 +741,10 @@ fn event_loop(
             }
         }
 
+        // After the rows and the hooks have both had their say this pass, and
+        // after any key that moved where you are looking.
+        app.needs_redraw |= app.observe_seen();
+
         // A brief for a just-launched agent comes due on a timer rather than an
         // event, so the loop is the only thing that can notice.
         app.tick_handoff();

@@ -1,5 +1,6 @@
 ---
 source: src/ui/snapshot.rs
+assertion_line: 346
 expression: screen
 ---
  1:Dashboard │ + Tab (t)

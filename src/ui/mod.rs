@@ -35,6 +35,7 @@ mod remote;
 pub mod render;
 mod runloop;
 mod scrollbar;
+mod seen;
 mod select;
 mod settings;
 mod share;
@@ -584,6 +585,8 @@ pub struct App {
     /// the bell's question — is it my move? — is about a session's state and
     /// these are about its numbers.
     pub alerts: crate::alert::Alerts,
+    /// Which finished turns have not been looked at yet — see [`seen`].
+    pub seen: seen::Seen,
 
     /// The last snapshot from each machine named with `--host`, keyed by the
     /// target as the user spelled it.
@@ -960,6 +963,7 @@ impl App {
             quota: Quota::default(),
             notify: crate::notify::Notifier::new(prefs.notify),
             alerts: crate::alert::Alerts::default(),
+            seen: seen::Seen::default(),
             collisions: crate::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),

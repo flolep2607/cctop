@@ -1052,9 +1052,7 @@ impl App {
         match self.launch_into {
             LaunchInto::Split { stacked } => {
                 let Some(tab) = self.active_tab() else { return };
-                tab.stacked = stacked;
-                tab.panes.push(pane);
-                tab.focus = tab.panes.len() - 1;
+                tab.split(pane, stacked);
             }
             LaunchInto::Tab => {
                 self.tabs.push(tabs::Tab::new(pane));

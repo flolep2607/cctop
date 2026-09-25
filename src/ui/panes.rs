@@ -99,19 +99,39 @@ impl App {
         self.go_to_tab((self.tab as isize + delta).rem_euclid(count) as usize);
     }
 
-    /// The next bar position after the view whose agent is blocked on you,
-    /// wrapping — `None` when no tab is asking.
+    /// The next bar position after the view whose agent wants you, wrapping —
+    /// `None` when no tab does.
+    ///
+    /// Two passes, loudest first: every tab blocked on a question, and only
+    /// then a turn that finished while you were not looking. A question is an
+    /// agent standing still until you answer; a finished turn is news that
+    /// keeps. Plain `Idle` is never a jump — it is context the bar already
+    /// carries in green, and it is most tabs most of the time.
     ///
     /// The current tab is checked last rather than skipped: a split's other
     /// pane can be the one asking, and you cannot tell from the bar.
-    /// `NeedsInput` is the only state worth a jump — `Idle` is context the
-    /// bar already carries in green.
     fn next_waiting(&self) -> Option<usize> {
-        let waiting = |i: usize| self.tab_attention(i) == Some(tabs::Attention::NeedsInput);
-        (self.tab + 1..=self.tabs.len())
-            .find(|&i| waiting(i))
-            .or_else(|| (1..self.tab).find(|&i| waiting(i)))
-            .or_else(|| waiting(self.tab).then_some(self.tab))
+        let next = |want: tabs::Attention| {
+            let wants = |i: usize| self.tab_attention(i) == Some(want);
+            (self.tab + 1..=self.tabs.len())
+                .find(|&i| wants(i))
+                .or_else(|| (1..self.tab).find(|&i| wants(i)))
+                .or_else(|| wants(self.tab).then_some(self.tab))
+        };
+        next(tabs::Attention::NeedsInput).or_else(|| next(tabs::Attention::Done))
+    }
+
+    /// `Alt+z`: fill the tab with the focused pane, or put the split back.
+    pub fn toggle_zoom(&mut self) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        match tab.toggle_zoom() {
+            Some(true) => self.set_status("Zoomed — Alt+z puts the split back"),
+            Some(false) => self.set_status("Unzoomed"),
+            None => self.set_status("Only one pane — nothing to zoom it over"),
+        }
+        self.needs_redraw = true;
     }
 
     /// Jump the view to the next tab that wants you — `Alt+b`, beside the
@@ -971,6 +991,115 @@ mod tests {
         app.next_waiting_tab();
         let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("Nothing is waiting"), "{status}");
+    }
+
+    /// A live row for the agent running as `pid`, doing `state`.
+    fn agent_row(id: &str, pid: u32, state: crate::session::ActivityState) -> Session {
+        let mut row = crate::ui::tests::session(id, true, id);
+        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+            pid,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        row.activity_state = state;
+        row
+    }
+
+    /// A tab no pane of this cctop's is attached to, for the agent `pid`.
+    fn detached_tab(name: &str, pid: u32, signal: Option<crate::hook::Signal>) -> tabs::Tab {
+        tabs::Tab::shared(&crate::rmux::Running {
+            name: format!("cctop-{name}"),
+            pid: Some(pid),
+            cwd: None,
+            attached: false,
+            activity: None,
+            label: Some(name.to_string()),
+            profile: None,
+            order: None,
+            state: signal.map(|signal| crate::rmux::State {
+                signal,
+                at: crate::rmux::now_secs(),
+            }),
+            color: None,
+        })
+    }
+
+    /// The whole of the unseen mark as the app sees it: a turn watched ending
+    /// off screen marks the row and its tab, `Alt+b` goes to a question
+    /// before it, and looking at the row takes the mark down.
+    #[test]
+    fn a_turn_that_ended_unseen_is_marked_and_visited_after_a_question() {
+        use crate::session::ActivityState::{Asking, WaitingForInput, Working};
+        let mut app = test_app();
+        app.sessions = vec![agent_row("a", 101, Working), agent_row("b", 202, Working)];
+        app.tabs = vec![detached_tab("a", 101, None), detached_tab("b", 202, None)];
+        app.tab = 0;
+        app.observe_seen();
+
+        // "a" finishes its turn; "b" stops on a question. Nobody is looking:
+        // the dashboard has no row selected until the table is filtered.
+        app.sessions[0].activity_state = WaitingForInput;
+        app.sessions[1].activity_state = Asking;
+        assert!(app.observe_seen(), "a new mark owed no frame");
+        assert!(app.seen.is_done(&app.sessions[0].key()));
+        assert!(!app.seen.is_done(&app.sessions[1].key()), "a question is not done");
+        assert_eq!(app.tab_attention(1), Some(tabs::Attention::Done));
+        assert_eq!(app.tab_attention(2), Some(tabs::Attention::NeedsInput));
+
+        // The question first, however the bar is ordered; the news after.
+        assert_eq!(app.next_waiting(), Some(2));
+        app.sessions[1].activity_state = Working;
+        assert_eq!(app.next_waiting(), Some(1), "a done tab was not a jump");
+
+        // Selecting its row on the dashboard is looking at it.
+        app.refilter();
+        let row = app
+            .visible
+            .iter()
+            .position(|r| matches!(r, crate::ui::Row::Session(0)))
+            .expect("the row is not in the table");
+        app.selected = row;
+        assert!(app.observe_seen(), "clearing the mark owed no frame");
+        assert!(!app.seen.is_done(&app.sessions[0].key()));
+        assert_eq!(app.tab_attention(1), Some(tabs::Attention::Idle));
+        assert_eq!(app.next_waiting(), None, "a read turn is still a jump");
+    }
+
+    /// `Alt+z` fills the tab with the focused pane and back, only where there
+    /// is something to fill it over, and a new split is never born hidden.
+    #[test]
+    fn zoom_toggles_only_over_a_split_and_a_new_split_unzooms() {
+        let mut app = test_app();
+        app.tabs = vec![tabs::Tab::new(tabs::Pane::for_test("one"))];
+        app.tab = 1;
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(!app.tabs[0].zoomed(), "a lone pane was zoomed");
+        let status = app.status().expect("nothing was said").to_owned();
+        assert!(status.contains("nothing to zoom"), "{status}");
+
+        app.tabs[0].split(tabs::Pane::for_test("two"), false);
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(app.tabs[0].zoomed());
+        // Focus moves under the zoom rather than ending it.
+        app.on_key(alt(KeyCode::Char('o')));
+        assert!(app.tabs[0].zoomed());
+        assert_eq!(app.tabs[0].focus, 0);
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(!app.tabs[0].zoomed());
+
+        app.on_key(alt(KeyCode::Char('z')));
+        app.tabs[0].split(tabs::Pane::for_test("three"), true);
+        assert!(!app.tabs[0].zoomed(), "the new pane was started out of sight");
+
+        // The dashboard has no pane to zoom, and does not claim the key.
+        app.tab = 0;
+        app.on_key(alt(KeyCode::Char('z')));
+        assert!(!app.tabs[0].zoomed());
     }
 
     /// `Alt+r` opens the same rename the right-click does, on the tab being
