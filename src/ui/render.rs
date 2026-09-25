@@ -930,6 +930,73 @@ fn push_while_fits(spans: &mut Vec<Span<'static>>, groups: Vec<Vec<Span<'static>
     }
 }
 
+/// Models that get a hue of their own in the spend bar; the rest share one.
+const CHARTED_MODELS: usize = 4;
+/// The fewest cells the spend bar is drawn in. Under this a cell is more than
+/// an eighth of the day, too coarse for a length to say more than the
+/// percentages beside it, so the bar leaves.
+const SPEND_BAR_MIN: usize = 8;
+const SPEND_BAR_MAX: usize = 16;
+
+/// The hue of the `rank`-th model in today's spend, largest first.
+///
+/// By rank rather than by vendor: [`theme::model_color`] paints every Claude
+/// model the same, and the mix worth seeing is usually opus against haiku. The
+/// slots are the palette's categorical ones, already folded to the terminal's
+/// depth, so a sixteen-colour screen gets sixteen-colour segments.
+fn model_hue(rank: usize) -> Color {
+    let p = theme::colors();
+    [p.accent, p.chart_hues[0], p.name_hue, p.chart_hues[1]]
+        .get(rank)
+        .copied()
+        .unwrap_or(p.dim)
+}
+
+/// Today's spend per model as one stacked bar, in whatever of `width` the
+/// names beside it leave.
+///
+/// A bar rather than more percentages because the row's question is the mix,
+/// and a mix is a proportion the eye reads off a length faster than it adds up
+/// numbers. Models past [`CHARTED_MODELS`] fold into one dim tail rather than
+/// being dropped, so the bar is always the whole of today.
+///
+/// The names come first and the bar takes what they leave: the percentages are
+/// what the row said before it had a bar, and a bar that pushed the second
+/// model's name off the row would have traded a number for a colour. Empty when
+/// that leaves fewer than [`SPEND_BAR_MIN`] cells — a squeezed bar is a smudge,
+/// and the names alone still answer the question.
+fn spend_bar(models: &[(String, f64)], width: usize) -> Vec<Span<'static>> {
+    let today: f64 = models.iter().map(|m| m.1).sum();
+    if models.is_empty() || today <= 0.0 {
+        return Vec::new();
+    }
+    // Each entry is drawn as ` name NN%` beside the bar; the two leading
+    // models must fit, the rest may fall off the end.
+    let entry = |(name, cost): &(String, f64)| {
+        name.chars().count() + format!(" {:.0}%", cost / today * 100.0).len() + 1
+    };
+    let names: usize = models.iter().take(2).map(entry).sum();
+    let bar_w = width.saturating_sub(names).min(SPEND_BAR_MAX);
+    if bar_w < SPEND_BAR_MIN {
+        return Vec::new();
+    }
+    let mut weights: Vec<u64> = models
+        .iter()
+        .take(CHARTED_MODELS)
+        .map(|(_, cost)| (cost.max(0.0) * 10_000.0).round() as u64)
+        .collect();
+    let rest: f64 = models.iter().skip(CHARTED_MODELS).map(|m| m.1).sum();
+    if rest > 0.0 {
+        weights.push((rest * 10_000.0).round() as u64);
+    }
+    panels::apportion(&weights, bar_w)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, n)| *n > 0)
+        .map(|(rank, n)| Span::styled("█".repeat(n), Style::default().fg(model_hue(rank))))
+        .collect()
+}
+
 fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel_block("Overview");
     let inner = block.inner(area);
@@ -1113,12 +1180,26 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             // Percentages of today's spend, not a count of sessions ever seen:
             // the mix that is costing money is the one worth naming.
+            let bar = spend_bar(&stats.models_today, body_w);
+            let charted = !bar.is_empty();
+            model_spans.extend(bar);
             let mut groups = Vec::new();
-            for (i, (name, cost)) in stats.models_today.iter().take(3).enumerate() {
-                let sep = if i > 0 { " · " } else { "" };
+            for (i, (name, cost)) in stats
+                .models_today
+                .iter()
+                .take(if charted { CHARTED_MODELS } else { 3 })
+                .enumerate()
+            {
+                // Beside the bar each name wears its segment's hue, which is
+                // the legend; without one the plain dotted list is clearer.
+                let (sep, style) = match charted {
+                    true => (" ", Style::default().fg(model_hue(i))),
+                    false if i > 0 => (" · ", theme::value()),
+                    false => ("", theme::value()),
+                };
                 groups.push(vec![
                     Span::styled(sep, theme::dim()),
-                    Span::styled(name.clone(), theme::value()),
+                    Span::styled(name.clone(), style),
                 ]);
                 groups.push(vec![Span::styled(
                     format!(" {:.0}%", cost / today * 100.0),
@@ -3325,6 +3406,32 @@ mod tests {
             mine.contains("cctop --add-account") && !mine.contains("claude login"),
             "a token account was told to log in: {mine:?}"
         );
+    }
+
+    /// The spend bar fills the room the two leading names leave, up to a cap,
+    /// and every model spent on — the folded tail included — has a cell.
+    #[test]
+    fn the_spend_bar_takes_what_the_names_leave_and_hides_when_squeezed() {
+        let cells =
+            |spans: &[Span]| -> usize { spans.iter().map(|s| s.content.chars().count()).sum() };
+        let models: Vec<(String, f64)> = vec![
+            ("opus-5".into(), 90.0),
+            ("haiku-4-5".into(), 8.0),
+            ("a".into(), 1.0),
+            ("b".into(), 0.5),
+            ("c".into(), 0.3),
+            ("d".into(), 0.2),
+        ];
+        // ` opus-5 90%` and ` haiku-4-5 8%` take 24 columns.
+        let bar = spend_bar(&models, 34);
+        assert_eq!(cells(&bar), 10);
+        // Four hues and the folded tail, each at least a cell.
+        assert_eq!(bar.len(), CHARTED_MODELS + 1, "{bar:?}");
+        assert_eq!(cells(&spend_bar(&models, 200)), SPEND_BAR_MAX);
+        assert!(spend_bar(&models, 24 + SPEND_BAR_MIN - 1).is_empty());
+        assert!(spend_bar(&[], 200).is_empty());
+        // One model is still a mix worth drawing: all of today.
+        assert_eq!(spend_bar(&models[..1], 40).len(), 1);
     }
 
     /// The Overview earns its width or gives it up.

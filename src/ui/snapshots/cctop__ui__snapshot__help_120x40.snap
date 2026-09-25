@@ -4,7 +4,7 @@ expression: screen
 ---
  1:Dashboard │ + Tab (t)
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Live rate         $0.╭ Help ────────────────────────────────────────────────────────────────────╮onnet-4-5 32%        │
+│Live rate         $0.╭ Help ────────────────────────────────────────────────────────────────────╮claude-sonnet-4-5 32%│
 │Today             $8.│Start here                                                                ┃                     │
 │This month        $0.│  Enter            Everything you can do to this row, in one menu         ┃                     │
 │All time         $28.│  ?  F1            This page                                              ┃                     │

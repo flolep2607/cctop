@@ -4,7 +4,7 @@ expression: screen
 ---
  1:Dashboard │ + Tab (t)
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68% · claude-sonnet-4-5 32%        │
+│Live rate         $0.04                               ⡀  Models    █████████ claude-opus-4-1 68% claude-sonnet-4-5 32%│
 │Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
 │This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
