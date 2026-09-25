@@ -166,6 +166,10 @@ impl App {
             return;
         }
 
+        if self.tab == 0 && self.mode == Mode::List && self.hear_rave(key) {
+            return;
+        }
+
         match self.mode {
             Mode::Search => self.on_key_search(key),
             Mode::SortBy => self.on_key_sortby(key),
