@@ -52,6 +52,10 @@ pub struct Layout {
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
     /// Tool Activity log area: `(x_start, y_start, height)`.
     pub(super) tool_log: Option<(u16, u16, u16)>,
+    /// The session table's scrollbar track, while the table overflows.
+    pub(super) table_track: Option<Rect>,
+    /// The active bottom panel's scrollbar track, while it overflows.
+    pub(super) panel_track: Option<Rect>,
     /// Every place a key is written on screen as its own label, and the key it
     /// stands for: `(row, start_col, end_col, key)`.
     ///
@@ -1391,7 +1395,8 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), target);
     // Shift+↑/↓ scrolls every one of these, and without the bar a panel cut
     // off at its last visible row looks exactly like one that ended there.
-    scrollbar::on_border(frame, area, total, target.height as usize, scroll as usize);
+    layout.panel_track =
+        scrollbar::on_border(frame, area, total, target.height as usize, scroll as usize);
 }
 
 const TOOL_SIDEBAR_W: u16 = 18;
@@ -3077,6 +3082,8 @@ mod tests {
             tab_spans: vec![(2, 6, 0), (8, 19, 1)],
             tool_sidebar: Some((18, 21, 0, 3)),
             tool_log: Some((19, 21, 4)),
+            table_track: None,
+            panel_track: None,
             modal_rect: Some(Rect::new(10, 8, 20, 6)),
             launch_rows: vec![(10, 0), (11, 1)],
             launch_cwd_rows: vec![(12, 0)],

@@ -1989,6 +1989,12 @@ impl App {
                     }
                 }
             }
+            // A press or a drag on a scrollbar goes where it points: the
+            // table's to that row, a panel's to that part of its text. The
+            // drag is what makes the bar a handle, so it is answered on the
+            // track alone — a drag that wanders off it asks for nothing.
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+                if self.on_scrollbar(ev.column, ev.row, layout) => {}
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.bottom_tab == 3
                     && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
@@ -2015,6 +2021,33 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Answer a press on the table's or the active panel's scrollbar, if
+    /// `(col, row)` is on one. False when it is not, so the click falls through
+    /// to whatever else is under it.
+    ///
+    /// The table's bar moves the selection rather than the view, because the
+    /// view follows the selection: a scroll that left the cursor behind would
+    /// be undone by the next frame.
+    fn on_scrollbar(&mut self, col: u16, row: u16, layout: &render::Layout) -> bool {
+        use super::scrollbar;
+        if let Some(track) = scrollbar::hit(layout.table_track, col, row) {
+            let last = self.visible.len().saturating_sub(1);
+            self.selected = scrollbar::position_at(track, row, last);
+            self.ensure_available_tab();
+            self.needs_redraw = true;
+            return true;
+        }
+        if let Some(track) = scrollbar::hit(layout.panel_track, col, row) {
+            let target = scrollbar::position_at(track, row, self.panel_max_scroll as usize);
+            // From the top, so the step is the target itself; the panel's own
+            // clamp and Tool Activity's follow pin then behave as for a key.
+            self.scroll_active_panel(i32::MIN);
+            self.scroll_active_panel(target as i32);
+            return true;
+        }
+        false
     }
 }
 
@@ -2216,6 +2249,54 @@ mod tests {
         );
         assert_eq!(app.selected, 2, "a click cannot reach the row it landed on");
         assert_eq!(app.mode, Mode::Search, "the click closed the search box");
+    }
+
+    /// A press on the table's bar picks the row at that point of the list and a
+    /// drag carries it along; a press on a panel's bar scrolls the panel. Beside
+    /// the bar the same click is an ordinary row click.
+    #[test]
+    fn a_click_on_a_scrollbar_goes_where_it_points() {
+        use ratatui::layout::Rect;
+        let mut app = test_app();
+        for i in 0..30 {
+            app.sessions.push(crate::session::Session::new(
+                Provider::Claude,
+                format!("s{i}"),
+            ));
+        }
+        app.visible = (0..30).map(Row::Session).collect();
+        app.panel_max_scroll = 40;
+        app.bottom_tab = 0;
+        let layout = render::Layout {
+            rows_start: 7,
+            rows_end: 17,
+            bottom_start: 20,
+            table_track: Some(Rect::new(79, 7, 1, 10)),
+            panel_track: Some(Rect::new(79, 21, 1, 5)),
+            ..Default::default()
+        };
+        let at = |kind, column, row| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let press = event::MouseEventKind::Down(event::MouseButton::Left);
+        let drag = event::MouseEventKind::Drag(event::MouseButton::Left);
+
+        app.on_mouse(at(press, 79, 16), &layout);
+        assert_eq!(app.selected, 29, "the bottom of the bar is the last row");
+        app.on_mouse(at(drag, 79, 7), &layout);
+        assert_eq!(app.selected, 0, "dragged back to the top");
+        app.on_mouse(at(drag, 40, 12), &layout);
+        assert_eq!(app.selected, 0, "a drag off the bar asks for nothing");
+        app.on_mouse(at(press, 40, 9), &layout);
+        assert_eq!(app.selected, 2, "beside the bar a click is a row click");
+
+        app.on_mouse(at(press, 79, 25), &layout);
+        assert_eq!(app.info_scroll, 40);
+        app.on_mouse(at(press, 79, 21), &layout);
+        assert_eq!(app.info_scroll, 0);
     }
 
     /// Regression: `launch_prompt` set the mode and nothing asked for a frame, so

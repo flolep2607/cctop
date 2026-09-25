@@ -155,7 +155,13 @@ impl App {
         };
         self.matched = visible.len();
         if self.tree {
-            let tree = super::tree::build(&self.sessions, &visible, &self.collapsed, children);
+            let tree = super::tree::build(
+                &self.sessions,
+                &visible,
+                &self.collapsed,
+                (col, asc),
+                children,
+            );
             self.visible = tree.rows;
             self.groups = tree.groups;
             self.indent = tree.indent;
