@@ -12,7 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::{Path, PathBuf};
 
-pub const TABS: [&str; 8] = [
+pub const TABS: [&str; 9] = [
     "Info",
     "Performance",
     "Processes",
@@ -21,6 +21,7 @@ pub const TABS: [&str; 8] = [
     "Cost",
     "Config",
     "Context",
+    "Preview",
 ];
 
 fn label(text: &str) -> Span<'static> {

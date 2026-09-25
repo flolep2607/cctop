@@ -4,17 +4,17 @@ expression: styles(&buffer)
 ---
 AAAAAAAAAAAAABCCCCCCCCCCC
 BDDDDDDDDDDBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-BCCCCCCCCCCCEEEEEEEEEEEEE..............................F..CCCCCCCCCCGGGGGGHHHIGGGGGGGGGGGGGGGIIIIIHHHHHHHHHHHHHHHHHIIIIB
-BCCCCCCCCCCCEEEEEEEEEEEEE..............................F..CCCCCCCCCCJIIIKKKKKKIIIIIIIIIII..............................B
-BCCCCCCCCCCCEEEEEEEEEEEEE..............................F..CCCCCCCCCCJJJJJJJ...................F........................B
-BCCCCCCCCCCCEEEEEEEEEEEEEIIIIIIIIIIIIIIIIIIII.............CCCCCCCCCCJJJJJJIIIIIIIIIIIIIIIIIIIIII.......................B
+BCCCCCCCCCCCEEEEEEEEEEEEE..............................F..CCCCCCCCCCGGGGGGGGGGGGGGGHHHHHHHGGGGGGGGGGGGGGGGGHHHH........B
+BCCCCCCCCCCCEEEEEEEEEEEEE..............................F..CCCCCCCCCCGHHHIIIIIIHHHHHHHHHHH..............................B
+BCCCCCCCCCCCEEEEEEEEEEEEE..............................F..CCCCCCCCCCGGGGGGG...................F........................B
+BCCCCCCCCCCCEEEEEEEEEEEEEHHHHHHHHHHHHHHHHHHHH.............CCCCCCCCCCGGGGGGHHHHHHHHHHHHHHHHHHHHHH.......................B
 BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 BDDDDDDDDDDDDDDBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB
-BLLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB
-BMM.NNNNN........MMMMMMMMM.KKKKKK.KKKKK.OOOOOOOOOOOOOO............PPPPPP...PPPPPPPPPP..................................B
-BII.QQQQQ........KKKKKKKKK.PPPPPP.PPPPP.OOOOOOOOOOOOOO............PPPPPP...PPPPPPPPPP..................................B
-BII.RRRRR........MMMMMMMMM.PPPPPP.PPPPP.SSSSSSSSSSSSSS............PPPPPP...PPPPPPPPPP..................................B
+BJJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB
+BKK.LLLLL........KKKKKKKKK.IIIIII.IIIII.MMMMMMMMMMMMMM............NNNNNN...NNNNNNNNNN..................................B
+BHH.OOOOO........IIIIIIIII.NNNNNN.NNNNN.MMMMMMMMMMMMMM............NNNNNN...NNNNNNNNNN..................................B
+BHH.PPPPP........KKKKKKKKK.NNNNNN.NNNNN.QQQQQQQQQQQQQQ............NNNNNN...NNNNNNNNNN..................................B
 B......................................................................................................................B
 B......................................................................................................................B
 B......................................................................................................................B
@@ -25,12 +25,12 @@ B...............................................................................
 B......................................................................................................................B
 B......................................................................................................................B
 BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-BBIIIIBBIIIIIIIIIIIBBTTTTTTTTTBBIIIIIIIIIIIIIBBIIIIIIIIIBBIIIIBBIIIIIIBBIIIIIIIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-BCCCC.IIIIIIIIIIIIIIIIIIIIIIIIIIII.....................................................................................B
+BBHHHHBBHHHHHHHHHHHBBRRRRRRRRRBBHHHHHHHHHHHHHBBHHHHHHHHHBBHHHHBBHHHHHHBBHHHHHHHBBHHHHHHHBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+BCCCC.HHHHHHHHHHHHHHHHHHHHHHHHHHHH.....................................................................................B
 BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA....................................................................................B
-BJJJJJJJ..KKKKKK..JJJJJJJJ..JJJJJJJJJJJJJJJJJJJ........................................................................B
-BUUUUUUU..KKKKKK..UUUUUUUU..UUUUUUUUUUUUUUUUUU.........................................................................B
-BUUUUUUU..KKKKKK..UUUUUUUU..UUUUUUUUUUUUUUUU...........................................................................B
+BGGGGGGG..IIIIII..GGGGGGGG..GGGGGGGGGGGGGGGGGGG........................................................................B
+BSSSSSSS..IIIIII..SSSSSSSS..SSSSSSSSSSSSSSSSSS.........................................................................B
+BSSSSSSS..IIIIII..SSSSSSSS..SSSSSSSSSSSSSSSS...........................................................................B
 B......................................................................................................................B
 B......................................................................................................................B
 B......................................................................................................................B
@@ -39,9 +39,9 @@ B...............................................................................
 B......................................................................................................................B
 BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 BDDDDDDDDBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBDDDDDDDDDDDB
-BCCCCCCCIIIIIIIII............................................CCCCCCIIIIIIIII...........................................B
+BCCCCCCCHHHHHHHHH............................................CCCCCCHHHHHHHHH...........................................B
 BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-VVIIIIIIVIIIIIIIIIVIIIIIIIIVVVVVIIIIIIVIIIIIIIIVIIIIIIIIVIIIIIIVIIIIIIIIIVVVIIIIIIIVIIIIIIVIIIIII...............IIIIIII
+TTHHHHHHTHHHHHHHHHTHHHHHHHHTTTTTHHHHHHTHHHHHHHHTHHHHHHHHTHHHHHHTHHHHHHHHHTTTHHHHHHHTHHHHHHTHHHHHH...............HHHHHHH
 
 A fg=White bg=Indexed(236) mod=BOLD
 B fg=Indexed(60) bg=Reset mod=NONE
@@ -49,19 +49,17 @@ C fg=Indexed(75) bg=Reset mod=BOLD
 D fg=Indexed(179) bg=Reset mod=BOLD
 E fg=Indexed(221) bg=Reset mod=BOLD
 F fg=Indexed(236) bg=Reset mod=NONE
-G fg=Indexed(75) bg=Reset mod=NONE
-H fg=Indexed(109) bg=Reset mod=NONE
-I fg=Indexed(245) bg=Reset mod=NONE
-J fg=White bg=Reset mod=BOLD
-K fg=Indexed(114) bg=Reset mod=NONE
-L fg=Indexed(82) bg=Indexed(236) mod=BOLD
-M fg=Indexed(221) bg=Reset mod=NONE
-N fg=White bg=Reset mod=NONE
-O fg=Indexed(173) bg=Reset mod=NONE
-P fg=Indexed(238) bg=Reset mod=NONE
-Q fg=Indexed(251) bg=Reset mod=NONE
-R fg=Indexed(244) bg=Reset mod=NONE
-S fg=Indexed(110) bg=Reset mod=NONE
-T fg=Indexed(179) bg=Reset mod=BOLD | UNDERLINED
-U fg=Indexed(250) bg=Reset mod=NONE
-V fg=Black bg=Indexed(75) mod=BOLD
+G fg=White bg=Reset mod=BOLD
+H fg=Indexed(245) bg=Reset mod=NONE
+I fg=Indexed(114) bg=Reset mod=NONE
+J fg=Indexed(82) bg=Indexed(236) mod=BOLD
+K fg=Indexed(221) bg=Reset mod=NONE
+L fg=White bg=Reset mod=NONE
+M fg=Indexed(173) bg=Reset mod=NONE
+N fg=Indexed(238) bg=Reset mod=NONE
+O fg=Indexed(251) bg=Reset mod=NONE
+P fg=Indexed(244) bg=Reset mod=NONE
+Q fg=Indexed(110) bg=Reset mod=NONE
+R fg=Indexed(179) bg=Reset mod=BOLD | UNDERLINED
+S fg=Indexed(250) bg=Reset mod=NONE
+T fg=Black bg=Indexed(75) mod=BOLD

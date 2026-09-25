@@ -324,6 +324,8 @@ impl App {
             4 => bump(&mut self.subagent_scroll),
             5 => bump(&mut self.cost_scroll),
             6 => bump(&mut self.config_scroll),
+            // Preview is a screen clipped to the panel, not a list of lines.
+            super::preview::TAB => {}
             _ => bump(&mut self.context_scroll),
         }
         self.needs_redraw = true;

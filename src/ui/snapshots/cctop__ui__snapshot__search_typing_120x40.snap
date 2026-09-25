@@ -25,7 +25,7 @@ expression: screen
 │                            │ ○ Columns only — Tab also searches transcripts             │                            │
 │                            │ Enter apply   Esc cancel                                   │                            │
 ╰────────────────────────────╰────────────────────────────────────────────────────────────╯────────────────────────────╯
-╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  ──────────────────────────────────────╮
+╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  Preview  ─────────────────────────────╮
 │Root /usr/bin/claude                                                                                                  │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   5120    0.4%    180.0M  claude                                                                                     │

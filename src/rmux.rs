@@ -1132,6 +1132,90 @@ pub fn holding(pid: u32) -> Option<String> {
         .map(|agent| agent.name)
 }
 
+/// What the session's first pane shows right now, as bytes a vt100 parser of
+/// its size can replay.
+///
+/// For the dashboard's Preview panel, which has no client of its own to read a
+/// screen from: a tab this cctop is not looking at gives up its rmux client (see
+/// [`Tab::detach`](crate::ui::tabs::Tab::detach)), so on the dashboard nearly
+/// every agent tab has no parser behind it. Asking rmux for the screen is the
+/// read-only way to see it — attaching a client would resize the window to the
+/// panel, which the agent would then redraw for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    pub cols: u16,
+    pub rows: u16,
+    /// Where the cursor is, or `None` when the agent has hidden it.
+    pub cursor: Option<(u16, u16)>,
+    /// The visible rows with their colours, joined by `\r\n`.
+    pub bytes: Vec<u8>,
+}
+
+/// Capture the screen of the session called `name`. See [`Capture`].
+///
+/// Two commands, because the first is what makes the second exact: a bare
+/// session name prefix-matches (see [`agent_pid`]), so the session is checked by
+/// its answer and the capture then targets the pane by its `%id`, which cannot
+/// land on a neighbour.
+pub fn capture(name: &str) -> Option<Capture> {
+    let out = Command::new(BIN)
+        .args([
+            "list-panes",
+            "-t",
+            name,
+            "-F",
+            "#{session_name}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = listing
+        .lines()
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .find(|f| f.len() == 7 && f[0] == name)?;
+    let num = |i: usize| fields[i].trim().parse::<u16>().ok();
+    let (cols, rows) = (num(2)?, num(3)?);
+    let cursor = match fields[6].trim() {
+        "0" => None,
+        _ => Some((num(5)?, num(4)?)),
+    };
+    let out = Command::new(BIN)
+        .args(["capture-pane", "-p", "-e", "-t", fields[1]])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(Capture {
+        cols,
+        rows,
+        cursor,
+        bytes: capture_bytes(&out.stdout),
+    })
+}
+
+/// Turn `capture-pane -p` output into what a parser can replay.
+///
+/// Newlines become `\r\n`, since a bare `\n` only moves down, and the last is
+/// dropped: on the bottom row it would scroll the whole capture up by one.
+/// Attributes are left running across the joins — rmux carries them from one
+/// line into the next rather than restating them, so resetting at each line
+/// would strip the colour off every row that continues a span.
+fn capture_bytes(raw: &[u8]) -> Vec<u8> {
+    let raw = raw.strip_suffix(b"\n").unwrap_or(raw);
+    let mut bytes = Vec::with_capacity(raw.len() + raw.len() / 32);
+    for (i, line) in raw.split(|&b| b == b'\n').enumerate() {
+        if i > 0 {
+            bytes.extend_from_slice(b"\r\n");
+        }
+        bytes.extend_from_slice(line);
+    }
+    bytes
+}
+
 /// Serialises the tests that drive a real rmux server.
 ///
 /// The server is one shared, machine-wide thing, and its *lifetime* is the part
@@ -1150,6 +1234,25 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A capture replays as the screen it came from: every row on its own line,
+    /// nothing scrolled off the top, and a colour that runs across a line break
+    /// still running.
+    #[test]
+    fn a_capture_replays_without_scrolling_or_losing_colour() {
+        let raw = b"one\n\x1b[31mtwo\nthree\x1b[39m\n";
+        assert_eq!(
+            super::capture_bytes(raw),
+            b"one\r\n\x1b[31mtwo\r\nthree\x1b[39m".to_vec()
+        );
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(&super::capture_bytes(raw));
+        assert_eq!(parser.screen().contents(), "one\ntwo\nthree");
+        assert_eq!(
+            parser.screen().cell(2, 0).unwrap().fgcolor(),
+            vt100::Color::Idx(1)
+        );
+    }
 
     /// The option is one string in a tab-separated listing, so its spelling is
     /// load-bearing in both directions: a word this cctop cannot read, or a

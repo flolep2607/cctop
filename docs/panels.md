@@ -3,10 +3,10 @@
 [← back to the README](../README.md)
 
 The panel under the table describes whichever session the cursor is on. `←` and
-`→` move between panels, `1`–`7` jump to one, `Tab` reaches Context, and
+`→` move between panels, `1`–`9` jump to one, `Tab` cycles through them, and
 `Shift+↑`/`↓` scrolls inside the active one.
 
-Two of them repay a closer look, and so does the conversation view `i` opens.
+Three of them repay a closer look, and so does the conversation view `i` opens.
 
 ## Tool Activity
 
@@ -141,3 +141,26 @@ A sawtooth is a session living on compactions, paying to rebuild its context
 over and over. The chart spans the whole session rather than the live segment,
 because a compaction is the most interesting thing that can happen to a context
 window and it is the only view that can show one.
+
+## Preview
+
+The last panel, `9`, is the selected row's tab, watched from the dashboard: the
+agent's screen as it is right now, updating while you look, without leaving the
+table to see whether it has finished or is asking you something.
+
+It is a window, not a way in. Nothing typed on the dashboard reaches the agent,
+and the pane is not resized to fit the panel — the agent keeps drawing at the
+size its tab gave it, and the panel shows as much of that as fits. When the
+screen is taller than the panel, the bottom of what the agent has drawn is what
+stays, because that is where its prompt and its questions are. The bottom border
+names the tab and the key that goes to it, `Alt+2` onwards.
+
+A tab you have switched away from gives up its rmux client, so there is no
+screen of cctop's own to show. The panel asks rmux for the screen instead, twice
+a second and only while the panel is on show; that is a read, and rmux resizes
+nothing for it.
+
+A row with no tab says so in one line: `a` opens a running session's terminal in
+one, `R` resumes a stopped session in one, and either then shows here live. A
+row from [another machine](integrations.md#more-than-one-machine) has no tab
+here to show.

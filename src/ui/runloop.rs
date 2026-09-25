@@ -695,6 +695,7 @@ fn event_loop(
         for tab in &mut app.tabs {
             drawn |= tab.pump();
         }
+        drawn |= app.pump_preview();
         // An agent that said what it wanted says it once, to the person who
         // just looked: the tab colour is the alarm, this is the message. Here
         // rather than on the keypress that focused the pane — a bell arriving

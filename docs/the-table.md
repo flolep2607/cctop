@@ -370,7 +370,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `W` | Share the agent's terminal to a browser (needs rmux, see [Driving agents](driving-agents.md)) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
-| `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
+| `1`–`9` | Jump to a panel directly; `9` is Preview, the selected row's tab live (see [The bottom panels](panels.md#preview)) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
 | `Shift+Home`/`End` | Jump to the top / bottom of that panel |
 | `f` | Follow mode: keep the selection centered |
