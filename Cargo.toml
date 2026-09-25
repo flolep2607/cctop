@@ -1,6 +1,6 @@
 [package]
 name = "cctop"
-version = "0.20.3"
+version = "0.20.4"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -161,6 +161,10 @@ ratatui-image = { version = "11.0.8", default-features = false }
 # the same set the sniff accepts (clipboard::format_of): a JPEG or WebP that
 # could not preview would still paste, but the toast would go silently missing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# Decodes the station the rave plays (src/ui/rave/sound.rs). Pure Rust, so it
+# links into the static musl build where an audio crate tied to the system's
+# sound library could not; MP3 alone, because that is all the stream is.
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
 
 [dev-dependencies]
 # Whole-screen snapshots of the TUI (`ui::snapshot`). The `.snap` files are
