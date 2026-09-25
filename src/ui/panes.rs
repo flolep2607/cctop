@@ -1045,7 +1045,10 @@ mod tests {
         app.sessions[1].activity_state = Asking;
         assert!(app.observe_seen(), "a new mark owed no frame");
         assert!(app.seen.is_done(&app.sessions[0].key()));
-        assert!(!app.seen.is_done(&app.sessions[1].key()), "a question is not done");
+        assert!(
+            !app.seen.is_done(&app.sessions[1].key()),
+            "a question is not done"
+        );
         assert_eq!(app.tab_attention(1), Some(tabs::Attention::Done));
         assert_eq!(app.tab_attention(2), Some(tabs::Attention::NeedsInput));
 
@@ -1094,7 +1097,10 @@ mod tests {
 
         app.on_key(alt(KeyCode::Char('z')));
         app.tabs[0].split(tabs::Pane::for_test("three"), true);
-        assert!(!app.tabs[0].zoomed(), "the new pane was started out of sight");
+        assert!(
+            !app.tabs[0].zoomed(),
+            "the new pane was started out of sight"
+        );
 
         // The dashboard has no pane to zoom, and does not claim the key.
         app.tab = 0;

@@ -3761,7 +3761,11 @@ mod tests {
         let screen = screen(&terminal, cols, rows);
 
         assert_eq!(layout.pane_rects.len(), 2, "a pane lost its index");
-        assert_eq!(layout.pane_rects[0], Rect::default(), "the hidden pane is clickable");
+        assert_eq!(
+            layout.pane_rects[0],
+            Rect::default(),
+            "the hidden pane is clickable"
+        );
         assert!(
             layout.pane_rects[1].width > cols / 2,
             "the zoomed pane did not get the tab: {:?}",
