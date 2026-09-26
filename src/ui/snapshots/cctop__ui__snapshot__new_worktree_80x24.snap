@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
+│   LAST╭ New worktree ────────────────────────────────────────────────╮ECT    │
+│●    no│ From /home/me/src/cctop/.claude/worktrees/side               │the ch…┃
+│●     7│ A new branch forks from here; an existing one is checked out.│       │
+╰───────│                                                              │───────╯
+╭ Info  │ > try-fork█                                                  │Context╮
+│Root /u│ → /home/me/src/cctop/.claude/worktrees/try-fork              │       │
+│    PID│                                                              │       │
+│   4101│ Enter create and pick an agent   Esc cancel                  │       │
+│   4188╰──────────────────────────────────────────────────────────────╯       │
+│   4290    0.3%      8.0M  bash -c npm test                                   │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

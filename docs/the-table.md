@@ -273,6 +273,15 @@ skips the second level. A directory outside any repository is a group of its
 own, and a row from another machine is grouped by host and directory, since
 the far filesystem is not there to ask.
 
+`F` starts new parallel work from any of those rows. It asks for a branch
+name, runs `git worktree add` at `<repo>/.claude/worktrees/<branch>` — where
+Claude Code's own `--worktree` puts them — and opens the launcher in the new
+checkout, so the next agent you pick starts there and shows up under the
+repository's heading. A new branch forks from the checkout under the cursor; a
+branch that already exists is checked out instead. `.claude/worktrees/` gets a
+`.gitignore` of its own, so the checkouts never appear as untracked files in
+the repository they came from.
+
 A heading carries what adds up: how many sessions are under it, how many of
 those are waiting on you and how many are running, their total cost, the latest activity, and for a
 checkout the branch it has out. Its dot is the loudest state beneath it, so a
@@ -401,6 +410,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `v` | Toggle inline diffs for edits |
 | `L` | Toggle the Tool Activity live filter |
 | `T` | Tree view: group by repository and worktree (see above) |
+| `F` | Fork a git worktree and launch an agent in it (see above) |
 | `+`, `-`, `=` | Speed up / slow down / reset refresh interval |
 | `Space` | Mark / unmark the selected session |
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |

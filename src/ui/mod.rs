@@ -104,6 +104,9 @@ pub enum Mode {
     CostFilter,
     /// Text input typed into the selected session's rmux pane.
     SendKeys,
+    /// Naming the branch `F` forks into a new worktree. Enter creates it and
+    /// hands over to [`Mode::Launch`], pointed at the new checkout.
+    NewWorktree,
     /// Picking which agent a new tab or split should run.
     Launch,
     /// Everything that can be done to the selected row, in one list.
@@ -464,6 +467,14 @@ pub struct App {
     pub launch_cwd_pick: Option<usize>,
     /// Line being typed into the selected session's terminal.
     pub send_input: line_edit::LineEdit,
+    /// The branch being named for `F`, the checkout it forks from, and the
+    /// main repository whose `.claude/worktrees/` it lands in.
+    ///
+    /// Resolved when the prompt opens, not at Enter: the table re-sorts under
+    /// a modal, and the fork belongs to the row `F` was pressed on.
+    pub worktree_input: line_edit::LineEdit,
+    pub worktree_base: std::path::PathBuf,
+    pub worktree_repo: std::path::PathBuf,
     /// The new name being typed for a tab, and which tab it is for.
     ///
     /// The title as it stood when the rename opened is kept alongside the
@@ -936,6 +947,9 @@ impl App {
             menu_cursor: 0,
             cost_input: Default::default(),
             send_input: Default::default(),
+            worktree_input: Default::default(),
+            worktree_base: Default::default(),
+            worktree_repo: Default::default(),
             rename_input: Default::default(),
             rename_tab: 0,
             rename_was: String::new(),

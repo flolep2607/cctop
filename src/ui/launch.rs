@@ -193,6 +193,44 @@ impl App {
         ));
     }
 
+    /// Ask for the branch `F` should fork into a worktree.
+    pub(super) fn worktree_prompt(&mut self) {
+        match self.fork_point() {
+            Ok((base, repo)) => {
+                self.worktree_base = base;
+                self.worktree_repo = repo;
+                self.worktree_input.clear();
+                self.mode = Mode::NewWorktree;
+            }
+            Err(why) => self.set_status(why),
+        }
+    }
+
+    /// Create the worktree the prompt named, then open the launcher in it.
+    ///
+    /// The launcher rather than a fixed agent: which harness gets the new
+    /// branch is the one thing `F` cannot guess, and the launcher already
+    /// knows profiles, rmux naming and `c` to change the directory after all.
+    pub(super) fn worktree_create(&mut self) {
+        self.mode = Mode::List;
+        let branch = self.worktree_input.trim().to_string();
+        if branch.is_empty() {
+            return;
+        }
+        let path = match add_worktree(&self.worktree_base, &self.worktree_repo, &branch) {
+            Ok(path) => path,
+            Err(why) => {
+                self.set_status(format!("Could not add worktree: {why}"));
+                return;
+            }
+        };
+        self.launch_prompt(LaunchInto::Tab);
+        if self.mode == Mode::Launch {
+            self.launch_cwd = Some(path);
+            self.set_status(format!("Worktree {branch} ready — pick an agent"));
+        }
+    }
+
     /// Deliver a brief to the agent it was launched for, once that agent has had
     /// long enough to start reading its keyboard.
     pub(super) fn tick_handoff(&mut self) {
@@ -1168,10 +1206,170 @@ impl App {
     }
 }
 
+/// `git -C dir`, and nothing else deciding which repository that is.
+///
+/// Git's own repository-selection variables outrank `-C`: with `GIT_DIR` set,
+/// `git -C elsewhere init` reinitialises `$GIT_DIR`, not `elsewhere`. A git hook
+/// exports them to everything it runs, so a cctop or a test run from one would
+/// otherwise aim every command here at the repository being committed to —
+/// which is how a test once flipped this repository to `core.bare = true`.
+/// The list is `git rev-parse --local-env-vars`.
+pub(super) fn git_in(dir: &std::path::Path) -> std::process::Command {
+    const LOCAL: [&str; 15] = [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    ];
+    let mut git = std::process::Command::new("git");
+    for var in LOCAL {
+        git.env_remove(var);
+    }
+    git.arg("-C").arg(dir);
+    git
+}
+
+/// `git worktree add` for `branch`, at `<repo>/.claude/worktrees/<branch>`.
+///
+/// `.claude/worktrees/` because it is where Claude Code's own `--worktree`
+/// puts them, so the two never disagree about where a repository's parallel
+/// checkouts live. A branch that already exists is checked out; any other is
+/// created from `base`'s HEAD — the checkout `F` was pressed on, not the main
+/// one, so forking from a worktree continues that worktree's work.
+///
+/// The name is checked by git before it is joined onto a path: `../x` is a
+/// directory outside the repository long before it is a bad branch name.
+///
+// ponytail: blocks the draw loop for the checkout; move to worker::Request if a
+// large repository makes it noticeable.
+pub(super) fn add_worktree(
+    base: &std::path::Path,
+    repo: &std::path::Path,
+    branch: &str,
+) -> Result<std::path::PathBuf, String> {
+    let git = |args: &[&std::ffi::OsStr]| {
+        git_in(base)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git: {e}"))
+    };
+    let fail = |out: std::process::Output| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let line = err
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("git failed");
+        line.trim_start_matches("fatal: ").to_string()
+    };
+    let check = git(&[
+        "check-ref-format".as_ref(),
+        "--branch".as_ref(),
+        branch.as_ref(),
+    ])?;
+    if !check.status.success() {
+        return Err(format!("{branch:?} is not a valid branch name"));
+    }
+    let dir = repo.join(".claude/worktrees");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Self-ignoring, so the checkouts never show up as untracked files in
+    // the repository they came from, whatever its own .gitignore says.
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, "*\n").map_err(|e| format!("{}: {e}", ignore.display()))?;
+    }
+    let path = dir.join(branch);
+    let head = format!("refs/heads/{branch}");
+    let exists = git(&[
+        "show-ref".as_ref(),
+        "--verify".as_ref(),
+        "--quiet".as_ref(),
+        head.as_ref(),
+    ])?
+    .status
+    .success();
+    let out = if exists {
+        git(&[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            path.as_ref(),
+            branch.as_ref(),
+        ])?
+    } else {
+        git(&[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            "-b".as_ref(),
+            branch.as_ref(),
+            path.as_ref(),
+        ])?
+    };
+    match out.status.success() {
+        true => Ok(path),
+        false => Err(fail(out)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ui::tests::test_app;
+
+    /// Against a real repository, because what is being tested is what git
+    /// accepts: a new branch forks, a taken one is refused with git's reason,
+    /// and a name that would climb out of the directory never reaches a path.
+    #[test]
+    fn add_worktree_creates_checks_out_and_refuses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let out = git_in(repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+
+        let path = add_worktree(repo, repo, "try-fork").expect("new branch");
+        assert_eq!(path, repo.join(".claude/worktrees/try-fork"));
+        assert!(path.join(".git").is_file(), "a linked worktree");
+        assert!(repo.join(".claude/worktrees/.gitignore").is_file());
+
+        let again = add_worktree(repo, repo, "try-fork").expect_err("already checked out");
+        assert!(again.contains("try-fork"), "{again}");
+
+        git(&["branch", "existing"]);
+        let path = add_worktree(repo, repo, "existing").expect("existing branch");
+        assert!(path.join(".git").is_file());
+
+        let bad = add_worktree(repo, repo, "../escape").expect_err("bad name");
+        assert!(bad.contains("not a valid branch name"), "{bad}");
+        assert!(!repo.join(".claude/escape").exists());
+    }
     /// Regression: the "already open" guard asked only about `rmux`, which is
     /// `None` on every pane when rmux is not installed — so `R` on a session
     /// already resumed in a tab started a second agent on the one transcript,

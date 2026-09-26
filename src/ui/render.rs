@@ -363,6 +363,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::BatchKillBlocked => modals::draw_batch_blocked(frame, area, app, false, &mut layout),
         Mode::CostFilter => modals::draw_cost_filter(frame, area, app),
         Mode::SendKeys => modals::draw_send_keys(frame, area, app),
+        Mode::NewWorktree => modals::draw_new_worktree(frame, area, app),
         Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
         Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
         // The same modal: the directory field replaces one line of it, so the

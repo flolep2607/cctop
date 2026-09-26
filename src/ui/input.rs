@@ -30,6 +30,10 @@ const HELP_FILTER_MAX: usize = 80;
 /// longer belongs in the agent's own composer, where it can be read back.
 const SEND_MAX: usize = 500;
 
+/// Longest branch name `F` takes. It becomes a directory name as well, and a
+/// paste of anything longer was never meant as one.
+const BRANCH_MAX: usize = 100;
+
 /// Longest cost floor: more digits than any dollar amount a session reaches.
 const COST_MAX: usize = 12;
 
@@ -193,6 +197,7 @@ impl App {
             }
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
+            Mode::NewWorktree => self.on_key_worktree(key),
             Mode::RenameTab => self.on_key_rename(key),
             Mode::SwitchTab => self.on_key_switch(key),
             Mode::AddAccount => self.on_key_add_account(key),
@@ -336,6 +341,9 @@ impl App {
             }
             Mode::SendKeys => {
                 paste_into(&mut self.send_input, text, SEND_MAX);
+            }
+            Mode::NewWorktree => {
+                paste_into(&mut self.worktree_input, text, BRANCH_MAX);
             }
             Mode::RenameTab => {
                 // The clipboard a right-click brought along with it, not a
@@ -532,6 +540,7 @@ impl App {
             Mode::Search
             | Mode::CostFilter
             | Mode::SendKeys
+            | Mode::NewWorktree
             | Mode::RenameTab
             | Mode::SwitchTab
             | Mode::LaunchCwd => true,
@@ -1059,6 +1068,16 @@ impl App {
         }
     }
 
+    fn on_key_worktree(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Enter => self.worktree_create(),
+            _ => {
+                self.worktree_input.key(key, BRANCH_MAX);
+            }
+        }
+    }
+
     /// The tab-rename field, which is also the tab-colour field.
     ///
     /// The arrows were the colour row's before the name had a cursor, and they
@@ -1462,6 +1481,7 @@ impl App {
             // htop's tree key is `t`, which is the new tab here, and `F5`,
             // which refreshes; capital `T` is the nearest free spelling.
             KeyCode::Char('T') => self.toggle_tree(),
+            KeyCode::Char('F') => self.worktree_prompt(),
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('e') => self.toggle_expanded(),
             KeyCode::Char('E') => self.toggle_expanded_all(),

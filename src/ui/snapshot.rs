@@ -417,6 +417,16 @@ fn row_menu() {
 }
 
 #[test]
+fn new_worktree() {
+    let mut app = fixture();
+    app.worktree_base = "/home/me/src/cctop/.claude/worktrees/side".into();
+    app.worktree_repo = "/home/me/src/cctop".into();
+    app.worktree_input = "try-fork".into();
+    app.mode = Mode::NewWorktree;
+    snap("new_worktree", &mut app);
+}
+
+#[test]
 fn delete_confirm() {
     let mut app = fixture();
     // A finished row, since a running one gets the "stop it first" modal

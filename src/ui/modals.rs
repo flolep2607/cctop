@@ -315,6 +315,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("{running_only}", "Show only running sessions"),
         item("{tree}", "Tree view: group by repository and worktree"),
         item(
+            "{worktree}",
+            "Fork a git worktree and launch an agent in it",
+        ),
+        item(
             "  Enter / Space",
             "Fold or unfold the group under the cursor",
         ),
@@ -2302,6 +2306,38 @@ pub(super) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
         )),
     ];
     modal(frame, area, "Send to session", lines, 64);
+}
+
+/// Naming the branch for `F`. The directory it will land in is shown as it is
+/// typed, since that path is the thing the launcher opens next.
+pub(super) fn draw_new_worktree(frame: &mut Frame, area: Rect, app: &App) {
+    let branch = app.worktree_input.trim();
+    let into = app
+        .worktree_repo
+        .join(".claude/worktrees")
+        .join(match branch {
+            "" => "…",
+            b => b,
+        });
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" From {}", app.worktree_base.display()),
+            theme::value(),
+        )),
+        Line::from(Span::styled(
+            " A new branch forks from here; an existing one is checked out.",
+            theme::dim(),
+        )),
+        Line::default(),
+        input_line(&app.worktree_input),
+        Line::from(Span::styled(format!(" → {}", into.display()), theme::dim())),
+        Line::default(),
+        Line::from(Span::styled(
+            " Enter create and pick an agent   Esc cancel",
+            theme::dim(),
+        )),
+    ];
+    modal(frame, area, "New worktree", lines, 64);
 }
 
 /// Naming and painting a workspace tab, opened by right-clicking it in the bar.

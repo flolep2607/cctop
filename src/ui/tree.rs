@@ -544,6 +544,46 @@ impl App {
         self.selected_group().is_some()
     }
 
+    /// Where `F` would fork from: the checkout root the new branch starts at,
+    /// and the main repository whose `.claude/worktrees/` it goes in.
+    ///
+    /// A heading is read back from its fold key rather than from one of its
+    /// sessions, because a repository heading stands for the main checkout
+    /// even when every session under it is in some other worktree. Forking
+    /// from a linked worktree still lands beside the others, under the main
+    /// one — a worktree nested in a worktree is one nobody finds again.
+    pub(super) fn fork_point(&self) -> Result<(PathBuf, PathBuf), &'static str> {
+        let dir = match self.selected_row() {
+            Some(Row::Group(g)) => {
+                let key = self.groups.get(g).map_or("", |g| g.key.as_str());
+                // Under a user level every key is `user:<name>/<key>`.
+                let key = key
+                    .strip_prefix("user:")
+                    .and_then(|rest| rest.split_once('/'))
+                    .map_or(key, |(_, key)| key);
+                if let Some(common) = key.strip_prefix("repo:") {
+                    repo_dir(Path::new(common))
+                } else if let Some(root) = key.strip_prefix("wt:") {
+                    PathBuf::from(root)
+                } else if key.starts_with("host:") {
+                    return Err("That repository is on another machine");
+                } else {
+                    return Err("Not in a git repository");
+                }
+            }
+            _ => {
+                let s = self.selected_session().ok_or("Nothing selected")?;
+                if s.remote.is_some() {
+                    return Err("That session is on another machine");
+                }
+                PathBuf::from(&s.label_source)
+            }
+        };
+        let (common, root) =
+            locate_cached(&dir.to_string_lossy()).ok_or("Not in a git repository")?;
+        Ok((root, repo_dir(&common)))
+    }
+
     /// Switch between the flat table and the tree.
     ///
     /// The cursor keeps its session across the switch, the way it keeps it
@@ -988,6 +1028,55 @@ mod tests {
         app.on_key(key(KeyCode::Right));
         assert_ne!(app.bottom_tab, tab, "→ still moves the panels");
         assert_eq!(app.visible.len(), 2);
+    }
+
+    /// `F` forks from the checkout under the cursor but always into the main
+    /// repository's `.claude/worktrees/`, and refuses a directory that is not
+    /// a repository at all.
+    #[test]
+    fn f_resolves_where_a_worktree_forks_from() {
+        use crate::ui::tests::key;
+        use ratatui::crossterm::event::KeyCode;
+        let fx = Scratch::new("fork");
+        let repo = fx.repo("r");
+        let wt = fx.worktree(&repo, "wt", "side");
+        let plain = fx.0.join("plain");
+        std::fs::create_dir_all(&plain).expect("plain dir");
+        let mut app = test_app();
+        app.tree = true;
+        app.sessions = vec![
+            session("a", true, &repo),
+            session("b", true, &wt),
+            session("c", true, &plain.to_string_lossy()),
+        ];
+        app.refilter();
+
+        let heading = |app: &App, prefix: &str| {
+            app.visible
+                .iter()
+                .position(|r| matches!(r, Row::Group(g) if app.groups[*g].key.starts_with(prefix)))
+                .expect(prefix)
+        };
+        app.selected = heading(&app, "repo:");
+        app.on_key(key(KeyCode::Char('F')));
+        assert_eq!(app.mode, Mode::NewWorktree);
+        assert_eq!(app.worktree_base, Path::new(&repo));
+        assert_eq!(app.worktree_repo, Path::new(&repo));
+
+        app.mode = Mode::List;
+        app.selected = heading(&app, "wt:");
+        app.on_key(key(KeyCode::Char('F')));
+        assert_eq!(app.worktree_base, Path::new(&wt), "forks from the worktree");
+        assert_eq!(
+            app.worktree_repo,
+            Path::new(&repo),
+            "but lands in the main repo"
+        );
+
+        app.mode = Mode::List;
+        app.selected = heading(&app, "dir:");
+        app.on_key(key(KeyCode::Char('F')));
+        assert_eq!(app.mode, Mode::List, "no repository, no prompt");
     }
 
     /// A session in a folded group is unfolded to, not silently unreachable.
