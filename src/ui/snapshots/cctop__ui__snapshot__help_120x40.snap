@@ -1,6 +1,5 @@
 ---
 source: src/ui/snapshot.rs
-assertion_line: 352
 expression: screen
 ---
  1:Dashboard │ + Tab (t)
@@ -41,5 +40,5 @@ expression: screen
 ╰─────────────────────│  D                Delete all marked sessions                             │─────────────────────╯
 ╭ Limits ─────────────│  K                Terminate all marked live sessions                     │────────── + account ╮
 │Claude checking…     │  I                Idle view: live sessions quiet for idle_after          │                     │
-╰─────────────────────╰ 1–35 of 140   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
+╰─────────────────────╰ 1–35 of 141   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

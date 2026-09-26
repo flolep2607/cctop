@@ -92,7 +92,7 @@ pub const IDLE_AFTER_HOURS: f64 = 6.0;
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 49] = [
+pub const BINDINGS: [(&str, &str, &str); 50] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "This settings panel"),
@@ -122,6 +122,11 @@ pub const BINDINGS: [(&str, &str, &str); 49] = [
     ("expand", "e", "Show its subagents"),
     ("expand_all", "E", "Show all subagents"),
     ("tree", "T", "Tree view: group by repository and worktree"),
+    (
+        "worktree",
+        "F",
+        "Fork a git worktree and launch an agent in it",
+    ),
     ("delete", "d", "Delete it"),
     ("terminate", "ctrl+k", "Terminate it"),
     ("mark", "space", "Mark / unmark it"),
