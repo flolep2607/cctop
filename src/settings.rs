@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 13] = [
+pub const SETTINGS: [(&str, &str, &str); 14] = [
     (
         "theme",
         "\"auto\"",
@@ -76,6 +76,11 @@ pub const SETTINGS: [(&str, &str, &str); 13] = [
         "idle_after",
         "6",
         "Hours quiet before a live session counts as idle (I)",
+    ),
+    (
+        "read_screen",
+        "false",
+        "Read each agent's screen in a tab for its state, over hooks",
     ),
 ];
 
@@ -176,6 +181,12 @@ pub struct Settings {
     /// Hours without activity before a live session is idle — see
     /// [`Settings::idle_after_ms`].
     pub idle_after: Option<f64>,
+    /// Whether a tab's agent is read off its own screen — see
+    /// [`crate::ui::tabs::screen_state`]. Off unless the file says otherwise,
+    /// because the words it looks for belong to each agent's UI, not to any
+    /// contract, and a release that rewords them goes unread until cctop
+    /// catches up.
+    pub read_screen: Option<bool>,
     /// `(action, key)` as written, in file order.
     pub keys: Vec<(String, String)>,
     /// Everything that was written and could not be used, said in a sentence.
@@ -211,6 +222,7 @@ impl Settings {
                     "notify" => item.as_bool().map(|v| out.notify = Some(v)).is_none(),
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
                     "warn_agents" => item.as_bool().map(|v| out.warn_agents = Some(v)).is_none(),
+                    "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
                         .or_else(|| item.as_integer().map(|i| i as f64))
@@ -284,6 +296,7 @@ impl Settings {
             "notify" => self.notify.map(|v| v.to_string()),
             "auto_update" => self.auto_update.map(|v| v.to_string()),
             "warn_agents" => self.warn_agents.map(|v| v.to_string()),
+            "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),
             "alert_cost" => self.alert_cost.map(|v| v.to_string()),

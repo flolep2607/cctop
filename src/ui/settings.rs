@@ -60,7 +60,7 @@ impl App {
         };
         let (current, _) = self.settings.value_of(name);
         match *name {
-            "notify" | "auto_update" | "warn_agents" => {
+            "notify" | "auto_update" | "warn_agents" | "read_screen" => {
                 let on = current != "true";
                 self.write_setting("settings", name, Some(on.into()));
                 // The one setting with a live switch of its own, so the file

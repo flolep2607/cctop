@@ -697,6 +697,17 @@ fn event_loop(
             drawn |= tab.pump();
         }
         drawn |= app.pump_preview();
+        // After the pump, so the verdict is about what was just drawn. A row
+        // that the screen moves is restamped here rather than on the next walk,
+        // and everything a moved row feeds is told the same way it is above: a
+        // permission prompt is worth the bell the frame it appears.
+        if app.read_screens() {
+            app.apply_reports();
+            app.check_bells();
+            app.notify.ring_pending();
+            app.feed_serving();
+            app.needs_redraw = true;
+        }
         // An agent that said what it wanted says it once, to the person who
         // just looked: the tab colour is the alarm, this is the message. Here
         // rather than on the keypress that focused the pane — a bell arriving

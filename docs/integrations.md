@@ -181,6 +181,50 @@ on `warn_agents` — a note on a file write that another running agent wrote the
 same file moments ago. See
 [Telling the second agent](the-table.md#telling-the-second-agent).
 
+## Reading the agents' screens instead
+
+Hooks can fail in ways that look like an agent with nothing to say: not
+installed, installed at a binary that has since moved, a session started before
+they were, a permission prompt announced six seconds late. For an agent running
+in one of cctop's own tabs, there is a second way in:
+
+```toml
+[settings]
+read_screen = true   # or toggle it with `,`
+```
+
+cctop then reads the bottom of each agent tab's screen on every frame and takes
+the state from the key hints the agent draws there — a way to cancel a dialog
+holding the turn, a way to interrupt a turn in flight. The words differ per agent, and sometimes collide: `Esc to cancel` is a
+permission prompt in Claude Code and a turn in flight in Gemini CLI. So each
+harness has its own list:
+
+| Harness | Asking | Working |
+|---|---|---|
+| Claude Code | `Esc to cancel` | `esc to interrupt` |
+| Codex | `Press enter to confirm or esc to cancel`, `enter confirm · esc skip`, … | `Working (12s • esc to interrupt)` |
+| Gemini CLI | `Allow execution`, `Apply this change`, … | `esc to cancel` |
+| OpenCode | `△ Permission required`, … | `esc interrupt`, … |
+| Cursor | `Run this command?`, `Skip (esc or n)`, … | `ctrl+c to stop` |
+| Devin | `Approve once` + `Esc cancel`, … | `esc to interrupt`, … |
+| Droid | `Enter to select` + `Esc to cancel` | `esc to stop` |
+| Pi | — | `Working...` |
+
+Claude Code's (2.1.283) and Codex's (0.157.1) were captured from real screens;
+the rest come from [herdr](https://github.com/herdrdev/herdr)'s detection
+manifests. Idle has no phrase: a screen that matches neither column counts as
+idle once it has been still for two seconds, since every one of these agents
+ticks a timer while it works. A phrase would not do — Codex keeps `? for
+shortcuts` on screen while it works, and draws a frame mid-turn with no working
+line at all.
+
+When the screen says something, it outranks the hooks and the transcript, for
+the row, the tab bar and the bell. It is off by default because these phrases
+are each agent's UI, not a contract — a release that rewords its footer goes
+unread until cctop catches up. And it only sees agents cctop has a live screen
+for: a tab you are attached to, not an agent in a terminal of its own, and not
+a detached rmux tab.
+
 ## Letting agents see each other
 
 ```bash

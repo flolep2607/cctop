@@ -415,10 +415,30 @@ impl App {
     /// web report, `--json`, and a fleet peer — rather than each of them being
     /// handed the UI's map of live reports and asked to agree with the others.
     pub(crate) fn apply_reports(&mut self) {
-        if self.hooked.is_empty() {
+        if self.hooked.is_empty() && self.screen_read.is_empty() {
             return;
         }
         for session in &mut self.sessions {
+            // The screen, when it is being read and says something, outranks
+            // every report: it is what the agent is showing *now*, where a hook
+            // event is what it said last — late for a permission prompt, stale
+            // for a question already answered, absent when hooks are not
+            // installed at all. See [`App::read_screens`].
+            let screen = session
+                .root_pid()
+                .and_then(|pid| self.screen_read.get(&pid).copied());
+            if let Some(signal) = screen {
+                use crate::session::ActivityState::{Asking, WaitingForInput, Working};
+                match signal.activity() {
+                    Some(state) => session.activity_state = state,
+                    // Mid-turn on screen clears a waiting state a report left
+                    // behind; an API error the transcript found stays put.
+                    None if matches!(session.activity_state, Asking | WaitingForInput) => {
+                        session.activity_state = Working;
+                    }
+                    None => {}
+                }
+            }
             if let Some(reported) = self.hooked.get(&session.session_id) {
                 // Only ever set from a report. A session whose newest event did
                 // not carry the field keeps the last mode that did, because the
@@ -437,13 +457,43 @@ impl App {
                 // [`Reported::is_settled`](crate::hook::Reported::is_settled).
                 // The row keeps whatever the transcript makes of it — which is
                 // "working", because that is what the agent is doing.
-                if reported.is_settled()
+                if screen.is_none()
+                    && reported.is_settled()
                     && let Some(state) = reported.signal.activity()
                 {
                     session.activity_state = state;
                 }
             }
         }
+    }
+
+    /// Read every tab's agent off its screen, when the setting asks for it. True when any verdict changed, so the rows are restamped.
+    ///
+    /// The hooks are how an agent says what it is doing, and they can fail in
+    /// ways that look exactly like an agent with nothing to say: not installed,
+    /// installed at a binary that has since moved, a session started before
+    /// they were, a permission prompt announced six seconds late. The screen
+    /// has none of those failure modes, only its own — it has to be one cctop
+    /// holds, and in words cctop knows — which is why it is opt-in rather than
+    /// the default.
+    ///
+    /// ponytail: tabs cctop has a live screen for only. A detached rmux tab has
+    /// no parser here, and reading it would be a `capture-pane` per tab per
+    /// tick; `rmux::capture` is the way in if that is ever wanted.
+    pub(super) fn read_screens(&mut self) -> bool {
+        let read: HashMap<u32, crate::hook::Signal> = match self.settings.read_screen == Some(true)
+        {
+            true => self
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.panes)
+                .filter_map(|pane| Some((pane.agent(), pane.read_screen()?)))
+                .collect(),
+            false => HashMap::new(),
+        };
+        let changed = read != self.screen_read;
+        self.screen_read = read;
+        changed
     }
 
     /// Mark the subagents whose own hook has reported them finished.
@@ -489,7 +539,8 @@ impl App {
     /// panes and this runs once per frame, so a map would be state to keep
     /// correct in exchange for nothing measurable.
     pub(super) fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
-        self.reported_by(pid).or_else(|| {
+        let screen = self.screen_read.get(&pid).copied();
+        screen.or_else(|| self.reported_by(pid)).or_else(|| {
             self.sessions
                 .iter()
                 .filter(|session| session.root_pid() == Some(pid))
@@ -891,6 +942,101 @@ mod tests {
             app.sessions[0].activity_state,
             crate::session::ActivityState::ApiError
         );
+    }
+
+    /// The whole way from bytes on a pane to a verdict: a Claude tab whose
+    /// footer holds a prompt reads as asking, but only with the setting on; the
+    /// same words are a turn in flight in Gemini; and a shell is not read.
+    #[test]
+    fn a_tab_is_read_off_its_screen_when_asked() {
+        use super::tabs::{Pane, Tab};
+        use crate::hook::Signal;
+        let footer = " Do you want to proceed?\r\n \u{276f} 1. Yes\r\n\r\n Esc to cancel \u{b7} Tab to amend";
+        let tab = |label: &str, text: &str| {
+            let mut pane = Pane::for_test(label);
+            pane.view.parser.process(text.as_bytes());
+            Tab::new(pane)
+        };
+        let mut app = test_app();
+        app.tabs = vec![tab("claude", footer)];
+        assert!(!app.read_screens(), "off unless the file says so");
+        assert!(app.screen_read.is_empty());
+
+        app.settings.read_screen = Some(true);
+        assert!(app.read_screens(), "a new verdict is a change");
+        assert_eq!(app.screen_read.get(&4321), Some(&Signal::NeedsInput));
+        assert_eq!(app.pane_signal(4321), Some(Signal::NeedsInput));
+        assert!(!app.read_screens(), "the same verdict twice is not");
+
+        app.tabs = vec![tab("gemini", " \u{280f} Reading files (esc to cancel, 3s)")];
+        assert!(app.read_screens());
+        assert_eq!(
+            app.screen_read.get(&4321),
+            Some(&Signal::Busy),
+            "Gemini's working hint"
+        );
+
+        app.tabs = vec![tab("zsh", footer)];
+        assert!(app.read_screens());
+        assert!(app.screen_read.is_empty(), "a shell has no footer to read");
+    }
+
+    /// With the screen read, what it shows outranks what the hook last said —
+    /// in both directions — and a screen with nothing recognisable on it
+    /// leaves the hook's word standing.
+    #[test]
+    fn the_screen_outranks_a_stale_report() {
+        use crate::hook::Signal;
+        use crate::session::ActivityState;
+        let mut app = test_app();
+        let mut row = session("a", true, "proj");
+        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+            pid: 4321,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        app.sessions = vec![row];
+        app.apply_hooks(vec![crate::hook::Event {
+            session_id: "a".into(),
+            pids: Vec::new(),
+            reported: crate::hook::Reported {
+                signal: Signal::Idle,
+                cwd: "/w/proj".into(),
+                permission: None,
+                at: std::time::Instant::now(),
+                provisional: false,
+            },
+            finished_agent: None,
+            agent: None,
+        }]);
+        app.apply_reports();
+        assert_eq!(
+            app.sessions[0].activity_state,
+            ActivityState::WaitingForInput
+        );
+
+        // A permission prompt the hook has not announced yet.
+        app.screen_read.insert(4321, Signal::NeedsInput);
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Asking);
+        assert_eq!(app.pane_signal(4321), Some(Signal::NeedsInput));
+
+        // Answered, and back to work: the waiting state goes with it.
+        app.screen_read.insert(4321, Signal::Busy);
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Working);
+
+        // Nothing on screen to read: the hook's word again.
+        app.screen_read.clear();
+        app.apply_reports();
+        assert_eq!(
+            app.sessions[0].activity_state,
+            ActivityState::WaitingForInput
+        );
+        assert_eq!(app.pane_signal(4321), Some(Signal::Idle));
     }
 
     /// The mode is reported by a live agent but drawn on a row rebuilt by every

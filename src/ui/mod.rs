@@ -663,6 +663,9 @@ pub struct App {
     /// absent entry is the ordinary case and means "fall back to the transcript"
     /// rather than "nothing is happening".
     pub hooked: HashMap<String, crate::hook::Reported>,
+    /// What each tab's agent says on its own screen, by agent pid, while
+    /// `read_screen` is on — see [`App::read_screens`].
+    pub screen_read: HashMap<u32, crate::hook::Signal>,
     /// The questions a session's subagents are waiting on, by subagent id.
     ///
     /// `hooked` holds one report per session and every event replaces it, so a
@@ -1011,6 +1014,7 @@ impl App {
             shared_at: None,
             drag_tab: None,
             hooked: HashMap::new(),
+            screen_read: HashMap::new(),
             asking_agents: HashMap::new(),
             // Loaded rather than started empty, because the row most likely to
             // want a tab blinking is the one blocked on a question — and that
