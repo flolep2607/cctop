@@ -49,7 +49,6 @@ fn summarize(path: PathBuf, roots: &[PathBuf]) -> Option<Session> {
 
     let mut session = Session::new(Provider::Cursor, session_id);
     session.surface = Surface::Editor;
-    session.harness = "Cursor".into();
     session.started_at = util::ms_to_rfc3339(created_ms(&path) as i64);
     session.last_active = util::ms_to_rfc3339(config::file_mtime_ms(&path) as i64);
     session.label_source = project_slug(&path, roots);

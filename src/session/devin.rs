@@ -103,7 +103,6 @@ fn list_in(db_path: &Path, transcripts: &Path, sessions: &mut Vec<Session>) {
         }
 
         let mut session = Session::new(Provider::Devin, session_id);
-        session.harness = "Devin".into();
         session.model = model;
         session.label_source = working_dir;
         // The database stamps seconds, not milliseconds.
