@@ -18,7 +18,8 @@
 //!   empty, and this month's spend is zero so its per-day average does not
 //!   divide by today's date.
 //! * **Disk.** `App::with_prefs` loads the burn log and the hook claims from
-//!   `$HOME`; both are replaced with empty ones. Working directories live under
+//!   `$HOME`; both are replaced with empty ones, and so is the limits panel's
+//!   list of profiles, which is read from the same place. Working directories live under
 //!   `/nonexistent`, so the branch column finds no repository to read and
 //!   `tildify` has no home directory to shorten them against. The Info tab is
 //!   never drawn, because it names the account signed in on this machine.
@@ -209,6 +210,20 @@ fn fixture() -> App {
     app.hook_pids = Default::default();
     app.hidden_columns = Vec::new();
     app.launch_root = Some("/nonexistent".into());
+    // `Quota::default` lists one pending entry per profile found under
+    // `$HOME`, so a developer with a second Claude login drew an extra column.
+    let pending = || {
+        vec![crate::quota::ProfileQuota {
+            profile: "default".into(),
+            status: crate::quota::ProviderStatus::Pending,
+            source: crate::config::AccountSource::Directory,
+        }]
+    };
+    app.quota = crate::quota::Quota {
+        fetched: false,
+        claude: pending(),
+        codex: pending(),
+    };
 
     app.sessions = sessions();
     app.loaded = true;
