@@ -13,34 +13,23 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Exact line deltas from OpenCode's built-in editing tools.  `write` can
-/// replace an existing file wholesale, so its removed lines cannot be known
-/// from the recorded input and are deliberately not guessed.
-fn tool_delta(name: &str, state: &Value) -> Option<super::Delta> {
+/// The line delta behind OpenCode's built-in editing tools, and the patch to
+/// show for it.
+///
+/// `edit` is handed the text it replaces and the text that takes its place, so
+/// its diff is the literal before and after. `write` can replace a file
+/// wholesale, so its removed lines cannot be known from the recorded input and
+/// are deliberately not guessed. `apply_patch` carries a real patch.
+///
+/// Read by the table's extraction and by the conversation reader alike: what
+/// counts as an edit is one fact about this harness, not one per caller.
+pub fn tool_delta(name: &str, state: &Value) -> Option<super::Delta> {
     if state.get("status").and_then(Value::as_str) != Some("completed") {
         return None;
     }
     let input = state.get("input")?;
     match name {
-        "edit" => {
-            let removed = input
-                .get("oldString")
-                .or_else(|| input.get("old_string"))
-                .and_then(Value::as_str)?
-                .lines()
-                .count() as u32;
-            let added = input
-                .get("newString")
-                .or_else(|| input.get("new_string"))
-                .and_then(Value::as_str)?
-                .lines()
-                .count() as u32;
-            Some(super::Delta {
-                added,
-                removed,
-                ..Default::default()
-            })
-        }
+        "edit" => extract::edit_delta(input),
         "apply_patch" => input
             .get("patch")
             .and_then(Value::as_str)
@@ -214,6 +203,80 @@ fn database_paths() -> Vec<PathBuf> {
                 .map(move |name| root.join(name))
         })
         .collect()
+}
+
+/// Every message one session recorded, oldest first, with its own parts.
+///
+/// `message` holds the envelope and `part` the words and the calls, so the two
+/// are read as one ordered pass: the join is the only place that knows which
+/// part belongs to which message, and a reader needs them together.
+///
+/// Ponytail: the whole session is read, not the newest of it. A subagent's
+/// messages are not in it — a subagent is its own session, so a parent's
+/// conversation cannot pick one up by accident — but a parent that delegated
+/// reads as though it did not.
+pub fn for_each_message(path: &Path, session_id: &str, mut f: impl FnMut(&Value, i64, &[Value])) {
+    with_db(path, |db| {
+        let Ok(mut stmt) = db.prepare(
+            "SELECT m.id, m.time_created, m.data, p.data FROM message m \
+             LEFT JOIN part p ON p.message_id = m.id \
+             WHERE m.session_id = ?1 ORDER BY m.time_created, m.id, p.id",
+        ) else {
+            return;
+        };
+        let Ok(mut rows) = stmt.query(params![session_id]) else {
+            return;
+        };
+        let mut current = String::new();
+        let mut created = 0i64;
+        let mut message = Value::Null;
+        let mut parts: Vec<Value> = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            let Ok(id) = row.get::<_, String>(0) else {
+                continue;
+            };
+            if id != current {
+                if !current.is_empty() && !message.is_null() {
+                    f(&message, created, &parts);
+                }
+                current = id.clone();
+                created = row
+                    .get::<_, Option<i64>>(1)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                message = row
+                    .get::<_, Option<String>>(2)
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or(Value::Null);
+                parts.clear();
+            }
+            // A message with no parts at all is a `LEFT JOIN` that found nothing,
+            // and one whose part will not parse is the same as not being there.
+            if let Ok(Some(raw)) = row.get::<_, Option<String>>(3)
+                && let Ok(part) = serde_json::from_str::<Value>(&raw)
+            {
+                parts.push(part);
+            }
+        }
+        if !current.is_empty() && !message.is_null() {
+            f(&message, created, &parts);
+        }
+    });
+}
+
+/// When a message was written, in RFC-3339.
+///
+/// The column is the fallback because `data.time.created` is the envelope's own
+/// idea of when it was spoken, which is not always when the row landed.
+pub fn message_time(message: &Value, column: i64) -> String {
+    let ms = message
+        .pointer("/time/created")
+        .and_then(Value::as_i64)
+        .unwrap_or(column);
+    util::ms_to_rfc3339(ms)
 }
 
 /// Discover sessions from every OpenCode channel database, preferring the most
