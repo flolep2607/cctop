@@ -9,9 +9,25 @@ expression: screen
 │This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Sessions (1/4) ──────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│   LAST▲    DUR         $   CTX%  CPU% MODEL          HARNESS    PERM   ! HOST       PROFILE   BRANCH       PROJECT   │
-│●    now     1h    $18.42    90%  12.5 opus-4-1       ─          ─        local                ─            Fix the c…│
+╭ Settings ─────────────────────────────────────────────────────────────────────────────────────────────── /alert when ╮
+│  File ~/.config/cctop/config.toml                                                                                    │
+│                                                                                                                      │
+│config.toml · [settings]                                                                                              │
+│  notify            false            Bell + desktop alert when a session needs you                                    │
+│  alert_cost        0                Alert when a session's cost passes $X                                            │
+│  alert_burn        0                Alert when a session burns over $X an hour                                       │
+│  alert_today       0                Alert when today's spend passes $X                                               │
+│  alert_errors      0                Alert when X% of 10m of tool calls fail (try 25)                                 │
+│  alert_stall       0                Alert when a working agent writes nothing for X min (try 10)                     │
+│                                                                                                                      │
+│  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table                                           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -25,20 +41,4 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  Preview  ─────────────────────────────╮
-│Root /usr/bin/claude --model opus                                                                                     │
-│    PID    CPU%       MEM  COMMAND                                                                                    │
-│   4101    9.8%    360.0M  claude --model opus                                                                        │
-│   4188    2.4%     44.0M  node mcp-server.js                                                                         │
-│   4290    0.3%      8.0M  bash -c npm test                                                                           │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Limits ─────────────────────────────────────────────────────────────────────────────────────────────────── + account ╮
-│Claude checking…                                            Codex checking…                                           │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-↑↓ Move ↵ Actions / Filter Space Mark Esc Clear filter a Attach R Resume ? Help t New tab  Filter: web          ⧉ share
+/ Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Settings ────────────────────────────────────────────────────────── / filter ╮
+│  File ~/.config/cctop/config.toml                                            ┃
+│                                                                              ┃
+│config.toml · [settings]                                                      │
+│  theme             "auto"           auto/light/dark/mono; $CCTOP_THEME wins. │
+│On restart                                                                    │
+│  notify            false            Bell + desktop alert when a session needs│
+│you                                                                           │
+│  auto_update       true             Offer to update at startup when a newer  │
+│release is out                                                                │
+│  compact_threshold 83.5             Context % at which the agent compacts. On│
+│restart                                                                       │
+│  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"     │
+│  alert_cost        0                Alert when a session's cost passes $X    │
+│  alert_burn        0                Alert when a session burns over $X an    │
+╰ 74   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
+/ Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

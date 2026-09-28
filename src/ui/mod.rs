@@ -137,8 +137,6 @@ pub enum Mode {
     /// A terminal just shared with `W`, as a code a phone can scan. See
     /// [`ShareQr`].
     ShareQr,
-    /// What `config.toml` sets and what it could set, keybinds included.
-    Settings,
     /// Adding a Claude account: naming it, then `claude setup-token` in a
     /// terminal inside the popup. See [`AddAccount`].
     AddAccount,
@@ -540,12 +538,41 @@ pub struct App {
     /// The file's mtime when it was last read, so an edit made in an editor is
     /// picked up at the next key without a restart.
     pub settings_stamp: u64,
-    /// Scroll offset of the settings overlay, kept following the cursor.
+    /// Whether the settings page is the body on screen.
+    ///
+    /// Its own field rather than an index, which is the correction this needed:
+    /// a position derived from `tabs.len()` moves every time a tab is added or
+    /// reaped, so a view sitting on it slid silently onto an agent the moment
+    /// the rmux sync found a session. The dashboard escapes this by being `0`,
+    /// and the settings tab escapes it by not being an index at all.
+    ///
+    /// [`App::settings_tab`] is still where the bar *draws* it — that is a
+    /// drawing decision, taken fresh each frame, and a frame late is nothing.
+    pub settings_open: bool,
+    /// Scroll offset of the settings page, kept following the cursor.
     pub settings_scroll: u16,
-    /// The panel's row: the settings first, then the keybinds, in the order of
-    /// [`SETTINGS`](crate::settings::SETTINGS) and
-    /// [`BINDINGS`](crate::settings::BINDINGS).
+    /// How far the page has ever been scrolled, recorded by the draw.
+    ///
+    /// Recorded rather than derived because only the renderer knows how tall
+    /// the page ended up, and an `End` key with no ceiling banks an offset that
+    /// then has to be walked back up.
+    pub settings_max_scroll: u16,
+    /// The page's row, as an index into the rows the filter leaves standing.
+    ///
+    /// Into the *filtered* list, not into a source: a filter that narrowed the
+    /// page under a cursor pointing at row 40 of 64 would otherwise leave the
+    /// cursor somewhere past the end. See [`settings::settings_shown`].
     pub settings_cursor: usize,
+    /// What the page's filter is looking for, matched against each row's name,
+    /// what it does and its value.
+    ///
+    /// The reason it exists: the page is every setting, every view choice and
+    /// every keybind, which is more rows than a terminal has, and the answer
+    /// to "where is the key for search" cannot be a scroll.
+    pub settings_filter: line_edit::LineEdit,
+    /// Whether keys are going into `settings_filter` rather than moving the
+    /// page.
+    pub settings_typing: bool,
     /// Waiting for the key the cursor's action should move to.
     pub settings_capture: bool,
     /// A setting's value being typed, for the ones that are not a toggle.
@@ -975,7 +1002,11 @@ impl App {
             settings_file: None,
             settings_stamp: 0,
             settings_scroll: 0,
+            settings_max_scroll: 0,
+            settings_open: false,
             settings_cursor: 0,
+            settings_filter: Default::default(),
+            settings_typing: false,
             settings_capture: false,
             settings_input: None,
             bottom_tab: prefs.bottom_tab.min(panels::TABS.len() - 1),
@@ -1608,11 +1639,11 @@ mod tests {
         assert!(app.sessions.is_empty());
     }
 
-    /// Rebinding from the panel: Enter on a keybind, then the new key, lands
-    /// in the file and works on the dashboard at once — and the panel draws
-    /// what it wrote.
+    /// Rebinding from the settings page: Enter on a keybind, then the new key,
+    /// lands in the file and works on the dashboard at once — and the page
+    /// draws what it wrote.
     #[test]
-    fn a_key_bound_in_the_panel_is_saved_and_works() {
+    fn a_key_bound_on_the_settings_page_is_saved_and_works() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1622,13 +1653,11 @@ mod tests {
         app.settings_file = Some(file.clone());
 
         app.on_key(key(KeyCode::Char(',')));
-        assert_eq!(app.mode, Mode::Settings);
-        let help = crate::settings::SETTINGS.len()
-            + crate::settings::BINDINGS
-                .iter()
-                .position(|b| b.0 == "help")
-                .expect("help is bindable");
-        app.settings_cursor = help;
+        assert!(app.on_settings(), "`,` did not reach the settings tab");
+        // The page is a tab, so opening it must not have opened a mode: the
+        // dashboard's own keys still belong to the dashboard underneath.
+        assert_eq!(app.mode, Mode::List);
+        app.settings_cursor = row_of(&app, "help");
         app.on_key(key(KeyCode::Enter));
         assert!(app.settings_capture);
         app.on_key(key(KeyCode::Char('x')));
@@ -1650,19 +1679,23 @@ mod tests {
             .collect();
         assert!(screen.contains("help"), "the cursor's row scrolled away");
 
+        // Esc goes back to the table, and `?` is now the key that opens help.
         app.on_key(key(KeyCode::Esc));
+        assert!(!app.on_settings());
         app.on_key(key(KeyCode::Char('?')));
         assert_eq!(app.mode, Mode::List, "the old key was moved away");
         app.on_key(key(KeyCode::Char('x')));
         assert_eq!(app.mode, Mode::Help);
 
         // Backspace on the row puts it back.
-        app.mode = Mode::Settings;
+        app.mode = Mode::List;
+        app.on_key(key(KeyCode::Char(',')));
+        app.settings_cursor = row_of(&app, "help");
         app.on_key(key(KeyCode::Backspace));
         assert_eq!(app.settings.key_for("help"), "?");
 
         // A toggle flips in place.
-        app.settings_cursor = 1;
+        app.settings_cursor = row_of(&app, "notify");
         assert_eq!(crate::settings::SETTINGS[1].0, "notify");
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.settings.notify, Some(true));
@@ -1670,5 +1703,20 @@ mod tests {
             app.notify.enabled,
             "the running cctop did not follow the file"
         );
+    }
+
+    /// Where a named row sits on the page, with nothing filtered out.
+    fn row_of(app: &App, name: &str) -> usize {
+        app.settings_shown()
+            .iter()
+            .position(|row| {
+                use super::settings::Row;
+                match row {
+                    Row::Setting(i) => crate::settings::SETTINGS[*i].0 == name,
+                    Row::View(i) => super::settings::VIEWS[*i].0 == name,
+                    Row::Key(i) => crate::settings::BINDINGS[*i].0 == name,
+                }
+            })
+            .unwrap_or_else(|| panic!("no row called {name}"))
     }
 }

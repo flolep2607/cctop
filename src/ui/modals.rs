@@ -142,21 +142,10 @@ fn draw_qr(frame: &mut Frame, inner: Rect, row: u16, qr: &qr::Qr) {
 /// overlay is simply cut off by `centered`, with nothing on screen to say that
 /// there is more — which is exactly how the Tabs section of the help went
 /// missing on anything shorter than about 57 rows.
-fn scrollable_modal(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    lines: Vec<Line<'static>>,
-    width: u16,
-    scroll: u16,
-) -> u16 {
-    let title = Line::from(Span::styled(format!(" {title} "), theme::title()));
-    scrollable_modal_titled(frame, area, vec![title], lines, width, scroll)
-}
-
-/// [`scrollable_modal`] with titles that are more than a word: the help's
-/// carry its filter and the build, which have to stay put on the border while
-/// the page under them scrolls. Each line keeps its own alignment.
+///
+/// The titles are more than a word — the help's carry its filter and the
+/// build, which have to stay put on the border while the page under them
+/// scrolls — so each line keeps its own alignment.
 fn scrollable_modal_titled(
     frame: &mut Frame,
     area: Rect,
@@ -647,20 +636,126 @@ fn filter_help(rows: Vec<(HelpRow, Line<'static>)>, query: &str) -> Vec<Line<'st
     out
 }
 
-/// Every setting and dashboard key at the value it has now, marked where
-/// `config.toml` is what set it — so the panel answers both "what can I tune"
-/// and "what did my file actually do" — with a cursor to change them in place.
+/// The settings page: every setting, every view choice and every dashboard key
+/// at the value it has now, marked where `config.toml` is what set it, with a
+/// cursor to change them in place and a filter to find them with.
+///
+/// A page rather than the 96-column sheet it replaced, because it outgrew one:
+/// the settings alone are more rows than a short terminal has, and the view
+/// choices and the keybinds were never going to fit either. Being a tab is what
+/// gave it the whole frame below the bar, so the row count costs scrolling
+/// instead of costing a subset of the knobs.
 pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
-    use crate::settings::{BINDINGS, SETTINGS};
-    let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
-    let path = crate::util::tildify(&crate::config::CONFIG_FILE.to_string_lossy());
-    let mut lines = vec![
-        Line::from(vec![Span::styled("  File ", theme::dim()), Span::raw(path)]),
-        Line::from(Span::styled(
-            "  * set in the file, rather than left at the default",
+    let rows = app.settings_shown();
+    let shown = rows.len();
+    let total = app.settings_rows().len();
+    let cursor = app.settings_cursor.min(shown.saturating_sub(1));
+    let (lines, cursor_line) = settings_lines(app, &rows, cursor);
+    let height = lines.len() as u16;
+
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
+        .title(Line::from(Span::styled(" Settings ", theme::title())));
+    if area.width >= 40 {
+        // Only where there is room for both: a 30-column terminal showing the
+        // title and a half a filter is worse than the hint on its own.
+        block = block.title(
+            Line::from(Span::styled(settings_filter_border(app), theme::dim())).right_aligned(),
+        );
+    }
+    let inner = block.inner(area);
+    let max_scroll = height.saturating_sub(inner.height);
+    let scroll = app.settings_scroll.min(max_scroll);
+    if max_scroll > 0 {
+        // On the border, so it costs no content line and cannot scroll away.
+        let count = match app.settings_filter.is_empty() {
+            true => format!("{total}"),
+            false => format!("{shown} of {total}"),
+        };
+        block = block.title_bottom(Line::from(Span::styled(
+            format!(" {count}   ↑↓ scroll   / filter   Esc back "),
             theme::dim(),
+        )));
+    }
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .style(theme::canvas()),
+        inner,
+    );
+    super::scrollbar::on_border(
+        frame,
+        area,
+        height as usize,
+        inner.height as usize,
+        scroll as usize,
+    );
+
+    // The renderer is the only place that knows how tall the page turned out,
+    // and it is what an `End` key needs in order to have a ceiling.
+    app.settings_max_scroll = max_scroll;
+    let Some(room) = inner.height.checked_sub(1).filter(|h| *h > 0) else {
+        return;
+    };
+    app.settings_scroll = if cursor_line < scroll {
+        cursor_line
+    } else if cursor_line >= scroll + room {
+        cursor_line + 1 - room
+    } else {
+        scroll
+    };
+}
+
+/// The filter, on the border, and the hint for it while it is empty.
+///
+/// On the border rather than as the first row, for the reason the help's is: a
+/// filter that scrolls off the top of the page it is filtering is worse than no
+/// filter at all, because it is still narrowing the rows and no longer says so.
+fn settings_filter_border(app: &App) -> String {
+    if app.settings_typing {
+        let accent = Style::default().fg(theme::colors().accent);
+        let text: String = app
+            .settings_filter
+            .spans(40, accent, accent, "█")
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        return format!(" {text} ");
+    }
+    match app.settings_filter.is_empty() {
+        true => " / filter ".to_string(),
+        false => format!(" /{} ", app.settings_filter),
+    }
+}
+
+/// The page's rows, grouped under the three places a value can be written, and
+/// the line the cursor's row ended up on.
+///
+/// The groups are the point. `config.toml` and `ui-prefs.json` are different
+/// files with different rules — one is hand-written and shared, the other is
+/// cctop's own and rewritten on every change — and a page showing them as one
+/// undifferentiated list would be asking somebody to change a number without
+/// telling them where it lands.
+fn settings_lines(
+    app: &App,
+    rows: &[super::settings::Row],
+    cursor: usize,
+) -> (Vec<Line<'static>>, u16) {
+    use super::settings::{Row, VIEWS};
+    let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
+    let mut lines = Vec::new();
+    let mut cursor_line = 0u16;
+
+    lines.push(Line::from(vec![
+        Span::styled("  File ", theme::dim()),
+        Span::raw(crate::util::tildify(
+            &crate::config::CONFIG_FILE.to_string_lossy(),
         )),
-    ];
+    ]));
     for problem in &app.settings.problems {
         lines.push(Line::from(Span::styled(
             format!("  ! {problem}"),
@@ -668,37 +763,37 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
         )));
     }
 
-    // One row per setting, then per keybind; `row` is the cursor's index.
-    let mut cursor_line = 0;
-    let mut push_row = |lines: &mut Vec<Line<'static>>,
-                        row: usize,
-                        name: &str,
-                        value: String,
-                        set: bool,
-                        what: &str| {
-        let here = row == app.settings_cursor;
-        let accent = Style::default().fg(theme::colors().accent);
-        let style = if set {
-            accent.add_modifier(Modifier::BOLD)
-        } else {
-            accent
+    let accent = Style::default().fg(theme::colors().accent);
+    // One row, in every section. `at` is the position in the *filtered* list,
+    // which is what the cursor counts in, so a filter that moved the page
+    // moves the cursor with it.
+    let mut row = |lines: &mut Vec<Line<'static>>,
+                   at: usize,
+                   name: &str,
+                   value: String,
+                   set: bool,
+                   what: &str| {
+        let here = at == cursor;
+        let style = match set {
+            true => accent.add_modifier(Modifier::BOLD),
+            false => accent,
         };
-        let value = match (here, &app.settings_input) {
-            (true, _) if app.settings_capture => {
-                vec![Span::styled(
-                    format!("{:<14}", "press a key… (Esc cancels)"),
-                    style,
-                )]
-            }
-            (true, Some(input)) => {
-                let mut spans = input.spans(usize::MAX, style, accent, "█");
-                // Padded to the column the other rows fill, so the `*` and
-                // the description do not shift as the value is typed.
-                let used: usize = spans.iter().map(Span::width).sum();
-                spans.push(Span::raw(" ".repeat(14usize.saturating_sub(used))));
-                spans
-            }
-            _ => vec![Span::styled(format!("{value:<14}"), style)],
+        // Three ways a row can be mid-edit, in the order they can happen: a key
+        // being bound, a number typed, or nothing at all.
+        let value = if here && app.settings_capture {
+            vec![Span::styled(
+                format!("{:<14}", "press a key… (Esc cancels)"),
+                style,
+            )]
+        } else if here && let Some(input) = &app.settings_input {
+            let mut spans = input.spans(usize::MAX, style, accent, "█");
+            // Padded back out to the column the other rows fill, so the marker
+            // and the description do not shift as the value is typed.
+            let used: usize = spans.iter().map(Span::width).sum();
+            spans.push(Span::raw(" ".repeat(14usize.saturating_sub(used))));
+            spans
+        } else {
+            vec![Span::styled(format!("{value:<14}"), style)]
         };
         let mut line = Line::from_iter(
             std::iter::once(Span::raw(format!("  {name:<18}")))
@@ -709,47 +804,70 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
                 ]),
         );
         if here {
-            cursor_line = lines.len();
+            cursor_line = lines.len() as u16;
             line = line.style(theme::selected());
         }
         lines.push(line);
     };
 
-    lines.push(Line::default());
-    lines.push(section("[settings]"));
-    for (row, (name, _, what)) in SETTINGS.iter().enumerate() {
-        let (value, set) = app.settings.value_of(name);
-        push_row(&mut lines, row, name, value, set, what);
+    // A heading with nothing under it is a heading about nothing, which is
+    // what a filter that left out one whole section would otherwise leave
+    // behind.
+    let wanted = |f: fn(&Row) -> bool| rows.iter().any(f);
+    if wanted(|r| matches!(r, Row::Setting(_))) {
+        lines.push(Line::default());
+        lines.push(section("config.toml · [settings]"));
+        for (at, entry) in rows.iter().enumerate() {
+            let Row::Setting(i) = entry else { continue };
+            let (name, _, what) = crate::settings::SETTINGS[*i];
+            let (value, set) = app.settings.value_of(name);
+            row(&mut lines, at, name, value, set, what);
+        }
     }
-    lines.push(Line::default());
-    lines.push(section("[keys]  on the session table"));
-    for (i, (action, default, what)) in BINDINGS.iter().enumerate() {
-        let key = app.settings.key_for(action).to_string();
-        let set = key != *default;
-        push_row(&mut lines, SETTINGS.len() + i, action, key, set, what);
+
+    if wanted(|r| matches!(r, Row::View(_))) {
+        lines.push(Line::default());
+        lines.push(section("Remembered · view"));
+        for (at, entry) in rows.iter().enumerate() {
+            let Row::View(i) = entry else { continue };
+            let (name, what, view) = &VIEWS[*i];
+            let value = app.view_value(view);
+            let set = app.view_is_set(view);
+            row(&mut lines, at, name, value, set, what);
+        }
     }
+
+    if wanted(|r| matches!(r, Row::Key(_))) {
+        lines.push(Line::default());
+        lines.push(section("config.toml · [keys], on the session table"));
+        for (at, entry) in rows.iter().enumerate() {
+            let Row::Key(i) = entry else { continue };
+            let (action, default, what) = crate::settings::BINDINGS[*i];
+            let key = app.settings.key_for(action).to_string();
+            let set = key != *default;
+            row(&mut lines, at, action, key, set, what);
+        }
+    }
+
+    // A filter that matched nothing has to say so, or a blank page is a hang.
+    if rows.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format!("  Nothing matches {}.", app.settings_filter),
+            theme::dim(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  / clears it. Esc goes back to the table.",
+            theme::dim(),
+        )));
+    }
+
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        "  ↵ change   ⌫ reset   e open in your editor   Esc close",
+        "  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table",
         theme::dim(),
     )));
-
-    // Keep the cursor on screen: the same height `scrollable_modal` will give
-    // the box, less its border.
-    let inner = (lines.len() as u16 + 2)
-        .min(area.height.saturating_sub(2))
-        .saturating_sub(2)
-        .max(1);
-    let at = cursor_line as u16;
-    // The first row brings the file's name and any problems back into view.
-    if app.settings_cursor == 0 {
-        app.settings_scroll = 0;
-    } else if at < app.settings_scroll {
-        app.settings_scroll = at;
-    } else if at >= app.settings_scroll + inner {
-        app.settings_scroll = at + 1 - inner;
-    }
-    scrollable_modal(frame, area, "Settings", lines, 96, app.settings_scroll);
+    (lines, cursor_line)
 }
 
 pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {

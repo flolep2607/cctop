@@ -391,6 +391,26 @@ fn help_modal() {
     snap("help", &mut app);
 }
 
+/// The settings page on its own tab, and the same page with a filter over it.
+///
+/// Both, because the two things that make the page work are invisible in a
+/// single frame: that it is a tab with the whole frame rather than a box over
+/// the table, and that sixty-odd rows are navigable because they can be
+/// filtered.
+#[test]
+fn settings_page() {
+    let mut app = fixture();
+    app.settings_open = true;
+    snap("settings", &mut app);
+
+    // A filter that matches only the alerts, so the cursor staying inside the
+    // narrowed page is held in a frame as well as in a test.
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings_filter = "alert when".into();
+    snap("settings_filtered", &mut app);
+}
+
 #[test]
 fn context_panel() {
     let mut app = fixture();

@@ -37,8 +37,15 @@ const BRANCH_MAX: usize = 100;
 /// Longest cost floor: more digits than any dollar amount a session reaches.
 const COST_MAX: usize = 12;
 
-/// Longest value the settings panel takes for one setting.
+/// Longest value the settings page takes for one setting.
 const SETTING_MAX: usize = 200;
+
+/// Longest query the settings page's filter accepts.
+///
+/// Short, like the switcher's: it is matched as a substring against a name and
+/// a description, and a query longer than this is not narrowing anything — it
+/// is a sentence somebody is typing at a list.
+const SETTING_FILTER_MAX: usize = 64;
 
 /// How long after a right-click a paste still counts as that click's echo.
 ///
@@ -145,6 +152,18 @@ impl App {
         // function keys, which are cctop's wherever you are. The footer offers
         // them from inside a pane, so one that reached the agent instead would
         // be a promise the pane quietly broke.
+        //
+        // The settings tab is a tab and not a pane, so it is asked for by name
+        // rather than caught by `tab > 0`: `active_tab` is empty there, and a
+        // page whose keys went to the pty underneath would be a page nothing
+        // could be typed into. The function keys are cctop's on a tab whatever
+        // the tab holds, so they are answered before it takes the keyboard.
+        if self.on_settings() && self.mode == Mode::List {
+            if matches!(key.code, KeyCode::F(_)) {
+                return self.on_key_function(key);
+            }
+            return self.on_key_settings(key);
+        }
         if self.tab > 0 && self.mode == Mode::List {
             if matches!(key.code, KeyCode::F(_)) {
                 self.on_key_function(key);
@@ -179,10 +198,6 @@ impl App {
             return;
         }
 
-        if self.tab == 0 && self.mode == Mode::List && self.hear_rave(key) {
-            return;
-        }
-
         match self.mode {
             Mode::Search => self.on_key_search(key),
             Mode::SortBy => self.on_key_sortby(key),
@@ -212,7 +227,6 @@ impl App {
             Mode::Insight => self.on_key_insight(key),
             Mode::Conversation => self.on_key_conversation(key),
             Mode::Help => self.on_key_help(key),
-            Mode::Settings => self.on_key_settings(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             // Any key, like the other panels that only have something to say;
             // and the link let go of with it, there being nothing left to draw.
@@ -379,9 +393,19 @@ impl App {
                 let digits: String = text.chars().filter(|c| cost_char(*c)).collect();
                 self.cost_input.insert_str(&digits, COST_MAX);
             }
-            Mode::Settings => {
+            // A paste into the settings page goes to whichever of its two text
+            // fields is live: the filter while nothing is being typed, the
+            // value when a number is. Nothing else on the page could want text,
+            // and guessing wrong would paste a cost floor into the filter that
+            // finds rows.
+            Mode::List if self.on_settings() => {
                 if let Some(input) = &mut self.settings_input {
                     paste_into(input, text, SETTING_MAX);
+                } else {
+                    let pasted = paste_into(&mut self.settings_filter, text, SETTING_FILTER_MAX);
+                    if pasted {
+                        self.settings_after_filter();
+                    }
                 }
             }
             // A paste into the help is a paste into its filter, typing or not:
@@ -552,7 +576,9 @@ impl App {
                 let flow = &self.add_account;
                 flow.pane.is_none() && flow.outcome.is_none() && !flow.named
             }
-            Mode::Settings => self.settings_input.is_some() && !self.settings_capture,
+            Mode::List if self.on_settings() => {
+                self.settings_input.is_some() && !self.settings_capture
+            }
             Mode::Help => self.help_typing,
             _ => false,
         }
@@ -848,14 +874,21 @@ impl App {
         }
     }
 
-    /// The settings panel: a cursor over every setting and keybind, changed
-    /// in place, with `e` for the whole file in an editor.
+    /// The settings page: a cursor over every setting, view choice and keybind,
+    /// changed in place, with `/` to find one and `e` for the whole file.
+    ///
+    /// A tab rather than an overlay, so the keys that leave it are the keys
+    /// that leave a tab — and `q` closes cctop here, as it does everywhere
+    /// else, rather than quietly backing out of a page that is now a place with
+    /// an address.
     fn on_key_settings(&mut self, key: KeyEvent) {
         // Waiting for a key takes every key, including the ones that would
-        // otherwise move or close the panel — they are what may be bound.
+        // otherwise move or close the page — they are what may be bound.
         if self.settings_capture {
             return self.settings_capture_key(key);
         }
+        // A value being typed is readline, not navigation: every key that is
+        // not Enter or Esc belongs to the field.
         if let Some(input) = &mut self.settings_input {
             match key.code {
                 KeyCode::Esc => self.settings_input = None,
@@ -866,24 +899,138 @@ impl App {
             }
             return;
         }
-        let rows = crate::settings::SETTINGS.len() + crate::settings::BINDINGS.len();
-        let step = |app: &mut App, delta: i32| {
-            app.settings_cursor =
-                (app.settings_cursor as i32 + delta).clamp(0, rows as i32 - 1) as usize;
-        };
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => step(self, -1),
-            KeyCode::Down | KeyCode::Char('j') => step(self, 1),
-            KeyCode::PageUp => step(self, -(PAGE as i32)),
-            KeyCode::PageDown => step(self, PAGE as i32),
-            KeyCode::Home | KeyCode::Char('g') => self.settings_cursor = 0,
-            KeyCode::End | KeyCode::Char('G') => self.settings_cursor = rows - 1,
-            KeyCode::Enter | KeyCode::Char(' ') => self.settings_activate(),
-            KeyCode::Backspace | KeyCode::Delete => self.settings_reset(),
-            KeyCode::Char('e') => self.edit_settings(),
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => self.mode = Mode::List,
-            _ => {}
+        // Two layers, in the order they can be true, as the help sheet is: the
+        // filter swallows letters while it is open, and the list only gets the
+        // keys that are not letters.
+        match (self.settings_typing, key.code) {
+            // Esc clears the query and gives the letters back in one press.
+            // Only that, because a page whose filter cannot be closed is a page
+            // Esc cannot leave: every further press would clear an already
+            // empty field and eat the key that was meant to be the way out.
+            (true, KeyCode::Esc) => {
+                self.settings_filter.clear();
+                self.settings_typing = false;
+                self.settings_after_filter();
+            }
+            // Enter changes the row *and* gives the letters back, rather than
+            // only giving the letters back and needing a second press. The help
+            // ends typing on Enter because it has no row to change; this page's
+            // whole verb is changing the row under the cursor, and the filter is
+            // only the way to find it — so `↵ change` in the footer has to be
+            // true, and a filter that made it take two presses was a lie in the
+            // one place where the row is the point. The arrows still move the
+            // cursor while typing, which is the other thing one wants to do
+            // between finding a row and changing it.
+            (true, KeyCode::Enter) => {
+                self.settings_typing = false;
+                self.settings_activate();
+            }
+            (true, KeyCode::Up) => self.settings_step(-1),
+            (true, KeyCode::Down) => self.settings_step(1),
+            (true, KeyCode::PageUp) => self.settings_step(-(PAGE as i32)),
+            (true, KeyCode::PageDown) => self.settings_step(PAGE as i32),
+            // Everything else is text, because the filter is what `/` opened
+            // and there is no motion to lose by not being able to type `j`.
+            (true, _) => self.settings_type(key),
+            // Back into the query that is there, with the cursor at its end,
+            // rather than a fresh one: `/` after Enter is how a filter gets
+            // narrowed, and a `/` that wiped the query would make that two
+            // keystrokes to fix a typo.
+            (false, KeyCode::Char('/')) => self.settings_typing = true,
+            // Esc peels one layer at a time: off the filter, then off the tab.
+            // Clearing both in one press is why a mistyped filter used to feel
+            // as though it had eaten the key.
+            (false, KeyCode::Esc) if !self.settings_filter.is_empty() => {
+                self.settings_filter.clear();
+                self.settings_after_filter();
+            }
+            (false, KeyCode::Up) => self.settings_step(-1),
+            (false, KeyCode::Down) => self.settings_step(1),
+            (false, KeyCode::PageUp) => self.settings_step(-(PAGE as i32)),
+            (false, KeyCode::PageDown) => self.settings_step(PAGE as i32),
+            (false, KeyCode::Home) => self.settings_to(0),
+            (false, KeyCode::End) => self.settings_to(usize::MAX),
+            (false, KeyCode::Enter | KeyCode::Char(' ')) => self.settings_activate(),
+            (false, KeyCode::Backspace | KeyCode::Delete) => self.settings_reset(),
+            (false, KeyCode::Char('e')) => self.edit_settings(),
+            (false, KeyCode::Char('q')) => self.request_quit(),
+            // `,` toggles, as it always has: pressed again it is the way back
+            // to where you came from, which is the table more often than not.
+            (false, KeyCode::Char(',')) | (false, KeyCode::Esc) => self.goto_settings(),
+            (false, _) => {}
         }
+    }
+
+    /// Move the cursor `delta` rows within what the filter left standing.
+    fn settings_step(&mut self, delta: i32) {
+        let rows = self.settings_shown().len();
+        if rows == 0 {
+            return;
+        }
+        self.settings_cursor =
+            (self.settings_cursor as i32 + delta).clamp(0, rows as i32 - 1) as usize;
+    }
+
+    /// Put the cursor on a row, or on the last one for [`usize::MAX`].
+    fn settings_to(&mut self, at: usize) {
+        let rows = self.settings_shown().len();
+        if rows == 0 {
+            return;
+        }
+        self.settings_cursor = at.min(rows - 1);
+    }
+
+    /// One more key into the filter, if it changed what is shown.
+    fn settings_type(&mut self, key: KeyEvent) {
+        if self.settings_filter.key(key, SETTING_FILTER_MAX).changed() {
+            self.settings_after_filter();
+        }
+    }
+
+    /// Put the cursor back inside the page after the filter changed under it.
+    ///
+    /// Clamped rather than reset, so typing a filter does not throw away where
+    /// you were on a page that is mostly still there. The scroll does reset:
+    /// every line of it is now a different line, and a remembered offset over
+    /// new content is not a place anybody asked to be.
+    pub(super) fn settings_after_filter(&mut self) {
+        let shown = self.settings_shown().len();
+        self.settings_cursor = match shown {
+            0 => 0,
+            n => self.settings_cursor.min(n - 1),
+        };
+        self.settings_scroll = 0;
+        self.needs_redraw = true;
+    }
+
+    /// Go to the settings page, or come back from it if that is where we are.
+    ///
+    /// Toggling rather than going one way, because `,` has always been the way
+    /// in and the way back, and a key that only opened it would leave someone
+    /// who pressed it twice — as people do — stuck in it. Coming back lands on
+    /// whatever tab was underneath, which is `tab`'s own job: it was never
+    /// touched.
+    ///
+    /// Arriving clears the two half-finished states a row can be left in. Left
+    /// alone they would swallow the next keypress on a different tab: a
+    /// `settings_capture` still set would take any key as a new binding, and an
+    /// open value field would type the next letter into a number nobody is
+    /// looking at. The filter is kept, because it is a way of looking rather
+    /// than something half-done.
+    pub(super) fn goto_settings(&mut self) {
+        if self.on_settings() {
+            return self.go_to_tab(self.tab);
+        }
+        self.settings_capture = false;
+        self.settings_input = None;
+        self.settings_typing = false;
+        self.settings_open = true;
+        // A page reached from a bar that has changed under it — a tab closed
+        // from another cctop — should not open scrolled to a row that is gone.
+        self.settings_cursor = 0;
+        self.settings_scroll = 0;
+        self.reload_settings();
+        self.needs_redraw = true;
     }
 
     fn on_key_sortby(&mut self, key: KeyEvent) {
@@ -1548,7 +1695,7 @@ impl App {
             KeyCode::Char('h') | KeyCode::F(8) => self.open_hooks(),
             KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
             KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
-            KeyCode::Char(',') => self.mode = Mode::Settings,
+            KeyCode::Char(',') => self.goto_settings(),
             // One way in, rather than the six single-letter sort keys this
             // replaced. `P`/`M`/`T` were htop's, and `H`/`X`/`S` were three
             // more that only cctop has columns for: six keys spent on an
@@ -1654,9 +1801,10 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(tab) = layout.workspace_at(ev.column, ev.row) {
                     self.show_tab(tab);
-                    // The dashboard is tab zero wherever the bar is drawn and
-                    // stays there, so only a real tab is picked up.
-                    self.drag_tab = (tab > 0).then_some(tab);
+                    // Only a real tab is picked up. The dashboard does not move,
+                    // and neither does the settings tab — it is the fixed end
+                    // of the bar, so dragging it would mean dragging the gap.
+                    self.drag_tab = (1..=self.tabs.len()).contains(&tab).then_some(tab);
                     return true;
                 }
                 if layout.workspace_new_at(ev.column, ev.row) {
@@ -1672,7 +1820,10 @@ impl App {
                 let Some(from) = self.drag_tab else {
                     return false;
                 };
-                if let Some(to) = layout.workspace_at(ev.column, ev.row).filter(|to| *to > 0) {
+                if let Some(to) = layout
+                    .workspace_at(ev.column, ev.row)
+                    .filter(|to| (1..=self.tabs.len()).contains(to))
+                {
                     self.move_tab(from, to);
                     self.drag_tab = Some(to);
                     self.needs_redraw = true;
@@ -1697,7 +1848,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Right) => {
                 match layout
                     .workspace_at(ev.column, ev.row)
-                    .filter(|tab| *tab > 0)
+                    .filter(|tab| (1..=self.tabs.len()).contains(tab))
                 {
                     Some(tab) => {
                         self.rename_prompt(tab);

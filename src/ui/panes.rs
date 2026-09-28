@@ -9,6 +9,13 @@
 
 use super::*;
 
+/// What the settings tab is called in the bar and in the switcher.
+///
+/// "Settings" rather than a glyph: it is the one label on the bar that is a
+/// noun about cctop itself rather than a name somebody chose, and the bar is
+/// where a new user looks to work out what the thing can do.
+pub(super) const SETTINGS_TITLE: &str = "Settings";
+
 /// How often the tab bar is reconciled against the rmux sessions on this
 /// machine, so a tab opened in one cctop shows up in the others.
 ///
@@ -87,9 +94,66 @@ impl SwitchState {
 }
 
 impl App {
-    /// The tab on screen, or `None` on the dashboard.
+    /// Where the bar draws the settings tab: one past the last workspace tab.
+    ///
+    /// A drawing position, recomputed every frame and never stored. Nothing
+    /// that closes, reaps, drags or syncs a tab can reach it, because it is not
+    /// a member of `tabs` and every lookup that could move or remove a tab
+    /// indexes that vector. The view's own state is [`App::settings_open`],
+    /// which is what keeps a tab appearing from sliding the page off screen.
+    pub fn settings_tab(&self) -> usize {
+        self.tabs.len() + 1
+    }
+
+    /// Whether the settings page is the body on screen.
+    ///
+    /// A tab rather than an overlay for one reason: the page is long — every
+    /// setting, every view choice and every keybind is a row — and as a modal
+    /// over the dashboard it was a 96-column box holding sixty-odd rows on a
+    /// screen with thirty. Given the whole frame below the bar it is a page
+    /// rather than a dialog, and being a tab is what gives it that: the body it
+    /// replaces is the table's, and the bar stays clickable so it is never a
+    /// place the mouse cannot leave.
+    pub fn on_settings(&self) -> bool {
+        self.settings_open
+    }
+
+    /// The tab on screen, or `None` on the dashboard and on the settings page.
+    ///
+    /// `None` on the page because the page is over a tab without being it:
+    /// nothing about the tab underneath is on screen, so an action that works on
+    /// a tab has nothing to act on. `Alt+w` from the settings page used to close
+    /// the agent behind it — a key pressed on a page about configuration
+    /// reaching past the page and ending a session in another tab — and every
+    /// other tab action would have done the same, so this is the one place that
+    /// says so for all of them.
     pub fn active_tab(&mut self) -> Option<&mut tabs::Tab> {
+        if self.settings_open {
+            return None;
+        }
         self.tabs.get_mut(self.tab.checked_sub(1)?)
+    }
+
+    /// What bar position `i` is called, for the bar and the switcher alike.
+    ///
+    /// One answer for both, because the two used to work it out separately and
+    /// a bar and a picker that disagree about a tab's name is the sort of
+    /// thing nobody notices until they have used the wrong one.
+    pub fn tab_title(&self, i: usize) -> String {
+        match i.checked_sub(1).and_then(|t| self.tabs.get(t)) {
+            Some(tab) => tab.title(),
+            None if i == 0 => "Dashboard".to_string(),
+            None if i == self.settings_tab() => SETTINGS_TITLE.to_string(),
+            // A position that has gone, which a close can leave a stale cursor
+            // on for a frame. Empty rather than the dashboard's name: it is
+            // neither.
+            None => String::new(),
+        }
+    }
+
+    /// The painted hue of bar position `i`, if the tab there has one.
+    pub fn tab_color(&self, i: usize) -> Option<theme::Hue> {
+        self.tabs.get(i.checked_sub(1)?).and_then(|tab| tab.color)
     }
 
     /// The pane the keyboard belongs to, or `None` on the dashboard.
@@ -118,13 +182,23 @@ impl App {
         }
         let moved = self.tabs.remove(a);
         self.tabs.insert(b, moved);
-        self.tab = match self.tab {
-            here if here == from => to,
-            // Everything the tab was lifted out of shifts one place towards the
-            // gap it left.
-            here if a < b && here > from && here <= to => here - 1,
-            here if b < a && here >= to && here < from => here + 1,
-            here => here,
+        // Worked out on the index into `tabs` and converted back once, rather
+        // than on the bar's numbering. The bar's numbering has a member that is
+        // not a tab — the settings page, one past the end — and shifting it
+        // like one is how a drag pushed a number the page was sitting on into
+        // being somebody else's tab. With the page up the tab underneath moves
+        // and the page stays over it, which is the only thing it can mean.
+        let after = |i: usize| -> usize {
+            match i {
+                i if i == a => b,
+                i if a < b && i > a && i <= b => i - 1,
+                i if b < a && i >= b && i < a => i + 1,
+                i => i,
+            }
+        };
+        self.tab = match self.tab.checked_sub(1) {
+            None => self.tab,
+            Some(here) => after(here) + 1,
         };
         self.needs_redraw = true;
     }
@@ -157,15 +231,44 @@ impl App {
         let Some(from) = (self.tab > 0).then_some(self.tab) else {
             return;
         };
+        // Said rather than ignored: the settings page is the last thing on the
+        // bar and it is not a tab, so there is nothing here to rearrange. A key
+        // that does nothing and says nothing is indistinguishable from one
+        // cctop lost. Asked of the *position*, because the view's own field is
+        // still the tab underneath and would answer for it.
+        if self.position() > self.tabs.len() {
+            return self.set_status("The settings tab is not a tab to move");
+        }
         let to = (from as isize + delta).clamp(1, self.tabs.len() as isize) as usize;
         self.move_tab(from, to);
         // One keystroke is one finished rearrangement, unlike a drag.
         self.save_tab_order();
     }
 
+    /// Move the view one place along the bar, wrapping.
+    ///
+    /// The settings tab is a stop in the cycle even though it is not a member
+    /// of `tabs`, so this cannot be the plain arithmetic over `0..=len`: the
+    /// two fixed ends of the bar are places you stop, and stepping past the last
+    /// agent should land on the page rather than wrap a whole turn of the bar
+    /// to the dashboard.
     pub fn cycle_workspace(&mut self, delta: isize) {
-        let count = self.tabs.len() as isize + 1;
-        self.go_to_tab((self.tab as isize + delta).rem_euclid(count) as usize);
+        let last = self.tabs.len();
+        let settings = self.settings_tab();
+        let next = (self.position() as isize + delta).rem_euclid(last as isize + 2) as usize;
+        self.show_tab(next.min(last));
+        if next == settings {
+            self.settings_open = true;
+        }
+    }
+
+    /// Where the view is along the bar, counting the settings tab as the last
+    /// stop. The bar's numbering, which is what a walk of it is over.
+    pub(super) fn position(&self) -> usize {
+        match self.settings_open {
+            true => self.settings_tab(),
+            false => self.tab,
+        }
     }
 
     /// The next bar position after the view whose agent wants you, wrapping —
@@ -243,6 +346,13 @@ impl App {
                 found.push(i + 1);
             }
         }
+        // Listed under `All` for the same reason the dashboard is: it has no
+        // agent, so no state filter can describe it — but a picker that could
+        // not reach the one place everything is configured would be a picker
+        // with a hole in it.
+        if matches(SETTINGS_TITLE) && self.switch_state.admits(true, None) {
+            found.push(self.settings_tab());
+        }
         found
     }
 
@@ -272,6 +382,12 @@ impl App {
     /// blank tab with the one you could see now detached as well.
     pub fn go_to_tab(&mut self, want: usize) {
         self.needs_redraw = true;
+        // Any move onto a workspace tab is also a move off the settings page.
+        // The two share the body, so leaving the page up behind the table would
+        // mean the bar's right end says one thing and the screen another — and
+        // it is cleared before the early return below, because arriving at the
+        // tab you were already on is still arriving somewhere.
+        self.settings_open = false;
         if want == self.tab {
             return;
         }
@@ -427,6 +543,12 @@ impl App {
     /// else's agent. There is nothing here to kill and stopping it was never
     /// cctop's to do, so that one is only closed.
     pub fn close_pane(&mut self) {
+        if self.settings_open {
+            // Said rather than ignored. `Alt+w` is the one Alt- key that does
+            // not survive onto the page being a tab, and a key that quietly did
+            // nothing on a page of settings is a key somebody will press twice.
+            return self.set_status("There is no agent on the settings tab");
+        }
         let Some(tab) = self.active_tab() else {
             return;
         };
@@ -517,6 +639,17 @@ impl App {
     /// [`go_to_tab`]: Self::go_to_tab
     pub(super) fn land_after(&mut self, was: usize, gone: &[usize]) {
         let want = Self::landing(was, gone, self.tabs.len());
+        // The settings page is not a tab, so a tab leaving does not move it off
+        // anything. Without this a background sync — which retires a tab whose
+        // rmux session has gone, on its own schedule, with nobody having asked
+        // for anything — would close the page you were reading a setting on.
+        // The tab underneath is still corrected, so the page is over a tab that
+        // exists.
+        if self.settings_open {
+            self.tab = want;
+            self.needs_redraw = true;
+            return;
+        }
         // `go_to_tab` answers a move to where it already is with nothing at
         // all, and here the field still holds the number of a tab that is gone.
         self.tab = 0;
@@ -600,9 +733,384 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::settings::{Row, VIEWS, View};
     use crate::ui::tests::{key, test_app};
     use ratatui::crossterm::event;
     use ratatui::crossterm::event::KeyCode;
+
+    /// The settings tab is at the end of the bar, always, and nothing that
+    /// happens to a workspace tab can take it away or move it.
+    ///
+    /// Both halves matter and they are the same property. It sits one past the
+    /// end of `tabs` rather than inside it, so every routine that walks the
+    /// vector — reaping, dragging, the rmux sync — is out of range where it
+    /// would have moved or removed it, and there is no index arithmetic
+    /// anywhere that has to learn about it.
+    #[test]
+    fn the_settings_tab_is_the_last_stop_and_no_tab_takes_it() {
+        let named = |name: &str| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+            })
+        };
+        let mut app = test_app();
+        app.tabs = vec![named("claude"), named("codex")];
+        let settings = app.settings_tab();
+        assert_eq!(settings, 3, "one past the last workspace tab");
+
+        // Cycling wraps through it rather than over it: stepping right from the
+        // last agent lands on the settings, not back on the dashboard. The
+        // position is the bar's numbering, which is what a walk of the bar is
+        // over — `tab` underneath is whatever tab was there.
+        app.go_to_tab(2);
+        app.cycle_workspace(1);
+        assert!(
+            app.on_settings() && app.tab == 2,
+            "did not reach the settings"
+        );
+        app.cycle_workspace(1);
+        assert_eq!(app.position(), 0, "and on past it to the dashboard");
+        app.cycle_workspace(-1);
+        assert!(app.on_settings(), "back the other way round");
+
+        // It is named, and it is the same name the bar and the picker give it.
+        assert_eq!(app.tab_title(settings), SETTINGS_TITLE);
+
+        // Nothing that closes a tab reaches it, from either end.
+        app.move_workspace(-1);
+        app.close_pane();
+        app.drop_empty_tabs();
+        assert_eq!(
+            app.tabs.len(),
+            2,
+            "a tab behind the page was closed by accident"
+        );
+
+        // The part that is easy to get wrong, and the reason the view is a
+        // field rather than an index. The sync adds and retires tabs without
+        // anybody asking, which moves the settings page's *position* along the
+        // bar; a view tracked by that position would be left standing on
+        // whichever agent took the number it used to be — or, since the two
+        // tabs above are fabricated and have no session behind them, on nothing
+        // at all. What the page is over is corrected as usual; the page is not.
+        app.settings_open = true;
+        app.sync_shared_tabs();
+        assert!(
+            app.on_settings(),
+            "the bar changing under the page closed it"
+        );
+        assert!(
+            (0..=app.tabs.len()).contains(&app.tab),
+            "and left the view on tab {} of {}",
+            app.tab,
+            app.tabs.len()
+        );
+        assert_eq!(
+            app.settings_tab(),
+            app.tabs.len() + 1,
+            "the settings tab is no longer the last stop on the bar"
+        );
+
+        // Dragging it along the bar does nothing at all, and says so: a key
+        // that does nothing silently is a key cctop looks broken for.
+        app.move_tab(settings, 1);
+        assert_eq!(app.settings_tab(), app.tabs.len() + 1);
+        app.move_workspace(-1);
+        assert!(
+            app.status()
+                .is_some_and(|s| s.contains("not a tab to move")),
+            "moving the settings tab said nothing: {:?}",
+            app.status()
+        );
+    }
+
+    /// The page holds every knob there is, and the filter finds any of them.
+    ///
+    /// The claim being held here is the one the whole feature rests on: a
+    /// setting you cannot see is a setting you cannot find. So the test counts
+    /// the page against the union of the two file tables and the view choices,
+    /// and then checks that filtering by what a thing *does* works — which is
+    /// the half a name-only filter would fail.
+    #[test]
+    fn every_configurable_thing_is_on_the_page_and_the_filter_finds_it() {
+        let mut app = test_app();
+        let all = app.settings_rows().len();
+        assert_eq!(
+            all,
+            crate::settings::SETTINGS.len() + VIEWS.len() + crate::settings::BINDINGS.len(),
+            "a source is missing rows"
+        );
+        assert_eq!(all, app.settings_shown().len(), "an empty filter hid rows");
+
+        // By name: a keybind.
+        app.settings_filter = "quit".into();
+        let found = app.settings_shown();
+        assert!(found.contains(&Row::Key(0)));
+        assert!(
+            found.len() < all,
+            "\"quit\" matched everything, so the filter is not filtering"
+        );
+
+        // By what it does, which no name-only filter could do: not one of these
+        // rows is called "alert".
+        app.settings_filter = "alert when".into();
+        let alerts = app.settings_shown();
+        assert!(!alerts.is_empty(), "nothing matched a description");
+        assert!(
+            alerts.iter().all(|r| matches!(r, Row::Setting(_))),
+            "a description matched something that is not a setting"
+        );
+
+        // A view choice, which is in neither file and used to have no page at
+        // all. This is the row that is the reason the feature exists.
+        app.settings_filter = "repositories".into();
+        assert_eq!(
+            app.settings_shown(),
+            vec![Row::View(0)],
+            "the tree toggle is not findable by what it does"
+        );
+
+        // Nothing matching is an answer, and the cursor is put somewhere legal.
+        app.settings_filter = "zzzz".into();
+        assert!(app.settings_shown().is_empty());
+        app.settings_after_filter();
+        assert_eq!(app.settings_cursor, 0);
+
+        // And a filter that stops matching brings the rest of the page back.
+        app.settings_filter.clear();
+        assert_eq!(app.settings_shown().len(), all);
+    }
+
+    /// Esc gets you off the page, however many times it takes.
+    ///
+    /// The trap this closes: Esc while the filter is open cleared the query but
+    /// left the filter *typing*, so every press after it was swallowed by a
+    /// field that was already empty and the page could not be left at all. A
+    /// snapshot could not have caught it — the frames it draws are all correct
+    /// — and neither could a test that only checked the page renders.
+    #[test]
+    fn esc_leaves_the_settings_page_however_many_presses_it_takes() {
+        let mut app = test_app();
+        app.goto_settings();
+        assert!(app.on_settings());
+
+        // Open the filter, type into it, and leave it typing.
+        app.on_key(key(KeyCode::Char('/')));
+        for c in "alert".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert!(app.settings_typing, "the filter did not open");
+        assert_eq!(app.settings_filter, "alert");
+        assert!(!app.settings_shown().is_empty());
+
+        // One Esc: the query goes, and so does typing — the letters are the
+        // page's own again.
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.settings_typing, "Esc left the filter typing");
+        assert!(app.settings_filter.is_empty());
+        assert!(app.on_settings(), "and left the page too");
+
+        // And the next one is the way out.
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.on_settings(), "Esc did not leave the page");
+        assert_eq!(app.tab, 0, "and did not land back on the dashboard");
+
+        // The same with the filter closed and something in it: Esc clears the
+        // query first, and only clears the page on the press after. Enter
+        // changes the row under the cursor *and* ends typing, because that is
+        // what the footer's `↵ change` says and a filter that made it take two
+        // presses would be a lie in the one place the row is the point.
+        app.goto_settings();
+        app.on_key(key(KeyCode::Char('/')));
+        for c in "subagent_sort".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        let before = app.subagent_sort;
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.settings_typing, "Enter left the filter typing");
+        assert_ne!(app.subagent_sort, before, "Enter did not change the row");
+        app.on_key(key(KeyCode::Char('/')));
+        assert!(app.settings_typing, "/ did not go back into the query");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.on_settings(), "Esc left a filtered page in one press");
+        assert!(app.settings_filter.is_empty());
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.on_settings());
+    }
+
+    /// `Alt+w` on the settings page closes nothing, and says so.
+    ///
+    /// The page is over a tab without being it, so the key that ends an agent
+    /// has nothing on this screen to end. Left alone it would have reached
+    /// through the page and closed whatever agent was underneath — a key
+    /// pressed while reading a line about notifications killing a session in
+    /// another tab, with nothing on screen saying so.
+    #[test]
+    fn closing_from_the_settings_page_says_there_is_nothing_to_close() {
+        let shared = |name: &str| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+            })
+        };
+        let mut app = test_app();
+        app.tabs = vec![shared("claude"), shared("codex")];
+        app.go_to_tab(1);
+        app.goto_settings();
+
+        let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
+        app.on_key(alt(KeyCode::Char('w')));
+        assert_eq!(
+            app.tabs.len(),
+            2,
+            "Alt+w on the settings page closed an agent behind it"
+        );
+        assert!(app.on_settings(), "and left the page");
+        assert!(
+            app.status()
+                .is_some_and(|s| s.contains("no agent on the settings tab")),
+            "and said nothing about it: {:?}",
+            app.status()
+        );
+
+        // The other tab actions are inert here for the same reason, and equally
+        // silent: none of them is on the page's footer, so there is no promise
+        // to break. They must at least not act.
+        app.on_key(alt(KeyCode::Char('z')));
+        app.on_key(alt(KeyCode::Char('v')));
+        assert_eq!(app.tabs.len(), 2, "a tab action reached past the page");
+        assert!(app.on_settings());
+    }
+
+    /// A tab can be retired underneath the settings page without taking the
+    /// page with it, and a tab can appear without taking it either.
+    ///
+    /// Both are the same property asked from both ends, and both were wrong the
+    /// first time round: the view was an index into a length, so the page both
+    /// moved when the length changed and was closed outright by a background
+    /// sync nobody had asked anything of.
+    #[test]
+    fn the_bar_changing_under_the_page_leaves_the_page_alone() {
+        let shared = |name: &str| {
+            tabs::Tab::shared(&crate::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+            })
+        };
+        let mut app = test_app();
+        app.tabs = vec![shared("claude"), shared("codex")];
+        app.go_to_tab(2);
+        app.goto_settings();
+
+        // One retires, the way the sync does it: `land_after` is the whole of
+        // what a retirement is, and asking for it directly keeps the test off
+        // rmux, which is not what is under test here.
+        app.land_after(2, &[2]);
+        assert!(app.on_settings(), "a tab retiring closed the page");
+        assert!(
+            (0..=app.tabs.len()).contains(&app.tab),
+            "the tab underneath is now {} with {} tabs",
+            app.tab,
+            app.tabs.len()
+        );
+
+        // And one arrives, which is the same correction the other way.
+        let under = app.tab;
+        app.tabs.push(shared("review"));
+        app.land_after(under, &[]);
+        assert!(app.on_settings(), "a tab arriving closed the page");
+        assert_eq!(app.tab, under, "and moved the tab underneath");
+    }
+
+    /// A view choice is changed by the page, and putting it back gives the
+    /// default rather than leaving it spelled as something once was.
+    #[test]
+    fn a_view_choice_is_toggled_by_the_page_and_reset_to_its_default() {
+        let mut app = test_app();
+        /// The page position of a view choice, by its name.
+        fn row_of(app: &App, name: &str) -> usize {
+            app.settings_shown()
+                .iter()
+                .position(|r| match r {
+                    Row::View(i) => VIEWS[*i].0 == name,
+                    _ => false,
+                })
+                .expect("a view row")
+        }
+
+        /// The choice itself, by its name — an index into `VIEWS`, which is not
+        /// the page position the cursor walks.
+        fn view_of(_app: &App, name: &str) -> View {
+            VIEWS
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, _, v)| *v)
+                .expect("a view choice")
+        }
+
+        app.settings_cursor = row_of(&app, "tree");
+        assert!(!app.tree, "not at the default to begin with");
+        app.settings_activate();
+        assert!(app.tree, "Enter did not flip the toggle");
+        app.settings_activate();
+        assert!(!app.tree, "Enter again did not flip it back");
+
+        // A choice cycles, and lands on its default first.
+        let panel = view_of(&app, "bottom_panel");
+        app.settings_cursor = row_of(&app, "bottom_panel");
+        let first = app.view_value(&panel);
+        app.settings_activate();
+        assert_ne!(
+            app.view_value(&panel),
+            first,
+            "Enter did not turn the choice on"
+        );
+
+        // Backspace puts it back, and a reset choice is the first option.
+        app.settings_cursor = row_of(&app, "cost_floor");
+        app.settings_input = Some("25".into());
+        app.settings_commit_input();
+        assert_eq!(app.cost_floor, 25.0);
+        app.settings_cursor = row_of(&app, "cost_floor");
+        app.settings_reset();
+        assert_eq!(app.cost_floor, 0.0, "Backspace did not clear the number");
+
+        // A number out of range is refused and says why, rather than being
+        // quietly clamped into something the user did not type.
+        app.settings_input = Some("999999999".into());
+        app.settings_commit_input();
+        assert_eq!(app.cost_floor, 0.0);
+        assert!(
+            app.status().is_some_and(|s| s.contains("number")),
+            "an out-of-range cost floor said nothing: {:?}",
+            app.status()
+        );
+    }
     /// Closing a tab leaves you on the tab beside it, not on the dashboard.
     ///
     /// The bug this closes: the view was corrected by decrementing, which is
@@ -1257,7 +1765,9 @@ mod tests {
 
         app.on_key(alt(KeyCode::Char('t')));
         assert_eq!(app.mode, Mode::SwitchTab);
-        assert_eq!(app.switch_matches(), vec![0, 1, 2, 3]);
+        // The dashboard, three tabs, and the settings tab — the picker lists
+        // everything on the bar, and the settings tab is on the bar.
+        assert_eq!(app.switch_matches(), vec![0, 1, 2, 3, 4]);
 
         typed(&mut app, "cod");
         assert_eq!(app.switch_matches(), vec![2]);
@@ -1265,6 +1775,10 @@ mod tests {
         app.switch_filter.clear();
         typed(&mut app, "DASH");
         assert_eq!(app.switch_matches(), vec![0]);
+        // And so is the settings tab, by the name the bar gives it.
+        app.switch_filter.clear();
+        typed(&mut app, "SETT");
+        assert_eq!(app.switch_matches(), vec![4]);
 
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.mode, Mode::List);
@@ -1316,7 +1830,9 @@ mod tests {
             doing("also-busy", Signal::Busy),
         ];
         app.on_key(alt(KeyCode::Char('t')));
-        assert_eq!(app.switch_matches(), vec![0, 1, 2, 3, 4]);
+        // The dashboard, four tabs and the settings tab, which has no agent
+        // and so is listed under `All` and under no other state.
+        assert_eq!(app.switch_matches(), vec![0, 1, 2, 3, 4, 5]);
 
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.switch_state, SwitchState::NeedsYou);
@@ -1339,11 +1855,11 @@ mod tests {
         app.tab = 3;
         assert_eq!(app.switch_matches(), vec![3]);
 
-        // Opened again, every tab again.
+        // Opened again, every tab again, settings included.
         app.on_key(key(KeyCode::Esc));
         app.on_key(alt(KeyCode::Char('t')));
         assert_eq!(app.switch_state, SwitchState::All);
-        assert_eq!(app.switch_matches().len(), 5);
+        assert_eq!(app.switch_matches().len(), 6);
     }
 
     /// Alt+B is a word back while a field is being typed in, and the next tab

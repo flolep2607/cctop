@@ -2,7 +2,7 @@
 source: src/ui/snapshot.rs
 expression: screen
 ---
- 1:Dashboard │ + Tab (t)
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────────────────────────────────────────────── Settings
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │Live rate         $0.04                               ⡀  Models    █████████ claude-opus-4-1 68% claude-sonnet-4-5 32%│
 │Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │

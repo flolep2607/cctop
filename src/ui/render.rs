@@ -251,6 +251,30 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         };
     }
 
+    // The settings tab gets the same frame an agent tab does — the Overview
+    // stays put, so the money and the alerts that several of its rows tune are
+    // on screen while they are being tuned. Sharing `tab_chunks` rather than
+    // taking the whole area is what keeps that true, and the page below it is
+    // still the largest thing on the frame.
+    if app.on_settings() {
+        let chunks = tab_chunks(area);
+        draw_overview(frame, chunks[0], app);
+        modals::draw_settings(frame, chunks[1], app);
+        draw_footer(frame, chunks[2], app, &mut layout);
+        // A modal raised from the settings tab belongs to the tab, exactly as
+        // one raised from the dashboard belongs to the dashboard.
+        match app.mode {
+            Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
+            Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
+            Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
+            Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
+            Mode::Help => modals::draw_help(frame, area, app),
+            _ => {}
+        }
+        draw_toasts(frame, chunks[0], app);
+        return layout;
+    }
+
     // A tab's terminals replace the table and panels, and the Overview stays put
     // so the money and the alerts never leave the frame. Agents are resized to
     // the space that leaves them rather than cropped to fit, so giving cctop
@@ -342,7 +366,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
 
     match app.mode {
         Mode::Help => modals::draw_help(frame, area, app),
-        Mode::Settings => modals::draw_settings(frame, area, app),
         Mode::Search => modals::draw_search(frame, area, app),
         Mode::SortBy => modals::draw_sortby(frame, area, app),
         Mode::AgeFilter => modals::draw_age_filter(frame, area, app),
@@ -479,28 +502,33 @@ const ZOOM: &str = "⤢ ";
 
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
-    let titles: Vec<String> = std::iter::once("Dashboard".to_string())
-        .chain(app.tabs.iter().map(|tab| tab.title()))
-        .enumerate()
-        // The number is the Alt- key that jumps to the tab, not an ordinal —
-        // past nine there is no such key, so the label stops pretending.
-        .map(|(i, title)| match i + 1 {
-            n @ 1..=9 => format!("{n}:{title}"),
-            _ => title,
+    let titles: Vec<String> = (0..=app.tabs.len())
+        .map(|i| {
+            // The number is the Alt- key that jumps to the tab, not an ordinal
+            // — past nine there is no such key, so the label stops pretending.
+            match i + 1 {
+                n @ 1..=9 => format!("{n}:{}", app.tab_title(i)),
+                _ => app.tab_title(i),
+            }
         })
         .collect();
     let mut spans = Vec::new();
     let mut pos = area.x;
     // The new-tab button is the one thing the bar exists for, so its room is
     // reserved before the labels get any: nothing else here is reachable by
-    // mouse if it falls off the end.
+    // mouse if it falls off the end. The settings tab is reserved beside it and
+    // from the other end for the same reason — it is a tab like any other, and a
+    // bar that pushed it off the right edge would be a bar that could not be
+    // clicked its way to.
     let new_tab = match app.tab {
         // Which key to name depends on where the keyboard is: inside a pane it
         // belongs to the agent, so only the Alt- form gets through.
         0 => " + Tab (t) ",
         _ => " + Tab (Alt+n) ",
     };
-    let label_room = area.width.saturating_sub(new_tab.chars().count() as u16) as usize;
+    let settings = format!(" {} ", super::panes::SETTINGS_TITLE);
+    let reserved = new_tab.chars().count() + settings.chars().count() + 2;
+    let label_room = area.width.saturating_sub(reserved as u16) as usize;
 
     let hues: Vec<Option<theme::Hue>> = (0..titles.len()).map(|i| tab_hue(app, i)).collect();
     // A tab being recorded says so on the bar, where it is seen from every
@@ -593,6 +621,33 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                 .add_modifier(Modifier::BOLD),
         ));
         layout.workspace_new = Some((pos, pos + width));
+        pos += width;
+    }
+
+    // The settings tab, against the right edge rather than packed in with the
+    // rest. It is the one thing on the bar that is not about the work in
+    // front of you, and a fixed end is what makes it findable: someone who
+    // does not know cctop has a settings tab will find it in the corner rather
+    // than work out that `,` exists.
+    //
+    // Right-aligned rather than last-in-line, so that a bar crowded with agent
+    // tabs cannot push the place everything is configured off the screen.
+    let settings_w = settings.chars().count() as u16;
+    let right = area.x + area.width;
+    if pos + settings_w + 2 <= right {
+        let at = right - settings_w;
+        // Pad out to the edge with a rule, so the gap reads as "not a tab"
+        // rather than as a tab whose label has been elided away.
+        if at > pos {
+            spans.push(Span::styled(
+                "─".repeat((at - pos) as usize),
+                Style::default().fg(theme::colors().border),
+            ));
+            pos = at;
+        }
+        let index = app.settings_tab();
+        spans.push(Span::styled(settings, tab_style(app, index, None)));
+        layout.workspace_spans.push((pos, pos + settings_w, index));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -626,10 +681,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
 /// unpainted one, or every painted tab would be a block of the terminal's
 /// default.
 fn tab_hue(app: &App, i: usize) -> Option<theme::Hue> {
-    i.checked_sub(1)
-        .and_then(|t| app.tabs.get(t))
-        .and_then(|tab| tab.color)
-        .filter(|hue| hue.color() != Color::Reset)
+    app.tab_color(i).filter(|hue| hue.color() != Color::Reset)
 }
 
 /// How tab `i` of the bar is drawn at this moment: its fill or its plain ink,
@@ -644,7 +696,7 @@ fn tab_style(app: &App, i: usize, hue: Option<theme::Hue>) -> Style {
         // agent is the normal state of a tab, and a colour that vanished
         // every time its agent finished a turn would not be a mark at all.
         Some(hue) => {
-            let watched = i == app.tab;
+            let watched = i == app.position();
             let strength = match watched {
                 true => theme::Fill::Selected,
                 false => theme::Fill::Rest,
@@ -699,7 +751,7 @@ fn tab_style(app: &App, i: usize, hue: Option<theme::Hue>) -> Style {
             Some(tabs::Attention::Done) => Style::default()
                 .fg(theme::colors().accent)
                 .add_modifier(Modifier::BOLD),
-            None if i == app.tab => theme::selected(),
+            None if i == app.position() => theme::selected(),
             None => Style::default().fg(theme::colors().dim),
         },
     }
@@ -732,7 +784,9 @@ fn needs_you(app: &App, rest: Style, lit: Style) -> Style {
 /// moved: a pulse snapped to 256 colours changes only a handful of times a
 /// breath, and a frame between two identical ones is work for nothing.
 pub(super) fn bar_styles(app: &App) -> Vec<Style> {
-    (0..=app.tabs.len())
+    // Past the last workspace tab, because the settings tab is drawn too and
+    // the loop compares these to notice the bar moving.
+    (0..=app.settings_tab())
         .map(|i| tab_style(app, i, tab_hue(app, i)))
         .collect()
 }
@@ -2524,9 +2578,31 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
 /// Messages used to take this row over for a few seconds, which cost the keys
 /// they covered and was lost to the next message anyway. They are toasts now
 /// — see [`super::toast`] — and the footer stays a legend.
+/// The settings page's hints, which are the page's own rather than the
+/// dashboard's or a terminal's.
+///
+/// Its own, because a page that showed the dashboard's keys would be promising
+/// a selection and filters that are not on this screen, and showing a
+/// terminal's would be promising keys for a pty that is not behind it. The
+/// one thing a page must never do is describe somebody else's screen.
+fn settings_hints() -> Vec<Hint> {
+    vec![
+        hint("/", "Filter"),
+        hint("↵", "Change"),
+        hint("⌫", "Reset"),
+        hint("e", "Edit file"),
+        hint(",", "Back"),
+        hint("Alt+←→", "Tabs"),
+        hint("F1", "Help"),
+        hint("F10", "Quit"),
+    ]
+}
+
 fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let total = area.width as usize;
-    let (hints, badges) = if app.tab > 0 {
+    let (hints, badges) = if app.on_settings() {
+        (settings_hints(), Vec::new())
+    } else if app.tab > 0 {
         // A terminal tab has no dashboard selection, filters or panels to act
         // on, so it has no badges either — just the compact map of the keys
         // cctop keeps.
@@ -3879,8 +3955,18 @@ mod tests {
             "the pty was never resized to the pane; wanted {want:?}"
         );
         assert!(
-            screen[0].starts_with(" 1:Dashboard │ 2:HELLO-FROM-AGENT"),
+            screen[0].starts_with(" 1:Dashboard │ 2:HELLO-FROM"),
             "the tab bar is not the top row: {:?}",
+            screen[0]
+        );
+        // The settings tab is on the right end of the bar even on a 60-column
+        // terminal, which is the point of reserving its room before the labels
+        // get any: at this width the agent tab's label is shortened to pay for
+        // it, because a label that is elided is still a label you can click
+        // and a settings tab that fell off the end would not be a tab at all.
+        assert!(
+            screen[0].ends_with(" Settings "),
+            "the settings tab is not at the right end: {:?}",
             screen[0]
         );
         assert!(

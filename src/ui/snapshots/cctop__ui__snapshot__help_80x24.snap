@@ -2,7 +2,7 @@
 source: src/ui/snapshot.rs
 expression: screen
 ---
- 1:Dashboard │ + Tab (t)
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
 ╭ Overview ────────────────────────────────────────────────────────────────────╮
 │L╭ Help ────────────────────────────────────────── cctop VERSION            ╮ │
 │T│Start here                                                                ┃ │

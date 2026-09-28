@@ -174,7 +174,7 @@ Agents can ask this themselves through `check_conflicts` — see
 The `!` column warns *you*, and by the time you look the second agent has
 usually made its edit. With the hooks installed, cctop can tell that agent
 instead, at the moment it reaches for the file. It is off by default; turn it on
-in the settings panel (`,`) or in `config.toml`:
+on the settings tab (`,`) or in `config.toml`:
 
 ```toml
 [settings]
@@ -379,6 +379,33 @@ The cursor never lands on a refusal, so `Enter` always does something. The
 letters stay live inside the menu, so `Enter` `R` and a plain `R` are the same
 two keystrokes — the menu shows the shortcuts rather than replacing them.
 Clicking works too. `Esc`, or a click outside, closes it.
+
+## The settings tab
+
+Everything cctop can be told to do differently is on one tab, at the right end
+of the workspace bar. `,` goes there, clicking **Settings** goes there, and
+`Alt+←`/`Alt+→` step onto it like any other tab. It is not a popup: it is a tab,
+so it holds the whole frame below the bar rather than a small box over the
+table, and the bar stays clickable while you are on it.
+
+It is in three parts, because the values live in three places:
+
+| Part | Lives in | What is on it |
+|------|----------|---------------|
+| `config.toml · [settings]` | the file you wrote | the theme, the alerts, how long a session counts as idle, hidden columns |
+| `Remembered · view` | `ui-prefs.json` | the tree, the filters, the cost floor, which panel opens, the account a new tab launches under |
+| `config.toml · [keys]` | the file you wrote | every dashboard keybind |
+
+`/` filters the page, matched against a row's name, what it does *and* its
+current value — so `alert`, `quit` and `83.5` all find something. `Enter`
+changes the row under the cursor: a toggle flips, a choice turns to the next
+one, a keybind waits for the key you press next, and a number opens a field.
+`⌫` puts it back to its default, and `e` opens `config.toml` in your editor.
+
+The middle part is the one that is not in `config.toml`. Those are choices cctop
+remembers for itself in `ui-prefs.json`, and they are on the page because a
+setting you cannot see is a setting you cannot find: until now the only way to
+reach them was to remember which key pressed which one.
 
 ## Every key
 

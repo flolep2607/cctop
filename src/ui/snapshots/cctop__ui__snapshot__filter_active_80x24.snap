@@ -2,7 +2,7 @@
 source: src/ui/snapshot.rs
 expression: screen
 ---
- 1:Dashboard │ + Tab (t)
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
 ╭ Overview ────────────────────────────────────────────────────────────────────╮
 │Live rate         $0.04                               ⡀  Models               │
 │Today             $8.97                               ⡀  Sessions  4 · 2 live │

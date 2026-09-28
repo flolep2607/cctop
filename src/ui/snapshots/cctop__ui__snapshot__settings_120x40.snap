@@ -1,0 +1,44 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models    █████████ claude-opus-4-1 68% claude-sonnet-4-5 32%│
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
+│This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Settings ────────────────────────────────────────────────────────────────────────────────────────────────── / filter ╮
+│  File ~/.config/cctop/config.toml                                                                                    ┃
+│                                                                                                                      ┃
+│config.toml · [settings]                                                                                              ┃
+│  theme             "auto"           auto/light/dark/mono; $CCTOP_THEME wins. On restart                              ┃
+│  notify            false            Bell + desktop alert when a session needs you                                    ┃
+│  auto_update       true             Offer to update at startup when a newer release is out                           ┃
+│  compact_threshold 83.5             Context % at which the agent compacts. On restart                                ┃
+│  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"                                             ┃
+│  alert_cost        0                Alert when a session's cost passes $X                                            ┃
+│  alert_burn        0                Alert when a session burns over $X an hour                                       ┃
+│  alert_today       0                Alert when today's spend passes $X                                               ┃
+│  alert_errors      0                Alert when X% of 10m of tool calls fail (try 25)                                 │
+│  alert_error_calls 10               …counting only once there are this many calls                                    │
+│  alert_stall       0                Alert when a working agent writes nothing for X min (try 10)                     │
+│  warn_agents       false            Tell an agent when a live peer just wrote its file                               │
+│  idle_after        6                Hours quiet before a live session counts as idle (I)                             │
+│  read_screen       false            Read each agent's screen in a tab for its state, over hooks                      │
+│                                                                                                                      │
+│Remembered · view                                                                                                     │
+│  tree              off              Draw the table as repositories and their checkouts                               │
+│  live_only         off              Only sessions that are running                                                   │
+│  age               default          Hide sessions quiet for longer than                                              │
+│  cost_floor        $0               Only sessions costing at least $X (0 for all)                                    │
+│  bottom_panel      Processes      * Which panel opens under the table                                                │
+│  tool_show_diff    off              Show each edit's diff under its row                                              │
+│  tool_live_only    off              Tool Activity shows this run only                                                │
+│  subagent_sort     last ↓           What the Subagents panel sorts by                                                │
+│  claude_account    default          The Claude account a new tab launches under                                      │
+│  codex_account     default          The Codex account a new tab launches under                                       │
+│                                                                                                                      │
+╰ 74   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+/ Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

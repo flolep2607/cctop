@@ -9,7 +9,7 @@
 //! wins.
 //!
 //! [`SETTINGS`] and [`BINDINGS`] are the whole schema. The template written
-//! into a fresh file, the settings panel and the key remapping are all derived
+//! into a fresh file, the settings page and the key remapping are all derived
 //! from them, so a knob cannot be documented in one place and missing from
 //! another.
 
@@ -42,7 +42,7 @@ pub const SETTINGS: [(&str, &str, &str); 14] = [
     (
         "hide_columns",
         "\"\"",
-        "Columns to hide, e.g. \"tok_rate,mem\". On restart",
+        "Columns to hide, e.g. \"tok_rate,mem\"",
     ),
     // The alerts, each off at 0. See `crate::alert` for what each one reads.
     ("alert_cost", "0", "Alert when a session's cost passes $X"),
@@ -100,7 +100,7 @@ pub const IDLE_AFTER_HOURS: f64 = 6.0;
 pub const BINDINGS: [(&str, &str, &str); 50] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
-    ("settings", ",", "This settings panel"),
+    ("settings", ",", "The settings tab, at the end of the bar"),
     ("up", "k", "Move up (the arrow keeps working)"),
     ("panel_up", "shift+up", "Scroll the bottom panel up"),
     ("panel_down", "shift+down", "Scroll the bottom panel down"),
