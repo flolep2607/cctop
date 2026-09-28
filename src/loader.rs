@@ -279,6 +279,12 @@ impl Loader {
 
         for s in sessions.iter_mut() {
             let key = s.key();
+            // A stopped session has no command line to read, but its provider
+            // and surface still say where it ran; without this every row that
+            // is not live showed the column as unknown.
+            if s.harness.is_empty() {
+                s.harness = default_harness(s).into();
+            }
             if let Some(pm) = metrics.get(&key) {
                 s.process = Some(pm.clone());
                 s.harness = harness_from_process(s, &pm.command).into();
@@ -643,11 +649,17 @@ fn harness_from_process(session: &Session, command: &str) -> &'static str {
     if command.contains("hermes") {
         return "Hermes";
     }
+    default_harness(session)
+}
+
+/// The harness a session's own record implies, for when no command line says
+/// otherwise. An editor session is named by its provider, not assumed to be
+/// Cursor: Windsurf is an editor too.
+fn default_harness(session: &Session) -> &'static str {
     match session.surface {
-        session::Surface::Editor => "Cursor",
         session::Surface::DesktopCode => "Claude Desktop",
         session::Surface::DesktopCowork => "Claude Cowork",
-        session::Surface::Cli => match session.provider {
+        session::Surface::Cli | session::Surface::Editor => match session.provider {
             Provider::Claude => "ClaudeCode",
             Provider::Codex => "Codex",
             Provider::Cursor => "Cursor",
@@ -1043,5 +1055,12 @@ mod tests {
         other.provider = Provider::Pi;
         assert_eq!(harness_from_process(&other, "pi --session x"), "Pi");
         assert_eq!(harness_from_process(&other, "hermes run"), "Hermes");
+
+        let mut windsurf = Session::new(Provider::Windsurf, "x".into());
+        windsurf.surface = session::Surface::Editor;
+        assert_eq!(
+            harness_from_process(&windsurf, "/usr/share/windsurf/windsurf"),
+            "Windsurf"
+        );
     }
 }

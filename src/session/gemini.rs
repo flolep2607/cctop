@@ -109,7 +109,6 @@ fn summarize(path: PathBuf) -> Option<Session> {
     // the identity here.
     let mut session = Session::new(Provider::Gemini, stem);
     session.surface = Surface::Cli;
-    session.harness = "Gemini".into();
     session.started_at = started;
     session.last_active = util::ms_to_rfc3339(config::file_mtime_ms(&path) as i64);
     session.label_source = project_root(path.parent()?);

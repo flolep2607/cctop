@@ -166,7 +166,6 @@ pub fn list_sessions() -> Vec<Session> {
             let Some(id) = tab_id(tab) else { continue };
             let mut session = Session::new(Provider::Windsurf, id);
             session.surface = Surface::Editor;
-            session.harness = "Windsurf".into();
             session.started_at = touched.clone();
             session.last_active = touched.clone();
             session.label_source = dir.clone();
