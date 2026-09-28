@@ -189,7 +189,7 @@ const UNCONTESTED_EXT: [&str; 9] = [
 const UNCONTESTED_NAME: [&str; 3] = ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml"];
 
 /// Whether two agents writing `path` is worth reporting.
-fn contested(path: &str) -> bool {
+pub fn contested(path: &str) -> bool {
     let path = Path::new(path);
     let matches = |part: Option<&std::ffi::OsStr>, list: &[&str]| {
         part.and_then(|p| p.to_str())

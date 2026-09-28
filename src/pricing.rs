@@ -525,6 +525,25 @@ impl Provider {
         }
     }
 
+    /// The provider named by `name`, or `None` for anything else.
+    ///
+    /// The inverse of [`Provider::as_str`], and deliberately total in the other
+    /// direction: a string that names no provider cctop knows is `None` rather
+    /// than a guess, because every caller here is about to act on the answer.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "claude" => Provider::Claude,
+            "codex" => Provider::Codex,
+            "cursor" => Provider::Cursor,
+            "devin" => Provider::Devin,
+            "gemini" => Provider::Gemini,
+            "opencode" => Provider::OpenCode,
+            "pi" => Provider::Pi,
+            "windsurf" => Provider::Windsurf,
+            _ => return None,
+        })
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Provider::Claude => "claude",

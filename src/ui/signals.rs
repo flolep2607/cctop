@@ -13,15 +13,27 @@ use super::*;
 /// fast enough to catch the eye.
 const BLINK_MS: u128 = 600;
 
-/// The eight characters a Gemini chat file is named after, out of the row id
-/// that file produced: `session-2026-05-14T17-34-79709c93` yields `79709c93`.
+/// How often a detached tab's screen is re-read. Each read is a `capture-pane`
+/// subprocess, which is not a per-frame cost the way an attached pane's own
+/// parser is — and a permission prompt can wait a second to be seen.
+const PEEK_EVERY: Duration = Duration::from_secs(1);
+
+/// What the stall alert needs from a session's hooks.
 ///
-/// `None` for every other harness's ids, which is what keeps this from matching
-/// on the tail of a uuid that happens to line up: only a stem shaped like
-/// Gemini's is looked up loosely, and only ever against a full id's prefix.
-fn gemini_id_tail(session_id: &str) -> Option<&str> {
-    let tail = session_id.strip_prefix("session-")?.rsplit_once('-')?.1;
-    (tail.len() == 8 && tail.chars().all(|c| c.is_ascii_alphanumeric())).then_some(tail)
+/// Read off the last report whether or not it is still believed. A working
+/// claim lapses after a quarter of an hour of silence so that the row stops
+/// saying "busy" about a session nobody is running — but for the stall alert
+/// that silence is the finding, not a reason to stop looking. The row's own
+/// state, which does honour the lapse, is checked beside it.
+fn stall_view(reports: &crate::hook::Reports, session_id: &str) -> crate::alert::Hooked {
+    use crate::alert::Hooked;
+    use crate::hook::Signal;
+    match reports.report(session_id).map(|r| r.signal) {
+        None => Hooked::Unknown,
+        Some(Signal::Busy | Signal::Started) => Hooked::Working,
+        Some(Signal::Acting | Signal::Compacting) => Hooked::InFlight,
+        Some(Signal::NeedsInput | Signal::Idle | Signal::Ended) => Hooked::Quiet,
+    }
 }
 
 impl App {
@@ -34,29 +46,59 @@ impl App {
     /// real it stays real, and leaving the flag up would have the whole table
     /// recomputed on every pass of the loop for the rest of the session.
     pub(super) fn promote_matured_prompts(&mut self) -> bool {
-        let mut matured = false;
-        for reported in self.hooked.values_mut() {
-            if reported.provisional && reported.at.elapsed() >= crate::hook::PERMISSION_GRACE {
-                reported.provisional = false;
-                matured = true;
-            }
-        }
+        let matured = self.reports.promote_matured();
         self.needs_redraw |= matured;
         matured
     }
 
-    /// Let the notifier see this refresh, and ring if anything crossed.
+    /// Let the notifier see this refresh, and queue a bell for anything that
+    /// crossed or fired.
     ///
-    /// Called from the event loop only when the rows actually moved. It has to
-    /// run on this thread: the bell and the OSC 9 sequence go straight to
-    /// stdout, which ratatui owns, and only here is it certain that no frame is
-    /// halfway through being flushed.
+    /// Called from the event loop only when the rows actually moved, which
+    /// then rings once for the whole pass with
+    /// [`Notifier::ring_pending`](crate::notify::Notifier::ring_pending). That
+    /// has to run on this thread: the bell and the OSC 9 sequence go straight
+    /// to stdout, which ratatui owns, and only here is it certain that no
+    /// frame is halfway through being flushed.
     pub(super) fn check_bells(&mut self) {
         // The serve's link is what a webhook POST points at, so it is refreshed
         // with the crossings: starting `B` mid-run must not leave every future
         // notification saying there is nowhere to look.
         self.notify.link_base = self.serving.as_ref().map(|s| s.best().to_string());
         self.notify.observe(&self.sessions);
+
+        let reports = &self.reports;
+        let fired = self.alerts.observe(
+            &self.settings.alert_rules(),
+            &self.sessions,
+            self.stats.spend_today,
+            |s| stall_view(reports, &s.session_id),
+            Instant::now(),
+            chrono::Utc::now(),
+        );
+        self.announce_alerts(fired);
+    }
+
+    /// Tell the user about the alerts that just fired: a toast each, whether
+    /// or not `w` is on — the thresholds are the opt-in, and a toast is quiet —
+    /// and one clause in the refresh's bell for the lot when it is.
+    ///
+    /// One clause, as with the sessions that finish together: three rings in
+    /// a row is noise, and the toasts already name every one.
+    fn announce_alerts(&mut self, fired: Vec<crate::alert::Fired>) {
+        let Some(first) = fired.first() else {
+            return;
+        };
+        self.notify.chime(&first.text, fired.len() - 1);
+        for alert in fired {
+            crate::elog::event(
+                "alert",
+                alert.kind_name(),
+                serde_json::json!({ "text": alert.text, "session": alert.key }),
+            );
+            self.notify.post_event("alert", &alert.text);
+            self.set_status(alert.text);
+        }
     }
 
     /// A quota window that just opened back up.
@@ -68,9 +110,7 @@ impl App {
     pub(super) fn announce_quota_freed(&mut self, text: &str) {
         crate::elog::event("quota", "freed", serde_json::json!({ "text": text }));
         self.notify.post_event("quota-freed", text);
-        if self.notify.enabled {
-            crate::notify::ring(&format!("cctop: {text}"));
-        }
+        self.notify.chime(text, 0);
         self.set_status(text.to_string());
     }
 
@@ -97,11 +137,12 @@ impl App {
             return;
         };
         let key = rang.key.clone();
+        self.reveal(&key);
         // The parent row, not a child of it: the bell rang for the session.
         match self
             .visible
             .iter()
-            .position(|&r| !r.is_subagent() && self.sessions[r.session()].key() == key)
+            .position(|&r| matches!(r, Row::Session(i) if self.sessions[i].key() == key))
         {
             Some(row) => {
                 self.selected = row;
@@ -121,7 +162,68 @@ impl App {
     /// in front of you, so blinking its title tells you nothing you cannot see.
     pub fn tab_attention(&self, index: usize) -> Option<tabs::Attention> {
         let tab = self.tabs.get(index.checked_sub(1)?)?;
-        tab.attention(index == self.tab, &|pid| self.pane_signal(pid))
+        let watched = index == self.tab;
+        match tab.attention(watched, &|pid| self.pane_signal(pid))? {
+            // Upgraded here rather than decided inside the tab: whether a turn
+            // has been seen is the app's memory, not anything a pane holds —
+            // see [`seen`](super::seen). Only a tab that already reads as idle
+            // is, so a disagreement between the row and the screen leaves the
+            // screen's answer standing.
+            tabs::Attention::Idle
+                if tab
+                    .unwatched_agents(watched)
+                    .into_iter()
+                    .any(|pid| self.pid_done(pid)) =>
+            {
+                Some(tabs::Attention::Done)
+            }
+            attention => Some(attention),
+        }
+    }
+
+    /// Whether the agent running as `pid` finished a turn you have not looked
+    /// at.
+    pub(super) fn pid_done(&self, pid: u32) -> bool {
+        self.sessions
+            .iter()
+            .filter(|session| session.root_pid() == Some(pid))
+            .any(|session| self.seen.is_done(&session.key()))
+    }
+
+    /// The session being looked at, as [`seen`](super::seen) counts looking:
+    /// the focused pane's agent in a tab, the selected row on the dashboard.
+    fn viewed_session(&self) -> Option<String> {
+        let pid = match self.tab {
+            0 => return self.selected_session().map(Session::key),
+            tab => {
+                let tab = self.tabs.get(tab - 1)?;
+                tab.panes.get(tab.focus)?.agent()
+            }
+        };
+        self.sessions
+            .iter()
+            .find(|session| session.root_pid() == Some(pid))
+            .map(Session::key)
+    }
+
+    /// Bring the unseen marks up to date with what the rows say and where you
+    /// are looking. Returns whether any mark came or went.
+    ///
+    /// Every pass of the loop rather than on refresh alone: looking is a
+    /// keypress, and a mark that outlived the look by a refresh interval would
+    /// be a mark on the thing you are reading.
+    pub(super) fn observe_seen(&mut self) -> bool {
+        let viewed = self.viewed_session();
+        let live: Vec<(String, seen::Phase)> = self
+            .sessions
+            .iter()
+            .filter(|session| session.is_running())
+            .map(|session| (session.key(), seen::Phase::of(session.activity_state)))
+            .collect();
+        self.seen.observe(
+            live.iter().map(|(key, phase)| (key.as_str(), *phase)),
+            viewed.as_deref(),
+        )
     }
 
     /// Fold in whatever the agents have reported.
@@ -143,103 +245,31 @@ impl App {
                 serde_json::json!({
                     "session": event.session_id,
                     "signal": format!("{:?}", event.reported.signal),
+                    // Which subagent spoke, if one did: a question the tab
+                    // failed to show is only diagnosable from which agent
+                    // asked and which sibling spoke over it.
+                    "agent": event.agent.as_deref().unwrap_or_default(),
+                    "provisional": event.reported.provisional,
                     "pids": event.pids.len(),
                     "cwd": &event.reported.cwd,
                 }),
             );
-            lifecycle |= event.reported.signal.is_lifecycle();
-            if let Some(agent) = event.finished_agent {
+            if let Some(agent) = event.finished_agent.clone() {
                 self.finished_agents.insert(agent);
             }
-            match event.reported.signal {
-                // Nothing more will be said about it, and leaving the last
-                // signal behind would have the row claim a state forever.
-                crate::hook::Signal::Ended => {
-                    self.hooked.remove(&event.session_id);
-                    self.asking_agents.remove(&event.session_id);
-                    moved |= self.hook_pids.remove(&event.session_id).is_some();
-                }
-                _ => {
-                    if !event.pids.is_empty()
-                        && self.hook_pids.get(&event.session_id) != Some(&event.pids)
-                    {
-                        self.hook_pids.insert(event.session_id.clone(), event.pids);
-                        moved = true;
-                    }
-                    let reported =
-                        self.still_asking(&event.session_id, event.agent, event.reported);
-                    self.hooked.insert(event.session_id, reported);
-                }
-            }
+            // The folding — open questions standing, stale claims swept, ended
+            // sessions forgotten — lives in [`Reports::observe`], shared with
+            // a standalone `cctop serve`, which has to agree with this table.
+            let (is_lifecycle, claims_moved) = self.reports.observe(&event);
+            lifecycle |= is_lifecycle;
+            moved |= claims_moved;
         }
         if moved {
-            self.note_hook_pids();
-        }
-        // A working claim that nothing has confirmed for a quarter of an hour is
-        // dropped rather than believed: see
-        // [`Reported::is_current`](crate::hook::Reported::is_current). Swept
-        // here because this is the only place the map grows, and a session that
-        // was killed mid-turn will never send the event that would clear it.
-        self.hooked.retain(|_, reported| reported.is_current());
-        // A chain outlives its usefulness exactly when the report it came with
-        // does, and a session that has been swept must stop claiming a pid —
-        // otherwise a reused pid would be handed to a session that is gone. A
-        // waiting session is never swept, which is the case this exists for.
-        let before = self.hook_pids.len();
-        self.hook_pids.retain(|id, _| self.hooked.contains_key(id));
-        if self.hook_pids.len() != before {
             self.note_hook_pids();
         }
         self.apply_finished_agents();
         self.apply_reports();
         (changed, lifecycle)
-    }
-
-    /// What a session should be taken to be doing after `reported`, given the
-    /// questions its subagents are still waiting on.
-    ///
-    /// A subagent's question stands until *that* subagent says something else —
-    /// its tool running, or being denied, or it stopping — however busy the
-    /// agents beside it are. While any stands, the session is asking: the most
-    /// recent open question is what it reports, so the tab stays lit and the
-    /// bell's grace period is the question's own.
-    fn still_asking(
-        &mut self,
-        session: &str,
-        agent: Option<String>,
-        reported: crate::hook::Reported,
-    ) -> crate::hook::Reported {
-        let open = self.asking_agents.entry(session.to_string()).or_default();
-        match agent {
-            Some(agent) => match reported.signal {
-                crate::hook::Signal::NeedsInput => {
-                    open.insert(agent, reported.clone());
-                }
-                _ => {
-                    open.remove(&agent);
-                }
-            },
-            // The session's own turn ending. A subagent it was waiting on cannot
-            // still be asking once it has — a prompt dismissed with Esc ends the
-            // turn and sends nothing from the subagent — and a question kept
-            // past that would light the tab for good, since a question is never
-            // aged out.
-            //
-            // ponytail: a *background* subagent asking across its parent's
-            // `Stop` is taken to have been answered.
-            None if reported.signal == crate::hook::Signal::Idle => open.clear(),
-            None => {}
-        }
-        if reported.signal == crate::hook::Signal::NeedsInput {
-            return reported;
-        }
-        match open.values().max_by_key(|asked| asked.at) {
-            Some(asked) => asked.clone(),
-            None => {
-                self.asking_agents.remove(session);
-                reported
-            }
-        }
     }
 
     /// Tell the worker which processes the agents say they are running under.
@@ -255,10 +285,10 @@ impl App {
     /// replacement cannot drift from what this cctop believes the way a stream
     /// of deltas could.
     fn note_hook_pids(&self) {
-        crate::hook::save_claims(&self.hook_pids);
-        let _ = self
-            .tx
-            .send(super::worker::Request::HookClaims(self.hook_pids.clone()));
+        crate::hook::save_claims(&self.reports.claims);
+        let _ = self.tx.send(super::worker::Request::HookClaims(
+            self.reports.claims.clone(),
+        ));
     }
 
     /// Stamp each session with what its own hooks reported: the permission mode
@@ -273,35 +303,67 @@ impl App {
     /// web report, `--json`, and a fleet peer — rather than each of them being
     /// handed the UI's map of live reports and asked to agree with the others.
     pub(crate) fn apply_reports(&mut self) {
-        if self.hooked.is_empty() {
-            return;
-        }
+        // Always run, even with nothing new to stamp: `asking_for` is only
+        // ever set here, and a row has to lose it when the prompt that named
+        // it went away — including by the last report being swept.
         for session in &mut self.sessions {
-            if let Some(reported) = self.hooked.get(&session.session_id) {
-                // Only ever set from a report. A session whose newest event did
-                // not carry the field keeps the last mode that did, because the
-                // setting has not changed just because one event was quiet
-                // about it.
-                if reported.permission.is_some() {
-                    session.permission = reported.permission;
-                }
-                // The report is only allowed to say the two things the
-                // transcript cannot — see
-                // [`Signal::activity`](crate::hook::Signal::activity) — so a
-                // stale-but-not-yet-expired working claim cannot talk a row out
-                // of an API error it is genuinely sitting in.
-                // A permission prompt auto mode may still answer is not yet
-                // news: see
-                // [`Reported::is_settled`](crate::hook::Reported::is_settled).
-                // The row keeps whatever the transcript makes of it — which is
-                // "working", because that is what the agent is doing.
-                if reported.is_settled()
-                    && let Some(state) = reported.signal.activity()
-                {
-                    session.activity_state = state;
-                }
-            }
+            // The screen, when it is being read and says something, outranks
+            // every report: it is what the agent is showing *now*, where a hook
+            // event is what it said last — late for a permission prompt, stale
+            // for a question already answered, absent when hooks are not
+            // installed at all. See [`App::read_screens`].
+            let screened = session
+                .root_pid()
+                .and_then(|pid| self.screen_read.get(&pid));
+            session.apply_reports(self.reports.report(&session.session_id), screened);
         }
+    }
+
+    /// Read every tab's agent off its screen, when the setting asks for it. True when any verdict changed, so the rows are restamped.
+    ///
+    /// The hooks are how an agent says what it is doing, and they can fail in
+    /// ways that look exactly like an agent with nothing to say: not installed,
+    /// installed at a binary that has since moved, a session started before
+    /// they were, a permission prompt announced six seconds late. The screen
+    /// has none of those failure modes, only its own — it has to be one cctop
+    /// holds, and in words cctop knows — which is why it is opt-in rather than
+    /// the default.
+    ///
+    /// A detached rmux tab's screen is read too, just on a slower clock: each
+    /// one is a `capture-pane` of a session this cctop holds no parser for,
+    /// where an attached pane's screen is already in memory. The reads merge
+    /// into one map — a pid knows one verdict however its screen was reached.
+    pub(super) fn read_screens(&mut self) -> bool {
+        if self.settings.read_screen != Some(true) {
+            let had = !self.screen_read.is_empty();
+            self.screen_read.clear();
+            self.peeked.clear();
+            self.peeked_at = None;
+            return had;
+        }
+        let mut read: HashMap<u32, crate::peek::Screened> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .filter_map(|pane| Some((pane.agent(), pane.read_screen()?)))
+            .collect();
+        let due = self.peeked_at.is_none_or(|at| at.elapsed() >= PEEK_EVERY);
+        if due {
+            self.peeked_at = Some(Instant::now());
+            self.peeked = self
+                .tabs
+                .iter()
+                .filter_map(|tab| {
+                    let shared = tab.shared.as_ref()?;
+                    let screened = crate::peek::named(&shared.name)?;
+                    Some((shared.pid?, screened))
+                })
+                .collect();
+        }
+        read.extend(self.peeked.iter().map(|(pid, read)| (*pid, read.clone())));
+        let changed = read != self.screen_read;
+        self.screen_read = read;
+        changed
     }
 
     /// Mark the subagents whose own hook has reported them finished.
@@ -331,21 +393,10 @@ impl App {
         // Checked here as well as in the sweep: the sweep runs when an event
         // arrives, and a session that has gone silent is precisely the one that
         // sends none — so between events the map still holds the stale claim.
-        if let Some(reported) = self.hooked.get(session_id) {
-            let show = reported.is_current() && reported.is_settled();
-            return show.then_some(reported.signal);
-        }
-        // Gemini CLI reports a full session id, but names the chat file it
-        // writes — which is the only identity cctop's rows have, because
-        // resuming reuses the id across disjoint files — after the *first eight
-        // characters* of it. Without this last step every Gemini event lands on
-        // no row at all.
-        let tail = gemini_id_tail(session_id)?;
-        self.hooked
-            .iter()
-            .find(|(id, _)| id.starts_with(tail))
-            .filter(|(_, reported)| reported.is_current() && reported.is_settled())
-            .map(|(_, reported)| reported.signal)
+        self.reports
+            .report(session_id)
+            .filter(|reported| reported.is_current() && reported.is_settled())
+            .map(|reported| reported.signal)
     }
 
     /// What has been reported about the agent running as `pid`, if anything.
@@ -359,7 +410,8 @@ impl App {
     /// panes and this runs once per frame, so a map would be state to keep
     /// correct in exchange for nothing measurable.
     pub(super) fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
-        self.reported_by(pid).or_else(|| {
+        let screen = self.screen_read.get(&pid).map(|read| read.signal);
+        screen.or_else(|| self.reported_by(pid)).or_else(|| {
             self.sessions
                 .iter()
                 .filter(|session| session.root_pid() == Some(pid))
@@ -425,7 +477,7 @@ impl App {
         running: &[crate::rmux::Running],
         now: u64,
     ) -> Vec<(String, crate::hook::Signal)> {
-        if self.hooked.is_empty() {
+        if self.reports.hooked.is_empty() {
             return Vec::new();
         }
         running
@@ -466,7 +518,7 @@ impl App {
             .map(|session| session.session_id.clone())
             .collect();
         for id in answered {
-            if let Some(reported) = self.hooked.get_mut(&id)
+            if let Some(reported) = self.reports.hooked.get_mut(&id)
                 && reported.signal.awaits_you()
             {
                 reported.signal = crate::hook::Signal::Busy;
@@ -550,6 +602,7 @@ mod tests {
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -566,7 +619,7 @@ mod tests {
     fn a_subagents_question_outlives_what_its_sibling_does_next() {
         use crate::hook::Signal::{Acting, Busy, Idle, NeedsInput};
         let mut app = test_app();
-        let now = |app: &App| app.hooked.get("a").map(|r| r.signal);
+        let now = |app: &App| app.reports.hooked.get("a").map(|r| r.signal);
 
         app.apply_hooks(vec![heard(NeedsInput, Some("sub-1"))]);
         app.apply_hooks(vec![heard(Acting, Some("sub-2"))]);
@@ -591,7 +644,7 @@ mod tests {
         app.apply_hooks(vec![heard(NeedsInput, Some("sub-1"))]);
         app.apply_hooks(vec![heard(Idle, None)]);
         assert_eq!(now(&app), Some(Idle), "a dismissed question stayed up");
-        assert!(!app.asking_agents.contains_key("a"));
+        assert!(!app.reports.asking_agents.contains_key("a"));
     }
     use crate::ui::tests::{session, test_app};
     /// What gets written onto a session, and — mostly — what does not.
@@ -644,6 +697,7 @@ mod tests {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -692,6 +746,7 @@ mod tests {
                 signal: crate::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -729,6 +784,7 @@ mod tests {
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -763,6 +819,117 @@ mod tests {
         );
     }
 
+    /// The whole way from bytes on a pane to a verdict: a Claude tab whose
+    /// footer holds a prompt reads as asking, but only with the setting on; the
+    /// same words are a turn in flight in Gemini; and a shell is not read.
+    #[test]
+    fn a_tab_is_read_off_its_screen_when_asked() {
+        use super::tabs::{Pane, Tab};
+        use crate::hook::Signal;
+        let footer = " Do you want to proceed?\r\n \u{276f} 1. Yes\r\n\r\n Esc to cancel \u{b7} Tab to amend";
+        let tab = |label: &str, text: &str| {
+            let mut pane = Pane::for_test(label);
+            pane.view.parser.process(text.as_bytes());
+            Tab::new(pane)
+        };
+        let mut app = test_app();
+        app.tabs = vec![tab("claude", footer)];
+        assert!(!app.read_screens(), "off unless the file says so");
+        assert!(app.screen_read.is_empty());
+
+        app.settings.read_screen = Some(true);
+        assert!(app.read_screens(), "a new verdict is a change");
+        assert_eq!(
+            app.screen_read.get(&4321).map(|s| s.signal),
+            Some(Signal::NeedsInput)
+        );
+        assert_eq!(app.pane_signal(4321), Some(Signal::NeedsInput));
+        assert!(!app.read_screens(), "the same verdict twice is not");
+
+        app.tabs = vec![tab("gemini", " \u{280f} Reading files (esc to cancel, 3s)")];
+        assert!(app.read_screens());
+        assert_eq!(
+            app.screen_read.get(&4321).map(|s| s.signal),
+            Some(Signal::Busy),
+            "Gemini's working hint"
+        );
+
+        app.tabs = vec![tab("zsh", footer)];
+        assert!(app.read_screens());
+        assert!(app.screen_read.is_empty(), "a shell has no footer to read");
+    }
+
+    /// With the screen read, what it shows outranks what the hook last said —
+    /// in both directions — and a screen with nothing recognisable on it
+    /// leaves the hook's word standing.
+    #[test]
+    fn the_screen_outranks_a_stale_report() {
+        use crate::hook::Signal;
+        use crate::session::ActivityState;
+        let mut app = test_app();
+        let mut row = session("a", true, "proj");
+        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+            pid: 4321,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        app.sessions = vec![row];
+        app.apply_hooks(vec![crate::hook::Event {
+            session_id: "a".into(),
+            pids: Vec::new(),
+            reported: crate::hook::Reported {
+                signal: Signal::Idle,
+                cwd: "/w/proj".into(),
+                permission: None,
+                ask: None,
+                at: std::time::Instant::now(),
+                provisional: false,
+            },
+            finished_agent: None,
+            agent: None,
+        }]);
+        app.apply_reports();
+        assert_eq!(
+            app.sessions[0].activity_state,
+            ActivityState::WaitingForInput
+        );
+
+        // A permission prompt the hook has not announced yet.
+        app.screen_read.insert(
+            4321,
+            crate::peek::Screened {
+                signal: Signal::NeedsInput,
+                ask: None,
+            },
+        );
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Asking);
+        assert_eq!(app.pane_signal(4321), Some(Signal::NeedsInput));
+
+        // Answered, and back to work: the waiting state goes with it.
+        app.screen_read.insert(
+            4321,
+            crate::peek::Screened {
+                signal: Signal::Busy,
+                ask: None,
+            },
+        );
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Working);
+
+        // Nothing on screen to read: the hook's word again.
+        app.screen_read.clear();
+        app.apply_reports();
+        assert_eq!(
+            app.sessions[0].activity_state,
+            ActivityState::WaitingForInput
+        );
+        assert_eq!(app.pane_signal(4321), Some(Signal::Idle));
+    }
+
     /// The mode is reported by a live agent but drawn on a row rebuilt by every
     /// walk, so the two have to survive arriving in either order.
     #[test]
@@ -775,6 +942,7 @@ mod tests {
                 signal: crate::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: mode,
+                ask: None,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -824,6 +992,7 @@ mod tests {
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
             },
             // This test is about the session's own state; subagent events are
@@ -882,6 +1051,7 @@ mod tests {
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now() - std::time::Duration::from_secs(60 * 60),
             },
             finished_agent: None,
@@ -923,6 +1093,7 @@ mod tests {
                 signal: crate::hook::Signal::Idle,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -941,10 +1112,13 @@ mod tests {
         );
         assert!(app.hooked_signal("79709c93").is_none());
         assert_eq!(
-            gemini_id_tail("session-2026-05-14T17-34-79709c93"),
+            crate::hook::gemini_id_tail("session-2026-05-14T17-34-79709c93"),
             Some("79709c93")
         );
-        assert_eq!(gemini_id_tail("019fda22-5315-7580-84de-033e4f6835b5"), None);
+        assert_eq!(
+            crate::hook::gemini_id_tail("019fda22-5315-7580-84de-033e4f6835b5"),
+            None
+        );
     }
 
     /// Answering a prompt in a pane stops the tab asking about it, without
@@ -976,6 +1150,7 @@ mod tests {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -999,6 +1174,7 @@ mod tests {
                 signal: crate::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -1009,6 +1185,45 @@ mod tests {
             app.hooked_signal("a"),
             Some(crate::hook::Signal::NeedsInput)
         );
+    }
+
+    /// A question's own words survive the follow-up event that does not carry
+    /// them, and are dropped with the prompt itself.
+    ///
+    /// Claude Code fires `PermissionRequest` with the tool named, then a
+    /// `permission_prompt` notification for the same question that names
+    /// nothing — only the first knows what the prompt is about.
+    #[test]
+    fn a_questions_detail_survives_its_followup_notification() {
+        use crate::hook::{Event, Reported, Signal};
+
+        let raised = |signal: Signal, ask: Option<&str>| Event {
+            session_id: "a".to_string(),
+            pids: Vec::new(),
+            finished_agent: None,
+            agent: None,
+            reported: Reported {
+                signal,
+                cwd: String::new(),
+                permission: None,
+                ask: ask.map(str::to_string),
+                at: std::time::Instant::now(),
+                provisional: false,
+            },
+        };
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", true, "proj")];
+        app.apply_hooks(vec![raised(Signal::NeedsInput, Some("Bash: rm -rf build"))]);
+        // Claude Code's `permission_prompt` notification: same question, no tool.
+        app.apply_hooks(vec![raised(Signal::NeedsInput, None)]);
+        assert_eq!(
+            app.sessions[0].asking_for.as_deref(),
+            Some("Bash: rm -rf build")
+        );
+
+        app.apply_hooks(vec![raised(Signal::Busy, None)]);
+        assert_eq!(app.sessions[0].asking_for, None);
     }
 
     /// A permission prompt is not put in front of anyone until auto mode has
@@ -1032,6 +1247,7 @@ mod tests {
                 signal,
                 cwd: String::new(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
                 provisional,
             },
@@ -1054,7 +1270,7 @@ mod tests {
         // A prompt nobody answered. Once its grace runs out it is a person's
         // problem, and no event is coming to say so.
         app.apply_hooks(vec![raised(Signal::NeedsInput, true)]);
-        let held = app.hooked.get_mut("a").expect("the report");
+        let held = app.reports.hooked.get_mut("a").expect("the report");
         held.at = std::time::Instant::now()
             - (crate::hook::PERMISSION_GRACE + std::time::Duration::from_secs(1));
         assert!(app.promote_matured_prompts(), "the grace never ran out");
@@ -1093,5 +1309,98 @@ mod tests {
         app.jump_to_bell();
         assert_eq!(app.selected, 0);
         assert!(app.status().is_some());
+    }
+
+    /// An alert reaches the user as a toast on the refresh that sees the
+    /// crossing, and the row keeps its marker after the toast has gone — but
+    /// the next refresh, still over, says nothing new.
+    #[test]
+    fn an_alert_crossing_is_toasted_once_and_marked_while_it_holds() {
+        let mut app = test_app();
+        app.settings = crate::settings::Settings::parse("[settings]\nalert_cost = 5\n");
+        app.sessions = vec![session("a", true, "proj")];
+        app.sessions[0].total_cost = Some(1.0);
+        app.check_bells();
+        assert_eq!(app.toasts.latest(), None);
+
+        app.sessions[0].total_cost = Some(6.0);
+        app.check_bells();
+        let said = app.toasts.latest().map(str::to_string);
+        assert!(
+            said.as_deref().is_some_and(|t| t.contains("$6.00")),
+            "{said:?}"
+        );
+        let key = app.sessions[0].key();
+        assert_eq!(app.alerts.marker(&key), Some(crate::alert::Kind::Cost));
+
+        app.toasts = toast::Toasts::default();
+        app.check_bells();
+        assert_eq!(app.toasts.latest(), None, "still over is not news");
+        assert_eq!(app.alerts.marker(&key), Some(crate::alert::Kind::Cost));
+    }
+
+    /// A session finishing its turn on the same refresh an alert fires is one
+    /// moment, and it used to be two bells and two desktop notifications. It
+    /// is one now, naming both.
+    #[test]
+    fn a_crossing_and_an_alert_on_one_refresh_ring_once() {
+        let mut app = test_app();
+        app.notify.enabled = true;
+        app.settings = crate::settings::Settings::parse("[settings]\nalert_cost = 5\n");
+        app.sessions = vec![session("a", true, "api"), session("b", true, "web")];
+        app.sessions[1].total_cost = Some(1.0);
+        app.check_bells();
+        app.notify.ring_pending();
+        assert!(
+            crate::notify::take_rung().is_empty(),
+            "nothing has happened"
+        );
+
+        app.sessions[0].activity_state = crate::session::ActivityState::WaitingForInput;
+        app.sessions[1].total_cost = Some(6.0);
+        app.check_bells();
+        app.notify.ring_pending();
+        let rung = crate::notify::take_rung();
+        assert_eq!(rung.len(), 1, "one refresh, one bell: {rung:?}");
+        assert!(
+            rung[0].starts_with("cctop: ") && rung[0].contains("waiting for input · "),
+            "{rung:?}"
+        );
+        assert!(rung[0].contains("$6.00"), "the alert went unsaid: {rung:?}");
+
+        // And the next pass, with nothing new, is silent.
+        app.check_bells();
+        app.notify.ring_pending();
+        assert!(crate::notify::take_rung().is_empty());
+    }
+
+    /// The stall alert reads the hooks' last word even once the row has
+    /// stopped believing it, and a finished turn is never a stall.
+    #[test]
+    fn a_stall_reads_the_last_hook_report_however_old() {
+        use crate::alert::Hooked;
+        use crate::hook::Signal;
+        let report = |signal, age| crate::hook::Reported {
+            signal,
+            cwd: String::new(),
+            permission: None,
+            ask: None,
+            at: Instant::now() - std::time::Duration::from_secs(age),
+            provisional: false,
+        };
+        let mut reports = crate::hook::Reports::default();
+        assert_eq!(stall_view(&reports, "a"), Hooked::Unknown);
+        reports
+            .hooked
+            .insert("a".to_string(), report(Signal::Busy, 3_600));
+        assert_eq!(stall_view(&reports, "a"), Hooked::Working);
+        reports
+            .hooked
+            .insert("a".to_string(), report(Signal::Acting, 0));
+        assert_eq!(stall_view(&reports, "a"), Hooked::InFlight);
+        reports
+            .hooked
+            .insert("a".to_string(), report(Signal::Idle, 0));
+        assert_eq!(stall_view(&reports, "a"), Hooked::Quiet);
     }
 }

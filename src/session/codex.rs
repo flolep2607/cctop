@@ -9,7 +9,7 @@ use crate::pricing::{self, Provider};
 use crate::util;
 use rayon::prelude::*;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -420,6 +420,11 @@ pub fn list_sessions() -> Vec<Session> {
             s.last_active = last_active;
             s.model = statics.model;
             s.label_source = statics.cwd;
+            // A session cctop wrote as a handoff into Codex says where it came
+            // from. Codex has no room for a record type of its own — an
+            // unrecognised one is dropped on read — so the marker rides inside
+            // the session metadata, which is the first line either way.
+            s.converted_from = crate::convert::provenance_of_codex(&path);
             s.data_file = Some(path);
             s
         })
@@ -450,17 +455,52 @@ pub fn extract(path: &Path) -> SessionData {
     let mut counted_total: Option<Value> = None;
     let mut by_day: HashMap<String, RawBucket> = HashMap::new();
     let mut by_hour: HashMap<String, RawBucket> = HashMap::new();
+    // Not through `super::record_cost` like the other providers: Codex names
+    // its model after the usage it bills, so every bucket is priced at the end.
+    let mut by_minute: BTreeMap<i64, RawBucket> = BTreeMap::new();
     let mut metrics = Metrics::default();
     let mut seen_call_ids: HashSet<String> = HashSet::new();
     let mut seen_queries: HashSet<String> = HashSet::new();
     // call_id -> when its output arrived, so calls can be timed.
     let mut result_ts: HashMap<String, String> = HashMap::new();
     let mut failed_calls: HashSet<String> = HashSet::new();
+    let mut ultracode_at: Option<String> = None;
 
     let read = for_each_jsonl(path, |item| {
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
         let payload = item.get("payload");
         let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
+
+        // What the person typed. `user_message` is the event Codex raises for
+        // it; a rollout without one still carries the prompt as a user
+        // message, beside the environment and instructions Codex injects in
+        // the same role, which are all tagged blocks starting with `<`.
+        let typed: Vec<&str> = match (
+            item_type,
+            payload.and_then(|p| p.get("type")).and_then(Value::as_str),
+        ) {
+            ("event_msg", Some("user_message")) => payload
+                .and_then(|p| p.get("message"))
+                .and_then(Value::as_str)
+                .into_iter()
+                .collect(),
+            ("response_item", Some("message"))
+                if payload.and_then(|p| p.get("role")).and_then(Value::as_str) == Some("user") =>
+            {
+                payload
+                    .and_then(|p| p.get("content"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .filter(|t| !t.trim_start().starts_with('<'))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if typed.iter().any(|t| super::says_ultracode(t)) {
+            super::latest(&mut ultracode_at, ts);
+        }
 
         if item_type == "turn_context"
             && let Some(m) = payload.and_then(|p| p.get("model")).and_then(Value::as_str)
@@ -513,6 +553,10 @@ pub fn extract(path: &Path) -> SessionData {
                     b.cached_input += cached;
                     b.output += out;
                 }
+                let b = by_minute.entry(super::unix_minute(&dt)).or_default();
+                b.input += inp;
+                b.cached_input += cached;
+                b.output += out;
             }
         }
 
@@ -675,6 +719,7 @@ pub fn extract(path: &Path) -> SessionData {
         return SessionData {
             last_model: model.clone(),
             reasoning_effort,
+            ultracode_at,
             models: if model.is_empty() {
                 vec![]
             } else {
@@ -698,15 +743,15 @@ pub fn extract(path: &Path) -> SessionData {
     };
     let total = costs.input + costs.cached_input + costs.output;
 
+    let price = |b: &RawBucket| {
+        let uncached = b.input.saturating_sub(b.cached_input);
+        util::token_cost(uncached, p.input)
+            + util::token_cost(b.cached_input, p.cached_input)
+            + util::token_cost(b.output, p.output)
+    };
     let finalize = |raw: HashMap<String, RawBucket>| -> HashMap<String, HashMap<String, f64>> {
         raw.into_iter()
-            .map(|(key, b)| {
-                let uncached = b.input.saturating_sub(b.cached_input);
-                let cost = util::token_cost(uncached, p.input)
-                    + util::token_cost(b.cached_input, p.cached_input)
-                    + util::token_cost(b.output, p.output);
-                (key, HashMap::from([(model.clone(), cost)]))
-            })
+            .map(|(key, b)| (key, HashMap::from([(model.clone(), price(&b))])))
             .collect()
     };
 
@@ -726,6 +771,7 @@ pub fn extract(path: &Path) -> SessionData {
     SessionData {
         last_model: model.clone(),
         reasoning_effort,
+        ultracode_at,
         models: vec![model.clone()],
         model_breakdown: vec![ModelBreakdown {
             model: model.clone(),
@@ -741,6 +787,7 @@ pub fn extract(path: &Path) -> SessionData {
         tokens_by_hour: finalize_tokens(&by_hour),
         costs_by_day: finalize(by_day),
         costs_by_hour: finalize(by_hour),
+        costs_by_minute: by_minute.iter().map(|(&m, b)| (m, price(b))).collect(),
         metrics,
         rates: Some(CodexRates {
             input: p.input,
@@ -1032,6 +1079,11 @@ const result = await tools.apply_patch(patch);"#;
         let data = extract(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(data.tokens.input_total, 1500);
+        // Priced at the end like the day buckets, so the two cannot disagree.
+        let minutes: f64 = data.costs_by_minute.values().sum();
+        let days: f64 = data.costs_by_day.values().flat_map(|m| m.values()).sum();
+        assert!((minutes - days).abs() < 1e-12);
+        assert_eq!(data.costs_by_minute.len(), 1);
     }
 
     #[test]
@@ -1065,5 +1117,36 @@ const result = await tools.apply_patch(patch);"#;
         assert_eq!(data.metrics.tool_details["Bash"][0].d, "rg --files");
         assert_eq!(extract_last_tool(&session), "Bash");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// What the person typed says `ultracode`, whichever way the rollout
+    /// carries it; the context Codex injects in the user's role does not
+    /// count even when it says the word.
+    #[test]
+    fn a_typed_ultracode_is_heard_and_injected_context_is_not() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-codex-ultracode-{}.jsonl",
+            std::process::id()
+        ));
+        let lines = [
+            json!({"type": "response_item", "timestamp": "2026-09-25T01:00:00.000Z",
+                "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "<user_instructions>ultracode</user_instructions>"}]}}),
+            json!({"type": "event_msg", "timestamp": "2026-09-25T02:00:00.000Z",
+                "payload": {"type": "user_message", "message": "fix it, ultracode"}}),
+            json!({"type": "response_item", "timestamp": "2026-09-25T02:00:00.010Z",
+                "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "fix it, ultracode"}]}}),
+            json!({"type": "event_msg", "timestamp": "2026-09-25T03:00:00.000Z",
+                "payload": {"type": "user_message", "message": "thanks"}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).expect("write rollout");
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            data.ultracode_at.as_deref(),
+            Some("2026-09-25T02:00:00.010Z")
+        );
     }
 }

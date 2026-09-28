@@ -279,6 +279,12 @@ impl Loader {
 
         for s in sessions.iter_mut() {
             let key = s.key();
+            // A stopped session has no command line to read, but its provider
+            // and surface still say where it ran; without this every row that
+            // is not live showed the column as unknown.
+            if s.harness.is_empty() {
+                s.harness = default_harness(s).into();
+            }
             if let Some(pm) = metrics.get(&key) {
                 s.process = Some(pm.clone());
                 s.harness = harness_from_process(s, &pm.command).into();
@@ -323,6 +329,7 @@ impl Loader {
             s.started_at = now.clone();
             s.last_active = now;
             s.label_source = cwd;
+            s.owner = orphan.owner.clone();
             s.process = Some(pm.clone());
             s.harness = harness_from_process(&s, &pm.command).into();
             sessions.push(s);
@@ -594,6 +601,8 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     s.tool_count = m.tool_count;
     s.tool_errors = m.tool_errors;
     s.compactions = data.compactions;
+    s.ultracode_at = data.ultracode_at.clone();
+    s.ultracode_off_at = data.ultracode_off_at.clone();
     s.total_cost = (s.cost_available && !plan.includes(s.provider)).then_some(data.costs.total);
     s.cost_is_free = s.cost_available
         && data.costs.total == 0.0
@@ -604,7 +613,9 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     if s.title.is_none() {
         s.title = data.title.clone();
     }
-    s.cost_hour = data.cost_this_hour();
+    // Rolling as of this annotation, so it ages only as often as the row is
+    // re-annotated — the same cadence every other figure on the row has.
+    s.cost_hour = data.cost_last_hour(&Utc::now());
     s.cost_today = data.cost_today();
     s.costs_by_day = data.costs_by_day.clone();
     s.costs_by_hour = data.costs_by_hour.clone();
@@ -639,11 +650,17 @@ fn harness_from_process(session: &Session, command: &str) -> &'static str {
     if command.contains("hermes") {
         return "Hermes";
     }
+    default_harness(session)
+}
+
+/// The harness a session's own record implies, for when no command line says
+/// otherwise. An editor session is named by its provider, not assumed to be
+/// Cursor: Windsurf is an editor too.
+fn default_harness(session: &Session) -> &'static str {
     match session.surface {
-        session::Surface::Editor => "Cursor",
         session::Surface::DesktopCode => "Claude Desktop",
         session::Surface::DesktopCowork => "Claude Cowork",
-        session::Surface::Cli => match session.provider {
+        session::Surface::Cli | session::Surface::Editor => match session.provider {
             Provider::Claude => "ClaudeCode",
             Provider::Codex => "Codex",
             Provider::Cursor => "Cursor",
@@ -697,6 +714,7 @@ pub struct Stats {
     /// per-provider breakdown stays exhaustive rather than silently skipping a
     /// provider that might start reporting cost later.
     pub spend_windsurf: f64,
+    /// Spend in the last 60 minutes, rolling: the sum of the rows' `cost_hour`.
     pub spend_hour: f64,
     pub spend_today: f64,
     pub spend_week: f64,
@@ -739,7 +757,6 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
     let today_key = util::local_date_key(&midnight);
     let week_key = util::local_date_key(&(midnight - chrono::Duration::days(6)));
     let month_key = util::local_date_key(&(midnight - chrono::Duration::days(29)));
-    let hour_key = util::local_hour_key(&now);
 
     let days = util::days_in_current_month() as usize;
     let month_start_key = format!("{}-01", &today_key[..7]);
@@ -799,6 +816,9 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 Provider::Windsurf => st.spend_windsurf += cost,
             }
             st.spend_per_min += s.cost_per_min;
+            // The rows' rolling hour rather than the clock-hour bucket, so the
+            // overview and the `$/1H` column agree about what an hour is.
+            st.spend_hour += s.cost_hour;
 
             // A missing total means this provider is included in the selected
             // billing plan. Its retail-equivalent buckets must not leak back
@@ -832,9 +852,6 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             }
             for (key, models) in &s.costs_by_hour {
                 let amount: f64 = models.values().sum();
-                if key == &hour_key {
-                    st.spend_hour += amount;
-                }
                 if key.starts_with(&today_key)
                     && let Some(hour_part) = key.get(11..13)
                     && let Ok(hour) = hour_part.parse::<usize>()
@@ -1039,5 +1056,12 @@ mod tests {
         other.provider = Provider::Pi;
         assert_eq!(harness_from_process(&other, "pi --session x"), "Pi");
         assert_eq!(harness_from_process(&other, "hermes run"), "Hermes");
+
+        let mut windsurf = Session::new(Provider::Windsurf, "x".into());
+        windsurf.surface = session::Surface::Editor;
+        assert_eq!(
+            harness_from_process(&windsurf, "/usr/share/windsurf/windsurf"),
+            "Windsurf"
+        );
     }
 }

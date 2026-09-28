@@ -25,6 +25,31 @@ pub fn ms_to_rfc3339(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+/// Why "today" and "this hour" may not be the viewer's, when that is likely.
+///
+/// Every calendar bucket cctop draws is cut at the process's local midnight,
+/// and a login over ssh does not carry the viewer's timezone across — so on a
+/// server set to UTC, a run at 11:47 in Auckland lands on yesterday and the
+/// Cost panel says nothing was spent today. Only said when all three hold:
+/// the session came in over ssh, `TZ` is not set, and the local clock is UTC.
+/// Setting `TZ` at all, `TZ=UTC` included, is a decision and silences it.
+pub fn unzoned_over_ssh() -> Option<String> {
+    let over_ssh = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()));
+    let tz_set = std::env::var_os("TZ").is_some_and(|s| !s.is_empty());
+    let utc = Local::now().offset().local_minus_utc() == 0;
+    unzoned(over_ssh, tz_set, utc)
+}
+
+fn unzoned(over_ssh: bool, tz_set: bool, utc: bool) -> Option<String> {
+    (over_ssh && !tz_set && utc).then(|| {
+        "Times are in this server's UTC, not yours — set TZ (e.g. export TZ=Pacific/Auckland) \
+         so \"today\" and \"this hour\" are your day"
+            .to_string()
+    })
+}
+
 /// Local-time day key, `YYYY-MM-DD`.
 pub fn local_date_key(dt: &DateTime<Utc>) -> String {
     let l = dt.with_timezone(&Local);
@@ -610,6 +635,16 @@ fn read_random(want: usize) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Only an ssh login with no timezone of its own on a UTC clock is told;
+    /// a TZ set on purpose, a local terminal, or a zoned server is not.
+    #[test]
+    fn only_an_unzoned_ssh_login_on_utc_is_warned() {
+        assert!(super::unzoned(true, false, true).is_some_and(|m| m.contains("TZ")));
+        assert!(super::unzoned(true, true, true).is_none());
+        assert!(super::unzoned(false, false, true).is_none());
+        assert!(super::unzoned(true, false, false).is_none());
+    }
 
     /// Round-trips, tolerates the line wrapping a pasted blob carries, and
     /// refuses prose rather than decoding it into rubbish — which is what makes

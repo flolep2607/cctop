@@ -172,7 +172,11 @@ impl App {
             }
         };
         self.pending_brief = Some(path);
-        self.pending_fork = crate::handoff::forkable(&session).map(std::path::Path::to_path_buf);
+        // The transcript behind that brief, when the session it describes is one
+        // another agent can be resumed onto directly. Which agent can is not
+        // known until one is picked, so what is held here is the file and the
+        // harness it is in — see `fork_pending`.
+        self.pending_fork = self.handover_target(&session);
         self.launch_prompt(LaunchInto::Tab);
         // `launch_prompt` bails on its own when nothing can be launched, and
         // leaving a brief pending for a launcher that never opened would attach
@@ -191,6 +195,44 @@ impl App {
             "Handing off {} — pick who takes it",
             brief.summary()
         ));
+    }
+
+    /// Ask for the branch `F` should fork into a worktree.
+    pub(super) fn worktree_prompt(&mut self) {
+        match self.fork_point() {
+            Ok((base, repo)) => {
+                self.worktree_base = base;
+                self.worktree_repo = repo;
+                self.worktree_input.clear();
+                self.mode = Mode::NewWorktree;
+            }
+            Err(why) => self.set_status(why),
+        }
+    }
+
+    /// Create the worktree the prompt named, then open the launcher in it.
+    ///
+    /// The launcher rather than a fixed agent: which harness gets the new
+    /// branch is the one thing `F` cannot guess, and the launcher already
+    /// knows profiles, rmux naming and `c` to change the directory after all.
+    pub(super) fn worktree_create(&mut self) {
+        self.mode = Mode::List;
+        let branch = self.worktree_input.trim().to_string();
+        if branch.is_empty() {
+            return;
+        }
+        let path = match add_worktree(&self.worktree_base, &self.worktree_repo, &branch) {
+            Ok(path) => path,
+            Err(why) => {
+                self.set_status(format!("Could not add worktree: {why}"));
+                return;
+            }
+        };
+        self.launch_prompt(LaunchInto::Tab);
+        if self.mode == Mode::Launch {
+            self.launch_cwd = Some(path);
+            self.set_status(format!("Worktree {branch} ready — pick an agent"));
+        }
     }
 
     /// Deliver a brief to the agent it was launched for, once that agent has had
@@ -882,38 +924,121 @@ impl App {
         &self.launch_offer
     }
 
+    /// The transcript behind the pending brief, when the session it describes is
+    /// one some agent can be resumed onto.
+    ///
+    /// `None` for a session with no transcript on this disk — a remote row, or
+    /// one Claude for Mac keeps in a directory of its own — and for any harness
+    /// cctop cannot read a conversation out of. Set rather than asked about
+    /// here, because which *receiving* agent can use it is not known until one
+    /// is picked.
+    fn handover_target(&mut self, session: &Session) -> Option<std::path::PathBuf> {
+        let transcript = session.data_file.as_deref();
+        match transcript {
+            Some(path) if crate::convert::convertible_session(session) => {
+                self.pending_provider = session.provider;
+                Some(path.to_path_buf())
+            }
+            // A Claude-to-Claude fork does not read the transcript at all, so a
+            // session `convertible_session` rejects can still be copied whole.
+            _ => crate::handoff::forkable(session).map(std::path::Path::to_path_buf),
+        }
+    }
+
     /// The argv that resumes a new agent onto a copy of the session being
     /// handed over, when that is possible and `argv` is the agent that can read
     /// it.
+    ///
+    /// Three cases, in the order they are worth trying. Between two Claudes the
+    /// transcript is *copied*, so nothing is lost; between two harnesses that
+    /// keep a file of JSON lines it is *converted*, which carries the
+    /// conversation and drops the sending harness's own accounting — see
+    /// [`crate::convert`]. Everything else gets the brief, which is the only
+    /// form that agent can read.
     ///
     /// The copy lands in the *receiving* account's directory, which is not
     /// always the sending one's: handing a personal session to a work login has
     /// to put the transcript where that login will look for it.
     ///
-    /// A failure to copy is reported and answered with `None`, which puts the
-    /// launch back on the brief — the handoff still happens, with less of the
-    /// conversation in it.
+    /// A failure to copy or convert is reported and answered with `None`, which
+    /// puts the launch back on the brief — the handoff still happens, with less
+    /// of the conversation in it.
     pub(super) fn fork_pending(&mut self, argv: &[String]) -> Option<Vec<String>> {
         let transcript = self.pending_fork.clone()?;
-        if crate::handoff::command_of(argv) != Some("claude") {
-            return None;
+        // `argv` may carry an `env VAR=value` prefix when a profile was chosen,
+        // so the command is read off it by name rather than taken as argv[0].
+        let target = crate::pricing::Provider::parse(crate::handoff::command_of(argv)?)?;
+        match target {
+            // Claude to Claude: a byte-for-byte copy, so it is tried first and
+            // keeps everything a conversion drops.
+            Provider::Claude if self.pending_provider == Provider::Claude => {
+                let profile = self.chosen_profile(Provider::Claude);
+                let config_dir = profile
+                    .map(|p| p.dir.clone())
+                    .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
+                match crate::handoff::fork(&transcript, &config_dir) {
+                    Ok(id) => {
+                        let argv = vec!["claude".to_string(), "--resume".to_string(), id];
+                        Some(match profile {
+                            Some(profile) => crate::config::argv_under_profile(argv, profile),
+                            None => argv,
+                        })
+                    }
+                    Err(error) => {
+                        self.set_status(format!("Could not copy the transcript: {error}"));
+                        None
+                    }
+                }
+            }
+            _ if crate::convert::convertible(self.pending_provider, target) => {
+                let home = self.store_of(target);
+                let written =
+                    crate::convert::convert(self.pending_provider, &transcript, target, &home);
+                match written {
+                    Some(written) => {
+                        self.set_status(format!(
+                            "Converted the conversation for {} as session {}",
+                            target.as_str(),
+                            written.session_id
+                        ));
+                        Some(self.resume_argv(target, &written.session_id))
+                    }
+                    None => {
+                        self.set_status("Could not convert the transcript".to_string());
+                        None
+                    }
+                }
+            }
+            _ => None,
         }
-        let profile = self.chosen_profile(Provider::Claude);
-        let config_dir = profile
-            .map(|p| p.dir.clone())
-            .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
-        match crate::handoff::fork(&transcript, &config_dir) {
-            Ok(id) => {
-                let argv = vec!["claude".to_string(), "--resume".to_string(), id];
-                Some(match profile {
-                    Some(profile) => crate::config::argv_under_profile(argv, profile),
-                    None => argv,
-                })
-            }
-            Err(error) => {
-                self.set_status(format!("Could not copy the transcript: {error}"));
-                None
-            }
+    }
+
+    /// The store `target` keeps its sessions in, for a chosen account where the
+    /// launcher has one.
+    ///
+    /// A converted session is written for whoever resumes it, so the account
+    /// the launcher is showing is the one to write into — the same reason
+    /// [`crate::handoff::fork`] takes the receiving profile rather than the
+    /// conventional directory.
+    fn store_of(&self, target: Provider) -> std::path::PathBuf {
+        match self.chosen_profile(target) {
+            Some(profile) => profile.dir.clone(),
+            None => match target {
+                Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
+                _ => crate::config::CODEX_HOME.clone(),
+            },
+        }
+    }
+
+    /// The argv that resumes `target` on `id`, under a chosen account.
+    fn resume_argv(&self, target: Provider, id: &str) -> Vec<String> {
+        let argv = match target {
+            Provider::Codex => vec!["codex".to_string(), "resume".to_string(), id.to_string()],
+            _ => vec!["claude".to_string(), "--resume".to_string(), id.to_string()],
+        };
+        match self.chosen_profile(target) {
+            Some(profile) => crate::config::argv_under_profile(argv, profile),
+            None => argv,
         }
     }
 
@@ -977,10 +1102,10 @@ impl App {
         // in a conversation already under way, where a "read this and continue"
         // line would interrupt whatever it is doing mid-turn.
         let fresh = matches!(choice, tabs::Choice::Start(_));
-        // Claude to Claude the conversation itself is handed over rather than a
-        // summary of it, the receiving agent being resumed onto a copy of the
-        // transcript. Everything else gets the brief, which is the only form it
-        // can read.
+        // Where the receiving agent can read the transcript itself, the
+        // conversation is handed over rather than a summary of it: copied
+        // between two Claudes, converted between Claude and Codex. Everything
+        // else gets the brief, which is the only form it can read.
         let forked = fresh.then(|| self.fork_pending(&argv)).flatten();
         let carrying_conversation = forked.is_some();
         let argv = forked.unwrap_or(argv);
@@ -1052,9 +1177,7 @@ impl App {
         match self.launch_into {
             LaunchInto::Split { stacked } => {
                 let Some(tab) = self.active_tab() else { return };
-                tab.stacked = stacked;
-                tab.panes.push(pane);
-                tab.focus = tab.panes.len() - 1;
+                tab.split(pane, stacked);
             }
             LaunchInto::Tab => {
                 self.tabs.push(tabs::Tab::new(pane));
@@ -1170,10 +1293,170 @@ impl App {
     }
 }
 
+/// `git -C dir`, and nothing else deciding which repository that is.
+///
+/// Git's own repository-selection variables outrank `-C`: with `GIT_DIR` set,
+/// `git -C elsewhere init` reinitialises `$GIT_DIR`, not `elsewhere`. A git hook
+/// exports them to everything it runs, so a cctop or a test run from one would
+/// otherwise aim every command here at the repository being committed to —
+/// which is how a test once flipped this repository to `core.bare = true`.
+/// The list is `git rev-parse --local-env-vars`.
+pub(super) fn git_in(dir: &std::path::Path) -> std::process::Command {
+    const LOCAL: [&str; 15] = [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    ];
+    let mut git = std::process::Command::new("git");
+    for var in LOCAL {
+        git.env_remove(var);
+    }
+    git.arg("-C").arg(dir);
+    git
+}
+
+/// `git worktree add` for `branch`, at `<repo>/.claude/worktrees/<branch>`.
+///
+/// `.claude/worktrees/` because it is where Claude Code's own `--worktree`
+/// puts them, so the two never disagree about where a repository's parallel
+/// checkouts live. A branch that already exists is checked out; any other is
+/// created from `base`'s HEAD — the checkout `F` was pressed on, not the main
+/// one, so forking from a worktree continues that worktree's work.
+///
+/// The name is checked by git before it is joined onto a path: `../x` is a
+/// directory outside the repository long before it is a bad branch name.
+///
+// ponytail: blocks the draw loop for the checkout; move to worker::Request if a
+// large repository makes it noticeable.
+pub(super) fn add_worktree(
+    base: &std::path::Path,
+    repo: &std::path::Path,
+    branch: &str,
+) -> Result<std::path::PathBuf, String> {
+    let git = |args: &[&std::ffi::OsStr]| {
+        git_in(base)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git: {e}"))
+    };
+    let fail = |out: std::process::Output| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let line = err
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("git failed");
+        line.trim_start_matches("fatal: ").to_string()
+    };
+    let check = git(&[
+        "check-ref-format".as_ref(),
+        "--branch".as_ref(),
+        branch.as_ref(),
+    ])?;
+    if !check.status.success() {
+        return Err(format!("{branch:?} is not a valid branch name"));
+    }
+    let dir = repo.join(".claude/worktrees");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Self-ignoring, so the checkouts never show up as untracked files in
+    // the repository they came from, whatever its own .gitignore says.
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, "*\n").map_err(|e| format!("{}: {e}", ignore.display()))?;
+    }
+    let path = dir.join(branch);
+    let head = format!("refs/heads/{branch}");
+    let exists = git(&[
+        "show-ref".as_ref(),
+        "--verify".as_ref(),
+        "--quiet".as_ref(),
+        head.as_ref(),
+    ])?
+    .status
+    .success();
+    let out = if exists {
+        git(&[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            path.as_ref(),
+            branch.as_ref(),
+        ])?
+    } else {
+        git(&[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            "-b".as_ref(),
+            branch.as_ref(),
+            path.as_ref(),
+        ])?
+    };
+    match out.status.success() {
+        true => Ok(path),
+        false => Err(fail(out)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ui::tests::test_app;
+
+    /// Against a real repository, because what is being tested is what git
+    /// accepts: a new branch forks, a taken one is refused with git's reason,
+    /// and a name that would climb out of the directory never reaches a path.
+    #[test]
+    fn add_worktree_creates_checks_out_and_refuses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let out = git_in(repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+
+        let path = add_worktree(repo, repo, "try-fork").expect("new branch");
+        assert_eq!(path, repo.join(".claude/worktrees/try-fork"));
+        assert!(path.join(".git").is_file(), "a linked worktree");
+        assert!(repo.join(".claude/worktrees/.gitignore").is_file());
+
+        let again = add_worktree(repo, repo, "try-fork").expect_err("already checked out");
+        assert!(again.contains("try-fork"), "{again}");
+
+        git(&["branch", "existing"]);
+        let path = add_worktree(repo, repo, "existing").expect("existing branch");
+        assert!(path.join(".git").is_file());
+
+        let bad = add_worktree(repo, repo, "../escape").expect_err("bad name");
+        assert!(bad.contains("not a valid branch name"), "{bad}");
+        assert!(!repo.join(".claude/escape").exists());
+    }
     /// Regression: the "already open" guard asked only about `rmux`, which is
     /// `None` on every pane when rmux is not installed — so `R` on a session
     /// already resumed in a tab started a second agent on the one transcript,

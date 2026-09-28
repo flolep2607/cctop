@@ -38,10 +38,11 @@ fn block() -> String {
 
 /// Shell startup files to manage, limited to those that already exist: creating
 /// a `.bashrc` for someone who runs zsh would be litter, not help.
+///
+/// [`crate::config::HOME`] rather than `$HOME`, which a `sudo` may have kept:
+/// root installing its aliases must not edit the invoking user's `.bashrc`.
 fn rc_files() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
+    let home = &*crate::config::HOME;
     [".zshrc", ".bashrc"]
         .iter()
         .map(|f| home.join(f))
@@ -58,10 +59,8 @@ fn rc_files() -> Vec<PathBuf> {
 /// Fish keeps its config under `~/.config/fish` rather than wherever
 /// `dirs::config_dir` points, which is why that is not consulted.
 fn fish_file() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => dirs::home_dir()?.join(".config"),
-    };
+    let base = crate::config::env_dir("XDG_CONFIG_HOME")
+        .unwrap_or_else(|| crate::config::HOME.join(".config"));
     let fish = base.join("fish");
     fish.is_dir()
         .then(|| fish.join("conf.d").join("cctop.fish"))

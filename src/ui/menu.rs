@@ -36,6 +36,7 @@ pub enum Action {
     Mark,
     Terminate,
     Delete,
+    UpdateRemote,
 }
 
 pub struct Item {
@@ -82,7 +83,7 @@ pub fn items(app: &App) -> Vec<Item> {
     // named — the same answer, from the same place, as pressing the key.
     let far = |also: Option<String>| remote.clone().or(also);
 
-    vec![
+    let mut items = vec![
         Item {
             action: Action::Resume,
             label: "Resume in a tab",
@@ -185,7 +186,23 @@ pub fn items(app: &App) -> Vec<Item> {
             }),
             rule: false,
         },
-    ]
+    ];
+    // Only on a remote row, where it is the one thing cctop does to the far
+    // machine rather than reads from it. Always listed there, though, refused
+    // with a reason when the host is not behind: a menu that grows an entry
+    // only some of the time is a menu nobody learns has it.
+    if let Some(r) = &session.remote {
+        items.push(Item {
+            action: Action::UpdateRemote,
+            label: "Update cctop on its host",
+            // No table key. It is rare, it reaches another machine, and it
+            // always stops at a confirmation anyway.
+            key: "",
+            blocked: app.remote_update_refusal(&r.host),
+            rule: true,
+        });
+    }
+    items
 }
 
 /// Move `cursor` by `delta`, skipping entries that cannot run.

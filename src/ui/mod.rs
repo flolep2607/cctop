@@ -11,36 +11,50 @@
 //! modes, the row type, construction and the toasts — that every one of
 //! them touches.
 
+mod ansi;
 mod batch;
 pub mod columns;
 mod dirs;
+mod drunk;
 mod effects;
 mod filter;
+mod high;
 mod hooks;
 mod hyperlink;
+mod idle;
 mod input;
 mod launch;
 mod launch_cwd;
+mod line_edit;
+mod markdown;
 pub mod menu;
 mod modals;
 pub mod panels;
 mod panes;
+mod preview;
 mod profiles;
 mod qr;
 mod rave;
+mod reader;
 mod remote;
 pub mod render;
 mod runloop;
+mod scrollbar;
+mod seen;
 mod select;
 mod settings;
 mod share;
 mod signals;
+#[cfg(test)]
+mod snapshot;
 pub mod spark;
+mod styled;
 mod table;
 pub mod tabs;
 pub mod theme;
 mod toast;
 mod torn;
+mod tree;
 mod worker;
 
 pub use runloop::run;
@@ -76,6 +90,8 @@ pub enum Mode {
     ResumeConfirm,
     /// Confirming a quit that would take the hosted agent down with it.
     QuitConfirm,
+    /// Confirming `cctop --update` on the machine in `App::remote_update`.
+    RemoteUpdateConfirm,
     /// Explaining why a live session cannot be terminated locally.
     KillBlocked,
     /// Confirming a batch action over all marked sessions.
@@ -88,6 +104,9 @@ pub enum Mode {
     CostFilter,
     /// Text input typed into the selected session's rmux pane.
     SendKeys,
+    /// Naming the branch `F` forks into a new worktree. Enter creates it and
+    /// hands over to [`Mode::Launch`], pointed at the new checkout.
+    NewWorktree,
     /// Picking which agent a new tab or split should run.
     Launch,
     /// Everything that can be done to the selected row, in one list.
@@ -151,7 +170,7 @@ pub enum AccountKind {
 /// the one question. `cctop --add-account` still says it.
 #[derive(Default)]
 pub struct AddAccount {
-    pub name: String,
+    pub name: line_edit::LineEdit,
     /// Which kind of account, once the name is in and the choice is made.
     /// `None` with a name accepted is the popup asking.
     pub kind: Option<AccountKind>,
@@ -213,6 +232,10 @@ pub struct PastePreview {
 pub enum BatchKind {
     Delete,
     Kill,
+    /// Stop the idle view's sessions: the marked ones, or every one when none
+    /// is marked. Unlike [`BatchKind::Kill`] it skips rather than refuses —
+    /// see [`App::reclaim_plan`].
+    Reclaim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,7 +300,8 @@ pub const AGE_OPTIONS: [Option<AgeFilter>; 4] = [
 // Application state
 // ---------------------------------------------------------------------------
 
-/// One line of the table: a session, or a subagent shown beneath its parent.
+/// One line of the table: a session, a subagent shown beneath its parent, or
+/// in the tree view a heading for the sessions of one repository or checkout.
 ///
 /// Rows rather than session indices, because an expanded session occupies
 /// several lines and everything that walks the table — scrolling, the cursor,
@@ -291,17 +315,24 @@ pub enum Row {
         parent: usize,
         index: usize,
     },
+    /// An index into [`App::groups`].
+    Group(usize),
 }
 
 impl Row {
     /// The session this row belongs to, which for a child is its parent.
     ///
     /// Actions are addressed to sessions — a subagent has no process to signal
-    /// and no transcript of its own to delete — so every row resolves to one.
-    pub fn session(self) -> usize {
+    /// and no transcript of its own to delete — so a child resolves to its
+    /// parent. A group heading resolves to nothing: it stands for several
+    /// sessions, and an action aimed at "one of them" would be aimed at a row
+    /// nobody pointed at. Every action already bails on no session, which is
+    /// what makes the heading inert without a guard per key.
+    pub fn session(self) -> Option<usize> {
         match self {
-            Row::Session(i) => i,
-            Row::Subagent { parent, .. } => parent,
+            Row::Session(i) => Some(i),
+            Row::Subagent { parent, .. } => Some(parent),
+            Row::Group(_) => None,
         }
     }
 
@@ -331,6 +362,18 @@ pub struct App {
     /// every walk, which would leave an index pointing at whatever sorted into
     /// that slot next.
     pub expanded: std::collections::HashSet<String>,
+    /// Whether the table is drawn as a tree of repositories and checkouts.
+    pub tree: bool,
+    /// Keys of the tree groups that are folded.
+    pub collapsed: std::collections::HashSet<String>,
+    /// The tree's headings, which `Row::Group` indexes. Rebuilt with `visible`.
+    pub groups: Vec<tree::Group>,
+    /// The tree glyphs leading each row's label, aligned with `visible`. Empty
+    /// when the tree is off.
+    pub indent: Vec<String>,
+    /// How many sessions passed the filters, which is not `visible.len()` once
+    /// rows can be headings, children, or folded away.
+    pub matched: usize,
     pub stats: Stats,
     pub selected: usize,
     pub scroll: usize,
@@ -341,7 +384,7 @@ pub struct App {
     pub sort_asc: bool,
     pub sortby_cursor: usize,
 
-    pub search: String,
+    pub search: line_edit::LineEdit,
     /// Search the transcripts as well as the columns.
     ///
     /// Off by default, and deliberately: the metadata filter answers instantly
@@ -367,6 +410,11 @@ pub struct App {
     pub age_filter: Option<AgeFilter>,
     pub age_cursor: usize,
     pub live_only: bool,
+    /// The idle view: only live sessions quiet for `idle_after`, biggest
+    /// first. See the `idle` module.
+    pub idle_only: bool,
+    /// The sort the idle view replaced, put back when it closes.
+    idle_sort: Option<(ColumnId, bool)>,
 
     /// Session keys the user has marked (Space) for a batch action.
     pub marked: HashSet<String>,
@@ -396,10 +444,10 @@ pub struct App {
     /// [`menu::step`].
     pub menu_cursor: usize,
     /// Raw digits being typed into the cost-floor modal.
-    pub cost_input: String,
+    pub cost_input: line_edit::LineEdit,
     /// The directory being typed into the launcher, spelled as the user is
     /// spelling it — `~` and all, expanded only when it is accepted.
-    pub launch_cwd_input: String,
+    pub launch_cwd_input: line_edit::LineEdit,
     /// Set when the typed directory does not name one, so the field can say so
     /// where it is being typed rather than in a toast across the screen.
     pub launch_cwd_bad: bool,
@@ -418,7 +466,15 @@ pub struct App {
     /// `None` means the field is being typed in, and Enter takes what is typed.
     pub launch_cwd_pick: Option<usize>,
     /// Line being typed into the selected session's terminal.
-    pub send_input: String,
+    pub send_input: line_edit::LineEdit,
+    /// The branch being named for `F`, the checkout it forks from, and the
+    /// main repository whose `.claude/worktrees/` it lands in.
+    ///
+    /// Resolved when the prompt opens, not at Enter: the table re-sorts under
+    /// a modal, and the fork belongs to the row `F` was pressed on.
+    pub worktree_input: line_edit::LineEdit,
+    pub worktree_base: std::path::PathBuf,
+    pub worktree_repo: std::path::PathBuf,
     /// The new name being typed for a tab, and which tab it is for.
     ///
     /// The title as it stood when the rename opened is kept alongside the
@@ -426,7 +482,7 @@ pub struct App {
     /// retired mid-typing and every index after it shifts down one. Checking
     /// the title back means a rename either lands on the tab it was aimed at or
     /// is dropped, rather than renaming whichever tab slid into the slot.
-    pub rename_input: String,
+    pub rename_input: line_edit::LineEdit,
     pub rename_tab: usize,
     pub rename_was: String,
     /// The colour the rename modal is offering for the tab.
@@ -445,8 +501,10 @@ pub struct App {
     pub rename_opened_by_click: Option<Instant>,
     /// What has been typed into the tab switcher, and which row of the
     /// narrowed list the cursor is on. See `App::switch_matches`.
-    pub switch_filter: String,
+    pub switch_filter: line_edit::LineEdit,
     pub switch_cursor: usize,
+    /// Which tabs the switcher lists by what they are doing, cycled with Tab.
+    pub switch_state: panes::SwitchState,
     /// Whether the footer's `q Quit` has been clicked once already.
     ///
     /// The share corner's `share_arm` for the other irreversible thing a
@@ -465,6 +523,12 @@ pub struct App {
     pub help_scroll: u16,
     /// Last computed bottom of the help overlay, recorded during draw.
     pub help_max_scroll: u16,
+    /// What the help is narrowed to, typed after `/` in it.
+    pub help_filter: line_edit::LineEdit,
+    /// Whether keys are going into `help_filter` rather than moving the page.
+    /// Enter stops typing and keeps the filter, so `j` and `k` scroll the
+    /// narrowed page again instead of spelling more of the query.
+    pub help_typing: bool,
 
     /// `[settings]` and `[keys]` from `config.toml`, as last read.
     pub settings: crate::settings::Settings,
@@ -485,7 +549,7 @@ pub struct App {
     /// Waiting for the key the cursor's action should move to.
     pub settings_capture: bool,
     /// A setting's value being typed, for the ones that are not a toggle.
-    pub settings_input: Option<String>,
+    pub settings_input: Option<line_edit::LineEdit>,
 
     pub bottom_tab: usize,
     pub panel_data: Option<SessionData>,
@@ -539,9 +603,20 @@ pub struct App {
     started: Instant,
     /// The easter egg. See [`rave`].
     rave: rave::Rave,
+    /// The other one. See [`drunk`].
+    drunk: drunk::Drunk,
+    /// And the third. See [`high`].
+    high: high::High,
 
     /// Bell and desktop notifications, and who rang last.
     pub notify: crate::notify::Notifier,
+    /// The `alert_*` thresholds' state: which have fired, and which rows are
+    /// still past theirs. Beside the notifier rather than inside it, because
+    /// the bell's question — is it my move? — is about a session's state and
+    /// these are about its numbers.
+    pub alerts: crate::alert::Alerts,
+    /// Which finished turns have not been looked at yet — see [`seen`].
+    pub seen: seen::Seen,
 
     /// The last snapshot from each machine named with `--host`, keyed by the
     /// target as the user spelled it.
@@ -555,6 +630,18 @@ pub struct App {
     /// Shown rather than logged. A host that has quietly dropped out is worse
     /// than one that was never added: the totals still look complete.
     pub remote_errors: HashMap<String, String>,
+    /// What each host's `cctop --version` said, asked once per connection.
+    pub remote_versions: HashMap<String, crate::fleet::Probe>,
+    /// Hosts whose version skew has been toasted this run. Once per host: the
+    /// news is the same every poll, and a toast that comes back every fifteen
+    /// seconds is one people learn to stop reading.
+    pub remote_skew_told: std::collections::HashSet<String>,
+    /// The host an update is being confirmed for, in `RemoteUpdateConfirm`.
+    /// Held by name rather than read off the selection, which the table's
+    /// next refresh is free to move.
+    pub remote_update: Option<String>,
+    /// Hosts with a `--update` in flight, so the menu does not offer a second.
+    pub remote_updating: std::collections::HashSet<String>,
 
     /// Which live sessions are working the same ground, recomputed whenever
     /// rows move. The level also rides on each row so the table can sort by it;
@@ -564,6 +651,9 @@ pub struct App {
 
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
+    /// The last screen the Preview panel read off a detached tab, kept between
+    /// captures so each one replays into the same parser.
+    preview: preview::Capture,
     /// Which tab is on screen: `0` is the dashboard, `1..=tabs.len()` index
     /// `tabs`. Zero-length `tabs` is the ordinary case: the bar still shows the
     /// dashboard and its new-tab button, so the feature is findable.
@@ -578,29 +668,25 @@ pub struct App {
     /// release the bar's rather than the agent's: a drag that started on the bar
     /// and ended over a pane must not be delivered as a click inside it.
     pub(super) drag_tab: Option<usize>,
-    /// What each session's own hooks last said about it, keyed by session id.
+    /// What the agents have reported, folded together: last report per session,
+    /// the questions its subagents are still waiting on, and the pid claims.
     ///
     /// Only sessions whose agent has cctop's hooks installed appear here, so an
     /// absent entry is the ordinary case and means "fall back to the transcript"
-    /// rather than "nothing is happening".
-    pub hooked: HashMap<String, crate::hook::Reported>,
-    /// The questions a session's subagents are waiting on, by subagent id.
+    /// rather than "nothing is happening". See [`crate::hook::Reports`].
+    pub reports: crate::hook::Reports,
+    /// What each tab's agent says on its own screen, by agent pid, while
+    /// `read_screen` is on — see [`App::read_screens`].
+    pub screen_read: HashMap<u32, crate::peek::Screened>,
+    /// What detached tabs' screens last said, by agent pid.
     ///
-    /// `hooked` holds one report per session and every event replaces it, so a
-    /// subagent's permission prompt was overwritten by whatever a sibling
-    /// running beside it did next — and the tab stopped asking while the
-    /// question was still on screen. A question is kept here until the
-    /// subagent that asked it says something else. See `App::apply_hooks`.
-    pub asking_agents: HashMap<String, HashMap<String, crate::hook::Reported>>,
-    /// The process tree each session's hooks reported running under, keyed by
-    /// session id.
-    ///
-    /// Kept apart from `hooked` because it answers a different question and
-    /// changes on a different clock: `hooked` is what the agent is *doing* and
-    /// turns over constantly, while this is *where it is* and is written once
-    /// and then repeated. Only the changes go to the worker, which is what makes
-    /// storing it separately worth a field — see [`App::note_hook_pids`].
-    pub(super) hook_pids: HashMap<String, Vec<u32>>,
+    /// Kept apart from the pane reads because it is refreshed on a slower
+    /// clock: each one is a `capture-pane`, which is not a per-frame cost the
+    /// way reading a parser this process owns is. Merged into `screen_read`
+    /// every tick so the rows see one map.
+    pub(super) peeked: HashMap<u32, crate::peek::Screened>,
+    /// When `peeked` was last rebuilt. `None` until the first detached read.
+    pub(super) peeked_at: Option<Instant>,
     /// The integration's state, as of the last time the panel was opened.
     ///
     /// Rebuilt on opening and after every action rather than every frame: it
@@ -729,6 +815,15 @@ pub struct App {
     /// used is not known until an agent has been picked, and every agent but
     /// Claude still needs the brief. See [`crate::handoff::fork`].
     pub pending_fork: Option<std::path::PathBuf>,
+    /// The harness that wrote [`pending_fork`](Self::pending_fork).
+    ///
+    /// Held because which receiving agent can read a transcript is not known
+    /// until one is picked, and the answer depends on which harness the
+    /// transcript came from: Claude to Claude is a copy, Claude to Codex is a
+    /// conversion. The default is Claude, which is what a session that is only
+    /// forkable — and so never passed through `convert::convertible_session` —
+    /// needs.
+    pub pending_provider: crate::pricing::Provider,
     /// A brief handed to an agent that is still starting up, as
     /// `(pid, line, not before)`.
     ///
@@ -801,6 +896,11 @@ impl App {
                 .iter()
                 .cloned()
                 .collect::<std::collections::HashSet<_>>(),
+            tree: prefs.tree,
+            collapsed: prefs.collapsed_groups.iter().cloned().collect(),
+            groups: Vec::new(),
+            indent: Vec::new(),
+            matched: 0,
             stats: Stats::default(),
             selected: 0,
             scroll: 0,
@@ -811,7 +911,7 @@ impl App {
             sort_col: ColumnId::Last,
             sort_asc: true,
             sortby_cursor: 0,
-            search: String::new(),
+            search: Default::default(),
             search_content: false,
             scan_query: String::new(),
             scan_hits: HashMap::new(),
@@ -822,6 +922,8 @@ impl App {
             age_filter,
             age_cursor,
             live_only: prefs.live_only,
+            idle_only: false,
+            idle_sort: None,
             marked: HashSet::new(),
             deleting: HashSet::new(),
             batch: BatchKind::Delete,
@@ -848,20 +950,26 @@ impl App {
             })
             .collect(),
             menu_cursor: 0,
-            cost_input: String::new(),
-            send_input: String::new(),
-            rename_input: String::new(),
+            cost_input: Default::default(),
+            send_input: Default::default(),
+            worktree_input: Default::default(),
+            worktree_base: Default::default(),
+            worktree_repo: Default::default(),
+            rename_input: Default::default(),
             rename_tab: 0,
             rename_was: String::new(),
             rename_color: None,
             rename_opened_by_click: None,
-            switch_filter: String::new(),
+            switch_filter: Default::default(),
             switch_cursor: 0,
+            switch_state: Default::default(),
             quit_arm: false,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             help_scroll: 0,
             help_max_scroll: 0,
+            help_filter: Default::default(),
+            help_typing: false,
             settings: Default::default(),
             keymap: Default::default(),
             settings_file: None,
@@ -898,27 +1006,37 @@ impl App {
             global_spend: History::default(),
             quota: Quota::default(),
             notify: crate::notify::Notifier::new(prefs.notify),
+            alerts: crate::alert::Alerts::default(),
+            seen: seen::Seen::default(),
             collisions: crate::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
+            remote_versions: HashMap::new(),
+            remote_skew_told: std::collections::HashSet::new(),
+            remote_update: None,
+            remote_updating: std::collections::HashSet::new(),
             update_available: None,
             toasts: toast::Toasts::default(),
             started_at: chrono::Utc::now().to_rfc3339(),
             started: Instant::now(),
             rave: rave::Rave::default(),
+            drunk: drunk::Drunk::default(),
+            high: high::High::default(),
             prefs,
             tx,
             tabs: Vec::new(),
+            preview: preview::Capture::default(),
             tab: 0,
             shared_at: None,
             drag_tab: None,
-            hooked: HashMap::new(),
-            asking_agents: HashMap::new(),
             // Loaded rather than started empty, because the row most likely to
             // want a tab blinking is the one blocked on a question — and that
             // is exactly the row that sends nothing until it is answered. See
-            // [`hook::load_claims`](crate::hook::load_claims).
-            hook_pids: crate::hook::load_claims(),
+            // [`Reports::new`](crate::hook::Reports::new).
+            reports: crate::hook::Reports::new(),
+            screen_read: HashMap::new(),
+            peeked: HashMap::new(),
+            peeked_at: None,
             hooks: None,
             listener: None,
             launch_cursor: 0,
@@ -926,7 +1044,7 @@ impl App {
             launch_into: LaunchInto::Tab,
             launch_root: std::env::current_dir().ok(),
             launch_cwd: None,
-            launch_cwd_input: String::new(),
+            launch_cwd_input: Default::default(),
             launch_cwd_bad: false,
             launch_cwd_known: Vec::new(),
             launch_cwd_hits: Vec::new(),
@@ -946,6 +1064,7 @@ impl App {
             torn: torn::Torn::default(),
             pending_brief: None,
             pending_fork: None,
+            pending_provider: crate::pricing::Provider::Claude,
             handoff_send: None,
             hosted: None,
             paste_preview: None,
@@ -965,6 +1084,10 @@ impl App {
         let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();
         expanded.sort();
         self.prefs.expanded = expanded;
+        self.prefs.tree = self.tree;
+        let mut collapsed: Vec<String> = self.collapsed.iter().cloned().collect();
+        collapsed.sort();
+        self.prefs.collapsed_groups = collapsed;
         self.prefs.subagent_sort_col = self.subagent_sort.0.key().to_string();
         self.prefs.subagent_sort_asc = self.subagent_sort.1;
         self.prefs.cost_floor = self.cost_floor;
@@ -1051,8 +1174,15 @@ impl App {
             conversation: None,
             error: None,
             back: 0,
-            max_back: 0,
             fetching: false,
+            raw: false,
+            tools_open: false,
+            opened: std::collections::HashSet::new(),
+            search: reader::Search::default(),
+            laid: None,
+            visible: 0,
+            dirty: false,
+            hold: false,
         });
         self.mode = Mode::Conversation;
         self.fetch_chat(None);
@@ -1107,10 +1237,18 @@ impl App {
                         if current.note.is_none() {
                             current.note = page.note.take();
                         }
+                        // Only the new turns are laid out; the ones already
+                        // shown are kept (see [`reader`]).
+                        view.relayout(false);
                     }
                     None => view.conversation = Some(*page),
                 },
-                None => view.conversation = Some(*page),
+                None => {
+                    view.conversation = Some(*page);
+                    // A whole new document: a kept turn could be one whose
+                    // tool has since returned, so none of them are kept.
+                    view.laid = None;
+                }
             },
             Err(why) => view.error = Some(why),
         }
@@ -1129,7 +1267,7 @@ impl App {
     }
 }
 
-/// The state behind the conversation overlay.
+/// The state behind the conversation reader (see [`reader`]).
 pub struct ChatView {
     /// The session the view is about — kept because a page of older turns is
     /// asked for on the same row the view was opened on.
@@ -1143,17 +1281,36 @@ pub struct ChatView {
     pub conversation: Option<crate::serve::chat::Conversation>,
     /// Why the read failed, when it did.
     pub error: Option<String>,
-    /// Lines scrolled back from the bottom. A scrollback's zero is the end:
+    /// Rows scrolled back from the bottom. A scrollback's zero is the end:
     /// new turns arriving while it sits there must not move what you are
     /// reading, and a prepend of older turns leaves a distance from the end
     /// exactly where it was.
-    pub back: u16,
-    /// How far `back` can go, written by the draw — the only place the wrapped
-    /// line count is known.
-    pub max_back: u16,
+    pub back: usize,
     /// A fetch is in flight — the spinner's reason to keep turning, and what
     /// keeps a second `u` from asking for the page already coming.
     pub fetching: bool,
+    /// Replies shown as the markdown source they were written in, rather than
+    /// rendered — `m` flips it, for the times the exact characters matter.
+    pub raw: bool,
+    /// Every tool call drawn in full rather than as its one line — `t`.
+    pub tools_open: bool,
+    /// Turns, by `seq`, whose tools are drawn the other way from `tools_open`
+    /// — what `Enter` flips, one turn at a time.
+    pub opened: std::collections::HashSet<usize>,
+    /// `/`: the query and the rows it is on.
+    pub search: reader::Search,
+    /// The conversation laid out at the last frame's width, kept so a frame
+    /// copies the rows it shows rather than rendering every reply again.
+    pub laid: Option<reader::Laid>,
+    /// Rows the last frame had for text, written by the draw — the only place
+    /// it is known — for the keys to page and clamp by.
+    pub visible: usize,
+    /// Something `laid` was built from has changed; the next frame lays out
+    /// again, keeping every turn it can.
+    pub dirty: bool,
+    /// The next layout keeps the top row in place even at the end; see
+    /// [`ChatView::relayout`].
+    pub hold: bool,
 }
 
 /// Columns the user has hidden outright, which win over the automatic

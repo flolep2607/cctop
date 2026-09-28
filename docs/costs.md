@@ -34,6 +34,18 @@ differently, so these numbers will not match your invoice. Treat the `$` column
 as a measure of resource consumption, not as billing. Use `--plan max` or
 `--plan included` to display bundled usage as `incl` instead.
 
+## Today's model mix
+
+The Overview's **Models** row is today's spend split by model: a short stacked
+bar, then each model's name in its segment's colour with its share of the day.
+Colours go by rank, not vendor, since the mix worth seeing is usually two
+Claude models against each other; past the fourth, models share one dim tail
+so the bar is always the whole of today. Like the Today figure, it counts every
+session rather than only the ones a filter leaves on the table. The names are
+placed first and the bar takes what they leave, up to sixteen cells; when that
+is fewer than eight the bar is left off and the row is the plain list of
+percentages.
+
 ## Where each provider's data comes from
 
 | Source | Path |

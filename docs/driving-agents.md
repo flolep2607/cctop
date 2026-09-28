@@ -72,6 +72,19 @@ transcript path instead. Resuming a session that is *still running* asks first �
 two agents appending to one transcript is not something the harnesses
 coordinate.
 
+## Stopping the sessions nobody is using
+
+The other end of resuming. An agent left open for days still holds its memory,
+and on a shared server those add up to gigabytes. `I` shows the live sessions
+that have been quiet for `idle_after` hours (6 by default), biggest first, with
+the total a stop would give back; `K` there stops them — the marked ones, or all
+of them — after a confirmation that names each, its idle time and its memory.
+
+It skips any session that is working, asking a question, or still using CPU, and
+says which and why. The stop is SIGTERM, so each agent exits cleanly and `R`
+brings it back whenever it is wanted again. See [idle
+sessions](the-table.md#idle-sessions-and-the-memory-they-hold) for the details.
+
 ## Tabs and splits
 
 The session table is tab 1. `t` opens another: pick an agent — whichever of
@@ -120,6 +133,20 @@ when it has explicitly asked a question and is blocked on the answer. Amber wins
 when a tab has both. The tab you are on never blinks, since its focused pane is
 already in front of you.
 
+Green is most tabs most of the time, so a turn that ended while you were
+somewhere else says so a second way: the label turns the accent colour and
+carries a `✓` until you focus that pane, or select its row on the dashboard.
+`Alt+b` walks every amber tab first and then the `✓` ones, so pressing it until
+it says "Nothing is waiting for you" is a round of everything with news. See
+[the status dot](the-table.md#the-status-dot) for what counts as looking, and
+why the mark is this cctop's own rather than shared with the others.
+
+`Alt+z` zooms the focused pane over the whole tab — for reading a long diff in
+one half of a split — and again puts the split back. The tab wears a `⤢` while
+it is zoomed. The panes you cannot see keep running and are not resized, so
+zooming costs their agents nothing; see
+[Every key](the-table.md#every-key) for the details.
+
 A tab holding the login shell rather than an agent is left alone. Both colours
 describe a turn, and a shell has no turns — it sits at its prompt drawing
 nothing, which is exactly the silence the green is read from, so a tab opened
@@ -135,6 +162,35 @@ same. So idleness is read off the pane's own screen instead: a working agent
 repaints constantly (a spinner's elapsed counter alone ticks every second), so
 two seconds of a still screen means the agent is waiting on you. That needs no
 per-harness parsing and works for anything you open in a tab, shells included.
+
+### Recording a pane
+
+`Alt+Shift+C` records the focused pane to an [asciinema](https://asciinema.org)
+v2 `.cast` file, and pressing it again stops and says where the file went. The
+tab carries a red `● REC` on the bar for as long as any of its panes is being
+recorded, so one left running is seen from every other tab. Closing the pane, or
+its agent exiting, stops the recording too, and says so the same way.
+
+Play one back with `asciinema play <file>`, or upload it to wherever asciinema
+casts go. What is recorded is the terminal's own output — the bytes the agent
+wrote to its pty, at the times it wrote them, before cctop's emulator read them —
+so a player redraws the pane exactly rather than cctop's rendering of it. The
+file opens on the screen as it stood when you pressed the key, since a recording
+started mid-session would otherwise begin blank and fill in only as the agent
+happened to repaint. The header carries the pane's size, and a resize — the
+window changing, a split opening beside it — is recorded as one, so the replay
+reflows where the pane did.
+
+Recordings go to `~/.local/share/cctop/casts` (`$XDG_DATA_HOME/cctop/casts`),
+named after the tab and the time. Not the cache directory, which
+`--clear-cache` empties, and not the session's own directory, which is usually a
+repository: a cast there turns up in `git status` and in the agent's own view of
+the project it recorded.
+
+In a split each pane is recorded on its own, because a cast is one terminal of
+one size. A tab that is being recorded keeps its rmux client when you switch
+away from it, rather than handing it back as tabs otherwise do — giving it up
+would end the recording.
 
 ### Tabs outlive cctop
 
@@ -289,6 +345,41 @@ deliberately not answered; the shim relays bytes rather than parsing them, so
 it does not know where the cursor is, and a made-up position would put an
 agent's first frame in the wrong place.
 
+## Waiting for an agent to finish
+
+```bash
+cctop wait 3f2a                     # a session id prefix
+cctop wait reviewer --until done    # a tab's name
+cctop wait 48213 -j --timeout 30m   # a pid anywhere in the agent's process tree
+```
+
+blocks until that session stops working, then exits — so a script, or another
+agent, can hand work to one agent and pick up when it is done. It reads what
+the dashboard reads: the transcripts, the agents' own hooks (it listens for them
+the way a running cctop does, so a finished turn is heard the moment it
+happens), and the state a cctop recorded on the agent's rmux session.
+
+| `--until` | Met when |
+|---|---|
+| `any-stop` (default) | it is not working — at once, if it already is not |
+| `idle` | its turn is over and the prompt is yours |
+| `waiting` | it is blocked on a question: a permission prompt, an MCP elicitation |
+| `done` | it has worked since the wait began, and stopped since — the one to use after typing it a prompt, which may not have landed yet |
+
+It exits 0 when the condition is met, 1 when the session ended first without
+meeting it, 2 when the target names no session or more than one, and 124 on
+`--timeout` (default `10m`; `0` waits forever), `timeout(1)`'s own code. `-j`
+prints the outcome as one line of JSON: `session`, `pid`, `label`, `state`,
+`until`, `met`, `timed_out`, `waited_secs`. An agent can ask the same thing
+over MCP with `wait_for_session` — see
+[Letting agents see each other](integrations.md#letting-agents-see-each-other).
+
+A Claude Code transcript cannot say that a turn is over — answering you and
+still thinking look the same on disk — so for Claude that answer comes from its
+hooks. Install them (`cctop --install-hooks`), or a Claude session that went
+quiet before the wait started reads as working until its next event, unless the
+agent is in a cctop tab and a running cctop recorded its state there.
+
 ## Getting pinged when a session needs you
 
 cctop is a monitor you look away from, so `w` turns on the other direction:
@@ -316,6 +407,58 @@ One thing it deliberately does *not* ring for: an agent that has simply
 finished its turn and is sitting at its prompt. In the transcript that looks
 the same as an agent still thinking, and a timer would fire in the middle of
 every long reasoning turn.
+
+### Alerts on spend, error loops and stalls
+
+The same machinery can watch a session's numbers as well as its state. Each
+alert is off until you give it a threshold in `[settings]` (or with `,`, where
+Enter on the row opens a field), and `0` turns it back off:
+
+```toml
+[settings]
+alert_cost = 20          # a session's COST passes $20
+alert_burn = 30          # a session burns more than $30 an hour
+alert_today = 100        # today's spend across every session passes $100
+alert_errors = 25        # 25% of its tool calls in the last 10 minutes failed…
+alert_error_calls = 10   # …once there are at least this many calls in them
+alert_stall = 10         # a working agent has written nothing for 10 minutes
+```
+
+When one fires, cctop says so in a toast, and — with `w` on — rings the bell and
+raises the desktop notification, one ring per refresh however many fired in it.
+With `$CCTOP_NOTIFY_URL` set, each is POSTed as `{"event": "alert", "text": …}`.
+The row takes a marker in place of its status dot for as long as the reading is
+still past the threshold: `$` for cost or burn rate, `!` in red for an error
+loop, `◌` for a stall. The day's spend has no row, so it is the toast alone.
+
+Each fires on the *crossing*, like the bell, and not on the refresh after. It
+can fire again only once the reading has come back below four-fifths of the
+threshold, so a burn rate hovering around its limit is one alert rather than
+one a refresh. A session already over a threshold when cctop starts — or when
+you lower the threshold under it — is marked but not rung for: nobody watched
+that crossing happen. The day's spend starts over at local midnight, and so
+does its alert.
+
+The error loop is measured over the last ten minutes, not the session's whole
+life: `ERR%` barely moves when a session that made three hundred good calls
+starts failing every one, so the alert takes the difference of the two counters
+the transcript already records across the window. The window only holds calls
+this cctop saw — it starts when cctop first sees the session.
+
+A stall needs the agent's hooks (`cctop hook --install`), and cctop will not
+guess without them. A transcript cannot tell three silences apart: a turn that
+is over, a tool call still running, and an agent that has stopped getting
+anywhere all leave the newest record where it was, and for most harnesses a
+finished turn reads as work in progress. So a stall is a session whose row and
+hooks both say it is working, with no tool call open, and no new record for the
+threshold — counting a running subagent's transcript, since a parent waiting on
+its subagent writes nothing of its own. A tool call that has not come back is
+never called a stall: a hung command and a half-hour build look identical from
+outside, and an alert on every long build is one people learn to ignore.
+
+Alerts only ever tell you. cctop never stops, pauses or signals a session for
+crossing one — an agent over budget may be a minute from finishing the job the
+budget paid for.
 
 ### When the agent is the one ringing
 
@@ -390,14 +533,42 @@ it was found — still listed, still resumable, still the only writer of its own
 file. That is also what makes this different from `R`, which refuses to put a
 second agent on a transcript for precisely that reason.
 
-The cost is the one the brief was written to avoid: the whole window, tool output
-and all, replayed into a fresh one. That is the trade being made on purpose —
-everything is carried because everything can be. Hand the same session to any
-other agent and it gets the brief, which is the only form that agent can read.
+### Claude to Codex, and back
 
-The same brief is available without the UI:
+Between two harnesses that keep a file of JSON lines, the copy can be made by
+reading one and writing the other instead, and cctop does that: handing a Claude
+session to `codex` writes a rollout into `~/.codex/sessions/`, and `codex resume`
+picks it up. The reverse works the same way.
+
+That is the same trade as the Claude-to-Claude fork, for the same reason and
+with the same cost — the whole window goes across, tool output and all — but
+between two harnesses whose vocabularies differ, so something is left behind.
+The conversation crosses: what was asked, what was said, and every tool call with
+its result. The rest does not, because the receiving harness can work it out for
+itself and the sending harness's figures are about a window the receiver is not
+using. That means token counts, costs, the model, and reasoning — the last
+because it is signed for the model that wrote it and is unreadable to any other.
+
+The copy keeps the session's **own id** where the receiving store has it free,
+which is what lets cctop recognise the two as one piece of work rather than two
+sessions that arrived in the same directory. Where the id is taken, a new one is
+minted instead — a handoff never overwrites a conversation — and the transcript
+records which session it came from either way, so `cctop --converted` can list
+the copies and `--remove` clear them out.
+
+OpenCode is not in this set. It keeps its transcripts in SQLite tables beside a
+project's real state, and writing rows into a live store another agent is using
+is a different kind of risk from adding a file to a directory of rollouts. It
+gets the brief, which is the only form it can read today.
+
+The brief is available without the UI, as is a conversion:
 
 ```bash
 cctop --handoff            # the most recently active session, as markdown
 cctop --handoff 2abd15fe   # a session id, or any unique prefix of one
+cctop --convert 2abd15fe codex   # the conversation, in Codex's own store
+cctop --converted          # the copies on this machine, and where they came from
 ```
+
+`--convert` writes the transcript and stops there; it does not start an agent.
+Use the UI's `O` for the launch, which resumes the copy as it goes.

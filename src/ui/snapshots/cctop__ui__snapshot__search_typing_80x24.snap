@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t)
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (1/4) ──────────────────────────────────────────────────────────────╮
+│   LAST▲         $ MODEL          PERM   ! HOST       BRANCH       PROJECT    │
+│●     7m╭ Filter sessions ───────────────────────────────────────────╮        │
+│        │ > ap█                                                      │        │
+╰────────│ 1 of 4 sessions                                            │────────╯
+╭ Info  P│ ○ Columns only — Tab also searches transcripts             │ Context╮
+│Root /us│ Enter apply   Esc cancel                                   │        │
+│    PID ╰────────────────────────────────────────────────────────────╯        │
+│   5120    0.4%    180.0M  claude                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark Esc Clear filter  Filter: ap      ⧉ share

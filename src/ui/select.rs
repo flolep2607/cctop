@@ -21,7 +21,7 @@ impl App {
     pub fn selected_session(&self) -> Option<&Session> {
         self.visible
             .get(self.selected)
-            .and_then(|row| self.sessions.get(row.session()))
+            .and_then(|row| self.sessions.get(row.session()?))
     }
 
     /// The highlighted row, whatever kind it is.
@@ -32,7 +32,7 @@ impl App {
     /// The highlighted subagent, when the cursor is on a child row.
     pub fn selected_subagent(&self) -> Option<&crate::session::Subagent> {
         match self.selected_row()? {
-            Row::Session(_) => None,
+            Row::Session(_) | Row::Group(_) => None,
             Row::Subagent { parent, index } => self.sessions.get(parent)?.subagents.get(index),
         }
     }
@@ -62,7 +62,7 @@ impl App {
         let Some(row) = self.selected_row() else {
             return;
         };
-        let Some(session) = self.sessions.get(row.session()) else {
+        let Some(session) = row.session().and_then(|i| self.sessions.get(i)) else {
             return;
         };
         if session.subagents.is_empty() {
@@ -105,11 +105,18 @@ impl App {
     /// alone cannot tell a parent from its children, so the cursor is anchored
     /// on the pair.
     pub(super) fn row_key(&self, row: Row) -> String {
-        let Some(session) = self.sessions.get(row.session()) else {
+        if let Row::Group(g) = row {
+            // Prefixed so a heading can never share a key with a session.
+            return match self.groups.get(g) {
+                Some(g) => format!("group:{}", g.key),
+                None => String::new(),
+            };
+        }
+        let Some(session) = row.session().and_then(|i| self.sessions.get(i)) else {
             return String::new();
         };
         match row {
-            Row::Session(_) => session.key(),
+            Row::Session(_) | Row::Group(_) => session.key(),
             Row::Subagent { index, .. } => match session.subagents.get(index) {
                 Some(sub) => format!("{}/{}", session.key(), sub.agent_id),
                 None => session.key(),
@@ -124,7 +131,7 @@ impl App {
     /// worker, cache, every panel — reads it without knowing the difference, and
     /// the panels describe the subagent rather than the parent it ran under.
     pub(super) fn panel_subject(&self, row: Row) -> Option<Session> {
-        let session = self.sessions.get(row.session())?;
+        let session = self.sessions.get(row.session()?)?;
         let Row::Subagent { index, .. } = row else {
             return Some(session.clone());
         };
@@ -142,11 +149,14 @@ impl App {
         stand_in.harness = session.harness.clone();
         stand_in.title = Some(sub.description.clone()).filter(|d| !d.is_empty());
         stand_in.started_at = sub.started_at.clone().unwrap_or_default();
-        stand_in.data_file = session
-            .data_file
-            .as_ref()
-            .map(|f| f.with_extension("").join("subagents"))
-            .map(|dir| dir.join(format!("{}.jsonl", sub.agent_id)));
+        // Found among the session's transcripts rather than rebuilt from the
+        // id: a workflow's agents sit a run directory further down.
+        stand_in.data_file = session.data_file.as_ref().and_then(|f| {
+            crate::session::transcript_files(f)
+                .into_iter()
+                .skip(1)
+                .find(|t| t.file_stem().is_some_and(|s| *s == *sub.agent_id))
+        });
         // Its own mtime, so the panels refresh while the subagent is working and
         // not merely when its parent writes something.
         stand_in.last_active = stand_in
@@ -317,6 +327,8 @@ impl App {
             4 => bump(&mut self.subagent_scroll),
             5 => bump(&mut self.cost_scroll),
             6 => bump(&mut self.config_scroll),
+            // Preview is a screen clipped to the panel, not a list of lines.
+            super::preview::TAB => {}
             _ => bump(&mut self.context_scroll),
         }
         self.needs_redraw = true;

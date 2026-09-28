@@ -24,6 +24,12 @@
 //! the next key says whether a `<` follows it; nobody types `[<` then three
 //! numbers and an `M`, and everything else is released the moment it cannot be
 //! a report.
+//!
+//! Two more ways a report arrives torn. A read that ends after `\x1b[` is
+//! decoded by crossterm as Alt+`[` — an Esc followed by a character is how a
+//! terminal spells Alt — so the report opens with that instead of an Esc. And
+//! when the `[` has gone through on its own, the tail starts at `<`. Both are
+//! held the same way; a `<` typed on purpose waits only for the next key.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
@@ -52,8 +58,11 @@ impl Torn {
     /// and this one once it clearly is not a report.
     pub fn feed(&mut self, key: KeyEvent, now: Instant) -> Vec<KeyEvent> {
         if self.held.is_empty() {
-            let opens = (key.code == KeyCode::Esc || key.code == KeyCode::Char('['))
-                && key.modifiers.is_empty();
+            let opens = match (key.code, key.modifiers) {
+                (KeyCode::Char('['), KeyModifiers::ALT) => true,
+                (KeyCode::Esc | KeyCode::Char('[' | '<'), m) => m.is_empty(),
+                _ => false,
+            };
             if opens {
                 self.held.push(key);
                 self.since = Some(now);
@@ -69,7 +78,7 @@ impl Torn {
             KeyCode::Esc => &self.held[1..],
             _ => &self.held[..],
         };
-        match shape(after) {
+        match shape(&spell(after)) {
             Shape::Report => {
                 crate::elog::event("tui", "torn-mouse-report", serde_json::json!({}));
                 self.held.clear();
@@ -116,20 +125,34 @@ enum Shape {
     Neither,
 }
 
-/// What the keys after an Esc spell, as far as an SGR mouse report goes.
-fn shape(keys: &[KeyEvent]) -> Shape {
+/// The keys after an Esc as the text of a report, `[` included — or `None`
+/// when one of them could not be part of a report at all.
+///
+/// An Alt+`[` in front is the Esc and `[` read as one key, and a lone `<` in
+/// front is a tail whose `[` went through already; both spell the same text as
+/// the report they came from.
+fn spell(keys: &[KeyEvent]) -> Option<String> {
     let mut text = String::new();
-    for key in keys {
-        // The reader marks a capital as shifted, and `M` is one: shift is the
-        // only modifier a character of a report can arrive with.
-        let (KeyCode::Char(c), m) = (key.code, key.modifiers) else {
-            return Shape::Neither;
-        };
-        if !(m - KeyModifiers::SHIFT).is_empty() {
-            return Shape::Neither;
+    for (i, key) in keys.iter().enumerate() {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('['), KeyModifiers::ALT) if i == 0 => text.push('['),
+            // The reader marks a capital as shifted, and `M` is one: shift is
+            // the only modifier a character of a report can arrive with.
+            (KeyCode::Char(c), m) if (m - KeyModifiers::SHIFT).is_empty() => text.push(c),
+            _ => return None,
         }
-        text.push(c);
     }
+    if text.starts_with('<') {
+        text.insert(0, '[');
+    }
+    Some(text)
+}
+
+/// What the keys after an Esc spell, as far as an SGR mouse report goes.
+fn shape(text: &Option<String>) -> Shape {
+    let Some(text) = text else {
+        return Shape::Neither;
+    };
     if text.is_empty() || text == "[" {
         return Shape::Prefix;
     }
@@ -221,6 +244,29 @@ mod tests {
         assert_eq!(run(&mut torn, "a[b]", now), keys("a[b]"));
         assert_eq!(run(&mut torn, "[", now), Vec::<KeyEvent>::new());
         assert_eq!(torn.expire(now + WINDOW), keys("["));
+    }
+
+    /// The two tears seen in a real pane: the read ending after `\x1b[`, which
+    /// the reader hands over as Alt+`[`, and the tail arriving from its `<`.
+    #[test]
+    fn a_report_opened_by_alt_bracket_or_a_bare_angle_is_dropped() {
+        let mut torn = Torn::default();
+        let now = Instant::now();
+        let alt = KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT);
+        let mut out = torn.feed(alt, now);
+        out.extend(run(&mut torn, "<35;148;3M", now));
+        assert!(out.is_empty(), "leaked: {out:?}");
+        assert!(!torn.holding());
+
+        assert!(run(&mut torn, "<35;148;3M<0;97;19m", now).is_empty());
+
+        // Typed on purpose, both still arrive.
+        assert_eq!(run(&mut torn, "a < b", now), keys("a < b"));
+        assert_eq!(run(&mut torn, "<", now), Vec::<KeyEvent>::new());
+        assert_eq!(torn.expire(now + WINDOW), keys("<"));
+        let mut out = torn.feed(alt, now);
+        out.extend(run(&mut torn, "x", now));
+        assert_eq!(out, vec![alt, KeyEvent::from(KeyCode::Char('x'))]);
     }
 
     /// A report with a field missing or too many is not one, and is typed.

@@ -1,6 +1,7 @@
 //! Key and mouse handling: translate input events into state changes.
 
 use super::columns::COLUMNS;
+use super::line_edit::LineEdit;
 use super::select::PAGE;
 use super::{AGE_OPTIONS, App, BatchKind, LaunchInto, Mode, Request, render, theme};
 /// Longest path the launcher's directory field accepts.
@@ -21,6 +22,24 @@ pub(super) const TAB_NAME_MAX: usize = 64;
 /// is matched against, minus the need to store it anywhere.
 const SWITCH_FILTER_MAX: usize = 64;
 
+/// Longest query the help filter takes. Its longest line is well under this;
+/// a query past it cannot match anything, so it would only be a paste.
+const HELP_FILTER_MAX: usize = 80;
+
+/// Longest line the send box takes: a prompt, not a document — anything
+/// longer belongs in the agent's own composer, where it can be read back.
+const SEND_MAX: usize = 500;
+
+/// Longest branch name `F` takes. It becomes a directory name as well, and a
+/// paste of anything longer was never meant as one.
+const BRANCH_MAX: usize = 100;
+
+/// Longest cost floor: more digits than any dollar amount a session reaches.
+const COST_MAX: usize = 12;
+
+/// Longest value the settings panel takes for one setting.
+const SETTING_MAX: usize = 200;
+
 /// How long after a right-click a paste still counts as that click's echo.
 ///
 /// One frame's worth of slack: the terminal writes the click and the clipboard
@@ -33,9 +52,9 @@ use ratatui::crossterm::event::{
 };
 use std::time::{Duration, Instant};
 
-/// The pasted text as a single line, within `room` more bytes — the budget being
-/// in bytes because the caps it enforces are the ones `on_key_send` and
-/// `on_key_cost` already apply to a `String`'s length.
+/// The pasted text as a single line, within `room` more characters — the room
+/// left under the cap of the field it is going into (see [`LineEdit::room`]),
+/// so a runaway paste is cut here rather than copied whole first.
 ///
 /// Every input on the dashboard is one line drawn in one strip, and none of them
 /// has a notion of a cursor on a second row — a newline dropped straight in would
@@ -47,9 +66,10 @@ use std::time::{Duration, Instant};
 /// among them would repaint the strip it landed in.
 fn flatten(text: &str, room: usize) -> String {
     let mut out = String::new();
+    let mut taken = 0;
     let mut last_was_break = false;
     for c in text.chars() {
-        if out.len() + c.len_utf8() > room {
+        if taken == room {
             break;
         }
         match c {
@@ -58,17 +78,31 @@ fn flatten(text: &str, room: usize) -> String {
             '\n' | '\r' | '\t' => {
                 if !last_was_break {
                     out.push(' ');
+                    taken += 1;
                 }
                 last_was_break = true;
             }
             c if c.is_control() => {}
             c => {
                 out.push(c);
+                taken += 1;
                 last_was_break = false;
             }
         }
     }
     out
+}
+
+/// A paste typed into `field` at its cursor, flattened to the one line every
+/// field is, and cut to `cap`. True when anything went in.
+fn paste_into(field: &mut LineEdit, text: &str, cap: usize) -> bool {
+    field.insert_str(&flatten(text, field.room(cap)), cap)
+}
+
+/// What the cost floor can hold: it is parsed as a number, so nothing else
+/// could have been meant.
+fn cost_char(c: char) -> bool {
+    c.is_ascii_digit() || c == '.'
 }
 
 impl App {
@@ -78,14 +112,30 @@ impl App {
         }
         self.needs_redraw = true;
 
+        // Before anything else sees the key, in every mode and on every tab:
+        // the arrows move things, and a code heard only on the dashboard is
+        // lost to the first arrow that carries you off it.
+        // Every code hears every key — `|`, not `||` — or one would lose its
+        // place each time another kept a letter.
+        if self.hear_rave(key) | self.hear_drunk(key) | self.hear_high(key) {
+            return;
+        }
+
         // Moving between tabs and panes has to work from inside a pane, where
         // every other key belongs to the agent. Alt is the modifier left over:
         // Ctrl- is the agent's (Ctrl-C interrupts it), and the function keys are
         // too few to also carry the splits.
         // Except while the settings panel waits for a key to bind: then Alt+n
         // is the answer, not a new tab.
+        //
+        // And except for the letters readline gives Alt, while a field is being
+        // typed in: Alt+B there is a word back, not the next tab that rang —
+        // which is still a keystroke away once Enter or Esc puts the field
+        // down.
+        let readline = matches!(key.code, KeyCode::Char('b' | 'f' | 'd'));
         if key.modifiers.contains(KeyModifiers::ALT)
             && !self.settings_capture
+            && !(readline && self.typing())
             && self.on_key_workspace(key)
         {
             return;
@@ -145,11 +195,13 @@ impl App {
             }
             Mode::Serve => self.on_key_serve(key),
             Mode::QuitConfirm => self.on_key_quit(key),
+            Mode::RemoteUpdateConfirm => self.on_key_remote_update(key),
             Mode::BatchConfirm | Mode::BatchDeleteBlocked | Mode::BatchKillBlocked => {
                 self.on_key_batch(key)
             }
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
+            Mode::NewWorktree => self.on_key_worktree(key),
             Mode::RenameTab => self.on_key_rename(key),
             Mode::SwitchTab => self.on_key_switch(key),
             Mode::AddAccount => self.on_key_add_account(key),
@@ -282,18 +334,20 @@ impl App {
                     pane.view.send_paste(text);
                 }
                 None if self.add_account.outcome.is_none() && !self.add_account.named => {
-                    let room = TAB_NAME_MAX.saturating_sub(self.add_account.name.chars().count());
-                    self.add_account.name.push_str(&flatten(text, room));
+                    paste_into(&mut self.add_account.name, text, TAB_NAME_MAX);
                 }
                 None => {}
             },
             Mode::Search => {
-                self.search.push_str(&flatten(text, usize::MAX));
-                self.search_edited();
+                if paste_into(&mut self.search, text, usize::MAX) {
+                    self.search_edited();
+                }
             }
             Mode::SendKeys => {
-                let room = 500usize.saturating_sub(self.send_input.len());
-                self.send_input.push_str(&flatten(text, room));
+                paste_into(&mut self.send_input, text, SEND_MAX);
+            }
+            Mode::NewWorktree => {
+                paste_into(&mut self.worktree_input, text, BRANCH_MAX);
             }
             Mode::RenameTab => {
                 // The clipboard a right-click brought along with it, not a
@@ -303,38 +357,40 @@ impl App {
                 {
                     return;
                 }
-                let room = TAB_NAME_MAX.saturating_sub(self.rename_input.chars().count());
-                self.rename_input.push_str(&flatten(text, room));
+                paste_into(&mut self.rename_input, text, TAB_NAME_MAX);
             }
             // Pasting a path in is the point of this field: a directory deep
             // enough to be worth typing is one you copied from somewhere.
             Mode::LaunchCwd => {
-                let room = MAX_PATH_INPUT.saturating_sub(self.launch_cwd_input.chars().count());
-                self.launch_cwd_input.push_str(&flatten(text, room));
-                self.launch_cwd_bad = false;
-                self.launch_cwd_suggest();
+                if paste_into(&mut self.launch_cwd_input, text, MAX_PATH_INPUT) {
+                    self.launch_cwd_bad = false;
+                    self.launch_cwd_suggest();
+                }
             }
             Mode::SwitchTab => {
-                let room = SWITCH_FILTER_MAX.saturating_sub(self.switch_filter.chars().count());
-                self.switch_filter.push_str(&flatten(text, room));
-                self.switch_cursor = 0;
+                if paste_into(&mut self.switch_filter, text, SWITCH_FILTER_MAX) {
+                    self.switch_cursor = 0;
+                }
             }
             // The cost floor is a number, so a paste is filtered the way typing
             // one is rather than flattened: anything that is not a digit or a
             // point could not have been typed here either.
             Mode::CostFilter => {
-                let room = 12usize.saturating_sub(self.cost_input.len());
-                let digits: String = text
-                    .chars()
-                    .filter(|c| c.is_ascii_digit() || *c == '.')
-                    .take(room)
-                    .collect();
-                self.cost_input.push_str(&digits);
+                let digits: String = text.chars().filter(|c| cost_char(*c)).collect();
+                self.cost_input.insert_str(&digits, COST_MAX);
             }
             Mode::Settings => {
                 if let Some(input) = &mut self.settings_input {
-                    let room = 200usize.saturating_sub(input.len());
-                    input.push_str(&flatten(text, room));
+                    paste_into(input, text, SETTING_MAX);
+                }
+            }
+            // A paste into the help is a paste into its filter, typing or not:
+            // nothing else on the page could want text.
+            Mode::Help => {
+                let pasted = paste_into(&mut self.help_filter, text, HELP_FILTER_MAX);
+                self.help_typing |= pasted;
+                if pasted {
+                    self.help_scroll = 0;
                 }
             }
             _ => {}
@@ -391,7 +447,7 @@ impl App {
         };
         self.send_prompt();
         if self.mode == Mode::SendKeys {
-            self.send_input = format!("{path} ");
+            self.send_input = format!("{path} ").into();
             return;
         }
         // `send_prompt` will have said why it could not open, which is no
@@ -481,6 +537,27 @@ impl App {
     /// The multiplexer keys, live everywhere including inside a pane. Returns
     /// false for an Alt- combination that means nothing here, so it still
     /// reaches the agent.
+    /// Whether the keyboard is going into a text field just now, rather than
+    /// driving a list — the question behind giving readline its Alt letters.
+    pub(super) fn typing(&self) -> bool {
+        match self.mode {
+            Mode::Search
+            | Mode::CostFilter
+            | Mode::SendKeys
+            | Mode::NewWorktree
+            | Mode::RenameTab
+            | Mode::SwitchTab
+            | Mode::LaunchCwd => true,
+            Mode::AddAccount => {
+                let flow = &self.add_account;
+                flow.pane.is_none() && flow.outcome.is_none() && !flow.named
+            }
+            Mode::Settings => self.settings_input.is_some() && !self.settings_capture,
+            Mode::Help => self.help_typing,
+            _ => false,
+        }
+    }
+
     fn on_key_workspace(&mut self, key: KeyEvent) -> bool {
         match key.code {
             // Shifted, the arrows carry the tab instead of moving between them
@@ -508,6 +585,9 @@ impl App {
                 None => return false,
             },
             KeyCode::Char('w') => self.close_pane(),
+            // Not taken on the dashboard, where there is no pane to zoom, so
+            // it still reaches whatever would have read it there.
+            KeyCode::Char('z') if self.tab > 0 => self.toggle_zoom(),
             // Shifted for the same reason as `W`, and because `r` renames: the
             // agent is ended and resumed, on whatever version is now installed.
             // On the dashboard it restarts the selected row's tab, and only from
@@ -519,6 +599,11 @@ impl App {
             // pane only detaches, and the key that ends the agent should not be
             // the same key with a slip of a finger.
             KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::SHIFT) => self.kill_pane(),
+            // `c` for cast, shifted because a bare Alt+c is a word-capitalise
+            // in every readline a shell pane might be running. On the
+            // dashboard there is no terminal to record, so the key is not
+            // taken there.
+            KeyCode::Char('C') if self.tab > 0 => self.toggle_recording(),
             _ => return false,
         }
         true
@@ -575,19 +660,14 @@ impl App {
             // moved while its directory is being typed.
             KeyCode::Down => self.step_launch_cwd(true),
             KeyCode::Up => self.step_launch_cwd(false),
-            KeyCode::Backspace => {
-                self.launch_cwd_input.pop();
-                self.launch_cwd_bad = false;
-                self.launch_cwd_suggest();
-            }
             // Bounded like every other one-line input here: a path longer than
             // this is not one anybody typed on purpose.
-            KeyCode::Char(c) if self.launch_cwd_input.chars().count() < MAX_PATH_INPUT => {
-                self.launch_cwd_input.push(c);
-                self.launch_cwd_bad = false;
-                self.launch_cwd_suggest();
+            _ => {
+                if self.launch_cwd_input.key(key, MAX_PATH_INPUT).changed() {
+                    self.launch_cwd_bad = false;
+                    self.launch_cwd_suggest();
+                }
             }
-            _ => {}
         }
         self.needs_redraw = true;
     }
@@ -624,72 +704,6 @@ impl App {
             KeyCode::Char('c') => self.open_insight("compare"),
             _ => {}
         }
-    }
-
-    /// Scroll the conversation, page further back into it, or close it.
-    ///
-    /// Like the insight overlay there is nothing here that can touch the
-    /// session: it is a transcript being read, not a terminal being driven.
-    /// `back` is a distance from the end rather than a position from the top,
-    /// so a turn landing mid-read does not shift the text under the cursor.
-    fn on_key_conversation(&mut self, key: KeyEvent) {
-        const PAGE: u16 = 20;
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::List;
-                self.chat = None;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.back.saturating_sub(1);
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = (view.back + 1).min(view.max_back);
-                }
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.back.saturating_sub(PAGE);
-                }
-            }
-            KeyCode::PageUp => {
-                if let Some(view) = &mut self.chat {
-                    view.back = (view.back + PAGE).min(view.max_back);
-                }
-            }
-            // Home is the transcript's start, End the live edge it opened on.
-            KeyCode::Home => {
-                if let Some(view) = &mut self.chat {
-                    view.back = view.max_back;
-                }
-            }
-            KeyCode::End => {
-                if let Some(view) = &mut self.chat {
-                    view.back = 0;
-                }
-            }
-            // `u` for "earlier": the window grows at the top, which a
-            // bottom-anchored scroll survives without moving a line.
-            KeyCode::Char('u') => {
-                let wants = self.chat.as_ref().is_some_and(|v| {
-                    !v.fetching && v.conversation.as_ref().is_some_and(|c| c.earlier > 0)
-                });
-                if wants {
-                    let before = self
-                        .chat
-                        .as_ref()
-                        .and_then(|v| v.conversation.as_ref())
-                        .and_then(|c| c.turns.first().map(|t| t.seq));
-                    if let Some(seq) = before {
-                        self.fetch_chat(Some(seq));
-                    }
-                }
-            }
-            _ => {}
-        }
-        self.needs_redraw = true;
     }
 
     fn on_key_hooks(&mut self, key: KeyEvent) {
@@ -758,20 +772,16 @@ impl App {
                 self.mode = Mode::List;
             }
             KeyCode::Esc => self.mode = Mode::List,
-            KeyCode::Backspace => {
-                self.search.pop();
-                self.search_edited();
-            }
             // Tab rather than a letter: every printable character belongs to the
             // query being typed.
             KeyCode::Tab => self.toggle_content_search(),
             KeyCode::Up => self.history_step(1),
             KeyCode::Down => self.history_step(-1),
-            KeyCode::Char(c) => {
-                self.search.push(c);
-                self.search_edited();
+            _ => {
+                if self.search.key(key, usize::MAX).changed() {
+                    self.search_edited();
+                }
             }
-            _ => {}
         }
     }
 
@@ -784,12 +794,37 @@ impl App {
     }
 
     /// The help text is longer than most terminals are tall, so the navigation
-    /// keys scroll it and everything else still dismisses it.
+    /// keys scroll it, `/` narrows it, and everything else still dismisses it.
+    ///
+    /// Esc peels: a filter first, then the page. Closing on the Esc that was
+    /// meant to clear a query would throw away the page you had just found
+    /// your way to; clearing it on the way out costs one more press.
     fn on_key_help(&mut self, key: KeyEvent) {
         let step = |app: &mut App, delta: i32| {
             app.help_scroll =
                 (app.help_scroll as i32 + delta).clamp(0, app.help_max_scroll as i32) as u16;
         };
+        if self.help_typing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.help_filter.clear();
+                    self.help_typing = false;
+                    self.help_scroll = 0;
+                }
+                // Done typing, filter kept: the letters scroll again.
+                KeyCode::Enter => self.help_typing = false,
+                KeyCode::Up => step(self, -1),
+                KeyCode::Down => step(self, 1),
+                KeyCode::PageUp => step(self, -(PAGE as i32)),
+                KeyCode::PageDown => step(self, PAGE as i32),
+                _ => {
+                    if self.help_filter.key(key, HELP_FILTER_MAX).changed() {
+                        self.help_scroll = 0;
+                    }
+                }
+            }
+            return;
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => step(self, -1),
             KeyCode::Down | KeyCode::Char('j') => step(self, 1),
@@ -797,9 +832,18 @@ impl App {
             KeyCode::PageDown | KeyCode::Char(' ') => step(self, PAGE as i32),
             KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.help_scroll = self.help_max_scroll,
+            // Back into the query that is there, with the cursor at its end,
+            // rather than a fresh one: `/` after Enter is how a filter gets
+            // refined.
+            KeyCode::Char('/') => self.help_typing = true,
+            KeyCode::Esc if !self.help_filter.is_empty() => {
+                self.help_filter.clear();
+                self.help_scroll = 0;
+            }
             _ => {
                 self.mode = Mode::List;
                 self.help_scroll = 0;
+                self.help_filter.clear();
             }
         }
     }
@@ -816,11 +860,9 @@ impl App {
             match key.code {
                 KeyCode::Esc => self.settings_input = None,
                 KeyCode::Enter => self.settings_commit_input(),
-                KeyCode::Backspace => {
-                    input.pop();
+                _ => {
+                    input.key(key, SETTING_MAX);
                 }
-                KeyCode::Char(c) if input.len() < 200 => input.push(c),
-                _ => {}
             }
             return;
         }
@@ -916,11 +958,12 @@ impl App {
     /// `claude`, `codex`, or a shell binds one — and cctop's own map is written
     /// in them, which is why they were the keys it kept.
     ///
-    /// Most act on the dashboard: a search box, a sort order, or the help sheet
-    /// drawn over a pane would be a modal on a screen the agent is repainting
-    /// underneath, and the thing being filtered is not on screen at all. So the
+    /// Most act on the dashboard: a search box or a sort order over a pane
+    /// would be a modal for a table that is not on screen at all. So the
     /// dashboard comes forward first and the key then does exactly what it does
-    /// there. The three that need no dashboard stay where they are pressed.
+    /// there. The ones that need no dashboard stay where they are pressed —
+    /// help among them, since the sheet is about the keys, not about the table,
+    /// and reading it should not cost you the agent you were looking at.
     fn on_key_function(&mut self, key: KeyEvent) {
         match key.code {
             // Back to the dashboard, which is the one function key that only
@@ -936,8 +979,11 @@ impl App {
             // the dashboard forward would take the composer off screen at the
             // moment something is being put into it.
             KeyCode::F(9) => self.paste_image_into_pane(),
+            // The help sheet, over the pane. Every frame repaints it on top of
+            // the agent, and Esc gives the keyboard back to the same pane.
+            KeyCode::F(1) => self.mode = Mode::Help,
             // The keys the dashboard binds, on the dashboard.
-            KeyCode::F(1) | KeyCode::F(3) | KeyCode::F(6) | KeyCode::F(7) | KeyCode::F(8) => {
+            KeyCode::F(3) | KeyCode::F(6) | KeyCode::F(7) | KeyCode::F(8) => {
                 self.show_tab(0);
                 self.on_key_list(key);
             }
@@ -987,13 +1033,14 @@ impl App {
                 }
                 self.mode = Mode::List;
             }
-            KeyCode::Backspace => {
-                self.cost_input.pop();
+            // A number, so a letter is not typed — but a letter with Ctrl
+            // held is still the editor's, which is why the modifiers are
+            // looked at before the character is.
+            KeyCode::Char(c)
+                if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() && !cost_char(c) => {}
+            _ => {
+                self.cost_input.key(key, COST_MAX);
             }
-            KeyCode::Char(c) if (c.is_ascii_digit() || c == '.') && self.cost_input.len() < 12 => {
-                self.cost_input.push(c);
-            }
-            _ => {}
         }
     }
 
@@ -1001,7 +1048,7 @@ impl App {
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Enter => {
-                let text = self.send_input.clone();
+                let text = self.send_input.to_string();
                 if !text.is_empty()
                     && let Some(pid) = self.selected_session().and_then(|s| s.root_pid())
                 {
@@ -1010,34 +1057,45 @@ impl App {
                 }
                 self.mode = Mode::List;
             }
-            KeyCode::Backspace => {
-                self.send_input.pop();
-            }
+            // At the cursor, like a paste, and whole or not at all: half a
+            // path is a file the agent cannot open.
             KeyCode::F(9) => {
-                if let Some(path) = self.image_paste() {
-                    let room = 500usize.saturating_sub(self.send_input.len());
-                    if path.len() < room {
-                        self.send_input.push_str(&path);
-                        self.send_input.push(' ');
-                    }
+                if let Some(path) = self.image_paste()
+                    && path.chars().count() < self.send_input.room(SEND_MAX)
+                {
+                    self.send_input.insert_str(&format!("{path} "), SEND_MAX);
                 }
             }
-            KeyCode::Char(c) if self.send_input.len() < 500 => self.send_input.push(c),
-            _ => {}
+            _ => {
+                self.send_input.key(key, SEND_MAX);
+            }
+        }
+    }
+
+    fn on_key_worktree(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Enter => self.worktree_create(),
+            _ => {
+                self.worktree_input.key(key, BRANCH_MAX);
+            }
         }
     }
 
     /// The tab-rename field, which is also the tab-colour field.
     ///
-    /// The name half has no cursor — text only ever appends — so the arrows
-    /// were free for the colour row, which is what they drive. Enter applies
+    /// The arrows were the colour row's before the name had a cursor, and they
+    /// still are: the name moves with Ctrl+B and Ctrl+F, Home and End, Ctrl+A
+    /// and Ctrl+E, and by word with Ctrl+← and Ctrl+→, while a plain arrow
+    /// paints. Enter applies
     /// whichever half changed; an empty name is still not a name, so pressing
     /// it with nothing typed only ever moved the colour, never blanks the tab.
     fn on_key_rename(&mut self, key: KeyEvent) {
+        let plain = key.modifiers.is_empty();
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
-            KeyCode::Left => self.step_rename_color(-1),
-            KeyCode::Right => self.step_rename_color(1),
+            KeyCode::Left if plain => self.step_rename_color(-1),
+            KeyCode::Right if plain => self.step_rename_color(1),
             KeyCode::Enter => {
                 let name = self.rename_input.trim().to_string();
                 let color = self.rename_color;
@@ -1080,13 +1138,9 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
-                self.rename_input.pop();
+            _ => {
+                self.rename_input.key(key, TAB_NAME_MAX);
             }
-            KeyCode::Char(c) if self.rename_input.chars().count() < TAB_NAME_MAX => {
-                self.rename_input.push(c)
-            }
-            _ => {}
         }
     }
 
@@ -1162,11 +1216,9 @@ impl App {
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Enter => self.accept_account_name(),
-            KeyCode::Backspace => {
-                flow.name.pop();
+            _ => {
+                flow.name.key(key, TAB_NAME_MAX);
             }
-            KeyCode::Char(c) if flow.name.chars().count() < TAB_NAME_MAX => flow.name.push(c),
-            _ => {}
         }
     }
 
@@ -1196,23 +1248,26 @@ impl App {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Up => self.step_switch(-1),
             KeyCode::Down => self.step_switch(1),
+            // The state filter, the one thing here that is not spelled. Back
+            // to the top for the same reason as a change to the name.
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.switch_state = self.switch_state.step(key.code == KeyCode::BackTab);
+                self.switch_cursor = 0;
+            }
             KeyCode::Enter => {
                 self.mode = Mode::List;
                 if let Some(&tab) = self.switch_matches().get(self.switch_cursor) {
                     self.go_to_tab(tab);
                 }
             }
-            KeyCode::Backspace => {
-                self.switch_filter.pop();
-                // Back to the top: the list just widened, and a cursor kept
-                // at its old depth is pointing at a name nobody picked.
-                self.switch_cursor = 0;
+            // Back to the top on any change: the list just narrowed or
+            // widened, and a cursor kept at its old depth is pointing at a
+            // name nobody picked.
+            _ => {
+                if self.switch_filter.key(key, SWITCH_FILTER_MAX).changed() {
+                    self.switch_cursor = 0;
+                }
             }
-            KeyCode::Char(c) if self.switch_filter.chars().count() < SWITCH_FILTER_MAX => {
-                self.switch_filter.push(c);
-                self.switch_cursor = 0;
-            }
-            _ => {}
         }
     }
 
@@ -1231,6 +1286,9 @@ impl App {
     /// the tab it is already on.
     fn switch_prompt(&mut self) {
         self.switch_filter.clear();
+        // Every tab, every time it opens: a state filter left over from last
+        // time would be tabs missing from a list that looks like the bar.
+        self.switch_state = Default::default();
         self.switch_cursor = self
             .switch_matches()
             .iter()
@@ -1314,6 +1372,7 @@ impl App {
             Action::Mark => self.toggle_mark(),
             Action::Terminate => self.confirm_terminate(),
             Action::Delete => self.delete_selected(),
+            Action::UpdateRemote => self.confirm_remote_update(),
         }
     }
 
@@ -1417,12 +1476,29 @@ impl App {
                     "Follow mode off"
                 });
             }
+            // On a tree heading the keys that open or pick a row fold it
+            // instead: a heading has no menu and cannot be marked, so none of
+            // them has anything else to do there. ←/→ stay on the bottom
+            // panels — a key that switched meaning as the cursor crossed a
+            // heading would move the panels on one row and fold on the next.
+            KeyCode::Enter | KeyCode::Char(' ' | 'e') if self.on_group() => self.toggle_group(),
+            // htop's tree key is `t`, which is the new tab here, and `F5`,
+            // which refreshes; capital `T` is the nearest free spelling.
+            KeyCode::Char('T') => self.toggle_tree(),
+            KeyCode::Char('F') => self.worktree_prompt(),
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('e') => self.toggle_expanded(),
             KeyCode::Char('E') => self.toggle_expanded_all(),
             KeyCode::Char('U') => self.unmark_all(),
             KeyCode::Char('D') => self.batch(BatchKind::Delete),
+            // In the idle view `K` stops what the view found, skipping what is
+            // in use, rather than refusing the batch over one row: the view is
+            // the selection, and that is the question it was opened to answer.
+            KeyCode::Char('K') if self.idle_only => self.batch(BatchKind::Reclaim),
             KeyCode::Char('K') => self.batch(BatchKind::Kill),
+            // `I` for idle. Capital, like the other keys that can end in
+            // stopping agents.
+            KeyCode::Char('I') => self.toggle_idle_view(),
             KeyCode::Char('n') => self.cycle_matches(1),
             KeyCode::Char('N') => self.cycle_matches(-1),
             // `w` for the bell, not `n`: n/N is next/previous match everywhere
@@ -1445,9 +1521,9 @@ impl App {
             }
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
-                    format!("{:.2}", self.cost_floor)
+                    format!("{:.2}", self.cost_floor).into()
                 } else {
-                    String::new()
+                    Default::default()
                 };
                 self.mode = Mode::CostFilter;
             }
@@ -1704,6 +1780,37 @@ impl App {
             self.needs_redraw = true;
         }
 
+        // The help sheet covers most of the screen and records no rectangle,
+        // so it answers the mouse itself: the wheel reads it and a click puts
+        // it away. Over a pane this is what keeps a click from reaching the
+        // agent the sheet is drawn on top of.
+        // The reader covers the whole screen, so the wheel is its wherever
+        // the pointer is.
+        if self.mode == Mode::Conversation {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.on_wheel_conversation(true),
+                MouseEventKind::ScrollDown => self.on_wheel_conversation(false),
+                _ => {}
+            }
+            return;
+        }
+        if self.mode == Mode::Help {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.on_key_help(KeyEvent::from(KeyCode::Up)),
+                MouseEventKind::ScrollDown => self.on_key_help(KeyEvent::from(KeyCode::Down)),
+                // Away in one click, filter or not: Esc peels a filter off
+                // first, but a click has no second click it is the first of.
+                MouseEventKind::Down(_) => {
+                    self.mode = Mode::List;
+                    self.help_scroll = 0;
+                    self.help_filter.clear();
+                    self.help_typing = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // A modal owns the mouse while it is up. Without this the dashboard
         // underneath still answers, so a click on a launcher row lands on the
         // panel tab or session row the modal is drawn over.
@@ -1931,6 +2038,12 @@ impl App {
                     }
                 }
             }
+            // A press or a drag on a scrollbar goes where it points: the
+            // table's to that row, a panel's to that part of its text. The
+            // drag is what makes the bar a handle, so it is answered on the
+            // track alone — a drag that wanders off it asks for nothing.
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+                if self.on_scrollbar(ev.column, ev.row, layout) => {}
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.bottom_tab == 3
                     && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
@@ -1957,6 +2070,33 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Answer a press on the table's or the active panel's scrollbar, if
+    /// `(col, row)` is on one. False when it is not, so the click falls through
+    /// to whatever else is under it.
+    ///
+    /// The table's bar moves the selection rather than the view, because the
+    /// view follows the selection: a scroll that left the cursor behind would
+    /// be undone by the next frame.
+    fn on_scrollbar(&mut self, col: u16, row: u16, layout: &render::Layout) -> bool {
+        use super::scrollbar;
+        if let Some(track) = scrollbar::hit(layout.table_track, col, row) {
+            let last = self.visible.len().saturating_sub(1);
+            self.selected = scrollbar::position_at(track, row, last);
+            self.ensure_available_tab();
+            self.needs_redraw = true;
+            return true;
+        }
+        if let Some(track) = scrollbar::hit(layout.panel_track, col, row) {
+            let target = scrollbar::position_at(track, row, self.panel_max_scroll as usize);
+            // From the top, so the step is the target itself; the panel's own
+            // clamp and Tool Activity's follow pin then behave as for a key.
+            self.scroll_active_panel(i32::MIN);
+            self.scroll_active_panel(target as i32);
+            return true;
+        }
+        false
     }
 }
 
@@ -1991,6 +2131,46 @@ mod tests {
         assert_eq!(app.cost_input, "12.50");
     }
 
+    /// Every box edits at its cursor, typed or pasted, and the keys a box had
+    /// already given a meaning to keep it.
+    #[test]
+    fn the_boxes_edit_at_the_cursor_and_keep_their_own_keys() {
+        let mut app = test_app();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+
+        app.mode = Mode::Search;
+        app.search = "login".into();
+        app.on_key(key(KeyCode::Home));
+        app.on_key(key(KeyCode::Char('!')));
+        app.on_paste("fix\nthe ");
+        assert_eq!(app.search, "!fix the login");
+        app.on_key(ctrl('w'));
+        assert_eq!(app.search, "!fix login");
+        // Tab is still the transcript toggle, not a character.
+        let content = app.search_content;
+        app.on_key(key(KeyCode::Tab));
+        assert_ne!(app.search_content, content);
+        assert_eq!(app.search, "!fix login");
+
+        // The rename box's plain arrows still paint; Home moves the name.
+        app.mode = Mode::RenameTab;
+        app.rename_input = "ab".into();
+        app.rename_color = None;
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.rename_color, Some(theme::Hue::ALL[0]));
+        app.on_key(key(KeyCode::Home));
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(app.rename_input, "xab");
+
+        // The cost floor takes no letters, but Ctrl+U still clears it.
+        app.mode = Mode::CostFilter;
+        app.cost_input = "12".into();
+        app.on_key(key(KeyCode::Char('z')));
+        assert_eq!(app.cost_input, "12");
+        app.on_key(ctrl('u'));
+        assert_eq!(app.cost_input, "");
+    }
+
     /// The caps the typed path enforces are the paste's too, and a paste with
     /// nowhere to land does nothing rather than something surprising.
     #[test]
@@ -1998,7 +2178,7 @@ mod tests {
         let mut app = test_app();
 
         app.mode = Mode::SendKeys;
-        app.send_input = "x".repeat(495);
+        app.send_input = "x".repeat(495).into();
         app.on_paste(&"y".repeat(50));
         assert_eq!(app.send_input.len(), 500);
 
@@ -2118,6 +2298,54 @@ mod tests {
         );
         assert_eq!(app.selected, 2, "a click cannot reach the row it landed on");
         assert_eq!(app.mode, Mode::Search, "the click closed the search box");
+    }
+
+    /// A press on the table's bar picks the row at that point of the list and a
+    /// drag carries it along; a press on a panel's bar scrolls the panel. Beside
+    /// the bar the same click is an ordinary row click.
+    #[test]
+    fn a_click_on_a_scrollbar_goes_where_it_points() {
+        use ratatui::layout::Rect;
+        let mut app = test_app();
+        for i in 0..30 {
+            app.sessions.push(crate::session::Session::new(
+                Provider::Claude,
+                format!("s{i}"),
+            ));
+        }
+        app.visible = (0..30).map(Row::Session).collect();
+        app.panel_max_scroll = 40;
+        app.bottom_tab = 0;
+        let layout = render::Layout {
+            rows_start: 7,
+            rows_end: 17,
+            bottom_start: 20,
+            table_track: Some(Rect::new(79, 7, 1, 10)),
+            panel_track: Some(Rect::new(79, 21, 1, 5)),
+            ..Default::default()
+        };
+        let at = |kind, column, row| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let press = event::MouseEventKind::Down(event::MouseButton::Left);
+        let drag = event::MouseEventKind::Drag(event::MouseButton::Left);
+
+        app.on_mouse(at(press, 79, 16), &layout);
+        assert_eq!(app.selected, 29, "the bottom of the bar is the last row");
+        app.on_mouse(at(drag, 79, 7), &layout);
+        assert_eq!(app.selected, 0, "dragged back to the top");
+        app.on_mouse(at(drag, 40, 12), &layout);
+        assert_eq!(app.selected, 0, "a drag off the bar asks for nothing");
+        app.on_mouse(at(press, 40, 9), &layout);
+        assert_eq!(app.selected, 2, "beside the bar a click is a row click");
+
+        app.on_mouse(at(press, 79, 25), &layout);
+        assert_eq!(app.info_scroll, 40);
+        app.on_mouse(at(press, 79, 21), &layout);
+        assert_eq!(app.info_scroll, 0);
     }
 
     /// Regression: `launch_prompt` set the mode and nothing asked for a frame, so
@@ -2366,7 +2594,6 @@ mod tests {
     fn function_keys_are_cctops_inside_a_pane_and_bring_the_dashboard_with_them() {
         // Each key, and the dashboard state it must leave behind.
         for (code, mode) in [
-            (KeyCode::F(1), Mode::Help),
             (KeyCode::F(3), Mode::Search),
             (KeyCode::F(6), Mode::SortBy),
             (KeyCode::F(7), Mode::AgeFilter),
@@ -2377,6 +2604,16 @@ mod tests {
             assert_eq!(app.tab, 0, "{code:?} left the dashboard behind");
             assert_eq!(app.mode, mode, "{code:?} did not open its modal");
         }
+
+        // F1's sheet is drawn over the pane, and Esc hands the keyboard back
+        // to it rather than to the dashboard.
+        let mut app = test_app();
+        app.tab = 1;
+        app.on_key(key(KeyCode::F(1)));
+        assert_eq!(app.tab, 1, "the help sheet took you off the agent");
+        assert_eq!(app.mode, Mode::Help);
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!((app.tab, app.mode), (1, Mode::List));
 
         // F12 is the pane's own key and F5 acts on the walk, so neither takes
         // you off the agent — F5 says so on the footer instead.
@@ -2449,10 +2686,14 @@ mod tests {
             app.on_key(key(KeyCode::Char(digit)));
             assert_eq!(app.bottom_tab, i, "key {digit} must select panel {i}");
         }
-        // One past the end changes nothing rather than selecting a phantom tab.
-        let past = char::from_digit(panels::TABS.len() as u32 + 1, 10).unwrap();
-        let before = app.bottom_tab;
-        app.on_key(key(KeyCode::Char(past)));
-        assert_eq!(app.bottom_tab, before);
+        // Nine panels spend every digit; a tenth would have no key of its own.
+        assert!(panels::TABS.len() <= 9, "a panel past 9 has no number key");
+        // One past the end changes nothing rather than selecting a phantom tab —
+        // asked while there is a digit past the end to press.
+        if let Some(past) = char::from_digit(panels::TABS.len() as u32 + 1, 10) {
+            let before = app.bottom_tab;
+            app.on_key(key(KeyCode::Char(past)));
+            assert_eq!(app.bottom_tab, before);
+        }
     }
 }

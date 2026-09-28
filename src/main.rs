@@ -1,12 +1,16 @@
 mod access;
+mod advise;
+mod alert;
 mod alias;
 mod attach;
 mod burn;
 mod cache;
+mod cast;
 mod cli;
 mod clipboard;
 mod collide;
 mod config;
+mod convert;
 mod doctor;
 mod elog;
 mod embed;
@@ -19,6 +23,7 @@ mod insight;
 mod loader;
 mod mcp;
 mod notify;
+mod peek;
 mod pricing;
 mod proc;
 mod quota;
@@ -31,6 +36,7 @@ mod trace;
 mod ui;
 mod update;
 mod util;
+mod wait;
 mod watch;
 mod why;
 
@@ -129,6 +135,20 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if let Some(word @ ("optimize" | "compare")) = argv.get(1).map(String::as_str) {
             std::process::exit(insight::run(word, &argv[2..]));
+        }
+    }
+
+    // `cctop wait` alongside `doctor`, and for the same reason: a bare word
+    // with a positional of its own. Its flags are clap's, parsed from the rest
+    // — a usage error exits 2, which is also what an unknown session exits
+    // with, so a script has one code for "you asked about nothing".
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("wait") {
+            let args = cli::WaitArgs::parse_from(
+                std::iter::once("cctop wait".to_string()).chain(argv[2..].iter().cloned()),
+            );
+            std::process::exit(wait::run(&args));
         }
     }
 
@@ -257,6 +277,22 @@ fn main() -> anyhow::Result<()> {
         let mut loader = loader::Loader::new();
         let sessions = loader.load(args.plan);
         cli::run_handoff(&sessions, which, &loader)?;
+        loader.store().save();
+        finish_trace(&args);
+        return Ok(());
+    }
+
+    // The non-interactive session modes together: each reads one session's own
+    // transcript, and none of them wants a cache that might be mid-walk.
+    if !args.convert.is_empty() || args.converted {
+        let mut loader = loader::Loader::new();
+        let sessions = loader.load(args.plan);
+        if args.converted {
+            cli::run_converted(&sessions, args.remove)?;
+        } else {
+            let (which, agent) = args.convert.split_at(1);
+            cli::run_convert(&sessions, which[0].as_str(), agent[0].as_str())?;
+        }
         loader.store().save();
         finish_trace(&args);
         return Ok(());

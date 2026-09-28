@@ -292,6 +292,12 @@ pub struct Attach {
     /// The agent's screen, rebuilt from its output, and the signals it raised
     /// alongside it — see [`Signals`].
     pub parser: vt100::Parser<Signals>,
+    /// The `.cast` this pane is being recorded to, while it is.
+    ///
+    /// Here rather than on the pane because this is the one place the pty's
+    /// bytes pass through unparsed, in order with the resizes between them —
+    /// see [`cast`](crate::cast) for why those are what gets recorded.
+    cast: Option<crate::cast::Recording>,
 }
 
 impl Attach {
@@ -309,14 +315,58 @@ impl Attach {
         }
         for event in events {
             match event {
-                Event::Output(bytes) => self.parser.process(&bytes),
+                Event::Output(bytes) => {
+                    if let Some(cast) = self.cast.as_mut() {
+                        cast.output(&bytes);
+                    }
+                    self.parser.process(&bytes);
+                }
                 Event::Size(cols, rows) => {
+                    // The size frame is what the agent was actually given, not
+                    // what this pane asked for, so it is the one a replay must
+                    // follow. An unchanged one is not a resize.
+                    if let Some(cast) = self.cast.as_mut().filter(|_| self.size != (cols, rows)) {
+                        cast.resize(cols, rows);
+                    }
                     self.size = (cols, rows);
                     self.parser.screen_mut().set_size(rows, cols);
                 }
             }
         }
+        if let Some(cast) = self.cast.as_mut() {
+            cast.flush();
+        }
         true
+    }
+
+    /// Start recording this pane to a new `.cast` file, returning its path.
+    ///
+    /// The recording opens on the screen as it stands, as vt100 would redraw
+    /// it — the live screen, not whatever scrollback is being read, and on the
+    /// alternate screen if that is where the agent is, so what it draws next
+    /// lands where it expects to.
+    pub fn start_recording(&mut self, label: &str) -> std::io::Result<&std::path::Path> {
+        let mut screen = self.parser.screen().clone();
+        screen.set_scrollback(0);
+        let mut opening = Vec::new();
+        if screen.alternate_screen() {
+            opening.extend_from_slice(b"\x1b[?1049h");
+        }
+        opening.extend_from_slice(&screen.contents_formatted());
+        let (cols, rows) = self.size;
+        let cast = crate::cast::Recording::start(label, cols, rows, &opening)?;
+        Ok(&self.cast.insert(cast).path)
+    }
+
+    /// Stop recording, if this pane was: where the file is, and whether all of
+    /// it was written.
+    pub fn stop_recording(&mut self) -> Option<(std::path::PathBuf, std::io::Result<()>)> {
+        self.cast.take().map(crate::cast::Recording::stop)
+    }
+
+    /// Whether this pane is being recorded.
+    pub fn recording(&self) -> bool {
+        self.cast.is_some()
     }
 
     /// Send keys in their extended form without waiting to be asked.
@@ -365,6 +415,7 @@ impl Attach {
             requested: (0, 0),
             assume_extended: false,
             parser: vt100::Parser::new_with_callbacks(24, 80, SCROLLBACK, Signals::default()),
+            cast: None,
         }
     }
 
@@ -911,6 +962,7 @@ pub fn attach(pid: u32) -> Option<Attach> {
         requested: (0, 0),
         assume_extended: false,
         parser: vt100::Parser::new_with_callbacks(size.1, size.0, SCROLLBACK, Signals::default()),
+        cast: None,
     })
 }
 
@@ -1523,6 +1575,7 @@ mod tests {
             requested: (0, 0),
             assume_extended: false,
             parser: vt100::Parser::new_with_callbacks(24, 80, SCROLLBACK, Signals::default()),
+            cast: None,
         };
         (attach, written)
     }

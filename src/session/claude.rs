@@ -11,7 +11,7 @@ use crate::util;
 use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -39,6 +39,9 @@ struct StaticParts {
     cwd: String,
     started_at: String,
     ai_title: Option<String>,
+    /// Whether an `/effort` switch is among the first lines, before any
+    /// model has answered. See [`summarize`].
+    switched_effort: bool,
     /// The id this session was *launched* with, which is not its own once it
     /// has been resumed. See [`Session::launch_id`](crate::session::Session::launch_id).
     launch_id: String,
@@ -87,6 +90,16 @@ fn collect_static(transcript: &Path) -> StaticParts {
         {
             parts.launch_id = id.to_string();
         }
+        if item.get("type").and_then(Value::as_str) == Some("user")
+            && item
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_str)
+                .and_then(super::effort_switch)
+                .is_some()
+        {
+            parts.switched_effort = true;
+        }
         if item.get("type").and_then(Value::as_str) == Some("ai-title")
             && let Some(t) = item.get("aiTitle").and_then(Value::as_str)
         {
@@ -134,7 +147,15 @@ fn summarize(transcript: &Path) -> Option<Session> {
     let session_id = transcript.file_stem()?.to_string_lossy().to_string();
     let statics = collect_static(transcript);
     // An abandoned session that never reached the model has nothing to show.
-    if statics.model.is_empty() {
+    // Except one switched to or from ultracode, whose switch starts or ends
+    // the dashboard's party whether or not anything has been asked yet: see
+    // `ui::rave`. It is listed without a model, and the process running it
+    // can be matched to it rather than shown as a row of its own.
+    //
+    // ponytail: only a switch among the first lines is seen before the first
+    // answer. A session with nothing in it but slash commands is short, and
+    // once the model answers every line is read anyway.
+    if statics.model.is_empty() && !statics.switched_effort {
         return None;
     }
     let custom_title = scan_custom_title(transcript);
@@ -152,6 +173,11 @@ fn summarize(transcript: &Path) -> Option<Session> {
     s.launch_id = statics.launch_id;
     s.data_file = Some(transcript.to_path_buf());
     s.title = custom_title.or(statics.ai_title);
+    // A session cctop wrote as a handoff into Claude says where it came from, so
+    // the row can be recognised as a copy of another session rather than as
+    // work that happened here. Read from the head of the file, which is where
+    // the marker is written — a converted session can be megabytes.
+    s.converted_from = crate::convert::provenance_of_file(transcript);
     Some(s)
 }
 
@@ -457,6 +483,7 @@ struct Extractor {
     costs_by_model: HashMap<String, Costs>,
     costs_by_day: HashMap<String, HashMap<String, f64>>,
     costs_by_hour: HashMap<String, HashMap<String, f64>>,
+    costs_by_minute: BTreeMap<i64, f64>,
     /// Same buckets as the cost maps, in tokens: a bundled plan or an unpriced
     /// model empties the dollar figures but not the usage underneath them.
     tokens_by_day: HashMap<String, HashMap<String, u64>>,
@@ -466,6 +493,9 @@ struct Extractor {
     last_main_model: String,
     custom_title: Option<String>,
     ai_title: Option<String>,
+    /// See [`SessionData::ultracode_at`].
+    ultracode_at: Option<String>,
+    ultracode_off_at: Option<String>,
     metrics: Metrics,
     seen_tool_ids: HashSet<String>,
     seen_urls: HashSet<String>,
@@ -570,18 +600,14 @@ impl Extractor {
         cm.total += call_cost;
 
         if let Some(dt) = util::parse_ts(ts) {
-            *self
-                .costs_by_day
-                .entry(util::local_date_key(&dt))
-                .or_default()
-                .entry(model.to_string())
-                .or_insert(0.0) += call_cost;
-            *self
-                .costs_by_hour
-                .entry(util::local_hour_key(&dt))
-                .or_default()
-                .entry(model.to_string())
-                .or_insert(0.0) += call_cost;
+            super::record_cost(
+                &mut self.costs_by_day,
+                &mut self.costs_by_hour,
+                &mut self.costs_by_minute,
+                &dt,
+                model,
+                call_cost,
+            );
             // Everything this request was billed for, whatever the plan priced
             // it at.
             let billed = inp + cache_r + out + cw5m + cw1h;
@@ -751,6 +777,24 @@ impl Extractor {
                 }
             }
             _ => {}
+        }
+
+        // In the person's role: not a skill's body or a slash command's
+        // expansion (`isMeta`), not a summary standing in for a compacted
+        // conversation, and not a subagent's brief — in its own file, or in an
+        // older transcript marked as a sidechain of this one.
+        let typed = is_main
+            && item.get("isSidechain").and_then(Value::as_bool) != Some(true)
+            && item.get("isMeta").and_then(Value::as_bool) != Some(true)
+            && item.get("isCompactSummary").and_then(Value::as_bool) != Some(true);
+        if typed {
+            for text in &texts {
+                match super::effort_switch(text) {
+                    Some(true) => super::latest(&mut self.ultracode_at, ts),
+                    Some(false) => super::latest(&mut self.ultracode_off_at, ts),
+                    None => {}
+                }
+            }
         }
 
         for text in texts {
@@ -1133,6 +1177,10 @@ pub fn extract(transcript: &Path) -> SessionData {
                 "No assistant usage records found in {}",
                 transcript.display()
             )),
+            // A prompt the agent has not answered yet is still one that was
+            // typed, and the moment it is typed is the moment to hear it.
+            ultracode_at: ext.ultracode_at,
+            ultracode_off_at: ext.ultracode_off_at,
             ..Default::default()
         };
     }
@@ -1212,12 +1260,15 @@ pub fn extract(transcript: &Path) -> SessionData {
         costs,
         costs_by_day: ext.costs_by_day,
         costs_by_hour: ext.costs_by_hour,
+        costs_by_minute: ext.costs_by_minute,
         tokens_by_day: ext.tokens_by_day,
         tokens_by_hour: ext.tokens_by_hour,
         metrics: ext.metrics,
         context_breakdown,
         context_series: ext.ctx_series,
         compactions: ext.compactions,
+        ultracode_at: ext.ultracode_at,
+        ultracode_off_at: ext.ultracode_off_at,
         subagents,
         rates: None,
         error: None,
@@ -1713,6 +1764,59 @@ mod tests {
         format!(
             r#"{{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"{request}","message":{{"id":"m_{request}","role":"assistant","model":"claude-opus-5","content":[{content}],"usage":{{"input_tokens":{window},"output_tokens":5}}}}}}"#
         )
+    }
+
+    /// A workflow's agents are a run directory below the ordinary subagents,
+    /// beside a journal that is the run's log rather than anyone's transcript.
+    /// Each agent is counted and listed under the name its sidecar gives it;
+    /// the journal is neither.
+    #[test]
+    fn a_workflows_agents_are_counted_and_its_journal_is_not() {
+        let main = temp_path("workflow").with_extension("jsonl");
+        let subagents = main.with_extension("").join("subagents");
+        let run = subagents.join("workflows").join("wf_1");
+        std::fs::create_dir_all(&run).expect("run dir");
+        let write = |path: &Path, lines: &[String]| {
+            std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write transcript");
+        };
+        let text = r#"{"type":"text","text":"ok"}"#;
+        write(&main, &[assistant("req_main", 100, text)]);
+        write(
+            &subagents.join("agent-plain.jsonl"),
+            &[assistant("req_plain", 100, text)],
+        );
+        write(
+            &run.join("agent-a1.jsonl"),
+            &[assistant("req_wf", 100, text)],
+        );
+        std::fs::write(
+            run.join("agent-a1.meta.json"),
+            r#"{"agentType":"transcriber","description":"transcribe the first","workflowPhase":"Transcribe"}"#,
+        )
+        .expect("meta");
+        write(
+            &run.join("journal.jsonl"),
+            &[assistant("req_journal", 100, text)],
+        );
+
+        let files = crate::session::transcript_files(&main);
+        let data = extract(&main);
+        let _ = std::fs::remove_dir_all(main.with_extension(""));
+        let _ = std::fs::remove_file(&main);
+
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert_eq!(
+            data.tokens.output, 15,
+            "main, plain and workflow agent, no journal"
+        );
+        let wf = data
+            .subagents
+            .iter()
+            .find(|s| s.agent_id == "agent-a1")
+            .expect("the workflow agent is listed");
+        assert_eq!(wf.agent_type, "transcriber");
+        assert_eq!(wf.description, "transcribe the first");
+        assert_eq!(data.subagents.len(), 2, "{:?}", data.subagents);
     }
 
     /// The chart spans the session, not the live segment: a compaction is the
@@ -2301,5 +2405,60 @@ mod tests {
         let ctx = extract_context(&session).expect("usage past the first tail window");
         assert_eq!(ctx.used, 647_414);
         assert!(!ctx.compacted);
+    }
+
+    /// The `/effort` switch is what counts, both ways, and nothing else that
+    /// says the word: not a prompt about it, not a skill's text, not a
+    /// subagent's brief.
+    #[test]
+    fn ultracode_follows_the_effort_switch() {
+        let stdout = |ts: &str, level: &str, extra: &str| {
+            format!(
+                r#"{{"type":"user",{extra}"timestamp":"{ts}","message":{{"role":"user","content":"<local-command-stdout>Set effort level to {level} (this session only): …</local-command-stdout>"}}}}"#
+            )
+        };
+        let data = extract_lines(
+            "ultracode",
+            &[
+                stdout("2026-09-25T01:00:00.000Z", "ultracode", ""),
+                r#"{"type":"user","timestamp":"2026-09-25T02:00:00.000Z","message":{"role":"user","content":"please ultracode this"}}"#.to_string(),
+                stdout("2026-09-25T03:00:00.000Z", "ultracode", r#""isMeta":true,"#),
+                stdout("2026-09-25T04:00:00.000Z", "ultracode", r#""isSidechain":true,"#),
+                stdout("2026-09-25T05:00:00.000Z", "xhigh", ""),
+            ],
+        );
+        assert_eq!(
+            data.ultracode_at.as_deref(),
+            Some("2026-09-25T01:00:00.000Z")
+        );
+        assert_eq!(
+            data.ultracode_off_at.as_deref(),
+            Some("2026-09-25T05:00:00.000Z")
+        );
+    }
+
+    /// A session nobody has asked anything yet is not listed, unless it has
+    /// switched effort: that switch is what the dashboard's party follows.
+    #[test]
+    fn an_unanswered_session_is_listed_once_it_switches_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fresh.jsonl");
+        let open = r#"{"type":"user","timestamp":"2026-09-25T09:00:00.000Z","cwd":"/w","message":{"role":"user","content":"<command-name>/effort</command-name>"}}"#;
+        std::fs::write(&path, format!("{open}\n")).expect("write transcript");
+        assert!(
+            summarize(&path).is_none(),
+            "nothing asked, nothing switched"
+        );
+
+        let switch = r#"{"type":"user","timestamp":"2026-09-25T09:00:01.000Z","cwd":"/w","message":{"role":"user","content":"<local-command-stdout>Set effort level to ultracode (this session only): …</local-command-stdout>"}}"#;
+        std::fs::write(&path, format!("{open}\n{switch}\n")).expect("write transcript");
+        let session = summarize(&path).expect("a session that switched effort");
+        assert!(session.model.is_empty());
+        assert_eq!(session.label_source, "/w");
+        let data = extract(&path);
+        assert_eq!(
+            data.ultracode_at.as_deref(),
+            Some("2026-09-25T09:00:01.000Z")
+        );
     }
 }

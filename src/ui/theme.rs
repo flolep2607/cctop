@@ -407,6 +407,32 @@ fn fold(color: Color, depth: Depth) -> Color {
     }
 }
 
+/// A colour cctop did not choose — one a tool wrote into its own output — as
+/// this terminal can show it.
+///
+/// The palette's slots were folded once, at startup; a colour that arrives in
+/// an SGR sequence later has not been, and passing it through as it came would
+/// put a 256-colour index on a sixteen-colour screen, or a 24-bit colour on a
+/// terminal that never said it takes one ([`truecolor`]). Without colour it is
+/// `Reset`, so the output's own emphasis — bold, underline — is all that stays.
+///
+/// ponytail: a light ground takes a tool's colours as the tool wrote them. Most
+/// output is written for a dark terminal, so a bright white or yellow can come
+/// out faint; remapping another program's palette by guesswork would be worse.
+pub fn adapt(color: Color) -> Color {
+    adapt_for(color, variant(), colors().depth, truecolor())
+}
+
+fn adapt_for(color: Color, variant: Variant, depth: Depth, truecolor: bool) -> Color {
+    match (variant, color) {
+        (Variant::Mono, _) => Color::Reset,
+        (_, Color::Rgb(..)) if depth == Depth::Indexed && !truecolor => {
+            TermProfile::Ansi256.adapt_color(color).unwrap_or(color)
+        }
+        _ => fold(color, depth),
+    }
+}
+
 /// `palette` for a terminal of sixteen colours.
 ///
 /// Most slots take the nearest of the sixteen. The ones set by hand below are
@@ -1661,6 +1687,40 @@ mod tests {
         assert_eq!(dark.selected_bg, Color::Indexed(236));
         let light = select(None, Some("light"), None, Depth::Indexed, unasked);
         assert_eq!(light.marked_bg, LIGHT.marked_bg);
+    }
+
+    /// A tool's own colours take the fold the palette took: sixteen colours
+    /// get one of the sixteen, a 256-colour terminal that never claimed 24-bit
+    /// gets an index, and no colour gets none.
+    #[test]
+    fn a_tools_colours_are_folded_like_the_palette() {
+        use Variant::*;
+        let sixteen = |c| adapt_for(c, Dark, Depth::Ansi16, false);
+        for c in [
+            Color::Indexed(196),
+            Color::Rgb(0, 200, 0),
+            Color::Indexed(33),
+        ] {
+            assert!(
+                !matches!(sixteen(c), Color::Indexed(_) | Color::Rgb(..)),
+                "{c:?} stayed outside the sixteen"
+            );
+        }
+        assert_eq!(sixteen(Color::Red), Color::Red);
+        assert!(matches!(
+            adapt_for(Color::Rgb(255, 0, 0), Dark, Depth::Indexed, false),
+            Color::Indexed(_)
+        ));
+        let rgb = Color::Rgb(1, 2, 3);
+        assert_eq!(adapt_for(rgb, Light, Depth::Indexed, true), rgb);
+        assert_eq!(
+            adapt_for(Color::Indexed(196), Dark, Depth::Indexed, false),
+            Color::Indexed(196)
+        );
+        assert_eq!(
+            adapt_for(Color::Green, Mono, Depth::Indexed, true),
+            Color::Reset
+        );
     }
 
     /// Every slot of a sixteen-colour palette is one of the sixteen, and the

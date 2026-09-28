@@ -51,6 +51,8 @@ pub(super) enum Request {
         query: String,
         targets: Vec<crate::session::search::Target>,
     },
+    /// Run `cctop --update` on a remote machine, which the user has confirmed.
+    UpdateRemote(crate::fleet::Host),
     Shutdown,
 }
 
@@ -86,6 +88,18 @@ pub(super) enum Response {
     Remote {
         host: String,
         snapshot: crate::fleet::Snapshot,
+    },
+    /// What a host's `cctop --version` said. Sent once per connection by its
+    /// poll thread, and again after an update there, which is the one time
+    /// the answer is known to have changed.
+    RemoteVersion {
+        host: String,
+        probe: crate::fleet::Probe,
+    },
+    /// How a confirmed `--update` on a host went.
+    RemoteUpdated {
+        host: String,
+        result: Result<String, crate::fleet::UpdateFailure>,
     },
     /// A finished transcript scan: session key -> the text around its match.
     /// The query comes back with it, because the user has usually typed more by
@@ -367,6 +381,25 @@ pub(super) fn spawn_worker(
                         let _ = tx.send(Response::Data(session.key(), Box::new(data)));
                     });
                 }
+                // Root reads other users' homes and never writes to them, and a
+                // delete is a write: it removes their transcript and, for some
+                // harnesses, rewrites a database they own. Refused here rather
+                // than at the key, so no path to a delete can get round it.
+                Request::Delete(session) if session.owner.is_some() => {
+                    let owner = session.owner.as_deref().unwrap_or_default();
+                    let result = Err(format!(
+                        "{owner}'s session is read-only: cctop never changes another user's files"
+                    ));
+                    if tx
+                        .send(Response::Deleted {
+                            session_key: session.key(),
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Request::Delete(session) => {
                     let result = match session.provider {
                         Provider::Claude => crate::session::claude::delete(&session)
@@ -484,6 +517,26 @@ pub(super) fn spawn_worker(
                     if tx.send(Response::Scanned { query, hits }).is_err() {
                         break;
                     }
+                }
+                // A thread of its own: the far side downloads a release and
+                // swaps its binary, which takes seconds on a good link, and the
+                // worker is what answers the keyboard's refresh meanwhile.
+                Request::UpdateRemote(host) => {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let result = host.update();
+                        let updated = result.is_ok();
+                        let _ = tx.send(Response::RemoteUpdated {
+                            host: host.target.clone(),
+                            result,
+                        });
+                        if updated {
+                            let _ = tx.send(Response::RemoteVersion {
+                                host: host.target.clone(),
+                                probe: host.probe(),
+                            });
+                        }
+                    });
                 }
                 Request::Shutdown => break,
             }

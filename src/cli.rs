@@ -20,6 +20,7 @@ use serde::Serialize;
                       cctop as <account> <agent> [args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop optimize | compare | burn\n       \
+                      cctop wait <session> [--until …] [--timeout …]\n       \
                       cctop doctor",
     // Shown by `-h` as well as `--help`: the long description is the only place
     // that mentioned launching agents, and nobody reads `--help` to find out a
@@ -44,6 +45,9 @@ one-shot rate, cost per file changed, cache hit.\n  \
 cctop burn             What your subscription windows were paid for and did\n                         \
 not use. A window is use-it-or-lose-it, and the\n                         \
 provider only ever reports the current figure.\n  \
+cctop wait <session>   Block until a session stops working — by id prefix, tab\n                         \
+name or pid. --until idle|waiting|done|any-stop; exits\n                         \
+124 on --timeout. For one agent to wait on another.\n  \
 cctop why [ID]         Why a row says a session is running, or is not: every\n                         \
 agent process, the session it was matched to, and the\n                         \
 rule that matched it.\n  \
@@ -104,7 +108,9 @@ It carries counts and durations only: no session titles, project paths or\n  \
 file names, and cctop's own paths are spelled with `~`.\n\n\
 EVERY USER\n  \
 Run as root and cctop reads every user's sessions rather than root's own,\n  \
-naming whose each row is in the USER column. CCTOP_ALL_USERS=0 turns that\n  \
+naming whose each row is in the USER column; `/user:<name>` filters to one.\n  \
+Other homes are only read: cctop writes nothing into them, and refuses to\n  \
+delete another user's session. CCTOP_ALL_USERS=0 turns that\n  \
 off, =1 turns it on without root, and CCTOP_HOMES names homes that are\n  \
 neither in /etc/passwd nor under /home.\n\n\
 NOTES\n  \
@@ -175,6 +181,28 @@ pub struct Args {
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub handoff: Option<String>,
 
+    /// Copy a session into another harness's store, in the shape that harness's
+    /// own resume command reads, and exit. Takes a session id or a unique prefix
+    /// of one, then the harness to convert to — currently claude and codex, in
+    /// either direction. The copy keeps the session's own id where the receiving
+    /// store has it free, so cctop can tell the two apart as one piece of work
+    #[arg(
+        long,
+        num_args = 1..=2,
+        value_names = ["SESSION", "AGENT"],
+        default_missing_value = ""
+    )]
+    pub convert: Vec<String>,
+
+    /// List the sessions on this machine that cctop converted as a handoff, and
+    /// exit. --remove deletes the copies, leaving the sessions they came from
+    #[arg(long)]
+    pub converted: bool,
+
+    /// With --converted, remove the converted copies rather than listing them
+    #[arg(long, requires = "converted")]
+    pub remove: bool,
+
     /// Print one line for a status bar — tmux, waybar, a shell prompt — and
     /// exit: how many agents are working, how many are waiting on you, and
     /// the current spend rate
@@ -237,6 +265,44 @@ pub struct Args {
     /// session titles, project paths or file names
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "FILE")]
     pub trace: Option<String>,
+}
+
+/// `cctop wait`'s own flags.
+///
+/// A parser of its own, like `serve`'s, because `wait` is a bare word and
+/// [`Args`] takes no positionals — `main` intercepts the word and hands the
+/// rest here. Derived rather than hand-rolled because this one is meant to be
+/// called from scripts, where a clap usage error that names the flag is worth
+/// more than the few lines saved.
+#[derive(Parser, Debug)]
+#[command(
+    name = "cctop wait",
+    about = "Block until a session stops working",
+    long_about = "Block until a session stops working, then exit.\n\n\
+Reads what the dashboard reads: the transcripts, the agents' own hooks \
+(heard live while waiting), and what a cctop recorded on the agent's rmux \
+session. Useful for one agent to wait on another, or for a script that has \
+just typed a prompt at one.",
+    after_help = "Exit status: 0 when the condition is met, 1 when the session ended \
+first without meeting it, 2 when the target names no session (or more than \
+one), 124 on timeout."
+)]
+pub struct WaitArgs {
+    /// The session: a prefix of its id, the name of its tab, or a pid in its
+    /// process tree
+    pub target: String,
+
+    /// What to wait for
+    #[arg(long, value_enum, default_value = "any-stop")]
+    pub until: crate::wait::Until,
+
+    /// Give up after this long: 90, 30s, 10m, 2h. 0 waits forever
+    #[arg(long, default_value = "10m", value_parser = crate::wait::parse_timeout)]
+    pub timeout: std::time::Duration,
+
+    /// Print the outcome as one line of JSON on stdout
+    #[arg(short, long)]
+    pub json: bool,
 }
 
 fn parse_plan(s: &str) -> Result<Plan, String> {
@@ -388,7 +454,15 @@ pub struct JsonCost {
     /// Recorded usage that priced at nothing, as with a free model. Distinct
     /// from `available: false`, which is a provider that records no usage.
     free: bool,
+    /// Spend in the current local clock hour, which is what this key has
+    /// always meant; kept so older readers and peers go on getting it.
     this_hour: f64,
+    /// Spend in the last 60 minutes, rolling — the `$/1H` column's figure.
+    ///
+    /// A new key rather than a new meaning for `this_hour`: a peer reading an
+    /// older cctop finds this missing and falls back, where a changed meaning
+    /// would be read wrong without anything saying so.
+    last_hour: f64,
     today: f64,
     /// Smoothed live spend rate, USD per minute.
     per_min: f64,
@@ -469,6 +543,9 @@ pub struct JsonSession {
     /// What the status dot says: `working`, `waiting` for the user, or `error`
     /// on an API failure. Independent of `running`, which is about a process.
     state: &'static str,
+    /// What an `asking` session wants to do, when its hook or its screen said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asking_for: Option<String>,
     session_id: String,
     started_at: String,
     last_active: String,
@@ -602,6 +679,275 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
 }
 
 // ---------------------------------------------------------------------------
+// --convert
+// ---------------------------------------------------------------------------
+
+/// Copy a session into another harness's store so its own resume command can
+/// pick the conversation up, and say where it went.
+///
+/// The transcript form of a handoff: where `--handoff` writes a brief for an
+/// agent to read, this writes the conversation itself in the shape the
+/// receiving harness reads back. That is worth doing only for a pair cctop can
+/// transcode between, and `crate::convert` is what knows which those are —
+/// OpenCode keeps its transcripts in SQLite, so a conversion to or from it
+/// answers "not yet" rather than half-doing it.
+pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Result<()> {
+    // A converted copy is excluded: converting one would hand over a
+    // conversation cctop had already transcoded, losing whatever the first
+    // conversion dropped, and the source it names is the session to convert
+    // instead. Said here rather than left to chance, because the copy shares
+    // its source's id and a bare prefix matches both.
+    let session = find_original(sessions, which)?;
+    if !crate::convert::convertible_session(session) {
+        anyhow::bail!(
+            "{} has no transcript on this machine cctop can convert",
+            session.provider.as_str()
+        );
+    }
+    let target = crate::pricing::Provider::parse(agent)
+        .ok_or_else(|| anyhow::anyhow!("{agent} is not a harness cctop knows"))?;
+    if !crate::convert::convertible(session.provider, target) {
+        anyhow::bail!(
+            "cctop cannot convert {} sessions into {}",
+            session.provider.as_str(),
+            target.as_str()
+        );
+    }
+    let transcript = session
+        .data_file
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("that session has no transcript on this machine"))?;
+    let home = match target {
+        crate::pricing::Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
+        crate::pricing::Provider::Codex => crate::config::CODEX_HOME.clone(),
+        _ => anyhow::bail!("that harness has no store cctop writes into"),
+    };
+    let written = crate::convert::convert(session.provider, transcript, target, &home)
+        .ok_or_else(|| anyhow::anyhow!("the transcript could not be converted"))?;
+    // The id, because it is usually the session's own and the receiving store
+    // may be a long way from the one it came from. `--json` and the tests read
+    // this line, so it is the machine-readable part of the answer.
+    println!(
+        "{} {} {} {}",
+        target.as_str(),
+        written.session_id,
+        if written.id_kept { "kept" } else { "renamed" },
+        written.path.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod convert_tests {
+    use super::*;
+    use crate::session::Session;
+
+    /// A session with just enough shape for the resolution rules to act on.
+    fn session(id: &str, provider: crate::pricing::Provider, converted: bool) -> Session {
+        let mut s = Session::new(provider, id.into());
+        s.label_source = "/tmp/proj".into();
+        s.started_at = "2026-09-28T00:00:00.000Z".into();
+        s.last_active = "2026-09-28T00:00:00.000Z".into();
+        if converted {
+            s.converted_from = Some(crate::convert::Provenance {
+                harness: "claude".into(),
+                session_id: id.into(),
+                session_path: "/tmp/proj/source.jsonl".into(),
+                converted_at: "2026-09-28T00:00:00.000Z".into(),
+            });
+        }
+        s
+    }
+
+    const ID: &str = "5049dbcd-8ef7-412f-bf57-589e61c41d0e";
+
+    #[test]
+    fn a_prefix_matching_a_session_and_a_copy_of_it_resolves_to_the_session() {
+        let sessions = vec![
+            session(ID, crate::pricing::Provider::Claude, false),
+            session(ID, crate::pricing::Provider::Codex, true),
+        ];
+        // Without the originals-first rule this is an ambiguity error, which is
+        // the wrong complaint: the user named a session, and the copy is not it.
+        assert_eq!(find_original(&sessions, "5049d").unwrap().session_id, ID);
+        assert!(
+            find_original(&sessions, ID)
+                .unwrap()
+                .converted_from
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_only_a_copy_says_where_the_session_really_is() {
+        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let why = find_original(&sessions, ID).unwrap_err().to_string();
+        assert!(why.contains("copy of a claude session"), "{why}");
+        // Not "no session id starts with" — the id is right there.
+        assert!(!why.contains("no session id starts with"), "{why}");
+    }
+
+    #[test]
+    fn an_id_matching_nothing_says_so_plainly() {
+        let sessions = vec![session(ID, crate::pricing::Provider::Claude, false)];
+        let why = find_original(&sessions, "zzz").unwrap_err().to_string();
+        assert_eq!(why, "no session id starts with 'zzz'");
+    }
+
+    #[test]
+    fn no_argument_takes_the_most_recent_original() {
+        let mut older = session(ID, crate::pricing::Provider::Claude, false);
+        older.last_active = "2026-09-28T00:00:00.000Z".into();
+        let mut newer = session(
+            "aa4ff133-cde9-470f-aaff-1fd6ac2da49e",
+            crate::pricing::Provider::Codex,
+            false,
+        );
+        newer.last_active = "2026-09-29T00:00:00.000Z".into();
+        let want = newer.session_id.clone();
+        let sessions = vec![older, newer];
+        assert_eq!(find_original(&sessions, "").unwrap().session_id, want);
+    }
+
+    #[test]
+    fn only_copies_and_no_argument_says_rather_than_picking_one() {
+        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let why = find_original(&sessions, "").unwrap_err().to_string();
+        assert!(why.contains("copy of a claude session"), "{why}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --converted
+// ---------------------------------------------------------------------------
+
+/// Resolve `which` to the session a conversion should read, preferring the
+/// original over any copy made from it.
+///
+/// A converted session carries its source's id, so the same prefix matches both
+/// and [`find_session`] would report the pair as ambiguous — a message about an
+/// id that is genuinely shared, sent to a command that has an obvious answer.
+/// The original is the one to convert: it holds the accounting the copy dropped
+/// and is the session the user is thinking of.
+fn find_original<'a>(sessions: &'a [Session], which: &str) -> anyhow::Result<&'a Session> {
+    // `find_session`'s own rules — empty means the most recently active, a
+    // prefix otherwise, several matches is an error — applied to the originals
+    // alone. Filtering first is the whole point: a copy shares its source's id,
+    // so the ambiguity has to be judged with the copies out of the way.
+    if which.is_empty() {
+        // Most recently active rather than first found, for the reason
+        // `find_session` gives: the loader groups by provider, so load order is
+        // whichever provider sorted last.
+        return sessions
+            .iter()
+            .filter(|s| s.converted_from.is_none())
+            .max_by_key(|s| s.last_active.clone())
+            .ok_or_else(|| no_original(sessions, which));
+    }
+    let matched: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.converted_from.is_none() && s.session_id.starts_with(which))
+        .collect();
+    let found = match matched.as_slice() {
+        [only] => *only,
+        [] => return Err(no_original(sessions, which)),
+        many => anyhow::bail!(
+            "'{which}' matches {} sessions:\n{}",
+            many.len(),
+            many.iter()
+                .map(|s| format!("  {} ({})", s.session_id, s.provider.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    };
+    Ok(found)
+}
+
+/// Why no original session matched, said in terms of the copy that did.
+///
+/// Without this the command would report "no session id starts with" for an id
+/// that is right there, one directory over, and the user would be sent looking
+/// for a typo rather than told the session they have is a converted copy.
+fn no_original(sessions: &[Session], which: &str) -> anyhow::Error {
+    let copy = sessions.iter().find(|s| {
+        s.converted_from.is_some() && (which.is_empty() || s.session_id.starts_with(which))
+    });
+    match copy {
+        Some(copy) => {
+            let source = copy.converted_from.as_ref().expect("filtered above");
+            anyhow::anyhow!(
+                "{} is a copy of a {} session that is not on this machine — \
+                 convert that one where it lives",
+                copy.session_id,
+                source.harness
+            )
+        }
+        None if which.is_empty() => anyhow::anyhow!("no sessions found"),
+        None => anyhow::anyhow!("no session id starts with '{which}'"),
+    }
+}
+
+/// List the sessions cctop converted as a handoff, or remove them.
+///
+/// A converted copy is an ordinary session to the harness that reads it, which
+/// is the point — but it is not work anybody did here, and a list of sessions
+/// that grows every time somebody hands work over is a list nobody reads. This
+/// is how they are found again, and how the copies are cleared out.
+pub fn run_converted(sessions: &[Session], remove: bool) -> anyhow::Result<()> {
+    let converted: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.converted_from.is_some())
+        .collect();
+    if converted.is_empty() {
+        println!("no converted sessions");
+        return Ok(());
+    }
+    for session in &converted {
+        let from = session.converted_from.as_ref().expect("filtered above");
+        // The path is the transcript itself, which is the thing `--remove`
+        // deletes. A row with no file is one a store keeps elsewhere, and
+        // saying so beats printing a directory as though it were a file.
+        let where_ = match session.data_file.as_deref() {
+            Some(path) => path.display().to_string(),
+            None => "no transcript on this machine".to_string(),
+        };
+        println!(
+            "{} {} from {} {} ({where_})",
+            session.provider.as_str(),
+            session.session_id,
+            from.harness,
+            from.session_id,
+        );
+    }
+    if !remove {
+        return Ok(());
+    }
+    for session in &converted {
+        // A session with a process behind it is somebody's *current* work now:
+        // they resumed the copy and carried on, and deleting it would take the
+        // transcript out from under a running agent.
+        if session.is_running() {
+            println!(
+                "kept {} — a {} is using it",
+                session.session_id,
+                session.provider.as_str()
+            );
+            continue;
+        }
+        let Some(path) = session.data_file.as_deref() else {
+            continue;
+        };
+        match std::fs::remove_file(path) {
+            Ok(()) => println!("removed {}", path.display()),
+            // The source is gone, the transcript lives on, and one failure
+            // should not stop the rest of the list.
+            Err(e) => println!("could not remove {}: {e}", path.display()),
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // --statusline
 // ---------------------------------------------------------------------------
 
@@ -722,6 +1068,7 @@ pub fn json_sessions(
     let claude_account = crate::quota::claude_account();
     let codex_account = crate::quota::codex_account();
     let collisions = crate::collide::detect(sessions);
+    let now = chrono::Utc::now();
 
     sessions
         .iter()
@@ -757,6 +1104,7 @@ pub fn json_sessions(
                     crate::session::ActivityState::Asking => "asking",
                     crate::session::ActivityState::ApiError => "error",
                 },
+                asking_for: s.asking_for.clone(),
                 surface: match s.surface {
                     crate::session::Surface::Cli => "cli",
                     crate::session::Surface::Editor => "editor",
@@ -789,7 +1137,8 @@ pub fn json_sessions(
                     total: (s.cost_available && !included).then(|| util::money(data.costs.total)),
                     included,
                     free: s.cost_is_free,
-                    this_hour: s.cost_hour,
+                    this_hour: s.cost_clock_hour(&now),
+                    last_hour: s.cost_hour,
                     today: s.cost_today,
                     per_min: s.cost_per_min,
                     by_day: trimmed_buckets(&s.costs_by_day, JSON_DAYS),
@@ -843,6 +1192,39 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Args::command().debug_assert();
+        WaitArgs::command().debug_assert();
+    }
+
+    /// `cctop wait`'s defaults are the ones a script wants without thinking:
+    /// any stop, ten minutes — and every flag takes the spelling the docs use.
+    #[test]
+    fn wait_parses_its_target_and_flags() {
+        use crate::wait::Until;
+        let parse = |argv: &[&str]| {
+            WaitArgs::try_parse_from(std::iter::once("cctop wait").chain(argv.iter().copied()))
+        };
+        let plain = parse(&["3f2a"]).expect("a bare target");
+        assert_eq!(plain.target, "3f2a");
+        assert_eq!(plain.until, Until::AnyStop);
+        assert_eq!(plain.timeout, std::time::Duration::from_secs(600));
+        assert!(!plain.json);
+
+        let full =
+            parse(&["reviewer", "--until", "done", "--timeout", "30s", "-j"]).expect("every flag");
+        assert_eq!(full.until, Until::Done);
+        assert_eq!(full.timeout, std::time::Duration::from_secs(30));
+        assert!(full.json);
+        assert_eq!(
+            parse(&["1", "--until", "any-stop"]).unwrap().until,
+            Until::AnyStop
+        );
+        assert!(parse(&["1", "--timeout", "0"]).unwrap().timeout.is_zero());
+
+        assert!(parse(&[]).is_err(), "no target");
+        assert!(parse(&["1", "--until", "never"]).is_err());
+        assert!(parse(&["1", "--timeout", "soon"]).is_err());
+        // A usage error exits 2, which is also an unknown session's code.
+        assert_eq!(parse(&[]).unwrap_err().exit_code(), 2);
     }
 
     #[test]

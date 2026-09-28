@@ -42,6 +42,10 @@ const FIND_AGENT_EVERY: Duration = Duration::from_millis(500);
 pub enum Attention {
     /// The agent has stopped drawing: its turn is over and the prompt is yours.
     Idle,
+    /// [`Attention::Idle`], on a turn this cctop watched end while you were
+    /// not looking at it — news, where plain idle is only context. See
+    /// [`seen`](super::seen).
+    Done,
     /// The agent has explicitly asked something and is blocked on the answer.
     NeedsInput,
 }
@@ -121,6 +125,33 @@ impl Pane {
             view: crate::attach::Attach::for_test(),
             drew_at: Instant::now(),
         }
+    }
+
+    /// What this pane's agent says it is doing, read off its screen.
+    ///
+    /// Only for a harness with a row in [`FOOTERS`]: that row is what makes a
+    /// pane an agent worth reading, where `is_agent` only knows the harnesses
+    /// cctop aliases, and `Esc to cancel` in a shell is nobody's question.
+    ///
+    /// A screen none of its rules match is idle once it has gone still — the
+    /// same inference the tab bar makes from silence, and sound for the same
+    /// reason: every one of these harnesses ticks a timer or a spinner while it
+    /// works, so a still screen with no working hint on it is a turn that ended.
+    /// Still, and not merely unmatched: see [`FOOTERS`] for the frame mid-turn
+    /// that has neither.
+    pub fn read_screen(&self) -> Option<crate::peek::Screened> {
+        if !screenable(self.harness()) {
+            return None;
+        }
+        let screen = self.view.parser.screen();
+        let (_, cols) = screen.size();
+        let rows: Vec<String> = screen.rows(0, cols).collect();
+        let signal = screen_state(self.harness(), &rows)
+            .or_else(|| self.idle().then_some(crate::hook::Signal::Idle))?;
+        let ask = (signal == crate::hook::Signal::NeedsInput)
+            .then(|| screen_ask(self.harness(), &rows))
+            .flatten();
+        Some(crate::peek::Screened { signal, ask })
     }
 
     /// Whether the agent has gone quiet long enough to count as waiting for you.
@@ -475,6 +506,14 @@ pub struct Tab {
     /// swaps the pane or the `Shared` underneath, and the one thing still
     /// standing afterwards is the tab.
     pub restarted: Option<Instant>,
+    /// Whether the focused pane is drawn over the whole tab — `Alt+z`.
+    ///
+    /// A mode of the tab rather than a mark on one pane, so it follows the
+    /// keyboard: `Alt+o` while zoomed shows the next pane zoomed, the way
+    /// flipping through full-screen terminals should feel, and `Alt+b`'s walk
+    /// through a split lands on the pane that asked with it on screen. See
+    /// [`Tab::zoomed`] for why it is read through a method.
+    zoom: bool,
 }
 
 impl Tab {
@@ -486,6 +525,7 @@ impl Tab {
             shared: None,
             color: None,
             restarted: None,
+            zoom: false,
         }
     }
 
@@ -500,6 +540,7 @@ impl Tab {
             // not know means nothing was painted, never a guess at a colour.
             color: agent.color.as_deref().and_then(Hue::from_name),
             restarted: None,
+            zoom: false,
             shared: Some(Shared {
                 label: agent.label.clone().unwrap_or_else(|| {
                     // No label recorded: an agent from a cctop older than this,
@@ -572,6 +613,13 @@ impl Tab {
         let [pane] = &self.panes[..] else {
             return false;
         };
+        // A recording is fed by this client, so giving it up would end the
+        // recording — and switching tabs is not asking for that. The tab keeps
+        // its client until the recording is stopped, at the cost of rmux
+        // sizing the window for it meanwhile.
+        if pane.view.recording() {
+            return false;
+        }
         let Some(name) = pane.rmux.clone() else {
             return false;
         };
@@ -640,8 +688,46 @@ impl Tab {
         }
     }
 
+    /// Whether any pane of this tab is being recorded, for the bar to say so.
+    pub fn recording(&self) -> bool {
+        self.panes.iter().any(|pane| pane.view.recording())
+    }
+
     pub fn focused_mut(&mut self) -> Option<&mut Pane> {
         self.panes.get_mut(self.focus)
+    }
+
+    /// Whether one pane is filling the tab.
+    ///
+    /// Only while there is more than one: zooming a lone pane changes nothing
+    /// on screen, and a marker in the bar that says otherwise would be a lie
+    /// — nor should closing a split down to one leave the flag set for the
+    /// next split to inherit as a surprise.
+    pub fn zoomed(&self) -> bool {
+        self.zoom && self.panes.len() > 1
+    }
+
+    /// Zoom the focused pane, or put the split back. Returns whether it is
+    /// zoomed now; `None` when there is nothing to zoom it over.
+    pub fn toggle_zoom(&mut self) -> Option<bool> {
+        if self.panes.len() < 2 {
+            self.zoom = false;
+            return None;
+        }
+        self.zoom = !self.zoom;
+        Some(self.zoom)
+    }
+
+    /// Add a pane to the split and give it the keyboard.
+    ///
+    /// Unzooms: asking for a split is asking to see both halves of it, and a
+    /// new pane born hidden behind a zoom would be an agent started out of
+    /// sight.
+    pub fn split(&mut self, pane: Pane, stacked: bool) {
+        self.stacked = stacked;
+        self.panes.push(pane);
+        self.focus = self.panes.len() - 1;
+        self.zoom = false;
     }
 
     /// Move the keyboard to the next pane, wrapping.
@@ -777,13 +863,40 @@ impl Tab {
             .max_by_key(|a| matches!(a, Attention::NeedsInput))
     }
 
+    /// The agents this tab speaks for in the bar: every pane's but the one you
+    /// are looking straight at, which is the same exclusion
+    /// [`Tab::attention`] makes. A detached tab speaks for the agent its
+    /// session carries.
+    pub fn unwatched_agents(&self, focused: bool) -> Vec<u32> {
+        if let Some(shared) = &self.shared {
+            return shared.pid.into_iter().collect();
+        }
+        self.panes
+            .iter()
+            .enumerate()
+            .filter(|(i, pane)| pane.is_agent && !(focused && *i == self.focus))
+            .map(|(_, pane)| pane.agent())
+            .collect()
+    }
+
     /// Drop the panes whose agents have exited. True once nothing is left.
     ///
     /// A detached tab is never nothing left: it holds no pane by design, and
     /// what becomes of it is the sync's to decide — the session it stands for
     /// outlives every client, this cctop's included.
-    pub fn reap(&mut self) -> bool {
-        self.panes.retain_mut(|pane| !pane.finished());
+    ///
+    /// A pane that goes while it is being recorded has its recording stopped
+    /// here, and where the file went is added to `saved` for the caller to say:
+    /// the agent exiting is the commonest way a recording ends, and the one
+    /// nobody pressed a key for.
+    pub fn reap(&mut self, saved: &mut Vec<(std::path::PathBuf, std::io::Result<()>)>) -> bool {
+        self.panes.retain_mut(|pane| {
+            if !pane.finished() {
+                return true;
+            }
+            saved.extend(pane.view.stop_recording());
+            false
+        });
         self.focus = self.focus.min(self.panes.len().saturating_sub(1));
         self.panes.is_empty() && self.shared.is_none()
     }
@@ -881,11 +994,243 @@ pub fn label_of(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// How one agent's screen says what it is doing.
+///
+/// Each harness ends its screen with a line of key hints, and the hints change
+/// with the state: a dialog holding the turn offers a way to cancel it, a turn
+/// in flight offers a way to interrupt it. The same words do not mean the same
+/// thing across harnesses — `esc to cancel` is a permission prompt in Claude
+/// Code and a turn in flight in Gemini — which is why this is a table per
+/// harness rather than one list of phrases.
+///
+/// A rule is a set of phrases that must *all* appear in the last `lines`
+/// non-empty lines, compared without case. Asking is tried before working, so
+/// a prompt raised mid-turn is the prompt.
+///
+/// There are no idle phrases, on purpose. Codex keeps `? for shortcuts` on its
+/// bottom line while it works, and between two steps of one turn draws a frame
+/// with no working line at all — so a footer that *looks* idle is a flicker
+/// away from a false bell. Idle is instead the absence of both, held still;
+/// see [`Pane::read_screen`].
+///
+/// Only the bottom of the screen is read because the conversation is on the
+/// same screen, and a reply that quotes one of these phrases — this comment,
+/// read aloud — must not answer for the footer. The narrower the footer, the
+/// fewer lines: Claude Code's is the last two.
+///
+/// Claude Code's phrases were captured from 2.1.283 and Codex's from 0.157.1,
+/// both off real screens. The rest are distilled from herdr's detection
+/// manifests (Apache-2.0,
+/// github.com/herdrdev/herdr, `src/detect/manifests/`, 2026-09), keeping the
+/// rules that are plain phrases and leaving out the ones that need a regex or
+/// the terminal title.
+///
+/// ponytail: phrases, not herdr's rule engine; a harness that rewords its
+/// footer reads as "nothing recognised" until its row here is updated, and the
+/// quiet-screen fallback in [`Pane::read_screen`] carries it meanwhile.
+struct Footer {
+    harness: &'static str,
+    lines: usize,
+    asking: &'static [&'static [&'static str]],
+    working: &'static [&'static [&'static str]],
+}
+
+const FOOTERS: &[Footer] = &[
+    Footer {
+        harness: "claude",
+        lines: 2,
+        // A permission prompt, an AskUserQuestion, the trust-this-folder question.
+        asking: &[&["esc to cancel"]],
+        working: &[&["esc to interrupt"]],
+    },
+    Footer {
+        harness: "codex",
+        lines: 10,
+        asking: &[
+            // An approval: `Would you like to run the following command?` over
+            // `Press enter to confirm or esc to cancel`.
+            &["press enter to confirm or esc to cancel"],
+            &["would you like to run the following command?"],
+            // Its startup questions: trust the hooks, update now.
+            &["enter confirm · esc skip"],
+            &["press enter to confirm or esc to go back"],
+            &["update now", "skip until next version"],
+            &["enter to submit answer"],
+            &["enter to submit all"],
+            &["allow command?"],
+            &["do you trust the contents of this directory?"],
+            &["[y/n]"],
+            &["yes (y)"],
+        ],
+        // `• Working (12s • esc to interrupt)`, above the prompt box.
+        working: &[&[" to interrupt)"]],
+    },
+    Footer {
+        harness: "gemini",
+        lines: 10,
+        asking: &[
+            &["apply this change"],
+            &["allow execution"],
+            &["waiting for user confirmation"],
+            &["do you want to proceed"],
+        ],
+        working: &[&["esc to cancel"]],
+    },
+    Footer {
+        harness: "opencode",
+        lines: 10,
+        asking: &[
+            &["△ permission required"],
+            &["esc dismiss", "enter confirm"],
+            &["esc dismiss", "enter submit"],
+        ],
+        working: &[
+            &["esc to interrupt"],
+            &["ctrl+c to interrupt"],
+            &["esc interrupt"],
+            &["esc again to interrupt"],
+        ],
+    },
+    Footer {
+        harness: "cursor",
+        lines: 8,
+        asking: &[
+            &["write to this file?", "proceed (y)"],
+            &["run this command?"],
+            &["skip (esc or n)"],
+            &["(y) (enter)"],
+            &["keep (n)"],
+        ],
+        working: &[&["ctrl+c to stop"]],
+    },
+    Footer {
+        harness: "devin",
+        lines: 8,
+        asking: &[
+            &["do you trust the authors of this directory?"],
+            &["approve once", "esc cancel"],
+        ],
+        working: &[&["esc to interrupt"], &["guide devin while it works"]],
+    },
+    Footer {
+        harness: "droid",
+        lines: 8,
+        asking: &[
+            &["enter to select", "esc to cancel"],
+            &["enter select", "esc cancel"],
+        ],
+        working: &[&["esc to stop"]],
+    },
+    Footer {
+        harness: "pi",
+        lines: 12,
+        asking: &[],
+        working: &[&["working..."]],
+    },
+];
+
+/// Whether `harness` has a row in [`FOOTERS`] — the cheap half of the check a
+/// reader makes before paying for the screen itself.
+pub(crate) fn screenable(harness: &str) -> bool {
+    FOOTERS.iter().any(|f| f.harness == harness)
+}
+
+/// What `harness`'s own footer says it is doing, when it says so plainly.
+///
+/// `None` both for a harness with no row in [`FOOTERS`] and for a screen none
+/// of its rules match; [`Pane::read_screen`] tells the two apart.
+pub(crate) fn screen_state(harness: &str, rows: &[String]) -> Option<crate::hook::Signal> {
+    use crate::hook::Signal;
+    let footer = FOOTERS.iter().find(|f| f.harness == harness)?;
+    let bottom: Vec<String> = rows
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .rev()
+        .take(footer.lines)
+        .map(str::to_lowercase)
+        .collect();
+    let text = bottom.join("\n");
+    let any = |rules: &[&[&str]]| rules.iter().any(|all| all.iter().all(|p| text.contains(p)));
+    if any(footer.asking) {
+        Some(Signal::NeedsInput)
+    } else if any(footer.working) {
+        Some(Signal::Busy)
+    } else {
+        None
+    }
+}
+
+/// What a prompt on `harness`'s screen is asking for, when the prompt draws
+/// the answer on it.
+///
+/// Read only once the screen has said it is asking — a `$ …` command line is a
+/// normal thing to have on screen at a shell, and this is only called on the
+/// screen that just matched a prompt. Codex puts the command it wants under
+/// "Would you like to run…"; Claude Code's menu is numbered, so the question
+/// and the tool's own detail are the rows above the highlighted option.
+/// Whatever is found is verbatim screen text, one line and bounded: a summary
+/// invented here would be shown next to an Allow button.
+///
+/// ponytail: claude and codex only. The other harnesses' prompts were seen,
+/// not read for this — a guessed extraction beside a real answer is worse
+/// than none.
+pub(crate) fn screen_ask(harness: &str, rows: &[String]) -> Option<String> {
+    // Wider than the footer: Claude's question box and Codex's `$` line sit a
+    // few rows above the hint row the recognizer matches on.
+    const ASK_ROWS: usize = 15;
+    let bottom: Vec<String> = rows
+        .iter()
+        .map(|row| row.trim().to_string())
+        .filter(|row| !row.is_empty())
+        .rev()
+        .take(ASK_ROWS)
+        .collect();
+    let found = match harness {
+        "codex" => bottom.iter().find_map(|row| {
+            row.strip_prefix('$')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })?,
+        "claude" => {
+            // The highlighted option (`❯ 1. Yes`) is the menu's top edge; the
+            // question and the tool's box are the rows above it. The first one
+            // met from the bottom is the prompt's — a `❯` in the conversation
+            // above is never the nearer one.
+            let top = bottom
+                .iter()
+                .position(|row| row.starts_with('❯') || row.starts_with('›'))?;
+            let mut detail: Vec<String> = bottom[top + 1..]
+                .iter()
+                .map(|row| unbox(row))
+                .filter(|row| !row.is_empty())
+                // Further up than this is the conversation, not the prompt.
+                .take(3)
+                .collect();
+            detail.reverse();
+            match detail.is_empty() {
+                true => return None,
+                false => detail.join(" — "),
+            }
+        }
+        _ => return None,
+    };
+    Some(crate::util::truncate(&found, crate::hook::MAX_ASK))
+}
+
+/// A row's box-drawing edges removed, for what the box says rather than draws.
+fn unbox(row: &str) -> String {
+    row.trim_matches(|c: char| "╭╮╰╯─│ ".contains(c))
+        .trim()
+        .to_string()
+}
+
 /// The harness a rmux session name or a pane label starts with, as one word.
 ///
 /// `cctop-<harness>-…` is how every session is named at creation, whether it
 /// was launched fresh or resumed; a label is the command, so its first word.
-fn harness_of(name: &str) -> &str {
+pub(crate) fn harness_of(name: &str) -> &str {
     name.strip_prefix("cctop-")
         .unwrap_or(name)
         .split(['-', ' ', '·'])
@@ -912,6 +1257,161 @@ fn starts_an_agent(argv: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The screens below are Claude Code 2.1.283's own, captured from a real
+    /// session: at its prompt, mid-turn, on a permission prompt and on an
+    /// AskUserQuestion — plus a reply quoting the phrases, which must not count.
+    /// One footer per state for every other harness, spelled the way herdr's
+    /// manifests say they are drawn — so a row edited into the table is checked
+    /// against the words it was meant to catch, and the harnesses whose words
+    /// overlap stay apart.
+    #[test]
+    fn each_harness_is_read_by_its_own_words() {
+        use crate::hook::Signal::{Busy, NeedsInput};
+        let read = |harness: &str, text: &str| {
+            let rows: Vec<String> = text.lines().map(String::from).collect();
+            super::screen_state(harness, &rows)
+        };
+        let cases = [
+            (
+                "codex",
+                "Allow command?\n  Yes (y)   No (n)",
+                Some(NeedsInput),
+            ),
+            ("gemini", "⠏ Reading files (esc to cancel, 3s)", Some(Busy)),
+            (
+                "gemini",
+                "│ Allow execution of: 'touch x'?\n│ ● 1. Yes",
+                Some(NeedsInput),
+            ),
+            ("opencode", "■■■■⬝⬝⬝⬝  esc interrupt", Some(Busy)),
+            (
+                "opencode",
+                "△ Permission required\n  bash touch x",
+                Some(NeedsInput),
+            ),
+            ("cursor", "⬢ Generating  ctrl+c to stop", Some(Busy)),
+            (
+                "cursor",
+                "Run this command?\n → Run (once) (y)\n   Skip (esc or n)",
+                Some(NeedsInput),
+            ),
+            ("devin", "Running tools · esc to interrupt", Some(Busy)),
+            (
+                "devin",
+                "Approve once\nSelect · Confirm · Esc cancel",
+                Some(NeedsInput),
+            ),
+            ("devin", "❭ \n  Context: 12% used", None),
+            ("droid", "⠋ Thinking…  (esc to stop)", Some(Busy)),
+            (
+                "droid",
+                "> Yes, allow\n  No, cancel\nEnter to select · ↑↓ to navigate · Esc to cancel",
+                Some(NeedsInput),
+            ),
+            ("pi", "── ⠋ Working... ──", Some(Busy)),
+            ("pi", "> hello", None),
+            ("aider", "esc to interrupt", None),
+        ];
+        for (harness, text, want) in cases {
+            assert_eq!(read(harness, text), want, "{harness}: {text:?}");
+        }
+    }
+
+    /// Codex 0.157.1's own screens: `? for shortcuts` on the bottom line
+    /// throughout, which is why it is not taken for idle; the working line
+    /// above the prompt box; and an approval.
+    #[test]
+    fn codex_says_what_it_is_doing_above_its_prompt() {
+        use crate::hook::Signal;
+        let screen = |text: &str| {
+            let rows: Vec<String> = text.lines().map(String::from).collect();
+            super::screen_state("codex", &rows)
+        };
+        let busy = "\
+› Run the shell command: touch hello.txt
+• I’ll create hello.txt in the current workspace.
+◦ Working (5s • esc to interrupt)
+
+› Ask Codex to do anything
+
+  GPT-5.6-Terra high · ~/play · No changes
+  ← for agents · ? for shortcuts";
+        assert_eq!(screen(busy), Some(Signal::Busy));
+        let between = "\
+› Run the shell command: touch hello.txt
+• I’ll create hello.txt in the current workspace.
+
+› Ask Codex to do anything
+
+  GPT-5.6-Terra high · ~/play · No changes
+  ← for agents · ? for shortcuts";
+        assert_eq!(screen(between), None, "mid-turn, and no phrase says so");
+        let approval = "\
+• Running touch ../outside.txt
+  Would you like to run the following command?
+  $ touch ../outside.txt
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch ../outside.txt` (p)
+  3. No, and tell Codex what to do differently (esc)
+  Press enter to confirm or esc to cancel";
+        assert_eq!(screen(approval), Some(Signal::NeedsInput));
+        let hooks = "\
+  Hooks need review
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+  enter confirm · esc skip";
+        assert_eq!(screen(hooks), Some(Signal::NeedsInput));
+    }
+
+    #[test]
+    fn claude_says_what_it_is_doing_in_its_footer() {
+        use crate::hook::Signal;
+        let screen = |text: &str| {
+            let rows: Vec<String> = text.lines().map(String::from).collect();
+            super::screen_state("claude", &rows)
+        };
+        let idle = "\
+────────────────────────────
+❯ Try \"create a util logging.py that...\"
+────────────────────────────
+  ⚠ Transcript saving is off
+  ⏸ manual mode on · ? for shortcuts
+
+";
+        assert_eq!(screen(idle), None, "idle is stillness, not a phrase");
+        let busy = "\
+✢ Quantumizing… (2s · thinking)
+────────────────────────────
+❯
+────────────────────────────
+  ⚠ Transcript saving is off
+  ⏸ manual mode on · esc to interrupt";
+        assert_eq!(screen(busy), Some(Signal::Busy));
+        let permission = "\
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to this folder
+   3. No
+
+ Esc to cancel · Tab to amend
+";
+        assert_eq!(screen(permission), Some(Signal::NeedsInput));
+        let question = "\
+❯ 1. Tea
+  2. Coffee
+────────────────────────────
+  4. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel";
+        assert_eq!(screen(question), Some(Signal::NeedsInput));
+        let quoted = "\
+⏺ The footer reads `Esc to cancel` on a prompt and `esc to interrupt` mid-turn.
+  That is how the state is told.
+❯ fix the parser
+  ⏸ manual mode on";
+        assert_eq!(screen(quoted), None, "a reply is not the footer");
+        assert_eq!(screen(""), None);
+    }
 
     /// A resumed tab is named after its session, not its command.
     ///
@@ -1308,10 +1808,13 @@ mod tests {
     #[test]
     fn a_detached_tab_is_not_reaped() {
         let mut tab = Tab::shared(&session("cctop-claude-a", None, 0));
-        assert!(!tab.reap(), "a shared tab was reaped for having no pane");
+        assert!(
+            !tab.reap(&mut Vec::new()),
+            "a shared tab was reaped for having no pane"
+        );
         // Once it stands for nothing, it is nothing.
         tab.shared = None;
-        assert!(tab.reap());
+        assert!(tab.reap(&mut Vec::new()));
     }
 
     /// A still-running agent in the launcher, as rmux would have described it.

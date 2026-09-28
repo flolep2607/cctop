@@ -486,15 +486,23 @@ fn full_differs(short: &str, full: &str) -> bool {
     !full.is_empty() && short != full
 }
 
-/// The diff a Devin edit made, synthesised from its arguments.
+/// The diff an edit made, synthesised from its arguments.
 ///
-/// ATIF records no `structuredPatch` — an `edit` call carries `old_string` and
-/// `new_string`, a `write` only the new `content` — so the hunks are the
-/// literal before and after rather than a minimal hunk. That is still the
-/// right thing to put in front of a reader asking what the session changed.
+/// An edit tool is handed the text it replaces and the text that takes its
+/// place, and a writer the whole file. ATIF spells those `old_string` and
+/// `new_string`, OpenCode's built-in tools spell them `oldString` and
+/// `newString`, and neither records a `structuredPatch` — so the hunks are the
+/// literal before and after rather than a minimal hunk. That is still the right
+/// thing to put in front of a reader asking what the session changed.
 pub fn edit_delta(input: &Value) -> Option<super::Delta> {
     let mut delta = super::Delta::default();
-    if let Some(old) = input.get("old_string").and_then(Value::as_str) {
+    let string = |snake: &str, camel: &str| {
+        input
+            .get(snake)
+            .or_else(|| input.get(camel))
+            .and_then(Value::as_str)
+    };
+    if let Some(old) = string("old_string", "oldString") {
         for line in old.lines() {
             delta.removed += 1;
             if delta.hunks.len() < crate::config::MAX_DIFF_LINES {
@@ -502,10 +510,8 @@ pub fn edit_delta(input: &Value) -> Option<super::Delta> {
             }
         }
     }
-    let added = input
-        .get("new_string")
-        .or_else(|| input.get("content"))
-        .and_then(Value::as_str)
+    let added = string("new_string", "newString")
+        .or_else(|| input.get("content").and_then(Value::as_str))
         .unwrap_or_default();
     for line in added.lines() {
         delta.added += 1;

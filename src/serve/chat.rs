@@ -26,14 +26,29 @@
 //! how the page can say "312 earlier turns" instead of implying the session
 //! began where the scroll does.
 //!
-//! # Claude Code and Codex only
+//! # What each harness writes
 //!
-//! Those two write JSONL that says, per entry, who spoke and what they said.
-//! The rest do not, in different ways and to different degrees: Cursor's native
-//! transcripts carry no roles cctop can trust, and OpenCode and Windsurf pack
-//! whole workspaces into SQLite with schemas that move between releases. Rather
-//! than half-read those into a view that looks authoritative and is not, a
-//! session on one of them comes back [`unsupported`](Conversation::supported)
+//! The JSONL harnesses say, per entry, who spoke and what they said, so one
+//! reader walks the line stream and matches each result to the call before it.
+//! Devin writes one ATIF document instead, and OpenCode writes two tables in a
+//! database its own sessions share — where a message, its reasoning, its words
+//! and its calls including their results are all part of the same row, so those
+//! readers take a whole entry at a time and have nothing to pair up.
+//!
+//! # What a harness leaves out
+//!
+//! A transcript is not obliged to record everything, and the gaps are read as
+//! gaps rather than filled in. Cursor dates nothing and pairs nothing, so its
+//! turns carry no time and its calls carry an empty result — a call that
+//! finished, about an outcome the file never kept, which is a different
+//! statement from one still running. Gemini and Pi keep results keyed to the
+//! call, so there an absent result really is a call in flight.
+//!
+//! Windsurf is the one harness with no reader. It packs a whole workspace's
+//! conversations into one SQLite value rewritten wholesale on every write, and
+//! nothing in that value is dated, so a conversation cannot even be placed in
+//! time. Rather than half-read it into a view that looks authoritative and is
+//! not, a Windsurf session comes back [`unsupported`](Conversation::supported)
 //! with the reason attached, and the page keeps showing the tool log and the
 //! diffs, which every provider does have.
 //!
@@ -41,9 +56,16 @@
 //! them interleaved into the same file, and threading them into the transcript
 //! they branch from is a display problem this does not solve; the report's
 //! subagent section already names them and what they cost.
+//!
+//! ponytail: Pi's transcript is a tree of `id`/`parentId` entries, so the
+//! reader walks the file in order rather than resolving the tree to the leaf
+//! the entries describe. An abandoned branch is therefore shown beside the one
+//! that was kept. Resolving the tree first means holding every entry id in hand
+//! before saying anything, which for a session file large enough to matter is
+//! the whole cost of opening the page.
 
 use crate::pricing::Provider;
-use crate::session::{Delta, Session, devin, extract};
+use crate::session::{Delta, Session, devin, extract, gemini, opencode, pi};
 use crate::util;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -224,10 +246,17 @@ pub fn build(session: &Session, before: Option<usize>) -> Conversation {
         Provider::Claude => extract::for_each_jsonl(path, |item| sink.claude(item)),
         Provider::Codex => extract::for_each_jsonl(path, |item| sink.codex(item)),
         Provider::Devin => read_devin(path, &mut sink),
+        Provider::OpenCode => read_opencode(path, &session.session_id, &mut sink),
+        Provider::Cursor => extract::for_each_jsonl(path, |item| sink.cursor(item)),
+        Provider::Gemini => gemini::for_each_record(path, |item| sink.gemini(item)),
+        Provider::Pi => extract::for_each_jsonl(path, |item| sink.pi(item)),
         _ => {
             return unsupported(&format!(
-                "cctop cannot read a {} conversation yet — the tool calls, \
-                 diffs and costs below come from the same transcript and are complete",
+                "cctop cannot read {} {} conversation yet — it keeps the whole \
+                 workspace's conversations in one settings value, rewritten \
+                 wholesale on every write, and the tool log and diffs below come \
+                 from the same value and are complete",
+                article(session.surface.label(session.provider)),
                 session.surface.label(session.provider)
             ));
         }
@@ -236,6 +265,21 @@ pub fn build(session: &Session, before: Option<usize>) -> Conversation {
         return unsupported(&format!("could not read the transcript: {e}"));
     }
     sink.finish()
+}
+
+/// One OpenCode conversation, out of the database every one of its sessions
+/// shares.
+///
+/// Nothing is asked for by file: the transcript is two tables in that
+/// database, and a session is a `session_id` rather than a path. A message and
+/// its parts come back together, which is what lets a tool call show as
+/// finished the moment it is read — the call and its result are one row there,
+/// rather than two entries a reader has to pair up.
+fn read_opencode(path: &Path, session_id: &str, sink: &mut Sink) -> std::io::Result<()> {
+    opencode::for_each_message(path, session_id, |message, created, parts| {
+        sink.opencode(message, &opencode::message_time(message, created), parts);
+    });
+    Ok(())
 }
 
 /// Devin's transcript is one ATIF document rather than a line stream, so it
@@ -247,13 +291,25 @@ fn read_devin(path: &Path, sink: &mut Sink) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     // A call's outcome is not in the transcript — the step records the call,
     // the database records how it ended.
-    let statuses = devin::tool_statuses(doc.get("session_id").and_then(Value::as_str));
+    let statuses = devin::tool_statuses(
+        doc.get("session_id").and_then(Value::as_str),
+        &devin::db_for(Some(path)),
+    );
     if let Some(steps) = doc.get("steps").and_then(Value::as_array) {
         for step in steps {
             sink.devin(step, &statuses);
         }
     }
     Ok(())
+}
+
+/// `a` or `an`, whichever a harness label takes — "an OpenCode conversation",
+/// not "a OpenCode conversation".
+fn article(label: &str) -> &'static str {
+    match label.chars().next() {
+        Some('A' | 'E' | 'I' | 'O' | 'U') => "an",
+        _ => "a",
+    }
 }
 
 fn unsupported(why: &str) -> Conversation {
@@ -696,6 +752,79 @@ impl Sink {
         self.add_tool(seq, id, tool);
     }
 
+    // --- OpenCode ---
+
+    /// One OpenCode message: what it said, and what it did while saying it.
+    ///
+    /// A message is already a whole reply. Its reasoning, its words and every
+    /// call it made are parts of this one row, so there is no run to carry
+    /// across entries as there is for the harnesses that write a reply in
+    /// pieces, and no result waiting on a later one — which is also why two
+    /// messages in a row are two replies rather than one spread over two.
+    fn opencode(&mut self, message: &Value, ts: &str, parts: &[Value]) {
+        let mut text = String::new();
+        let mut thinking = String::new();
+        let mut calls: Vec<ToolUse> = Vec::new();
+        let mut compacted = false;
+
+        for part in parts {
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if opencode_is_played_back(part) {
+                        continue;
+                    }
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        push_text(&mut text, t);
+                    }
+                }
+                Some("reasoning") => {
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        push_text(&mut thinking, t);
+                    }
+                }
+                Some("tool") => calls.push(opencode_call(part)),
+                Some("compaction") => compacted = true,
+                // `step-start` and `step-finish` bracket a model call and carry
+                // its cost; `patch` is the file state a call left behind, which
+                // the call itself already reports; `file` is an attachment.
+                _ => {}
+            }
+        }
+
+        if compacted {
+            // The messages before a compaction are deleted rather than scrolled
+            // past, so the transcript jumps with nothing to mark it. This is the
+            // only thing in it that says the conversation went on.
+            let mut turn = Turn::new("system", "compaction", ts);
+            turn.set_text(
+                "the context was compacted here — every turn before it \
+                           is no longer in this session's transcript",
+            );
+            self.push(turn);
+        }
+        if !thinking.trim().is_empty() {
+            let mut turn = Turn::new("assistant", "reasoning", ts);
+            turn.set_text(&thinking);
+            self.push(turn);
+        }
+        if text.trim().is_empty() && calls.is_empty() {
+            return;
+        }
+        let role = match message.get("role").and_then(Value::as_str) {
+            Some("assistant") => "assistant",
+            Some("user") => "user",
+            _ => "system",
+        };
+        let mut turn = Turn::new(role, "message", ts);
+        turn.set_text(&text);
+        let seq = self.push(turn);
+        // No call id: the result is on the same part as the call, so nothing
+        // later can resolve it and an index entry would only be a leak.
+        for call in calls {
+            self.add_tool(seq, None, call);
+        }
+    }
+
     // --- Devin ---
 
     /// One ATIF step: the source says who is speaking, and an agent step is a
@@ -823,6 +952,360 @@ impl Sink {
             self.resolve(id, Some(body), failed, None);
         }
     }
+
+    // --- Cursor ---
+
+    /// One Cursor entry: the role says who is speaking, and the blocks beneath
+    /// it are what they said and what they asked the agent to do.
+    ///
+    /// A Cursor transcript dates nothing and pairs nothing, so a turn here has
+    /// no time and a call has nothing to resolve — which is why each call is
+    /// given an empty result rather than none. A missing one would say the call
+    /// is still running, and for a harness that keeps no outcomes at all that
+    /// would be a claim the transcript cannot support.
+    fn cursor(&mut self, item: &Value) {
+        let Some(role) = item.get("role").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(blocks) = item
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                        push_text(&mut text, t);
+                    }
+                }
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    let args = block.get("input").cloned().unwrap_or(Value::Null);
+                    calls.push(call_tool(name, &args, Outcome::NotRecorded));
+                }
+                _ => {}
+            }
+        }
+        // Cursor wraps what a person typed in a `<user_query>` block, and hangs
+        // attachments off the same message as their own tag.
+        let tidy = tidy_harness_text(&text);
+        if tidy.trim().is_empty() && calls.is_empty() {
+            return;
+        }
+        let mut turn = Turn::new(
+            match role {
+                "assistant" => "assistant",
+                "user" => "user",
+                _ => "system",
+            },
+            "message",
+            "",
+        );
+        turn.set_text(&tidy);
+        let seq = self.push(turn);
+        for call in calls {
+            self.add_tool(seq, None, call);
+        }
+    }
+
+    // --- Gemini ---
+
+    /// One Gemini record: the header and the `$set` patches that revise it are
+    /// not conversation, so a record without one of the three types a person
+    /// reads as nothing.
+    fn gemini(&mut self, item: &Value) {
+        let ts = item
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match item.get("type").and_then(Value::as_str) {
+            Some("user") => {
+                let mut turn = Turn::new("user", "message", &ts);
+                turn.set_text(&gemini_text(item.get("content")));
+                self.push(turn);
+            }
+            Some("info") => {
+                // "Switched to Plan Mode." and the like: the harness speaking
+                // for itself, which is what a `system` turn is.
+                let text = item.get("content").and_then(Value::as_str).unwrap_or("");
+                if text.trim().is_empty() {
+                    return;
+                }
+                let mut turn = Turn::new("system", "message", &ts);
+                turn.set_text(&tidy_harness_text(text));
+                self.push(turn);
+            }
+            Some("gemini") => self.gemini_reply(item, &ts),
+            _ => {}
+        }
+    }
+
+    /// One Gemini reply: what it thought, what it said, and every call it made
+    /// in between.
+    ///
+    /// A `gemini` record is a whole response, and it carries each call's
+    /// outcome on the call itself — the same one-record-one-reply shape
+    /// OpenCode uses, and for the same reason there is no run to carry.
+    fn gemini_reply(&mut self, item: &Value, ts: &str) {
+        let mut thinking = String::new();
+        for thought in item
+            .get("thoughts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let body = thought
+                .get("description")
+                .and_then(Value::as_str)
+                .or_else(|| thought.get("subject").and_then(Value::as_str))
+                .unwrap_or("");
+            push_text(&mut thinking, body);
+        }
+        if !thinking.trim().is_empty() {
+            let mut turn = Turn::new("assistant", "reasoning", ts);
+            turn.set_text(&thinking);
+            self.push(turn);
+        }
+
+        let text = item.get("content").and_then(Value::as_str).unwrap_or("");
+        let empty: Vec<Value> = Vec::new();
+        let calls = item
+            .get("toolCalls")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        if text.trim().is_empty() && calls.is_empty() {
+            return;
+        }
+        let mut turn = Turn::new("assistant", "message", ts);
+        turn.set_text(&tidy_harness_text(text));
+        let seq = self.push(turn);
+        for call in calls {
+            let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
+            let args = call.get("args").cloned().unwrap_or(Value::Null);
+            // A Gemini call records what came back on the call itself, so a
+            // missing result is a call still running rather than one whose
+            // outcome the harness threw away.
+            let outcome = match call.get("result") {
+                Some(result) => Outcome::Recorded(
+                    gemini_result(result),
+                    call.get("status").and_then(Value::as_str) == Some("error"),
+                ),
+                None => Outcome::Running,
+            };
+            self.add_tool(seq, None, call_tool(name, &args, outcome));
+        }
+    }
+
+    // --- Pi ---
+
+    /// One Pi entry, of which only a `message` is conversation: the rest of the
+    /// file is the harness narrating itself — labels, model changes, branch
+    /// summaries, compactions.
+    fn pi(&mut self, item: &Value) {
+        if item.get("type").and_then(Value::as_str) != Some("message") {
+            return;
+        }
+        let Some(message) = item.get("message") else {
+            return;
+        };
+        let ts = pi::message_ts(item, message);
+        match message.get("role").and_then(Value::as_str) {
+            Some("toolResult") => {
+                let Some(id) = message.get("toolCallId").and_then(Value::as_str) else {
+                    return;
+                };
+                let body = flatten_content(message.get("content"));
+                let failed = message.get("isError").and_then(Value::as_bool) == Some(true);
+                self.resolve(id, Some(body), failed, None);
+            }
+            Some(role @ ("user" | "assistant")) => {
+                let mut text = String::new();
+                let mut thinking = String::new();
+                let mut calls = Vec::new();
+                match message.get("content") {
+                    // A person's turn is the string; an agent's is blocks.
+                    Some(Value::String(s)) => push_text(&mut text, s),
+                    Some(Value::Array(blocks)) => {
+                        for block in blocks {
+                            match block.get("type").and_then(Value::as_str) {
+                                Some("text") => {
+                                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                        push_text(&mut text, t);
+                                    }
+                                }
+                                Some("thinking") => {
+                                    if let Some(t) = block.get("thinking").and_then(Value::as_str) {
+                                        push_text(&mut thinking, t);
+                                    }
+                                }
+                                Some("toolCall") => {
+                                    let name =
+                                        block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                                    let args =
+                                        block.get("arguments").cloned().unwrap_or(Value::Null);
+                                    // The result is a later entry keyed by
+                                    // `toolCallId`, so the call starts in flight
+                                    // and `resolve` is what fills it in.
+                                    let call = call_tool(name, &args, Outcome::Running);
+                                    calls.push((id_of(block), call));
+                                }
+                                // An image is what a person pasted; the page
+                                // shows the words, not the bytes.
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if !thinking.trim().is_empty() {
+                    let mut turn = Turn::new("assistant", "reasoning", &ts);
+                    turn.set_text(&thinking);
+                    self.push(turn);
+                }
+                if text.trim().is_empty() && calls.is_empty() {
+                    return;
+                }
+                let mut turn = Turn::new(
+                    if role == "user" { "user" } else { "assistant" },
+                    "message",
+                    &ts,
+                );
+                turn.set_text(&tidy_harness_text(&text));
+                let seq = self.push(turn);
+                for (id, call) in calls {
+                    self.add_tool(seq, id.as_deref(), call);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The id a Pi tool call is answered by, if it gave one.
+///
+/// Pi pairs a result to its call by id, so an idless call is one no later entry
+/// can resolve and indexing it would be a key nothing ever looks up.
+fn id_of(block: &Value) -> Option<String> {
+    block.get("id").and_then(Value::as_str).map(str::to_string)
+}
+
+/// What a transcript says about how a call ended.
+enum Outcome {
+    /// The outcome is here, and this is whether it was a failure.
+    Recorded(String, bool),
+    /// The call is in flight. This harness records results, and there is not
+    /// one yet — which is a different statement from there being no kind.
+    Running,
+    /// This harness records no outcomes at all, so a call in the transcript
+    /// has finished and whatever came back was never kept.
+    NotRecorded,
+}
+
+/// One call as a transcript records it.
+///
+/// [`Outcome::NotRecorded`] is the case worth the type: a missing result on a
+/// harness that keeps some is a call still running, and the page draws those
+/// two differently. Reading one as the other is the difference between a live
+/// conversation and a transcript claiming every call in it is in flight.
+fn call_tool(name: &str, args: &Value, outcome: Outcome) -> ToolUse {
+    let (detail, full) = extract::tool_detail(name, args);
+    let (result, failed) = match outcome {
+        Outcome::Recorded(result, failed) => (Some(result), failed),
+        Outcome::Running => (None, false),
+        Outcome::NotRecorded => (Some(String::new()), false),
+    };
+    let delta = edits_file(name)
+        .then(|| extract::edit_delta(args))
+        .flatten();
+    ToolUse {
+        name: util::pretty_mcp_name(name),
+        detail,
+        full,
+        result,
+        failed,
+        added: delta.as_ref().map_or(0, |d| d.added),
+        removed: delta.as_ref().map_or(0, |d| d.removed),
+        diff: delta
+            .map(|d| d.hunks.into_iter().take(MAX_DIFF_LINES).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// Whether a tool is one of the harnesses' own file editors, which are the
+/// calls whose arguments are the patch.
+///
+/// The names differ by capitalisation and by synonym between harnesses, and
+/// none of them is the same word, so this is the list rather than a rule about
+/// the arguments — a call's `content` key can hold anything, and treating that
+/// as a diff would invent one.
+fn edits_file(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "edit" | "write" | "replace" | "multiedit" | "str_replace" | "str_replace_editor"
+    )
+}
+
+/// Whether a text part is something a person said rather than something
+/// OpenCode or a plugin put in their mouth.
+///
+/// Two flags mark it, and both land on `user` messages: `ignored` is a plugin's
+/// own progress output (a compression notice with a bar of block characters
+/// under it), and `synthetic` is a replay of a tool call the reader has already
+/// been shown. Neither is in the conversation, and a transcript showing either
+/// is one nobody recognises.
+fn opencode_is_played_back(part: &Value) -> bool {
+    part.get("ignored").and_then(Value::as_bool) == Some(true)
+        || part.get("synthetic").and_then(Value::as_bool) == Some(true)
+}
+
+/// One OpenCode tool call, with whatever came back from it.
+///
+/// The call and its outcome are one record, so there is nothing to wait for: a
+/// `state` with no `output` yet is a call still running, and that absence is
+/// what the page already draws for a live call from any other harness.
+fn opencode_call(part: &Value) -> ToolUse {
+    let state = part.get("state");
+    let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
+    let input = state
+        .and_then(|s| s.get("input"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let (mut detail, full) = extract::tool_detail(name, &input);
+    // OpenCode writes the one line it shows for the call, which is the only
+    // thing that can describe a tool cctop has no rule for — a plugin's, or an
+    // MCP server's, where `tool_detail` has nothing to go on.
+    if detail.is_empty()
+        && let Some(title) = state.and_then(|s| s.get("title")).and_then(Value::as_str)
+    {
+        detail = title.to_string();
+    }
+    let output = state.and_then(|s| s.get("output"));
+    let why = state
+        .and_then(|s| s.get("error"))
+        .and_then(Value::as_str)
+        .filter(|e| !e.trim().is_empty());
+    let mut tool = ToolUse {
+        name: util::pretty_mcp_name(name),
+        detail,
+        full,
+        result: output
+            .map(|out| flatten_content(Some(out)))
+            .or_else(|| why.map(str::to_string)),
+        failed: state.and_then(|s| s.get("status")).and_then(Value::as_str) == Some("error"),
+        ..ToolUse::default()
+    };
+    if let Some(delta) = state.and_then(|s| opencode::tool_delta(name, s)) {
+        tool.added = delta.added;
+        tool.removed = delta.removed;
+        tool.diff = delta.hunks.into_iter().take(MAX_DIFF_LINES).collect();
+    }
+    tool
 }
 
 /// The diff a Claude edit reported, from the entry carrying its result.
@@ -969,6 +1452,51 @@ fn push_text(out: &mut String, text: &str) {
         out.push_str("\n\n");
     }
     out.push_str(text);
+}
+
+/// What a Gemini record said, whichever of its two shapes holds it.
+///
+/// A person's turn is a list of text blocks; an agent's is the string itself.
+/// Both appear on the same field, so the string case is the one that has to be
+/// told apart rather than assumed.
+fn gemini_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(blocks) => {
+            let mut out = String::new();
+            for block in blocks.as_array().into_iter().flatten() {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    push_text(&mut out, t);
+                }
+            }
+            out
+        }
+        None => String::new(),
+    }
+}
+
+/// What a Gemini call returned, out of the envelope it arrives in.
+///
+/// The outcome sits under `functionResponse.response`, whose shape is the
+/// called tool's own, so the first response that carries any text is the one
+/// shown and the whole envelope is the fallback — an empty box on a call that
+/// demonstrably did something is worse than an ugly one.
+fn gemini_result(result: &Value) -> String {
+    for response in result
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("functionResponse"))
+    {
+        let body = response
+            .get("response")
+            .map(|inner| flatten_content(Some(inner)))
+            .unwrap_or_default();
+        if !body.trim().is_empty() {
+            return body;
+        }
+    }
+    flatten_content(Some(result))
 }
 
 /// Whether a user turn is really the harness talking.
@@ -1206,6 +1734,396 @@ mod tests {
             sink.codex(&serde_json::from_str(line).unwrap());
         }
         sink.finish()
+    }
+
+    fn sink_cursor(lines: &[&str]) -> Conversation {
+        let mut sink = Sink::default();
+        for line in lines {
+            sink.cursor(&serde_json::from_str(line).unwrap());
+        }
+        sink.finish()
+    }
+
+    fn sink_gemini(lines: &[&str]) -> Conversation {
+        let mut sink = Sink::default();
+        for line in lines {
+            sink.gemini(&serde_json::from_str(line).unwrap());
+        }
+        sink.finish()
+    }
+
+    fn sink_pi(lines: &[&str]) -> Conversation {
+        let mut sink = Sink::default();
+        for line in lines {
+            sink.pi(&serde_json::from_str(line).unwrap());
+        }
+        sink.finish()
+    }
+
+    /// A database shaped the way OpenCode writes one, holding the rows of
+    /// `ses_f1d129d6dffeGj3ft9REKBbzIY` verbatim.
+    ///
+    /// The envelope of each message and the JSON of each part are exactly what
+    /// the real database held, so a reader that gets this right is right about
+    /// the format rather than about a shape invented beside it.
+    fn opencode_db(
+        messages: &[(&str, i64, &str, &str, &[&str])],
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, \
+             time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL); \
+             CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, \
+             session_id text NOT NULL, time_created integer NOT NULL, \
+             time_updated integer NOT NULL, data text NOT NULL);",
+        )
+        .unwrap();
+        for (index, (id, created, data, session, parts)) in messages.iter().enumerate() {
+            db.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) \
+                 VALUES (?1, ?4, ?2, ?2, ?3)",
+                rusqlite::params![id, created, data, session],
+            )
+            .unwrap();
+            for (part, data) in parts.iter().enumerate() {
+                db.execute(
+                    "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+                     VALUES (?1, ?2, ?4, ?3, ?3, ?5)",
+                    rusqlite::params![
+                        format!("prt_{index}_{part:02}"),
+                        id,
+                        created,
+                        session,
+                        *data
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        (dir, path)
+    }
+
+    /// What a person asked and what the agent did about it, read out of two
+    /// tables rather than a line of JSON: the text is a part of a message, and
+    /// so is the call the reply made.
+    #[test]
+    fn an_opencode_exchange_reads_the_same_way() {
+        let (_dir, path) = opencode_db(&[
+            (
+                "msg_user",
+                1_790_513_603_273,
+                r#"{"role":"user","time":{"created":1790513603273},"agent":"build","model":{"providerID":"opencode-go","modelID":"deepseek-v4.1-flash"},"summary":{"diffs":[]}}"#,
+                "ses_1",
+                &[r#"{"type":"text","text":"fix that"}"#],
+            ),
+            (
+                "msg_assistant",
+                1_790_513_603_841,
+                r#"{"parentID":"msg_user","role":"assistant","mode":"build","agent":"build","cost":0.005038026,"tokens":{"total":35130,"input":33267,"output":43,"reasoning":28,"cache":{"write":0,"read":1792}},"modelID":"deepseek-v4.1-flash","providerID":"opencode-go","time":{"created":1790513603841,"completed":1790513623910},"finish":"tool-calls"}"#,
+                "ses_1",
+                &[
+                    r#"{"type":"step-start","snapshot":"b5c54e70bee180a4dfda72a57242f7cf0cf790c0"}"#,
+                    r#"{"type":"reasoning","text":"the note reads wrong","time":{"start":1790513603841,"end":1790513604000}}"#,
+                    r#"{"type":"tool","tool":"grep","callID":"call_00_2oelhco6qfl7o8wyhsmg9e2s","state":{"status":"completed","input":{"pattern":"cannot read a OpenCode conversation"},"output":"No files found","metadata":{"matches":0,"truncated":false},"title":"cannot read a OpenCode conversation","time":{"start":1790513604100,"end":1790513604110}}}"#,
+                    r#"{"type":"step-finish","reason":"tool-calls","snapshot":"b5c54e70bee180a4dfda72a57242f7cf0cf790c0","cost":0.005038026}"#,
+                ],
+            ),
+        ]);
+        let mut session = Session::new(Provider::OpenCode, "ses_1".into());
+        session.data_file = Some(path);
+        let chat = build(&session, None);
+        assert!(chat.supported, "{:?}", chat.note);
+        // The thinking part and the two bookkeeping parts are not turns, but
+        // the thinking is a turn of its own: it reads differently on purpose.
+        assert_eq!(chat.turns.len(), 3);
+        assert_eq!(
+            (chat.turns[0].role.as_ref(), chat.turns[0].kind.as_ref()),
+            ("user", "message")
+        );
+        assert_eq!(chat.turns[0].text, "fix that");
+        assert_eq!(
+            (chat.turns[1].role.as_ref(), chat.turns[1].kind.as_ref()),
+            ("assistant", "reasoning")
+        );
+        assert_eq!(chat.turns[1].text, "the note reads wrong");
+        // A message is already a whole reply, so the turn it becomes is its own
+        // rather than an extension of the reasoning above it.
+        assert_eq!(chat.turns[2].seq, 2);
+        assert_eq!(chat.turns[2].role, "assistant");
+        let call = &chat.turns[2].tools[0];
+        assert_eq!(call.name, "grep");
+        assert_eq!(call.detail, "cannot read a OpenCode conversation");
+        assert_eq!(call.result.as_deref(), Some("No files found"));
+        assert!(!call.failed);
+        // The millisecond the envelope records is the turn's time, in the form
+        // the page hands to its clock.
+        assert_eq!(chat.turns[0].ts, util::ms_to_rfc3339(1_790_513_603_273));
+    }
+
+    /// A call that has not come back yet, and one that came back wrong, are
+    /// both things the live view exists to show: the first has no result to
+    /// show, the second has a message to show instead of output.
+    #[test]
+    fn an_opencode_call_says_whether_it_is_still_running() {
+        let (_dir, path) = opencode_db(&[(
+            "msg_assistant",
+            1_790_513_603_841,
+            r#"{"role":"assistant","time":{"created":1790513603841}}"#,
+            "ses_1",
+            &[
+                r#"{"type":"tool","tool":"bash","state":{"status":"running","input":{"command":"cargo test"},"title":"cargo test"}}"#,
+                r#"{"type":"tool","tool":"read","state":{"status":"error","input":{"filePath":"/tmp/backend_test.log"},"error":"Cannot read binary file: /tmp/backend_test.log","title":"/tmp/backend_test.log"}}"#,
+            ],
+        )]);
+        let mut session = Session::new(Provider::OpenCode, "ses_1".into());
+        session.data_file = Some(path);
+        let chat = build(&session, None);
+        let tools = &chat.turns[0].tools;
+        assert_eq!(tools.len(), 2);
+        assert!(tools[0].result.is_none(), "a running call has no result");
+        assert!(!tools[0].failed);
+        assert_eq!(
+            tools[1].result.as_deref(),
+            Some("Cannot read binary file: /tmp/backend_test.log")
+        );
+        assert!(tools[1].failed);
+    }
+
+    /// The lines an edit added and removed come out of the input OpenCode
+    /// recorded, and the table already counts its `+` and `-` from there, so a
+    /// call in the conversation view and its row in the table say one number.
+    #[test]
+    fn an_opencode_edit_carries_the_same_lines_the_table_counted() {
+        let (_dir, path) = opencode_db(&[(
+            "msg_assistant",
+            1_790_513_603_841,
+            r#"{"role":"assistant","time":{"created":1790513603841}}"#,
+            "ses_1",
+            &[
+                r#"{"type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"/a/b.rs","oldString":"let a = 1;\nlet b = 2;\n","newString":"let a = 1;\nlet b = 3;\nlet c = 4;\n"},"output":"ok","title":"/a/b.rs"}}"#,
+            ],
+        )]);
+        let mut session = Session::new(Provider::OpenCode, "ses_1".into());
+        session.data_file = Some(path);
+        let chat = build(&session, None);
+        let call = &chat.turns[0].tools[0];
+        assert_eq!(call.name, "edit");
+        assert_eq!((call.added, call.removed), (3, 2));
+        assert!(call.diff.iter().any(|l| l.contains("let b = 3;")));
+        assert!(call.diff.iter().any(|l| l.contains("let b = 2;")));
+    }
+
+    /// A plugin writing its progress and a tool call replayed into the prompt
+    /// both land on a user message. Shown, they are a person being shown their
+    /// own tool output a second time, as though they had asked for it.
+    #[test]
+    fn text_the_harness_played_back_is_not_something_a_person_said() {
+        let (_dir, path) = opencode_db(&[(
+            "msg_user",
+            1_790_513_603_273,
+            r#"{"role":"user","time":{"created":1790513603273},"summary":{"diffs":[]}}"#,
+            "ses_1",
+            &[
+                r#"{"type":"text","text":"the real question"}"#,
+                r#"{"type":"text","text":"▣ DCP | -31.1K removed, +4.7K summary","ignored":true}"#,
+                r#"{"type":"text","text":"Called the Read tool with the following input: {\"filePath\":\"/a/b.rs\"}","synthetic":true}"#,
+            ],
+        )]);
+        let mut session = Session::new(Provider::OpenCode, "ses_1".into());
+        session.data_file = Some(path);
+        let chat = build(&session, None);
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].text, "the real question");
+    }
+
+    /// OpenCode drops the messages before a compaction and records the seam. A
+    /// transcript that opens mid-conversation says so, rather than implying the
+    /// session began where the scroll does.
+    #[test]
+    fn an_opencode_compaction_is_a_seam_not_a_message() {
+        let (_dir, path) = opencode_db(&[(
+            "msg_compaction",
+            1_790_513_603_273,
+            r#"{"role":"user","model":{"providerID":"opencode-go"},"agent":"explore","time":{"created":1790513603273},"summary":{"diffs":[]}}"#,
+            "ses_1",
+            &[r#"{"type":"compaction","auto":true,"overflow":false,"tail_start_id":"msg_tail"}"#],
+        )]);
+        let mut session = Session::new(Provider::OpenCode, "ses_1".into());
+        session.data_file = Some(path);
+        let chat = build(&session, None);
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(
+            (chat.turns[0].role.as_ref(), chat.turns[0].kind.as_ref()),
+            ("system", "compaction")
+        );
+        assert!(chat.turns[0].text.contains("compacted"));
+    }
+
+    /// Four hundred and ninety of the seven hundred sessions here are a
+    /// subagent, whose messages are their own. A parent that read its child's
+    /// would show work twice, on two rows of the table at once.
+    #[test]
+    fn an_opencode_subagent_does_not_leak_into_its_parent() {
+        let (_dir, path) = opencode_db(&[
+            (
+                "msg_parent",
+                1_790_513_603_273,
+                r#"{"role":"user","time":{"created":1790513603273}}"#,
+                "ses_parent",
+                &[r#"{"type":"text","text":"the parent's question"}"#],
+            ),
+            (
+                "msg_child",
+                1_790_513_603_274,
+                r#"{"role":"user","time":{"created":1790513603274}}"#,
+                "ses_child",
+                &[r#"{"type":"text","text":"the subagent's brief"}"#],
+            ),
+        ]);
+        let mut session = Session::new(Provider::OpenCode, "ses_parent".into());
+        session.data_file = Some(path);
+        let chat = build(&session, None);
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].text, "the parent's question");
+    }
+
+    /// A Cursor exchange reads the way every other does: the role says who is
+    /// speaking, the blocks are the words and the calls, and what the harness
+    /// does not keep is left as a gap rather than filled in.
+    ///
+    /// These are the shapes Cursor actually writes, taken from transcripts in
+    /// `~/.cursor/projects`: no `type` on a message entry at all, `turn_ended`
+    /// entries beside them, and user text wrapped in `<user_query>`.
+    #[test]
+    fn a_cursor_exchange_reads_the_same_way() {
+        let chat = sink_cursor(&[
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nextract doesn't extract the lorebook\n</user_query>"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"I'll trace how `extract` works."},{"type":"tool_use","name":"Grep","input":{"pattern":"lorebook","path":"/home/flo/JAR/jar_cli"}}]}}"#,
+            r#"{"type":"turn_ended","status":"success"}"#,
+            r#"{"type":"turn_ended","status":"error","error":"User aborted request"}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 2);
+        assert_eq!(chat.turns[0].role, "user");
+        // The wrapper is Cursor's, not the person's.
+        assert_eq!(chat.turns[0].text, "extract doesn't extract the lorebook");
+        assert_eq!(chat.turns[1].role, "assistant");
+        assert_eq!(chat.turns[1].text, "I'll trace how `extract` works.");
+        assert_eq!(chat.turns[1].tools.len(), 1);
+        assert_eq!(chat.turns[1].tools[0].name, "Grep");
+        assert!(chat.turns[1].tools[0].detail.contains("lorebook"));
+        // Cursor dates nothing, so there is no time to show.
+        assert_eq!(chat.turns[1].ts, "");
+    }
+
+    /// A Cursor call carries no outcome, and saying so must not read as a call
+    /// still running: the page shows a missing result as a live one.
+    #[test]
+    fn a_cursor_call_is_not_forever_running() {
+        let chat = sink_cursor(&[
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"src/main.rs"}}]}}"#,
+        ]);
+        let tool = &chat.turns[0].tools[0];
+        assert_eq!(tool.result.as_deref(), Some(""));
+        assert!(!tool.failed);
+    }
+
+    /// A Gemini reply is one record holding its thoughts, its words and every
+    /// call it made, with each result on the call itself.
+    #[test]
+    fn a_gemini_reply_reads_the_same_way() {
+        let chat = sink_gemini(&[
+            r#"{"sessionId":"79709c93","startTime":"2026-05-14T17:34:01.387Z","kind":"main"}"#,
+            r#"{"$set":{"summary":"Improving script latency"}}"#,
+            r#"{"type":"user","timestamp":"2026-05-14T17:34:06.028Z","content":[{"text":"go"}]}"#,
+            r#"{"type":"gemini","timestamp":"2026-05-14T17:34:13.475Z","content":"on it","thoughts":[{"subject":"Where it blocks","description":"the parser re-reads the file per record"}],"toolCalls":[{"id":"read_file_1","name":"read_file","args":{"file_path":"README.md"},"status":"success","result":[{"functionResponse":{"id":"read_file_1","name":"read_file","response":{"output":"the readme"}}}]}]}"#,
+            r#"{"type":"info","timestamp":"2026-05-14T17:34:20.000Z","content":"Switched to Plan Mode."}"#,
+        ]);
+        // The header and the `$set` patch are not conversation.
+        assert_eq!(chat.turns.len(), 4);
+        assert_eq!(chat.turns[0].role, "user");
+        assert_eq!(chat.turns[0].text, "go");
+        assert_eq!(chat.turns[0].ts, "2026-05-14T17:34:06.028Z");
+        assert_eq!(chat.turns[1].kind, "reasoning");
+        assert_eq!(
+            chat.turns[1].text,
+            "the parser re-reads the file per record"
+        );
+        assert_eq!(chat.turns[2].text, "on it");
+        let tool = &chat.turns[2].tools[0];
+        assert_eq!(tool.name, "read_file");
+        assert_eq!(tool.result.as_deref(), Some("the readme"));
+        assert!(!tool.failed);
+        // The harness speaking for itself.
+        assert_eq!(chat.turns[3].role, "system");
+        assert_eq!(chat.turns[3].text, "Switched to Plan Mode.");
+    }
+
+    /// A Gemini call that failed says so, and one with no result yet is a call
+    /// in flight — this harness records outcomes, so the two are tellable apart.
+    #[test]
+    fn a_gemini_call_says_whether_it_still_is_running() {
+        let chat = sink_gemini(&[
+            r#"{"type":"gemini","timestamp":"t","content":"","toolCalls":[{"id":"a","name":"replace","args":{"file_path":"src/main.rs"},"status":"error","result":[{"functionResponse":{"response":{"output":"no such file"}}}]}]}"#,
+            r#"{"type":"gemini","timestamp":"t2","content":"","toolCalls":[{"id":"b","name":"read_file","args":{}}]}"#,
+        ]);
+        assert!(chat.turns[0].tools[0].failed);
+        assert_eq!(
+            chat.turns[0].tools[0].result.as_deref(),
+            Some("no such file")
+        );
+        // No result recorded: Gemini keeps them, so this one is still running.
+        assert!(chat.turns[1].tools[0].result.is_none());
+    }
+
+    /// A Pi exchange: a person's turn is a bare string, an agent's is blocks,
+    /// and a result is an entry of its own keyed to the call it answers.
+    #[test]
+    fn a_pi_exchange_reads_the_same_way() {
+        let chat = sink_pi(&[
+            r#"{"type":"session","version":3,"id":"pi-1","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/work"}"#,
+            r#"{"type":"label","label":"a name for this session"}"#,
+            r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"Hello"}}"#,
+            r#"{"type":"message","id":"b2","parentId":"a1","timestamp":"2024-12-03T14:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"they said hello"},{"type":"text","text":"Hi!"},{"type":"toolCall","id":"call_123","name":"bash","arguments":{"command":"ls"}}]}}"#,
+            r#"{"type":"message","id":"c3","parentId":"b2","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"README.md"}],"isError":false}}"#,
+        ]);
+        // The session header and the label are the harness, not the conversation.
+        assert_eq!(chat.turns.len(), 3);
+        assert_eq!(chat.turns[0].role, "user");
+        assert_eq!(chat.turns[0].text, "Hello");
+        assert_eq!(chat.turns[1].kind, "reasoning");
+        assert_eq!(chat.turns[1].text, "they said hello");
+        assert_eq!(chat.turns[2].text, "Hi!");
+        let tool = &chat.turns[2].tools[0];
+        assert_eq!(tool.name, "bash");
+        // The result arrived as a later entry and found its call.
+        assert_eq!(tool.result.as_deref(), Some("README.md"));
+        assert!(!tool.failed);
+    }
+
+    /// A Pi result that failed is marked as one, and a call with no result
+    /// entry behind it is a call in flight.
+    #[test]
+    fn a_pi_call_says_whether_it_still_is_running() {
+        let chat = sink_pi(&[
+            r#"{"type":"message","timestamp":"t","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{}}]}}"#,
+            r#"{"type":"message","timestamp":"t2","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","content":[{"type":"text","text":"boom"}],"isError":true}}"#,
+        ]);
+        assert!(chat.turns[0].tools[0].failed);
+        assert_eq!(chat.turns[0].tools[0].result.as_deref(), Some("boom"));
+    }
+
+    /// An editor's arguments are the patch, whichever harness spelled the tool
+    /// its own way — this is what the report's per-file diffs read.
+    #[test]
+    fn an_edit_carries_the_patch_whatever_the_tool_is_called() {
+        let chat = sink_cursor(&[
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"path":"a.rs","oldString":"let x = 1;","newString":"let x = 2;"}}]}}"#,
+        ]);
+        let tool = &chat.turns[0].tools[0];
+        assert_eq!((tool.added, tool.removed), (1, 1));
+        assert_eq!(tool.diff, vec!["-let x = 1;", "+let x = 2;"]);
     }
 
     #[test]
@@ -1740,6 +2658,30 @@ mod tests {
         let chat = build(&session, None);
         assert!(!chat.supported);
         assert!(chat.note.is_some_and(|n| n.contains("could not read")));
+    }
+
+    /// A harness name is the one place a label is read inside a sentence, and
+    /// "a OpenCode conversation" would be the sentence that carried it.
+    #[test]
+    fn an_article_follows_the_first_letter_of_the_harness() {
+        assert_eq!(article("OpenCode"), "an");
+        assert_eq!(article("Claude Code"), "a");
+        assert_eq!(article("Codex"), "a");
+    }
+
+    /// A provider with no reader says which one it is, rather than coming back
+    /// empty and reading like a session that said nothing.
+    #[test]
+    fn a_provider_with_no_reader_names_itself() {
+        let mut session = Session::new(Provider::Windsurf, "s1".into());
+        session.data_file = Some(std::path::PathBuf::from("/nonexistent"));
+        let chat = build(&session, None);
+        assert!(!chat.supported);
+        let note = chat.note.expect("a reason is attached");
+        assert!(
+            note.starts_with("cctop cannot read a Windsurf conversation yet"),
+            "{note}"
+        );
     }
 
     /// A turn's `seq` is its place in the whole transcript, not its position

@@ -108,6 +108,7 @@ impl App {
     /// which needs a name you recognise.
     pub fn reporting(&self) -> Vec<(String, &'static str)> {
         let mut rows: Vec<(String, &'static str)> = self
+            .reports
             .hooked
             .values()
             .filter(|r| r.is_current())
@@ -167,6 +168,7 @@ mod tests {
         app.sessions[0].remote = Some(crate::session::Remote {
             host: "elsewhere".into(),
             branch: None,
+            ..Default::default()
         });
         assert!(!app.codex_hooks_heard());
 

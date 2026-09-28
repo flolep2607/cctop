@@ -20,7 +20,7 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `LAST` | `active` | Time since the session last did anything |
 | `DUR` | `duration` | First to last activity |
 | `$` | `cost` | Estimated cost — see [What the cost figures mean](costs.md) |
-| `$/1H` | `cost_hour` | Estimated cost in the current clock hour |
+| `$/1H` | `cost_hour` | Estimated cost in the last 60 minutes, rolling |
 | `$/24H` | `cost_today` | Estimated cost since local midnight |
 | `CTX%` | `ctx` | Context window used, as a share of the auto-compact threshold. `COMPCT` while one is happening |
 | `CPU%` | `cpu` | CPU across the session's process tree |
@@ -34,7 +34,7 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `PERM` | `perm` | How much it asks before acting — see below |
 | `!` | `conflict` | Another agent is on the same ground — see below |
 | `HOST` | `host` | Which machine, when [reading more than one](integrations.md#more-than-one-machine). Hidden otherwise |
-| `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Blank for your own, hidden otherwise |
+| `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Shown only while more than one user's sessions are on the table |
 | `BRANCH` | `branch` | Branch checked out in the working directory, `@<commit>` when detached, `─` when not a repository |
 | `PROJECT` | `project` | The session's title if it has one, otherwise its working directory |
 
@@ -44,6 +44,27 @@ The left status dot is green while an agent is working, amber after its latest
 response is waiting for your input, and red when the newest transcript event is
 an API error. A hollow grey dot is a stopped session, and a filled `◉` is the
 session that rang in the last 30 seconds.
+
+A live session whose turn ended while you were not looking at it wears a `✓`
+in the accent colour instead of its amber dot: *done, unseen*. Amber says the
+prompt is yours, which is true of most agents most of the time; the check says
+this one has news since you last looked. It is cleared by looking, which means
+one of two things — its row is the selected one while the dashboard is on
+screen, or its pane is the focused pane of the tab you are on. A split's other
+pane does not count, for the same reason it still lights up the tab bar: you
+are not reading it. The tab bar carries the same `✓` after the tab's label,
+and `Alt+b` goes there once nothing is blocked on a question.
+
+The mark belongs to this cctop alone. A tab's name and colour follow it into
+every cctop on the machine, but having read a reply on your laptop says
+nothing about the cctop on your phone, so seen-ness is kept in memory and not
+written anywhere. It also only marks a turn it watched end: a cctop started
+after an agent went quiet has no news to report about it.
+
+A session past one of the `alert_*` thresholds you have set wears that alert
+in place of its dot for as long as it stays past it: `$` for its cost or burn
+rate, a red `!` for an error loop, `◌` for a working agent that has written
+nothing for a while. See [alerts](driving-agents.md#alerts-on-spend-error-loops-and-stalls).
 
 ## `PERM` — how much a session asks
 
@@ -148,6 +169,50 @@ And a Codex `apply_patch` covering several files summarises as
 Agents can ask this themselves through `check_conflicts` — see
 [Letting agents see each other](integrations.md#letting-agents-see-each-other).
 
+### Telling the second agent
+
+The `!` column warns *you*, and by the time you look the second agent has
+usually made its edit. With the hooks installed, cctop can tell that agent
+instead, at the moment it reaches for the file. It is off by default; turn it on
+in the settings panel (`,`) or in `config.toml`:
+
+```toml
+[settings]
+warn_agents = true
+```
+
+From then on every file write a hook sees is noted in a small ledger beside the
+hook sockets — which file, which session, when, and the agent process that made
+it. When a session is about to write a file that a *different* agent, still
+running, wrote in the last 30 minutes, its hook answers with a note the model
+reads:
+
+```
+cctop: another agent that is still running on this machine wrote this file recently.
+- /home/you/proj/src/ui.rs — 3m12s ago, by Claude Code session 1a2b3c4d working in /home/you/proj
+Two agents editing one file do not merge: whichever writes last silently replaces
+the other's work. Re-read the file before changing it again, and settle who finishes
+first — or move one of you into a separate git worktree.
+```
+
+| harness | told on | through |
+|---|---|---|
+| Claude Code | `PreToolUse` of `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `additionalContext`, which reaches the model with the tool result |
+| Gemini CLI | `AfterTool` of `write_file`, `replace` | `additionalContext` — `BeforeTool` has no way to add context |
+| Codex | not told | its `apply_patch` writes are recorded, so the others hear about them |
+
+It is advice and nothing more: the answer carries no permission decision, so it
+cannot block, prompt or deny, and the hook still exits 0 inside its 250ms
+deadline. Anything that goes wrong on the way — no ledger yet, a mangled one,
+another hook holding its lock — is the same silence as the setting being off.
+
+It needs no cctop running: the hooks keep the ledger between themselves. It
+makes the same exemption as the `!` column (prose and lock files are never
+mentioned), a session is never warned about its own writes, and a writer whose
+process has exited no longer counts. Codex is recorded but never answered, and
+Cursor neither, because neither documents what it does with a hook's JSON on a
+tool call — a guess there is how a monitor becomes an error on every edit.
+
 ## Finding a session
 
 `/` filters the table as you type, on everything a row is: its label or title,
@@ -156,6 +221,12 @@ the git branch, the model, the harness, the provider and the session id. The
 cell that matched is underlined, so it is clear *why* a row survived the filter.
 `n` and `N` step through matches, `Esc` clears, and `↑`/`↓` inside the prompt
 bring back a search you ran before — the last twenty are remembered across runs.
+
+`user:<name>` narrows to one person's sessions when cctop is
+[watching every user](integrations.md#every-user-on-the-machine), without the
+name also matching every title that happens to contain it. Part of a name is
+enough, the rest of the query still applies (`user:ana flaky test`), and two
+`user:` terms show either user's rows.
 
 `Tab` widens the search to the transcripts themselves, which is how you find the
 session where something was actually discussed rather than one whose name
@@ -171,6 +242,109 @@ refining a search re-reads only what it must. Two limits are worth knowing:
 transcripts store their text as JSON, so a phrase containing a quote or a
 newline is escaped on disk and will not match; and a single session is scanned
 up to 64 MiB.
+
+## The tree view
+
+`T` groups the table the way htop's tree mode groups processes: each
+repository gets a heading, each checkout of it a heading beneath that, and the
+sessions hang off the checkout they were started in. When the rows shown belong
+to more than one user — root [watching every user](integrations.md#every-user-on-the-machine)
+— each user gets a heading above their repositories, so two people in the same
+repository are two groups that fold separately.
+
+```
+   LAST       $  BRANCH  PROJECT
+●    4s  $18.40          ▾ ~/cctop  4 sessions, 1 waiting, 3 running
+●    4s  $11.02  main    ├─ ▾ cctop (main)  2 sessions, 1 waiting, 1 running
+●    4s   $9.10  main    │  ├─ Improve super cctop
+○    3h   $1.92  main    │  └─ Release 0.17.8
+●   12s   $7.38  tree    └─ ▾ .claude/worktrees/agent-a9c7  2 sessions, 2 running
+●   12s   $5.01  tree       ├─ Tree view for the table
+●    1m   $2.37  tree       └─ Search tiers
+```
+
+The glyphs are drawn in the PROJECT column, so every other column stays under
+its header and sorting by one still works.
+
+A repository is recognised by its git common directory, which every worktree
+of it shares — so a linked worktree lands under the repository it was taken
+from rather than as a stranger. A repository seen through only one checkout
+skips the second level. A directory outside any repository is a group of its
+own, and a row from another machine is grouped by host and directory, since
+the far filesystem is not there to ask.
+
+`F` starts new parallel work from any of those rows. It asks for a branch
+name, runs `git worktree add` at `<repo>/.claude/worktrees/<branch>` — where
+Claude Code's own `--worktree` puts them — and opens the launcher in the new
+checkout, so the next agent you pick starts there and shows up under the
+repository's heading. A new branch forks from the checkout under the cursor; a
+branch that already exists is checked out instead. `.claude/worktrees/` gets a
+`.gitignore` of its own, so the checkouts never appear as untracked files in
+the repository they came from.
+
+A heading carries what adds up: how many sessions are under it, how many of
+those are waiting on you and how many are running, their total cost, the latest activity, and for a
+checkout the branch it has out. Its dot is the loudest state beneath it, so a
+folded heading still shows red when something inside is asking a question.
+
+`Enter`, `Space` or `e` on a heading folds and unfolds it. They do nothing else
+there — a heading has no menu and cannot be marked — while `←`/`→` stay on the
+bottom panels on every row, heading or not. Subagents still expand under their
+session with `e`, one level further in. Sessions are never nested under each
+other: no harness records that one session started another.
+
+Filtering shows the sessions that match with the headings above them, and a
+heading's totals count only what is shown. The sort applies inside each group,
+and groups are ordered by the same column applied to the group. Where the
+column adds up — `$`, `$/1H`, `$/24H`, `TOKENS`, `TOK/m`, `TOOLS`, `CPU%`, `MEM` —
+that is the group's total, so a cost sort puts the repository that has cost
+the most first, three $4 agents ahead of one $9 one. Where it does not — age,
+context, a model name — it is the group's best-placed session. Either way a
+group is never split.
+`b` unfolds whatever is hiding the session that rang. The view and the folds
+are remembered across runs.
+
+## Idle sessions, and the memory they hold
+
+An agent left open keeps its whole process tree: a `claude` process is a few
+hundred megabytes, and an MCP server it started is often another hundred. On a
+shared machine that is where the RAM goes — twenty sessions a few days old is
+ten gigabytes that nobody is typing into.
+
+`I` narrows the table to those: sessions that still have a process but have
+written nothing for `idle_after` hours (6 unless `,` says otherwise). They are
+sorted by the memory of their process tree, the root and every child — the
+figure the Processes panel adds up — and the MEM column stays on screen however
+narrow the terminal. `LAST` is how long each has been quiet. The table's title
+says what a stop would give back:
+
+```
+╭ Sessions (14/340) — idle ≥6h: 12 sessions, 5.4G reclaimable ──────╮
+```
+
+`K` in this view stops them. With rows marked it stops the marked ones; with
+none marked it stops every one the view shows, since the view is already the
+selection. A confirmation lists each with its idle time and memory, and the
+total. Some are left running, and are named with the reason:
+
+- **working** — its own hooks say a turn is under way;
+- **asking a question** — a permission prompt or an elicitation is waiting on
+  you;
+- **busy (N% CPU)** — nothing in the transcript, but the process tree is using
+  at least 5% of a core, which is what a long build or a background shell
+  looks like from outside;
+- **on host** — a row from another machine, which cctop reads and does not
+  signal.
+
+Stopping is SIGTERM to the agent, the same as `Ctrl+K`, never SIGKILL: the
+agent writes its transcript out and takes its children with it, so `R` resumes
+any of them later. What cctop cannot see is a prompt typed into one and not
+sent, which goes with it — the confirmation says so.
+
+`I` again, or `Esc`, puts the table back the way it was sorted. When a stop
+would give back more than a gigabyte the overview says so beside the agents'
+total, as `Agent mem 10035 MB · 5.4G idle (I)`, so the view does not have to be
+remembered to be found.
 
 ## The row menu
 
@@ -221,26 +395,28 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `W` | Share the agent's terminal to a browser (needs rmux, see [Driving agents](driving-agents.md)) |
 | `b` | Jump to the session that rang last |
 | `←`, `→` | Move between bottom panels |
-| `1`–`7` | Jump to a panel directly (`Tab` also reaches Context, the eighth) |
+| `1`–`9` | Jump to a panel directly; `9` is Preview, the selected row's tab live (see [The bottom panels](panels.md#preview)) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
 | `Shift+Home`/`End` | Jump to the top / bottom of that panel |
 | `f` | Follow mode: keep the selection centered |
 | `/` or `F3` | Filter sessions by text (see below) |
-| `F6`, `>`, `<` | Sort-by panel |
+| `S`, `F6`, `>`, `<` | Sort-by panel |
 | `F7` | Filter by age (1d / 1w / 1mo) |
 | `#` | Cost floor: only sessions costing ≥ `$X` |
 | `,` | Settings and keybinds (see below) |
 | `` ` `` | Show only running sessions |
+| `I` | Idle view: live sessions quiet for `idle_after` hours, most memory first (see above) |
 | `[`, `]` | Move through the Tool Activity tool filter |
 | `v` | Toggle inline diffs for edits |
 | `L` | Toggle the Tool Activity live filter |
-| `P` / `M` / `T` | Sort by status / memory / cost |
-| `H` / `X` / `S` | Sort by harness / context / tools |
+| `T` | Tree view: group by repository and worktree (see above) |
+| `F` | Fork a git worktree and launch an agent in it (see above) |
 | `+`, `-`, `=` | Speed up / slow down / reset refresh interval |
 | `Space` | Mark / unmark the selected session |
-| `D`, `K` | Delete / terminate all marked sessions (with confirmation) |
+| `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |
 | `U` | Clear all marks |
 | `h` or `F8` | Agent integration: what reports to cctop, and install it |
+| `i` | Read the conversation, full-screen (see [Panels](panels.md#reading-the-conversation)) |
 | `y` | Copy resume command or transcript path |
 | `d` | Delete the selected session (not running) |
 | `k` | Terminate the selected live session (with confirmation) |
@@ -251,6 +427,7 @@ Clicking works too. `Esc`, or a click outside, closes it.
 | `a` | Open that session's terminal in a tab and drive it |
 | `t` | New tab: run an agent or a shell (see below) |
 | `Esc` | Clear the active filter |
+| `?` or `F1` | Help: every key on one page, as `[keys]` has bound them, with the version and commit on its border; `/` in it narrows the page (see below) |
 | `q` or `F10` | Quit |
 
 Tabs and splits, from anywhere including inside a running agent:
@@ -261,15 +438,26 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+v` / `Alt+s` | Split the current tab right / down |
 | `Alt+←` / `Alt+→` | Previous / next tab |
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
-| `Alt+t` | Pick a tab from a list, typing to narrow it |
-| `Alt+b` | Jump to the next tab whose agent needs you |
+| `Alt+t` | Pick a tab from a list, typing to narrow it and `Tab` to pick by state (see below) |
+| `Alt+b` | Jump to the next tab whose agent needs you, then to one whose turn ended unseen (`✓`) |
 | `Alt+r` | Rename or recolour the tab you are on |
 | `Alt+o` | Move focus to the next pane |
+| `Alt+z` | Zoom the focused pane to fill the tab, or put the split back (see below) |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `Alt+Shift+R` | Restart the pane's agent on the same session, after an update; on the dashboard, the selected row's tab |
+| `Alt+Shift+C` | Record the focused pane to an asciinema `.cast`; again to stop (see [Recording a pane](driving-agents.md#recording-a-pane)) |
 | `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
+
+`Alt+z` zooms the focused pane over the whole tab, and the bar marks the tab
+`⤢` while it is. The other panes keep running out of sight — their output is
+still read, so none of them stalls — but they are not resized: each agent goes
+on at the size it had in the split, so zooming costs the hidden ones no
+redraw. Only the zoomed agent is resized, once each way. `Alt+o` while zoomed
+moves the zoom to the next pane; splitting again unzooms, so a new agent is
+never started out of sight. An agent another cctop is also showing is drawn at
+the smaller of the two sizes, as always, so zooming cannot grow it past that.
 
 Every function key is cctop's, inside a pane as much as on the dashboard: none
 of them is passed to the agent. `F10` (quit) and `F5` (refresh) act where you
@@ -280,9 +468,63 @@ or a sort order over a pane would be drawn on a screen the agent is repainting.
 An unbound function key does nothing rather than reaching the agent as an escape
 sequence.
 
+The `Alt+t` picker narrows two ways at once. Whatever is typed matches tab
+names — every printable key is the name's, `j` and `k` included — and `Tab`
+cycles which tabs are listed by what their agents are doing: all of them, the
+ones that need you, the ones working, the ones idle; `Shift+Tab` goes back. The
+state in force is in the picker's title (`Go to tab · needs you`), and it opens
+on all of them every time. The tab you are on is filed by what it is doing too,
+though the bar leaves it uncoloured, because with the picker over it you are not
+looking at it. The dashboard is only listed under all.
+
+In the help, `/` starts a filter: the page narrows as you type to the entries
+that mention it, under their headings, with the query on the top border. It is
+a plain case-insensitive match that takes in the key column, so `ctrl+u` finds
+keys and `half a page` finds what they do; a heading that matches keeps its
+whole section. `Enter` stops typing and keeps the filter, so the arrows and
+`j`/`k` scroll the narrowed page, and `/` again goes back to editing it. `Esc`
+takes the filter off first and the page away second.
+
+### Typing in a box
+
+Every box that takes text — the `/` filter, the cost floor, the `s` send box,
+the tab name, the launcher's directory, the add-account name, a setting being
+changed, the `Alt+t` picker and the help filter — edits the way a shell prompt
+does, with readline's keys:
+
+| Key | Does |
+|---|---|
+| `←` / `→`, `Ctrl+B` / `Ctrl+F` | Move a character |
+| `Ctrl+←` / `Ctrl+→`, `Alt+B` / `Alt+F` | Move a word |
+| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | To the start / end |
+| `Backspace` or `Ctrl+H`, `Delete` or `Ctrl+D` | Delete a character before / after the cursor |
+| `Ctrl+W`, `Alt+Backspace` | Cut the word before the cursor |
+| `Alt+D`, `Ctrl+Delete` | Cut the word after it |
+| `Ctrl+U` / `Ctrl+K` | Cut to the start / to the end |
+| `Ctrl+Y` | Put the last cut back at the cursor |
+
+A word is letters, digits and `_`, so in a path each component is one. Cuts in a
+row add up — `Ctrl+W` twice and `Ctrl+Y` gives both words back — and they go to
+the box's own slot, not the system clipboard, so cutting never loses what you
+copied to paste. A paste goes in at the cursor, with its line breaks flattened
+to spaces. The cursor steps over an accented letter or an emoji as one thing,
+and a value wider than its box scrolls to keep the cursor in view, with `…`
+where it runs off.
+
+These keys are the box's only while one is open: on the table `Ctrl+U` and
+`Ctrl+D` still page, and `Alt+B` still jumps to the tab that needs you. Each box
+keeps the keys it already had — `↑`/`↓` for search history, `Tab` to complete a
+directory, the plain arrows to pick a colour in the rename box (its name moves
+by `Ctrl+B`/`Ctrl+F`, `Home`/`End` and `Ctrl+←`/`→` instead), digits only in the cost floor.
+
 Mouse works too: click session rows, column headers, and panel tabs; scroll
 anywhere. In Tool Activity, click any row to expand the full untruncated
 argument, and click the sidebar to filter by tool.
+
+Anything that scrolls shows a scrollbar on its right border while it has more
+than fits, and only then. Click or drag along the table's bar to jump the
+selection to that point of the list, top to first row and bottom to last; the
+bottom panel's bar does the same for the panel's text.
 
 ### Settings and keybinds
 
@@ -302,6 +544,7 @@ tokens, and only what you changed is written:
 theme = "light"          # auto / light / dark / mono
 notify = true
 compact_threshold = 90   # context % the agent compacts at
+idle_after = 12          # hours quiet before `I` counts a live session idle
 
 [keys]
 quit = "x"
@@ -310,6 +553,12 @@ bottom = "shift+down"    # ctrl+, alt+ and shift+ all work
 
 Only the session table's keys move. A modal's keys are the letters on its own
 buttons, and inside a pane the keyboard is the agent's.
+
+The help page follows what you bind: a moved key is shown where it now is, and
+an action whose key you gave to something else, without giving it another,
+reads `unbound` rather than naming a key that now does something different.
+A line the file has but cctop could not use — listed as a problem at the top of
+the `,` panel — moved nothing, and the help says so by not moving either.
 
 ### Pasting an image
 

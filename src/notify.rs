@@ -92,6 +92,14 @@ pub struct Notifier {
     /// `provider/profile/window` — the edge the quota ring fires on, and the
     /// only state that edge needs.
     quota_limited: HashMap<String, bool>,
+    /// What this refresh's bell will say, one clause per kind of news —
+    /// sessions that crossed, alerts that fired, quota that freed up.
+    ///
+    /// Queued rather than rung where each is found, because they are found
+    /// in different places on the same pass of the event loop, and each
+    /// ringing for itself put two bells and two desktop notifications on the
+    /// screen for one moment. [`Notifier::ring_pending`] says all of it once.
+    pending: Vec<String>,
 }
 
 impl Notifier {
@@ -187,7 +195,7 @@ impl Notifier {
         // three bells in a row is noise, and the count says the same thing.
         let extra = crossed.len() - 1;
         let rang = crossed.swap_remove(0);
-        ring(&desktop_text(&rang, extra));
+        self.pending.push(crossing_text(&rang, extra));
         // Every crossing is remembered, not only the one the bell named:
         // each still needs finding, which is what the marker and `b` are for.
         self.recent.push_back(rang);
@@ -195,6 +203,28 @@ impl Notifier {
         while self.recent.len() > MAX_RANG {
             self.recent.pop_front();
         }
+    }
+
+    /// Add a clause to this refresh's bell, when the bell is on: `first`
+    /// names the news, and `extra` counts the rest of its kind, which the
+    /// bell cannot fit and the toasts already name.
+    pub fn chime(&mut self, first: &str, extra: usize) {
+        if self.enabled {
+            self.pending.push(format!("{first}{}", more(extra)));
+        }
+    }
+
+    /// Ring once for everything queued since the last ring, if anything was.
+    ///
+    /// The clauses are joined rather than the first one winning: the bell
+    /// is one interruption, but "api is waiting" and "web passed $20" are
+    /// both reasons to look, and a notification that dropped one would be
+    /// the only place the user heard about it while away from the screen.
+    pub fn ring_pending(&mut self) {
+        if let Some(text) = bell_text(&self.pending) {
+            ring(&text);
+        }
+        self.pending.clear();
     }
 
     /// Put a session on the queue as though it had just crossed — for the
@@ -392,18 +422,28 @@ fn state_of(session: &Session) -> State {
     }
 }
 
-fn desktop_text(rang: &Rang, extra: usize) -> String {
+/// The bell's clause for the sessions that crossed: the first by name, the
+/// rest as a count.
+fn crossing_text(rang: &Rang, extra: usize) -> String {
     let what = match rang.reason {
         Reason::NeedsInput => "is waiting for input",
         Reason::Asking => "needs permission",
         Reason::Stopped => "stopped",
     };
-    let more = if extra > 0 {
-        format!(" (+{extra} more)")
-    } else {
-        String::new()
-    };
-    format!("cctop: {} {what}{more}", rang.label)
+    format!("{} {what}{}", rang.label, more(extra))
+}
+
+/// The " (+2 more)" after a clause, or nothing when it stands alone.
+fn more(extra: usize) -> String {
+    match extra {
+        0 => String::new(),
+        n => format!(" (+{n} more)"),
+    }
+}
+
+/// The one notification a refresh raises, or `None` when nothing rang.
+fn bell_text(clauses: &[String]) -> Option<String> {
+    (!clauses.is_empty()).then(|| format!("cctop: {}", clauses.join(" · ")))
 }
 
 /// Ring the terminal and raise a desktop notification.
@@ -415,16 +455,19 @@ fn desktop_text(rang: &Rang, extra: usize) -> String {
 /// is untouched. Written from the worker thread instead, it could land in the
 /// middle of a flush and cut somebody's escape sequence in half.
 pub(crate) fn ring(text: &str) {
-    use std::io::Write;
     // The state-machine tests drive real crossings, and stdout under `cargo
     // test` is the developer's terminal: without this the suite beeps at them
-    // and leaves escape sequences among the results.
-    if cfg!(test) {
-        return;
+    // and leaves escape sequences among the results. What would have been
+    // written is kept instead, so a test can count the bells.
+    #[cfg(test)]
+    RUNG.with(|rung| rung.borrow_mut().push(text.to_string()));
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x07\x1b]9;{}\x07", sanitize(text));
+        let _ = out.flush();
     }
-    let mut out = std::io::stdout();
-    let _ = write!(out, "\x07\x1b]9;{}\x07", sanitize(text));
-    let _ = out.flush();
 }
 
 /// Strip what would end the OSC string early.
@@ -434,6 +477,19 @@ pub(crate) fn ring(text: &str) {
 /// terminal as commands; an ESC would do worse.
 fn sanitize(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What [`ring`] would have written, for the tests that count bells.
+    /// Per thread, because the test harness runs tests side by side.
+    static RUNG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every bell rung on this thread since the last call, emptied as it is read.
+#[cfg(test)]
+pub(crate) fn take_rung() -> Vec<String> {
+    RUNG.with(|rung| std::mem::take(&mut *rung.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -466,9 +522,9 @@ mod tests {
         let rang = n.recent.back().expect("a blocked agent rings");
         assert_eq!(rang.reason, Reason::Asking);
         assert!(
-            desktop_text(rang, 0).contains("needs permission"),
+            crossing_text(rang, 0).contains("needs permission"),
             "the bell says which kind of waiting it is: {}",
-            desktop_text(rang, 0)
+            crossing_text(rang, 0)
         );
 
         // And the other kind still reads as the other kind.
@@ -615,10 +671,14 @@ mod tests {
             reason: Reason::NeedsInput,
             at: Instant::now(),
         };
-        assert_eq!(desktop_text(&rang, 0), "cctop: alpha is waiting for input");
+        let bell = |extra| bell_text(&[crossing_text(&rang, extra)]);
         assert_eq!(
-            desktop_text(&rang, 2),
-            "cctop: alpha is waiting for input (+2 more)"
+            bell(0).as_deref(),
+            Some("cctop: alpha is waiting for input")
+        );
+        assert_eq!(
+            bell(2).as_deref(),
+            Some("cctop: alpha is waiting for input (+2 more)")
         );
     }
 

@@ -12,6 +12,10 @@
 // uses as the cache version, and which its tests re-derive through the
 // functions below.
 //
+// Also emits `CCTOP_COMMIT`, the commit being built, which the help page shows
+// beside the version — so a report of "the help says X" can be told apart
+// from a build of the same version with a different tree under it.
+//
 // No dependencies here on purpose: a build script is compiled for the host
 // before anything else, and a 20-line FNV-1a is cheaper than making every
 // build of cctop wait on a hashing crate it does not otherwise need.
@@ -56,6 +60,52 @@ fn main() {
         "cargo:rustc-env=CCTOP_CACHE_HASH={:016x}",
         digest(&read_all(&files))
     );
+    println!(
+        "cargo:rustc-env=CCTOP_COMMIT={}",
+        commit().unwrap_or_default()
+    );
+}
+
+/// The commit being built, abbreviated, or `None` when nothing says.
+///
+/// From git when this is a checkout, which also tells cargo to look again when
+/// HEAD moves — a commit, a checkout, a rebase — and otherwise from the
+/// `.cargo_vcs_info.json` that `cargo package` writes into a crate, which is
+/// the only record of the commit a `cargo install cctop` builds from.
+///
+/// ponytail: a tree with uncommitted changes shows the commit it started
+/// from, unmarked. Knowing it was dirty would need this script to rerun on
+/// every edit to every file, which is a recompile of the crate on each build.
+pub fn commit() -> Option<String> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git").args(args).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !text.is_empty()).then_some(text)
+    };
+    if let Some(hash) = git(&["rev-parse", "--short=9", "HEAD"]) {
+        // HEAD, the branch it names, and the packed refs a branch can live in
+        // instead. Only those that exist: cargo reruns a script whose watched
+        // path is missing on every build.
+        let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string()];
+        watched.extend(git(&["symbolic-ref", "-q", "HEAD"]));
+        for name in watched {
+            if let Some(path) = git(&["rev-parse", "--git-path", &name])
+                && Path::new(&path).exists()
+            {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
+        return Some(hash);
+    }
+    let info = std::fs::read_to_string(".cargo_vcs_info.json").ok()?;
+    let at = info.find("\"sha1\"")?;
+    let hash: String = info[at + 6..]
+        .chars()
+        .skip_while(|c| !c.is_ascii_hexdigit())
+        .take_while(char::is_ascii_hexdigit)
+        .take(9)
+        .collect();
+    (hash.len() == 9).then_some(hash)
 }
 
 /// Every hashed file and every directory walked to find them, relative to the

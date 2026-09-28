@@ -2,7 +2,8 @@
 
 use super::extract;
 use super::{
-    ActivityState, ContextUsage, Costs, FallbackRates, ModelBreakdown, Session, SessionData, Tokens,
+    ActivityState, ContextUsage, Costs, FallbackRates, ModelBreakdown, Session, SessionData,
+    Subagent, SubagentStatus, Tokens,
 };
 use crate::config;
 use crate::pricing::Provider;
@@ -13,34 +14,23 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Exact line deltas from OpenCode's built-in editing tools.  `write` can
-/// replace an existing file wholesale, so its removed lines cannot be known
-/// from the recorded input and are deliberately not guessed.
-fn tool_delta(name: &str, state: &Value) -> Option<super::Delta> {
+/// The line delta behind OpenCode's built-in editing tools, and the patch to
+/// show for it.
+///
+/// `edit` is handed the text it replaces and the text that takes its place, so
+/// its diff is the literal before and after. `write` can replace a file
+/// wholesale, so its removed lines cannot be known from the recorded input and
+/// are deliberately not guessed. `apply_patch` carries a real patch.
+///
+/// Read by the table's extraction and by the conversation reader alike: what
+/// counts as an edit is one fact about this harness, not one per caller.
+pub fn tool_delta(name: &str, state: &Value) -> Option<super::Delta> {
     if state.get("status").and_then(Value::as_str) != Some("completed") {
         return None;
     }
     let input = state.get("input")?;
     match name {
-        "edit" => {
-            let removed = input
-                .get("oldString")
-                .or_else(|| input.get("old_string"))
-                .and_then(Value::as_str)?
-                .lines()
-                .count() as u32;
-            let added = input
-                .get("newString")
-                .or_else(|| input.get("new_string"))
-                .and_then(Value::as_str)?
-                .lines()
-                .count() as u32;
-            Some(super::Delta {
-                added,
-                removed,
-                ..Default::default()
-            })
-        }
+        "edit" => extract::edit_delta(input),
         "apply_patch" => input
             .get("patch")
             .and_then(Value::as_str)
@@ -216,14 +206,96 @@ fn database_paths() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Every message one session recorded, oldest first, with its own parts.
+///
+/// `message` holds the envelope and `part` the words and the calls, so the two
+/// are read as one ordered pass: the join is the only place that knows which
+/// part belongs to which message, and a reader needs them together.
+///
+/// Ponytail: the whole session is read, not the newest of it. A subagent's
+/// messages are not in it — a subagent is its own session, so a parent's
+/// conversation cannot pick one up by accident — but a parent that delegated
+/// reads as though it did not.
+pub fn for_each_message(path: &Path, session_id: &str, mut f: impl FnMut(&Value, i64, &[Value])) {
+    with_db(path, |db| {
+        let Ok(mut stmt) = db.prepare(
+            "SELECT m.id, m.time_created, m.data, p.data FROM message m \
+             LEFT JOIN part p ON p.message_id = m.id \
+             WHERE m.session_id = ?1 ORDER BY m.time_created, m.id, p.id",
+        ) else {
+            return;
+        };
+        let Ok(mut rows) = stmt.query(params![session_id]) else {
+            return;
+        };
+        let mut current = String::new();
+        let mut created = 0i64;
+        let mut message = Value::Null;
+        let mut parts: Vec<Value> = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            let Ok(id) = row.get::<_, String>(0) else {
+                continue;
+            };
+            if id != current {
+                if !current.is_empty() && !message.is_null() {
+                    f(&message, created, &parts);
+                }
+                current = id.clone();
+                created = row
+                    .get::<_, Option<i64>>(1)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                message = row
+                    .get::<_, Option<String>>(2)
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or(Value::Null);
+                parts.clear();
+            }
+            // A message with no parts at all is a `LEFT JOIN` that found nothing,
+            // and one whose part will not parse is the same as not being there.
+            if let Ok(Some(raw)) = row.get::<_, Option<String>>(3)
+                && let Ok(part) = serde_json::from_str::<Value>(&raw)
+            {
+                parts.push(part);
+            }
+        }
+        if !current.is_empty() && !message.is_null() {
+            f(&message, created, &parts);
+        }
+    });
+}
+
+/// When a message was written, in RFC-3339.
+///
+/// The column is the fallback because `data.time.created` is the envelope's own
+/// idea of when it was spoken, which is not always when the row landed.
+pub fn message_time(message: &Value, column: i64) -> String {
+    let ms = message
+        .pointer("/time/created")
+        .and_then(Value::as_i64)
+        .unwrap_or(column);
+    util::ms_to_rfc3339(ms)
+}
+
 /// Discover sessions from every OpenCode channel database, preferring the most
 /// recently updated copy if the same session was migrated between channels.
 pub fn list_sessions() -> Vec<Session> {
     let mut sessions = Vec::new();
     for path in database_paths() {
         let Ok(db) = readonly(&path) else { continue };
+        // A subagent is a session of its own, with `parent_id` naming the one
+        // that spawned it; listed, each stands alone as a conversation. They
+        // are hidden here and folded into their parent by `extract`, the way
+        // Claude's subagents are. A database from before the column existed has
+        // no subagents to hide, so it falls back to the unfiltered query.
+        const COLUMNS: &str =
+            "SELECT id, directory, title, model, time_created, time_updated FROM session";
         let Ok(mut stmt) = db
-            .prepare("SELECT id, directory, title, model, time_created, time_updated FROM session")
+            .prepare(&format!("{COLUMNS} WHERE parent_id IS NULL"))
+            .or_else(|_| db.prepare(COLUMNS))
         else {
             continue;
         };
@@ -398,18 +470,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
             mt.total += tokens.total;
             mc.total += costs.total;
             if let Some(dt) = util::parse_ts(&ts) {
-                *data
-                    .costs_by_day
-                    .entry(util::local_date_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
-                *data
-                    .costs_by_hour
-                    .entry(util::local_hour_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
+                data.record_cost(&dt, &model, costs.total);
                 // Reasoning is already inside `output` here — billing it again
                 // would double-count, the same rule `FallbackRates` applies.
                 let billed = tokens.all_input() + tokens.output;
@@ -504,6 +565,8 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
         }
     }
 
+    fold_subagents(&db, session_id, &mut data, &mut breakdown, &mut rates);
+
     let mut models: Vec<_> = breakdown.into_iter().collect();
     models.sort_by(|a, b| a.0.cmp(&b.0));
     data.models = models.iter().map(|(m, _)| m.clone()).collect();
@@ -517,6 +580,146 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
         })
         .collect();
     data
+}
+
+/// Fold a session's subagents into it.
+///
+/// OpenCode records each subagent as a session of its own, linked by
+/// `parent_id`, where Claude keeps its subagents inside one transcript. So the
+/// spend that Claude's parser sums for free has to be summed here by hand: each
+/// child's tokens and cost are added to the parent's totals — otherwise hiding
+/// the child rows would hide their spend — and each child is listed under the
+/// parent rather than standing alone.
+///
+/// The subagent's own metrics come straight off its session row, which already
+/// carries the aggregate OpenCode keeps; only the tool count is a query. The
+/// per-message context window and tool history are left out, as its numbers on
+/// the parent's Subagents pane do not need them.
+fn fold_subagents(
+    db: &Connection,
+    parent_id: &str,
+    data: &mut SessionData,
+    breakdown: &mut HashMap<String, (Tokens, Costs)>,
+    rates: &mut FallbackRates,
+) {
+    let Ok(mut stmt) = db.prepare(
+        "SELECT id, agent, title, model, cost, tokens_input, tokens_output, tokens_reasoning, \
+         tokens_cache_read, tokens_cache_write, time_created, time_updated \
+         FROM session WHERE parent_id = ?1 ORDER BY time_created, id",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map(params![parent_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, f64>(4)?,
+            row.get::<_, u64>(5)?,
+            row.get::<_, u64>(6)?,
+            row.get::<_, u64>(7)?,
+            row.get::<_, u64>(8)?,
+            row.get::<_, u64>(9)?,
+            row.get::<_, i64>(10)?,
+            row.get::<_, i64>(11)?,
+        ))
+    }) else {
+        return;
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    for row in rows.flatten() {
+        let (
+            id,
+            agent,
+            title,
+            model_json,
+            cost,
+            input,
+            output,
+            reasoning,
+            read,
+            write,
+            created,
+            updated,
+        ) = row;
+        let model = model_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
+        let tokens = Tokens {
+            input,
+            output,
+            cache_read: read,
+            cache_write_5m: write,
+            reasoning_output: reasoning,
+            total: input + output + read + write,
+            ..Default::default()
+        };
+        // The same zero-cost fallback the parent uses: a provider OpenCode has
+        // no rates for reports nothing, and its tokens are priced from LiteLLM.
+        let cost = if cost > 0.0 || tokens.total == 0 {
+            cost
+        } else {
+            rates.costs(&model, &tokens).map_or(0.0, |c| c.total)
+        };
+
+        add_usage(
+            data,
+            &tokens,
+            &Costs {
+                total: cost,
+                ..Default::default()
+            },
+        );
+        let (mt, mc) = breakdown.entry(model.clone()).or_default();
+        mt.input += tokens.input;
+        mt.output += tokens.output;
+        mt.cache_read += tokens.cache_read;
+        mt.cache_write_5m += tokens.cache_write_5m;
+        mt.reasoning_output += tokens.reasoning_output;
+        mt.total += tokens.total;
+        mc.total += cost;
+        // Attribute the subagent's spend to when it last ran, so the burn
+        // charts do not lose it. ponytail: one point per subagent, not per
+        // message — a per-minute curve only if a subagent's timeline matters.
+        if let Some(dt) = util::parse_ts(&util::ms_to_rfc3339(updated)) {
+            data.record_cost(&dt, &model, cost);
+        }
+
+        let tool_count = db
+            .query_row(
+                "SELECT count(*) FROM part WHERE session_id = ?1 \
+                 AND json_extract(data, '$.type') = 'tool'",
+                params![id],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap_or(0);
+
+        data.subagents.push(Subagent {
+            agent_id: id,
+            agent_type: agent.unwrap_or_default(),
+            description: title,
+            model,
+            started_at: Some(util::ms_to_rfc3339(created)),
+            last_active: Some(util::ms_to_rfc3339(updated)),
+            duration_ms: (updated - created).max(0),
+            // A subagent still writing is one whose parent has not moved on; the
+            // same quiet window the Claude parser uses tells the two apart.
+            status: if now_ms - updated >= 30_000 {
+                SubagentStatus::Done
+            } else {
+                SubagentStatus::Running
+            },
+            cost,
+            tool_count,
+            tool_use_id: None,
+            context: None,
+            ghost: false,
+        });
+    }
 }
 
 pub fn delete(session: &Session) -> rusqlite::Result<()> {
@@ -712,6 +915,65 @@ mod tests {
         assert_eq!(data.metrics.tool_errors, 1);
 
         // Release the handle this thread holds before removing the file.
+        close_databases();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A subagent is a session of its own with `parent_id` set. Its spend must
+    /// count towards the parent it ran under, and it must be listed under it
+    /// rather than folded away or left standing alone as a conversation.
+    #[test]
+    fn subagents_fold_into_their_parent() {
+        let path = temp_db("subagents");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT NOT NULL,
+                title TEXT NOT NULL, model TEXT, cost REAL NOT NULL,
+                tokens_input INTEGER NOT NULL, tokens_output INTEGER NOT NULL,
+                tokens_reasoning INTEGER NOT NULL, tokens_cache_read INTEGER NOT NULL,
+                tokens_cache_write INTEGER NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+             );
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+        let cols = "id,parent_id,agent,directory,title,model,cost,tokens_input,tokens_output,\
+                    tokens_reasoning,tokens_cache_read,tokens_cache_write,time_created,time_updated";
+        db.execute(
+            &format!("INSERT INTO session ({cols}) VALUES ('par',NULL,NULL,'/w','parent',?1,0.10,100,20,0,0,0,1000,2000)"),
+            params![r#"{"id":"claude-x"}"#],
+        )
+        .unwrap();
+        db.execute(
+            &format!("INSERT INTO session ({cols}) VALUES ('kid','par','general','/w','find the bug',?1,0.05,200,40,0,0,0,1500,1800)"),
+            params![r#"{"id":"claude-x"}"#],
+        )
+        .unwrap();
+        // A tool call the subagent made, so its tool count is not zero.
+        db.execute(
+            "INSERT INTO part VALUES ('prt','kid',1600,?1)",
+            params![r#"{"type":"tool","tool":"bash"}"#],
+        )
+        .unwrap();
+        drop(db);
+
+        let data = extract(&path, "par");
+        assert_eq!(
+            data.subagents.len(),
+            1,
+            "the child is listed under the parent"
+        );
+        let sa = &data.subagents[0];
+        assert_eq!(sa.agent_type, "general");
+        assert_eq!(sa.description, "find the bug");
+        assert_eq!(sa.tool_count, 1);
+        assert!((sa.cost - 0.05).abs() < 1e-9);
+        // The parent's totals now carry the subagent's tokens and spend.
+        assert_eq!(data.tokens.input, 300);
+        assert!((data.costs.total - 0.15).abs() < 1e-9);
+
         close_databases();
         std::fs::remove_file(path).unwrap();
     }

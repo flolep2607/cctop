@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 5] = [
+pub const SETTINGS: [(&str, &str, &str); 14] = [
     (
         "theme",
         "\"auto\"",
@@ -44,7 +44,50 @@ pub const SETTINGS: [(&str, &str, &str); 5] = [
         "\"\"",
         "Columns to hide, e.g. \"tok_rate,mem\". On restart",
     ),
+    // The alerts, each off at 0. See `crate::alert` for what each one reads.
+    ("alert_cost", "0", "Alert when a session's cost passes $X"),
+    (
+        "alert_burn",
+        "0",
+        "Alert when a session burns over $X an hour",
+    ),
+    ("alert_today", "0", "Alert when today's spend passes $X"),
+    (
+        "alert_errors",
+        "0",
+        "Alert when X% of 10m of tool calls fail (try 25)",
+    ),
+    (
+        "alert_error_calls",
+        "10",
+        "…counting only once there are this many calls",
+    ),
+    (
+        "alert_stall",
+        "0",
+        "Alert when a working agent writes nothing for X min (try 10)",
+    ),
+    (
+        "warn_agents",
+        "false",
+        "Tell an agent when a live peer just wrote its file",
+    ),
+    (
+        "idle_after",
+        "6",
+        "Hours quiet before a live session counts as idle (I)",
+    ),
+    (
+        "read_screen",
+        "false",
+        "Read each agent's screen in a tab for its state, over hooks",
+    ),
 ];
+
+/// `idle_after`'s default, in hours: long enough that nobody's lunch break
+/// counts, short enough that yesterday's forgotten sessions do. The number
+/// [`SETTINGS`] spells for it must agree, which a test holds it to.
+pub const IDLE_AFTER_HOURS: f64 = 6.0;
 
 /// Every dashboard action a `[keys]` entry can rebind: its name, the key it is
 /// on by default, and what it does.
@@ -54,7 +97,7 @@ pub const SETTINGS: [(&str, &str, &str); 5] = [
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 47] = [
+pub const BINDINGS: [(&str, &str, &str); 50] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "This settings panel"),
@@ -83,6 +126,12 @@ pub const BINDINGS: [(&str, &str, &str); 47] = [
     ("copy", "y", "Copy resume command or transcript path"),
     ("expand", "e", "Show its subagents"),
     ("expand_all", "E", "Show all subagents"),
+    ("tree", "T", "Tree view: group by repository and worktree"),
+    (
+        "worktree",
+        "F",
+        "Fork a git worktree and launch an agent in it",
+    ),
     ("delete", "d", "Delete it"),
     ("terminate", "ctrl+k", "Terminate it"),
     ("mark", "space", "Mark / unmark it"),
@@ -93,6 +142,7 @@ pub const BINDINGS: [(&str, &str, &str); 47] = [
     ("sort", "S", "Sort by a column"),
     ("cost_floor", "#", "Only sessions costing at least $X"),
     ("running_only", "`", "Show only running sessions"),
+    ("idle", "I", "Live sessions left idle, biggest first"),
     ("new_tab", "t", "New tab"),
     ("open_hosted", "A", "Open the agent this cctop launched"),
     ("notify", "w", "Toggle alerts"),
@@ -119,6 +169,29 @@ pub struct Settings {
     /// to.
     pub compact_threshold: Option<f64>,
     pub hide_columns: Option<String>,
+    /// The alert thresholds, as the file spells them — dollars, a percentage,
+    /// minutes. [`Settings::alert_rules`] turns them into what
+    /// [`crate::alert`] compares against.
+    pub alert_cost: Option<f64>,
+    pub alert_burn: Option<f64>,
+    pub alert_today: Option<f64>,
+    pub alert_errors: Option<f64>,
+    pub alert_error_calls: Option<u64>,
+    pub alert_stall: Option<f64>,
+    /// Whether `cctop hook` answers a file write with the other live sessions
+    /// that wrote the same file — see [`crate::advise`]. Off unless the file
+    /// says otherwise, because it is the one thing that makes the hook write
+    /// to the agent's stdout on a tool call.
+    pub warn_agents: Option<bool>,
+    /// Hours without activity before a live session is idle — see
+    /// [`Settings::idle_after_ms`].
+    pub idle_after: Option<f64>,
+    /// Whether a tab's agent is read off its own screen — see
+    /// [`crate::ui::tabs::screen_state`]. Off unless the file says otherwise,
+    /// because the words it looks for belong to each agent's UI, not to any
+    /// contract, and a release that rewords them goes unread until cctop
+    /// catches up.
+    pub read_screen: Option<bool>,
     /// `(action, key)` as written, in file order.
     pub keys: Vec<(String, String)>,
     /// Everything that was written and could not be used, said in a sentence.
@@ -153,6 +226,8 @@ impl Settings {
                     "theme" => item.as_str().map(|v| out.theme = Some(v.into())).is_none(),
                     "notify" => item.as_bool().map(|v| out.notify = Some(v)).is_none(),
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
+                    "warn_agents" => item.as_bool().map(|v| out.warn_agents = Some(v)).is_none(),
+                    "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
                         .or_else(|| item.as_integer().map(|i| i as f64))
@@ -162,6 +237,27 @@ impl Settings {
                     "hide_columns" => item
                         .as_str()
                         .map(|v| out.hide_columns = Some(v.into()))
+                        .is_none(),
+                    "alert_cost" => amount(item).map(|v| out.alert_cost = Some(v)).is_none(),
+                    "alert_burn" => amount(item).map(|v| out.alert_burn = Some(v)).is_none(),
+                    "alert_today" => amount(item).map(|v| out.alert_today = Some(v)).is_none(),
+                    "alert_stall" => amount(item).map(|v| out.alert_stall = Some(v)).is_none(),
+                    // Zero would make every live session idle the moment it
+                    // stopped typing, which is a list of everything, not of
+                    // what was forgotten.
+                    "idle_after" => amount(item)
+                        .filter(|h| *h > 0.0)
+                        .map(|v| out.idle_after = Some(v))
+                        .is_none(),
+                    "alert_errors" => amount(item)
+                        .filter(|p| *p <= 100.0)
+                        .map(|v| out.alert_errors = Some(v))
+                        .is_none(),
+                    "alert_error_calls" => item
+                        .as_integer()
+                        .and_then(|n| u64::try_from(n).ok())
+                        .filter(|n| *n >= 1)
+                        .map(|v| out.alert_error_calls = Some(v))
                         .is_none(),
                     _ => {
                         out.problems
@@ -204,8 +300,17 @@ impl Settings {
             "theme" => self.theme.as_ref().map(|v| format!("{v:?}")),
             "notify" => self.notify.map(|v| v.to_string()),
             "auto_update" => self.auto_update.map(|v| v.to_string()),
+            "warn_agents" => self.warn_agents.map(|v| v.to_string()),
+            "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),
+            "alert_cost" => self.alert_cost.map(|v| v.to_string()),
+            "alert_burn" => self.alert_burn.map(|v| v.to_string()),
+            "alert_today" => self.alert_today.map(|v| v.to_string()),
+            "alert_errors" => self.alert_errors.map(|v| v.to_string()),
+            "alert_error_calls" => self.alert_error_calls.map(|v| v.to_string()),
+            "alert_stall" => self.alert_stall.map(|v| v.to_string()),
+            "idle_after" => self.idle_after.map(|v| v.to_string()),
             _ => None,
         };
         match set {
@@ -215,6 +320,37 @@ impl Settings {
                 (default.to_string(), false)
             }
         }
+    }
+}
+
+/// A threshold as the file may spell it: a number, whole or not, and never
+/// negative — a limit below zero would be a limit everything is always over.
+fn amount(item: &toml_edit::Item) -> Option<f64> {
+    item.as_float()
+        .or_else(|| item.as_integer().map(|i| i as f64))
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+impl Settings {
+    /// The alert thresholds in force, in the units [`crate::alert`] compares:
+    /// a fraction rather than a percentage, a duration rather than minutes.
+    pub fn alert_rules(&self) -> crate::alert::Rules {
+        let default = crate::alert::Rules::default();
+        crate::alert::Rules {
+            session_cost: self.alert_cost.unwrap_or(default.session_cost),
+            burn_rate: self.alert_burn.unwrap_or(default.burn_rate),
+            daily_spend: self.alert_today.unwrap_or(default.daily_spend),
+            error_rate: self.alert_errors.map_or(default.error_rate, |p| p / 100.0),
+            error_calls: self.alert_error_calls.unwrap_or(default.error_calls),
+            stall: self.alert_stall.map_or(default.stall, |m| {
+                std::time::Duration::from_secs_f64(m * 60.0)
+            }),
+        }
+    }
+
+    /// How long a live session has to have been quiet to count as idle.
+    pub fn idle_after_ms(&self) -> i64 {
+        (self.idle_after.unwrap_or(IDLE_AFTER_HOURS) * 3_600_000.0) as i64
     }
 }
 
@@ -355,6 +491,45 @@ pub fn key_name(key: KeyEvent) -> Option<String> {
     Some(out)
 }
 
+/// A key as the help page spells it: `Ctrl+K`, `Shift+↑`, `Space`, `F5`.
+///
+/// Not [`key_name`], which is the file's spelling and has to round-trip
+/// through [`parse_key`]; this one is for reading, in the notation the rest
+/// of the help page was written in — capitals after Ctrl, arrows as arrows.
+pub fn key_label((code, mods): Key) -> String {
+    let mut out = String::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        out.push_str("Ctrl+");
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        out.push_str("Alt+");
+    }
+    if mods.contains(KeyModifiers::SHIFT) || code == KeyCode::BackTab {
+        out.push_str("Shift+");
+    }
+    let chord = mods.contains(KeyModifiers::CONTROL);
+    let name = match code {
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) if chord => c.to_uppercase().to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::BackTab | KeyCode::Tab => "Tab".into(),
+        KeyCode::Enter => "Enter".into(),
+        KeyCode::Esc => "Esc".into(),
+        KeyCode::Up => "↑".into(),
+        KeyCode::Down => "↓".into(),
+        KeyCode::Left => "←".into(),
+        KeyCode::Right => "→".into(),
+        KeyCode::PageUp => "PgUp".into(),
+        KeyCode::PageDown => "PgDn".into(),
+        KeyCode::Home => "Home".into(),
+        KeyCode::End => "End".into(),
+        KeyCode::F(n) => format!("F{n}"),
+        other => format!("{other:?}"),
+    };
+    out.push_str(&name);
+    out
+}
+
 /// `"ctrl+k"`, `"G"`, `"f5"`, `"space"` as the key it names.
 pub fn parse_key(spec: &str) -> Option<Key> {
     let mut mods = KeyModifiers::NONE;
@@ -465,6 +640,26 @@ impl Keymap {
         (map, problems)
     }
 
+    /// The key that does `action` now, or `None` when nothing does.
+    ///
+    /// Read off the translation itself rather than off the file: an entry the
+    /// file has but [`Keymap::build`] refused — a typo, a key already bound —
+    /// changed nothing, and the help that is built from this must not claim
+    /// it did. `None` is an action whose default key was given to something
+    /// else and which was not given one back.
+    pub fn key_of(&self, action: &str) -> Option<Key> {
+        let (_, default, _) = BINDINGS.iter().find(|b| b.0 == action)?;
+        let (code, mods) = parse_key(default)?;
+        let default = normal(code, mods);
+        if let Some((from, _)) = self.remap.iter().find(|(_, to)| *to == default) {
+            return Some(*from);
+        }
+        match self.remap.iter().any(|(from, _)| *from == default) {
+            true => None,
+            false => Some(default),
+        }
+    }
+
     /// The key the dashboard should see for `key`, or `None` when it has been
     /// moved away and nothing took its place.
     pub fn apply(&self, key: KeyEvent) -> Option<KeyEvent> {
@@ -513,6 +708,18 @@ mod tests {
     }
 
     #[test]
+    fn idle_after_is_hours_and_refuses_zero() {
+        let default = SETTINGS.iter().find(|s| s.0 == "idle_after").unwrap().1;
+        assert_eq!(default.parse::<f64>().unwrap(), IDLE_AFTER_HOURS);
+        assert_eq!(Settings::default().idle_after_ms(), 6 * 3_600_000);
+        let s = Settings::parse("[settings]\nidle_after = 1.5\n");
+        assert_eq!(s.idle_after_ms(), 90 * 60_000);
+        let s = Settings::parse("[settings]\nidle_after = 0\n");
+        assert_eq!(s.idle_after, None);
+        assert_eq!(s.problems.len(), 1, "{:?}", s.problems);
+    }
+
+    #[test]
     fn a_rebound_key_moves_and_frees_its_old_one() {
         let s = Settings::parse("[keys]\nquit = \"x\"\n");
         let (map, _) = Keymap::build(&s);
@@ -527,6 +734,34 @@ mod tests {
         );
         assert_eq!(s.key_for("quit"), "x");
         assert_eq!(s.key_for("help"), "?");
+    }
+
+    #[test]
+    fn the_keymap_says_which_key_does_what_now() {
+        let label = |map: &Keymap, action: &str| map.key_of(action).map(key_label);
+        let (map, _) = Keymap::build(&Settings::default());
+        assert_eq!(label(&map, "help").as_deref(), Some("?"));
+        assert_eq!(label(&map, "terminate").as_deref(), Some("Ctrl+K"));
+        assert_eq!(label(&map, "mark").as_deref(), Some("Space"));
+        assert_eq!(label(&map, "panel_up").as_deref(), Some("Shift+↑"));
+        assert_eq!(label(&map, "no_such_action"), None);
+
+        // Moved; swapped; and one whose key went to something else.
+        let s = Settings::parse(
+            "[keys]\nquit = \"ctrl+q\"\nup = \"j\"\ndown = \"k\"\nsearch = \"f\"\n",
+        );
+        let (map, _) = Keymap::build(&s);
+        assert_eq!(label(&map, "quit").as_deref(), Some("Ctrl+Q"));
+        assert_eq!(label(&map, "up").as_deref(), Some("j"));
+        assert_eq!(label(&map, "down").as_deref(), Some("k"));
+        assert_eq!(label(&map, "search").as_deref(), Some("f"));
+        assert_eq!(label(&map, "follow"), None, "f is search's now");
+
+        // A line the file has but the keymap refused moved nothing.
+        let s = Settings::parse("[keys]\nquit = \"hyper+q\"\n");
+        let (map, problems) = Keymap::build(&s);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(label(&map, "quit").as_deref(), Some("q"));
     }
 
     #[test]
@@ -637,5 +872,29 @@ mod tests {
         let (_, problems) = Keymap::build(&s);
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert_eq!(Settings::parse("not toml [").problems.len(), 1);
+    }
+
+    /// The file speaks in the units a person thinks in — dollars, a
+    /// percentage, minutes — and the rules in the ones they are compared in.
+    #[test]
+    fn alert_thresholds_read_in_the_files_units() {
+        let s = Settings::parse(
+            "[settings]\nalert_cost = 20\nalert_burn = 7.5\nalert_errors = 25\nalert_error_calls = 6\nalert_stall = 10\n",
+        );
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        let rules = s.alert_rules();
+        assert_eq!(rules.session_cost, 20.0);
+        assert_eq!(rules.burn_rate, 7.5);
+        assert_eq!(rules.daily_spend, 0.0, "unset is off");
+        assert_eq!(rules.error_rate, 0.25);
+        assert_eq!(rules.error_calls, 6);
+        assert_eq!(rules.stall, std::time::Duration::from_secs(600));
+        assert_eq!(s.value_of("alert_cost"), ("20".to_string(), true));
+
+        let bad = Settings::parse(
+            "[settings]\nalert_cost = -1\nalert_errors = 120\nalert_error_calls = 0\nalert_stall = \"10m\"\n",
+        );
+        assert_eq!(bad.problems.len(), 4, "{:?}", bad.problems);
+        assert_eq!(bad.alert_rules(), crate::alert::Rules::default());
     }
 }

@@ -89,11 +89,6 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // The conversations and serves that reach back to a remote row ask the
     // `Host`, not the row — the row only knows the machine's name.
     app.remote_hosts = hosts;
-    // Likewise USER: with only this user's homes in view, every row's owner is
-    // the person reading the screen.
-    if crate::config::OTHER_HOMES.is_empty() {
-        app.hidden_columns.push(ColumnId::User);
-    }
     // And PROFILE, which most machines have exactly one of. A column repeating
     // `default` down every row is a column that answers nothing.
     if crate::config::profile_count() <= 1 {
@@ -102,8 +97,8 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // Ahead of the first walk, so the first table already attributes processes
     // by what the agents said rather than by the guess that stands in when
     // nothing has.
-    if !app.hook_pids.is_empty() {
-        let _ = req_tx.send(Request::HookClaims(app.hook_pids.clone()));
+    if !app.reports.claims.is_empty() {
+        let _ = req_tx.send(Request::HookClaims(app.reports.claims.clone()));
     }
     let _ = req_tx.send(Request::Refresh);
 
@@ -180,6 +175,11 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // reporting nothing. Anything narrower than that is left for the panel.
     for fixed in crate::hook::repair(app.hook_project().as_deref()) {
         app.set_status(&fixed);
+    }
+    // Once per launch: the Cost panel's "today" reading $0.00 for work done
+    // this morning is the symptom, and nothing on it says the clock is why.
+    if let Some(why) = crate::util::unzoned_over_ssh() {
+        app.set_status(why);
     }
     // What repair deliberately would not touch: an install registering fewer
     // events than this cctop wants, or a settings file that will not parse.
@@ -304,8 +304,13 @@ fn restore_terminal() {
 /// keyboard's refresh. One wedged host must cost only itself.
 fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
     std::thread::spawn(move || {
+        let mut handshake = crate::fleet::Handshake::default();
         loop {
             let snapshot = host.poll();
+            // Asked of the snapshot before it is sent away, and the probe sent
+            // after it: the rows are the news, and the version is a footnote
+            // that can wait the one extra round trip it costs.
+            let ask = handshake.after(&snapshot);
             if tx
                 .send(Response::Remote {
                     host: host.target.clone(),
@@ -315,6 +320,17 @@ fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
             {
                 // The UI has gone; so should this.
                 return;
+            }
+            let probe = match ask {
+                crate::fleet::Ask::Nothing => None,
+                crate::fleet::Ask::Probe => Some(host.probe()),
+                crate::fleet::Ask::Missing => Some(crate::fleet::Probe::Missing),
+            };
+            if let Some(probe) = probe {
+                let _ = tx.send(Response::RemoteVersion {
+                    host: host.target.clone(),
+                    probe,
+                });
             }
             std::thread::sleep(crate::fleet::POLL);
         }
@@ -612,6 +628,14 @@ fn event_loop(
                     app.merge_remotes();
                     rows_changed = true;
                 }
+                Ok(Response::RemoteVersion { host, probe }) => {
+                    app.got_remote_version(host, probe);
+                    // The HOST cell's marker rides on the rows, which are
+                    // stamped as they are merged back in.
+                    app.merge_remotes();
+                    rows_changed = true;
+                }
+                Ok(Response::RemoteUpdated { host, result }) => app.remote_updated(host, result),
                 Ok(Response::Scanned { query, hits }) => app.scanned(query, hits),
                 Ok(Response::Insight(text)) => {
                     app.insight = Some(text);
@@ -640,6 +664,7 @@ fn event_loop(
             // it can still race anyone, and cheap enough to redo wholesale:
             // it compares paths already in memory and reads no transcript.
             app.collisions = crate::collide::apply(&mut app.sessions);
+            app.hear_ultracode();
         }
         if annotated_rows_changed {
             // A burst can contain hundreds of rows. Recompute and sort once
@@ -650,6 +675,10 @@ fn event_loop(
         if rows_changed {
             app.check_bells();
         }
+        // After everything this pass could have queued a bell for — the rows
+        // above, a quota window freed while draining — so a moment that
+        // brought several kinds of news rings once and says all of them.
+        app.notify.ring_pending();
         // The page gets what the table has, and only when it changed. This is
         // also what wakes a browser: its event stream is parked on the version
         // this bumps, so a page updates when the table does rather than on a
@@ -667,6 +696,18 @@ fn event_loop(
         for tab in &mut app.tabs {
             drawn |= tab.pump();
         }
+        drawn |= app.pump_preview();
+        // After the pump, so the verdict is about what was just drawn. A row
+        // that the screen moves is restamped here rather than on the next walk,
+        // and everything a moved row feeds is told the same way it is above: a
+        // permission prompt is worth the bell the frame it appears.
+        if app.read_screens() {
+            app.apply_reports();
+            app.check_bells();
+            app.notify.ring_pending();
+            app.feed_serving();
+            app.needs_redraw = true;
+        }
         // An agent that said what it wanted says it once, to the person who
         // just looked: the tab colour is the alarm, this is the message. Here
         // rather than on the keypress that focused the pane — a bell arriving
@@ -675,7 +716,14 @@ fn event_loop(
         if let Some(note) = app.focused_pane().and_then(tabs::Pane::answer_bell) {
             app.set_status(note);
         }
-        let closed = app.tabs.iter_mut().fold(false, |any, tab| tab.reap() | any);
+        let mut saved = Vec::new();
+        let closed = app
+            .tabs
+            .iter_mut()
+            .fold(false, |any, tab| tab.reap(&mut saved) | any);
+        for (path, finished) in &saved {
+            app.set_status(crate::cast::stopped_message(path, finished));
+        }
         if closed {
             app.drop_empty_tabs();
         }
@@ -706,6 +754,10 @@ fn event_loop(
             }
         }
 
+        // After the rows and the hooks have both had their say this pass, and
+        // after any key that moved where you are looking.
+        app.needs_redraw |= app.observe_seen();
+
         // A brief for a just-launched agent comes due on a timer rather than an
         // event, so the loop is the only thing that can notice.
         app.tick_handoff();
@@ -715,9 +767,10 @@ fn event_loop(
         // a channel nothing polls but this, and until it does the corner has a
         // spinner to turn.
         app.needs_redraw |= app.tick_share();
-        // The insight report's spinner turns on the same terms, and so does
-        // the conversation view's.
-        app.needs_redraw |= app.insight_loading() || app.chat_loading();
+        // The insight report's spinner turns on the same terms, and so do
+        // the conversation view's and the empty table's during the first scan.
+        let scanning = !app.loaded && app.tab == 0;
+        app.needs_redraw |= app.insight_loading() || app.chat_loading() || scanning;
 
         // A pulsing tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only
@@ -759,7 +812,7 @@ fn event_loop(
         }
 
         // The party is on no clock but its own.
-        app.needs_redraw |= app.raving();
+        app.needs_redraw |= app.raving() || app.reeling() || app.tripping();
 
         if app.needs_redraw {
             terminal.draw(|frame| layout = render::draw(frame, app))?;
@@ -777,17 +830,23 @@ fn event_loop(
         };
         // A spinner that advances five times a second reads as a stutter. While
         // one is turning the loop wakes at its frame rate instead.
-        let idle_wait =
-            match app.share_opening.is_some() || app.insight_loading() || app.chat_loading() {
-                true => idle_wait.min(Duration::from_millis(100)),
-                false => idle_wait,
-            };
+        let idle_wait = match app.share_opening.is_some()
+            || app.insight_loading()
+            || app.chat_loading()
+            || scanning
+        {
+            true => idle_wait.min(Duration::from_millis(100)),
+            false => idle_wait,
+        };
         // Anything in the bar moving wants frames at its own rate, and gets
         // them only while it moves: once the last tab stops asking and the
         // last sweep is done, the wait is back to what it was, and the
         // dashboard is back to five wakes a second.
         let sweeping = (1..=app.tabs.len()).any(|i| app.restart_flash(i).is_some());
-        let idle_wait = match (sweeping || app.raving(), app.animating()) {
+        let idle_wait = match (
+            sweeping || app.raving() || app.reeling() || app.tripping(),
+            app.animating(),
+        ) {
             (true, _) => idle_wait.min(effects::FRAME),
             (false, true) => idle_wait.min(effects::frame_for(app.tab)),
             (false, false) => idle_wait,

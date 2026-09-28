@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 /// objects: every field they revise is one the header already declares, so a
 /// caller that simply takes the last value it sees ends up with the same
 /// header the JSON form states outright.
-fn for_each_record(path: &Path, mut f: impl FnMut(&Value)) -> std::io::Result<()> {
+pub fn for_each_record(path: &Path, mut f: impl FnMut(&Value)) -> std::io::Result<()> {
     if path.extension().is_some_and(|ext| ext == "jsonl") {
         return for_each_jsonl(path, |item| match item.get("$set") {
             Some(patch) => f(patch),
@@ -109,7 +109,6 @@ fn summarize(path: PathBuf) -> Option<Session> {
     // the identity here.
     let mut session = Session::new(Provider::Gemini, stem);
     session.surface = Surface::Cli;
-    session.harness = "Gemini".into();
     session.started_at = started;
     session.last_active = util::ms_to_rfc3339(config::file_mtime_ms(&path) as i64);
     session.label_source = project_root(path.parent()?);
@@ -227,18 +226,7 @@ pub fn extract(path: &Path) -> SessionData {
             add_costs(model_costs, &costs);
 
             if let Some(dt) = util::parse_ts(&ts) {
-                *data
-                    .costs_by_day
-                    .entry(util::local_date_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
-                *data
-                    .costs_by_hour
-                    .entry(util::local_hour_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0.0) += costs.total;
+                data.record_cost(&dt, &model, costs.total);
                 // All input kinds plus output — and thinking, which Gemini
                 // bills as output. `total` is not reused because it folds in
                 // the unbilled `tool` bucket.

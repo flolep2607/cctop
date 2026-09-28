@@ -9,7 +9,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-fn message_ts(item: &Value, message: &Value) -> String {
+/// When a Pi entry was written, from whichever of the two stamps carries it.
+///
+/// The message's own millisecond stamp is the one the harness wrote as the
+/// message was sealed; the entry's ISO string is stamped as the line was
+/// opened, and an entry still being streamed has no message stamp yet.
+pub fn message_ts(item: &Value, message: &Value) -> String {
     message
         .get("timestamp")
         .and_then(Value::as_i64)
@@ -194,18 +199,7 @@ pub fn extract(path: &Path) -> SessionData {
 
         let ts = message_ts(item, message);
         if let Some(dt) = util::parse_ts(&ts) {
-            *data
-                .costs_by_day
-                .entry(util::local_date_key(&dt))
-                .or_default()
-                .entry(model.clone())
-                .or_insert(0.0) += costs.total;
-            *data
-                .costs_by_hour
-                .entry(util::local_hour_key(&dt))
-                .or_default()
-                .entry(model.clone())
-                .or_insert(0.0) += costs.total;
+            data.record_cost(&dt, &model, costs.total);
             // `billable` above is only a did-anything-happen check and skips
             // the 1h cache-write split; the bucket counts everything billed.
             let billed = tokens.all_input() + tokens.output;
