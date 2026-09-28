@@ -22,14 +22,30 @@ A Rust rewrite of an earlier Node implementation.
 **cctop runs on Linux, including WSL.** It reads Linux process tables and drives
 agents over ptys and unix sockets; there is no macOS or Windows build.
 
-Grab a binary from the
-[latest release](https://github.com/flolep2607/cctop/releases/latest) —
-x86_64 and aarch64, both statically linked, so either runs on any distro:
+```bash
+curl -fsSL https://raw.githubusercontent.com/flolep2607/cctop/main/install.sh | sh
+```
+
+That works out your architecture, fetches the right archive, checks it against
+the checksum the release publishes, and puts the binary on your `PATH` —
+`/usr/local/bin` when you can write there, `~/.local/bin` when you cannot, with
+a line to add to your profile if that one is not on it already. It asks for
+`sudo` only when the install genuinely needs it.
+
+Prefer to do it by hand? A release is one statically linked archive, x86_64 or
+aarch64, holding a single file called `cctop`:
 
 ```bash
-curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz | tar xz
-sudo install -m755 cctop /usr/local/bin/cctop
+d=$(mktemp -d)
+curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz | tar xz -C "$d"
+sudo install -m755 "$d/cctop" /usr/local/bin/cctop && rm -rf "$d"
 ```
+
+Swap in `cctop-aarch64-unknown-linux-musl.tar.gz` on aarch64. The `-C "$d"`
+carries its weight: it unpacks into a temporary directory rather than into
+whatever directory you happen to be standing in, and without it this stops at
+`Cannot open: File exists` for anyone running it inside a cctop checkout,
+because the crate directory is already named `cctop`.
 
 Or with cargo:
 
