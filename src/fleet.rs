@@ -458,6 +458,12 @@ fn row(host: &str, v: &Value) -> Option<Session> {
         "error" => ActivityState::ApiError,
         _ => ActivityState::Working,
     };
+    // What the question is, when a newer peer on the far side recorded one.
+    s.asking_for = v
+        .get("asking_for")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string);
 
     // There is no local process, and nothing may go looking for one — but the
     // row still has to read as live and still has the far side's figures. The

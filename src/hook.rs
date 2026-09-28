@@ -46,6 +46,7 @@
 //! way — a ledger that will not parse, a lock another hook holds, a deadline
 //! that runs out — is the ordinary silence. [`crate::advise`] has the rest.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -267,6 +268,31 @@ fn forward(args: &[String], advice: &std::sync::mpsc::Sender<Option<String>>) {
     deliver(&line);
 }
 
+/// The events [`announce_answer`] sends. Spelled so no harness could send them.
+const ANSWERED_ALLOW: &str = "cctop.answered.allow";
+const ANSWERED_DENY: &str = "cctop.answered.deny";
+
+/// Tell every running cctop that `session_id`'s permission prompt was answered
+/// from outside its terminal.
+///
+/// Through the same sockets the agents' hooks use, because the page that
+/// answered is served by one process and the rows that show the prompt live in
+/// every cctop on the machine — and the answer is exactly the kind of fact a
+/// hook event is: said once, by whoever saw it happen.
+pub fn announce_answer(session_id: &str, allowed: bool) {
+    deliver(&answer_line(session_id, allowed));
+}
+
+fn answer_line(session_id: &str, allowed: bool) -> Vec<u8> {
+    let event = serde_json::json!({
+        "event": if allowed { ANSWERED_ALLOW } else { ANSWERED_DENY },
+        "session_id": session_id,
+    });
+    let mut line = event.to_string().into_bytes();
+    line.push(b'\n');
+    line
+}
+
 /// Write one framed event to every cctop that will take it.
 fn deliver(line: &[u8]) {
     use std::io::Write;
@@ -431,6 +457,9 @@ fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
         // carrying: nothing in a transcript says it, so a session running with
         // permissions turned off is otherwise indistinguishable from any other.
         "permission_mode": first(&["permission_mode", "permissionMode"]).unwrap_or_default(),
+        // What a permission prompt is asking for, so whoever answers it from
+        // somewhere other than the agent's own terminal is not approving blind.
+        "ask": ask_of(&body),
         // The one fact the agent does not state and only this process can: see
         // [`ancestry`]. Absent from any harness whose hook cctop does not
         // spawn, which the reader treats as "no claim" rather than as an empty
@@ -440,6 +469,53 @@ fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
     Some(line)
+}
+
+/// The longest [`ask_of`] summary kept: enough for a command line or a path,
+/// and bounded so a tool input the size of a file never rides every event.
+pub(crate) const MAX_ASK: usize = 300;
+
+/// One line saying what a `PermissionRequest` wants to do — `Bash: rm -rf
+/// build`, `Edit: src/main.rs` — or `None` for every other event.
+///
+/// Only the permission events, because this is the question a person is being
+/// asked to say yes to; every other event is answered by nobody. The one field
+/// that says the most is picked per tool shape rather than per tool, since
+/// Claude, Codex and the MCP servers behind them name their tools freely but
+/// agree on `command`, `file_path`, `url` and `pattern`.
+fn ask_of(body: &serde_json::Value) -> Option<String> {
+    let event = body
+        .get("hook_event_name")
+        .or_else(|| body.get("type"))
+        .and_then(|v| v.as_str())?;
+    if !matches!(event, "PermissionRequest" | "permission.asked") {
+        return None;
+    }
+    let tool = body
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.is_empty())?;
+    let input = body.get("tool_input");
+    let detail = ["command", "file_path", "path", "url", "pattern", "query"]
+        .iter()
+        .find_map(|key| input?.get(key)?.as_str().filter(|v| !v.is_empty()));
+    let line = match detail {
+        Some(detail) => format!("{tool}: {detail}"),
+        None => tool.to_string(),
+    };
+    // One line, because it is shown on one: a heredoc's body is not what the
+    // person needs to see to recognise the command.
+    let line: String = line
+        .split(['\n', '\r'])
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    Some(match line.chars().count() > MAX_ASK {
+        true => line.chars().take(MAX_ASK - 1).chain(['…']).collect(),
+        false => line,
+    })
 }
 
 /// What an event says about a session, as far as the UI is concerned.
@@ -626,6 +702,8 @@ pub struct Reported {
     /// or the tool simply running — the newer event replaces this one and it is
     /// never shown at all. See [`Reported::is_settled`].
     pub provisional: bool,
+    /// What the prompt is asking to do, when this is one: see [`ask_of`].
+    pub ask: Option<String>,
 }
 
 /// How long a permission prompt is given to answer itself before it is somebody
@@ -671,6 +749,212 @@ impl Reported {
     /// [`provisional`]: Reported::provisional
     pub fn is_settled(&self) -> bool {
         !self.provisional || self.at.elapsed() >= PERMISSION_GRACE
+    }
+}
+
+/// What the agents have reported, folded together the way both readers need it.
+///
+/// The dashboard's `App` and a standalone `cctop serve` each keep one, because
+/// the folding is the subtle part and is not written twice: a subagent's open
+/// question outlives whatever a sibling says next ([`still_asking`]), a prompt
+/// inherits the description only its first event carried, a working claim
+/// expires where a waiting one stands, and an `Ended` erases the lot.
+#[derive(Default)]
+pub(crate) struct Reports {
+    /// The last report each session made, however old — callers gate on
+    /// [`Reported::is_current`] and [`Reported::is_settled`].
+    pub hooked: HashMap<String, Reported>,
+    /// The questions a session's subagents are waiting on, by subagent id.
+    ///
+    /// `hooked` holds one report per session and every event replaces it, so a
+    /// subagent's permission prompt was overwritten by whatever a sibling
+    /// running beside it did next — and the session stopped asking while the
+    /// question was still on screen. A question is kept here until the
+    /// subagent that asked it says something else. See [`still_asking`].
+    ///
+    /// Visible to the crate for the tests that assert a question was closed,
+    /// not for other writes — only [`Reports::observe`] folds these.
+    pub(crate) asking_agents: HashMap<String, HashMap<String, Reported>>,
+    /// The process tree each session's hooks reported running under, keyed by
+    /// session id.
+    ///
+    /// Kept apart from `hooked` because it answers a different question and
+    /// changes on a different clock: `hooked` is what the agent is *doing* and
+    /// turns over constantly, while this is *where it is* and is written once
+    /// and then repeated. Readers republish only the changes — see
+    /// [`save_claims`].
+    pub claims: HashMap<String, Vec<u32>>,
+}
+
+impl Reports {
+    /// A fresh memory, seeded with the pid claims some cctop last wrote.
+    ///
+    /// The file is the only way to know where a session runs when it has said
+    /// nothing since this process started — which is exactly what a session
+    /// blocked on a question does. See [`load_claims`].
+    pub(crate) fn new() -> Reports {
+        Reports {
+            claims: load_claims(),
+            ..Default::default()
+        }
+    }
+
+    /// Fold one event into what each session is taken to be doing.
+    ///
+    /// Returns `(lifecycle, claims_moved)`: lifecycle when the set of sessions
+    /// itself changed — a reason to rescan now rather than at the next poll —
+    /// and claims_moved when the session→pid map did, which is the caller's
+    /// cue to republish it (`save_claims`, and the worker/loader that resolves
+    /// pids by it).
+    pub(crate) fn observe(&mut self, event: &Event) -> (bool, bool) {
+        let lifecycle = event.reported.signal.is_lifecycle();
+        let mut moved = false;
+        match event.reported.signal {
+            // Nothing more will be said about it, and leaving the last signal
+            // behind would have the row claim a state forever.
+            Signal::Ended => {
+                self.hooked.remove(&event.session_id);
+                self.asking_agents.remove(&event.session_id);
+                moved = self.claims.remove(&event.session_id).is_some();
+            }
+            _ => {
+                if !event.pids.is_empty() && self.claims.get(&event.session_id) != Some(&event.pids)
+                {
+                    self.claims
+                        .insert(event.session_id.clone(), event.pids.clone());
+                    moved = true;
+                }
+                let mut reported = still_asking(
+                    &mut self.asking_agents,
+                    &event.session_id,
+                    event.agent.clone(),
+                    event.reported.clone(),
+                );
+                // Claude Code follows a `PermissionRequest` with a
+                // `permission_prompt` notification for the same question, and
+                // only the first says what the question is. Without this the
+                // second wiped it a few seconds in — exactly when the prompt
+                // stopped being provisional and was shown.
+                if reported.signal == Signal::NeedsInput
+                    && reported.ask.is_none()
+                    && let Some(before) = self.hooked.get(&event.session_id)
+                    && before.signal == Signal::NeedsInput
+                {
+                    reported.ask = before.ask.clone();
+                }
+                self.hooked.insert(event.session_id.clone(), reported);
+            }
+        }
+        // A working claim that nothing has confirmed for a quarter of an hour
+        // is dropped rather than believed: see [`Reported::is_current`]. Swept
+        // here because this is the only place the map grows, and a session that
+        // was killed mid-turn will never send the event that would clear it.
+        self.hooked.retain(|_, reported| reported.is_current());
+        // A chain outlives its usefulness exactly when the report it came with
+        // does, and a session that has been swept must stop claiming a pid —
+        // otherwise a reused pid would be handed to a session that is gone. A
+        // waiting session is never swept, which is the case this exists for.
+        let before = self.claims.len();
+        self.claims.retain(|id, _| self.hooked.contains_key(id));
+        (lifecycle, moved || self.claims.len() != before)
+    }
+
+    /// Promote every held permission prompt whose grace has expired, and say
+    /// whether any had.
+    ///
+    /// Auto mode's answer arrives as its own event and replaces the report, so
+    /// a prompt still sitting here when the grace runs out is one a person has
+    /// to answer. Cleared rather than re-tested every tick: once a prompt is
+    /// real it stays real.
+    pub(crate) fn promote_matured(&mut self) -> bool {
+        let mut matured = false;
+        for reported in self.hooked.values_mut() {
+            if reported.provisional && reported.at.elapsed() >= PERMISSION_GRACE {
+                reported.provisional = false;
+                matured = true;
+            }
+        }
+        matured
+    }
+
+    /// The report `session_id`'s hooks last made, however old, if they made one.
+    pub(crate) fn report(&self, session_id: &str) -> Option<&Reported> {
+        if let Some(reported) = self.hooked.get(session_id) {
+            return Some(reported);
+        }
+        // Gemini CLI reports a full session id, but names the chat file it
+        // writes — which is the only identity cctop's rows have, because
+        // resuming reuses the id across disjoint files — after the *first
+        // eight characters* of it. Without this last step every Gemini event
+        // lands on no row at all.
+        let tail = gemini_id_tail(session_id)?;
+        self.hooked
+            .iter()
+            .find(|(id, _)| id.starts_with(tail))
+            .map(|(_, reported)| reported)
+    }
+}
+
+/// The report a session's hooks last made, however old, if they made one.
+///
+/// Gemini CLI reports a full session id, but names the chat file it writes —
+/// which is the only identity cctop's rows have, because resuming reuses the
+/// id across disjoint files — after the *first eight characters* of it.
+/// Without this fallback every Gemini event lands on no row at all.
+///
+/// `None` for every other harness's ids, which is what keeps the tail from
+/// matching on the end of a uuid that happens to line up: only a stem shaped
+/// like Gemini's is looked up loosely, and only ever against a full id's
+/// prefix.
+pub(crate) fn gemini_id_tail(session_id: &str) -> Option<&str> {
+    let tail = session_id.strip_prefix("session-")?.rsplit_once('-')?.1;
+    (tail.len() == 8 && tail.chars().all(|c| c.is_ascii_alphanumeric())).then_some(tail)
+}
+
+/// What a session should be taken to be doing after `reported`, given the
+/// questions its subagents are still waiting on.
+///
+/// A subagent's question stands until *that* subagent says something else —
+/// its tool running, or being denied, or it stopping — however busy the
+/// agents beside it are. While any stands, the session is asking: the most
+/// recent open question is what it reports, so the tab stays lit and the
+/// bell's grace period is the question's own.
+fn still_asking(
+    asking_agents: &mut HashMap<String, HashMap<String, Reported>>,
+    session: &str,
+    agent: Option<String>,
+    reported: Reported,
+) -> Reported {
+    let open = asking_agents.entry(session.to_string()).or_default();
+    match agent {
+        Some(agent) => match reported.signal {
+            Signal::NeedsInput => {
+                open.insert(agent, reported.clone());
+            }
+            _ => {
+                open.remove(&agent);
+            }
+        },
+        // The session's own turn ending. A subagent it was waiting on cannot
+        // still be asking once it has — a prompt dismissed with Esc ends the
+        // turn and sends nothing from the subagent — and a question kept past
+        // that would light the tab for good, since a question is never aged
+        // out.
+        //
+        // ponytail: a *background* subagent asking across its parent's `Stop`
+        // is taken to have been answered.
+        None if reported.signal == Signal::Idle => open.clear(),
+        None => {}
+    }
+    if reported.signal == Signal::NeedsInput {
+        return reported;
+    }
+    match open.values().max_by_key(|asked| asked.at) {
+        Some(asked) => asked.clone(),
+        None => {
+            asking_agents.remove(session);
+            reported
+        }
     }
 }
 
@@ -880,6 +1164,13 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // event that says a refusal happened at all. Without it the only trace
         // is a tool that never ran.
         "PermissionDenied" => Some(Signal::Busy),
+        // cctop's own, sent by [`announce_answer`] when the page answered a
+        // prompt. Allowed, the tool runs and its own events follow. Denied is
+        // Esc, which ends the turn and sends nothing at all — so without this
+        // the row asked a question that was no longer on screen, and the next
+        // Allow typed a `1` into the composer.
+        ANSWERED_ALLOW => Some(Signal::Busy),
+        ANSWERED_DENY => Some(Signal::Idle),
         // Compaction is the one kind of work worth naming separately: the
         // context panel is about to lurch, and it is not the agent stalling.
         "PreCompact" | "PreCompress" | "preCompact" | "session.compacted" => {
@@ -1070,6 +1361,10 @@ fn parse(line: &str) -> Option<Event> {
                 .get("permission_mode")
                 .and_then(|v| v.as_str())
                 .and_then(Permission::parse),
+            ask: value
+                .get("ask")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             at: std::time::Instant::now(),
         },
     })
@@ -2754,6 +3049,7 @@ mod tests {
     fn a_stale_claim_to_be_working_stops_being_believed() {
         let aged = |signal: Signal, ago: std::time::Duration| Reported {
             provisional: false,
+            ask: None,
             signal,
             cwd: "/w".into(),
             permission: None,
@@ -2822,6 +3118,51 @@ mod tests {
         // all, both keep the behaviour every version had before this was read.
         assert_eq!(notification("something_new"), Some(Signal::NeedsInput));
         assert_eq!(notification(""), Some(Signal::NeedsInput));
+    }
+
+    /// An answer from the page reads back as the state the agent is left in:
+    /// working on the tool it was allowed, or waiting on you after a denial
+    /// ended its turn.
+    #[test]
+    fn an_answer_from_the_page_reads_back_as_what_it_left() {
+        let read = |allowed| {
+            let line = String::from_utf8(answer_line("s-1", allowed)).unwrap();
+            let event = parse(line.trim()).expect("a parseable event");
+            assert_eq!(event.session_id, "s-1");
+            event.reported.signal
+        };
+        assert_eq!(read(true), Signal::Busy);
+        assert_eq!(read(false), Signal::Idle);
+    }
+
+    /// A permission request carries what it wants to do, on one bounded
+    /// line, and nothing else does.
+    #[test]
+    fn a_permission_request_says_what_it_asks() {
+        let ask = |raw: &str| ask_of(&serde_json::from_str(raw).unwrap());
+        assert_eq!(
+            ask(r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf build\necho done"}}"#).as_deref(),
+            Some("Bash: rm -rf build")
+        );
+        assert_eq!(
+            ask(r#"{"hook_event_name":"PermissionRequest","tool_name":"Edit","tool_input":{"file_path":"/w/src/main.rs","old_string":"a"}}"#).as_deref(),
+            Some("Edit: /w/src/main.rs")
+        );
+        assert_eq!(
+            ask(r#"{"hook_event_name":"PermissionRequest","tool_name":"mcp__x__y","tool_input":{"n":1}}"#).as_deref(),
+            Some("mcp__x__y")
+        );
+        assert_eq!(
+            ask(
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#
+            ),
+            None
+        );
+        let long = format!(
+            r#"{{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
+            "x".repeat(2000)
+        );
+        assert_eq!(ask(&long).unwrap().chars().count(), MAX_ASK);
     }
 
     /// End to end, from the bytes Claude Code actually writes to the hook.

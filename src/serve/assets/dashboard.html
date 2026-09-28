@@ -139,6 +139,12 @@
     border: 1px solid var(--line); background: var(--panel); color: var(--dim);
     flex: 0 0 auto;
   }
+  .wanting .asked { padding: 0 14px 8px 32px; min-width: 0; }
+  .wanting .asked code {
+    display: block; font-size: 12px; padding: 5px 9px; border-radius: 7px;
+    background: var(--bg); border: 1px solid var(--line); color: var(--ink);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
   form.say .said { font-size: 12px; align-self: center; color: var(--faint); }
   form.say .said.bad { color: var(--red); }
   .ctx i.hot { background: var(--amber); }
@@ -628,20 +634,21 @@ function answerBox(s) {
   // The one POST, shared by the typed answer and the one-tap chips below: a
   // chip is the Send button with the word already chosen — same route, same
   // disabled-while-in-flight, same error line.
-  const post = async (text, button) => {
+  const post = async (verb, payload, button) => {
     button.disabled = true;
     said.className = "said";
     said.textContent = "…";
     try {
-      await ask(
-        "/api/act/send/" + encodeURIComponent(s.session_id) + QUERY,
+      const response = await ask(
+        "/api/act/" + verb + "/" + encodeURIComponent(s.session_id) + QUERY,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify(payload),
         },
       );
-      said.textContent = "sent";
+      const done = await response.json().catch(() => ({}));
+      said.textContent = (done.message || "sent").toLowerCase();
       return true;
     } catch (e) {
       said.className = "said bad";
@@ -654,14 +661,23 @@ function answerBox(s) {
   // The commonest answers to a waiting agent are single words, and one tap on
   // a phone beats typing any of them. Only the states with an obvious word
   // get chips — anything else is a real answer and wants the box.
+  //
+  // A permission prompt is not answered with a word: it is a menu, and these
+  // once typed "yes" or "no" and pressed Enter — which Claude Code reads as
+  // the highlighted option, "Yes", either way. So those two go to the answer
+  // route, which presses the key that harness's own menu names, and only for
+  // the harnesses it knows the keys of.
+  const PROMPTED = new Set(["claude", "codex"]);
   const QUICK = {
-    asking: [["Yes", "yes"], ["No", "no"]],
-    waiting: [["Continue", "continue"]],
+    asking: PROMPTED.has(s.provider)
+      ? [["Allow", "answer", { choice: "allow" }], ["Deny", "answer", { choice: "deny" }]]
+      : [],
+    waiting: [["Continue", "send", { text: "continue" }]],
   };
-  for (const [label, text] of QUICK[s.state] || []) {
+  for (const [label, verb, payload] of QUICK[s.state] || []) {
     const chip = el("button", "chip", label);
     chip.type = "button";
-    chip.addEventListener("click", () => { post(text, chip); });
+    chip.addEventListener("click", () => { post(verb, payload, chip); });
     form.appendChild(chip);
   }
   form.appendChild(input);
@@ -717,7 +733,7 @@ function answerBox(s) {
     event.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    if (await post(text, send)) input.value = "";
+    if (await post("send", { text }, send)) input.value = "";
   });
   return form;
 }
@@ -727,6 +743,13 @@ function answerBox(s) {
 function wantingNode(s) {
   const box = el("div", "wanting");
   box.appendChild(pickableRow(s));
+  // What Allow would allow. Without it the page asks for a yes to a question
+  // it has not shown, which is approving blind.
+  if (s.running && s.state === "asking" && s.asking_for) {
+    const asked = el("div", "asked");
+    asked.appendChild(el("code", null, s.asking_for));
+    box.appendChild(asked);
+  }
   const say = answerBox(s);
   if (say) box.appendChild(say);
   // Dismissal is recorded against the state that was dismissed, not the

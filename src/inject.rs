@@ -40,26 +40,78 @@ const SUBMIT: char = '\r';
 // the Enter, this is the number to raise.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
 
+/// One key, pressed on its own with no Enter after it.
+///
+/// What answers a permission prompt: the agents draw it as a menu that acts on
+/// the keypress, so a digit or a letter *is* the answer and an Enter after it
+/// would land on whatever the agent shows next. Only the keys an answer needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Char(char),
+    Escape,
+}
+
+impl Key {
+    /// What the key sends down a pty.
+    fn bytes(self) -> Vec<u8> {
+        match self {
+            Key::Char(c) => c.to_string().into_bytes(),
+            Key::Escape => vec![0x1b],
+        }
+    }
+}
+
+/// What reaches the agent's keyboard: a line to submit, or one key.
+#[derive(Debug, Clone, Copy)]
+enum Input<'a> {
+    Line(&'a str),
+    Key(Key),
+}
+
+impl Input<'_> {
+    /// The writes that make it up, each its own read on the agent's side — see
+    /// [`SETTLE`] for why a line and its Enter cannot share one.
+    fn writes(self) -> Vec<Vec<u8>> {
+        match self {
+            Input::Line(text) => vec![text.as_bytes().to_vec(), vec![SUBMIT as u8]],
+            Input::Key(key) => vec![key.bytes()],
+        }
+    }
+}
+
 /// Type `text` into the terminal running the agent at `pid`, then submit it.
 ///
 /// Backends are tried strongest first; each reports `None` when it doesn't apply
 /// to this session, so a session under `cctop run` never falls through to the
 /// root-only path and the error the user sees names every option they have.
 pub fn send_line(pid: u32, text: &str) -> Result<(), String> {
+    deliver(pid, Input::Line(text))
+}
+
+/// Press `key` in the terminal running the agent at `pid`, and nothing else.
+pub fn press(pid: u32, key: Key) -> Result<(), String> {
+    deliver(pid, Input::Key(key))
+}
+
+fn deliver(pid: u32, input: Input) -> Result<(), String> {
+    let what = match input {
+        Input::Line(_) => "send",
+        Input::Key(_) => "press",
+    };
     for (backend, send) in [
         (
             "shim",
-            shim_send as fn(u32, &str) -> Option<Result<(), String>>,
+            shim_send as fn(u32, Input) -> Option<Result<(), String>>,
         ),
         ("rmux", rmux_send),
         ("tiocsti", tiocsti_send),
     ] {
-        if let Some(result) = send(pid, text) {
+        if let Some(result) = send(pid, input) {
             crate::elog::bytes(
                 "inject",
-                "send",
+                what,
                 "out",
-                text.as_bytes(),
+                &input.writes().concat(),
                 serde_json::json!({"pid": pid, "via": backend, "ok": result.is_ok()}),
             );
             return result;
@@ -67,7 +119,7 @@ pub fn send_line(pid: u32, text: &str) -> Result<(), String> {
     }
     crate::elog::event(
         "inject",
-        "send",
+        what,
         serde_json::json!({"pid": pid, "via": "none", "ok": false}),
     );
     Err(format!(
@@ -77,28 +129,35 @@ pub fn send_line(pid: u32, text: &str) -> Result<(), String> {
 }
 
 /// Hand the line to the `cctop run` shim that owns this agent's pty.
-fn shim_send(pid: u32, text: &str) -> Option<Result<(), String>> {
+fn shim_send(pid: u32, input: Input) -> Option<Result<(), String>> {
     let path = crate::shim::socket_path(pid)?;
     // A stale socket file from a crashed shim refuses connections, which is
     // indistinguishable from "no shim" and correctly falls through.
     let mut stream = std::os::unix::net::UnixStream::connect(path).ok()?;
-    Some(write_then_submit(&mut stream, text).map_err(|e| format!("cctop run socket: {e}")))
+    Some(write_apart(&mut stream, input).map_err(|e| format!("cctop run socket: {e}")))
 }
 
-/// Type `text`, let the agent take it in, then press Enter — see [`SETTLE`] for
-/// why those cannot be one write.
-fn write_then_submit(out: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
-    out.write_all(text.as_bytes())?;
-    out.flush()?;
-    std::thread::sleep(SETTLE);
-    out.write_all(&[SUBMIT as u8])?;
-    out.flush()
+/// Write each part of `input`, letting the agent take one in before the next —
+/// see [`SETTLE`] for why a line and its Enter cannot be one write.
+fn write_apart(out: &mut impl std::io::Write, input: Input) -> std::io::Result<()> {
+    for (i, write) in input.writes().iter().enumerate() {
+        if i > 0 {
+            std::thread::sleep(SETTLE);
+        }
+        out.write_all(write)?;
+        out.flush()?;
+    }
+    Ok(())
 }
 
 /// Ask rmux to type into the pane holding this agent.
-fn rmux_send(pid: u32, text: &str) -> Option<Result<(), String>> {
+fn rmux_send(pid: u32, input: Input) -> Option<Result<(), String>> {
     let pane = pane_for(pid)?;
-    Some(send(&pane, text))
+    Some(match input {
+        Input::Line(text) => send(&pane, text),
+        Input::Key(Key::Char(c)) => rmux(&["send-keys", "-t", &pane, "-l", "--", &c.to_string()]),
+        Input::Key(Key::Escape) => rmux(&["send-keys", "-t", &pane, "Escape"]),
+    })
 }
 
 /// Push the line into the tty's input queue with `TIOCSTI`.
@@ -107,7 +166,7 @@ fn rmux_send(pid: u32, text: &str) -> Option<Result<(), String>> {
 /// plain terminal. Both of its preconditions are off by default, so an applicable
 /// session with an unmet precondition returns the reason rather than falling
 /// through to a less specific error.
-fn tiocsti_send(pid: u32, text: &str) -> Option<Result<(), String>> {
+fn tiocsti_send(pid: u32, input: Input) -> Option<Result<(), String>> {
     use std::os::fd::AsRawFd;
 
     let tty = std::fs::read_link(format!("/proc/{pid}/fd/0")).ok()?;
@@ -143,15 +202,19 @@ fn tiocsti_send(pid: u32, text: &str) -> Option<Result<(), String>> {
             _ => format!("TIOCSTI: {err}"),
         })
     };
-    for byte in text.bytes() {
-        if let Err(e) = push(byte) {
-            return Some(Err(e));
-        }
-    }
     // Same reason as the shim path: the line reaches the input queue as one
     // burst, so the Enter needs its own moment or it reads as a paste.
-    std::thread::sleep(SETTLE);
-    Some(push(SUBMIT as u8))
+    for (i, write) in input.writes().iter().enumerate() {
+        if i > 0 {
+            std::thread::sleep(SETTLE);
+        }
+        for &byte in write {
+            if let Err(e) = push(byte) {
+                return Some(Err(e));
+            }
+        }
+    }
+    Some(Ok(()))
 }
 
 /// How far up the process tree to look for a pane before giving up. Deep enough
@@ -164,18 +227,19 @@ const MAX_DEPTH: usize = 32;
 /// from, or the agent itself when it *is* the pane command — so the two meet by
 /// walking up from the agent.
 fn pane_for(pid: u32) -> Option<String> {
-    pane_in(&list_panes()?, pid)
-}
-
-/// The walk itself, over a pane list the caller supplies.
-///
-/// Split out because the hijack below cannot be reproduced against the real
-/// server without typing into whichever pane the test runner happens to sit in
-/// — which is the bug, not a way to test it.
-fn pane_in(panes: &[(u32, String)], pid: u32) -> Option<String> {
     let mut sys = System::new();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
+    pane_in(&sys, &list_panes()?, pid)
+}
 
+/// The walk itself, over a pane list and process table the caller supplies.
+///
+/// Split out two ways: because the hijack below cannot be reproduced against
+/// the real server without typing into whichever pane the test runner happens
+/// to sit in — which is the bug, not a way to test it — and because
+/// [`crate::peek`] asks the same question of every running session per tick,
+/// which is one process scan and one pane list for the lot rather than one each.
+pub(crate) fn pane_in(sys: &System, panes: &[(u32, String)], pid: u32) -> Option<String> {
     // Climbing past cctop itself leaves the agent's terminal and enters cctop's
     // own, so the pane it then finds belongs to the user's shell rather than to
     // the session being typed into. That is not a near miss: it sends the line
@@ -219,7 +283,7 @@ fn send(pane: &str, text: &str) -> Result<(), String> {
 ///
 /// `None` when rmux isn't installed or no server is running — both mean "this
 /// session isn't in a pane", which is the caller's only question.
-fn list_panes() -> Option<Vec<(u32, String)>> {
+pub(crate) fn list_panes() -> Option<Vec<(u32, String)>> {
     let out = Command::new(crate::rmux::BIN)
         .args(["list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"])
         .output()
@@ -280,13 +344,21 @@ mod tests {
 
         let mut out = Writes(Vec::new());
         let start = std::time::Instant::now();
-        write_then_submit(&mut out, "continue").unwrap();
+        write_apart(&mut out, Input::Line("continue")).unwrap();
 
         assert_eq!(out.0, vec![b"continue".to_vec(), vec![b'\r']]);
         assert!(
             start.elapsed() >= SETTLE,
             "the two writes went out back to back, which is the race this avoids"
         );
+    }
+
+    /// A key is one write and nothing after it: an Enter following the answer
+    /// to a prompt would land on whatever the agent drew next.
+    #[test]
+    fn a_key_is_pressed_alone() {
+        assert_eq!(Input::Key(Key::Char('1')).writes(), vec![b"1".to_vec()]);
+        assert_eq!(Input::Key(Key::Escape).writes(), vec![vec![0x1b]]);
     }
 
     /// A child of cctop's own process must never resolve to a pane, because the
@@ -306,27 +378,29 @@ mod tests {
 
         // Claim cctop's own parent is a pane, exactly as the real server would
         // report the shell that cargo was launched from.
-        let ancestor = {
+        let sys = {
             let mut sys = System::new();
             sys.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 false,
                 ProcessRefreshKind::nothing(),
             );
-            sys.process(Pid::from_u32(std::process::id()))
-                .and_then(|p| p.parent())
-                .map(|p| p.as_u32())
+            sys
         };
+        let ancestor = sys
+            .process(Pid::from_u32(std::process::id()))
+            .and_then(|p| p.parent())
+            .map(|p| p.as_u32());
         let ancestor = ancestor.expect("cctop's own parent is what the walk must not reach");
 
         // Both probes run while the child is alive: once it is reaped the walk
         // stops at the missing process and returns `None` for a reason that has
         // nothing to do with the guard, which is how the first cut of this test
         // passed against the unfixed code.
-        let hijacked = pane_in(&[(ancestor, "%99".to_string())], kid);
+        let hijacked = pane_in(&sys, &[(ancestor, "%99".to_string())], kid);
         // Positive control: a pane that really is the target still resolves, so
         // the guard is not simply refusing everything.
-        let found = pane_in(&[(kid, "%7".to_string())], kid);
+        let found = pane_in(&sys, &[(kid, "%7".to_string())], kid);
 
         let _ = child.kill();
         let _ = child.wait();

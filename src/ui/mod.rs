@@ -668,32 +668,25 @@ pub struct App {
     /// release the bar's rather than the agent's: a drag that started on the bar
     /// and ended over a pane must not be delivered as a click inside it.
     pub(super) drag_tab: Option<usize>,
-    /// What each session's own hooks last said about it, keyed by session id.
+    /// What the agents have reported, folded together: last report per session,
+    /// the questions its subagents are still waiting on, and the pid claims.
     ///
     /// Only sessions whose agent has cctop's hooks installed appear here, so an
     /// absent entry is the ordinary case and means "fall back to the transcript"
-    /// rather than "nothing is happening".
-    pub hooked: HashMap<String, crate::hook::Reported>,
+    /// rather than "nothing is happening". See [`crate::hook::Reports`].
+    pub reports: crate::hook::Reports,
     /// What each tab's agent says on its own screen, by agent pid, while
     /// `read_screen` is on — see [`App::read_screens`].
-    pub screen_read: HashMap<u32, crate::hook::Signal>,
-    /// The questions a session's subagents are waiting on, by subagent id.
+    pub screen_read: HashMap<u32, crate::peek::Screened>,
+    /// What detached tabs' screens last said, by agent pid.
     ///
-    /// `hooked` holds one report per session and every event replaces it, so a
-    /// subagent's permission prompt was overwritten by whatever a sibling
-    /// running beside it did next — and the tab stopped asking while the
-    /// question was still on screen. A question is kept here until the
-    /// subagent that asked it says something else. See `App::apply_hooks`.
-    pub asking_agents: HashMap<String, HashMap<String, crate::hook::Reported>>,
-    /// The process tree each session's hooks reported running under, keyed by
-    /// session id.
-    ///
-    /// Kept apart from `hooked` because it answers a different question and
-    /// changes on a different clock: `hooked` is what the agent is *doing* and
-    /// turns over constantly, while this is *where it is* and is written once
-    /// and then repeated. Only the changes go to the worker, which is what makes
-    /// storing it separately worth a field — see [`App::note_hook_pids`].
-    pub(super) hook_pids: HashMap<String, Vec<u32>>,
+    /// Kept apart from the pane reads because it is refreshed on a slower
+    /// clock: each one is a `capture-pane`, which is not a per-frame cost the
+    /// way reading a parser this process owns is. Merged into `screen_read`
+    /// every tick so the rows see one map.
+    pub(super) peeked: HashMap<u32, crate::peek::Screened>,
+    /// When `peeked` was last rebuilt. `None` until the first detached read.
+    pub(super) peeked_at: Option<Instant>,
     /// The integration's state, as of the last time the panel was opened.
     ///
     /// Rebuilt on opening and after every action rather than every frame: it
@@ -1036,14 +1029,14 @@ impl App {
             tab: 0,
             shared_at: None,
             drag_tab: None,
-            hooked: HashMap::new(),
-            screen_read: HashMap::new(),
-            asking_agents: HashMap::new(),
             // Loaded rather than started empty, because the row most likely to
             // want a tab blinking is the one blocked on a question — and that
             // is exactly the row that sends nothing until it is answered. See
-            // [`hook::load_claims`](crate::hook::load_claims).
-            hook_pids: crate::hook::load_claims(),
+            // [`Reports::new`](crate::hook::Reports::new).
+            reports: crate::hook::Reports::new(),
+            screen_read: HashMap::new(),
+            peeked: HashMap::new(),
+            peeked_at: None,
             hooks: None,
             listener: None,
             launch_cursor: 0,

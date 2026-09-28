@@ -390,13 +390,14 @@ mod tests {
     fn a_session_whose_hooks_say_it_is_working_is_left_alone() {
         let mut app = test_app();
         app.sessions = vec![live("mid", 10, 500)];
-        app.hooked.insert(
+        app.reports.hooked.insert(
             "mid".into(),
             crate::hook::Reported {
                 provisional: false,
                 signal: crate::hook::Signal::Acting,
                 cwd: "/x".into(),
                 permission: None,
+                ask: None,
                 at: std::time::Instant::now(),
             },
         );

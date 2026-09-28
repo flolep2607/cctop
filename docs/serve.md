@@ -21,6 +21,18 @@ one, and hand one's work to a different harness. Nothing destructive: no route
 stops an agent, kills a process or deletes a transcript — those stay in the TUI,
 where the confirmation prompt is.
 
+A permission prompt gets a different pair of buttons. *Allow* and *Deny* are not
+words typed at the agent — a prompt is a menu, and a word plus Enter picks
+whatever is highlighted — so the page presses the key that harness's own menu
+names: `1` to allow in Claude Code, `y` in Codex, Esc to deny either. The two
+harnesses only, because those are the menus cctop has actually driven; for
+anyone else the prompt still shows, with what it is asking where the hook or
+the screen could name it, and the answer stays in the terminal. The asking
+state itself arrives over the hooks, or — with `read_screen = true` in the
+settings file — read off the agent's screen, which is how a session no hooks
+cover still puts the buttons on the page. See
+[Reading the agents' screens](integrations.md#reading-the-agents-screens-instead).
+
 The whole authorisation for that is the token in the URL, so it is worth stating
 plainly: **whoever holds the link can drive the agents on this machine.** Hence
 the defaults — loopback, a token, and `--no-actions` to serve the pages without

@@ -108,6 +108,7 @@ impl App {
     /// which needs a name you recognise.
     pub fn reporting(&self) -> Vec<(String, &'static str)> {
         let mut rows: Vec<(String, &'static str)> = self
+            .reports
             .hooked
             .values()
             .filter(|r| r.is_current())

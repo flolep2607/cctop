@@ -327,6 +327,10 @@ pub struct Session {
     pub launch_id: String,
     /// A transcript-derived state that refines the liveness dot.
     pub activity_state: ActivityState,
+    /// What a session in [`ActivityState::Asking`] is asking to do, when its
+    /// hook said — `Bash: rm -rf build`. `None` in every other state, so a
+    /// stale question cannot outlive the prompt it came from.
+    pub asking_for: Option<String>,
     /// How much this session asks before it acts, when its own hooks have said.
     ///
     /// Read from the transcript, which Claude Code stamps with the mode on
@@ -540,6 +544,7 @@ impl Session {
             inferred_running: false,
             launch_id: String::new(),
             activity_state: ActivityState::Working,
+            asking_for: None,
             permission: None,
             converted_from: None,
             recent_writes: Vec::new(),
@@ -634,6 +639,71 @@ impl Session {
             .process_list
             .iter()
             .find_map(|process| (process.is_root && !process.ghost).then_some(process.pid))
+    }
+
+    /// Fold what the agent's own hook last reported and what its screen shows
+    /// into the transcript's reading of it.
+    ///
+    /// The one place a row is stamped: the dashboard's `App::apply_reports` and
+    /// the refresher inside a standalone `cctop serve` both call this rather
+    /// than agree separately. The screen, when it is being read and says
+    /// something, outranks every report — it is what the agent is showing
+    /// *now*, where a hook event is what it said last: late for a permission
+    /// prompt, stale for a question already answered, absent when hooks are not
+    /// installed at all.
+    pub(crate) fn apply_reports(
+        &mut self,
+        reported: Option<&crate::hook::Reported>,
+        screened: Option<&crate::peek::Screened>,
+    ) {
+        if let Some(screened) = screened {
+            match screened.signal.activity() {
+                Some(state) => self.activity_state = state,
+                // Mid-turn on screen clears a waiting state a report left
+                // behind; an API error the transcript found stays put.
+                None if matches!(
+                    self.activity_state,
+                    ActivityState::Asking | ActivityState::WaitingForInput
+                ) =>
+                {
+                    self.activity_state = ActivityState::Working;
+                }
+                None => {}
+            }
+        }
+        if let Some(reported) = reported {
+            // Only ever set from a report. A session whose newest event did
+            // not carry the field keeps the last mode that did, because the
+            // setting has not changed just because one event was quiet about
+            // it.
+            if reported.permission.is_some() {
+                self.permission = reported.permission;
+            }
+            // The report is only allowed to say the two things the transcript
+            // cannot — see [`Signal::activity`](crate::hook::Signal::activity) —
+            // so a stale-but-not-yet-expired working claim cannot talk a row
+            // out of an API error it is genuinely sitting in. A permission
+            // prompt auto mode may still answer is not yet news: see
+            // [`Reported::is_settled`](crate::hook::Reported::is_settled). The
+            // row keeps whatever the transcript makes of it — which is
+            // "working", because that is what the agent is doing.
+            if screened.is_none()
+                && reported.is_settled()
+                && let Some(state) = reported.signal.activity()
+            {
+                self.activity_state = state;
+            }
+        }
+        self.asking_for = match self.activity_state {
+            // A prompt the screen found is still answered blind if the hook's
+            // own words exist: `Bash: rm -rf build` beats "yes or no" whatever
+            // told cctop the prompt was up.
+            ActivityState::Asking => reported
+                .filter(|r| r.signal == crate::hook::Signal::NeedsInput)
+                .and_then(|r| r.ask.clone())
+                .or_else(|| screened.and_then(|s| s.ask.clone())),
+            _ => None,
+        };
     }
 
     /// The working directory a resumed session should start in.

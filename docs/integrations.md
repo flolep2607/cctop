@@ -221,9 +221,16 @@ line at all.
 When the screen says something, it outranks the hooks and the transcript, for
 the row, the tab bar and the bell. It is off by default because these phrases
 are each agent's UI, not a contract — a release that rewords its footer goes
-unread until cctop catches up. And it only sees agents cctop has a live screen
-for: a tab you are attached to, not an agent in a terminal of its own, and not
-a detached rmux tab.
+unread until cctop catches up.
+
+The read reaches further than the tab you are looking at. A detached rmux tab's
+screen is borrowed with `capture-pane` once a second — no client is attached, so
+nothing resizes — and a standalone `cctop serve` does the same for every running
+agent it can reach, through the `cctop run` shim's replay socket or the pane
+rmux holds. That is what lets the page show *asking* — and the Allow and Deny
+buttons Claude Code and Codex prompts get — for a session nobody has a terminal
+open on. What it cannot see is an agent in a plain terminal of its own: no shim,
+no pane, no screen to borrow.
 
 ## Letting agents see each other
 
