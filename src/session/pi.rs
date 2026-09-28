@@ -9,7 +9,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-fn message_ts(item: &Value, message: &Value) -> String {
+/// When a Pi entry was written, from whichever of the two stamps carries it.
+///
+/// The message's own millisecond stamp is the one the harness wrote as the
+/// message was sealed; the entry's ISO string is stamped as the line was
+/// opened, and an entry still being streamed has no message stamp yet.
+pub fn message_ts(item: &Value, message: &Value) -> String {
     message
         .get("timestamp")
         .and_then(Value::as_i64)

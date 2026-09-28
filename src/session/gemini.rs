@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 /// objects: every field they revise is one the header already declares, so a
 /// caller that simply takes the last value it sees ends up with the same
 /// header the JSON form states outright.
-fn for_each_record(path: &Path, mut f: impl FnMut(&Value)) -> std::io::Result<()> {
+pub fn for_each_record(path: &Path, mut f: impl FnMut(&Value)) -> std::io::Result<()> {
     if path.extension().is_some_and(|ext| ext == "jsonl") {
         return for_each_jsonl(path, |item| match item.get("$set") {
             Some(patch) => f(patch),
