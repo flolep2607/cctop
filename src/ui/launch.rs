@@ -172,7 +172,11 @@ impl App {
             }
         };
         self.pending_brief = Some(path);
-        self.pending_fork = crate::handoff::forkable(&session).map(std::path::Path::to_path_buf);
+        // The transcript behind that brief, when the session it describes is one
+        // another agent can be resumed onto directly. Which agent can is not
+        // known until one is picked, so what is held here is the file and the
+        // harness it is in — see `fork_pending`.
+        self.pending_fork = self.handover_target(&session);
         self.launch_prompt(LaunchInto::Tab);
         // `launch_prompt` bails on its own when nothing can be launched, and
         // leaving a brief pending for a launcher that never opened would attach
@@ -920,38 +924,121 @@ impl App {
         &self.launch_offer
     }
 
+    /// The transcript behind the pending brief, when the session it describes is
+    /// one some agent can be resumed onto.
+    ///
+    /// `None` for a session with no transcript on this disk — a remote row, or
+    /// one Claude for Mac keeps in a directory of its own — and for any harness
+    /// cctop cannot read a conversation out of. Set rather than asked about
+    /// here, because which *receiving* agent can use it is not known until one
+    /// is picked.
+    fn handover_target(&mut self, session: &Session) -> Option<std::path::PathBuf> {
+        let transcript = session.data_file.as_deref();
+        match transcript {
+            Some(path) if crate::convert::convertible_session(session) => {
+                self.pending_provider = session.provider;
+                Some(path.to_path_buf())
+            }
+            // A Claude-to-Claude fork does not read the transcript at all, so a
+            // session `convertible_session` rejects can still be copied whole.
+            _ => crate::handoff::forkable(session).map(std::path::Path::to_path_buf),
+        }
+    }
+
     /// The argv that resumes a new agent onto a copy of the session being
     /// handed over, when that is possible and `argv` is the agent that can read
     /// it.
+    ///
+    /// Three cases, in the order they are worth trying. Between two Claudes the
+    /// transcript is *copied*, so nothing is lost; between two harnesses that
+    /// keep a file of JSON lines it is *converted*, which carries the
+    /// conversation and drops the sending harness's own accounting — see
+    /// [`crate::convert`]. Everything else gets the brief, which is the only
+    /// form that agent can read.
     ///
     /// The copy lands in the *receiving* account's directory, which is not
     /// always the sending one's: handing a personal session to a work login has
     /// to put the transcript where that login will look for it.
     ///
-    /// A failure to copy is reported and answered with `None`, which puts the
-    /// launch back on the brief — the handoff still happens, with less of the
-    /// conversation in it.
+    /// A failure to copy or convert is reported and answered with `None`, which
+    /// puts the launch back on the brief — the handoff still happens, with less
+    /// of the conversation in it.
     pub(super) fn fork_pending(&mut self, argv: &[String]) -> Option<Vec<String>> {
         let transcript = self.pending_fork.clone()?;
-        if crate::handoff::command_of(argv) != Some("claude") {
-            return None;
+        // `argv` may carry an `env VAR=value` prefix when a profile was chosen,
+        // so the command is read off it by name rather than taken as argv[0].
+        let target = crate::pricing::Provider::parse(crate::handoff::command_of(argv)?)?;
+        match target {
+            // Claude to Claude: a byte-for-byte copy, so it is tried first and
+            // keeps everything a conversion drops.
+            Provider::Claude if self.pending_provider == Provider::Claude => {
+                let profile = self.chosen_profile(Provider::Claude);
+                let config_dir = profile
+                    .map(|p| p.dir.clone())
+                    .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
+                match crate::handoff::fork(&transcript, &config_dir) {
+                    Ok(id) => {
+                        let argv = vec!["claude".to_string(), "--resume".to_string(), id];
+                        Some(match profile {
+                            Some(profile) => crate::config::argv_under_profile(argv, profile),
+                            None => argv,
+                        })
+                    }
+                    Err(error) => {
+                        self.set_status(format!("Could not copy the transcript: {error}"));
+                        None
+                    }
+                }
+            }
+            _ if crate::convert::convertible(self.pending_provider, target) => {
+                let home = self.store_of(target);
+                let written =
+                    crate::convert::convert(self.pending_provider, &transcript, target, &home);
+                match written {
+                    Some(written) => {
+                        self.set_status(format!(
+                            "Converted the conversation for {} as session {}",
+                            target.as_str(),
+                            written.session_id
+                        ));
+                        Some(self.resume_argv(target, &written.session_id))
+                    }
+                    None => {
+                        self.set_status("Could not convert the transcript".to_string());
+                        None
+                    }
+                }
+            }
+            _ => None,
         }
-        let profile = self.chosen_profile(Provider::Claude);
-        let config_dir = profile
-            .map(|p| p.dir.clone())
-            .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
-        match crate::handoff::fork(&transcript, &config_dir) {
-            Ok(id) => {
-                let argv = vec!["claude".to_string(), "--resume".to_string(), id];
-                Some(match profile {
-                    Some(profile) => crate::config::argv_under_profile(argv, profile),
-                    None => argv,
-                })
-            }
-            Err(error) => {
-                self.set_status(format!("Could not copy the transcript: {error}"));
-                None
-            }
+    }
+
+    /// The store `target` keeps its sessions in, for a chosen account where the
+    /// launcher has one.
+    ///
+    /// A converted session is written for whoever resumes it, so the account
+    /// the launcher is showing is the one to write into — the same reason
+    /// [`crate::handoff::fork`] takes the receiving profile rather than the
+    /// conventional directory.
+    fn store_of(&self, target: Provider) -> std::path::PathBuf {
+        match self.chosen_profile(target) {
+            Some(profile) => profile.dir.clone(),
+            None => match target {
+                Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
+                _ => crate::config::CODEX_HOME.clone(),
+            },
+        }
+    }
+
+    /// The argv that resumes `target` on `id`, under a chosen account.
+    fn resume_argv(&self, target: Provider, id: &str) -> Vec<String> {
+        let argv = match target {
+            Provider::Codex => vec!["codex".to_string(), "resume".to_string(), id.to_string()],
+            _ => vec!["claude".to_string(), "--resume".to_string(), id.to_string()],
+        };
+        match self.chosen_profile(target) {
+            Some(profile) => crate::config::argv_under_profile(argv, profile),
+            None => argv,
         }
     }
 
@@ -1015,10 +1102,10 @@ impl App {
         // in a conversation already under way, where a "read this and continue"
         // line would interrupt whatever it is doing mid-turn.
         let fresh = matches!(choice, tabs::Choice::Start(_));
-        // Claude to Claude the conversation itself is handed over rather than a
-        // summary of it, the receiving agent being resumed onto a copy of the
-        // transcript. Everything else gets the brief, which is the only form it
-        // can read.
+        // Where the receiving agent can read the transcript itself, the
+        // conversation is handed over rather than a summary of it: copied
+        // between two Claudes, converted between Claude and Codex. Everything
+        // else gets the brief, which is the only form it can read.
         let forked = fresh.then(|| self.fork_pending(&argv)).flatten();
         let carrying_conversation = forked.is_some();
         let argv = forked.unwrap_or(argv);

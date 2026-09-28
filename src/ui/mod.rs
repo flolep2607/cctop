@@ -822,6 +822,15 @@ pub struct App {
     /// used is not known until an agent has been picked, and every agent but
     /// Claude still needs the brief. See [`crate::handoff::fork`].
     pub pending_fork: Option<std::path::PathBuf>,
+    /// The harness that wrote [`pending_fork`](Self::pending_fork).
+    ///
+    /// Held because which receiving agent can read a transcript is not known
+    /// until one is picked, and the answer depends on which harness the
+    /// transcript came from: Claude to Claude is a copy, Claude to Codex is a
+    /// conversion. The default is Claude, which is what a session that is only
+    /// forkable — and so never passed through `convert::convertible_session` —
+    /// needs.
+    pub pending_provider: crate::pricing::Provider,
     /// A brief handed to an agent that is still starting up, as
     /// `(pid, line, not before)`.
     ///
@@ -1062,6 +1071,7 @@ impl App {
             torn: torn::Torn::default(),
             pending_brief: None,
             pending_fork: None,
+            pending_provider: crate::pricing::Provider::Claude,
             handoff_send: None,
             hosted: None,
             paste_preview: None,

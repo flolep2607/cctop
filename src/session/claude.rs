@@ -152,6 +152,11 @@ fn summarize(transcript: &Path) -> Option<Session> {
     s.launch_id = statics.launch_id;
     s.data_file = Some(transcript.to_path_buf());
     s.title = custom_title.or(statics.ai_title);
+    // A session cctop wrote as a handoff into Claude says where it came from, so
+    // the row can be recognised as a copy of another session rather than as
+    // work that happened here. Read from the head of the file, which is where
+    // the marker is written — a converted session can be megabytes.
+    s.converted_from = crate::convert::provenance_of_file(transcript);
     Some(s)
 }
 

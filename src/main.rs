@@ -10,6 +10,7 @@ mod cli;
 mod clipboard;
 mod collide;
 mod config;
+mod convert;
 mod doctor;
 mod elog;
 mod embed;
@@ -275,6 +276,22 @@ fn main() -> anyhow::Result<()> {
         let mut loader = loader::Loader::new();
         let sessions = loader.load(args.plan);
         cli::run_handoff(&sessions, which, &loader)?;
+        loader.store().save();
+        finish_trace(&args);
+        return Ok(());
+    }
+
+    // The non-interactive session modes together: each reads one session's own
+    // transcript, and none of them wants a cache that might be mid-walk.
+    if !args.convert.is_empty() || args.converted {
+        let mut loader = loader::Loader::new();
+        let sessions = loader.load(args.plan);
+        if args.converted {
+            cli::run_converted(&sessions, args.remove)?;
+        } else {
+            let (which, agent) = args.convert.split_at(1);
+            cli::run_convert(&sessions, which[0].as_str(), agent[0].as_str())?;
+        }
         loader.store().save();
         finish_trace(&args);
         return Ok(());

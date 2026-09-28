@@ -420,6 +420,11 @@ pub fn list_sessions() -> Vec<Session> {
             s.last_active = last_active;
             s.model = statics.model;
             s.label_source = statics.cwd;
+            // A session cctop wrote as a handoff into Codex says where it came
+            // from. Codex has no room for a record type of its own — an
+            // unrecognised one is dropped on read — so the marker rides inside
+            // the session metadata, which is the first line either way.
+            s.converted_from = crate::convert::provenance_of_codex(&path);
             s.data_file = Some(path);
             s
         })
