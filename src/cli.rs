@@ -543,6 +543,9 @@ pub struct JsonSession {
     /// What the status dot says: `working`, `waiting` for the user, or `error`
     /// on an API failure. Independent of `running`, which is about a process.
     state: &'static str,
+    /// What an `asking` session wants to do, when its hook or its screen said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asking_for: Option<String>,
     session_id: String,
     started_at: String,
     last_active: String,
@@ -1101,6 +1104,7 @@ pub fn json_sessions(
                     crate::session::ActivityState::Asking => "asking",
                     crate::session::ActivityState::ApiError => "error",
                 },
+                asking_for: s.asking_for.clone(),
                 surface: match s.surface {
                     crate::session::Surface::Cli => "cli",
                     crate::session::Surface::Editor => "editor",

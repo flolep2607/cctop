@@ -162,6 +162,65 @@ pub fn send(session: &Session, text: &str) -> Result<Done, Failed> {
     }
 }
 
+/// Press the key that answers the prompt this session is holding.
+///
+/// Not a line of text — the prior version of this sent the words "yes" and
+/// "no" to a permission prompt, and Claude Code reads Enter in one as picking
+/// the highlighted option — which is "Yes". So "No" allowed the tool. Each
+/// harness is pressed the key its own menu names, and only when the row says
+/// it is asking: a `1` typed into a composer is a stray character in someone's
+/// next prompt, not an answer to anything.
+///
+/// Deny is Esc everywhere, because it is the one key both menus bind to "no"
+/// whatever else they list — the number of the "No" option moves as the menu
+/// grows ("always allow", "switch to auto mode"). Allow is the first option,
+/// which is "Yes" in both and the only one that never widens what is allowed.
+pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
+    use crate::inject::Key;
+    local(session)?;
+    let allow = match choice {
+        "allow" => true,
+        "deny" => false,
+        _ => return Err((400, "an answer is `allow` or `deny`".into())),
+    };
+    if session.activity_state != crate::session::ActivityState::Asking {
+        return Err((409, "this session is not asking anything right now".into()));
+    }
+    // ponytail: Claude Code and Codex only, the two whose menus were driven and
+    // checked. Gemini and OpenCode report prompts too, but pressing a guessed
+    // key at a menu that means something else by it is how "No" came to allow.
+    let key = match (session.provider, allow) {
+        (crate::pricing::Provider::Claude, true) => Key::Char('1'),
+        (crate::pricing::Provider::Codex, true) => Key::Char('y'),
+        (crate::pricing::Provider::Claude | crate::pricing::Provider::Codex, false) => Key::Escape,
+        (other, _) => {
+            return Err((
+                409,
+                format!(
+                    "cctop does not know how {} answers a prompt — answer it in its terminal",
+                    other.as_str()
+                ),
+            ));
+        }
+    };
+    let Some(pid) = session.root_pid() else {
+        return Err((
+            409,
+            "nothing is running this session — resume it first".into(),
+        ));
+    };
+    match crate::inject::press(pid, key) {
+        Ok(()) => {
+            // Every other cctop watching this session hears about the answer
+            // over the hook socket and stops asking — the agent's own next
+            // event is a while coming, and a denied turn sends none at all.
+            crate::hook::announce_answer(&session.session_id, allow);
+            done(if allow { "Allowed" } else { "Denied" })
+        }
+        Err(why) => Err((409, why)),
+    }
+}
+
 /// Start this session's harness back up on this session's transcript.
 ///
 /// The counterpart of `R` in the terminal, and the only way into a session cctop
@@ -640,6 +699,49 @@ mod tests {
 
     fn session() -> Session {
         Session::new(Provider::Claude, "s1".into())
+    }
+
+    /// Nothing is pressed at a session that is not asking: the key that answers
+    /// a prompt is a stray character typed into a composer anywhere else.
+    #[test]
+    fn a_prompt_is_only_answered_while_one_is_open() {
+        let (status, message) = answer(&session(), "allow").unwrap_err();
+        assert_eq!(status, 409);
+        assert!(message.contains("not asking"), "{message}");
+
+        let mut asking = session();
+        asking.activity_state = crate::session::ActivityState::Asking;
+        assert_eq!(answer(&asking, "yes").unwrap_err().0, 400);
+        // Asking, answerable, and nothing to press it at — the refusal is
+        // about the process, not the answer.
+        assert!(answer(&asking, "deny").unwrap_err().1.contains("resume"));
+    }
+
+    /// A harness whose menu nobody has driven gets no guessed key: a guess is
+    /// how "No" came to allow.
+    #[test]
+    fn an_unknown_harness_is_told_to_answer_in_its_terminal() {
+        let mut gemini = Session::new(Provider::Gemini, "g1".into());
+        gemini.activity_state = crate::session::ActivityState::Asking;
+        let (status, message) = answer(&gemini, "allow").unwrap_err();
+        assert_eq!(status, 409);
+        assert!(message.contains("its terminal"), "{message}");
+    }
+
+    /// A remote row's prompt belongs to the machine it is on — the pid that
+    /// would be pressed at is a local coincidence.
+    #[test]
+    fn a_remote_prompt_is_refused_before_a_key_is_chosen() {
+        let mut session = session();
+        session.remote = Some(crate::session::Remote {
+            host: "build-box".into(),
+            branch: None,
+            ..Default::default()
+        });
+        session.activity_state = crate::session::ActivityState::Asking;
+        let (status, message) = answer(&session, "allow").unwrap_err();
+        assert_eq!(status, 409);
+        assert!(message.contains("build-box"), "{message}");
     }
 
     #[test]

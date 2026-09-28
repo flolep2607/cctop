@@ -23,6 +23,7 @@ mod insight;
 mod loader;
 mod mcp;
 mod notify;
+mod peek;
 mod pricing;
 mod proc;
 mod quota;

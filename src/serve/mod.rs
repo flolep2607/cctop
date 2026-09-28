@@ -1069,7 +1069,20 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
 
         let mut loader = Loader::new();
         let watch = Watch::start();
+        // A hook listener of our own: agents report to every socket in the
+        // directory, so a standalone serve sees a permission prompt the moment
+        // it goes up whether or not a dashboard process is running.
+        let listener = crate::hook::Listener::start();
+        let mut reports = crate::hook::Reports::new();
+        // Reading an agent's screen needs somewhere to read it from — a shim
+        // socket or an rmux pane — which [`Peek`] finds once and reuses. The
+        // same opt-in as the TUI's: the phrases are each agent's own UI, not a
+        // contract, so they are only looked for when the file says so.
+        let mut peek = crate::peek::Peek::new();
+        let read_screen = crate::settings::Settings::load().read_screen == Some(true);
+        loader.set_hook_claims(reports.claims.clone());
         let mut rows = loader.load(plan);
+        stamp(&mut rows, &reports, &mut peek, read_screen);
         let mut walked = Instant::now();
         let mut version = 0u64;
         publish(
@@ -1085,7 +1098,22 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
         loop {
             std::thread::sleep(delay);
 
-            let appeared = watch.as_ref().is_some_and(|w| {
+            // Hook events first: a `SessionStart` is a session to walk for now
+            // rather than at the next poll, and a moved pid claim belongs in
+            // the file the loader resolves pids by.
+            let mut appeared = false;
+            for event in listener.as_ref().map(|l| l.drain()).unwrap_or_default() {
+                let (lifecycle, moved) = reports.observe(&event);
+                appeared |= lifecycle;
+                if moved {
+                    crate::hook::save_claims(&reports.claims);
+                    loader.set_hook_claims(reports.claims.clone());
+                }
+            }
+            // A prompt auto mode never answered promotes itself, no event
+            // needed — the grace running out is the news.
+            reports.promote_matured();
+            appeared |= watch.as_ref().is_some_and(|w| {
                 w.took_structural_change()
                     || w.awaiting_discovery(|path| {
                         rows.iter().any(|s| s.data_file.as_deref() == Some(path))
@@ -1099,6 +1127,7 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
             } else {
                 loader.refresh_live(plan, &mut rows);
             }
+            stamp(&mut rows, &reports, &mut peek, read_screen);
             publish(
                 &shared,
                 &remotes,
@@ -1110,6 +1139,35 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
             );
         }
     });
+}
+
+/// Stamp each row with what reports and screens say about it.
+///
+/// The same [`Session::apply_reports`] the TUI's `App::apply_reports` calls,
+/// for the same reason: whatever the rows end up believing is decided once.
+/// Rows are rebuilt by the walk and re-derived by the refresh, so the stamp
+/// is re-applied every pass — a permission prompt survives the rebuild
+/// precisely because the report that raised it lives in `reports`, not the
+/// row.
+fn stamp(
+    rows: &mut [Session],
+    reports: &crate::hook::Reports,
+    peek: &mut crate::peek::Peek,
+    read_screen: bool,
+) {
+    for session in rows.iter_mut() {
+        // A screen read is worth its cost only for a live local agent — a
+        // stopped one has no screen, and the transcript already said the rest.
+        let screened = match (read_screen, session.is_running()) {
+            // `provider`, not `harness`: the column is the display name
+            // ("ClaudeCode"), and the recognizer's ids are the lowercase ones.
+            (true, true) => session
+                .root_pid()
+                .and_then(|pid| peek.read(session.provider.as_str(), pid)),
+            _ => None,
+        };
+        session.apply_reports(reports.report(&session.session_id), screened.as_ref());
+    }
 }
 
 /// Render one snapshot and wake everyone waiting on it.
@@ -1624,6 +1682,7 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
     }
     let outcome = match verb {
         "send" => actions::send(session, &field("text")),
+        "answer" => actions::answer(session, &field("choice")),
         "resume" => actions::resume(session),
         "handoff" => {
             // The brief is built from the extraction, so this one pays for a

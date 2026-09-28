@@ -207,7 +207,7 @@ fn fixture() -> App {
     // Loaded from `$HOME` by `with_prefs`; a developer's history must not
     // reach the frame.
     app.burn = crate::burn::Log::default();
-    app.hook_pids = Default::default();
+    app.reports.claims = Default::default();
     app.hidden_columns = Vec::new();
     app.launch_root = Some("/nonexistent".into());
     // `Quota::default` lists one pending entry per profile found under

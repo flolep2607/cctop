@@ -139,14 +139,19 @@ impl Pane {
     /// works, so a still screen with no working hint on it is a turn that ended.
     /// Still, and not merely unmatched: see [`FOOTERS`] for the frame mid-turn
     /// that has neither.
-    pub fn read_screen(&self) -> Option<crate::hook::Signal> {
-        if !FOOTERS.iter().any(|f| f.harness == self.harness()) {
+    pub fn read_screen(&self) -> Option<crate::peek::Screened> {
+        if !screenable(self.harness()) {
             return None;
         }
         let screen = self.view.parser.screen();
         let (_, cols) = screen.size();
-        screen_state(self.harness(), &screen.rows(0, cols).collect::<Vec<_>>())
-            .or_else(|| self.idle().then_some(crate::hook::Signal::Idle))
+        let rows: Vec<String> = screen.rows(0, cols).collect();
+        let signal = screen_state(self.harness(), &rows)
+            .or_else(|| self.idle().then_some(crate::hook::Signal::Idle))?;
+        let ask = (signal == crate::hook::Signal::NeedsInput)
+            .then(|| screen_ask(self.harness(), &rows))
+            .flatten();
+        Some(crate::peek::Screened { signal, ask })
     }
 
     /// Whether the agent has gone quiet long enough to count as waiting for you.
@@ -1124,6 +1129,12 @@ const FOOTERS: &[Footer] = &[
     },
 ];
 
+/// Whether `harness` has a row in [`FOOTERS`] — the cheap half of the check a
+/// reader makes before paying for the screen itself.
+pub(crate) fn screenable(harness: &str) -> bool {
+    FOOTERS.iter().any(|f| f.harness == harness)
+}
+
 /// What `harness`'s own footer says it is doing, when it says so plainly.
 ///
 /// `None` both for a harness with no row in [`FOOTERS`] and for a screen none
@@ -1150,11 +1161,76 @@ pub(crate) fn screen_state(harness: &str, rows: &[String]) -> Option<crate::hook
     }
 }
 
+/// What a prompt on `harness`'s screen is asking for, when the prompt draws
+/// the answer on it.
+///
+/// Read only once the screen has said it is asking — a `$ …` command line is a
+/// normal thing to have on screen at a shell, and this is only called on the
+/// screen that just matched a prompt. Codex puts the command it wants under
+/// "Would you like to run…"; Claude Code's menu is numbered, so the question
+/// and the tool's own detail are the rows above the highlighted option.
+/// Whatever is found is verbatim screen text, one line and bounded: a summary
+/// invented here would be shown next to an Allow button.
+///
+/// ponytail: claude and codex only. The other harnesses' prompts were seen,
+/// not read for this — a guessed extraction beside a real answer is worse
+/// than none.
+pub(crate) fn screen_ask(harness: &str, rows: &[String]) -> Option<String> {
+    // Wider than the footer: Claude's question box and Codex's `$` line sit a
+    // few rows above the hint row the recognizer matches on.
+    const ASK_ROWS: usize = 15;
+    let bottom: Vec<String> = rows
+        .iter()
+        .map(|row| row.trim().to_string())
+        .filter(|row| !row.is_empty())
+        .rev()
+        .take(ASK_ROWS)
+        .collect();
+    let found = match harness {
+        "codex" => bottom.iter().find_map(|row| {
+            row.strip_prefix('$')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })?,
+        "claude" => {
+            // The highlighted option (`❯ 1. Yes`) is the menu's top edge; the
+            // question and the tool's box are the rows above it. The first one
+            // met from the bottom is the prompt's — a `❯` in the conversation
+            // above is never the nearer one.
+            let top = bottom
+                .iter()
+                .position(|row| row.starts_with('❯') || row.starts_with('›'))?;
+            let mut detail: Vec<String> = bottom[top + 1..]
+                .iter()
+                .map(|row| unbox(row))
+                .filter(|row| !row.is_empty())
+                // Further up than this is the conversation, not the prompt.
+                .take(3)
+                .collect();
+            detail.reverse();
+            match detail.is_empty() {
+                true => return None,
+                false => detail.join(" — "),
+            }
+        }
+        _ => return None,
+    };
+    Some(crate::util::truncate(&found, crate::hook::MAX_ASK))
+}
+
+/// A row's box-drawing edges removed, for what the box says rather than draws.
+fn unbox(row: &str) -> String {
+    row.trim_matches(|c: char| "╭╮╰╯─│ ".contains(c))
+        .trim()
+        .to_string()
+}
+
 /// The harness a rmux session name or a pane label starts with, as one word.
 ///
 /// `cctop-<harness>-…` is how every session is named at creation, whether it
 /// was launched fresh or resumed; a label is the command, so its first word.
-fn harness_of(name: &str) -> &str {
+pub(crate) fn harness_of(name: &str) -> &str {
     name.strip_prefix("cctop-")
         .unwrap_or(name)
         .split(['-', ' ', '·'])
