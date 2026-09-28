@@ -8,7 +8,25 @@ agents over ptys and unix sockets, and there is no macOS or Windows build.
 cctop is a single binary. It links no system libraries and needs no runtime, so
 "installing" it means putting one file on your `PATH`.
 
-## Download a binary
+## Let the script do it
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/flolep2607/cctop/main/install.sh | sh
+```
+
+It works out your architecture from `uname -m`, fetches that archive from the
+latest release, verifies it against the `.sha256` published beside it, and
+installs the binary into `/usr/local/bin` — or `~/.local/bin` if that directory
+is not yours to write, printing the line to add to your profile when the
+fallback is not on your `PATH` either. `sudo` is used only if the install needs
+it, and a `sudo` that cannot run (no tty, no askpass, no sudo at all) falls
+back rather than stopping.
+
+Nothing is unpacked until the checksum has been checked, and a mismatch stops
+the install instead of warning about it afterwards. To read it before running
+it, `curl -fsSLO` it and look.
+
+## Download a binary by hand
 
 A release ships two archives, x86_64 and aarch64, both statically linked against
 musl — so either runs on any distro, glibc or not. Grab the one for your
@@ -18,21 +36,34 @@ architecture from the
 
 ```bash
 # x86_64
-curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz | tar xz
-sudo install -m755 cctop /usr/local/bin/cctop
+d=$(mktemp -d)
+curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz | tar xz -C "$d"
+sudo install -m755 "$d/cctop" /usr/local/bin/cctop && rm -rf "$d"
 ```
 
 ```bash
 # aarch64
-curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-aarch64-unknown-linux-musl.tar.gz | tar xz
-sudo install -m755 cctop /usr/local/bin/cctop
+d=$(mktemp -d)
+curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-aarch64-unknown-linux-musl.tar.gz | tar xz -C "$d"
+sudo install -m755 "$d/cctop" /usr/local/bin/cctop && rm -rf "$d"
 ```
 
-Every archive ships with a `.sha256` file next to it:
+The archive holds one file, called `cctop`, which is why each of these unpacks
+into a temporary directory rather than into whatever directory you are standing
+in. Run one inside a cctop checkout and tar stops at
+`Cannot open: File exists`; the `install` that follows then finds the crate
+directory where it expected the binary, reports `omitting directory 'cctop'`,
+and leaves nothing on your `PATH`.
+
+Every archive ships with a `.sha256` file next to it, named for the archive
+rather than after it — `cctop-x86_64-unknown-linux-musl.sha256`, not
+`cctop-x86_64-unknown-linux-musl.tar.gz.sha256`, which is a 404:
 
 ```bash
-curl -fsSLO https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz.sha256
-sha256sum -c cctop-x86_64-unknown-linux-musl.tar.gz.sha256
+d=$(mktemp -d)
+curl -fsSL -O --output-dir "$d" https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.sha256
+curl -fsSL -O --output-dir "$d" https://github.com/flolep2607/cctop/releases/latest/download/cctop-x86_64-unknown-linux-musl.tar.gz
+(cd "$d" && sha256sum -c cctop-x86_64-unknown-linux-musl.sha256)
 ```
 
 ## Staying up to date
