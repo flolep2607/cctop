@@ -181,6 +181,28 @@ pub struct Args {
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub handoff: Option<String>,
 
+    /// Copy a session into another harness's store, in the shape that harness's
+    /// own resume command reads, and exit. Takes a session id or a unique prefix
+    /// of one, then the harness to convert to — currently claude and codex, in
+    /// either direction. The copy keeps the session's own id where the receiving
+    /// store has it free, so cctop can tell the two apart as one piece of work
+    #[arg(
+        long,
+        num_args = 1..=2,
+        value_names = ["SESSION", "AGENT"],
+        default_missing_value = ""
+    )]
+    pub convert: Vec<String>,
+
+    /// List the sessions on this machine that cctop converted as a handoff, and
+    /// exit. --remove deletes the copies, leaving the sessions they came from
+    #[arg(long)]
+    pub converted: bool,
+
+    /// With --converted, remove the converted copies rather than listing them
+    #[arg(long, requires = "converted")]
+    pub remove: bool,
+
     /// Print one line for a status bar — tmux, waybar, a shell prompt — and
     /// exit: how many agents are working, how many are waiting on you, and
     /// the current spend rate
@@ -650,6 +672,275 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
     // Printed *and* written: the record of the conversation is a file, and a
     // brief that named one it had not left would send its reader looking.
     print!("{}", crate::handoff::rendered(&brief));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --convert
+// ---------------------------------------------------------------------------
+
+/// Copy a session into another harness's store so its own resume command can
+/// pick the conversation up, and say where it went.
+///
+/// The transcript form of a handoff: where `--handoff` writes a brief for an
+/// agent to read, this writes the conversation itself in the shape the
+/// receiving harness reads back. That is worth doing only for a pair cctop can
+/// transcode between, and `crate::convert` is what knows which those are —
+/// OpenCode keeps its transcripts in SQLite, so a conversion to or from it
+/// answers "not yet" rather than half-doing it.
+pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Result<()> {
+    // A converted copy is excluded: converting one would hand over a
+    // conversation cctop had already transcoded, losing whatever the first
+    // conversion dropped, and the source it names is the session to convert
+    // instead. Said here rather than left to chance, because the copy shares
+    // its source's id and a bare prefix matches both.
+    let session = find_original(sessions, which)?;
+    if !crate::convert::convertible_session(session) {
+        anyhow::bail!(
+            "{} has no transcript on this machine cctop can convert",
+            session.provider.as_str()
+        );
+    }
+    let target = crate::pricing::Provider::parse(agent)
+        .ok_or_else(|| anyhow::anyhow!("{agent} is not a harness cctop knows"))?;
+    if !crate::convert::convertible(session.provider, target) {
+        anyhow::bail!(
+            "cctop cannot convert {} sessions into {}",
+            session.provider.as_str(),
+            target.as_str()
+        );
+    }
+    let transcript = session
+        .data_file
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("that session has no transcript on this machine"))?;
+    let home = match target {
+        crate::pricing::Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
+        crate::pricing::Provider::Codex => crate::config::CODEX_HOME.clone(),
+        _ => anyhow::bail!("that harness has no store cctop writes into"),
+    };
+    let written = crate::convert::convert(session.provider, transcript, target, &home)
+        .ok_or_else(|| anyhow::anyhow!("the transcript could not be converted"))?;
+    // The id, because it is usually the session's own and the receiving store
+    // may be a long way from the one it came from. `--json` and the tests read
+    // this line, so it is the machine-readable part of the answer.
+    println!(
+        "{} {} {} {}",
+        target.as_str(),
+        written.session_id,
+        if written.id_kept { "kept" } else { "renamed" },
+        written.path.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod convert_tests {
+    use super::*;
+    use crate::session::Session;
+
+    /// A session with just enough shape for the resolution rules to act on.
+    fn session(id: &str, provider: crate::pricing::Provider, converted: bool) -> Session {
+        let mut s = Session::new(provider, id.into());
+        s.label_source = "/tmp/proj".into();
+        s.started_at = "2026-09-28T00:00:00.000Z".into();
+        s.last_active = "2026-09-28T00:00:00.000Z".into();
+        if converted {
+            s.converted_from = Some(crate::convert::Provenance {
+                harness: "claude".into(),
+                session_id: id.into(),
+                session_path: "/tmp/proj/source.jsonl".into(),
+                converted_at: "2026-09-28T00:00:00.000Z".into(),
+            });
+        }
+        s
+    }
+
+    const ID: &str = "5049dbcd-8ef7-412f-bf57-589e61c41d0e";
+
+    #[test]
+    fn a_prefix_matching_a_session_and_a_copy_of_it_resolves_to_the_session() {
+        let sessions = vec![
+            session(ID, crate::pricing::Provider::Claude, false),
+            session(ID, crate::pricing::Provider::Codex, true),
+        ];
+        // Without the originals-first rule this is an ambiguity error, which is
+        // the wrong complaint: the user named a session, and the copy is not it.
+        assert_eq!(find_original(&sessions, "5049d").unwrap().session_id, ID);
+        assert!(
+            find_original(&sessions, ID)
+                .unwrap()
+                .converted_from
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_only_a_copy_says_where_the_session_really_is() {
+        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let why = find_original(&sessions, ID).unwrap_err().to_string();
+        assert!(why.contains("copy of a claude session"), "{why}");
+        // Not "no session id starts with" — the id is right there.
+        assert!(!why.contains("no session id starts with"), "{why}");
+    }
+
+    #[test]
+    fn an_id_matching_nothing_says_so_plainly() {
+        let sessions = vec![session(ID, crate::pricing::Provider::Claude, false)];
+        let why = find_original(&sessions, "zzz").unwrap_err().to_string();
+        assert_eq!(why, "no session id starts with 'zzz'");
+    }
+
+    #[test]
+    fn no_argument_takes_the_most_recent_original() {
+        let mut older = session(ID, crate::pricing::Provider::Claude, false);
+        older.last_active = "2026-09-28T00:00:00.000Z".into();
+        let mut newer = session(
+            "aa4ff133-cde9-470f-aaff-1fd6ac2da49e",
+            crate::pricing::Provider::Codex,
+            false,
+        );
+        newer.last_active = "2026-09-29T00:00:00.000Z".into();
+        let want = newer.session_id.clone();
+        let sessions = vec![older, newer];
+        assert_eq!(find_original(&sessions, "").unwrap().session_id, want);
+    }
+
+    #[test]
+    fn only_copies_and_no_argument_says_rather_than_picking_one() {
+        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let why = find_original(&sessions, "").unwrap_err().to_string();
+        assert!(why.contains("copy of a claude session"), "{why}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --converted
+// ---------------------------------------------------------------------------
+
+/// Resolve `which` to the session a conversion should read, preferring the
+/// original over any copy made from it.
+///
+/// A converted session carries its source's id, so the same prefix matches both
+/// and [`find_session`] would report the pair as ambiguous — a message about an
+/// id that is genuinely shared, sent to a command that has an obvious answer.
+/// The original is the one to convert: it holds the accounting the copy dropped
+/// and is the session the user is thinking of.
+fn find_original<'a>(sessions: &'a [Session], which: &str) -> anyhow::Result<&'a Session> {
+    // `find_session`'s own rules — empty means the most recently active, a
+    // prefix otherwise, several matches is an error — applied to the originals
+    // alone. Filtering first is the whole point: a copy shares its source's id,
+    // so the ambiguity has to be judged with the copies out of the way.
+    if which.is_empty() {
+        // Most recently active rather than first found, for the reason
+        // `find_session` gives: the loader groups by provider, so load order is
+        // whichever provider sorted last.
+        return sessions
+            .iter()
+            .filter(|s| s.converted_from.is_none())
+            .max_by_key(|s| s.last_active.clone())
+            .ok_or_else(|| no_original(sessions, which));
+    }
+    let matched: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.converted_from.is_none() && s.session_id.starts_with(which))
+        .collect();
+    let found = match matched.as_slice() {
+        [only] => *only,
+        [] => return Err(no_original(sessions, which)),
+        many => anyhow::bail!(
+            "'{which}' matches {} sessions:\n{}",
+            many.len(),
+            many.iter()
+                .map(|s| format!("  {} ({})", s.session_id, s.provider.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    };
+    Ok(found)
+}
+
+/// Why no original session matched, said in terms of the copy that did.
+///
+/// Without this the command would report "no session id starts with" for an id
+/// that is right there, one directory over, and the user would be sent looking
+/// for a typo rather than told the session they have is a converted copy.
+fn no_original(sessions: &[Session], which: &str) -> anyhow::Error {
+    let copy = sessions.iter().find(|s| {
+        s.converted_from.is_some() && (which.is_empty() || s.session_id.starts_with(which))
+    });
+    match copy {
+        Some(copy) => {
+            let source = copy.converted_from.as_ref().expect("filtered above");
+            anyhow::anyhow!(
+                "{} is a copy of a {} session that is not on this machine — \
+                 convert that one where it lives",
+                copy.session_id,
+                source.harness
+            )
+        }
+        None if which.is_empty() => anyhow::anyhow!("no sessions found"),
+        None => anyhow::anyhow!("no session id starts with '{which}'"),
+    }
+}
+
+/// List the sessions cctop converted as a handoff, or remove them.
+///
+/// A converted copy is an ordinary session to the harness that reads it, which
+/// is the point — but it is not work anybody did here, and a list of sessions
+/// that grows every time somebody hands work over is a list nobody reads. This
+/// is how they are found again, and how the copies are cleared out.
+pub fn run_converted(sessions: &[Session], remove: bool) -> anyhow::Result<()> {
+    let converted: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.converted_from.is_some())
+        .collect();
+    if converted.is_empty() {
+        println!("no converted sessions");
+        return Ok(());
+    }
+    for session in &converted {
+        let from = session.converted_from.as_ref().expect("filtered above");
+        // The path is the transcript itself, which is the thing `--remove`
+        // deletes. A row with no file is one a store keeps elsewhere, and
+        // saying so beats printing a directory as though it were a file.
+        let where_ = match session.data_file.as_deref() {
+            Some(path) => path.display().to_string(),
+            None => "no transcript on this machine".to_string(),
+        };
+        println!(
+            "{} {} from {} {} ({where_})",
+            session.provider.as_str(),
+            session.session_id,
+            from.harness,
+            from.session_id,
+        );
+    }
+    if !remove {
+        return Ok(());
+    }
+    for session in &converted {
+        // A session with a process behind it is somebody's *current* work now:
+        // they resumed the copy and carried on, and deleting it would take the
+        // transcript out from under a running agent.
+        if session.is_running() {
+            println!(
+                "kept {} — a {} is using it",
+                session.session_id,
+                session.provider.as_str()
+            );
+            continue;
+        }
+        let Some(path) = session.data_file.as_deref() else {
+            continue;
+        };
+        match std::fs::remove_file(path) {
+            Ok(()) => println!("removed {}", path.display()),
+            // The source is gone, the transcript lives on, and one failure
+            // should not stop the rest of the list.
+            Err(e) => println!("could not remove {}: {e}", path.display()),
+        }
+    }
     Ok(())
 }
 

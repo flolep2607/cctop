@@ -303,6 +303,41 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
     {
         return forked(session, transcript);
     }
+    // Between two harnesses that keep a file of JSON lines, the same trade is
+    // available by transcode rather than by copy: `crate::convert` reads one
+    // store and writes the other, and the receiving agent resumes onto that.
+    // Only reached when the copy above did not apply, so a Claude session going
+    // to Claude still keeps every record the copy carries over byte for byte.
+    if let Some(converted) = converted(session, agent) {
+        return match converted {
+            Ok(converted) => Ok(converted),
+            // A conversion that could not be written is not a failure of the
+            // handoff: the brief below is a working handoff with less of the
+            // conversation in it, which is the trade `handoff` exists for.
+            Err(reason) => {
+                crate::elog::event(
+                    "handoff",
+                    "convert-fallback",
+                    serde_json::json!({ "agent": agent, "reason": reason }),
+                );
+                brief_handoff(session, data, agent)
+            }
+        };
+    }
+    brief_handoff(session, data, agent)
+}
+
+/// Hand a session over as a brief: a markdown summary the receiving agent is
+/// pointed at, rather than the conversation itself.
+///
+/// The shape every handoff falls back to, and the only one available to a
+/// harness whose store cctop cannot write — or to a pair that
+/// [`crate::convert`] does not yet transcode between.
+fn brief_handoff(
+    session: &Session,
+    data: Option<&SessionData>,
+    agent: &str,
+) -> Result<Done, Failed> {
     let brief = handoff::build(session, data);
     let path = handoff::write(&brief)
         .map_err(|e| (503, format!("could not write the handoff brief: {e}")))?;
@@ -337,6 +372,107 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
         message: format!(
             "Handed {} to {agent} — attach with `rmux attach -t {name}`",
             brief.summary()
+        ),
+        rmux: Some(name),
+    })
+}
+
+/// The transcode of this session into `agent`'s store, if cctop can do one.
+///
+/// `None` for a pair that cannot be converted, and for a session with no
+/// transcript on this disk to read — either way the caller has a brief to fall
+/// back on, so the distinction matters only in what gets written.
+fn converted(session: &Session, agent: &str) -> Option<Result<Done, String>> {
+    if !crate::convert::convertible_session(session) {
+        return None;
+    }
+    let target = crate::pricing::Provider::parse(agent)?;
+    if !crate::convert::convertible(session.provider, target) {
+        return None;
+    }
+    let transcript = session.data_file.as_deref()?;
+    // The receiving account's store, not the sending one's: handing a personal
+    // session to a work login has to write it where that login will look.
+    let home = default_home(target)?;
+    Some(
+        crate::convert::convert(session.provider, transcript, target, &home)
+            .ok_or_else(|| "the transcript could not be read or written in that format".to_string())
+            .and_then(|written| resume_converted(session, &written)),
+    )
+}
+
+/// The store `target` keeps its sessions in.
+///
+/// The conventional directory rather than a named account's: a converted
+/// session is written for whoever resumes it, and the launcher picks which
+/// account that is by setting the harness's environment variable in the argv it
+/// runs. Writing into `~/.claude` and launching a work login would leave the
+/// copy where the work login never looks, which is the same mistake
+/// [`crate::handoff::fork`] avoids by taking the profile explicitly.
+fn default_home(target: crate::pricing::Provider) -> Option<std::path::PathBuf> {
+    Some(match target {
+        crate::pricing::Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
+        crate::pricing::Provider::Codex => crate::config::CODEX_HOME.clone(),
+        _ => return None,
+    })
+}
+
+/// Start the receiving agent resumed onto the converted transcript.
+///
+/// The harness and the id both come off the [`crate::convert::Converted`]
+/// rather than off the request, so the agent that is started and the store the
+/// conversation was written into cannot disagree — which would resume a
+/// session that does not exist and report a handoff that did not happen.
+fn resume_converted(
+    session: &Session,
+    converted: &crate::convert::Converted,
+) -> Result<Done, String> {
+    let target = converted.provider;
+    let agent = target.as_str();
+    let argv = match target {
+        crate::pricing::Provider::Claude => vec![
+            "claude".to_string(),
+            "--resume".to_string(),
+            converted.session_id.clone(),
+        ],
+        crate::pricing::Provider::Codex => vec![
+            "codex".to_string(),
+            "resume".to_string(),
+            converted.session_id.clone(),
+        ],
+        _ => return Err("that harness has no resume command cctop knows".into()),
+    };
+    let name = crate::rmux::free_name(agent);
+    // Launched from the session's own directory, which is what the converted
+    // transcript recorded as its `cwd` — and both harnesses filter their resume
+    // pickers on it, so launching elsewhere would start an agent that cannot
+    // see the conversation it was just handed.
+    let cwd = session.work_dir();
+    launch(&argv, &name, cwd.as_deref()).map_err(|(_, why)| why)?;
+    // The id is named because it usually *is* the source session's, and a user
+    // comparing the two stores will want to know whether it was kept. When it
+    // was not, the marker written into the transcript still says which session
+    // this is a copy of — that is the whole point of writing one.
+    let note = match converted.id_kept {
+        true => "under its own id".to_string(),
+        false => format!(
+            "as {}, the id it was converted from being taken",
+            converted.session_id
+        ),
+    };
+    crate::elog::event(
+        "handoff",
+        "converted",
+        serde_json::json!({
+            "agent": agent,
+            "session": converted.session_id,
+            "id_kept": converted.id_kept,
+            "transcript": converted.path.to_string_lossy(),
+        }),
+    );
+    Ok(Done {
+        message: format!(
+            "Handed the conversation to a new {agent} {note} — attach with `rmux attach -t {name}`"
         ),
         rmux: Some(name),
     })

@@ -533,14 +533,42 @@ it was found — still listed, still resumable, still the only writer of its own
 file. That is also what makes this different from `R`, which refuses to put a
 second agent on a transcript for precisely that reason.
 
-The cost is the one the brief was written to avoid: the whole window, tool output
-and all, replayed into a fresh one. That is the trade being made on purpose —
-everything is carried because everything can be. Hand the same session to any
-other agent and it gets the brief, which is the only form that agent can read.
+### Claude to Codex, and back
 
-The same brief is available without the UI:
+Between two harnesses that keep a file of JSON lines, the copy can be made by
+reading one and writing the other instead, and cctop does that: handing a Claude
+session to `codex` writes a rollout into `~/.codex/sessions/`, and `codex resume`
+picks it up. The reverse works the same way.
+
+That is the same trade as the Claude-to-Claude fork, for the same reason and
+with the same cost — the whole window goes across, tool output and all — but
+between two harnesses whose vocabularies differ, so something is left behind.
+The conversation crosses: what was asked, what was said, and every tool call with
+its result. The rest does not, because the receiving harness can work it out for
+itself and the sending harness's figures are about a window the receiver is not
+using. That means token counts, costs, the model, and reasoning — the last
+because it is signed for the model that wrote it and is unreadable to any other.
+
+The copy keeps the session's **own id** where the receiving store has it free,
+which is what lets cctop recognise the two as one piece of work rather than two
+sessions that arrived in the same directory. Where the id is taken, a new one is
+minted instead — a handoff never overwrites a conversation — and the transcript
+records which session it came from either way, so `cctop --converted` can list
+the copies and `--remove` clear them out.
+
+OpenCode is not in this set. It keeps its transcripts in SQLite tables beside a
+project's real state, and writing rows into a live store another agent is using
+is a different kind of risk from adding a file to a directory of rollouts. It
+gets the brief, which is the only form it can read today.
+
+The brief is available without the UI, as is a conversion:
 
 ```bash
 cctop --handoff            # the most recently active session, as markdown
 cctop --handoff 2abd15fe   # a session id, or any unique prefix of one
+cctop --convert 2abd15fe codex   # the conversation, in Codex's own store
+cctop --converted          # the copies on this machine, and where they came from
 ```
+
+`--convert` writes the transcript and stops there; it does not start an agent.
+Use the UI's `O` for the launch, which resumes the copy as it goes.

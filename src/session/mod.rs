@@ -340,6 +340,16 @@ pub struct Session {
     /// column whose whole job is not to guess.
     pub permission: Option<crate::hook::Permission>,
 
+    /// The session this one was converted from, when cctop wrote it as a
+    /// handoff into another harness.
+    ///
+    /// The two are one piece of work rather than two, and this is what says so:
+    /// a Codex session handed to Claude and resumed carries the same id under
+    /// `claude`, so [`Session::key`] alone would report two rows about two
+    /// sessions. A row that knows it is a copy can be hidden from a list, or
+    /// shown as a continuation of the row it came from.
+    pub converted_from: Option<crate::convert::Provenance>,
+
     /// Absolute paths this session has written recently, newest first.
     ///
     /// Kept on the row rather than looked up per frame because the only
@@ -531,6 +541,7 @@ impl Session {
             launch_id: String::new(),
             activity_state: ActivityState::Working,
             permission: None,
+            converted_from: None,
             recent_writes: Vec::new(),
             conflict: None,
             remote: None,
