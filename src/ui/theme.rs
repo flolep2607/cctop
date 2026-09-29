@@ -660,14 +660,16 @@ pub fn ground_rgb() -> Color {
     }
 }
 
-/// Choose the palette from the environment. Call once, before the first draw.
+/// Choose the palette for this run. Call once, before the first draw.
 ///
-/// `configured` is `theme` from `config.toml`; `$CCTOP_THEME` beats it, being
-/// the more local of the two. A theme changed later in the run goes through
-/// [`set_theme`], which needs none of what this does — so this is still the
-/// only place that pays for it, and still has to run before anything else reads
-/// stdin or puts the terminal in raw mode, which in practice means before
-/// `ratatui::init`.
+/// `configured` is `theme` from `config.toml` and the only thing that names a
+/// theme: there is no environment variable for it, deliberately, because the
+/// settings page is where a theme is chosen and a second way in means two
+/// answers to "which theme is this" with nothing saying which won. A theme
+/// changed later in the run goes through [`set_theme`], which needs none of what
+/// this does — so this is still the only place that pays for it, and still has
+/// to run before anything else reads stdin or puts the terminal in raw mode,
+/// which in practice means before `ratatui::init`.
 ///
 /// What it costs is a terminal round trip ([`query_ground`]) and a colour-depth
 /// detection. The answers are kept in [`ENV`], which is what lets a later theme
@@ -676,9 +678,8 @@ pub fn ground_rgb() -> Color {
 pub fn init_from_env(configured: Option<&str>) {
     let no_color = std::env::var("NO_COLOR").ok();
     let colorfgbg = std::env::var("COLORFGBG").ok();
-    let theme = std::env::var("CCTOP_THEME").ok();
     let depth = detect_depth(&termprofile::Env, &std::io::stdout());
-    let theme = theme.as_deref().or(configured);
+    let theme = configured;
     // Asked once, before the palette, and kept — see the note on `Env`. Doing
     // it after `select` would mean a second round trip for a terminal that
     // takes half a second to not answer, and `select` is handed the answer
@@ -758,9 +759,9 @@ const SIXTEEN: &[&str] = &[
 
 /// `NO_COLOR` wins over any theme choice — it is a request for no colour, not
 /// for a different one — and a terminal that cannot show colour is the same
-/// request made by the hardware. Otherwise `CCTOP_THEME` decides, and `auto`
-/// (the default) asks the terminal: its own answer about its background first,
-/// then `COLORFGBG`, then dark, because that is what most terminals and every
+/// request made by the hardware. Otherwise `theme` decides, and `auto` (the
+/// default) asks the terminal: its own answer about its background first, then
+/// `COLORFGBG`, then dark, because that is what most terminals and every
 /// previous cctop release assumed.
 ///
 /// The live answer outranks `COLORFGBG` because the variable is inherited, not
@@ -1530,6 +1531,41 @@ pub(super) mod tests {
     /// while the file said otherwise. And `auto` has to land on a real palette,
     /// since it resolves through the terminal's own answer and re-asking a
     /// terminal that is now in raw mode would give a different one.
+    /// `CCTOP_THEME` in the environment does not name a theme — a user who has
+    /// had it set for months, in a shell profile, gets the theme `config.toml`
+    /// says.
+    ///
+    /// This goes through `init_from_env` rather than `set_theme` because that is
+    /// the only function that ever read it, and a test of `set_theme` would pass
+    /// whether the variable was honoured or not: it takes a theme as its
+    /// argument and consults nothing. That test was written, passed, and guarded
+    /// nothing — re-adding the variable left it green, which is how it was found.
+    ///
+    /// `NO_COLOR` is cleared first because it *is* still read and beats every
+    /// theme, so leaving it set would have this pass for exactly the wrong
+    /// reason the test exists to rule out.
+    #[test]
+    fn the_environment_cannot_name_a_theme() {
+        // SAFETY: the runner is the only thread that reads these, and both are
+        // restored before returning. A panic in between leaves the variable
+        // set, which costs this test and not any other.
+        unsafe {
+            std::env::remove_var("NO_COLOR");
+            std::env::set_var("CCTOP_THEME", "mono");
+        }
+        init_from_env(Some("light"));
+        unsafe { std::env::remove_var("CCTOP_THEME") };
+
+        // The palette is what `init_from_env` published, not a stale one from
+        // another test: `mono` and `light` are the two most distant variants,
+        // so a variable that were still honoured could not pass as either.
+        assert_eq!(
+            colors().variant,
+            Variant::Light,
+            "the environment named a theme and won over the config file"
+        );
+    }
+
     #[test]
     fn a_theme_can_be_changed_after_the_first_frame() {
         let before = colors().variant;

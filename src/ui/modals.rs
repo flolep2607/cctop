@@ -241,6 +241,11 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "{settings}",
             "The settings tab: every setting, view choice and keybind",
         ),
+        // Named here rather than only on the page, because it is the one
+        // setting somebody looks for in the wrong place: it used to have an
+        // environment variable, and the variable is gone, so "where do I set
+        // the theme" is answered by the row and by this.
+        item("theme", "auto / light / dark / mono, in config.toml"),
         item("{quit}  F10", "Quit"),
         item("+", "Add a Claude account (runs claude setup-token)"),
         gap(),
@@ -429,10 +434,6 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("{refresh}  F5", "Refresh now"),
         gap(),
         section("Environment"),
-        item(
-            "CCTOP_THEME",
-            "light / dark / mono / auto (default: auto); beats config.toml",
-        ),
         item("NO_COLOR", "Drop colour; shape and weight carry the state"),
         item(
             "CCTOP_COLUMNS_HIDE",

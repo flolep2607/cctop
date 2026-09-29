@@ -10,19 +10,19 @@ expression: screen
 │A│  ?  F1            This page                                              ┃ │
 ╰─│  ,                The settings tab: every setting, view choice and       │─╯
 ╭ │keybind                                                                   │─╮
-│ │  q  F10           Quit                                                   │ │
-│●│  +                Add a Claude account (runs claude setup-token)         │…┃
-│●│                                                                          │ │
-╰─│Navigation                                                                │─╯
-╭ │  ↑/k  ↓/j         Move between sessions                                  │t╮
-│R│  PgUp / PgDn      Page through the list                                  │ │
+│ │  theme            auto / light / dark / mono, in config.toml             │ │
+│●│  q  F10           Quit                                                   │…┃
+│●│  +                Add a Claude account (runs claude setup-token)         │ │
+╰─│                                                                          │─╯
+╭ │Navigation                                                                │t╮
+│R│  ↑/k  ↓/j         Move between sessions                                  │ │
+│ │  PgUp / PgDn      Page through the list                                  │ │
 │ │  Ctrl+U / Ctrl+D  Half a page up / down                                  │ │
 │ │  g / G  Home / End Jump to first / last                                  │ │
 │ │  n / N            Next / previous search match (wraps)                   │ │
 │ │  b                Jump to the session that rang last                     │ │
-│ │  f                Follow mode: keep the selection centered               │ │
-╰─│                                                                          │─╯
-╭ │Acting on the selected session                                            │ ╮
-│C│  a                Open its terminal in a tab                             │ │
+╰─│  f                Follow mode: keep the selection centered               │─╯
+╭ │                                                                          │ ╮
+│C│Acting on the selected session                                            │ │
 ╰─╰ 1–19 of 141   ↑↓ scroll ─────────────────────────────────────────────────╯─╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

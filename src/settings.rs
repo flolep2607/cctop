@@ -22,7 +22,7 @@ pub const SETTINGS: [(&str, &str, &str); 14] = [
     (
         "theme",
         "\"auto\"",
-        "auto/light/dark/mono; $CCTOP_THEME wins, and overrides this",
+        "auto/light/dark/mono; auto asks the terminal",
     ),
     (
         "notify",

@@ -1768,7 +1768,7 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, html: &str, 
     .unwrap_or_else(|_| "\"\"".to_string());
     let body = html
         .replace("__CCTOP_CSS__", COMMON_CSS)
-        .replace("__CCTOP_THEME__", THEME_JS)
+        .replace("__CCTOP_THEME_JS__", THEME_JS)
         .replace(
             "\"__CCTOP_ACTIONS__\"",
             match actions {

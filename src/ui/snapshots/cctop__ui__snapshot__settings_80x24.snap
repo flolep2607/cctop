@@ -13,7 +13,7 @@ expression: screen
 │  File ~/.config/cctop/config.toml                                            ┃
 │                                                                              ┃
 │config.toml · [settings]                                                      │
-│  theme             "auto"           auto/light/dark/mono; $CCTOP_THEME wins,…│
+│  theme             "auto"           auto/light/dark/mono; auto asks the term…│
 │  notify            false            Bell + desktop alert when a session need…│
 │  auto_update       true             Offer to update at startup when a newer …│
 │  compact_threshold 83.5             Context % at which the agent compacts. O…│

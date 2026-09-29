@@ -10,11 +10,12 @@ expression: screen
 │All time         $28.│  ?  F1            This page                                              ┃                     │
 ╰─────────────────────│  ,                The settings tab: every setting, view choice and       ┃─────────────────────╯
 ╭ Sessions (4) ───────│keybind                                                                   ┃─────────────────────╮
-│   LAST▲    DUR      │  q  F10           Quit                                                   ┃ANCH       PROJECT   │
-│●    now     1h    $1│  +                Add a Claude account (runs claude setup-token)         ┃           Fix the c…│
-│●     7m     2h     $│                                                                          ┃           api       │
-│○     3h     1h     $│Navigation                                                                ┃           docs      │
-│○     2d    12h     $│  ↑/k  ↓/j         Move between sessions                                  │           infra     │
+│   LAST▲    DUR      │  theme            auto / light / dark / mono, in config.toml             ┃ANCH       PROJECT   │
+│●    now     1h    $1│  q  F10           Quit                                                   ┃           Fix the c…│
+│●     7m     2h     $│  +                Add a Claude account (runs claude setup-token)         ┃           api       │
+│○     3h     1h     $│                                                                          ┃           docs      │
+│○     2d    12h     $│Navigation                                                                │           infra     │
+│                     │  ↑/k  ↓/j         Move between sessions                                  │                     │
 │                     │  PgUp / PgDn      Page through the list                                  │                     │
 │                     │  Ctrl+U / Ctrl+D  Half a page up / down                                  │                     │
 │                     │  g / G  Home / End Jump to first / last                                  │                     │
@@ -23,22 +24,21 @@ expression: screen
 │                     │  f                Follow mode: keep the selection centered               │                     │
 │                     │                                                                          │                     │
 │                     │Acting on the selected session                                            │                     │
-│                     │  a                Open its terminal in a tab                             │                     │
-╰─────────────────────│  R                Resume it in a tab of its own                          │─────────────────────╯
-╭ Info  Performance  P│  s                Type a line into its terminal                          │─────────────────────╮
-│Root /usr/bin/claude │  O                Hand its context off to a different agent              │                     │
-│    PID    CPU%      │  i                Read its conversation (works on remote rows)           │                     │
-│   4101    9.8%    36│    / n N  [ ]     In it: search, next / previous hit, turn by turn       │                     │
-│   4188    2.4%     4│    ↵ t  m         In it: this turn's tools / all tools, source           │                     │
-│   4290    0.3%      │  y                Copy resume command or transcript path                 │                     │
+╰─────────────────────│  a                Open its terminal in a tab                             │─────────────────────╯
+╭ Info  Performance  P│  R                Resume it in a tab of its own                          │─────────────────────╮
+│Root /usr/bin/claude │  s                Type a line into its terminal                          │                     │
+│    PID    CPU%      │  O                Hand its context off to a different agent              │                     │
+│   4101    9.8%    36│  i                Read its conversation (works on remote rows)           │                     │
+│   4188    2.4%     4│    / n N  [ ]     In it: search, next / previous hit, turn by turn       │                     │
+│   4290    0.3%      │    ↵ t  m         In it: this turn's tools / all tools, source           │                     │
+│                     │  y                Copy resume command or transcript path                 │                     │
 │                     │  e / E            Show its subagents / all subagents                     │                     │
 │                     │  d                Delete it (only when it is not running)                │                     │
 │                     │  Ctrl+K           Terminate it                                           │                     │
 │                     │                                                                          │                     │
 │                     │Several at once                                                           │                     │
-│                     │  Space            Mark / unmark the selected session                     │                     │
-╰─────────────────────│  U                Clear all marks                                        │─────────────────────╯
-╭ Limits ─────────────│  D                Delete all marked sessions                             │────────── + account ╮
-│Claude checking…     │  K                Terminate all marked live sessions                     │                     │
+╰─────────────────────│  Space            Mark / unmark the selected session                     │─────────────────────╯
+╭ Limits ─────────────│  U                Clear all marks                                        │────────── + account ╮
+│Claude checking…     │  D                Delete all marked sessions                             │                     │
 ╰─────────────────────╰ 1–35 of 141   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share
