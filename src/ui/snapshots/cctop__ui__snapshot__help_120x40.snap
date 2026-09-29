@@ -8,13 +8,14 @@ expression: screen
 │Today             $8.│Start here                                                                ┃                     │
 │This month        $0.│  Enter            Everything you can do to this row, in one menu         ┃                     │
 │All time         $28.│  ?  F1            This page                                              ┃                     │
-╰─────────────────────│  ,                Settings and keybinds, and the file that holds them    ┃─────────────────────╯
-╭ Sessions (4) ───────│  q  F10           Quit                                                   ┃─────────────────────╮
-│   LAST▲    DUR      │  +                Add a Claude account (runs claude setup-token)         ┃ANCH       PROJECT   │
-│●    now     1h    $1│                                                                          ┃           Fix the c…│
-│●     7m     2h     $│Navigation                                                                ┃           api       │
-│○     3h     1h     $│  ↑/k  ↓/j         Move between sessions                                  ┃           docs      │
-│○     2d    12h     $│  PgUp / PgDn      Page through the list                                  │           infra     │
+╰─────────────────────│  ,                The settings tab: every setting, view choice and       ┃─────────────────────╯
+╭ Sessions (4) ───────│keybind                                                                   ┃─────────────────────╮
+│   LAST▲    DUR      │  q  F10           Quit                                                   ┃ANCH       PROJECT   │
+│●    now     1h    $1│  +                Add a Claude account (runs claude setup-token)         ┃           Fix the c…│
+│●     7m     2h     $│                                                                          ┃           api       │
+│○     3h     1h     $│Navigation                                                                ┃           docs      │
+│○     2d    12h     $│  ↑/k  ↓/j         Move between sessions                                  │           infra     │
+│                     │  PgUp / PgDn      Page through the list                                  │                     │
 │                     │  Ctrl+U / Ctrl+D  Half a page up / down                                  │                     │
 │                     │  g / G  Home / End Jump to first / last                                  │                     │
 │                     │  n / N            Next / previous search match (wraps)                   │                     │
@@ -23,22 +24,21 @@ expression: screen
 │                     │                                                                          │                     │
 │                     │Acting on the selected session                                            │                     │
 │                     │  a                Open its terminal in a tab                             │                     │
-│                     │  R                Resume it in a tab of its own                          │                     │
-╰─────────────────────│  s                Type a line into its terminal                          │─────────────────────╯
-╭ Info  Performance  P│  O                Hand its context off to a different agent              │─────────────────────╮
-│Root /usr/bin/claude │  i                Read its conversation (works on remote rows)           │                     │
-│    PID    CPU%      │    / n N  [ ]     In it: search, next / previous hit, turn by turn       │                     │
-│   4101    9.8%    36│    ↵ t  m         In it: this turn's tools / all tools, source           │                     │
-│   4188    2.4%     4│  y                Copy resume command or transcript path                 │                     │
-│   4290    0.3%      │  e / E            Show its subagents / all subagents                     │                     │
+╰─────────────────────│  R                Resume it in a tab of its own                          │─────────────────────╯
+╭ Info  Performance  P│  s                Type a line into its terminal                          │─────────────────────╮
+│Root /usr/bin/claude │  O                Hand its context off to a different agent              │                     │
+│    PID    CPU%      │  i                Read its conversation (works on remote rows)           │                     │
+│   4101    9.8%    36│    / n N  [ ]     In it: search, next / previous hit, turn by turn       │                     │
+│   4188    2.4%     4│    ↵ t  m         In it: this turn's tools / all tools, source           │                     │
+│   4290    0.3%      │  y                Copy resume command or transcript path                 │                     │
+│                     │  e / E            Show its subagents / all subagents                     │                     │
 │                     │  d                Delete it (only when it is not running)                │                     │
 │                     │  Ctrl+K           Terminate it                                           │                     │
 │                     │                                                                          │                     │
 │                     │Several at once                                                           │                     │
 │                     │  Space            Mark / unmark the selected session                     │                     │
-│                     │  U                Clear all marks                                        │                     │
-╰─────────────────────│  D                Delete all marked sessions                             │─────────────────────╯
-╭ Limits ─────────────│  K                Terminate all marked live sessions                     │────────── + account ╮
-│Claude checking…     │  I                Idle view: live sessions quiet for idle_after          │                     │
+╰─────────────────────│  U                Clear all marks                                        │─────────────────────╯
+╭ Limits ─────────────│  D                Delete all marked sessions                             │────────── + account ╮
+│Claude checking…     │  K                Terminate all marked live sessions                     │                     │
 ╰─────────────────────╰ 1–35 of 141   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

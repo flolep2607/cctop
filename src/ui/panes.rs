@@ -733,7 +733,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::settings::{Row, VIEWS, View};
+    use crate::ui::settings::{Item, VIEWS, View};
     use crate::ui::tests::{key, test_app};
     use ratatui::crossterm::event;
     use ratatui::crossterm::event::KeyCode;
@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn every_configurable_thing_is_on_the_page_and_the_filter_finds_it() {
         let mut app = test_app();
-        let all = app.settings_rows().len();
+        let all = app.settings_items().len();
         assert_eq!(
             all,
             crate::settings::SETTINGS.len() + VIEWS.len() + crate::settings::BINDINGS.len(),
@@ -854,7 +854,7 @@ mod tests {
         // By name: a keybind.
         app.settings_filter = "quit".into();
         let found = app.settings_shown();
-        assert!(found.contains(&Row::Key(0)));
+        assert!(found.contains(&Item::Key(0)));
         assert!(
             found.len() < all,
             "\"quit\" matched everything, so the filter is not filtering"
@@ -866,7 +866,7 @@ mod tests {
         let alerts = app.settings_shown();
         assert!(!alerts.is_empty(), "nothing matched a description");
         assert!(
-            alerts.iter().all(|r| matches!(r, Row::Setting(_))),
+            alerts.iter().all(|r| matches!(r, Item::Setting(_))),
             "a description matched something that is not a setting"
         );
 
@@ -875,7 +875,7 @@ mod tests {
         app.settings_filter = "repositories".into();
         assert_eq!(
             app.settings_shown(),
-            vec![Row::View(0)],
+            vec![Item::View(0)],
             "the tree toggle is not findable by what it does"
         );
 
@@ -1053,11 +1053,11 @@ mod tests {
     fn a_view_choice_is_toggled_by_the_page_and_reset_to_its_default() {
         let mut app = test_app();
         /// The page position of a view choice, by its name.
-        fn row_of(app: &App, name: &str) -> usize {
+        fn item_of(app: &App, name: &str) -> usize {
             app.settings_shown()
                 .iter()
                 .position(|r| match r {
-                    Row::View(i) => VIEWS[*i].0 == name,
+                    Item::View(i) => VIEWS[*i].0 == name,
                     _ => false,
                 })
                 .expect("a view row")
@@ -1073,7 +1073,7 @@ mod tests {
                 .expect("a view choice")
         }
 
-        app.settings_cursor = row_of(&app, "tree");
+        app.settings_cursor = item_of(&app, "tree");
         assert!(!app.tree, "not at the default to begin with");
         app.settings_activate();
         assert!(app.tree, "Enter did not flip the toggle");
@@ -1082,7 +1082,7 @@ mod tests {
 
         // A choice cycles, and lands on its default first.
         let panel = view_of(&app, "bottom_panel");
-        app.settings_cursor = row_of(&app, "bottom_panel");
+        app.settings_cursor = item_of(&app, "bottom_panel");
         let first = app.view_value(&panel);
         app.settings_activate();
         assert_ne!(
@@ -1092,11 +1092,11 @@ mod tests {
         );
 
         // Backspace puts it back, and a reset choice is the first option.
-        app.settings_cursor = row_of(&app, "cost_floor");
+        app.settings_cursor = item_of(&app, "cost_floor");
         app.settings_input = Some("25".into());
         app.settings_commit_input();
         assert_eq!(app.cost_floor, 25.0);
-        app.settings_cursor = row_of(&app, "cost_floor");
+        app.settings_cursor = item_of(&app, "cost_floor");
         app.settings_reset();
         assert_eq!(app.cost_floor, 0.0, "Backspace did not clear the number");
 

@@ -13,16 +13,16 @@ expression: screen
 │  File ~/.config/cctop/config.toml                                            ┃
 │                                                                              ┃
 │config.toml · [settings]                                                      │
-│  theme             "auto"           auto/light/dark/mono; $CCTOP_THEME wins. │
-│On restart                                                                    │
-│  notify            false            Bell + desktop alert when a session needs│
-│you                                                                           │
-│  auto_update       true             Offer to update at startup when a newer  │
-│release is out                                                                │
-│  compact_threshold 83.5             Context % at which the agent compacts. On│
-│restart                                                                       │
+│  theme             "auto"           auto/light/dark/mono; $CCTOP_THEME wins,…│
+│  notify            false            Bell + desktop alert when a session need…│
+│  auto_update       true             Offer to update at startup when a newer …│
+│  compact_threshold 83.5             Context % at which the agent compacts. O…│
 │  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"     │
 │  alert_cost        0                Alert when a session's cost passes $X    │
-│  alert_burn        0                Alert when a session burns over $X an    │
+│  alert_burn        0                Alert when a session burns over $X an ho…│
+│  alert_today       0                Alert when today's spend passes $X       │
+│  alert_errors      0                Alert when X% of 10m of tool calls fail …│
+│  alert_error_calls 10               …counting only once there are this many …│
+│  alert_stall       0                Alert when a working agent writes nothin…│
 ╰ 74   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

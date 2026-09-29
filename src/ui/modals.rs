@@ -239,7 +239,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("{help}  F1", "This page"),
         item(
             "{settings}",
-            "Settings and keybinds, and the file that holds them",
+            "The settings tab: every setting, view choice and keybind",
         ),
         item("{quit}  F10", "Quit"),
         item("+", "Add a Claude account (runs claude setup-token)"),
@@ -429,7 +429,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("{refresh}  F5", "Refresh now"),
         gap(),
         section("Environment"),
-        item("CCTOP_THEME", "light / dark / auto (default: auto)"),
+        item(
+            "CCTOP_THEME",
+            "light / dark / mono / auto (default: auto); beats config.toml",
+        ),
         item("NO_COLOR", "Drop colour; shape and weight carry the state"),
         item(
             "CCTOP_COLUMNS_HIDE",
@@ -648,9 +651,13 @@ fn filter_help(rows: Vec<(HelpRow, Line<'static>)>, query: &str) -> Vec<Line<'st
 pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
     let rows = app.settings_shown();
     let shown = rows.len();
-    let total = app.settings_rows().len();
+    let total = app.settings_items().len();
     let cursor = app.settings_cursor.min(shown.saturating_sub(1));
-    let (lines, cursor_line) = settings_lines(app, &rows, cursor);
+    // The width the rows are laid out in, so each can be cut to fit rather than
+    // wrapped. Passed in rather than measured here because the block has not
+    // been built yet, and its border is two of those columns.
+    let width = area.width.saturating_sub(2) as usize;
+    let (lines, cursor_line) = settings_lines(app, &rows, cursor, width);
     let height = lines.len() as u16;
 
     let mut block = Block::bordered()
@@ -680,9 +687,14 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
         )));
     }
     frame.render_widget(block, area);
+    // No wrapping, deliberately. `settings_lines` returns a line index for the
+    // cursor's row and the scroll is corrected against it, which is only true
+    // while one line of text is one line on screen: a wrapped line takes two
+    // rows and every row below it is out by one. So the rows are cut to fit
+    // when they are built, and this is the backstop for the two that are not
+    // ours to size — the config path and a problem cctop did not write.
     frame.render_widget(
         Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
             .style(theme::canvas()),
         inner,
@@ -742,23 +754,31 @@ fn settings_filter_border(app: &App) -> String {
 /// telling them where it lands.
 fn settings_lines(
     app: &App,
-    rows: &[super::settings::Row],
+    rows: &[super::settings::Item],
     cursor: usize,
+    width: usize,
 ) -> (Vec<Line<'static>>, u16) {
-    use super::settings::{Row, VIEWS};
+    use super::settings::{Item, VIEWS};
+    /// Columns a row spends before its description: the gutter, the name, the
+    /// value, and the set-marker.
+    const LEAD: usize = 2 + 18 + 14 + 3;
     let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
     let mut lines = Vec::new();
     let mut cursor_line = 0u16;
 
+    // Cut rather than wrapped, for the reason given on the Paragraph. A config
+    // path is as long as somebody's home directory made it, and a problem
+    // carries whatever the TOML parser had to say.
     lines.push(Line::from(vec![
         Span::styled("  File ", theme::dim()),
-        Span::raw(crate::util::tildify(
-            &crate::config::CONFIG_FILE.to_string_lossy(),
+        Span::raw(super::render::elide(
+            &crate::util::tildify(&crate::config::CONFIG_FILE.to_string_lossy()),
+            width.saturating_sub(8),
         )),
     ]));
     for problem in &app.settings.problems {
         lines.push(Line::from(Span::styled(
-            format!("  ! {problem}"),
+            super::render::elide(&format!("  ! {problem}"), width),
             theme::failed(),
         )));
     }
@@ -795,12 +815,19 @@ fn settings_lines(
         } else {
             vec![Span::styled(format!("{value:<14}"), style)]
         };
+        // The description is cut to the room left over rather than wrapped onto
+        // a second line. A wrap is the more generous-looking choice and reads
+        // far worse: a 80-column terminal strands one word on its own line for
+        // half the rows, so the eye ends up scanning a shape rather than a
+        // list, and the cursor's row becomes two rows tall — which breaks the
+        // arithmetic this page scrolls by.
+        let room = width.saturating_sub(LEAD);
         let mut line = Line::from_iter(
             std::iter::once(Span::raw(format!("  {name:<18}")))
                 .chain(value)
                 .chain([
                     Span::styled(if set { " * " } else { "   " }, theme::dim()),
-                    Span::styled(what.to_string(), theme::dim()),
+                    Span::styled(super::render::elide(what, room), theme::dim()),
                 ]),
         );
         if here {
@@ -813,23 +840,23 @@ fn settings_lines(
     // A heading with nothing under it is a heading about nothing, which is
     // what a filter that left out one whole section would otherwise leave
     // behind.
-    let wanted = |f: fn(&Row) -> bool| rows.iter().any(f);
-    if wanted(|r| matches!(r, Row::Setting(_))) {
+    let wanted = |f: fn(&Item) -> bool| rows.iter().any(f);
+    if wanted(|r| matches!(r, Item::Setting(_))) {
         lines.push(Line::default());
         lines.push(section("config.toml · [settings]"));
         for (at, entry) in rows.iter().enumerate() {
-            let Row::Setting(i) = entry else { continue };
+            let Item::Setting(i) = entry else { continue };
             let (name, _, what) = crate::settings::SETTINGS[*i];
             let (value, set) = app.settings.value_of(name);
             row(&mut lines, at, name, value, set, what);
         }
     }
 
-    if wanted(|r| matches!(r, Row::View(_))) {
+    if wanted(|r| matches!(r, Item::View(_))) {
         lines.push(Line::default());
         lines.push(section("Remembered · view"));
         for (at, entry) in rows.iter().enumerate() {
-            let Row::View(i) = entry else { continue };
+            let Item::View(i) = entry else { continue };
             let (name, what, view) = &VIEWS[*i];
             let value = app.view_value(view);
             let set = app.view_is_set(view);
@@ -837,11 +864,11 @@ fn settings_lines(
         }
     }
 
-    if wanted(|r| matches!(r, Row::Key(_))) {
+    if wanted(|r| matches!(r, Item::Key(_))) {
         lines.push(Line::default());
         lines.push(section("config.toml · [keys], on the session table"));
         for (at, entry) in rows.iter().enumerate() {
-            let Row::Key(i) = entry else { continue };
+            let Item::Key(i) = entry else { continue };
             let (action, default, what) = crate::settings::BINDINGS[*i];
             let key = app.settings.key_for(action).to_string();
             let set = key != *default;
@@ -853,7 +880,10 @@ fn settings_lines(
     if rows.is_empty() {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            format!("  Nothing matches {}.", app.settings_filter),
+            super::render::elide(
+                &format!("  Nothing matches {}.", app.settings_filter),
+                width,
+            ),
             theme::dim(),
         )));
         lines.push(Line::from(Span::styled(
@@ -864,7 +894,10 @@ fn settings_lines(
 
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        "  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table",
+        super::render::elide(
+            "  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table",
+            width,
+        ),
         theme::dim(),
     )));
     (lines, cursor_line)

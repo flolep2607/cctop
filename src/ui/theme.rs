@@ -498,12 +498,112 @@ fn sixteen(palette: Palette) -> Palette {
     p
 }
 
-static PALETTE: OnceLock<Palette> = OnceLock::new();
+// The active palette for the thread drawing the screen.
+//
+// Thread-local rather than a global with a lock, which is the shape the old
+// `OnceLock` had. Three reasons, and the first two are why a lock is not merely
+// slower but wrong:
+//
+// * A theme change is a draw-thread fact. Only the thread that draws reads the
+//   palette — every reader is a widget, and the worker threads answer over a
+//   channel rather than by drawing — so a process-global would be shared state
+//   nobody outside that thread has any business seeing.
+// * A lock would make the tests order-dependent. The runner runs tests in
+//   parallel threads and several read `colors()` expecting dark, so a test that
+//   changed the theme and published it globally poisoned whichever test
+//   happened to be reading at the time. It did exactly that: one run in three
+//   went red, in a different test each time. Per-thread, each test starts at
+//   dark and can only affect itself.
+// * No lock on the hot path. `colors()` is called a few hundred times a frame,
+//   and this is a thread-local read rather than an atomic.
+//
+// The address is stable per thread: a new palette is leaked and published, and
+// the old one is left to the process.
+//
+// ponytail: every theme change leaks one palette. It is a few hundred bytes, it
+// happens only on a keypress, and a user who changes their theme a thousand
+// times has spent less memory than the terminal they are looking at.
+thread_local! {
+    static PALETTE: std::cell::Cell<&'static Palette> = const { std::cell::Cell::new(&DARK) };
+}
 
-/// The active palette. Defaults to dark if nothing selected one, so tests and
-/// any path that skips [`init_from_env`] behave exactly as before.
+/// The active palette. Defaults to dark, so any thread that has not chosen one
+/// — a test, or a path that skips [`init_from_env`] — behaves exactly as before.
 pub fn colors() -> &'static Palette {
-    PALETTE.get_or_init(|| DARK)
+    PALETTE.with(|p| p.get())
+}
+
+/// What the environment said at startup, so the palette can be chosen again
+/// later without asking the terminal a second time.
+///
+/// [`init_from_env`] is the only place allowed to talk to the terminal, and
+/// this is what it kept so that a later [`set_theme`] can be as cheap and as
+/// quiet as re-reading a variable. The colour depth is here for the same
+/// reason and is not re-detected: it does not change under a running cctop, and
+/// detecting it costs a process spawn.
+#[derive(Clone)]
+struct Env {
+    no_color: Option<String>,
+    colorfgbg: Option<String>,
+    depth: Depth,
+    ground: Option<Ground>,
+}
+
+// Also thread-local, for the palette's reason: a test that runs
+// `init_from_env` — with a `NO_COLOR` set, say — must not leave that answer
+// behind for the next test's `set_theme`. See [`PALETTE`] above.
+thread_local! {
+    static ENV: std::cell::RefCell<Option<Env>> = const { std::cell::RefCell::new(None) };
+}
+
+/// This thread's record of the environment, or the one a fresh cctop on an
+/// ordinary terminal would have found.
+///
+/// Read through a closure rather than borrowed out, because the borrow cannot
+/// outlive the `RefCell` guard and the callers want to hold it across a
+/// [`select`] call.
+fn env() -> Env {
+    ENV.with(|slot| {
+        slot.borrow().clone().unwrap_or(Env {
+            no_color: None,
+            colorfgbg: None,
+            depth: Depth::Indexed,
+            ground: None,
+        })
+    })
+}
+
+/// Choose the palette for `theme`, from what the environment already said.
+///
+/// The half of [`init_from_env`] that can be repeated: no terminal round trip,
+/// no process, no stdin touched. `None` is `auto` and asks the terminal's own
+/// answer from the value cached at startup, so a theme changed to `auto` again
+/// lands on the same palette it started with rather than on a fresh guess.
+pub fn set_theme(theme: Option<&str>) {
+    // With no environment recorded — a test, or a caller that skipped
+    // `init_from_env` — this is what a fresh cctop on an ordinary terminal would
+    // have chosen. Reading a theme off a dashboard that never looked at one is
+    // the case that has to work: the page calls this on the first press of the
+    // row whether or not startup did.
+    let env = env();
+    let palette = select(
+        env.no_color.as_deref(),
+        theme,
+        env.colorfgbg.as_deref(),
+        env.depth,
+        || env.ground,
+    );
+    publish(palette);
+}
+
+/// Install `palette` as the active one for this thread.
+///
+/// Leaked so the address never moves: [`colors`] hands out `&'static Palette`
+/// and the cells holding one are built over several frames in some cases, so
+/// swapping in place would hand out a reference to memory already overwritten.
+fn publish(palette: Palette) {
+    let leaked: &'static Palette = Box::leak(Box::new(palette));
+    PALETTE.with(|p| p.set(leaked));
 }
 
 pub fn variant() -> Variant {
@@ -560,23 +660,57 @@ pub fn ground_rgb() -> Color {
     }
 }
 
-/// Choose the palette from the environment. Call once, before the first draw;
-/// later calls are ignored, which keeps the choice stable for a whole run.
+/// Choose the palette from the environment. Call once, before the first draw.
 ///
 /// `configured` is `theme` from `config.toml`; `$CCTOP_THEME` beats it, being
-/// the more local of the two.
+/// the more local of the two. A theme changed later in the run goes through
+/// [`set_theme`], which needs none of what this does — so this is still the
+/// only place that pays for it, and still has to run before anything else reads
+/// stdin or puts the terminal in raw mode, which in practice means before
+/// `ratatui::init`.
 ///
-/// This may talk to the terminal — see [`query_ground`] — so it has to run
-/// before anything else reads stdin or puts the terminal in raw mode, which in
-/// practice means before `ratatui::init`.
+/// What it costs is a terminal round trip ([`query_ground`]) and a colour-depth
+/// detection. The answers are kept in [`ENV`], which is what lets a later theme
+/// change reuse the terminal's reply rather than asking a terminal that is, by
+/// then, in raw mode and in the middle of a draw.
 pub fn init_from_env(configured: Option<&str>) {
-    let _ = PALETTE.set(select(
-        std::env::var("NO_COLOR").ok().as_deref(),
-        std::env::var("CCTOP_THEME").ok().as_deref().or(configured),
-        std::env::var("COLORFGBG").ok().as_deref(),
-        detect_depth(&termprofile::Env, &std::io::stdout()),
-        query_ground,
-    ));
+    let no_color = std::env::var("NO_COLOR").ok();
+    let colorfgbg = std::env::var("COLORFGBG").ok();
+    let theme = std::env::var("CCTOP_THEME").ok();
+    let depth = detect_depth(&termprofile::Env, &std::io::stdout());
+    let theme = theme.as_deref().or(configured);
+    // Asked once, before the palette, and kept — see the note on `Env`. Doing
+    // it after `select` would mean a second round trip for a terminal that
+    // takes half a second to not answer, and `select` is handed the answer
+    // rather than the question for exactly this reason.
+    let colourless = no_color.as_deref().is_some_and(|v| !v.is_empty());
+    let ground = match colourless || depth == Depth::Colorless {
+        true => None,
+        false => query_ground(),
+    };
+    let palette = select(
+        no_color.as_deref(),
+        theme,
+        colorfgbg.as_deref(),
+        depth,
+        || ground,
+    );
+    // The ground answer is the part `select` needed and would otherwise throw
+    // away, and it is the part a later `set_theme` cannot get any other way:
+    // `auto` has to resolve to the same palette it did here, and by then the
+    // terminal is in raw mode and in the middle of a draw. Overwritten rather
+    // than set-once, because this is the function that decides what the
+    // environment was, and calling it again with a changed terminal should
+    // change the answer.
+    ENV.with(|slot| {
+        *slot.borrow_mut() = Some(Env {
+            no_color,
+            colorfgbg,
+            depth,
+            ground,
+        });
+    });
+    publish(palette);
 }
 
 /// The terminal's colour depth, from the environment alone.
@@ -1355,7 +1489,7 @@ impl Gradient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::collections::HashMap;
 
@@ -1363,6 +1497,130 @@ mod tests {
     /// question — the situation every release before the question existed.
     fn plain(no_color: Option<&str>, theme: Option<&str>, colorfgbg: Option<&str>) -> Palette {
         select(no_color, theme, colorfgbg, Depth::Indexed, || None)
+    }
+
+    /// Puts the palette back when a test that changed it is done, however the
+    /// test leaves — a panic, an early return, an assertion in the middle.
+    ///
+    /// The palette is a process global and the tests that read it assume dark,
+    /// so a test that changes it and does not put it back poisons whichever test
+    /// runs next. That is not a hypothetical: it made this suite fail about one
+    /// run in three, in different tests each time, because the order the runner
+    /// picked decided who was poisoned. `Drop` is what makes it reliable — a
+    /// plain "put it back at the end" line is skipped by every panic before it,
+    /// and a failing assertion is the most likely way to reach one.
+    pub(crate) struct Restore(pub(crate) Variant);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_theme(match self.0 {
+                Variant::Light => Some("light"),
+                Variant::Dark => Some("dark"),
+                Variant::Mono => Some("mono"),
+            });
+        }
+    }
+
+    /// The theme can be changed after the first frame, and the colours every
+    /// other module reads follow it.
+    ///
+    /// The property is `colors()` returning the same thing twice across a
+    /// change — a palette read once and kept, or a `OnceLock` that refuses the
+    /// second answer, would both leave the screen drawn in the old colours
+    /// while the file said otherwise. And `auto` has to land on a real palette,
+    /// since it resolves through the terminal's own answer and re-asking a
+    /// terminal that is now in raw mode would give a different one.
+    #[test]
+    fn a_theme_can_be_changed_after_the_first_frame() {
+        let before = colors().variant;
+        let _restore = Restore(before);
+        // These three are each a different palette, and `mono` is the one that
+        // cannot be anything else.
+        set_theme(Some("mono"));
+        assert_eq!(colors().variant, Variant::Mono, "mono did not take");
+        assert!(no_color(), "and did not read as colourless");
+
+        set_theme(Some("light"));
+        assert_eq!(colors().variant, Variant::Light);
+        assert!(!no_color());
+
+        set_theme(Some("dark"));
+        assert_eq!(colors().variant, Variant::Dark);
+
+        // Back to the default the row starts on, which is `auto` and resolves
+        // through what startup learned. Not necessarily where it began — the
+        // machine's `NO_COLOR` may have decided that — but never a crash and
+        // never a query to a terminal in raw mode.
+        set_theme(Some("auto"));
+        assert!(
+            matches!(
+                colors().variant,
+                Variant::Light | Variant::Dark | Variant::Mono
+            ),
+            "auto resolved to nothing"
+        );
+
+        // `None` is what the settings file spells by not naming a theme, and it
+        // resolves through the environment rather than to a fixed palette — so
+        // it is only required to be *one of the three*, not to be the one that
+        // happened to be active when the test began. That is the actual
+        // contract: a reload after a hand-edit finds no `theme` entry, and the
+        // screen must land on a real palette rather than on a stale one.
+        set_theme(None);
+        assert!(
+            matches!(
+                colors().variant,
+                Variant::Light | Variant::Dark | Variant::Mono
+            ),
+            "the default resolved to nothing"
+        );
+        // Put back here as well as on the way out, so the assertion below is
+        // about the restore and not about the guard: the guard is what makes a
+        // *failing* run safe, this is what makes the passing one say so.
+        set_theme(match before {
+            Variant::Light => Some("light"),
+            Variant::Dark => Some("dark"),
+            Variant::Mono => Some("mono"),
+        });
+        assert_eq!(colors().variant, before, "the palette did not come back");
+    }
+
+    /// A theme chosen at runtime resolves to a whole palette at every colour
+    /// depth, and a colourless terminal is mono whatever it is told.
+    ///
+    /// The theme row now changes the palette underneath a running dashboard, so
+    /// a combination that was only ever exercised at startup is one somebody
+    /// reaches by pressing Enter. `Colorless` is included because it overrides
+    /// the theme entirely: a theme row that still showed a palette's colours
+    /// on a colourless terminal would be drawing colour where there is none.
+    #[test]
+    fn every_theme_resolves_at_every_depth() {
+        for theme in ["dark", "light", "mono"] {
+            for depth in [Depth::Indexed, Depth::Ansi16, Depth::Colorless] {
+                let p = select(None, Some(theme), None, depth, unasked);
+                // Mono is the exception: it asks for no colour at all, so it
+                // reports `Colorless` whatever the terminal could have shown,
+                // and that is what makes the rest of the UI reach for
+                // `Modifier`s instead.
+                match theme {
+                    "mono" => assert_eq!(p.depth, Depth::Colorless, "{theme} at {depth:?}"),
+                    _ => assert_eq!(p.depth, depth, "{theme} at {depth:?}"),
+                }
+                if depth == Depth::Colorless || theme == "mono" {
+                    assert_eq!(
+                        p.variant,
+                        Variant::Mono,
+                        "{theme} on a colourless terminal kept its colours"
+                    );
+                    continue;
+                }
+                // A palette that kept a slot from the other variant shows up as
+                // a colour the variant never paints, so the three that carry
+                // meaning have to stay apart from each other.
+                assert!(p.cost_low != p.cost_high, "{theme} at {depth:?}");
+                assert_ne!(p.border, p.accent, "{theme} at {depth:?}");
+            }
+        }
     }
 
     /// A `ground` callback that fails the test if it is called: the question

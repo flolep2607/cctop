@@ -13,7 +13,7 @@ expression: screen
 │  File ~/.config/cctop/config.toml                                                                                    ┃
 │                                                                                                                      ┃
 │config.toml · [settings]                                                                                              ┃
-│  theme             "auto"           auto/light/dark/mono; $CCTOP_THEME wins. On restart                              ┃
+│  theme             "auto"           auto/light/dark/mono; $CCTOP_THEME wins, and overrides this                      ┃
 │  notify            false            Bell + desktop alert when a session needs you                                    ┃
 │  auto_update       true             Offer to update at startup when a newer release is out                           ┃
 │  compact_threshold 83.5             Context % at which the agent compacts. On restart                                ┃

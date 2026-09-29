@@ -16,15 +16,21 @@
 
 use super::*;
 
-/// One editable row of the page, as a place in one of the three sources.
+/// One editable line of the page, as a place in one of the three sources.
 ///
 /// A cursor that indexes the rendered lines cannot survive a filter changing
 /// which lines exist, and a cursor that indexes a source cannot be drawn
-/// without re-deriving that arithmetic at every step. Naming the row instead
+/// without re-deriving that arithmetic at every step. Naming the line instead
 /// makes the filter a list of these, and every question about the cursor — what
 /// is under it, what Enter does, what Backspace does — a match on one value.
+///
+/// Named `Item` rather than `Row` because this crate already has a
+/// [`Row`](super::Row): the session table's, and a different thing entirely.
+/// Two types called `Row` in one `ui` module means every file that wants both
+/// has to alias one of them, and the alias gets read as though it meant
+/// something else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Row {
+pub enum Item {
     /// An entry of `[settings]`, by index into [`crate::settings::SETTINGS`].
     Setting(usize),
     /// A view choice, by index into [`VIEWS`].
@@ -246,10 +252,15 @@ pub const VIEWS: [(&str, &str, View); 10] = [
 
 /// The accounts `provider` can launch under, as the page offers them.
 ///
-/// "Default" is spelled first and last, because it is both the first thing
-/// anybody wants and the thing to come back to.
-fn account_names(app: &App, provider: crate::pricing::Provider) -> Vec<String> {
-    let _ = app;
+/// The default is the empty string and comes first, because it is both the
+/// first thing anybody wants and the thing to come back to — see
+/// [`chosen_account`], which spells the same choice the same way.
+///
+/// `app` goes unused and is named only to match the
+/// [`View::Choice::options`] signature every row in the table shares. The
+/// accounts are read off the filesystem rather than off the dashboard, so a
+/// row that did need the app would be a row reading something else.
+fn account_names(_app: &App, provider: crate::pricing::Provider) -> Vec<String> {
     let mut names = vec![String::new()];
     for profile in crate::config::launchable_for(provider) {
         // The default account is `default` by name, and the empty choice above
@@ -317,6 +328,20 @@ impl App {
         self.settings = settings;
         self.keymap = keymap;
         self.apply_columns();
+        self.apply_theme();
+    }
+
+    /// Repaint if the file now names a different theme.
+    ///
+    /// `reload_settings` is the one path every source of a change goes through —
+    /// the settings page's own writes, and an edit made in an editor while the
+    /// page is open with `e`. The second is why this is here rather than only in
+    /// the row's action: without it, changing the theme by hand and saving would
+    /// reload the keymap and the columns and quietly leave the screen in the old
+    /// colours, which is the exact thing the row on the page promises does not
+    /// happen.
+    pub(super) fn apply_theme(&mut self) {
+        super::theme::set_theme(self.settings.theme.as_deref());
     }
 
     /// Re-read the hidden columns out of the settings file.
@@ -355,45 +380,45 @@ impl App {
         self.reload_settings();
     }
 
-    /// Every row of the page, in the order they are shown.
+    /// Every line of the page, in the order they are shown.
     ///
     /// The three sources in one list, because the page is one list: a filter
     /// that could only see one of them would be worse than no filter, and the
     /// cursor needs a single numbering to walk.
-    pub(super) fn settings_rows(&self) -> Vec<Row> {
+    pub(super) fn settings_items(&self) -> Vec<Item> {
         (0..crate::settings::SETTINGS.len())
-            .map(Row::Setting)
-            .chain((0..VIEWS.len()).map(Row::View))
-            .chain((0..crate::settings::BINDINGS.len()).map(Row::Key))
+            .map(Item::Setting)
+            .chain((0..VIEWS.len()).map(Item::View))
+            .chain((0..crate::settings::BINDINGS.len()).map(Item::Key))
             .collect()
     }
 
-    /// The rows the filter leaves standing.
+    /// The lines the filter leaves standing.
     ///
     /// Matched against the name, what it does and the value, because the three
     /// are what somebody knows: "which key does search", "alerts", "83.5". A
     /// filter that only read names could not find a setting by what it does,
     /// which is most of the time.
-    pub(super) fn settings_shown(&self) -> Vec<Row> {
+    pub(super) fn settings_shown(&self) -> Vec<Item> {
         let needle = self.settings_filter.to_string();
         let needle = needle.trim().to_lowercase();
         if needle.is_empty() {
-            return self.settings_rows();
+            return self.settings_items();
         }
-        self.settings_rows()
+        self.settings_items()
             .into_iter()
-            .filter(|row| {
-                let hay = match row {
-                    Row::Setting(i) => {
+            .filter(|item| {
+                let hay = match item {
+                    Item::Setting(i) => {
                         let (name, default, what) = crate::settings::SETTINGS[*i];
                         let (now, _) = self.settings.value_of(name);
                         format!("{name} {default} {what} {now}")
                     }
-                    Row::View(i) => {
+                    Item::View(i) => {
                         let (name, what, view) = &VIEWS[*i];
                         format!("{name} {what} {}", self.view_value(view))
                     }
-                    Row::Key(i) => {
+                    Item::Key(i) => {
                         let (action, default, what) = crate::settings::BINDINGS[*i];
                         format!(
                             "{action} {default} {what} {}",
@@ -406,8 +431,8 @@ impl App {
             .collect()
     }
 
-    /// The row under the cursor, once the filter has had its say.
-    pub(super) fn settings_row(&self) -> Option<Row> {
+    /// The line under the cursor, once the filter has had its say.
+    pub(super) fn settings_item(&self) -> Option<Item> {
         self.settings_shown().get(self.settings_cursor).copied()
     }
 
@@ -460,13 +485,13 @@ impl App {
     /// Enter on the row: a toggle flips, a choice turns to the next one, a
     /// keybind waits for its new key, and anything else opens a field.
     pub(super) fn settings_activate(&mut self) {
-        let Some(row) = self.settings_row() else {
+        let Some(item) = self.settings_item() else {
             return;
         };
-        match row {
-            Row::Key(_) => self.settings_capture = true,
-            Row::View(i) => self.view_activate(i),
-            Row::Setting(i) => self.setting_activate(crate::settings::SETTINGS[i].0),
+        match item {
+            Item::Key(_) => self.settings_capture = true,
+            Item::View(i) => self.view_activate(i),
+            Item::Setting(i) => self.setting_activate(crate::settings::SETTINGS[i].0),
         }
     }
 
@@ -523,6 +548,10 @@ impl App {
                 let at = THEMES.iter().position(|t| current.trim_matches('"') == *t);
                 let next = THEMES[at.map_or(0, |i| (i + 1) % THEMES.len())];
                 self.write_setting("settings", name, Some(next.into()));
+                // Repainted by `write_setting` → `reload_settings` → the
+                // reload's own `apply_theme`, so this is a no-op and is left
+                // out rather than written twice. See [`App::apply_theme`] for
+                // why the repaint lives there and not only here.
             }
             _ => self.settings_input = Some(current.trim_matches('"').to_string().into()),
         }
@@ -537,13 +566,15 @@ impl App {
     /// spelled as "true" because it was once changed is the state the whole
     /// page exists to stop having.
     pub(super) fn settings_reset(&mut self) {
-        let Some(row) = self.settings_row() else {
+        let Some(item) = self.settings_item() else {
             return;
         };
-        match row {
-            Row::Setting(i) => self.write_setting("settings", crate::settings::SETTINGS[i].0, None),
-            Row::Key(i) => self.write_setting("keys", crate::settings::BINDINGS[i].0, None),
-            Row::View(i) => self.view_reset(i),
+        match item {
+            Item::Setting(i) => {
+                self.write_setting("settings", crate::settings::SETTINGS[i].0, None)
+            }
+            Item::Key(i) => self.write_setting("keys", crate::settings::BINDINGS[i].0, None),
+            Item::View(i) => self.view_reset(i),
         }
     }
 
@@ -559,7 +590,11 @@ impl App {
             }
             View::Number { set, .. } => set(self, 0.0),
         }
-        self.set_status(format!("{name} back to its default — {}", said("")));
+        // What it became, not that it was reset: a value is what the row shows
+        // and what somebody who pressed Backspace is looking for, and "back to
+        // its default" is a sentence about the row rather than about the
+        // setting.
+        self.set_status(format!("{name} = {}", said(&self.view_value(view))));
     }
 
     /// The key pressed while the page was waiting for one, bound to the
@@ -574,7 +609,7 @@ impl App {
         if key.code == ratatui::crossterm::event::KeyCode::Esc {
             return;
         }
-        let Some(Row::Key(i)) = self.settings_row() else {
+        let Some(Item::Key(i)) = self.settings_item() else {
             return;
         };
         let Some((action, default, _)) = BINDINGS.get(i) else {
@@ -606,12 +641,12 @@ impl App {
         let Some(text) = self.settings_input.take() else {
             return;
         };
-        let Some(row) = self.settings_row() else {
+        let Some(item) = self.settings_item() else {
             return;
         };
         let text = text.trim();
-        let Row::Setting(i) = row else {
-            return self.view_commit(row, text);
+        let Item::Setting(i) = item else {
+            return self.view_commit(item, text);
         };
         let Some((name, _, _)) = SETTINGS.get(i) else {
             return;
@@ -661,8 +696,8 @@ impl App {
     /// The bounds are the row's own and the message names them, because a
     /// figure quietly clamped to the range would leave somebody believing a
     /// cost floor of ten thousand was something other than the four they typed.
-    fn view_commit(&mut self, row: Row, text: &str) {
-        let Row::View(i) = row else {
+    fn view_commit(&mut self, item: Item, text: &str) {
+        let Item::View(i) = item else {
             return;
         };
         let (name, _, view) = &VIEWS[i];

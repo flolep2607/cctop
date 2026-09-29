@@ -13,16 +13,16 @@ expression: screen
 │  File ~/.config/cctop/config.toml                                            │
 │                                                                              │
 │config.toml · [settings]                                                      │
-│  notify            false            Bell + desktop alert when a session needs│
-│you                                                                           │
+│  notify            false            Bell + desktop alert when a session need…│
 │  alert_cost        0                Alert when a session's cost passes $X    │
-│  alert_burn        0                Alert when a session burns over $X an    │
-│hour                                                                          │
+│  alert_burn        0                Alert when a session burns over $X an ho…│
 │  alert_today       0                Alert when today's spend passes $X       │
-│  alert_errors      0                Alert when X% of 10m of tool calls fail  │
-│(try 25)                                                                      │
-│  alert_stall       0                Alert when a working agent writes nothing│
-│for X min (try 10)                                                            │
+│  alert_errors      0                Alert when X% of 10m of tool calls fail …│
+│  alert_stall       0                Alert when a working agent writes nothin…│
+│                                                                              │
+│  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table   │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

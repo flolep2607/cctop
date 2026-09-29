@@ -1639,6 +1639,146 @@ mod tests {
         assert!(app.sessions.is_empty());
     }
 
+    /// The theme row repaints the dashboard, rather than waiting for a restart.
+    ///
+    /// The whole of what the row says it does, checked the way a user would:
+    /// press Enter, and look. Drawn through the real renderer before and after,
+    /// because a palette swapped in a field that nothing then reads would pass a
+    /// test on the setting alone and leave the screen in the old colours.
+    #[test]
+    fn the_theme_row_repaints_without_a_restart() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        let mut app = test_app();
+        app.settings_file = Some(file.clone());
+        app.goto_settings();
+
+        // The frame as the renderer leaves it: every cell's symbol and style, so
+        // two palettes of the same variant are told apart by what was actually
+        // written rather than by what a field says.
+        let drawn = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(80u16, 24u16)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    render::draw(frame, app);
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..24u16)
+                .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+                .map(|at| (buffer[at].symbol().to_string(), buffer[at].style()))
+                .collect::<std::collections::HashSet<_>>()
+        };
+
+        let before = drawn(&mut app);
+        let start = super::theme::variant();
+        // The palette is a process global; the tests that read it assume dark,
+        // so this one puts it back however it ends.
+        let _restore = theme::tests::Restore(start);
+
+        // Cycle the row the way a user does and follow it. `auto` resolves
+        // through the terminal, so the *first* press is not guaranteed to look
+        // different — on a light terminal it changes nothing. `mono` always
+        // does, so the palette is asserted to have moved by the time the cycle
+        // reaches it rather than on the first press.
+        let mut seen = vec![super::theme::variant()];
+        for _ in 0..4 {
+            app.settings_cursor = item_of(&app, "theme");
+            app.settings_activate();
+            seen.push(super::theme::variant());
+        }
+        assert!(
+            seen.windows(2).any(|w| w[0] != w[1]),
+            "cycling the theme never changed the palette: {seen:?}"
+        );
+        assert!(
+            seen.contains(&theme::Variant::Mono),
+            "the cycle never reached mono: {seen:?}"
+        );
+        // And a frame drawn with a palette this test changed is not the frame
+        // that was there before it.
+        assert!(
+            drawn(&mut app) != before,
+            "the frame is identical after the palette changed"
+        );
+
+        // The file and the screen agree: what the page drew as the row's value
+        // is what was written, which is the whole claim of the row.
+        let text = std::fs::read_to_string(&file).expect("written");
+        let written = app
+            .settings
+            .theme
+            .as_deref()
+            .expect("the row wrote a theme");
+        assert!(text.contains(&format!("theme = \"{written}\"")), "{text}");
+
+        // Walk the rest of the cycle back round, so the palette this test leaves
+        // behind is the one the rest of the suite expects. Bounded by the four
+        // themes rather than by the number of presses needed, so a cycle that
+        // stopped advancing would fail here instead of hanging.
+        for _ in 0..4 {
+            app.settings_cursor = item_of(&app, "theme");
+            app.settings_activate();
+            if super::theme::variant() == start {
+                break;
+            }
+        }
+        assert_eq!(
+            super::theme::variant(),
+            start,
+            "the cycle never came back to where it started"
+        );
+    }
+
+    /// A theme changed by hand in the editor repaints, like one changed on the
+    /// page.
+    ///
+    /// `e` opens `config.toml` with the page open beside it, so this is the same
+    /// row reached the other way round: the file is rewritten underneath a
+    /// running dashboard rather than by the dashboard. `reload_settings` is what
+    /// notices, and it has to repaint as well as re-read the keymap — the gap
+    /// where it did not is invisible until someone changes their theme by hand
+    /// and watches nothing happen.
+    #[test]
+    fn a_theme_edited_in_the_file_repaints_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        let mut app = test_app();
+        app.settings_file = Some(file.clone());
+        let start = theme::variant();
+        let _restore = theme::tests::Restore(start);
+
+        std::fs::write(&file, "[settings]\ntheme = \"light\"\n").expect("write");
+        // A stamp of 0 is what a write inside the same millisecond leaves
+        // behind, and it is also the only way to be sure the reload is not
+        // skipped for having already seen this mtime.
+        app.settings_stamp = 0;
+        app.reload_settings();
+        assert_eq!(app.settings.theme.as_deref(), Some("light"), "not re-read");
+        assert_eq!(
+            theme::variant(),
+            theme::Variant::Light,
+            "the file was re-read but the screen kept the old palette"
+        );
+
+        // And taking the line back out goes to the default, not to a stale
+        // palette: a `theme` entry deleted by hand is a change like any other.
+        std::fs::write(&file, "[settings]\n").expect("write");
+        app.settings_stamp = 0;
+        app.reload_settings();
+        assert!(app.settings.theme.is_none());
+        assert!(
+            matches!(
+                theme::variant(),
+                theme::Variant::Light | theme::Variant::Dark | theme::Variant::Mono
+            ),
+            "the default theme resolved to nothing"
+        );
+    }
+
     /// Rebinding from the settings page: Enter on a keybind, then the new key,
     /// lands in the file and works on the dashboard at once — and the page
     /// draws what it wrote.
@@ -1657,7 +1797,7 @@ mod tests {
         // The page is a tab, so opening it must not have opened a mode: the
         // dashboard's own keys still belong to the dashboard underneath.
         assert_eq!(app.mode, Mode::List);
-        app.settings_cursor = row_of(&app, "help");
+        app.settings_cursor = item_of(&app, "help");
         app.on_key(key(KeyCode::Enter));
         assert!(app.settings_capture);
         app.on_key(key(KeyCode::Char('x')));
@@ -1690,12 +1830,12 @@ mod tests {
         // Backspace on the row puts it back.
         app.mode = Mode::List;
         app.on_key(key(KeyCode::Char(',')));
-        app.settings_cursor = row_of(&app, "help");
+        app.settings_cursor = item_of(&app, "help");
         app.on_key(key(KeyCode::Backspace));
         assert_eq!(app.settings.key_for("help"), "?");
 
         // A toggle flips in place.
-        app.settings_cursor = row_of(&app, "notify");
+        app.settings_cursor = item_of(&app, "notify");
         assert_eq!(crate::settings::SETTINGS[1].0, "notify");
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.settings.notify, Some(true));
@@ -1706,15 +1846,15 @@ mod tests {
     }
 
     /// Where a named row sits on the page, with nothing filtered out.
-    fn row_of(app: &App, name: &str) -> usize {
+    fn item_of(app: &App, name: &str) -> usize {
         app.settings_shown()
             .iter()
             .position(|row| {
-                use super::settings::Row;
+                use super::settings::Item;
                 match row {
-                    Row::Setting(i) => crate::settings::SETTINGS[*i].0 == name,
-                    Row::View(i) => super::settings::VIEWS[*i].0 == name,
-                    Row::Key(i) => crate::settings::BINDINGS[*i].0 == name,
+                    Item::Setting(i) => crate::settings::SETTINGS[*i].0 == name,
+                    Item::View(i) => super::settings::VIEWS[*i].0 == name,
+                    Item::Key(i) => crate::settings::BINDINGS[*i].0 == name,
                 }
             })
             .unwrap_or_else(|| panic!("no row called {name}"))
