@@ -228,17 +228,19 @@ impl App {
     /// are rearranging them, where a tab at the end jumping to the front reads
     /// as having lost it.
     pub fn move_workspace(&mut self, delta: isize) {
-        let Some(from) = (self.tab > 0).then_some(self.tab) else {
-            return;
-        };
         // Said rather than ignored: the settings page is the last thing on the
         // bar and it is not a tab, so there is nothing here to rearrange. A key
         // that does nothing and says nothing is indistinguishable from one
         // cctop lost. Asked of the *position*, because the view's own field is
-        // still the tab underneath and would answer for it.
+        // still the tab underneath and would answer for it. Before the
+        // dashboard check, because the page can be up over the dashboard and
+        // that must not be the silent case.
         if self.position() > self.tabs.len() {
             return self.set_status("The settings tab is not a tab to move");
         }
+        let Some(from) = (self.tab > 0).then_some(self.tab) else {
+            return;
+        };
         let to = (from as isize + delta).clamp(1, self.tabs.len() as isize) as usize;
         self.move_tab(from, to);
         // One keystroke is one finished rearrangement, unlike a drag.
