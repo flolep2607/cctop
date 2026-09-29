@@ -771,11 +771,21 @@ mod tests {
         // last agent lands on the settings, not back on the dashboard. The
         // position is the bar's numbering, which is what a walk of the bar is
         // over — `tab` underneath is whatever tab was there.
+        //
+        // Only `on_settings` is asserted, never which tab it is over.
+        // `go_to_tab` attaches a shared tab, so arriving at one replaces its
+        // `Shared` with a real pane, and what `tab` points at afterwards depends
+        // on whether this machine's rmux holds that session — so the "which
+        // tab" half passed on a developer machine with live sessions and failed
+        // on CI with none. The page being up is the claim; the other test
+        // covers the tab surviving a bar that changes underneath it.
         app.go_to_tab(2);
         app.cycle_workspace(1);
         assert!(
-            app.on_settings() && app.tab == 2,
-            "did not reach the settings"
+            app.on_settings(),
+            "did not reach the settings (tab={} of {} tabs)",
+            app.tab,
+            app.tabs.len()
         );
         app.cycle_workspace(1);
         assert_eq!(app.position(), 0, "and on past it to the dashboard");
