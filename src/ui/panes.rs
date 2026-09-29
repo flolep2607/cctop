@@ -779,7 +779,12 @@ mod tests {
         // tab" half passed on a developer machine with live sessions and failed
         // on CI with none. The page being up is the claim; the other test
         // covers the tab surviving a bar that changes underneath it.
-        app.go_to_tab(2);
+        //
+        // The same goes for getting to the last agent: `go_to_tab(2)` attaches,
+        // and where there is no rmux the attach fails and leaves the view on the
+        // dashboard, so the step right below landed on tab 1 instead of the
+        // settings. Standing on it by field needs nothing from the machine.
+        app.tab = 2;
         app.cycle_workspace(1);
         assert!(
             app.on_settings(),
