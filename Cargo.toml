@@ -1,3 +1,4 @@
+# 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 [package]
 name = "cctop"
 version = "0.23.0"
