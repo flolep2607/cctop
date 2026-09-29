@@ -161,9 +161,10 @@ impl App {
         self.active_tab()?.focused_mut()
     }
 
-    /// Show `tab`, clamped to what exists.
+    /// Show `tab`, clamped to what exists — the settings tab included, since it
+    /// is a stop on the bar like any other and a click on it lands here.
     pub fn show_tab(&mut self, tab: usize) {
-        self.go_to_tab(tab.min(self.tabs.len()));
+        self.go_to_tab(tab.min(self.settings_tab()));
     }
 
     /// Move `delta` tabs along, wrapping through the dashboard.
@@ -384,6 +385,16 @@ impl App {
     /// blank tab with the one you could see now detached as well.
     pub fn go_to_tab(&mut self, want: usize) {
         self.needs_redraw = true;
+        // The settings tab is on the bar but not in `tabs`, so it is reached
+        // here by number and not by index. Falling through would set `tab` one
+        // past the last agent (from the switcher) or clamp to the last agent
+        // (from a click) — either way, a page that could not be opened.
+        if want == self.settings_tab() {
+            if !self.settings_open {
+                self.goto_settings();
+            }
+            return;
+        }
         // Any move onto a workspace tab is also a move off the settings page.
         // The two share the body, so leaving the page up behind the table would
         // mean the bar's right end says one thing and the screen another — and
@@ -748,6 +759,22 @@ mod tests {
     /// vector — reaping, dragging, the rmux sync — is out of range where it
     /// would have moved or removed it, and there is no index arithmetic
     /// anywhere that has to learn about it.
+    #[test]
+    fn showing_the_settings_tab_by_number_opens_the_page() {
+        let mut app = test_app();
+        let settings = app.settings_tab();
+        app.show_tab(settings);
+        assert!(app.on_settings(), "a click on the tab did not open it");
+        assert!(app.tab <= app.tabs.len(), "and left tab at {}", app.tab);
+        // The switcher arrives by `go_to_tab` with the same number.
+        app.settings_open = false;
+        app.go_to_tab(settings);
+        assert!(app.on_settings());
+        // Landing on it again is staying, not toggling away.
+        app.go_to_tab(settings);
+        assert!(app.on_settings());
+    }
+
     #[test]
     fn the_settings_tab_is_the_last_stop_and_no_tab_takes_it() {
         let named = |name: &str| {

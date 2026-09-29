@@ -868,6 +868,10 @@ pub struct App {
     pub hosted: Option<(u32, String)>,
     /// The pasted image the corner is previewing, while it is previewing one.
     pub paste_preview: Option<PastePreview>,
+    /// The last paste delivered and when, so the same text arriving again a
+    /// moment later can be recognised as the terminal's echo of it. See
+    /// [`App::on_paste`].
+    pub last_paste: Option<(String, Instant)>,
 
     prefs: UiPrefs,
     tx: Sender<Request>,
@@ -1099,6 +1103,7 @@ impl App {
             handoff_send: None,
             hosted: None,
             paste_preview: None,
+            last_paste: None,
             needs_redraw: true,
             should_quit: false,
         }
