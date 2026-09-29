@@ -40,6 +40,10 @@ const COST_MAX: usize = 12;
 /// Longest value the settings page takes for one setting.
 const SETTING_MAX: usize = 200;
 
+/// How close two identical pastes must be to count as one. See
+/// [`App::on_paste`].
+const DOUBLE_PASTE: Duration = Duration::from_millis(150);
+
 /// Longest query the settings page's filter accepts.
 ///
 /// Short, like the switcher's: it is matched as a substring against a name and
@@ -293,8 +297,22 @@ impl App {
     /// into that and nothing at all when none is open. It is deliberately not a
     /// shortcut for anything: pasting into the dashboard is somebody aiming at a
     /// box, and answering it with an action would be a command nobody typed.
+    ///
+    /// The same text twice within [`DOUBLE_PASTE`] is one paste. A terminal that
+    /// answers a paste chord with a bracketed paste *and* a key, or a
+    /// multiplexer that forwards it on both of two paths, delivers it twice
+    /// while the person pressed once; nobody pastes the same thing twice in a
+    /// tenth of a second on purpose, so the second is dropped.
     pub(super) fn on_paste(&mut self, text: &str) {
         self.needs_redraw = true;
+        let now = Instant::now();
+        if let Some((last, at)) = &self.last_paste
+            && last == text
+            && now.duration_since(*at) < DOUBLE_PASTE
+        {
+            return;
+        }
+        self.last_paste = Some((text.to_string(), now));
 
         // An image that arrived as text — one of the ways one reaches a cctop
         // running over ssh, where the clipboard is on the machine the ssh was
@@ -2259,6 +2277,18 @@ mod tests {
     use crate::ui::{Row, menu, panels};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn the_same_paste_twice_at_once_is_one_paste() {
+        let mut app = test_app();
+        app.mode = Mode::Help;
+        app.on_paste("abc");
+        app.on_paste("abc");
+        assert_eq!(app.help_filter.to_string(), "abc", "pasted twice");
+        // A different text is a different paste, however soon.
+        app.on_paste("d");
+        assert_eq!(app.help_filter.to_string(), "abcd");
+    }
     /// A paste on the dashboard is typing into whichever one-line box is open,
     /// and the line breaks in it must not go in: none of these inputs can show a
     /// second row or let you delete back onto one.

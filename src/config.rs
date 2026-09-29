@@ -66,8 +66,27 @@ fn cache_base() -> PathBuf {
 /// Guarded like the rest because a root cctop binds its socket here, and
 /// without a runtime directory a `sudo` that kept `$HOME` would have it bind
 /// one inside the invoking user's `~/.cache`.
+///
+/// "Has one" means one this process can write to, not merely one the
+/// environment names. `$XDG_RUNTIME_DIR` is inherited across `su`, `sudo -u` and
+/// some ssh setups, where it still points at `/run/user/<somebody else>` — and
+/// every tab then failed to open with a bare "Permission denied", because the
+/// shim could not create its socket directory. The cache directory is a
+/// perfectly good home for sockets (it is what the fallback already was), so an
+/// unusable runtime directory is treated as an absent one.
 pub fn runtime_base() -> PathBuf {
-    own_dir(dirs::runtime_dir()).unwrap_or_else(cache_base)
+    own_dir(dirs::runtime_dir())
+        .filter(|dir| writable_dir(dir))
+        .unwrap_or_else(cache_base)
+}
+
+fn writable_dir(dir: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated string that outlives the call.
+    dir.is_dir() && unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) } == 0
 }
 
 /// `$CLAUDE_CONFIG_DIR`, falling back to `~/.claude`.

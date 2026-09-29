@@ -252,7 +252,8 @@ pub fn sessions() -> Vec<u32> {
 fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
     let path = socket_path(pid).ok_or_else(|| anyhow::anyhow!("no runtime or cache directory"))?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("could not create {}: {e}", parent.display()))?;
         // The socket is a typing channel into a live agent: keep the directory
         // owner-only even when it lands in a shared cache root.
         let _ =
@@ -260,7 +261,8 @@ fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
     }
     // A shim that died without cleaning up leaves a file that would block bind.
     let _ = std::fs::remove_file(&path);
-    Ok(std::os::unix::net::UnixListener::bind(&path)?)
+    std::os::unix::net::UnixListener::bind(&path)
+        .map_err(|e| anyhow::anyhow!("could not bind {}: {e}", path.display()))
 }
 
 /// First bytes of a connection that wants to *watch* the agent, not just type
