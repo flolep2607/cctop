@@ -26,6 +26,7 @@ Two rules keep it useful rather than a graveyard:
 | [subscription-burn.md](subscription-burn.md) | Design for showing how much of a subscription window is forfeited unused |
 | [follow-ups.md](follow-ups.md) | Defects and gaps noticed while researching, with where each was found |
 | [sources/](sources/) | Digests of documents read while researching, kept so a claim can be checked without re-fetching |
+| [sources/opencode-v2-plugins.md](sources/opencode-v2-plugins.md) and its neighbours | The OpenCode V2 documentation, fetched while porting cctop's plugin to the V2 API — the plugin guide, the API, the CLI, its settings, and the two migration guides |
 
 ## Conventions
 

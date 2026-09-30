@@ -483,6 +483,11 @@ pub(crate) const MAX_ASK: usize = 300;
 /// that says the most is picked per tool shape rather than per tool, since
 /// Claude, Codex and the MCP servers behind them name their tools freely but
 /// agree on `command`, `file_path`, `url` and `pattern`.
+///
+/// A harness that writes the question out in words beats anything assembled
+/// from a tool name: OpenCode 2 puts the agent's own sentence in `message` for
+/// the questions it asks, and `question: <the question>` is a worse line than
+/// the question. So `message` is taken whole when it is there.
 fn ask_of(body: &serde_json::Value) -> Option<String> {
     let event = body
         .get("hook_event_name")
@@ -491,17 +496,27 @@ fn ask_of(body: &serde_json::Value) -> Option<String> {
     if !matches!(event, "PermissionRequest" | "permission.asked") {
         return None;
     }
+    let said = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let tool = body
         .get("tool_name")
         .and_then(|v| v.as_str())
-        .filter(|t| !t.is_empty())?;
-    let input = body.get("tool_input");
-    let detail = ["command", "file_path", "path", "url", "pattern", "query"]
-        .iter()
-        .find_map(|key| input?.get(key)?.as_str().filter(|v| !v.is_empty()));
-    let line = match detail {
-        Some(detail) => format!("{tool}: {detail}"),
-        None => tool.to_string(),
+        .filter(|t| !t.is_empty());
+    let line = match said {
+        Some(said) => said,
+        None => {
+            let tool = tool?;
+            let input = body.get("tool_input");
+            let detail = ["command", "file_path", "path", "url", "pattern", "query"]
+                .iter()
+                .find_map(|key| input?.get(key)?.as_str().filter(|v| !v.is_empty()));
+            match detail {
+                Some(detail) => format!("{tool}: {detail}"),
+                None => tool.to_string(),
+            }
+        }
     };
     // One line, because it is shown on one: a heredoc's body is not what the
     // person needs to see to recognise the command.
@@ -1159,6 +1174,14 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // the same way it does for a tool that runs long and quietly. A session
         // blocked on one of these looked idle.
         "permission.asked" | "PermissionRequest" | "Elicitation" => Some(Signal::NeedsInput),
+        // The answer to one of those, from a harness that has no event for it.
+        // OpenCode 2 raises nothing when a prompt is answered — the request
+        // simply stops being pending — so its plugin says so from the API
+        // instead, which is the same closing-out a `PostToolUse` does for Claude
+        // Code: without it a tab keeps asking about a question that was
+        // answered minutes ago, and the only thing that clears it is the tool
+        // call that follows, or the end of the turn.
+        "permission.replied" | "permission.rejected" => Some(Signal::Busy),
         // Auto mode refused a tool call. The turn continues — the model is told
         // it may retry — so this is not the end of anything, but it is the one
         // event that says a refusal happened at all. Without it the only trace
@@ -2202,66 +2225,171 @@ const OPENCODE_EVENTS: &[&str] = &[
     "tool.execute.after",
 ];
 
+/// The names a plugin file has to carry for the OpenCode of `api` that cctop
+/// wants.
+///
+/// OpenCode 2 registers the two tool moments as hooks and reads the asking from
+/// the API, so its half is looked for under the names that API and those hooks
+/// use rather than the ones 1 announced them with — and it has to say when a
+/// prompt was answered as well as when one went up, which 1's half never had to.
+fn wanted(api: crate::opencode::Api) -> Vec<&'static str> {
+    match api {
+        crate::opencode::Api::V1 => OPENCODE_EVENTS.to_vec(),
+        crate::opencode::Api::V2 => vec![
+            "session.idle",
+            "session.created",
+            "session.deleted",
+            "session.compacted",
+            "permission.asked",
+            "permission.replied",
+            "execute.before",
+            "execute.after",
+        ],
+    }
+}
+
+/// Which dialects a plugin file on disk carries, read back out of its exports.
+///
+/// They cannot be mistaken for one another, which is the point: OpenCode 2
+/// refuses anything without a default export, so a version 1 file on a version 2
+/// server is not loaded at all — it says so in a log line and carries on, and
+/// the session looks to cctop like one that is merely quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginShape {
+    /// A version 1 plugin: a named export and nothing else.
+    V1,
+    /// A version 2 plugin: a default export and nothing else.
+    V2,
+    /// What cctop writes now: both halves in one file, which is right on every
+    /// version and is what makes an upgrade a non-event.
+    Both,
+}
+
+fn plugin_shape(text: &str) -> PluginShape {
+    match (
+        text.contains("export default"),
+        text.contains("export const cctop"),
+    ) {
+        (true, true) => PluginShape::Both,
+        (true, false) => PluginShape::V2,
+        (false, _) => PluginShape::V1,
+    }
+}
+
+/// The events `text` does not forward to the OpenCode of `api` that cctop wants.
+fn plugin_shortfall(text: &str, api: crate::opencode::Api) -> Vec<&'static str> {
+    let for_this_one = wanted(api);
+    // A file carrying both halves forwards everything on every version, so it is
+    // checked against the union and nothing else. One carrying a single half is
+    // short of *everything* on the other version, which is not a shortfall to be
+    // filled in by editing: the file is replaced whole, which is what an install
+    // does anyway. It is reported so that an OpenCode upgraded under a cctop
+    // installed before this one is rewritten rather than going quiet.
+    let carried = match plugin_shape(text) {
+        PluginShape::Both => {
+            let mut both = wanted(crate::opencode::Api::V1);
+            for name in wanted(crate::opencode::Api::V2) {
+                if !both.contains(&name) {
+                    both.push(name);
+                }
+            }
+            both
+        }
+        PluginShape::V1 if api == crate::opencode::Api::V1 => for_this_one,
+        PluginShape::V2 if api == crate::opencode::Api::V2 => for_this_one,
+        PluginShape::V1 | PluginShape::V2 => return for_this_one,
+    };
+    carried
+        .iter()
+        .filter(|event| !text.contains(**event))
+        .copied()
+        .collect()
+}
+
 /// The line the plugin records this binary's path on, and how its own state is
 /// read back out.
 const PLUGIN_MARKER: &str = "const CCTOP = ";
 
-/// The plugin cctop writes into OpenCode.
+/// The plugin cctop writes, as a file rather than as a string in here.
+///
+/// A real `.ts` file because it is a real program: an editor highlights it, a
+/// formatter can be run over it, and a diff of it is a diff of JavaScript rather
+/// than of Rust lines with every brace doubled to survive `format!`. Embedded
+/// with `include_str!` for the reason [`crate::serve`] embeds its pages the same
+/// way — an installed cctop is one binary, and a plugin cctop cannot find is a
+/// plugin that reports nothing.
+///
+/// The one line that is per-install is a placeholder: `PLUGIN_PATH`, replaced
+/// with this binary's path at install time, and read back out of the installed
+/// file by [`plugin_exe`].
+const PLUGIN: &str = include_str!("assets/opencode-plugin.ts");
+
+/// What the placeholder is written as, quoted, so the substitution is one
+/// replacement of a whole JSON string rather than a splice inside one.
+const PLUGIN_PATH: &str = "\"$CCTOP\"";
+
+/// The two exports whole, for the tests that take one of them out. Which
+/// dialect a file is comes from the shorter markers in [`plugin_shape`], because
+/// a file written for one version alone has a shorter line here.
+#[cfg(test)]
+const PLUGIN_DEFAULT_EXPORT: &str = "export default { id: \"cctop\", setup, server: cctopV1 }";
+#[cfg(test)]
+const PLUGIN_NAMED_EXPORT: &str = "export const cctop = cctopV1";
+
+/// The plugin cctop writes, for every OpenCode there is.
 ///
 /// OpenCode has no hook commands to register: extensions are code it loads at
 /// startup, so the only way in is a file, and cctop writes the whole of it. That
 /// makes this the one integration that runs *inside* the agent's process rather
-/// than beside it, which is why every line of the handler is wrapped: a plugin
+/// than beside it, which is why every line of the plugin is wrapped: a plugin
 /// that throws is a plugin that can spoil the session it is watching, and there
 /// is no exit code to hide behind here.
 ///
-/// The event is handed to `cctop hook` as one argument, the same way Codex does
-/// it, and the child is left to run on its own — nothing waits for it, so the
-/// agent's own loop is never blocked on a monitor.
+/// # One file for both OpenCodes
+///
+/// Version 2 replaced the plugin API outright and does not load a version 1
+/// plugin at all — it logs a warning nobody opens and carries on, so a session
+/// on version 2 reports nothing and looks merely quiet. The obvious answer is to
+/// write whichever file the installed version wants, which is what this did
+/// first, and it has one bad property: it is only right until somebody upgrades.
+///
+/// So the file carries both dialects instead, and neither can be run on the
+/// wrong OpenCode by accident:
+///
+/// - A named export is the version 1 plugin, and is what version 1 has always
+///   loaded — including 1.14, which knows nothing about object entrypoints.
+/// - The default export is `{ id, setup, server }`: version 2 calls `setup`,
+///   and version 1.18.29 and newer call `server`, which is the same version 1
+///   plugin again. Verified against 1.14.25, 1.18.33 and 2.0.20 rather than
+///   assumed: 1.18.33 calls *both*, handing `setup` a context with no `event`,
+///   `tool` or `permission` on it, which is why every use of them is optional
+///   and the whole body is guarded. Version 2 calls only `setup`, so a version 2
+///   session is never reported twice.
+///
+/// Both halves hand each moment to `cctop hook` the same way and under the same
+/// names, so everything downstream of the plugin reads one vocabulary.
 fn plugin_source(exe: &str) -> String {
-    let exe = serde_json::Value::String(exe.to_string());
-    let reported = serde_json::to_string(OPENCODE_EVENTS).unwrap_or_default();
-    format!(
-        r#"// Written by cctop, which watches coding agents. Safe to delete: removing
-// this file is all it takes to stop reporting.
-//
-// Reports the moments a transcript cannot show — a turn finishing, a session
-// starting or ending — to whatever cctop is running. Every failure is
-// swallowed on purpose: this runs inside OpenCode, and a monitor must never be
-// the reason a session breaks.
-{PLUGIN_MARKER}{exe}
-
-// Only the events cctop has something to say about. Anything else is ignored
-// here rather than spawning a process to be dropped at the other end.
-const REPORTED = new Set({reported})
-
-export const cctop = async ({{ directory, worktree }}) => {{
-  return {{
-    event: async ({{ event }}) => {{
-      try {{
-        const type = event?.type
-        if (!type || !REPORTED.has(type)) return
-        const props = event.properties ?? {{}}
-        const sessionID = props.sessionID ?? props.info?.id ?? props.sessionId
-        if (!sessionID) return
-        const payload = JSON.stringify({{
-          type,
-          sessionID,
-          directory: directory ?? worktree ?? "",
-        }})
-        Bun.spawn([CCTOP, "hook", "{OPENCODE_SELECTOR}", payload], {{
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-        }}).unref()
-      }} catch {{
-        // A monitor is never worth an exception in somebody else's agent.
-      }}
-    }},
-  }}
-}}
-"#
+    PLUGIN.replace(
+        PLUGIN_PATH,
+        &serde_json::Value::String(exe.to_string()).to_string(),
     )
+}
+
+/// The same plugin with one entry point taken out.
+///
+/// Not what cctop installs — this is for the tests, which need a file that is
+/// *only* version 1 or *only* version 2 to prove that one written for the other
+/// is noticed rather than read as installed. Taken out of the real file rather
+/// than written twice, so the two fixtures cannot drift from what ships: each
+/// keeps every name cctop wants, which is exactly the state being tested — a
+/// plugin that says the right things and is loaded by nothing.
+#[cfg(test)]
+fn plugin_source_for(exe: &str, api: crate::opencode::Api) -> String {
+    let text = plugin_source(exe);
+    match api {
+        crate::opencode::Api::V1 => text.replace(PLUGIN_DEFAULT_EXPORT, ""),
+        crate::opencode::Api::V2 => text.replace(PLUGIN_NAMED_EXPORT, ""),
+    }
 }
 
 /// Write the plugin, replacing whatever cctop left there before.
@@ -2366,14 +2494,16 @@ fn plugin_health(path: &Path) -> Health {
             // A plugin from an older cctop forwards fewer events, and the file
             // says which: the names are in it verbatim. Reported as a shortfall
             // so it is filled in the same way a stale settings file is.
-            Some(exe) => verdict(
-                Some(exe),
-                OPENCODE_EVENTS
-                    .iter()
-                    .filter(|event| !text.contains(**event))
-                    .copied()
-                    .collect(),
-            ),
+            //
+            // A plugin written for the *other* OpenCode is short all of them,
+            // and that is not a shortfall to be filled in by editing: the file
+            // is replaced whole, which is what an install does anyway. The
+            // difference is that it has to be reported at all. A V1 plugin on a
+            // V2 server names this binary and every event cctop wants, and
+            // forwards nothing, because OpenCode 2 does not load it — it says so
+            // in a log line and carries on, and the session looks to cctop like
+            // one that is merely quiet.
+            Some(exe) => verdict(Some(exe), plugin_shortfall(&text, crate::opencode::api())),
         },
     }
 }
@@ -3474,14 +3604,16 @@ mod tests {
             text.contains(&format!("\"hook\", \"{OPENCODE_SELECTOR}\"")),
             "the plugin has to call the hook the way `hook` reads it"
         );
-        for event in OPENCODE_EVENTS {
+        for event in wanted(crate::opencode::api()) {
             assert!(text.contains(event), "the plugin forwards no {event}");
         }
         // A plugin from an older cctop forwards fewer events, and cctop owns the
         // whole file — so it is a shortfall to be filled in rather than
         // something to leave alone. Nothing else notices: the exe line, which is
-        // all health used to read, is identical.
-        std::fs::write(&path, text.replace(",\"tool.execute.after\"", "")).unwrap();
+        // all health used to read, is identical. `session.compacted` rather than
+        // one of the tool moments, because which of those a file is expected to
+        // register is up to the OpenCode that is installed.
+        std::fs::write(&path, text.replace("session.compacted", "session.gone")).unwrap();
         assert!(
             Harness::OpenCode.health(&scope).unwrap().is_problem(),
             "a plugin missing an event read as fine"
@@ -3507,6 +3639,261 @@ mod tests {
             "the plugin file was left on disk"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One file, both OpenCodes.
+    ///
+    /// This is what makes an upgrade a non-event: the file cctop installed when
+    /// the machine was on one version is still the right file on the other, so
+    /// an OpenCode upgraded under a cctop that never runs again keeps reporting
+    /// instead of going quiet until somebody reinstalls the hooks.
+    ///
+    /// The shape is the one OpenCode's own migration guide documents — a named
+    /// export for version 1, a default export carrying `setup` for version 2 and
+    /// `server` for version 1.18.29 and newer — and it was checked against real
+    /// binaries rather than assumed: 1.14.25 loads the named export, 1.18.33 calls
+    /// `server` *and* `setup` (with a context carrying none of version 2's
+    /// domains, which is why the body is guarded), and 2.0.20 calls `setup` alone,
+    /// so a version 2 session is never reported twice.
+    #[test]
+    fn one_plugin_file_carries_both_open_codes() {
+        let text = plugin_source("/usr/bin/cctop");
+        // Both entrypoints, and the V1 function reachable from both.
+        assert!(
+            text.contains("export const cctop = cctopV1"),
+            "1.x loads a named export"
+        );
+        assert!(
+            text.contains("export default { id: \"cctop\", setup, server: cctopV1 }"),
+            "2 loads setup, 1.18.29+ loads server"
+        );
+        assert!(
+            text.contains("export default"),
+            "a V2 plugin default-exports"
+        );
+        assert!(text.contains("id: \"cctop\""), "and names itself");
+        // Each half reads its own version's payload key, and neither reads the
+        // other's: the wrong key is how a port reports nothing at all.
+        assert!(
+            text.contains("event.properties"),
+            "the V1 half reads `properties`"
+        );
+        assert!(text.contains("event?.data"), "the V2 half reads `data`");
+        // One spawn, shared, so there is one thing to be wrong about.
+        assert_eq!(
+            text.matches("node:child_process").count(),
+            1,
+            "the two halves share one way of handing an event over"
+        );
+        assert!(text.contains("const CCTOP = \"/usr/bin/cctop\""));
+        assert!(text.contains(&format!("\"hook\", \"{OPENCODE_SELECTOR}\"")));
+    }
+
+    /// The file OpenCode 2 loads is a different dialect from the one OpenCode 1
+    /// loads, and only one of the two names every event cctop wants: the tool
+    /// moments are hooks there, so they are registered as `execute.before` and
+    /// reported as the names the rest of cctop reads.
+    #[test]
+    fn the_plugin_for_opencode_two_is_written_in_the_api_it_loads() {
+        let text = plugin_source("/usr/bin/cctop");
+        assert!(
+            text.contains(PLUGIN_DEFAULT_EXPORT),
+            "a V2 plugin default-exports"
+        );
+        assert!(text.contains("id: \"cctop\""), "and names itself");
+        assert!(text.contains("ctx.event?.subscribe"), "it subscribes");
+        assert!(
+            text.contains("event?.data"),
+            "V2 payloads are under `data`, where 1 had `properties`"
+        );
+        assert!(text.contains("ctx.tool.hook(\"execute.before\""));
+        assert!(text.contains("ctx.tool.hook(\"execute.after\""));
+        for event in wanted(crate::opencode::Api::V2) {
+            assert!(text.contains(event), "the plugin registers no {event}");
+        }
+        // The stream carries four of them; the asking and the tool moments come
+        // from the API and the hooks, which is why they are not in this set.
+        let streamed = text
+            .split("const STREAMED = new Set([")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .unwrap_or_default();
+        assert_eq!(
+            streamed,
+            r#""session.idle","session.created","session.deleted","session.compacted""#
+        );
+    }
+
+    /// The one line that is per-install, and the one way the file can come out
+    /// wrong in a way nothing else would notice: a plugin that loaded, said
+    /// nothing, and looked installed — because it still had the placeholder
+    /// where the binary's path should be.
+    #[test]
+    fn the_binarys_path_is_substituted_and_leaves_nothing_behind() {
+        assert_eq!(
+            PLUGIN.matches(PLUGIN_PATH).count(),
+            1,
+            "one placeholder, and only one, or the substitution is a guess"
+        );
+        for exe in ["/usr/local/bin/cctop", "/home/some body/bin/cctop"] {
+            let text = plugin_source(exe);
+            assert!(!text.contains(PLUGIN_PATH), "{exe} left the placeholder in");
+            assert!(
+                !text.contains("$CCTOP"),
+                "a path that is not quoted JSON cannot be read back"
+            );
+            // A path with a quote or a backslash in it has to survive, because
+            // health reads this line back and a splice inside a quoted string
+            // would not.
+            assert_eq!(plugin_exe(&text).as_deref(), Some(exe));
+        }
+    }
+
+    /// The version 1 half, on its own, is the plugin OpenCode 1 has always
+    /// loaded: a named export of a function returning its hooks, reading the
+    /// payload key 1 puts it under.
+    #[test]
+    fn the_version_one_half_is_the_plugin_opencode_one_has_always_loaded() {
+        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V1);
+        assert!(text.contains("export const cctop = cctopV1"));
+        assert!(text.contains("event.properties"));
+        assert!(!text.contains("export default"));
+        for event in OPENCODE_EVENTS {
+            assert!(text.contains(event), "the plugin forwards no {event}");
+        }
+    }
+
+    /// The failure a single-dialect file has when it meets the other OpenCode:
+    /// it names the right binary and every event cctop wants, and forwards
+    /// nothing, because the server does not load it. Nothing else can see that,
+    /// so health has to — and the file cctop writes now cannot be in that state.
+    #[test]
+    fn a_single_dialect_file_is_short_of_everything_on_the_other_version() {
+        let v1 = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V1);
+        let v2 = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        let both = plugin_source("/usr/bin/cctop");
+        assert_eq!(plugin_shape(&v1), PluginShape::V1);
+        assert_eq!(plugin_shape(&v2), PluginShape::V2);
+        assert_eq!(plugin_shape(&both), PluginShape::Both);
+        // Each single-dialect file is right for its own OpenCode...
+        assert!(plugin_shortfall(&v1, crate::opencode::Api::V1).is_empty());
+        assert!(plugin_shortfall(&v2, crate::opencode::Api::V2).is_empty());
+        // ...and forwards nothing on the other, which is what gets it rewritten.
+        assert_eq!(
+            plugin_shortfall(&v1, crate::opencode::Api::V2),
+            wanted(crate::opencode::Api::V2)
+        );
+        assert_eq!(
+            plugin_shortfall(&v2, crate::opencode::Api::V1),
+            wanted(crate::opencode::Api::V1)
+        );
+        // The file cctop writes is right on both, and carries every name.
+        for api in [crate::opencode::Api::V1, crate::opencode::Api::V2] {
+            assert!(
+                plugin_shortfall(&both, api).is_empty(),
+                "the file cctop writes is short on {api:?}"
+            );
+        }
+        for api in [crate::opencode::Api::V1, crate::opencode::Api::V2] {
+            for event in wanted(api) {
+                assert!(both.contains(event), "the plugin carries no {event}");
+            }
+        }
+    }
+
+    /// The plugin for OpenCode 2 is written in the API that OpenCode 2 has.
+    ///
+    /// This is the part a translation cannot do. OpenCode 2 raises no event
+    /// when it stops to ask — not for a permission, not for a question, not
+    /// when either is answered — so a file that only listened to the stream
+    /// would report a blocked session as a working one, which is the state a
+    /// held prompt has always been hardest to see.
+    #[test]
+    fn the_plugin_for_opencode_two_asks_the_api_what_is_waiting() {
+        let text = plugin_source("/usr/bin/cctop");
+        assert!(
+            text.contains("ctx.permission.list"),
+            "the asking is a row in an API, not an event"
+        );
+        assert!(text.contains("report(\"permission.asked\""));
+        assert!(
+            text.contains("report(\"permission.replied\""),
+            "nothing in OpenCode 2 says a prompt was answered"
+        );
+        // And the question is the same fact as the permission: 2 counts an
+        // agent's question as a request whose action is `question`.
+        assert!(text.contains("askOf"));
+    }
+
+    /// A prompt is said once, an answer once, and a session that has gone quiet
+    /// stops being asked about — unless something is still pending, which is
+    /// the whole reason to keep asking.
+    #[test]
+    fn the_poll_says_each_moment_once_and_forgets() {
+        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        assert!(text.contains("const POLL_MS = 1000"));
+        assert!(text.contains("const FORGET_MS = 120000"));
+        assert!(
+            text.contains("if (now - at > FORGET_MS && !pending0?.size)"),
+            "a prompt left up is still up, and cctop's claim has to keep being true"
+        );
+        // Told what it has already said, so a request that stays pending is not
+        // re-announced once a second.
+        assert!(text.contains("const told = waiting.get(sessionID)"));
+    }
+
+    /// The line shown beside an Allow button, which is the whole reason to read
+    /// the request rather than the screen: it is what the agent asked, in the
+    /// agent's words where there are any.
+    #[test]
+    fn a_question_is_shown_as_the_question_and_a_command_as_the_command() {
+        let asked = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "shell",
+            "tool_input": { "command": "rm -rf build" },
+        }));
+        assert_eq!(asked.as_deref(), Some("shell: rm -rf build"));
+        // What 2 puts on a request it raised as a question.
+        let question = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "question",
+            "message": "Which database should this use?",
+        }));
+        assert_eq!(
+            question.as_deref(),
+            Some("Which database should this use?"),
+            "the agent's own sentence beats an assembled one"
+        );
+        // A path, and a prompt long enough to need cutting down to one line.
+        let path = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "edit",
+            "tool_input": { "file_path": "src/main.rs" },
+        }));
+        assert_eq!(path.as_deref(), Some("edit: src/main.rs"));
+        let long = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "shell",
+            "tool_input": { "command": format!("echo {}\nsecond line", "x".repeat(MAX_ASK)) },
+        }));
+        assert_eq!(long.as_ref().map(|l| l.chars().count()), Some(MAX_ASK));
+        assert!(!long.unwrap_or_default().contains('\n'));
+        // Not a permission event, so no line at all.
+        assert!(ask_of(&serde_json::json!({ "type": "session.idle" })).is_none());
+    }
+
+    /// The moment a prompt is answered, which for OpenCode 2 cctop has to be
+    /// told: a tab that keeps asking about a question that was answered two
+    /// minutes ago is worse than one that never noticed.
+    #[test]
+    fn an_answered_prompt_says_the_agent_is_working_again() {
+        assert_eq!(
+            signal_of("permission.replied", ""),
+            Some(Signal::Busy),
+            "the answer closes the prompt out, the way a tool call does"
+        );
+        assert_eq!(signal_of("permission.rejected", ""), Some(Signal::Busy));
+        assert_eq!(signal_of("permission.asked", ""), Some(Signal::NeedsInput));
     }
 
     /// An install from an older cctop registers fewer events than this one
