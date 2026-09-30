@@ -213,14 +213,26 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
         return;
     }
     let dir = cwd.filter(|d| d.is_dir()).map(|d| d.to_string_lossy());
-    let mut create = vec!["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name];
+    let mut create: Vec<String> = ["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     if let Some(dir) = &dir {
-        create.extend(["-c", dir]);
+        create.extend(["-c", dir].map(str::to_string));
+    }
+    // Set on the session rather than on the command, because the command is not
+    // what runs it: a placeholder window does, and the agent is typed into that
+    // window afterwards. Everything the agent is started with therefore has to
+    // be in the session's own environment, which also covers the detached
+    // launch that hands rmux the agent as the command.
+    for (var, value) in crate::opencode::launch_env(argv) {
+        create.push("-e".into());
+        create.push(format!("{var}={value}"));
     }
     // A window running nothing is a session that ends before it can be
     // configured, so the placeholder has to outlive the two commands after it.
     // The day is only how long an unreachable failure would sit around.
-    create.extend(["--", "sleep", "86400"]);
+    create.extend(["--", "sleep", "86400"].map(str::to_string));
     let Ok(out) = Command::new(BIN).args(&create).output() else {
         return;
     };

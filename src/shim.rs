@@ -607,6 +607,12 @@ fn spawn_on_pty_at(
     for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
         cmd.env_remove(var);
     }
+    // Anything the agent it is launching has to be told, which today is
+    // OpenCode 2's own tab strip: cctop's tabs are the ones on the dashboard and
+    // the tab bar inside the pane is a second, lesser account of the same fact.
+    for (var, value) in crate::opencode::launch_env(argv) {
+        cmd.env(var, value);
+    }
     // A directory that has since been removed would fail the spawn outright, so
     // an unusable one is simply not applied.
     if let Some(cwd) = cwd.filter(|dir| dir.is_dir()) {

@@ -28,7 +28,22 @@ One install covers five agents, each asked in its own dialect:
 | **Gemini CLI** | `~/.gemini/settings.json`, or `<project>/.gemini/` | eight — `BeforeAgent`, `AfterAgent`, `BeforeTool`, `AfterTool`, `Notification`, `SessionStart`, `SessionEnd`, `PreCompress` |
 | **Cursor** | `~/.cursor/hooks.json`, or `<project>/.cursor/` | seven — `stop`, `beforeSubmitPrompt`, `beforeShellExecution`, `sessionStart`, `sessionEnd`, `preCompact`, `subagentStop` |
 | **Codex** | `~/.codex/hooks.json`, or `<project>/.codex/`, and `~/.codex/config.toml` | ten hooks — `Stop`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`, `SubagentStop` — and `notify = ["cctop", "hook", "codex"]` |
-| **OpenCode** | `~/.config/opencode/plugins/cctop.ts`, or `<project>/.opencode/` | a plugin, since OpenCode extends by code rather than by command |
+| **OpenCode** | `~/.config/opencode/plugins/cctop.ts`, or `<project>/.opencode/` | a plugin, since OpenCode extends by code rather than by command — written for whichever OpenCode is installed, see below |
+
+OpenCode's plugin is the one file cctop cannot register with a command, and the
+only integration whose shape is decided by somebody else's release. OpenCode 2
+replaced the plugin API outright and does not load a V1 plugin at all — it says
+so in a log file and carries on — so cctop asks the binary which one it is
+(`opencode --version`) and writes that file. Both report the same events under
+the same names, so nothing downstream of the plugin has to know which is which,
+and an install left over from the other OpenCode reads as short of every event
+— which cctop repairs on its own at the next start, or on demand from
+`--install-hooks`.
+
+An OpenCode cctop launches also has its own tab strip turned off, for that run
+only: cctop's tabs are the real ones, and a tab bar inside the pane is a second
+and lesser account of the same fact. `cli.json` is yours and is not touched —
+type `opencode` yourself and your tabs are there.
 
 Codex is asked twice, because its two ways of saying things fail differently.
 Its hook framework borrowed Claude Code's spelling wholesale — same event names,

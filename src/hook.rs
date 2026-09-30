@@ -2202,11 +2202,48 @@ const OPENCODE_EVENTS: &[&str] = &[
     "tool.execute.after",
 ];
 
+/// The names a plugin file written for `api` has to carry, which is not the
+/// same set as [`OPENCODE_EVENTS`] for both.
+///
+/// The two tool moments are hooks in OpenCode 2 rather than events on the
+/// stream, so the file registers them under the names that API uses and reports
+/// them to cctop under the names above. Looking for the reported names in a V2
+/// file would find the first five and miss the two hooks, and a file that
+/// forwards nothing would still pass.
+fn wanted(api: crate::opencode::Api) -> Vec<&'static str> {
+    match api {
+        crate::opencode::Api::V1 => OPENCODE_EVENTS.to_vec(),
+        crate::opencode::Api::V2 => OPENCODE_EVENTS
+            .iter()
+            .map(|event| match *event {
+                "tool.execute.before" => "execute.before",
+                "tool.execute.after" => "execute.after",
+                other => other,
+            })
+            .collect(),
+    }
+}
+
+/// Which API a plugin file on disk was written against, read back out of the
+/// shape of its export.
+///
+/// OpenCode 2 refuses anything without a default export, so the two cannot be
+/// mistaken for one another — which is the point: a V1 file on a V2 server is
+/// not loaded at all, and the only sign of that is a warning in a log file
+/// nobody opens.
+fn plugin_api(text: &str) -> crate::opencode::Api {
+    if text.contains("export default") {
+        crate::opencode::Api::V2
+    } else {
+        crate::opencode::Api::V1
+    }
+}
+
 /// The line the plugin records this binary's path on, and how its own state is
 /// read back out.
 const PLUGIN_MARKER: &str = "const CCTOP = ";
 
-/// The plugin cctop writes into OpenCode.
+/// The plugin cctop writes into the OpenCode that is installed.
 ///
 /// OpenCode has no hook commands to register: extensions are code it loads at
 /// startup, so the only way in is a file, and cctop writes the whole of it. That
@@ -2218,9 +2255,28 @@ const PLUGIN_MARKER: &str = "const CCTOP = ";
 /// The event is handed to `cctop hook` as one argument, the same way Codex does
 /// it, and the child is left to run on its own — nothing waits for it, so the
 /// agent's own loop is never blocked on a monitor.
+///
+/// Two files, because OpenCode 2 replaced the plugin API rather than extending
+/// it and does not load a V1 plugin at all. Which one to write is not a
+/// preference: [`crate::opencode::api`] asks the binary, because a file written
+/// for the other one is a file OpenCode opens, finds nothing it recognises, and
+/// skips — leaving cctop watching a session that is reporting nothing at all.
 fn plugin_source(exe: &str) -> String {
-    let exe = serde_json::Value::String(exe.to_string());
-    let reported = serde_json::to_string(OPENCODE_EVENTS).unwrap_or_default();
+    plugin_source_for(exe, crate::opencode::api())
+}
+
+/// [`plugin_source`] for a known API, so that a test can check both files
+/// without a machine that has both installed.
+fn plugin_source_for(exe: &str, api: crate::opencode::Api) -> String {
+    match api {
+        crate::opencode::Api::V1 => plugin_source_v1(exe),
+        crate::opencode::Api::V2 => plugin_source_v2(exe),
+    }
+}
+
+/// The comment every cctop plugin opens with, and the line health reads the
+/// binary back out of.
+fn plugin_preamble(exe: &serde_json::Value) -> String {
     format!(
         r#"// Written by cctop, which watches coding agents. Safe to delete: removing
 // this file is all it takes to stop reporting.
@@ -2230,7 +2286,16 @@ fn plugin_source(exe: &str) -> String {
 // swallowed on purpose: this runs inside OpenCode, and a monitor must never be
 // the reason a session breaks.
 {PLUGIN_MARKER}{exe}
+"#
+    )
+}
 
+/// The plugin for OpenCode 1: a function that returns the hooks it wants.
+fn plugin_source_v1(exe: &str) -> String {
+    let exe = serde_json::Value::String(exe.to_string());
+    let reported = serde_json::to_string(OPENCODE_EVENTS).unwrap_or_default();
+    format!(
+        r#"{}
 // Only the events cctop has something to say about. Anything else is ignored
 // here rather than spawning a process to be dropped at the other end.
 const REPORTED = new Set({reported})
@@ -2260,7 +2325,109 @@ export const cctop = async ({{ directory, worktree }}) => {{
     }},
   }}
 }}
-"#
+"#,
+        plugin_preamble(&exe)
+    )
+}
+
+/// The plugin for OpenCode 2: a default export with an `id` and a `setup`.
+///
+/// The event names are the same five, and so is the JSON handed to `cctop hook`
+/// — which is what lets the reading half of cctop stay one thing across both
+/// OpenCodes. What changed is everything around them: the stream is subscribed
+/// to rather than called back on, the payload is under `data` where 1 had
+/// `properties`, and the two tool moments are hooks instead of events.
+///
+/// `node:child_process` rather than `Bun.spawn` because the one runtime this is
+/// certainly running under is Node's API, which Bun implements — whereas `Bun`
+/// being in scope is a property of the host that a plugin loaded from a plain
+/// file has no reason to assume. The two do not take the same arguments, though:
+/// `Bun.spawn` is handed one array and Node's `spawn` is handed the program and
+/// its arguments separately, and only the second is right here.
+///
+/// No import of `@opencode/plugin` for `Plugin.define`, which is the documented
+/// spelling of this export. The loader asks for a default export with an `id`
+/// and a `setup` and validates nothing else, and an import is one more thing
+/// that has to resolve before cctop can hear anything at all.
+fn plugin_source_v2(exe: &str) -> String {
+    let exe = serde_json::Value::String(exe.to_string());
+    let reported = serde_json::to_string(
+        &OPENCODE_EVENTS
+            .iter()
+            .copied()
+            .filter(|event| !event.starts_with("tool.execute."))
+            .collect::<Vec<&str>>(),
+    )
+    .unwrap_or_default();
+    format!(
+        r#"{}
+// Only the events cctop has something to say about. Anything else is ignored
+// here rather than spawning a process to be dropped at the other end. The two
+// tool moments are hooks rather than events and are registered below.
+const REPORTED = new Set({reported})
+
+import {{ spawn }} from "node:child_process"
+
+// One child per moment, left to run on its own: nothing waits for it, so the
+// agent's own loop is never blocked on a monitor.
+const report = (type, sessionID, directory) => {{
+  try {{
+    if (!sessionID) return
+    const payload = JSON.stringify({{ type, sessionID, directory: directory ?? "" }})
+    spawn(CCTOP, ["hook", "{OPENCODE_SELECTOR}", payload], {{
+      stdio: "ignore",
+      detached: true,
+    }}).unref()
+  }} catch {{
+    // A monitor is never worth an exception in somebody else's agent.
+  }}
+}}
+
+export default {{
+  id: "cctop",
+  async setup(ctx) {{
+    const here = ctx.location.directory
+    // The subscription is the whole of it, and the AbortController is what stops
+    // it: a plugin that outlives its OpenCode would keep spawning children for
+    // a server that is no longer there.
+    const controller = new AbortController()
+    void (async () => {{
+      try {{
+        for await (const event of ctx.event.subscribe({{ signal: controller.signal }})) {{
+          try {{
+            const type = event?.type
+            if (!type || !REPORTED.has(type)) continue
+            const props = event.data ?? {{}}
+            const sessionID = props.sessionID ?? props.info?.id
+            report(type, sessionID, event.location?.directory ?? here)
+          }} catch {{
+            // A monitor is never worth an exception in somebody else's agent.
+          }}
+        }}
+      }} catch {{
+        // Nor is a dropped stream: the hooks below are still registered.
+      }}
+    }})()
+
+    // A tool call starting is the same moment 1 delivered as an event, and the
+    // call coming back is the same moment it delivered as another. Reported in
+    // 1's spelling so that everything downstream of here reads one vocabulary.
+    try {{
+      await ctx.tool.hook("execute.before", (event) =>
+        report("tool.execute.before", event.sessionID, here),
+      )
+      await ctx.tool.hook("execute.after", (event) =>
+        report("tool.execute.after", event.sessionID, here),
+      )
+    }} catch {{
+      // A registration that fails leaves the stream above still reporting.
+    }}
+
+    return () => controller.abort()
+  }},
+}}
+"#,
+        plugin_preamble(&exe)
     )
 }
 
@@ -2366,16 +2533,31 @@ fn plugin_health(path: &Path) -> Health {
             // A plugin from an older cctop forwards fewer events, and the file
             // says which: the names are in it verbatim. Reported as a shortfall
             // so it is filled in the same way a stale settings file is.
-            Some(exe) => verdict(
-                Some(exe),
-                OPENCODE_EVENTS
-                    .iter()
-                    .filter(|event| !text.contains(**event))
-                    .copied()
-                    .collect(),
-            ),
+            //
+            // A plugin written for the *other* OpenCode is short all of them,
+            // and that is not a shortfall to be filled in by editing: the file
+            // is replaced whole, which is what an install does anyway. The
+            // difference is that it has to be reported at all. A V1 plugin on a
+            // V2 server names this binary and every event cctop wants, and
+            // forwards nothing, because OpenCode 2 does not load it — it says so
+            // in a log line and carries on, and the session looks to cctop like
+            // one that is merely quiet.
+            Some(exe) => verdict(Some(exe), plugin_shortfall(&text, crate::opencode::api())),
         },
     }
+}
+
+/// The events `text` does not forward to the OpenCode of `api` that cctop wants.
+fn plugin_shortfall(text: &str, api: crate::opencode::Api) -> Vec<&'static str> {
+    let wanted = wanted(api);
+    if plugin_api(text) != api {
+        return wanted;
+    }
+    wanted
+        .iter()
+        .filter(|event| !text.contains(**event))
+        .copied()
+        .collect()
 }
 
 /// Turn "cctop is recorded here, at this path, missing these events" into the
@@ -3474,14 +3656,16 @@ mod tests {
             text.contains(&format!("\"hook\", \"{OPENCODE_SELECTOR}\"")),
             "the plugin has to call the hook the way `hook` reads it"
         );
-        for event in OPENCODE_EVENTS {
+        for event in wanted(crate::opencode::api()) {
             assert!(text.contains(event), "the plugin forwards no {event}");
         }
         // A plugin from an older cctop forwards fewer events, and cctop owns the
         // whole file — so it is a shortfall to be filled in rather than
         // something to leave alone. Nothing else notices: the exe line, which is
-        // all health used to read, is identical.
-        std::fs::write(&path, text.replace(",\"tool.execute.after\"", "")).unwrap();
+        // all health used to read, is identical. `session.compacted` rather than
+        // one of the tool moments, because which of those a file is expected to
+        // register is up to the OpenCode that is installed.
+        std::fs::write(&path, text.replace("session.compacted", "session.gone")).unwrap();
         assert!(
             Harness::OpenCode.health(&scope).unwrap().is_problem(),
             "a plugin missing an event read as fine"
@@ -3507,6 +3691,83 @@ mod tests {
             "the plugin file was left on disk"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The plugin OpenCode 2 loads is a different file from the one OpenCode 1
+    /// loads, and only one of the two names every event cctop wants: the tool
+    /// moments are hooks there, so they are registered as `execute.before` and
+    /// reported as the names the rest of cctop reads.
+    #[test]
+    fn the_plugin_for_opencode_two_is_written_in_the_api_it_loads() {
+        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        assert!(
+            text.contains("export default"),
+            "a V2 plugin default-exports"
+        );
+        assert!(text.contains("id: \"cctop\""), "and names itself");
+        assert!(text.contains("ctx.event.subscribe"), "it subscribes");
+        assert!(text.contains("event.data"), "V2 payloads are under `data`");
+        assert!(
+            !text.contains("event.properties"),
+            "V1 read the payload from the wrong key and would report nothing"
+        );
+        assert!(text.contains("ctx.tool.hook(\"execute.before\""));
+        assert!(text.contains("ctx.tool.hook(\"execute.after\""));
+        assert!(
+            !text.contains("export const cctop"),
+            "OpenCode 2 does not load a V1 plugin at all"
+        );
+        for event in wanted(crate::opencode::Api::V2) {
+            assert!(text.contains(event), "the plugin registers no {event}");
+        }
+    }
+
+    /// The file OpenCode 1 wants is the one it wanted before OpenCode 2
+    /// existed, down to the hook names it has always reported under.
+    #[test]
+    fn the_plugin_for_opencode_one_is_the_one_it_always_was() {
+        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V1);
+        assert!(text.contains("export const cctop = async ("));
+        assert!(text.contains("event.properties"));
+        assert!(!text.contains("export default"));
+        for event in OPENCODE_EVENTS {
+            assert!(text.contains(event), "the plugin forwards no {event}");
+        }
+    }
+
+    /// Both files hand the event to `cctop hook` the same way, because that is
+    /// the one thing the reading half of cctop is written against.
+    #[test]
+    fn both_plugins_call_the_hook_the_same_way() {
+        for api in [crate::opencode::Api::V1, crate::opencode::Api::V2] {
+            let text = plugin_source_for("/usr/bin/cctop", api);
+            assert!(text.contains(&format!("\"hook\", \"{OPENCODE_SELECTOR}\"")));
+            assert!(text.contains("const CCTOP = \"/usr/bin/cctop\""));
+        }
+    }
+
+    /// The failure this whole split exists for: a plugin written for the other
+    /// OpenCode names the right binary and every event cctop wants, and forwards
+    /// nothing, because the server does not load it. Nothing else can see that,
+    /// so health has to.
+    #[test]
+    fn a_plugin_written_for_the_other_opencode_is_short_of_everything() {
+        let v1 = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V1);
+        let v2 = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        assert_eq!(plugin_api(&v1), crate::opencode::Api::V1);
+        assert_eq!(plugin_api(&v2), crate::opencode::Api::V2);
+        // A file that is right for its own OpenCode forwards everything.
+        assert!(plugin_shortfall(&v1, crate::opencode::Api::V1).is_empty());
+        assert!(plugin_shortfall(&v2, crate::opencode::Api::V2).is_empty());
+        // The same two files, read by the other OpenCode, forward nothing.
+        assert_eq!(
+            plugin_shortfall(&v1, crate::opencode::Api::V2),
+            wanted(crate::opencode::Api::V2)
+        );
+        assert_eq!(
+            plugin_shortfall(&v2, crate::opencode::Api::V1),
+            wanted(crate::opencode::Api::V1)
+        );
     }
 
     /// An install from an older cctop registers fewer events than this one
