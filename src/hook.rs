@@ -483,6 +483,11 @@ pub(crate) const MAX_ASK: usize = 300;
 /// that says the most is picked per tool shape rather than per tool, since
 /// Claude, Codex and the MCP servers behind them name their tools freely but
 /// agree on `command`, `file_path`, `url` and `pattern`.
+///
+/// A harness that writes the question out in words beats anything assembled
+/// from a tool name: OpenCode 2 puts the agent's own sentence in `message` for
+/// the questions it asks, and `question: <the question>` is a worse line than
+/// the question. So `message` is taken whole when it is there.
 fn ask_of(body: &serde_json::Value) -> Option<String> {
     let event = body
         .get("hook_event_name")
@@ -491,17 +496,27 @@ fn ask_of(body: &serde_json::Value) -> Option<String> {
     if !matches!(event, "PermissionRequest" | "permission.asked") {
         return None;
     }
+    let said = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let tool = body
         .get("tool_name")
         .and_then(|v| v.as_str())
-        .filter(|t| !t.is_empty())?;
-    let input = body.get("tool_input");
-    let detail = ["command", "file_path", "path", "url", "pattern", "query"]
-        .iter()
-        .find_map(|key| input?.get(key)?.as_str().filter(|v| !v.is_empty()));
-    let line = match detail {
-        Some(detail) => format!("{tool}: {detail}"),
-        None => tool.to_string(),
+        .filter(|t| !t.is_empty());
+    let line = match said {
+        Some(said) => said,
+        None => {
+            let tool = tool?;
+            let input = body.get("tool_input");
+            let detail = ["command", "file_path", "path", "url", "pattern", "query"]
+                .iter()
+                .find_map(|key| input?.get(key)?.as_str().filter(|v| !v.is_empty()));
+            match detail {
+                Some(detail) => format!("{tool}: {detail}"),
+                None => tool.to_string(),
+            }
+        }
     };
     // One line, because it is shown on one: a heredoc's body is not what the
     // person needs to see to recognise the command.
@@ -1159,6 +1174,14 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // the same way it does for a tool that runs long and quietly. A session
         // blocked on one of these looked idle.
         "permission.asked" | "PermissionRequest" | "Elicitation" => Some(Signal::NeedsInput),
+        // The answer to one of those, from a harness that has no event for it.
+        // OpenCode 2 raises nothing when a prompt is answered — the request
+        // simply stops being pending — so its plugin says so from the API
+        // instead, which is the same closing-out a `PostToolUse` does for Claude
+        // Code: without it a tab keeps asking about a question that was
+        // answered minutes ago, and the only thing that clears it is the tool
+        // call that follows, or the end of the turn.
+        "permission.replied" | "permission.rejected" => Some(Signal::Busy),
         // Auto mode refused a tool call. The turn continues — the model is told
         // it may retry — so this is not the end of anything, but it is the one
         // event that says a refusal happened at all. Without it the only trace
@@ -2205,22 +2228,23 @@ const OPENCODE_EVENTS: &[&str] = &[
 /// The names a plugin file written for `api` has to carry, which is not the
 /// same set as [`OPENCODE_EVENTS`] for both.
 ///
-/// The two tool moments are hooks in OpenCode 2 rather than events on the
-/// stream, so the file registers them under the names that API uses and reports
-/// them to cctop under the names above. Looking for the reported names in a V2
-/// file would find the first five and miss the two hooks, and a file that
-/// forwards nothing would still pass.
+/// OpenCode 2 registers the two tool moments as hooks and reads the asking from
+/// the API, so its file is looked for under the names that API and those hooks
+/// use rather than the ones 1 announced them with — and it has to say when a
+/// prompt was answered as well as when one went up, which 1's file never had to.
 fn wanted(api: crate::opencode::Api) -> Vec<&'static str> {
     match api {
         crate::opencode::Api::V1 => OPENCODE_EVENTS.to_vec(),
-        crate::opencode::Api::V2 => OPENCODE_EVENTS
-            .iter()
-            .map(|event| match *event {
-                "tool.execute.before" => "execute.before",
-                "tool.execute.after" => "execute.after",
-                other => other,
-            })
-            .collect(),
+        crate::opencode::Api::V2 => vec![
+            "session.idle",
+            "session.created",
+            "session.deleted",
+            "session.compacted",
+            "permission.asked",
+            "permission.replied",
+            "execute.before",
+            "execute.after",
+        ],
     }
 }
 
@@ -2332,11 +2356,18 @@ export const cctop = async ({{ directory, worktree }}) => {{
 
 /// The plugin for OpenCode 2: a default export with an `id` and a `setup`.
 ///
-/// The event names are the same five, and so is the JSON handed to `cctop hook`
-/// — which is what lets the reading half of cctop stay one thing across both
-/// OpenCodes. What changed is everything around them: the stream is subscribed
-/// to rather than called back on, the payload is under `data` where 1 had
-/// `properties`, and the two tool moments are hooks instead of events.
+/// What a turn is doing comes off the event stream and the two tool hooks, in
+/// the same names and the same JSON as 1 sent them — which is what lets the
+/// reading half of cctop stay one thing across both OpenCodes. Around that, 2
+/// changed everything: the stream is subscribed to rather than called back on,
+/// and the payload is under `data` where 1 had `properties`.
+///
+/// The asking is the reason this file is not a translation. OpenCode 2 raises
+/// **no event at all** when it stops to ask — not for a permission, not for the
+/// question an agent puts to the person, and not when either is answered: a
+/// request simply stops being pending. The prompt is a row in an API, so cctop
+/// reads that row once a second and says what it finds. It is the same fact 1
+/// announced on the stream, from the only place 2 keeps it.
 ///
 /// `node:child_process` rather than `Bun.spawn` because the one runtime this is
 /// certainly running under is Node's API, which Bun implements — whereas `Bun`
@@ -2351,29 +2382,41 @@ export const cctop = async ({{ directory, worktree }}) => {{
 /// that has to resolve before cctop can hear anything at all.
 fn plugin_source_v2(exe: &str) -> String {
     let exe = serde_json::Value::String(exe.to_string());
+    // The four the stream carries. `permission.asked` is with them in
+    // [`OPENCODE_EVENTS`] because it is what cctop reads, but 2 announces it
+    // from the API below rather than from here, and the two tool moments are
+    // hooks rather than events.
     let reported = serde_json::to_string(
         &OPENCODE_EVENTS
             .iter()
             .copied()
-            .filter(|event| !event.starts_with("tool.execute."))
+            .filter(|event| !event.starts_with("tool.execute.") && *event != "permission.asked")
             .collect::<Vec<&str>>(),
     )
     .unwrap_or_default();
     format!(
         r#"{}
 // Only the events cctop has something to say about. Anything else is ignored
-// here rather than spawning a process to be dropped at the other end. The two
-// tool moments are hooks rather than events and are registered below.
+// here rather than spawning a process to be dropped at the other end. The tool
+// moments are hooks and the asking is an API, both below.
 const REPORTED = new Set({reported})
+
+// How often to ask the server what is waiting on the user, and how long a
+// session that has said nothing is still worth asking about. A second is the
+// gap between a prompt going up and cctop saying so, which is the same gap as
+// any other harness's hook. Two minutes of quiet is a session nobody is waiting
+// on — unless something is pending, which outlasts any amount of quiet.
+const POLL_MS = 1000
+const FORGET_MS = 120000
 
 import {{ spawn }} from "node:child_process"
 
 // One child per moment, left to run on its own: nothing waits for it, so the
 // agent's own loop is never blocked on a monitor.
-const report = (type, sessionID, directory) => {{
+const report = (type, sessionID, directory, extra) => {{
   try {{
     if (!sessionID) return
-    const payload = JSON.stringify({{ type, sessionID, directory: directory ?? "" }})
+    const payload = JSON.stringify({{ type, sessionID, directory: directory ?? "", ...(extra ?? {{}}) }})
     spawn(CCTOP, ["hook", "{OPENCODE_SELECTOR}", payload], {{
       stdio: "ignore",
       detached: true,
@@ -2383,47 +2426,143 @@ const report = (type, sessionID, directory) => {{
   }}
 }}
 
+// What a pending request is asking to do, in the shape `cctop hook` reads a
+// permission prompt in. A question the agent wrote out is passed on as it was
+// said; anything else is the action and the resource, under the key that action
+// uses, because that is the field cctop looks in.
+const askOf = (request) => {{
+  const action = typeof request?.action === "string" ? request.action : ""
+  const said = typeof request?.message === "string" ? request.message : ""
+  const resources = Array.isArray(request?.resources) ? request.resources : []
+  const resource = resources.find((one) => typeof one === "string" && one !== "*")
+  if (said) return {{ tool_name: action, message: said }}
+  const key =
+    action === "shell"
+      ? "command"
+      : action === "webfetch"
+        ? "url"
+        : action === "websearch"
+          ? "query"
+          : action === "grep"
+            ? "pattern"
+            : "file_path"
+  return {{ tool_name: action, tool_input: resource ? {{ [key]: resource }} : {{}} }}
+}}
+
 export default {{
   id: "cctop",
   async setup(ctx) {{
     const here = ctx.location.directory
-    // The subscription is the whole of it, and the AbortController is what stops
-    // it: a plugin that outlives its OpenCode would keep spawning children for
-    // a server that is no longer there.
+    // Every session this project has been heard from, and when — the poll asks
+    // about those and nothing else, so a quiet project costs nothing at all.
+    const seen = new Map()
+    // Which requests have already been reported, so a prompt is said once and
+    // an answer is said once.
+    const waiting = new Map()
+
+    // The subscription is the whole of the event side, and the AbortController
+    // is what stops it: a plugin that outlives its OpenCode would keep spawning
+    // children for a server that is no longer there.
     const controller = new AbortController()
     void (async () => {{
       try {{
         for await (const event of ctx.event.subscribe({{ signal: controller.signal }})) {{
           try {{
+            const props = event?.data ?? {{}}
+            const sessionID = props.sessionID ?? props.info?.id
+            if (sessionID) seen.set(sessionID, Date.now())
             const type = event?.type
             if (!type || !REPORTED.has(type)) continue
-            const props = event.data ?? {{}}
-            const sessionID = props.sessionID ?? props.info?.id
             report(type, sessionID, event.location?.directory ?? here)
           }} catch {{
             // A monitor is never worth an exception in somebody else's agent.
           }}
         }}
       }} catch {{
-        // Nor is a dropped stream: the hooks below are still registered.
+        // Nor is a dropped stream: the hooks and the poll below still report.
       }}
     }})()
+
+    // What is waiting, which is the one thing the stream does not say. Read
+    // rather than inferred, so a permission prompt and an agent's question are
+    // both the fact they are — 2 counts a question as a request whose action is
+    // `question`, so one read covers both — and neither has to be recognised
+    // from a line of text on somebody's screen.
+    //
+    // ponytail: a session is known only once it has made a sound, because
+    // OpenCode 2 will not list its sessions to a plugin and the stream does not
+    // replay. A prompt that was already up when this file was written is
+    // therefore missed until the session next does something. That is the one
+    // case the screen behind cctop covers and this does not, and a prompt raised
+    // after startup — which is every prompt in normal use — is caught within a
+    // second of the tool call that raised it.
+    const poll = async () => {{
+      try {{
+        if (typeof ctx.permission?.list !== "function") return
+        const now = Date.now()
+        for (const [sessionID, at] of seen) {{
+          const pending0 = waiting.get(sessionID)
+          // Quiet for two minutes is a session nobody is waiting on, and it
+          // stops being asked about. Quiet with something pending is the
+          // opposite: a prompt left up is still up however long ago it went up,
+          // and cctop's claim that this session is blocked has to keep being
+          // true — including when the answer arrives in the agent's own terminal
+          // rather than in cctop, which is the usual way it arrives.
+          if (now - at > FORGET_MS && !pending0?.size) {{
+            seen.delete(sessionID)
+            waiting.delete(sessionID)
+            continue
+          }}
+          let pending
+          try {{
+            pending = await ctx.permission.list({{ sessionID }})
+          }} catch {{
+            continue
+          }}
+          const requests = (Array.isArray(pending) ? pending : []).filter((one) => one?.id)
+          const ids = new Set(requests.map((one) => one.id))
+          const told = waiting.get(sessionID)
+          const same = told && told.size === ids.size && [...ids].every((id) => told.has(id))
+          if (requests.length && !same) {{
+            for (const request of requests) {{
+              report("permission.asked", sessionID, here, askOf(request))
+            }}
+            waiting.set(sessionID, ids)
+          }} else if (!requests.length && told?.size) {{
+            // The prompt was answered. Nothing in OpenCode says so, and without
+            // this the tab keeps asking about a question that is already behind
+            // you until the tool call that follows, or the end of the turn.
+            report("permission.replied", sessionID, here)
+            waiting.set(sessionID, ids)
+          }}
+        }}
+      }} catch {{
+        // A failed read is a poll that did not happen.
+      }}
+    }}
+    const timer = setInterval(() => void poll(), POLL_MS)
+    if (typeof timer?.unref === "function") timer.unref()
 
     // A tool call starting is the same moment 1 delivered as an event, and the
     // call coming back is the same moment it delivered as another. Reported in
     // 1's spelling so that everything downstream of here reads one vocabulary.
     try {{
-      await ctx.tool.hook("execute.before", (event) =>
-        report("tool.execute.before", event.sessionID, here),
-      )
-      await ctx.tool.hook("execute.after", (event) =>
-        report("tool.execute.after", event.sessionID, here),
-      )
+      await ctx.tool.hook("execute.before", (event) => {{
+        if (event?.sessionID) seen.set(event.sessionID, Date.now())
+        report("tool.execute.before", event?.sessionID, here)
+      }})
+      await ctx.tool.hook("execute.after", (event) => {{
+        if (event?.sessionID) seen.set(event.sessionID, Date.now())
+        report("tool.execute.after", event?.sessionID, here)
+      }})
     }} catch {{
-      // A registration that fails leaves the stream above still reporting.
+      // A registration that fails leaves the stream and the poll still reporting.
     }}
 
-    return () => controller.abort()
+    return () => {{
+      clearInterval(timer)
+      controller.abort()
+    }}
   }},
 }}
 "#,
@@ -3706,7 +3845,7 @@ mod tests {
         );
         assert!(text.contains("id: \"cctop\""), "and names itself");
         assert!(text.contains("ctx.event.subscribe"), "it subscribes");
-        assert!(text.contains("event.data"), "V2 payloads are under `data`");
+        assert!(text.contains("event?.data"), "V2 payloads are under `data`");
         assert!(
             !text.contains("event.properties"),
             "V1 read the payload from the wrong key and would report nothing"
@@ -3768,6 +3907,104 @@ mod tests {
             plugin_shortfall(&v2, crate::opencode::Api::V1),
             wanted(crate::opencode::Api::V1)
         );
+    }
+
+    /// The plugin for OpenCode 2 is written in the API that OpenCode 2 has.
+    ///
+    /// This is the part a translation cannot do. OpenCode 2 raises no event
+    /// when it stops to ask — not for a permission, not for a question, not
+    /// when either is answered — so a file that only listened to the stream
+    /// would report a blocked session as a working one, which is the state a
+    /// held prompt has always been hardest to see.
+    #[test]
+    fn the_plugin_for_opencode_two_asks_the_api_what_is_waiting() {
+        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        assert!(
+            text.contains("ctx.permission.list"),
+            "the asking is a row in an API, not an event"
+        );
+        assert!(text.contains("report(\"permission.asked\""));
+        assert!(
+            text.contains("report(\"permission.replied\""),
+            "nothing in OpenCode 2 says a prompt was answered"
+        );
+        // And the question is the same fact as the permission: 2 counts an
+        // agent's question as a request whose action is `question`.
+        assert!(text.contains("askOf"));
+        // Only the four the stream really carries.
+        assert!(text.contains("const REPORTED = new Set([\"session.idle\""));
+        assert!(!text.contains("\"permission.asked\",\"tool.execute.before\""));
+    }
+
+    /// A prompt is said once, an answer once, and a session that has gone quiet
+    /// stops being asked about — unless something is still pending, which is
+    /// the whole reason to keep asking.
+    #[test]
+    fn the_poll_says_each_moment_once_and_forgets() {
+        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        assert!(text.contains("const POLL_MS = 1000"));
+        assert!(text.contains("const FORGET_MS = 120000"));
+        assert!(
+            text.contains("if (now - at > FORGET_MS && !pending0?.size)"),
+            "a prompt left up is still up, and cctop's claim has to keep being true"
+        );
+        // Told what it has already said, so a request that stays pending is not
+        // re-announced once a second.
+        assert!(text.contains("const told = waiting.get(sessionID)"));
+    }
+
+    /// The line shown beside an Allow button, which is the whole reason to read
+    /// the request rather than the screen: it is what the agent asked, in the
+    /// agent's words where there are any.
+    #[test]
+    fn a_question_is_shown_as_the_question_and_a_command_as_the_command() {
+        let asked = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "shell",
+            "tool_input": { "command": "rm -rf build" },
+        }));
+        assert_eq!(asked.as_deref(), Some("shell: rm -rf build"));
+        // What 2 puts on a request it raised as a question.
+        let question = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "question",
+            "message": "Which database should this use?",
+        }));
+        assert_eq!(
+            question.as_deref(),
+            Some("Which database should this use?"),
+            "the agent's own sentence beats an assembled one"
+        );
+        // A path, and a prompt long enough to need cutting down to one line.
+        let path = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "edit",
+            "tool_input": { "file_path": "src/main.rs" },
+        }));
+        assert_eq!(path.as_deref(), Some("edit: src/main.rs"));
+        let long = ask_of(&serde_json::json!({
+            "type": "permission.asked",
+            "tool_name": "shell",
+            "tool_input": { "command": format!("echo {}\nsecond line", "x".repeat(MAX_ASK)) },
+        }));
+        assert_eq!(long.as_ref().map(|l| l.chars().count()), Some(MAX_ASK));
+        assert!(!long.unwrap_or_default().contains('\n'));
+        // Not a permission event, so no line at all.
+        assert!(ask_of(&serde_json::json!({ "type": "session.idle" })).is_none());
+    }
+
+    /// The moment a prompt is answered, which for OpenCode 2 cctop has to be
+    /// told: a tab that keeps asking about a question that was answered two
+    /// minutes ago is worse than one that never noticed.
+    #[test]
+    fn an_answered_prompt_says_the_agent_is_working_again() {
+        assert_eq!(
+            signal_of("permission.replied", ""),
+            Some(Signal::Busy),
+            "the answer closes the prompt out, the way a tool call does"
+        );
+        assert_eq!(signal_of("permission.rejected", ""), Some(Signal::Busy));
+        assert_eq!(signal_of("permission.asked", ""), Some(Signal::NeedsInput));
     }
 
     /// An install from an older cctop registers fewer events than this one
