@@ -2310,34 +2310,40 @@ fn plugin_shortfall(text: &str, api: crate::opencode::Api) -> Vec<&'static str> 
 /// read back out.
 const PLUGIN_MARKER: &str = "const CCTOP = ";
 
-/// The comment every cctop plugin opens with, and the line health reads the
-/// binary back out of.
-fn plugin_preamble(exe: &serde_json::Value) -> String {
-    format!(
-        r#"// Written by cctop, which watches coding agents. Safe to delete: removing
-// this file is all it takes to stop reporting.
-//
-// Reports the moments a transcript cannot show — a turn finishing, a session
-// starting or ending — to whatever cctop is running. Every failure is
-// swallowed on purpose: this runs inside OpenCode, and a monitor must never be
-// the reason a session breaks.
-{PLUGIN_MARKER}{exe}
-"#
-    )
-}
+/// The plugin cctop writes, as a file rather than as a string in here.
+///
+/// A real `.ts` file because it is a real program: an editor highlights it, a
+/// formatter can be run over it, and a diff of it is a diff of JavaScript rather
+/// than of Rust lines with every brace doubled to survive `format!`. Embedded
+/// with `include_str!` for the reason [`crate::serve`] embeds its pages the same
+/// way — an installed cctop is one binary, and a plugin cctop cannot find is a
+/// plugin that reports nothing.
+///
+/// The one line that is per-install is a placeholder: `PLUGIN_PATH`, replaced
+/// with this binary's path at install time, and read back out of the installed
+/// file by [`plugin_exe`].
+const PLUGIN: &str = include_str!("assets/opencode-plugin.ts");
+
+/// What the placeholder is written as, quoted, so the substitution is one
+/// replacement of a whole JSON string rather than a splice inside one.
+const PLUGIN_PATH: &str = "\"$CCTOP\"";
+
+/// The two exports whole, for the tests that take one of them out. Which
+/// dialect a file is comes from the shorter markers in [`plugin_shape`], because
+/// a file written for one version alone has a shorter line here.
+#[cfg(test)]
+const PLUGIN_DEFAULT_EXPORT: &str = "export default { id: \"cctop\", setup, server: cctopV1 }";
+#[cfg(test)]
+const PLUGIN_NAMED_EXPORT: &str = "export const cctop = cctopV1";
 
 /// The plugin cctop writes, for every OpenCode there is.
 ///
 /// OpenCode has no hook commands to register: extensions are code it loads at
 /// startup, so the only way in is a file, and cctop writes the whole of it. That
 /// makes this the one integration that runs *inside* the agent's process rather
-/// than beside it, which is why every line of every handler is wrapped: a plugin
+/// than beside it, which is why every line of the plugin is wrapped: a plugin
 /// that throws is a plugin that can spoil the session it is watching, and there
 /// is no exit code to hide behind here.
-///
-/// The event is handed to `cctop hook` as one argument, the same way Codex does
-/// it, and the child is left to run on its own — nothing waits for it, so the
-/// agent's own loop is never blocked on a monitor.
 ///
 /// # One file for both OpenCodes
 ///
@@ -2347,8 +2353,8 @@ fn plugin_preamble(exe: &serde_json::Value) -> String {
 /// write whichever file the installed version wants, which is what this did
 /// first, and it has one bad property: it is only right until somebody upgrades.
 ///
-/// So the file carries both dialects instead, and the halves cannot be run on
-/// the wrong OpenCode by accident:
+/// So the file carries both dialects instead, and neither can be run on the
+/// wrong OpenCode by accident:
 ///
 /// - A named export is the version 1 plugin, and is what version 1 has always
 ///   loaded — including 1.14, which knows nothing about object entrypoints.
@@ -2356,322 +2362,35 @@ fn plugin_preamble(exe: &serde_json::Value) -> String {
 ///   and version 1.18.29 and newer call `server`, which is the same version 1
 ///   plugin again. Verified against 1.14.25, 1.18.33 and 2.0.20 rather than
 ///   assumed: 1.18.33 calls *both*, handing `setup` a context with no `event`,
-///   `tool` or `permission` on it, which is why every use of them below is
-///   optional and the whole body is guarded. Version 2 calls only `setup`, so a
-///   version 2 session is never reported twice.
+///   `tool` or `permission` on it, which is why every use of them is optional
+///   and the whole body is guarded. Version 2 calls only `setup`, so a version 2
+///   session is never reported twice.
+///
+/// Both halves hand each moment to `cctop hook` the same way and under the same
+/// names, so everything downstream of the plugin reads one vocabulary.
 fn plugin_source(exe: &str) -> String {
-    let exe = serde_json::Value::String(exe.to_string());
-    let v1_events = serde_json::to_string(OPENCODE_EVENTS).unwrap_or_default();
-    // The four the stream carries. `permission.asked` is with them in
-    // [`OPENCODE_EVENTS`] because it is what cctop reads, but 2 announces it
-    // from the API rather than from the stream, and the two tool moments are
-    // hooks rather than events.
-    let v2_events = serde_json::to_string(
-        &OPENCODE_EVENTS
-            .iter()
-            .copied()
-            .filter(|event| !event.starts_with("tool.execute.") && *event != "permission.asked")
-            .collect::<Vec<&str>>(),
-    )
-    .unwrap_or_default();
-    format!(
-        r#"{}
-{PLUGIN_SPAWN}
-
-// ---------------------------------------------------------------------------
-// OpenCode 1: a plugin is a function that returns the hooks it wants
-// ---------------------------------------------------------------------------
-
-// Only the events cctop has something to say about. Anything else is ignored
-// here rather than spawning a process to be dropped at the other end.
-const REPORTED = new Set({v1_events})
-
-{PLUGIN_BODY_V1}
-
-// The named export is what 1.x has always loaded, and the only thing 1.14 knows.
-// 1.18.29 and newer prefer `server` below, which is this same function.
-export const cctop = cctopV1
-
-// ---------------------------------------------------------------------------
-// OpenCode 2: a default export with an `id` and a `setup`
-// ---------------------------------------------------------------------------
-
-// The same four, from the stream. The asking is an API and the tool moments are
-// hooks; both are below.
-const STREAMED = new Set({v2_events})
-
-{PLUGIN_BODY_V2}
-
-export default {{ id: "cctop", setup, server: cctopV1 }}
-"#,
-        plugin_preamble(&exe)
+    PLUGIN.replace(
+        PLUGIN_PATH,
+        &serde_json::Value::String(exe.to_string()).to_string(),
     )
 }
 
-/// The same plugin written for one OpenCode only.
+/// The same plugin with one entry point taken out.
 ///
 /// Not what cctop installs — this is for the tests, which need a file that is
 /// *only* version 1 or *only* version 2 to prove that one written for the other
-/// is noticed rather than read as installed.
+/// is noticed rather than read as installed. Taken out of the real file rather
+/// than written twice, so the two fixtures cannot drift from what ships: each
+/// keeps every name cctop wants, which is exactly the state being tested — a
+/// plugin that says the right things and is loaded by nothing.
 #[cfg(test)]
 fn plugin_source_for(exe: &str, api: crate::opencode::Api) -> String {
-    let exe = serde_json::Value::String(exe.to_string());
+    let text = plugin_source(exe);
     match api {
-        crate::opencode::Api::V1 => {
-            let events = serde_json::to_string(OPENCODE_EVENTS).unwrap_or_default();
-            format!(
-                r#"{}
-{PLUGIN_SPAWN}
-
-// Only the events cctop has something to say about. Anything else is ignored
-// here rather than spawning a process to be dropped at the other end.
-const REPORTED = new Set({events})
-
-{PLUGIN_BODY_V1}
-
-export const cctop = cctopV1
-"#,
-                plugin_preamble(&exe)
-            )
-        }
-        crate::opencode::Api::V2 => {
-            let events = serde_json::to_string(
-                &OPENCODE_EVENTS
-                    .iter()
-                    .copied()
-                    .filter(|event| {
-                        !event.starts_with("tool.execute.") && *event != "permission.asked"
-                    })
-                    .collect::<Vec<&str>>(),
-            )
-            .unwrap_or_default();
-            format!(
-                r#"{}
-{PLUGIN_SPAWN}
-
-// Only the events the stream carries. The asking is an API and the tool moments
-// are hooks; both are below.
-const STREAMED = new Set({events})
-
-{PLUGIN_BODY_V2}
-
-export default {{ id: "cctop", setup }}
-"#,
-                plugin_preamble(&exe)
-            )
-        }
+        crate::opencode::Api::V1 => text.replace(PLUGIN_DEFAULT_EXPORT, ""),
+        crate::opencode::Api::V2 => text.replace(PLUGIN_NAMED_EXPORT, ""),
     }
 }
-
-/// How a plugin hands one moment to cctop, in the shape `cctop hook` reads.
-///
-/// Node's API rather than `Bun.spawn` because the one runtime a plugin loaded
-/// from a plain file can count on is Node's, which Bun implements — whereas
-/// `Bun` being in scope is a property of the host, and the two do not take the
-/// same arguments besides: `Bun.spawn` is handed one array where Node's `spawn`
-/// is handed the program and its arguments separately.
-const PLUGIN_SPAWN: &str = r#"import { spawn } from "node:child_process"
-
-// One child per moment, left to run on its own: nothing waits for it, so the
-// agent's own loop is never blocked on a monitor.
-const report = (type, sessionID, directory, extra) => {
-  try {
-    if (!sessionID) return
-    const payload = JSON.stringify({ type, sessionID, directory: directory ?? "", ...(extra ?? {}) })
-    spawn(CCTOP, ["hook", "opencode", payload], {
-      stdio: "ignore",
-      detached: true,
-    }).unref()
-  } catch {
-    // A monitor is never worth an exception in somebody else's agent.
-  }
-}
-"#;
-
-/// The version 1 half: a function returning the hooks it wants.
-const PLUGIN_BODY_V1: &str = r#"const cctopV1 = async ({ directory, worktree }) => {
-  return {
-    event: async ({ event }) => {
-      try {
-        const type = event?.type
-        if (!type || !REPORTED.has(type)) return
-        const props = event.properties ?? {}
-        const sessionID = props.sessionID ?? props.info?.id ?? props.sessionId
-        report(type, sessionID, directory ?? worktree ?? "")
-      } catch {
-        // A monitor is never worth an exception in somebody else's agent.
-      }
-    },
-  }
-}
-"#;
-
-/// The version 2 half.
-///
-/// What a turn is doing comes off the event stream and the two tool hooks, in
-/// the same names and the same JSON as 1 sent them — which is what lets the
-/// reading half of cctop stay one thing across both OpenCodes. Around that, 2
-/// changed everything: the stream is subscribed to rather than called back on,
-/// and the payload is under `data` where 1 had `properties`.
-///
-/// The asking is the reason this is not a translation. OpenCode 2 raises **no
-/// event at all** when it stops to ask — not for a permission, not for the
-/// question an agent puts to the person, and not when either is answered: a
-/// request simply stops being pending. The prompt is a row in an API, so cctop
-/// reads that row once a second and says what it finds. It is the same fact 1
-/// announced on the stream, from the only place 2 keeps it.
-const PLUGIN_BODY_V2: &str = r#"// How often to ask the server what is waiting on the user, and how long a
-// session that has said nothing is still worth asking about. A second is the gap
-// between a prompt going up and cctop saying so, which is the same gap as any
-// other harness's hook. Two minutes of quiet is a session nobody is waiting on
-// — unless something is pending, which outlasts any amount of quiet.
-const POLL_MS = 1000
-const FORGET_MS = 120000
-
-// What a pending request is asking to do, in the shape `cctop hook` reads a
-// permission prompt in. A question the agent wrote out is passed on as it was
-// said; anything else is the action and the resource, under the key that action
-// uses, because that is the field cctop looks in.
-const askOf = (request) => {
-  const action = typeof request?.action === "string" ? request.action : ""
-  const said = typeof request?.message === "string" ? request.message : ""
-  const resources = Array.isArray(request?.resources) ? request.resources : []
-  const resource = resources.find((one) => typeof one === "string" && one !== "*")
-  if (said) return { tool_name: action, message: said }
-  const key =
-    action === "shell"
-      ? "command"
-      : action === "webfetch"
-        ? "url"
-        : action === "websearch"
-          ? "query"
-          : action === "grep"
-            ? "pattern"
-            : "file_path"
-  return { tool_name: action, tool_input: resource ? { [key]: resource } : {} }
-}
-
-const setup = async (ctx) => {
-  // An OpenCode 1 that knows this shape hands over a context with none of it —
-  // 1.18.29 and newer call setup() as well as server() — so half of this file is
-  // dead code on the other version, and dead code must not throw. Everything is
-  // optional and the whole body is guarded for that reason alone.
-  try {
-    const here = ctx?.location?.directory ?? ""
-    // Every session this project has been heard from, and when — the poll asks
-    // about those and nothing else, so a quiet project costs nothing at all.
-    const seen = new Map()
-    // Which requests have already been reported, so a prompt is said once and
-    // an answer is said once.
-    const waiting = new Map()
-
-    // The subscription is the whole of the event side, and the AbortController
-    // is what stops it: a plugin that outlives its OpenCode would keep spawning
-    // children for a server that is no longer there.
-    const controller = new AbortController()
-    void (async () => {
-      try {
-        for await (const event of ctx.event?.subscribe?.({ signal: controller.signal }) ?? []) {
-          try {
-            const props = event?.data ?? {}
-            const sessionID = props.sessionID ?? props.info?.id
-            if (sessionID) seen.set(sessionID, Date.now())
-            const type = event?.type
-            if (!type || !STREAMED.has(type)) continue
-            report(type, sessionID, event.location?.directory ?? here)
-          } catch {
-            // A monitor is never worth an exception in somebody else's agent.
-          }
-        }
-      } catch {
-        // Nor is a dropped stream: the hooks and the poll below still report.
-      }
-    })()
-
-    // What is waiting, which is the one thing the stream does not say. Read
-    // rather than inferred, so a permission prompt and an agent's question are
-    // both the fact they are — 2 counts a question as a request whose action is
-    // `question`, so one read covers both — and neither has to be recognised
-    // from a line of text on somebody's screen.
-    //
-    // ponytail: a session is known only once it has made a sound, because
-    // OpenCode 2 will not list its sessions to a plugin and the stream does not
-    // replay. A prompt that was already up when this file was written is
-    // therefore missed until the session next does something. That is the one
-    // case the screen behind cctop covers and this does not, and a prompt raised
-    // after startup — which is every prompt in normal use — is caught within a
-    // second of the tool call that raised it.
-    const poll = async () => {
-      try {
-        if (typeof ctx.permission?.list !== "function") return
-        const now = Date.now()
-        for (const [sessionID, at] of seen) {
-          const pending0 = waiting.get(sessionID)
-          // Quiet for two minutes is a session nobody is waiting on, and it
-          // stops being asked about. Quiet with something pending is the
-          // opposite: a prompt left up is still up however long ago it went up,
-          // and cctop's claim that this session is blocked has to keep being
-          // true — including when the answer arrives in the agent's own terminal
-          // rather than in cctop, which is the usual way it arrives.
-          if (now - at > FORGET_MS && !pending0?.size) {
-            seen.delete(sessionID)
-            waiting.delete(sessionID)
-            continue
-          }
-          let pending
-          try {
-            pending = await ctx.permission.list({ sessionID })
-          } catch {
-            continue
-          }
-          const requests = (Array.isArray(pending) ? pending : []).filter((one) => one?.id)
-          const ids = new Set(requests.map((one) => one.id))
-          const told = waiting.get(sessionID)
-          const same = told && told.size === ids.size && [...ids].every((id) => told.has(id))
-          if (requests.length && !same) {
-            for (const request of requests) {
-              report("permission.asked", sessionID, here, askOf(request))
-            }
-            waiting.set(sessionID, ids)
-          } else if (!requests.length && told?.size) {
-            // The prompt was answered. Nothing in OpenCode says so, and without
-            // this the tab keeps asking about a question that is already behind
-            // you until the tool call that follows, or the end of the turn.
-            report("permission.replied", sessionID, here)
-            waiting.set(sessionID, ids)
-          }
-        }
-      } catch {
-        // A failed read is a poll that did not happen.
-      }
-    }
-    const timer = setInterval(() => void poll(), POLL_MS)
-    if (typeof timer?.unref === "function") timer.unref()
-
-    // A tool call starting is the same moment 1 delivered as an event, and the
-    // call coming back is the same moment it delivered as another. Reported in
-    // 1's spelling so that everything downstream of here reads one vocabulary.
-    if (typeof ctx.tool?.hook === "function") {
-      await ctx.tool.hook("execute.before", (event) => {
-        if (event?.sessionID) seen.set(event.sessionID, Date.now())
-        report("tool.execute.before", event?.sessionID, here)
-      })
-      await ctx.tool.hook("execute.after", (event) => {
-        if (event?.sessionID) seen.set(event.sessionID, Date.now())
-        report("tool.execute.after", event?.sessionID, here)
-      })
-    }
-
-    return () => {
-      clearInterval(timer)
-      controller.abort()
-    }
-  } catch {
-    // A monitor is never worth an exception in somebody else's agent.
-    return () => {}
-  }
-}
-"#;
 
 /// Write the plugin, replacing whatever cctop left there before.
 fn plugin_install(path: &Path, exe: &str) -> anyhow::Result<()> {
@@ -3976,22 +3695,57 @@ mod tests {
     /// reported as the names the rest of cctop reads.
     #[test]
     fn the_plugin_for_opencode_two_is_written_in_the_api_it_loads() {
-        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        let text = plugin_source("/usr/bin/cctop");
         assert!(
-            text.contains("export default"),
+            text.contains(PLUGIN_DEFAULT_EXPORT),
             "a V2 plugin default-exports"
         );
         assert!(text.contains("id: \"cctop\""), "and names itself");
         assert!(text.contains("ctx.event?.subscribe"), "it subscribes");
-        assert!(text.contains("event?.data"), "V2 payloads are under `data`");
         assert!(
-            !text.contains("event.properties"),
-            "V1 read the payload from the wrong key and would report nothing"
+            text.contains("event?.data"),
+            "V2 payloads are under `data`, where 1 had `properties`"
         );
         assert!(text.contains("ctx.tool.hook(\"execute.before\""));
         assert!(text.contains("ctx.tool.hook(\"execute.after\""));
         for event in wanted(crate::opencode::Api::V2) {
             assert!(text.contains(event), "the plugin registers no {event}");
+        }
+        // The stream carries four of them; the asking and the tool moments come
+        // from the API and the hooks, which is why they are not in this set.
+        let streamed = text
+            .split("const STREAMED = new Set([")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .unwrap_or_default();
+        assert_eq!(
+            streamed,
+            r#""session.idle","session.created","session.deleted","session.compacted""#
+        );
+    }
+
+    /// The one line that is per-install, and the one way the file can come out
+    /// wrong in a way nothing else would notice: a plugin that loaded, said
+    /// nothing, and looked installed — because it still had the placeholder
+    /// where the binary's path should be.
+    #[test]
+    fn the_binarys_path_is_substituted_and_leaves_nothing_behind() {
+        assert_eq!(
+            PLUGIN.matches(PLUGIN_PATH).count(),
+            1,
+            "one placeholder, and only one, or the substitution is a guess"
+        );
+        for exe in ["/usr/local/bin/cctop", "/home/some body/bin/cctop"] {
+            let text = plugin_source(exe);
+            assert!(!text.contains(PLUGIN_PATH), "{exe} left the placeholder in");
+            assert!(
+                !text.contains("$CCTOP"),
+                "a path that is not quoted JSON cannot be read back"
+            );
+            // A path with a quote or a backslash in it has to survive, because
+            // health reads this line back and a splice inside a quoted string
+            // would not.
+            assert_eq!(plugin_exe(&text).as_deref(), Some(exe));
         }
     }
 
@@ -4056,7 +3810,7 @@ mod tests {
     /// held prompt has always been hardest to see.
     #[test]
     fn the_plugin_for_opencode_two_asks_the_api_what_is_waiting() {
-        let text = plugin_source_for("/usr/bin/cctop", crate::opencode::Api::V2);
+        let text = plugin_source("/usr/bin/cctop");
         assert!(
             text.contains("ctx.permission.list"),
             "the asking is a row in an API, not an event"
@@ -4069,9 +3823,6 @@ mod tests {
         // And the question is the same fact as the permission: 2 counts an
         // agent's question as a request whose action is `question`.
         assert!(text.contains("askOf"));
-        // Only the four the stream really carries.
-        assert!(text.contains("const STREAMED = new Set([\"session.idle\""));
-        assert!(!text.contains("\"permission.asked\",\"tool.execute.before\""));
     }
 
     /// A prompt is said once, an answer once, and a session that has gone quiet
