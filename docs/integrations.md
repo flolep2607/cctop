@@ -32,18 +32,20 @@ One install covers five agents, each asked in its own dialect:
 
 OpenCode's plugin is the one file cctop cannot register with a command, and the
 only integration whose shape is decided by somebody else's release. OpenCode 2
-replaced the plugin API outright and does not load a V1 plugin at all — it says
-so in a log file and carries on — so cctop asks the binary which one it is
-(`opencode --version`) and writes that file. Both report the same events under
-the same names, so nothing downstream of the plugin has to know which is which,
-and an install left over from the other OpenCode reads as short of every event
-— which cctop repairs on its own at the next start, or on demand from
-`--install-hooks`.
+replaced the plugin API outright and does not load a version 1 plugin at all — it
+says so in a log file and carries on — so the file cctop writes carries both: a
+named export, which is what version 1 has always loaded, and a default export
+with `setup` for version 2 and `server` for version 1.18.29 and newer. One file
+is right on every version, which means an OpenCode upgraded under a cctop that
+never runs again keeps reporting rather than going quiet. Both halves report the
+same events under the same names, so nothing downstream of the plugin has to
+know which one ran.
 
 An OpenCode cctop launches also has its own tab strip turned off, for that run
 only: cctop's tabs are the real ones, and a tab bar inside the pane is a second
-and lesser account of the same fact. `cli.json` is yours and is not touched —
-type `opencode` yourself and your tabs are there.
+and lesser account of the same fact. That one does depend on the version — the
+strip is a version 2 thing — so cctop asks the binary which one it is. `cli.json`
+is yours and is not touched: type `opencode` yourself and your tabs are there.
 
 Codex is asked twice, because its two ways of saying things fail differently.
 Its hook framework borrowed Claude Code's spelling wholesale — same event names,

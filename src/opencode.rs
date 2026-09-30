@@ -1,10 +1,10 @@
 //! Which OpenCode is installed, and what that changes for cctop.
 //!
 //! OpenCode 2 is not OpenCode 1 with more features. Its plugin API was replaced
-//! outright — a V1 plugin is not loaded at all, and the server says so in a log
-//! line and carries on — and its terminal client grew a tab strip of its own.
-//! So two things cctop does depend on the answer to: the plugin it writes, and
-//! the environment it launches an agent in.
+//! outright, and its terminal client grew a tab strip of its own. The plugin is
+//! written to work on both — see [`crate::hook`] — so what is left here is the
+//! two things that genuinely differ: the tab strip cctop turns off, and telling
+//! a plugin file written for one version from one written for the other.
 //!
 //! The answer comes from the binary rather than from configuration, because
 //! nothing in a config file records it. One `opencode` on `PATH` serves every
