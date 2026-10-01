@@ -88,7 +88,17 @@ serde = { version = "1.0.229", features = ["derive"] }
 # `preserve_order` because cctop rewrites other tools' settings files to add its
 # hooks, and a `BTreeMap` behind `Map` would hand the user back every key they
 # own sorted alphabetically.
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
+#
+# `float_roundtrip` because the default parser is not correctly rounded, and a
+# cached cost is an `f64` that goes out to the cache file and comes back.
+# Measured here: 29.6% of finite `f64`s failed to survive a round trip through
+# serde_json's own output — each landing one ULP away — and with the feature on,
+# none do. A cost read back at the wrong bit is not the figure that was
+# computed, so a session's total could differ from a fresh parse of the same
+# transcript, and the cache never notices because the wrong value is now what
+# it stores. It costs about 2% on a float-heavy parse (15.6ms -> 15.9ms for
+# 1.3 MB of rate tables), which is startup and paid once.
+serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"

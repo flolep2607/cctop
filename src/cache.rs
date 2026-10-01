@@ -1315,6 +1315,71 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A cost comes back as the same number of bits it went in as.
+    ///
+    /// The test above stores `i as f64`, and whole numbers survive anything —
+    /// which is why a cache that was quietly corrupting a third of its floats
+    /// passed it. A cost is the product of a token count and a rate, so it is
+    /// almost never a whole number, and serde_json's default `f64` parser is
+    /// not correctly rounded: measured over the shortest-repr output it
+    /// produces, 29.6% of finite floats came back one ULP away. That is
+    /// invisible in a total rounded to cents and not invisible in a total that
+    /// is not — and, worse, the cache then stores the wrong figure as though it
+    /// had computed it, so nothing downstream can tell the two apart.
+    ///
+    /// Bit equality is the assertion because `assert_eq!` on two `f64`s that
+    /// differ by one ULP passes in every direction that matters here: the
+    /// difference is far below the tolerance a comparison applies.
+    #[test]
+    fn a_saved_cost_comes_back_as_the_number_it_was() {
+        // Values a real run produces: token counts times a rate, at the scales
+        // the pricing table carries.
+        let costs = [
+            0.001_625_000_000_000_000_1_f64,
+            0.042_535_301_669_349_68_f64,
+            1.0000000000000002,
+            0.1 + 0.2,
+            1e-7,
+            1.7976931348623157e308,
+            2.2250738585072014e-308,
+            1234.5678901234567,
+        ];
+        let dir = std::env::temp_dir().join(format!("cctop-float-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("a.jsonl");
+        std::fs::write(&transcript, "x").unwrap();
+
+        let mut entries = HashMap::new();
+        for (i, cost) in costs.iter().enumerate() {
+            let mut data = SessionData::default();
+            data.costs.total = *cost;
+            entries.insert(
+                format!("k{i}"),
+                Entry {
+                    path: transcript.clone(),
+                    session: format!("s{i}"),
+                    stamp: format!("s{i}"),
+                    stored_at: i as u64,
+                    data,
+                },
+            );
+        }
+        let file = dir.join("cost-cache.json");
+        write_atomically(&file, &entries).expect("the write must succeed");
+
+        let back: DiskCache = serde_json::from_str(&std::fs::read_to_string(&file).unwrap())
+            .expect("a saved cache must parse");
+        for (i, cost) in costs.iter().enumerate() {
+            let got = back.entries[&format!("k{i}")].data.costs.total;
+            assert_eq!(
+                got.to_bits(),
+                cost.to_bits(),
+                "cost {i} ({cost:e}) came back as {got:e}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A destination that cannot be written has to be reported, not swallowed:
     /// silently keeping the old cache forever is how a machine ends up
     /// re-parsing everything on every run with nothing to show for it.
