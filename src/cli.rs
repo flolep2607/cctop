@@ -7,6 +7,45 @@ use crate::util;
 use clap::Parser;
 use serde::Serialize;
 
+/// The command index printed after the options by `-h` and `--help` alike.
+///
+/// The bare words are intercepted in `main` before clap runs, so this text is
+/// the only place clap's output admits they exist. One line per command — the
+/// detail lives in each command's own --help, and in `long_about` above for
+/// the flags that shape them.
+const COMMANDS: &str = "\
+Commands:
+  cctop <agent> [args…]   Start claude, codex, opencode or pi on a pty cctop
+                          owns, so the UI can watch it and type into it. Same
+                          as `cctop run <agent>`; the args go to the agent.
+  cctop attach [pid]      Put a running agent on this terminal — no pid lists
+                          them. F12 detaches and leaves it running.
+  cctop as <acct> <agent> Start an agent under a named account (see
+                          --add-account).
+  cctop serve             Serve the table, and a per-session report, to a
+                          browser. Loopback and read-only by default; `serve
+                          --help` for the flags. Handy on a phone.
+  cctop wait <session>    Block until a session stops working — by id prefix,
+                          tab name or pid. For one agent to wait on another.
+  cctop doctor            Check this installation and say what is wrong with
+                          it: sessions, pricing, hooks, and what `s` reaches.
+                          --host also tests an ssh target.
+  cctop why [session]     Why a row says a session is running, or is not:
+                          every agent process, its session, the rule that
+                          matched it.
+  cctop optimize          What your sessions spent and did not get back.
+                          Reads only.
+  cctop compare           How each model did on the work you actually gave
+                          it — one-shot rate, cost per file, cache hit.
+  cctop burn              What your subscription windows were paid for and
+                          did not use.
+  cctop log               Print the event stream CCTOP_LOG writes; -f follows
+                          it.
+  cctop --trace           Time each stage of a run, for a bug report about
+                          slowness.
+
+Each command takes --help for the details.";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "cctop",
@@ -19,44 +58,18 @@ use serde::Serialize;
                       cctop attach [pid]\n       \
                       cctop as <account> <agent> [args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
-                      cctop optimize | compare | burn\n       \
+                      cctop optimize | compare | burn | log\n       \
                       cctop wait <session> [--until …] [--timeout …]\n       \
+                      cctop why [session]\n       \
                       cctop doctor",
-    // Shown by `-h` as well as `--help`: the long description is the only place
-    // that mentioned launching agents, and nobody reads `--help` to find out a
-    // command exists.
-    after_help = "Running agents:\n  \
-cctop <agent> [args…]  Start claude, codex, opencode or pi on a pty cctop owns,\n                         \
-so the UI can watch it and type into it. Same as\n                         \
-`cctop run <agent>`; everything after the name goes to it.\n  \
-cctop attach [pid]     Put a running agent on this terminal. With no pid, lists\n                         \
-them. F12 detaches and leaves it running.\n  \
-cctop serve            Serve the table, and a per-session report, to a browser.\n                         \
-Loopback and read-only by default; `serve --help` for the\n                         \
-flags. Handy on a phone for the sessions waiting on you.\n  \
-cctop doctor           Check this installation and say what is wrong with it:\n                         \
-where sessions are read from, pricing, hooks, and what\n                         \
-`s` can reach. --host also tests an ssh target.\n  \
-cctop optimize         What your sessions spent and did not get back: reads\n                         \
-into generated directories, files fetched again, calls\n                         \
-that failed and were paid for. Reads only.\n  \
-cctop compare          How each model did on the work you actually gave it —\n                         \
-one-shot rate, cost per file changed, cache hit.\n  \
-cctop burn             What your subscription windows were paid for and did\n                         \
-not use. A window is use-it-or-lose-it, and the\n                         \
-provider only ever reports the current figure.\n  \
-cctop wait <session>   Block until a session stops working — by id prefix, tab\n                         \
-name or pid. --until idle|waiting|done|any-stop; exits\n                         \
-124 on --timeout. For one agent to wait on another.\n  \
-cctop why [ID]         Why a row says a session is running, or is not: every\n                         \
-agent process, the session it was matched to, and the\n                         \
-rule that matched it.\n  \
-cctop --trace          Time each stage of a run and write the totals to a file\n                         \
-on exit, to attach to a bug report about slowness.\n\n\
-Use --help for the full description.",
-    // Otherwise clap repeats the block above under the long description, which
-    // covers the same ground at length.
-    after_long_help = "",
+    // The one-line summary is the whole of `-h`; the command list is the part
+    // that says what cctop is *for*, so both -h and --help carry it — `help`'s
+    // line count is short enough that it fits underneath.
+    after_help = COMMANDS,
+    // --help's own copy of the list: `after_help` is not shown there, and the
+    // long description's prose names most of the commands without ever saying
+    // they are commands.
+    after_long_help = COMMANDS,
     long_about = "cctop — an htop-like monitor for AI coding agent sessions\n\n\
 Tracks Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, and Windsurf\n\
 sessions on your machine, showing real-time cost estimation, token usage, tool\n\
@@ -131,15 +144,18 @@ pub struct Args {
     #[arg(short, long, default_value = "retail", value_parser = parse_plan)]
     pub plan: Plan,
 
-    /// Refresh interval in seconds. $CCTOP_SETTLE_MS is the other half of the
-    /// cadence: how long a transcript that was just written is left to finish
-    /// being written before the rows are rebuilt from it (default 2000). 0
-    /// rebuilds on every refresh, at the cost of doing it throughout a live
-    /// turn
+    /// Refresh interval in seconds
+    ///
+    /// $CCTOP_SETTLE_MS is the other half of the cadence: how long a
+    /// transcript that was just written is left to finish being written
+    /// before the rows are rebuilt from it (default 2000). 0 rebuilds on
+    /// every refresh, at the cost of doing it throughout a live turn
     #[arg(short, long, default_value_t = 2.0, value_parser = parse_delay)]
     pub delay: f64,
 
-    /// Clear persisted session extraction data before starting (keeps preferences and pricing)
+    /// Clear persisted session extraction data before starting
+    ///
+    /// Keeps preferences and pricing
     #[arg(long)]
     pub clear_cache: bool,
 
@@ -159,33 +175,39 @@ pub struct Args {
     #[arg(long)]
     pub remove_alias: bool,
 
-    /// Ask the agents — Claude Code, Gemini CLI, Cursor, Codex and OpenCode —
-    /// to report session events to cctop, and exit. Takes `user` (the default)
-    /// or `project` for the current directory's settings
+    /// Ask the agents to report session events to cctop, and exit
+    ///
+    /// Claude Code, Gemini CLI, Cursor, Codex and OpenCode. Takes `user` (the
+    /// default) or `project` for the current directory's settings
     #[arg(long, num_args = 0..=1, default_missing_value = "user", value_name = "SCOPE")]
     pub install_hooks: Option<String>,
 
-    /// Stop the agents reporting events to cctop, and exit. Same scopes as
-    /// --install-hooks
+    /// Stop the agents reporting events to cctop, and exit
+    ///
+    /// Same scopes as --install-hooks
     #[arg(long, num_args = 0..=1, default_missing_value = "user", value_name = "SCOPE")]
     pub remove_hooks: Option<String>,
 
-    /// Report what is installed where, whether it still points at this binary,
-    /// and whether events are being received, then exit
+    /// Report what is installed where and whether events arrive, then exit
+    ///
+    /// Also whether each hook still points at this binary
     #[arg(long)]
     pub hooks_status: bool,
 
-    /// Print a context brief for a session as markdown, and exit. Takes a
-    /// session id or a unique prefix of one; with no argument, briefs the most
-    /// recently active session
+    /// Print a context brief for a session as markdown, and exit
+    ///
+    /// Takes a session id or a unique prefix of one; with no argument, briefs
+    /// the most recently active session
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub handoff: Option<String>,
 
-    /// Copy a session into another harness's store, in the shape that harness's
-    /// own resume command reads, and exit. Takes a session id or a unique prefix
-    /// of one, then the harness to convert to — currently claude and codex, in
-    /// either direction. The copy keeps the session's own id where the receiving
-    /// store has it free, so cctop can tell the two apart as one piece of work
+    /// Copy a session into another harness's store, and exit
+    ///
+    /// The copy is in the shape that harness's own resume command reads. Takes
+    /// a session id or a unique prefix of one, then the harness to convert to
+    /// — currently claude and codex, in either direction. The copy keeps the
+    /// session's own id where the receiving store has it free, so cctop can
+    /// tell the two apart as one piece of work
     #[arg(
         long,
         num_args = 1..=2,
@@ -194,8 +216,9 @@ pub struct Args {
     )]
     pub convert: Vec<String>,
 
-    /// List the sessions on this machine that cctop converted as a handoff, and
-    /// exit. --remove deletes the copies, leaving the sessions they came from
+    /// List the sessions converted as a handoff, and exit
+    ///
+    /// --remove deletes the copies, leaving the sessions they came from
     #[arg(long)]
     pub converted: bool,
 
@@ -204,22 +227,27 @@ pub struct Args {
     pub remove: bool,
 
     /// Print one line for a status bar — tmux, waybar, a shell prompt — and
-    /// exit: how many agents are working, how many are waiting on you, and
-    /// the current spend rate
+    /// exit
+    ///
+    /// How many agents are working, how many are waiting on you, and the
+    /// current spend rate
     #[arg(long)]
     pub statusline: bool,
 
-    /// Print one session's report as JSON — the document `cctop serve` answers
-    /// /api/report/<id> with — and exit. Takes a session id or a unique
-    /// prefix; with no argument, the most recently active session. A serve
-    /// answers for a remote row by running this on the machine the session
-    /// lives on, over the same ssh channel the row arrived by
+    /// Print one session's report as JSON, and exit
+    ///
+    /// The document `cctop serve` answers /api/report/<id> with. Takes a
+    /// session id or a unique prefix; with no argument, the most recently
+    /// active session. A serve answers for a remote row by running this on
+    /// the machine the session lives on, over the same ssh channel the row
+    /// arrived by
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub report: Option<String>,
 
-    /// Print one session's conversation as JSON — /api/chat/<id> — and exit.
-    /// With --before, the window of turns ends just before that sequence
-    /// number, which is how older turns are reached
+    /// Print one session's conversation as JSON, and exit
+    ///
+    /// /api/chat/<id> on a serve. With --before, the window of turns ends just
+    /// before that sequence number, which is how older turns are reached
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub chat: Option<String>,
 
@@ -227,42 +255,51 @@ pub struct Args {
     #[arg(long, requires = "chat", value_name = "SEQ")]
     pub before: Option<usize>,
 
-    /// Print what one session can reach — instructions, skills, MCP servers —
-    /// as JSON, and exit. /api/access/<id> on a serve
+    /// Print what one session can reach, as JSON, and exit
+    ///
+    /// Instructions, skills, MCP servers — /api/access/<id> on a serve
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
     pub access: Option<String>,
 
     /// Download the model the topical search needs (about 30 MB, once), then
-    /// exit. Until this is run, `/` searches transcripts literally and nothing
+    /// exit
+    ///
+    /// Until this is run, `/` searches transcripts literally and nothing
     /// reaches the network
     #[arg(long)]
     pub fetch_search_model: bool,
 
-    /// Serve the Model Context Protocol on stdin/stdout, so an agent can ask
-    /// what the other agents on this machine are doing. Read-only
+    /// Serve the Model Context Protocol on stdin/stdout, and exit
+    ///
+    /// So an agent can ask what the other agents on this machine are doing.
+    /// Read-only
     #[arg(long)]
     pub mcp: bool,
 
-    /// Add Claude accounts, asking of each whether it is a full login — its
-    /// own ~/.claude-<name> via `claude auth login`, everything works — or a
-    /// token from `claude setup-token`, which shares ~/.claude history but has
-    /// no Remote Control or claude.ai connectors. Piped, reads one token from
-    /// stdin. Takes the first account's name; defaults to `default`. Launch
-    /// under one with `p` in the launcher, or `cctop as <name> claude`
+    /// Add a Claude account, and exit
+    ///
+    /// Asks whether it is a full login — its own ~/.claude-<name> via `claude
+    /// auth login`, everything works — or a token from `claude setup-token`,
+    /// which shares ~/.claude history but has no Remote Control or claude.ai
+    /// connectors. Piped, reads one token from stdin. Takes the first
+    /// account's name; defaults to `default`. Launch under one with `p` in the
+    /// launcher, or `cctop as <name> claude`
     #[arg(long, num_args = 0..=1, default_missing_value = "default", value_name = "PROFILE")]
     pub add_account: Option<String>,
 
-    /// Also show the sessions on another machine, read over ssh. Repeatable.
+    /// Also show the sessions on another machine, read over ssh. Repeatable
+    ///
     /// Takes `[user@]host`, or `[user@]host:/path/to/cctop` where cctop is not
     /// on the PATH a non-interactive ssh gets. $CCTOP_HOSTS adds more, comma
     /// separated. Remote rows are read-only: cctop acts only on this machine
     #[arg(long = "host", value_name = "HOST")]
     pub hosts: Vec<String>,
 
-    /// Time each stage of the run and write the totals to a file on exit, for
-    /// sending to a bug report. Takes a path; with no argument, writes beside
-    /// the cache and prints where. Carries counts and durations only — no
-    /// session titles, project paths or file names
+    /// Time each stage of the run and write the totals to a file on exit
+    ///
+    /// For sending to a bug report. Takes a path; with no argument, writes
+    /// beside the cache and prints where. Carries counts and durations only —
+    /// no session titles, project paths or file names
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "FILE")]
     pub trace: Option<String>,
 }
