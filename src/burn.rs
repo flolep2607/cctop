@@ -20,8 +20,10 @@
 //! [`Window::coverage`] is what says how much to trust a given figure.
 
 use crate::config;
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::Path;
 
 /// A single reading of one window.
@@ -270,16 +272,54 @@ pub fn average_unused(windows: &[Window]) -> Option<(u32, usize)> {
 /// Eight levels, so a series of percentages can be drawn in one line of text.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// A sparkline of percentages, drawn against a fixed 0–100 scale.
+/// The block for a percentage, against a fixed 0–100 scale.
 ///
 /// Fixed rather than scaled to the data, which is the whole point: a week that
 /// peaked at 12% must look like a week that peaked at 12%, not like a full bar
 /// because it was the busiest week on record. An auto-scaled chart of unused
 /// allowance would say the opposite of what happened.
-pub fn spark(pcts: &[u32]) -> String {
-    pcts.iter()
-        .map(|p| BLOCKS[((*p).min(100) as usize * (BLOCKS.len() - 1)) / 100])
-        .collect()
+fn block(pct: u32) -> char {
+    BLOCKS[(pct.min(100) as usize * (BLOCKS.len() - 1)) / 100]
+}
+
+/// The chart line, fitted to `cols` columns.
+///
+/// One character per window until they outnumber the columns, then the column
+/// takes its windows' highest peak — every bar is a floor either way, and a
+/// bucket's max is the floor that survives the merge. A column drawn only
+/// from windows cctop barely saw is dimmed: its height is a real floor, but
+/// reporting it at full strength would read as a measurement.
+fn sparkline(windows: &[Window], cols: usize, colour: bool) -> String {
+    let n = windows.len();
+    let cols = cols.min(n);
+    let mut out = String::new();
+    let mut dim = false;
+    for c in 0..cols {
+        let bucket = &windows[c * n / cols..(c + 1) * n / cols];
+        let thin = bucket.iter().all(|w| w.thin());
+        if colour && thin != dim {
+            out.push_str(if thin { "\x1b[2m" } else { "\x1b[0m" });
+            dim = thin;
+        }
+        out.push(block(bucket.iter().map(|w| w.peak).max().unwrap_or(0)));
+    }
+    if dim {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
+/// `Apr 3` inside the current year, `Apr ’24` outside it — the recent past is
+/// what this chart almost always covers, and there the year is noise.
+fn short_date(at: i64) -> String {
+    let Some(d) = chrono::DateTime::from_timestamp(at, 0).map(|d| d.with_timezone(&chrono::Local))
+    else {
+        return "?".into();
+    };
+    match d.year() == chrono::Local::now().year() {
+        true => d.format("%b %-d").to_string(),
+        false => d.format("%b ’%y").to_string(),
+    }
 }
 
 /// The short figure for the Limits pane, or `None` when there is nothing
@@ -304,6 +344,12 @@ A rate-limit window is use-it-or-lose-it: when it resets, whatever was not
 spent is gone. The provider reports only how full the window is now, so cctop
 writes those readings down as it sees them and reconstructs what each completed
 window came to.
+
+The chart draws one bar per completed window, oldest on the left, at the
+highest percentage seen before it reset; dates under the ends mark the span.
+When the windows outnumber the columns, a bar is the highest peak in its
+column. Dimmed bars are windows cctop did not watch for long — a floor, not a
+measurement.
 
 It only sees them while it is running. A window whose busiest hours happened
 with cctop closed has a recorded peak below its real one, so the unused share
@@ -330,7 +376,13 @@ pub fn run(argv: &[String]) -> i32 {
     let log = Log::load();
     match json {
         true => println!("{}", as_json(&log)),
-        false => print!("{}", report(&log)),
+        false => {
+            let width = crossterm::terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80);
+            let colour = std::io::stdout().is_terminal();
+            print!("{}", report(&log, width, colour));
+        }
     }
     0
 }
@@ -345,7 +397,11 @@ fn series_in_order(log: &Log) -> Vec<(&String, Vec<Window>)> {
         .collect()
 }
 
-pub fn report(log: &Log) -> String {
+/// `colour` dims the columns built only from half-watched windows, so the
+/// chart carries how much each stretch is worth. Off when the report goes
+/// anywhere but a terminal — pasted into a bug report the escape codes would
+/// be the only thing that survives.
+pub fn report(log: &Log, width: usize, colour: bool) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let series = series_in_order(log);
@@ -359,6 +415,10 @@ pub fn report(log: &Log) -> String {
             .into();
     }
 
+    // Two cells of indent and a little air at the right edge. A narrower
+    // floor would squeeze the chart into meaninglessness rather than wrap it.
+    let cols = width.saturating_sub(3).max(16);
+
     out.push('\n');
     for (key, windows) in &series {
         let plan = windows
@@ -369,14 +429,26 @@ pub fn report(log: &Log) -> String {
             .unwrap_or_default();
         let _ = writeln!(out, "  {key}{plan}");
 
-        let usable: Vec<&Window> = windows.iter().filter(|w| !w.thin()).collect();
-        let peaks: Vec<u32> = windows.iter().map(|w| w.peak).collect();
-        let _ = writeln!(
-            out,
-            "  {}  peak of each window, oldest first",
-            spark(&peaks)
-        );
+        let drawn = cols.min(windows.len());
+        let _ = writeln!(out, "  {}", sparkline(windows, cols, colour));
 
+        // Dates at the chart's own edges, so "oldest first" says when. A
+        // spark too short to hold both ends gets them joined instead.
+        let (a, b) = (
+            short_date(windows.first().map(|w| w.ended_at).unwrap_or(0)),
+            short_date(windows.last().map(|w| w.ended_at).unwrap_or(0)),
+        );
+        let (wa, wb) = (crate::util::cells(&a), crate::util::cells(&b));
+        if a == b {
+            let _ = writeln!(out, "  {a} · window peaks");
+        } else if drawn > wa + wb + 10 {
+            let pad = drawn - wa - wb;
+            let _ = writeln!(out, "  {a}{}{b} · window peaks", " ".repeat(pad));
+        } else {
+            let _ = writeln!(out, "  {a} → {b} · window peaks");
+        }
+
+        let usable = windows.iter().filter(|w| !w.thin()).count();
         match average_unused(windows) {
             Some((unused, n)) => {
                 let _ = writeln!(
@@ -388,22 +460,24 @@ pub fn report(log: &Log) -> String {
                         _ => "windows",
                     }
                 );
+                if usable < windows.len() {
+                    let _ = writeln!(
+                        out,
+                        "  {} of {} left out — cctop was not running for enough of them",
+                        windows.len() - usable,
+                        windows.len()
+                    );
+                }
             }
+            // A None average means every window was thin, so the left-out
+            // count would only repeat the same fact a second time.
             None => {
                 let _ = writeln!(
                     out,
-                    "  no average: none of these {} windows was observed for long enough",
+                    "  no average: all {} were half-watched — cctop was not running for enough of them",
                     windows.len()
                 );
             }
-        }
-        if usable.len() < windows.len() {
-            let _ = writeln!(
-                out,
-                "  {} of {} left out — cctop was not running for enough of them",
-                windows.len() - usable.len(),
-                windows.len()
-            );
         }
         out.push('\n');
     }
@@ -545,6 +619,40 @@ mod tests {
         );
         // And with nothing well-observed, no figure at all rather than a zero.
         assert_eq!(average_unused(&[glimpsed]), None);
+    }
+
+    /// The chart fits the width it is given: more windows than columns means
+    /// a column carries the highest peak of the windows merged into it, and a
+    /// column of only barely-watched windows is dimmed so it cannot be read
+    /// as a measurement.
+    #[test]
+    fn the_chart_fits_its_width_and_dims_the_half_watched() {
+        let solid = |peak| Window {
+            ended_at: 0,
+            peak,
+            samples: 20,
+            observed_secs: 900,
+            length_secs: Some(1000),
+            plan: None,
+        };
+        let glimpsed = |peak| Window {
+            ended_at: 0,
+            peak,
+            samples: 2,
+            observed_secs: 50,
+            length_secs: Some(1000),
+            plan: None,
+        };
+
+        // Ten windows into five columns: pairs merge at their max.
+        let windows: Vec<Window> = [solid(10), solid(80), solid(30), solid(40)]
+            .into_iter()
+            .chain((0..6).map(|_| glimpsed(60)))
+            .collect();
+        assert_eq!(sparkline(&windows, 5, false), "▆▃▅▅▅");
+        assert_eq!(sparkline(&windows, 5, true), "▆▃\u{1b}[2m▅▅▅\u{1b}[0m");
+        // Fewer windows than columns draw one bar each.
+        assert_eq!(sparkline(&windows[..2], 40, false), "▁▆");
     }
 
     /// A window whose length was never reported has no denominator, so its
