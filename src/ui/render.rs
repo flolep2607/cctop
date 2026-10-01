@@ -886,9 +886,24 @@ fn quota_suffix(status: &crate::quota::ProviderStatus, now: i64, detail: QuotaDe
 /// the rectangle it was given, so a split is two agents each drawing a real
 /// screen rather than two crops of one.
 fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
-    // Read out before the tab is borrowed mutably; the panes' borders want it.
-    let quota = app.quota.clone();
-    let Some(tab) = app.active_tab() else {
+    // The two conditions `App::active_tab` folds into its answer, asked here so
+    // the tab can be reached through its own field. The settings page has none of
+    // the tab's panes on screen, and `draw` returns before reaching this on it
+    // anyway.
+    if app.on_settings() {
+        return;
+    }
+    let Some(index) = app.tab.checked_sub(1) else {
+        return;
+    };
+    // The quota is borrowed, not copied. `App::active_tab` hands out a borrow of
+    // the whole `App`, so reading the quota beside the tab meant reading it out
+    // first — and every frame cloned every account's plan string and every one of
+    // their rate-limit windows, sixty times a second inside a tab, to put two
+    // percentages on a border. The fields are disjoint, so a reference into one of
+    // them lives as long as a mutable borrow of the other.
+    let quota = &app.quota;
+    let Some(tab) = app.tabs.get_mut(index) else {
         return;
     };
     if tab.panes.is_empty() {
@@ -949,7 +964,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         if let Some(text) = pane_quota(
             &pane.label,
             pane.profile.as_deref(),
-            &quota,
+            quota,
             now,
             slots[i].width.saturating_sub(taken).saturating_sub(2),
         ) {

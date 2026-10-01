@@ -681,18 +681,90 @@ pub fn branch_of(s: &crate::session::Session) -> Option<String> {
 /// `git rev-parse` would be a subprocess per row per frame, and `git2` is a C
 /// library and a build step for what is one short file in a documented format.
 fn branch(dir: &str) -> Option<String> {
-    if dir.is_empty() {
-        return None;
-    }
     let mut cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((branch, at)) = cache.get(dir)
-        && at.elapsed() < BRANCH_TTL
-    {
-        return branch.clone();
+    refresh(&mut cache, dir);
+    let (name, _) = reading(&cache, dir);
+    name.map(str::to_string)
+}
+
+/// Bring `dir`'s reading up to date in the cache, reading `HEAD` if it has to.
+///
+/// Split out of [`branch`] so [`cmp_branch`] can put the same question to two
+/// directories under one lock rather than two.
+fn refresh(cache: &mut HashMap<String, Reading>, dir: &str) {
+    // A row with no directory has no repository to ask, and reading one anyway
+    // would ask about whichever checkout cctop itself was started in.
+    if dir.is_empty() || is_fresh(cache.get(dir)) {
+        return;
     }
     let branch = read_head(Path::new(dir));
-    cache.insert(dir.to_string(), (branch.clone(), Instant::now()));
-    branch
+    cache.insert(dir.to_string(), (branch, Instant::now()));
+}
+
+/// Whether a reading is still inside the TTL.
+fn is_fresh(reading: Option<&Reading>) -> bool {
+    reading.is_some_and(|(_, at)| at.elapsed() < BRANCH_TTL)
+}
+
+/// The cached name for `dir`, and whether that name can still be trusted.
+///
+/// A directory with no reading at all counts as stale: nothing has said what is
+/// checked out there yet. A row with no directory is answered here rather than
+/// looked up — [`refresh`] reads no `HEAD` for it, so there is nothing to wait
+/// for either.
+fn reading<'c>(cache: &'c HashMap<String, Reading>, dir: &str) -> (Option<&'c str>, bool) {
+    if dir.is_empty() {
+        return (None, true);
+    }
+    match cache.get(dir) {
+        Some((branch, at)) => (branch.as_deref(), at.elapsed() < BRANCH_TTL),
+        None => (None, false),
+    }
+}
+
+/// Order two rows by branch without copying either name.
+///
+/// The branch column is a sort key, and a sort is O(n log n) comparisons of a
+/// list `refilter` rebuilds on every refresh *and* on every keystroke in the
+/// search box. Asking [`branch_of`] for each side meant a mutex round trip, a
+/// working directory hashed and a `String` copied, twice per comparison, to
+/// compare two names that were sitting in the cache already.
+fn cmp_branch(a: &Session, b: &Session) -> Ordering {
+    // A remote row's name arrived with the row, from the machine that read it;
+    // this machine's cache has nothing to say about it.
+    if a.remote.is_some() || b.remote.is_some() {
+        return branch_of(a).cmp(&branch_of(b));
+    }
+    let (ad, bd) = (a.label_source.as_str(), b.label_source.as_str());
+    let mut cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    // One lookup per side rather than two: asking whether a name is fresh and
+    // then asking for it hashes the same key twice, and the answer cannot come
+    // out differently — a name inside the TTL is the answer for as long as it
+    // has been inside it.
+    {
+        let (left, left_fresh) = reading(&cache, ad);
+        let (right, right_fresh) = reading(&cache, bd);
+        if left_fresh && right_fresh {
+            return left.cmp(&right);
+        }
+    }
+    refresh(&mut cache, ad);
+    refresh(&mut cache, bd);
+    let (left, _) = reading(&cache, ad);
+    let (right, _) = reading(&cache, bd);
+    left.cmp(&right)
+}
+
+/// `a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())` without the strings.
+///
+/// Case folding is per byte and length-preserving, so the folded bytes order
+/// two labels exactly as the folded strings did: a label that is not ASCII has
+/// its bytes left alone, and those still sort by value, and after the letters
+/// rather than among them.
+fn cmp_folded(a: &str, b: &str) -> Ordering {
+    a.bytes()
+        .map(|b| b.to_ascii_lowercase())
+        .cmp(b.bytes().map(|b| b.to_ascii_lowercase()))
 }
 
 /// Read the branch straight out of the repository's `HEAD`.
@@ -807,11 +879,8 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::User => a.owner.cmp(&b.owner),
         ColumnId::Profile => a.profile.cmp(&b.profile),
         // Sessions outside a repository sort together, below every branch.
-        ColumnId::Branch => branch_of(a).cmp(&branch_of(b)),
-        ColumnId::Project => a
-            .display_label()
-            .to_ascii_lowercase()
-            .cmp(&b.display_label().to_ascii_lowercase()),
+        ColumnId::Branch => cmp_branch(a, b),
+        ColumnId::Project => cmp_folded(a.display_label(), b.display_label()),
     }
     // Stable tiebreak so rows never swap places between identical refreshes.
     .then_with(|| age_secs(a, now).cmp(&age_secs(b, now)))
@@ -1068,6 +1137,78 @@ mod tests {
         let mut s = session("a");
         s.label_source = "/nonexistent/definitely/not/a/repo".into();
         assert_eq!(render_cell(ColumnId::Branch, &s, &now), "─");
+    }
+
+    /// Sorting the branch column must order rows the way reading each row's
+    /// branch does — a cheaper path through the cache is only allowed to be
+    /// cheaper if it agrees. A row with no directory, one in no repository, one
+    /// on `main` and one on `Alpha`, and a remote row whose name came from
+    /// another machine, are all pairs the two paths could read differently.
+    #[test]
+    fn sorting_by_branch_agrees_with_reading_each_rows_branch() {
+        let root = std::env::temp_dir().join(format!("cctop-branch-sort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (name, head) in [
+            ("main", "ref: refs/heads/main\n"),
+            ("alpha", "ref: refs/heads/Alpha\n"),
+        ] {
+            let repo = root.join(name);
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::write(repo.join(".git/HEAD"), head).unwrap();
+        }
+        std::fs::create_dir_all(root.join("plain/src")).unwrap();
+
+        let remote = |id: &str, branch: Option<&str>| {
+            let mut s = session(id);
+            s.label_source = root.join("main").to_string_lossy().into_owned();
+            s.remote = Some(crate::session::Remote {
+                host: "far".into(),
+                branch: branch.map(str::to_string),
+                skew: None,
+            });
+            s
+        };
+        let mut rows = vec![
+            session("no-dir"),
+            session("not-a-repo"),
+            session("main"),
+            session("alpha"),
+        ];
+        rows[1].label_source = root.join("plain/src").to_string_lossy().into_owned();
+        rows[2].label_source = root.join("main").to_string_lossy().into_owned();
+        rows[3].label_source = root.join("alpha/src").to_string_lossy().into_owned();
+        rows.extend([remote("far-main", Some("main")), remote("far-none", None)]);
+
+        for a in &rows {
+            for b in &rows {
+                assert_eq!(cmp_branch(a, b), branch_of(a).cmp(&branch_of(b)));
+            }
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Folding in place has to order labels exactly as folding them into two
+    /// new strings did. The interesting pairs are the ones where case folding
+    /// is not what a reader would guess: a non-ASCII label, whose bytes folding
+    /// leaves alone and which therefore sorts after every ASCII letter however
+    /// the letter before it was capitalised, and a label that differs from
+    /// another only in case.
+    #[test]
+    fn sorting_by_project_agrees_with_folding_both_labels() {
+        let labels = [
+            "", "a", "A", "ab", "AB", "aB", "Ab", "cctop", "CCTOP", "cctop-ui", "cctop UI",
+            "Zebra", "zebra", "é", "école", "École", "Ω", "ωmega", "über", "0", "9", "_leading",
+            "ß", "SS", "ﬀ",
+        ];
+        for a in labels {
+            for b in labels {
+                assert_eq!(
+                    cmp_folded(a, b),
+                    a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()),
+                    "{a:?} against {b:?}"
+                );
+            }
+        }
     }
 
     #[test]

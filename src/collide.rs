@@ -63,6 +63,10 @@ pub type Map = HashMap<String, Collision>;
 pub fn apply(sessions: &mut [Session]) -> Map {
     let map = detect(sessions);
     for s in sessions.iter_mut().filter(|s| s.remote.is_none()) {
+        // ponytail: one formatted key per row, which is what the map is keyed
+        // by. Reusing one buffer across the loop would mean writing
+        // `Session::key`'s format out a second time, and a stamp that quietly
+        // stops finding its row is worse than an allocation per refresh.
         s.conflict = map.get(&s.key()).map(|c| c.level);
     }
     map
@@ -84,6 +88,21 @@ pub fn detect(sessions: &[Session]) -> Map {
 
     let mut out = Map::new();
 
+    // One key per live session, derived at most once and only where something
+    // needs it. The map is keyed by owned Strings, but nothing that only
+    // compares two sessions needs one: `Session::key` formats, and both passes
+    // below pair every session with every other, so a key derived per pair is a
+    // key derived per pair of times — three over in the second pass, where the
+    // filter, the duplicate check and the push each wanted the same name. A
+    // session with nothing to report never derives one at all, which on a
+    // machine running agents across many checkouts is most of them.
+    let mut keys: Vec<Option<String>> = vec![None; live.len()];
+    // Whether two live rows can carry one key, which is the only way a pair can
+    // name a peer its row has already been told about. Asked on the first pair
+    // that shares a file, since answering costs a pass over `live` and most
+    // machines have nothing to report.
+    let mut keys_repeat: Option<bool> = None;
+
     // A shared file is global evidence, not scoped to a ground: the two
     // sessions hold one path on disk wherever they were launched from. An
     // agent working a parent checkout can write into a nested one another
@@ -100,7 +119,7 @@ pub fn detect(sessions: &[Session]) -> Map {
         if mine.is_empty() {
             continue;
         }
-        for other in live.iter().skip(i + 1) {
+        for (j, other) in live.iter().enumerate().skip(i + 1) {
             let common: Vec<&str> = other
                 .recent_writes
                 .iter()
@@ -110,15 +129,19 @@ pub fn detect(sessions: &[Session]) -> Map {
             if common.is_empty() {
                 continue;
             }
-            for (a, b) in [(*s, *other), (*other, *s)] {
-                let entry = out.entry(a.key()).or_insert_with(|| Collision {
-                    level: Overlap::File,
-                    peers: Vec::new(),
-                    files: Vec::new(),
-                });
-                let key = b.key();
-                if !entry.peers.contains(&key) {
-                    entry.peers.push(key);
+            let repeat = *keys_repeat.get_or_insert_with(|| keys_repeat_in(&live));
+            // Reported both ways round: a collision is worth nothing to the one
+            // session that was not told about it.
+            for (a, b) in [(i, j), (j, i)] {
+                derive_key(&mut keys, a, live[a]);
+                derive_key(&mut keys, b, live[b]);
+                let (key, peer) = (key_of(&keys, a), key_of(&keys, b));
+                let entry = slot(&mut out, key, Overlap::File);
+                // Each pair of rows is visited once, so a row can only already
+                // have been told about this peer if some other row is the same
+                // session — and then the list really can hold it twice.
+                if !repeat || !entry.peers.iter().any(|p| p == peer) {
+                    entry.peers.push(peer.to_string());
                 }
                 entry.files.extend(common.iter().map(|p| p.to_string()));
             }
@@ -128,21 +151,36 @@ pub fn detect(sessions: &[Session]) -> Map {
     // Same ground without a shared file — the lesser warning. A session
     // already at [`Overlap::File`] keeps only the peers its warning is about
     // rather than gaining the whole neighbourhood.
-    let mut by_repo: HashMap<PathBuf, Vec<&Session>> = HashMap::new();
-    for s in &live {
-        by_repo.entry(ground(&s.label_source)).or_default().push(*s);
+    let mut by_repo: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for (i, s) in live.iter().enumerate() {
+        by_repo.entry(ground(&s.label_source)).or_default().push(i);
     }
     for group in by_repo.into_values().filter(|g| g.len() > 1) {
-        for s in &group {
-            let key = s.key();
-            for other in group.iter().filter(|o| o.key() != key) {
-                let entry = out.entry(key.clone()).or_insert_with(|| Collision {
-                    level: Overlap::Directory,
-                    peers: Vec::new(),
-                    files: Vec::new(),
-                });
-                if entry.level == Overlap::Directory && !entry.peers.contains(&other.key()) {
-                    entry.peers.push(other.key());
+        // The whole group's keys before the pairs: each name is needed
+        // alongside another, and two mutable borrows cannot overlap.
+        for &i in &group {
+            derive_key(&mut keys, i, live[i]);
+        }
+        for &i in &group {
+            let key = key_of(&keys, i);
+            for &j in &group {
+                let other = key_of(&keys, j);
+                // The same session listed twice is one row, not a pair of them:
+                // the key is what says so, not the index.
+                if other == key {
+                    continue;
+                }
+                let entry = slot(&mut out, key, Overlap::Directory);
+                // ponytail: this scan is the one that stays. The file pass above
+                // can only find a peer already named when two rows are one
+                // session, and asks whether that is so rather than looking; here
+                // a row really can arrive with a peer from the file pass, so the
+                // list has to be searched — once per peer, which is a ground of
+                // n sessions costing n^2 again. It is the same warning one
+                // session at a time, and one checkout with a hundred agents in
+                // it is not the case this is worth losing the other work over.
+                if entry.level == Overlap::Directory && !entry.peers.iter().any(|p| p == other) {
+                    entry.peers.push(other.to_string());
                 }
             }
         }
@@ -153,6 +191,48 @@ pub fn detect(sessions: &[Session]) -> Map {
         c.files.dedup();
     }
     out
+}
+
+/// Whether two of `live` carry the same key.
+///
+/// The session list is not deduplicated before it gets here, and a row named
+/// twice is one row, not two — so the peers a pair appends can repeat. Matched
+/// on the key's two fields rather than on [`Session::key`], which formats a
+/// String per comparison: this is a pass over every live session, and the whole
+/// point is to keep the per-pair work off the heap.
+fn keys_repeat_in(live: &[&Session]) -> bool {
+    let mut seen: HashSet<(&crate::pricing::Provider, &str)> = HashSet::new();
+    live.iter()
+        .any(|s| !seen.insert((&s.provider, s.session_id.as_str())))
+}
+
+/// Remember `live[i]`'s key, unless something already needed it.
+fn derive_key(keys: &mut [Option<String>], i: usize, s: &Session) {
+    if keys[i].is_none() {
+        keys[i] = Some(s.key());
+    }
+}
+
+/// The key [`derive_key`] stored for `live[i]`.
+fn key_of(keys: &[Option<String>], i: usize) -> &str {
+    keys[i].as_deref().expect("key derived before it was read")
+}
+
+/// The row for `key`, empty at `level` if there is not one yet.
+///
+/// `entry` takes the key by value, so asking for a row that is already there
+/// formats a String to drop on the floor — and the hit is the common case, once
+/// per pair of sessions per direction. A miss pays for a String and a second
+/// hash; a hit pays for one.
+fn slot<'a>(out: &'a mut Map, key: &str, level: Overlap) -> &'a mut Collision {
+    if out.contains_key(key) {
+        return out.get_mut(key).expect("row present a moment ago");
+    }
+    out.entry(key.to_string()).or_insert(Collision {
+        level,
+        peers: Vec::new(),
+        files: Vec::new(),
+    })
 }
 
 /// Extensions where a second writer is ordinary rather than a race.
@@ -382,6 +462,42 @@ mod tests {
         assert_eq!(hit.files, vec![normalise(&shared, "/anywhere")]);
         // Symmetric: the warning is useless if only one of them gets it.
         assert_eq!(map.get(&b.key()).expect("b collides").level, Overlap::File);
+    }
+
+    /// The session list is not deduplicated before it gets here, so one session
+    /// can arrive twice — and a row is worth one mention of each peer however
+    /// many rows carry it. Two copies of a session have written the same files,
+    /// so the row also names itself once, which is the quirk this deduplication
+    /// is really for: without it the row would name itself twice.
+    #[test]
+    fn a_session_listed_twice_is_told_about_its_peers_once() {
+        let fx = Fixture::new("twice");
+        let repo = fx.checkout("repo");
+        let shared = format!("{repo}/src/ui.rs");
+
+        let a = live("a", &repo, &[&shared]);
+        let b = live("b", &repo, &[&shared]);
+        let hit = &detect(&[a.clone(), a.clone(), b.clone()])[&a.key()];
+
+        assert_eq!(hit.level, Overlap::File);
+        assert_eq!(
+            hit.peers,
+            vec![a.key(), b.key()],
+            "one row, one mention each"
+        );
+    }
+
+    /// The same for the lesser warning, where a pair is every other session
+    /// standing on the same ground: one session is not its own neighbour, and
+    /// two rows of one key are one row.
+    #[test]
+    fn a_session_listed_twice_is_not_its_own_neighbour() {
+        let fx = Fixture::new("twice-quiet");
+        let repo = fx.checkout("repo");
+        // Prose, so this is the ground pass and nothing else.
+        let a = live("a", &repo, &[&format!("{repo}/README.md")]);
+
+        assert!(detect(&[a.clone(), a.clone()]).is_empty());
     }
 
     /// Sharing a repository without having touched the same file yet is worth

@@ -51,6 +51,7 @@ use crate::pricing::Plan;
 use crate::session::{ActivityState, Session, SessionData};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 /// The media type of the text exposition format, version pinned — Prometheus
 /// picks its parser by this header, and an unversioned `text/plain` is read as
@@ -80,11 +81,16 @@ pub fn render(
 
 /// [`render`] with the extraction supplied, which is what lets the tests build
 /// rows without a transcript on disk.
+///
+/// The extraction arrives shared, as the store hands it out: a scrape reads
+/// about twenty scalars per row and none of the fields that make a
+/// `SessionData` large, so handing it back by value would copy tens of
+/// kilobytes per row for nothing.
 fn render_with(
     sessions: &[Session],
     plan: Plan,
     unreadable_hosts: usize,
-    data: impl Fn(&Session) -> SessionData,
+    data: impl Fn(&Session) -> Arc<SessionData>,
 ) -> String {
     let mut agg = Aggregate::default();
     for s in sessions {
@@ -279,7 +285,7 @@ impl Aggregate {
         }
 
         let today = crate::util::local_date_key(&chrono::Utc::now());
-        for (day, models) in &s.costs_by_day {
+        for (day, models) in s.costs_by_day.iter() {
             if day.as_str() < today.as_str() {
                 continue;
             }
@@ -669,7 +675,7 @@ mod tests {
 
     #[test]
     fn an_empty_table_is_still_a_valid_exposition() {
-        let text = render_with(&[], Plan::Retail, 0, |_| SessionData::default());
+        let text = render_with(&[], Plan::Retail, 0, |_| Arc::new(SessionData::default()));
         let samples = check(&text);
         assert!(
             find(
@@ -696,7 +702,7 @@ mod tests {
             max: 200,
             compacted: false,
         });
-        let text = render_with(&[s], Plan::Retail, 0, |_| SessionData::default());
+        let text = render_with(&[s], Plan::Retail, 0, |_| Arc::new(SessionData::default()));
         assert!(text.contains(r#"project="we\"ird\\na\nme""#), "{text}");
         assert!(text.contains(r#"model="model \"x\"""#), "{text}");
         let samples = check(&text);
@@ -722,7 +728,9 @@ mod tests {
         on.context = ctx;
         let mut off = Session::new(Provider::Claude, "fedcba9876543210".to_string());
         off.context = ctx;
-        let text = render_with(&[on, off], Plan::Retail, 0, |_| SessionData::default());
+        let text = render_with(&[on, off], Plan::Retail, 0, |_| {
+            Arc::new(SessionData::default())
+        });
         let samples = check(&text);
         let windows: Vec<_> = samples
             .iter()
@@ -747,7 +755,7 @@ mod tests {
         let mut ended = Session::new(Provider::Codex, "b".to_string());
         ended.activity_state = ActivityState::WaitingForInput;
         let text = render_with(&[waiting, ended], Plan::Retail, 0, |_| {
-            SessionData::default()
+            Arc::new(SessionData::default())
         });
         let samples = check(&text);
         let at = |state| {
@@ -772,10 +780,10 @@ mod tests {
         s.tool_count = 10;
         s.tool_errors = 2;
         let today = crate::util::local_date_key(&chrono::Utc::now());
-        s.costs_by_day = HashMap::from([(
+        s.costs_by_day = Arc::new(HashMap::from([(
             today,
             HashMap::from([("opus".to_string(), 1.0), ("haiku".to_string(), 0.5)]),
-        )]);
+        )]));
         let mut data = SessionData::default();
         data.costs.total = 3.0;
         let tokens = |input, output, cache_read| Tokens {
@@ -798,7 +806,7 @@ mod tests {
                 total: 1.0,
             },
         ];
-        let text = render_with(&[s], Plan::Max, 0, |_| data.clone());
+        let text = render_with(&[s], Plan::Max, 0, |_| Arc::new(data.clone()));
         let samples = check(&text);
         let claude = [("provider", "claude"), ("included", "true")];
         assert_eq!(find(&samples, "cctop_cost_usd", &claude), Some(&3.0));
@@ -841,7 +849,7 @@ mod tests {
     fn a_provider_without_outcomes_reports_calls_but_no_errors() {
         let mut s = live(Provider::Cursor, "c");
         s.tool_count = 4;
-        let text = render_with(&[s], Plan::Retail, 0, |_| SessionData::default());
+        let text = render_with(&[s], Plan::Retail, 0, |_| Arc::new(SessionData::default()));
         let samples = check(&text);
         assert_eq!(
             find(&samples, "cctop_tool_calls", &[("provider", "cursor")]),

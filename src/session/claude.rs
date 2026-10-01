@@ -13,7 +13,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// How long a subagent transcript must sit still before it counts as finished.
 ///
@@ -1258,8 +1258,8 @@ pub fn extract(transcript: &Path) -> SessionData {
         model_breakdown,
         tokens,
         costs,
-        costs_by_day: ext.costs_by_day,
-        costs_by_hour: ext.costs_by_hour,
+        costs_by_day: Arc::new(ext.costs_by_day),
+        costs_by_hour: Arc::new(ext.costs_by_hour),
         costs_by_minute: ext.costs_by_minute,
         tokens_by_day: ext.tokens_by_day,
         tokens_by_hour: ext.tokens_by_hour,

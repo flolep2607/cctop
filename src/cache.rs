@@ -5,7 +5,7 @@ use crate::session::{Session, SessionData};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Identity of the code that produced a cache entry, so a mismatch discards the
 /// whole cache. This replaces the pile of ad-hoc `_hasSubagentsField`-style
@@ -27,25 +27,52 @@ const CACHE_VERSION: &str = env!("CCTOP_CACHE_HASH");
 /// One cached extraction.
 ///
 /// The transcript path is a field rather than something recovered from the key.
-/// The key embeds it — `{path}|{len}|{mtime}|p{epoch}` — but a path may contain
-/// `|` itself, and splitting on the first one truncated it, so those sessions
-/// were dropped on every save and re-parsed forever.
+/// The key names the transcript — the path itself where a file holds one
+/// session, the path and the session id where it holds several — and a path may
+/// contain `|` itself, so a key can never be split back into its parts. That is
+/// not hypothetical: `save` used to recover the path with `key.split('|').next()`,
+/// which truncated an awkward path, and those sessions were dropped on every
+/// save and re-parsed forever.
 #[derive(Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
     /// Which session inside `path` this describes.
     ///
-    /// The path alone used to identify an entry, which is true only where a
-    /// file holds one session. OpenCode keeps every session in one database, so
-    /// storing one evicted all its siblings as superseded and the cache held
-    /// exactly one OpenCode session however many there were.
+    /// The key names it too, but the key is a rendering of it — `Path::display`
+    /// is — and this is the field to read when someone asks what an entry in the
+    /// cache file is about.
     #[serde(default)]
     session: String,
+    /// Which version of the transcript is stored: the part of the key that moves
+    /// when the file does.
+    ///
+    /// A hit is this string being equal to the one derived from the transcript
+    /// right now, which is the whole invalidation rule. It used to be embedded
+    /// in the map key, which meant the superseded entry had to be *found* before
+    /// it could be dropped; see [`CostCache::put`].
+    #[serde(default)]
+    stamp: String,
     /// Unix millis of the write that stored this, used to evict the oldest
     /// entries when the cache outgrows its bound.
     #[serde(default)]
     stored_at: u64,
     data: SessionData,
+}
+
+/// A transcript's identity in the cache, as two halves.
+///
+/// Which slot the entry occupies, and which version of the transcript that slot
+/// holds. Splitting them is what lets [`CostCache::put`] replace an entry
+/// without looking for it: a session has one slot, whatever its file has done
+/// since, so storing a new version is a single insert with nothing to search
+/// for first.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DiskId {
+    /// The map key: the transcript, plus the session inside it for the one
+    /// provider that keeps many sessions in one file.
+    origin: String,
+    /// What the stored version has to match to be served.
+    stamp: String,
 }
 
 #[derive(Deserialize)]
@@ -78,56 +105,60 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Disk key for a session, or `None` where one cannot be formed.
+/// Where a session's cache entry lives, and which version of the transcript that
+/// entry holds. `None` where no honest identity can be formed.
 ///
-/// Most providers give a session its own transcript, so the file's identity is
-/// the session's. OpenCode keeps every session in one database, where the file
-/// says nothing about any single one: its size and mtime move when *any*
-/// session is written, and a path-only key would make all of them collide on
-/// one entry. That is why they went uncached — and why it cost so much. A trace
-/// from a 2019-session machine put 1478 of them in OpenCode, 84% of all the
-/// time spent extracting, repeated in full on every run because none of it
+/// Most providers give a session its own transcript, so the file *is* the
+/// session's: one slot per file, and the stamp alone says whether what is
+/// stored still describes it. OpenCode keeps every session in one database,
+/// where the file says nothing about any single one — its size and mtime move
+/// when *any* session is written — so its slot has to name the session as well,
+/// and its stamp is the `time_updated` that discovery already read out of the
+/// `session` row and put in `last_active`. That is exactly the stamp that moves
+/// when this session gains a message, so it invalidates for the session that
+/// changed and no other — better than an mtime, which cannot tell them apart.
+/// A trace from a 2019-session machine put 1478 of them in OpenCode, 84% of all
+/// the time spent extracting, repeated in full on every run because none of it
 /// could be kept.
-///
-/// So the key is the session's own: its id, and the `time_updated` that
-/// discovery already read out of the `session` row and put in `last_active`.
-/// That is exactly the stamp that moves when this session gains a message, so
-/// it invalidates for the session that changed and no other — better than an
-/// mtime, which cannot tell them apart.
 ///
 /// Windsurf keeps its conversations in one settings blob much as OpenCode does,
 /// but nothing in that blob dates them per conversation, so there is no honest
 /// key to build and it stays uncached.
-fn disk_key(session: &Session, file: &Path) -> Option<String> {
+fn disk_id(session: &Session, file: &Path) -> Option<DiskId> {
     match session.provider {
         crate::pricing::Provider::Windsurf => None,
-        crate::pricing::Provider::OpenCode => Some(format!(
-            "{}|{}|{}|p{}",
-            file.display(),
-            session.session_id,
-            session.last_active,
-            crate::pricing::pricing_epoch()
-        )),
+        crate::pricing::Provider::OpenCode => Some(DiskId {
+            // NUL, because a path can hold `|` but never a NUL, and this is the
+            // one place the two halves have to be told apart. It is only ever
+            // compared whole, never split, so this is belt and braces.
+            origin: format!("{}\u{0}{}", file.display(), session.session_id),
+            stamp: format!(
+                "{}|p{}",
+                session.last_active,
+                crate::pricing::pricing_epoch()
+            ),
+        }),
         _ => cache_key(file),
     }
 }
 
-/// Identity of a transcript's *content*: any append changes size or mtime, so a
-/// stale entry can never be mistaken for a fresh one.
+/// A file-per-session transcript's cache identity: the slot it occupies, and the
+/// stamp that says whether what was read from it still describes it.
 ///
-/// For Claude sessions the key also folds in the newest subagent mtime. The
-/// parent's own mtime doesn't move while a subagent streams into its own file,
-/// and neither does the `subagents/` directory mtime, which only changes when
-/// files are added or removed.
+/// The stamp is size, mtime and the pricing generation. Any append changes size
+/// or mtime, so a stale entry can never be mistaken for a fresh one; and it
+/// carries the pricing generation because cached entries hold computed costs
+/// rather than raw tokens, so a refreshed rate table has to invalidate them just
+/// as an appended transcript does.
 ///
-/// The key also carries the pricing generation, because cached entries hold
-/// computed costs rather than raw tokens: a refreshed rate table has to
-/// invalidate them just as an appended transcript does.
-pub fn cache_key(path: &Path) -> Option<String> {
+/// For Claude sessions it also folds in the newest subagent mtime. The parent's
+/// own mtime doesn't move while a subagent streams into its own file, and
+/// neither does the `subagents/` directory mtime, which only changes when files
+/// are added or removed.
+fn cache_key(path: &Path) -> Option<DiskId> {
     let meta = std::fs::metadata(path).ok()?;
-    let mut key = format!(
-        "{}|{}|{}|p{}",
-        path.display(),
+    let mut stamp = format!(
+        "|{}|{}|p{}",
         meta.len(),
         config::file_mtime_ms(path),
         crate::pricing::pricing_epoch()
@@ -147,9 +178,12 @@ pub fn cache_key(path: &Path) -> Option<String> {
             )
             .max()
             .unwrap_or(0);
-        key.push_str(&format!("|{newest}"));
+        stamp.push_str(&format!("|{newest}"));
     }
-    Some(key)
+    Some(DiskId {
+        origin: path.display().to_string(),
+        stamp,
+    })
 }
 
 pub struct CostCache {
@@ -231,25 +265,56 @@ impl CostCache {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<SessionData> {
-        self.entries.lock().ok()?.get(key).map(|e| e.data.clone())
+    /// The extraction stored for `id`, if it is the version of the transcript
+    /// that `id` names.
+    ///
+    /// The stamp comparison is the invalidation rule and it used to be implicit:
+    /// the stamp was part of the map key, so a hit *was* the match. Comparing it
+    /// here instead is the same rule stated where it is read.
+    pub fn get(&self, id: &DiskId) -> Option<Arc<SessionData>> {
+        // Still a copy of the extraction, because `Entry` is the on-disk shape
+        // and cannot be an `Arc` without serde's `rc` feature — but one, where
+        // this used to take two: one here and another inserting the same data
+        // into the memory layer. Wrapping it here lets those two share the copy
+        // this line already paid for.
+        self.entries
+            .lock()
+            .ok()?
+            .get(&id.origin)
+            .filter(|e| e.stamp == id.stamp)
+            .map(|e| Arc::new(e.data.clone()))
     }
 
-    pub fn put(&self, key: String, path: &Path, session: &str, data: &SessionData) {
+    /// Store `data` as the current version of `id`, replacing whatever version
+    /// of the same transcript was there.
+    ///
+    /// One insert, whatever the map holds. The superseded entry used to have to
+    /// be found first — a `retain` over every entry comparing paths, on every
+    /// store — so filling a cache of N sessions cost O(N²): measured on this
+    /// machine, 0.56 s to fill 2000 and 90 s to fill 20 000, against 0.006 s and
+    /// 0.05 s now.
+    ///
+    /// The alternative was a reverse index from `(path, session)` to the live
+    /// key, and it was not taken: it works, but it stores a second copy of every
+    /// path and session id purely to find what the map could be keyed by
+    /// instead. Measured at 235 bytes of extra heap per entry — a permanent cost
+    /// on a cache that may hold 20 000 of them, to save a scan that happens once
+    /// per session per run.
+    ///
+    /// A file holding several sessions is what makes the origin more than a
+    /// path, and it is now structural rather than a comparison: two OpenCode
+    /// sessions in one database get two origins, so neither can evict the other.
+    /// Matched on the path alone, every one of them counted as superseding every
+    /// other and the cache held exactly one OpenCode session however many there
+    /// were.
+    pub fn put(&self, id: DiskId, path: &Path, session: &str, data: &SessionData) {
         if let Ok(mut entries) = self.entries.lock() {
-            // The old key for this session can never be hit again — its
-            // transcript has moved past it — so drop it here rather than
-            // re-deriving every key from the filesystem at save time.
-            //
-            // Matched on the session as well as the file. On path alone, every
-            // session sharing a database counted as superseding every other,
-            // so each one stored evicted the rest.
-            entries.retain(|k, e| k == &key || e.path != path || e.session != session);
             entries.insert(
-                key,
+                id.origin,
                 Entry {
                     path: path.to_path_buf(),
                     session: session.to_string(),
+                    stamp: id.stamp,
                     stored_at: now_ms(),
                     data: data.clone(),
                 },
@@ -349,10 +414,19 @@ fn evict_oldest(entries: &mut HashMap<String, Entry>) {
 /// Extracted data plus the inputs it was derived from. Both must still match
 /// for a hit, so a mid-session pricing refresh recomputes costs rather than
 /// serving the figures computed before rates were available.
+///
+/// The data is shared rather than held by value. Almost all of a `SessionData`
+/// is in two fields a row never reads: the tool history, measured at ~31 KB per
+/// session and 83% of a 2000-session cache, and the context series, another 15%.
+/// A row reads about fifteen scalars off it, so handing each row its own copy
+/// meant a walk deep-copied all of that per session, every walk, for fields no
+/// row can reach. `Arc` makes a hit a refcount bump, and the one reader that
+/// does want those fields takes its own copy deliberately (see
+/// [`Store::session_data_fresh`]).
 struct MemEntry {
     mtime: u64,
     pricing_epoch: u64,
-    data: SessionData,
+    data: Arc<SessionData>,
     /// How long the parse behind `data` took, and when it finished. Together
     /// with `size` they bound how much of a core one growing transcript may
     /// consume.
@@ -428,7 +502,12 @@ impl Store {
     }
 
     /// Extracted data for a table row, which may be served stale to bound CPU.
-    pub fn session_data(&self, session: &Session) -> SessionData {
+    ///
+    /// Shared, because this is the path thousands of rows take per walk and
+    /// none of them reads the fields that make a `SessionData` large. Callers
+    /// that want to keep one past the borrow take their own copy; that is one
+    /// session's worth, not a table's.
+    pub fn session_data(&self, session: &Session) -> Arc<SessionData> {
         self.data(session, true)
     }
 
@@ -446,14 +525,22 @@ impl Store {
     /// It is also the only path that sees the fields the cache drops — the tool
     /// history and the context series — so a cached copy of those, which is
     /// always empty, has to be refused rather than displayed as an empty panel.
-    pub fn session_data_fresh(&self, session: &Session) -> SessionData {
+    ///
+    /// Shared like the row path, so opening a panel on a session the walk has
+    /// already extracted costs no copy at all. The one that does pay is the
+    /// panel: `App::panel_data` owns a plain `SessionData`, so the run loop
+    /// takes its own copy as it takes the answer off the channel. That is the
+    /// right place for it — the panel is the reader that wants the fields that
+    /// make an extraction large, it is one session, and it happens on
+    /// selection.
+    pub fn session_data_fresh(&self, session: &Session) -> Arc<SessionData> {
         self.data(session, false)
     }
 
-    fn data(&self, session: &Session, allow_stale: bool) -> SessionData {
+    fn data(&self, session: &Session, allow_stale: bool) -> Arc<SessionData> {
         let Some(file) = session.data_file.as_ref() else {
             // A running process with no transcript yet.
-            return SessionData::default();
+            return Arc::new(SessionData::default());
         };
         let mem_key = session.key();
         let mtime = crate::session::effective_mtime_ms(session);
@@ -489,13 +576,13 @@ impl Store {
             }
         }
 
-        let disk_key = disk_key(session, file);
+        let disk_id = disk_id(session, file);
         // Rows only: what the disk holds is missing exactly the fields the panel
         // is opened to read, so serving it there would draw an empty panel over
         // a session that has plenty to show.
         if allow_stale
-            && let Some(key) = &disk_key
-            && let Some(data) = self.disk.get(key)
+            && let Some(id) = &disk_id
+            && let Some(data) = self.disk.get(id)
         {
             if let Ok(mut mem) = self.mem.lock() {
                 mem.insert(
@@ -561,6 +648,10 @@ impl Store {
         let parsed_in = started.elapsed();
         // Trim before anything sees it, so the cached copy and this one agree.
         data.finalize();
+        // Wrapped once here, so the memory layer, the disk layer and the caller
+        // all hold the same extraction: `put` copies for the disk shape, and a
+        // caller that keeps the data to read past the borrow copies for itself.
+        let data = Arc::new(data);
         if let Ok(mut mem) = self.mem.lock() {
             mem.insert(
                 mem_key,
@@ -575,10 +666,10 @@ impl Store {
             );
         }
         // Never persist a failed parse; it would stick until the file changes.
-        if let Some(key) = disk_key
+        if let Some(id) = disk_id
             && data.error.is_none()
         {
-            self.disk.put(key, file, &session.session_id, &data);
+            self.disk.put(id, file, &session.session_id, &data);
         }
         data
     }
@@ -592,10 +683,10 @@ impl Store {
         // would leave its entry behind — and now that those are cached, that
         // entry would outlive the session it describes.
         if let Some(file) = session.data_file.as_ref()
-            && let Some(key) = disk_key(session, file)
+            && let Some(id) = disk_id(session, file)
         {
             if let Ok(mut e) = self.disk.entries.lock() {
-                e.remove(&key);
+                e.remove(&id.origin);
             }
             if let Ok(mut d) = self.disk.dirty.lock() {
                 *d = true;
@@ -885,29 +976,47 @@ mod tests {
     /// `key.split('|').next()`, which truncates a path that contains `|`. The
     /// derived key then never matched, the entry was dropped on every save, and
     /// that session was re-parsed forever.
+    ///
+    /// Round-tripped through a real file now, because that is where the split
+    /// happened: an entry that only has to survive in memory never had to be
+    /// recoverable from its key.
     #[test]
     fn entries_survive_a_pipe_in_the_transcript_path() {
         let dir = std::env::temp_dir().join(format!("cctop-pipe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a|b.jsonl");
         std::fs::write(&file, "x").unwrap();
+        let out = dir.join("cost-cache.json");
 
         let cache = CostCache {
             entries: Mutex::new(HashMap::new()),
             dirty: Mutex::new(false),
         };
-        let key = cache_key(&file).unwrap();
-        assert!(key.contains("a|b"), "the key embeds the awkward path");
-        cache.put(key.clone(), &file, "sess", &SessionData::default());
+        let id = cache_key(&file).unwrap();
+        assert!(id.origin.contains("a|b"), "the key embeds the awkward path");
+        cache.put(
+            DiskId {
+                origin: id.origin.clone(),
+                stamp: id.stamp.clone(),
+            },
+            &file,
+            "sess",
+            &SessionData::default(),
+        );
+        write_atomically(&out, &cache.entries.lock().unwrap()).unwrap();
 
-        let entries = cache.entries.lock().unwrap();
+        let back: DiskCache =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        let entries = back.entries;
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[&key].path, file);
+        assert_eq!(entries[&id.origin].path, file);
+        assert_eq!(entries[&id.origin].stamp, id.stamp);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A new key for the same transcript replaces the old one, which is what
-    /// keeps the cache from growing without re-`stat`ing everything on save.
+    /// A new version of a transcript replaces the old one, which is what keeps
+    /// the cache from growing without re-`stat`ing everything on save. It does
+    /// so by landing in the same slot, so there is nothing to search for first.
     #[test]
     fn a_changed_transcript_supersedes_its_own_entry() {
         let path = Path::new("/tmp/whatever.jsonl");
@@ -915,11 +1024,58 @@ mod tests {
             entries: Mutex::new(HashMap::new()),
             dirty: Mutex::new(false),
         };
-        cache.put("k1".into(), path, "sess", &SessionData::default());
-        cache.put("k2".into(), path, "sess", &SessionData::default());
+        let put = |stamp: &str| {
+            cache.put(
+                DiskId {
+                    origin: "o".into(),
+                    stamp: stamp.into(),
+                },
+                path,
+                "sess",
+                &SessionData::default(),
+            )
+        };
+        put("k1");
+        put("k2");
         let entries = cache.entries.lock().unwrap();
         assert_eq!(entries.len(), 1);
-        assert!(entries.contains_key("k2"));
+        assert_eq!(entries["o"].stamp, "k2");
+    }
+
+    /// The other half of superseding: what is stored is served only while the
+    /// transcript still says the same thing, and an entry that has moved on is
+    /// not served as though it had not.
+    #[test]
+    fn an_entry_is_served_only_while_its_stamp_still_matches() {
+        let dir = std::env::temp_dir().join(format!("cctop-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.jsonl");
+        std::fs::write(&file, "one").unwrap();
+
+        let cache = CostCache {
+            entries: Mutex::new(HashMap::new()),
+            dirty: Mutex::new(false),
+        };
+        let before = cache_key(&file).unwrap();
+        cache.put(
+            DiskId {
+                origin: before.origin.clone(),
+                stamp: before.stamp.clone(),
+            },
+            &file,
+            "sess",
+            &SessionData::default(),
+        );
+        assert!(cache.get(&before).is_some(), "an unchanged transcript hits");
+
+        std::fs::write(&file, "one, and rather more of it").unwrap();
+        let after = cache_key(&file).unwrap();
+        assert_eq!(after.origin, before.origin, "the slot does not move");
+        assert!(
+            cache.get(&after).is_none(),
+            "an appended transcript must not be served the old extraction"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -931,6 +1087,7 @@ mod tests {
                 Entry {
                     path: PathBuf::from(format!("/tmp/{i}.jsonl")),
                     session: format!("s{i}"),
+                    stamp: String::new(),
                     stored_at: i as u64,
                     data: SessionData::default(),
                 },
@@ -951,7 +1108,8 @@ mod tests {
         let k1 = cache_key(&f).unwrap();
         std::fs::write(&f, "one plus more").unwrap();
         let k2 = cache_key(&f).unwrap();
-        assert_ne!(k1, k2, "size change must invalidate the key");
+        assert_eq!(k1.origin, k2.origin, "the slot is the file");
+        assert_ne!(k1.stamp, k2.stamp, "size change must invalidate the key");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -984,7 +1142,10 @@ mod tests {
         let k1 = cache_key(&f).unwrap();
         touch(4_000_000_100);
         let k2 = cache_key(&f).unwrap();
-        assert_ne!(k1, k2, "a workflow agent's write left the key as it was");
+        assert_ne!(
+            k1.stamp, k2.stamp,
+            "a workflow agent's write left the key as it was"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -998,10 +1159,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("a.jsonl");
         std::fs::write(&f, "x").unwrap();
-        let key = cache_key(&f).unwrap();
+        let id = cache_key(&f).unwrap();
         assert!(
-            key.contains(&format!("|p{}", crate::pricing::pricing_epoch())),
-            "key {key} must embed the pricing epoch"
+            id.stamp
+                .contains(&format!("|p{}", crate::pricing::pricing_epoch())),
+            "stamp {} must embed the pricing epoch",
+            id.stamp
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1134,6 +1297,7 @@ mod tests {
                 Entry {
                     path: transcript.clone(),
                     session: format!("s{i}"),
+                    stamp: format!("|{i}|0|p0"),
                     stored_at: i,
                     data,
                 },
@@ -1169,14 +1333,20 @@ mod tests {
         let key_of = |id: &str, updated: &str| {
             let mut s = Session::new(crate::pricing::Provider::OpenCode, id.into());
             s.last_active = updated.into();
-            disk_key(&s, db).expect("a shared-database session must still be keyable")
+            disk_id(&s, db).expect("a shared-database session must still be keyable")
         };
 
-        assert_ne!(key_of("a", "2026-01-01"), key_of("b", "2026-01-01"));
+        // The slot has to name the session: one database, one slot each.
+        let a = key_of("a", "2026-01-01");
+        assert_ne!(
+            a.origin,
+            key_of("b", "2026-01-01").origin,
+            "two sessions in one file shared a slot"
+        );
         // …and a session that gained a message must not be served its old copy.
-        assert_ne!(key_of("a", "2026-01-01"), key_of("a", "2026-01-02"));
+        assert_ne!(a.stamp, key_of("a", "2026-01-02").stamp);
         // …while one that did not change keeps its entry, which is the point.
-        assert_eq!(key_of("a", "2026-01-01"), key_of("a", "2026-01-01"));
+        assert_eq!(a, key_of("a", "2026-01-01"));
     }
 
     /// Windsurf shares a blob the way OpenCode shares a database, but nothing
@@ -1185,7 +1355,7 @@ mod tests {
     #[test]
     fn windsurf_stays_uncached_for_want_of_a_stamp() {
         let s = Session::new(crate::pricing::Provider::Windsurf, "x".into());
-        assert!(disk_key(&s, Path::new("/tmp/state.vscdb")).is_none());
+        assert!(disk_id(&s, Path::new("/tmp/state.vscdb")).is_none());
     }
 
     #[test]
@@ -1211,6 +1381,117 @@ mod tests {
             serde_json::from_str(r#"{"bottom_tab":3,"sort_col":"cpu","future_field":1}"#).unwrap();
         assert_eq!(back.bottom_tab, 3);
         assert_eq!(back.subagent_sort_col, "last"); // filled from Default
+    }
+
+    /// What a process restart actually does: write the map out, read it back,
+    /// and serve from what came off the disk.
+    ///
+    /// Every other test here exercises the map in memory, which is the half that
+    /// changed least — the map is keyed by origin now, and the stamp that used
+    /// to be part of that key is a field of the entry, so an entry that only
+    /// has to survive a `put` and a `get` proves nothing about a file. This one
+    /// goes through `write_atomically` and a real deserialisation, which is the
+    /// path a wrong field name or a missing `#[serde(default)]` would break.
+    #[test]
+    fn a_saved_entry_comes_back_serving_what_went_in() {
+        let dir = std::env::temp_dir().join(format!("cctop-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.jsonl");
+        std::fs::write(&file, "one").unwrap();
+
+        let mut s = Session::new(crate::pricing::Provider::Claude, "sess1".into());
+        s.data_file = Some(file.clone());
+        let id = disk_id(&s, &file).expect("a claude transcript is always keyable");
+
+        // Figures a caller would notice being wrong, rather than a default.
+        let mut data = SessionData::default();
+        data.costs.total = 1.25;
+        data.tokens.output = 7;
+        data.title = Some("a session worth finding".into());
+
+        let cache = CostCache {
+            entries: Mutex::new(HashMap::new()),
+            dirty: Mutex::new(false),
+        };
+        cache.put(
+            DiskId {
+                origin: id.origin.clone(),
+                stamp: id.stamp.clone(),
+            },
+            &file,
+            "sess1",
+            &data,
+        );
+
+        let out = dir.join("cost-cache.json");
+        write_atomically(&out, &cache.entries.lock().unwrap()).expect("the save must succeed");
+
+        // Read the file back as a cold process would, then ask it for the entry.
+        let reopened: DiskCache =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).expect("must parse");
+        assert_eq!(reopened.entries.len(), 1);
+        let back = CostCache {
+            entries: Mutex::new(reopened.entries),
+            dirty: Mutex::new(false),
+        };
+        let hit = back.get(&id).expect("a matching stamp must be served");
+        assert_eq!(hit.costs.total, 1.25);
+        assert_eq!(hit.tokens.output, 7);
+        assert_eq!(hit.title.as_deref(), Some("a session worth finding"));
+
+        // And the slot is the origin, so the entry is found under it — not under
+        // a key that has to be re-derived from the file.
+        let stored = back.entries.lock().unwrap();
+        assert!(stored.contains_key(&id.origin), "keyed by origin");
+        assert_eq!(
+            stored[&id.origin].path, file,
+            "the path survived the round trip"
+        );
+        assert_eq!(
+            stored[&id.origin].stamp, id.stamp,
+            "the stamp is what gates a hit"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two sessions in one transcript get one slot each, and neither evicts the
+    /// other.
+    ///
+    /// The origin is the path alone for a file-per-session provider, so this is
+    /// the case where the slot has to be widened to include the session id — and
+    /// it is the case that used to hold exactly one OpenCode session however
+    /// many there were.
+    #[test]
+    fn a_shared_file_gives_each_session_its_own_slot() {
+        let mut first = Session::new(crate::pricing::Provider::OpenCode, "one".into());
+        first.data_file = Some(PathBuf::from("/tmp/shared.db"));
+        first.last_active = "2026-01-01T00:00:00Z".into();
+        let mut second = Session::new(crate::pricing::Provider::OpenCode, "two".into());
+        second.data_file = Some(PathBuf::from("/tmp/shared.db"));
+        second.last_active = "2026-01-01T00:00:00Z".into();
+
+        // Derived per call, as the loader does: a `DiskId` is owned and moves
+        // into the store, so there is nothing to hand out and also keep.
+        let id = |s: &Session| disk_id(s, Path::new("/tmp/shared.db")).unwrap();
+        let (a, b) = (id(&first), id(&second));
+        assert_ne!(a.origin, b.origin, "one file, two slots");
+
+        let cache = CostCache {
+            entries: Mutex::new(HashMap::new()),
+            dirty: Mutex::new(false),
+        };
+        let mut data = SessionData::default();
+        data.costs.total = 3.0;
+        cache.put(id(&first), Path::new("/tmp/shared.db"), "one", &data);
+        cache.put(id(&second), Path::new("/tmp/shared.db"), "two", &data);
+        assert_eq!(
+            cache.entries.lock().unwrap().len(),
+            2,
+            "neither evicted the other"
+        );
+        assert!(cache.get(&a).is_some());
+        assert!(cache.get(&b).is_some());
     }
 
     /// Prefs written before these fields existed must still load. The
