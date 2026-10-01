@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Debug, Clone, Default)]
 struct StaticParts {
@@ -785,8 +785,8 @@ pub fn extract(path: &Path) -> SessionData {
         // value, so the shared borrow has to happen before the moves.
         tokens_by_day: finalize_tokens(&by_day),
         tokens_by_hour: finalize_tokens(&by_hour),
-        costs_by_day: finalize(by_day),
-        costs_by_hour: finalize(by_hour),
+        costs_by_day: Arc::new(finalize(by_day)),
+        costs_by_hour: Arc::new(finalize(by_hour)),
         costs_by_minute: by_minute.iter().map(|(&m, b)| (m, price(b))).collect(),
         metrics,
         rates: Some(CodexRates {

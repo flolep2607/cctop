@@ -137,9 +137,16 @@ pub struct AnalyticsSession {
     /// Session-level rather than `SessionData`-level on purpose: a remote row
     /// fills this from the wire document, which is the only way its history
     /// reaches the page.
-    pub by_day: HashMap<String, HashMap<String, f64>>,
+    ///
+    /// Shared with the row it came from, and serialised as the plain object it
+    /// has always been — this document is one row per session, and the copy it
+    /// used to make of each session's history was the largest thing in building
+    /// it.
+    #[serde(with = "crate::session::arc_as_map")]
+    pub by_day: std::sync::Arc<crate::session::CostBuckets>,
     /// `YYYY-MM-DDTHH` -> model -> USD.
-    pub by_hour: HashMap<String, HashMap<String, f64>>,
+    #[serde(with = "crate::session::arc_as_map")]
+    pub by_hour: std::sync::Arc<crate::session::CostBuckets>,
     /// `YYYY-MM-DD` -> model -> billed tokens.
     ///
     /// Lives on `SessionData`, which the wire format has no field for, so a
@@ -327,7 +334,9 @@ mod tests {
         // recorded total comes off the extraction — zero here, the session
         // having no transcript.
         s.total_cost = None;
-        s.costs_by_day
+        // `make_mut`, not a rebuild: the point of the shared map is that a row
+        // built from an extraction hands the same history to every reader of it.
+        std::sync::Arc::make_mut(&mut s.costs_by_day)
             .insert("2026-08-11".into(), HashMap::from([("m".into(), 1.25)]));
 
         let row = row_of(s, Plan::Max);
@@ -364,7 +373,7 @@ mod tests {
         s.total_cost = Some(4.2);
         s.input_tokens = 4_000;
         s.output_tokens = 500;
-        s.costs_by_day
+        std::sync::Arc::make_mut(&mut s.costs_by_day)
             .insert("2026-08-11".into(), HashMap::from([("m".into(), 4.2)]));
 
         let row = row_of(s, Plan::Retail);

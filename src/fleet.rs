@@ -28,6 +28,7 @@ use crate::util;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How long between polls of one host.
@@ -515,8 +516,8 @@ fn row(host: &str, v: &Value) -> Option<Session> {
             .unwrap_or_else(|| num(c, "this_hour"));
         s.cost_today = num(c, "today");
         s.cost_per_min = num(c, "per_min");
-        s.costs_by_day = buckets(c.get("by_day"));
-        s.costs_by_hour = buckets(c.get("by_hour"));
+        s.costs_by_day = Arc::new(buckets(c.get("by_day")));
+        s.costs_by_hour = Arc::new(buckets(c.get("by_hour")));
     }
 
     if let Some(ctx) = v.get("context") {

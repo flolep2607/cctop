@@ -16,6 +16,7 @@ use crate::util;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Where a session is being driven from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,8 +300,16 @@ pub struct Session {
     /// which an older peer computed for the clock hour instead.
     pub cost_hour: f64,
     pub cost_today: f64,
-    pub costs_by_day: HashMap<String, HashMap<String, f64>>,
-    pub costs_by_hour: HashMap<String, HashMap<String, f64>>,
+    /// `YYYY-MM-DD` -> model -> USD, shared with the extraction that built it.
+    ///
+    /// Behind an `Arc` because annotating a row runs on every refresh for every
+    /// row, and these maps are written once when the transcript is parsed and
+    /// only read from then on. Copying them was the most expensive line in the
+    /// walk — 8.5µs for a 30-day session against 0.19µs for a 1-day one — for a
+    /// hash table no reader mutates.
+    pub costs_by_day: Arc<HashMap<String, HashMap<String, f64>>>,
+    /// `YYYY-MM-DDTHH` -> model -> USD, shared the same way.
+    pub costs_by_hour: Arc<HashMap<String, HashMap<String, f64>>>,
     pub subagents: Vec<Subagent>,
     pub subagents_cost: f64,
     pub context: Option<ContextUsage>,
@@ -534,8 +543,8 @@ impl Session {
             cost_is_free: false,
             cost_hour: 0.0,
             cost_today: 0.0,
-            costs_by_day: HashMap::new(),
-            costs_by_hour: HashMap::new(),
+            costs_by_day: Arc::default(),
+            costs_by_hour: Arc::default(),
             subagents: Vec::new(),
             subagents_cost: 0.0,
             context: None,
@@ -560,6 +569,28 @@ impl Session {
     /// Stable identity used as a map key across refreshes.
     pub fn key(&self) -> String {
         format!("{}:{}", self.provider.as_str(), self.session_id)
+    }
+
+    /// [`Self::key`] written into a buffer the caller owns and reused, for the
+    /// passes that match every session against a map keyed by it.
+    ///
+    /// `key` itself is right almost everywhere and stays: it hands back
+    /// something the caller can keep. What it cannot do is a *lookup*, and the
+    /// sweeps that need one — the process attribution, the rate table, the tail
+    /// cache — run over every session on every refresh, so a fresh `String` per
+    /// row is a per-row allocation for a key that is thrown away a line later.
+    /// One buffer per pass turns that into one allocation however many rows
+    /// there are.
+    ///
+    /// What is left still costs: a pass that *writes* to one of those maps has
+    /// to own the key it writes. That is the minority of the calls, and for the
+    /// rate table — the only one retained across walks — it is the first
+    /// sighting of a session and never again.
+    pub fn key_into<'a>(&self, buf: &'a mut String) -> &'a str {
+        use std::fmt::Write as _;
+        buf.clear();
+        let _ = write!(buf, "{}:{}", self.provider.as_str(), self.session_id);
+        buf
     }
 
     /// The id a running process would name to mean this session: the one it was
@@ -1069,6 +1100,26 @@ mod tests {
         let text = serde_json::to_string(&data).expect("serializes");
         let back: SessionData = serde_json::from_str(&text).expect("deserializes");
         assert_eq!(back.costs_by_minute, data.costs_by_minute);
+    }
+
+    /// The day and hour buckets are shared with every row annotated from this
+    /// extraction, and still have to reach a cache file as the plain nested
+    /// object they always were. A change of shape here would be invisible until
+    /// every session cached by an older build failed to load.
+    #[test]
+    fn shared_cost_buckets_still_spell_themselves_as_plain_objects() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-11T10:00:00Z"), "m", 1.5);
+
+        let text = serde_json::to_string(&data).expect("serializes");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("is json");
+        // The day is whatever the host's time zone made it, so ask the data.
+        let day = data.costs_by_day.keys().next().expect("a day");
+        assert_eq!(value["costs_by_day"][day]["m"].as_f64(), Some(1.5));
+
+        let back: SessionData = serde_json::from_str(&text).expect("deserializes");
+        assert_eq!(back.costs_by_day, data.costs_by_day);
+        assert_eq!(back.costs_by_hour, data.costs_by_hour);
     }
 
     /// A session reached through two overlapping roots is one session. It used
@@ -1663,6 +1714,31 @@ pub struct Subagent {
     pub ghost: bool,
 }
 
+/// Date -> model -> USD, the shape both a [`Session`] and the analytics
+/// document carry it in.
+pub type CostBuckets = HashMap<String, HashMap<String, f64>>;
+
+/// Serde glue that writes a shared bucket map as the plain JSON object it has
+/// always been.
+///
+/// The refcount is a memory strategy for a running process, not something a
+/// cache file records, so the serialised form is byte-for-byte what it was.
+/// Serde's own `rc` feature would also have kept the JSON, and would have been
+/// less code; it is not used because turning it on is a build-configuration
+/// change for something no reader of a cache file can see.
+pub(crate) mod arc_as_map {
+    use super::{Arc, CostBuckets};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(map: &Arc<CostBuckets>, ser: S) -> Result<S::Ok, S::Error> {
+        CostBuckets::serialize(map, ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Arc<CostBuckets>, D::Error> {
+        CostBuckets::deserialize(de).map(Arc::new)
+    }
+}
+
 /// Everything parsed out of a session's transcript(s).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionData {
@@ -1679,9 +1755,17 @@ pub struct SessionData {
     pub tokens: Tokens,
     pub costs: Costs,
     /// `YYYY-MM-DD` -> model -> USD.
-    pub costs_by_day: HashMap<String, HashMap<String, f64>>,
+    ///
+    /// Shared with every [`Session`] row annotated from this extraction, so it
+    /// is an [`Arc`] rather than a copy per row — see [`Session::costs_by_day`].
+    /// The token maps below are not, and deliberately so: nothing copies them
+    /// onto a row, so they are already shared once, by the `Arc<SessionData>`
+    /// the cache store hands out.
+    #[serde(with = "arc_as_map")]
+    pub costs_by_day: Arc<HashMap<String, HashMap<String, f64>>>,
     /// `YYYY-MM-DDTHH` -> model -> USD.
-    pub costs_by_hour: HashMap<String, HashMap<String, f64>>,
+    #[serde(with = "arc_as_map")]
+    pub costs_by_hour: Arc<HashMap<String, HashMap<String, f64>>>,
     /// Unix minute (seconds / 60, UTC) -> USD, across every model.
     ///
     /// What "the last hour" is read from. The hour map above cannot answer it:
@@ -1930,6 +2014,10 @@ impl SessionData {
     /// The day, hour and minute maps are three views of the same spend; filling
     /// them from one place is what keeps "today" and "last 60 min" from
     /// disagreeing about an event one of them forgot.
+    ///
+    /// `make_mut` rather than a plain write, because rows annotated from this
+    /// extraction share the day and hour maps. It copies only once something
+    /// else already holds one, which during extraction is nothing.
     pub(crate) fn record_cost(
         &mut self,
         dt: &chrono::DateTime<chrono::Utc>,
@@ -1937,8 +2025,8 @@ impl SessionData {
         cost: f64,
     ) {
         record_cost(
-            &mut self.costs_by_day,
-            &mut self.costs_by_hour,
+            Arc::make_mut(&mut self.costs_by_day),
+            Arc::make_mut(&mut self.costs_by_hour),
             &mut self.costs_by_minute,
             dt,
             model,

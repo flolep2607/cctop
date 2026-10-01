@@ -9,6 +9,7 @@
 use super::*;
 use crate::loader::Loader;
 use crate::loader::Stats;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 pub(super) enum Request {
@@ -67,7 +68,10 @@ pub(super) enum Response {
     /// copying thousands of rows back every couple of seconds is the cost being
     /// avoided.
     LiveRows(Box<(Vec<Session>, Stats)>),
-    Data(String, Box<SessionData>),
+    /// The open session's extraction, shared with the cache. It arrives shared
+    /// because the store keeps it; it is *taken* shared out of the run loop,
+    /// which is the one place that copies — see there.
+    Data(String, Arc<SessionData>),
     Quota(Box<Quota>),
     /// Pricing landed, so cached costs are stale and a reload is due.
     PricingReady,
@@ -378,7 +382,7 @@ pub(super) fn spawn_worker(
                     let tx = tx.clone();
                     loader.gently_spawn(move || {
                         let data = store.session_data_fresh(&session);
-                        let _ = tx.send(Response::Data(session.key(), Box::new(data)));
+                        let _ = tx.send(Response::Data(session.key(), data));
                     });
                 }
                 // Root reads other users' homes and never writes to them, and a

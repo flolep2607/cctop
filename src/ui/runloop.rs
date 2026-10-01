@@ -14,6 +14,7 @@ use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event,
 };
 use ratatui::crossterm::execute;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use crate::quota::INTERVAL_SECS as QUOTA_INTERVAL_SECS;
@@ -551,7 +552,15 @@ fn event_loop(
                 Ok(Response::Data(key, data)) => {
                     // Discard results for a session the user has already left.
                     if key == app.panel_key {
-                        app.panel_data = Some(*data);
+                        // The one place the cache is copied rather than shared,
+                        // and deliberately so. `App::panel_data` is a plain
+                        // `SessionData` because every panel reads it that way,
+                        // and the panel is the reader that actually wants the
+                        // fields that make an extraction large — the tool
+                        // history and the context series. The row path reads
+                        // fifteen scalars and shares; this is one session, on
+                        // selection, and it is where the copy belongs.
+                        app.panel_data = Some(Arc::unwrap_or_clone(data));
                         app.needs_redraw = true;
                     }
                 }

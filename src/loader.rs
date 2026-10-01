@@ -273,22 +273,31 @@ impl Loader {
         }
     }
 
+    /// Match processes to rows, and give a row for an agent whose transcript
+    /// does not exist yet.
+    ///
+    /// Appends to `sessions` and never reorders or removes, which is what lets
+    /// the light refresh remember liveness as a `Vec<bool>` over the rows it was
+    /// given rather than as a set of keys — see [`Self::refresh_live`].
     fn attach_processes(&mut self, sessions: &mut Vec<Session>) {
         let metrics = self.collector.collect(sessions);
         let mut matched = std::collections::HashSet::new();
+        // One key buffer for the whole sweep: every row here needs its key only
+        // to look something up, and this runs on every light refresh.
+        let mut key = String::new();
 
         for s in sessions.iter_mut() {
-            let key = s.key();
+            let key = s.key_into(&mut key);
             // A stopped session has no command line to read, but its provider
             // and surface still say where it ran; without this every row that
             // is not live showed the column as unknown.
             if s.harness.is_empty() {
                 s.harness = default_harness(s).into();
             }
-            if let Some(pm) = metrics.get(&key) {
+            if let Some(pm) = metrics.get(key) {
                 s.process = Some(pm.clone());
                 s.harness = harness_from_process(s, &pm.command).into();
-                matched.insert(key);
+                matched.insert(key.to_string());
             } else if s.surface == session::Surface::DesktopCowork {
                 // Cowork runs in a cloud VM, so there is no local process. Recent
                 // activity is the only available liveness signal; CPU and memory
@@ -356,14 +365,18 @@ impl Loader {
         // file is edited behind cctop's back keeps its old dot until it runs
         // again. Extraction still notices, so only the tail-derived fields go
         // stale; re-check the mtime here if that ever matters.
+        //
+        // One key buffer for both passes, below and here: this runs over every
+        // session on every full walk, and each key is only ever looked up.
+        let mut key = String::new();
         let wanted: Vec<Option<bool>> = sessions
             .iter()
             .map(|s| {
                 let running = s.is_running();
-                if !running && self.tail_cache.contains_key(&s.key()) {
+                if !running && self.tail_cache.contains_key(s.key_into(&mut key)) {
                     return None; // already known, and it cannot have changed
                 }
-                Some(running || !self.context_cache.contains_key(&s.key()))
+                Some(running || !self.context_cache.contains_key(s.key_into(&mut key)))
             })
             .collect();
 
@@ -382,16 +395,16 @@ impl Loader {
         };
 
         for (s, read) in sessions.iter_mut().zip(reads) {
-            let key = s.key();
+            let key = s.key_into(&mut key);
             let Some(read) = read else {
-                if let Some((state, tool)) = self.tail_cache.get(&key) {
+                if let Some((state, tool)) = self.tail_cache.get(key) {
                     s.activity_state = *state;
                     s.last_tool = tool.clone();
                 }
-                s.context = self.context_cache.get(&key).copied();
+                s.context = self.context_cache.get(key).copied();
                 continue;
             };
-            self.apply_tail(s, read, &key);
+            self.apply_tail(s, read, key);
         }
     }
 
@@ -447,22 +460,31 @@ impl Loader {
         let _span = crate::trace::span("refresh-live");
         // A row that has just stopped changed too, and its cleared process has to
         // reach the table, so remember who was live before the process sweep.
-        let was_live: std::collections::HashSet<String> = sessions
-            .iter()
-            .filter(|s| s.is_running())
-            .map(Session::key)
-            .collect();
+        //
+        // A flag per row rather than a set of keys, which is what this used to
+        // build every two seconds: a `String` per live session, hashed, and a
+        // second one per row to ask the set. `attach_processes` only appends, so
+        // a row's position cannot move under us and the flag beside it is the
+        // same answer for a fifteenth of the work.
+        let rows_before = sessions.len();
+        let was_live: Vec<bool> = sessions.iter().map(Session::is_running).collect();
 
         // Runs first: it can also append a row for an agent that started since the
         // last walk and has no transcript yet, and those need annotating too.
         self.attach_processes(sessions);
 
-        let moved: Vec<usize> = sessions
+        let mut moved: Vec<usize> = sessions
             .iter()
+            .take(rows_before)
+            .zip(&was_live)
             .enumerate()
-            .filter(|(_, s)| s.is_running() || was_live.contains(&s.key()))
+            .filter(|(_, (s, was))| s.is_running() || **was)
             .map(|(i, _)| i)
             .collect();
+        // Every row the sweep appended has a process on it — that is what it is
+        // appended for — so it is live by construction, and would have been
+        // picked up above had the flags covered it.
+        moved.extend(rows_before..sessions.len());
         {
             let store = self.store();
             for &i in &moved {
@@ -484,15 +506,21 @@ impl Loader {
     /// Fold this refresh's deltas into each session's smoothed rates.
     fn update_rates(&mut self, sessions: &mut [Session]) {
         let now = util::now_ms();
+        // `rates` is retained across walks, so its keys are genuinely owned — but
+        // a key is only *written* the first time a session is seen, and this runs
+        // on every tick over every row. Formatting each one into a buffer the
+        // loop reuses leaves the map as it was and stops the other N of every N
+        // keys from being allocated and dropped.
+        let mut key = String::new();
         for s in sessions.iter_mut() {
-            let key = s.key();
+            let key = s.key_into(&mut key);
             let tokens = s.input_tokens + s.output_tokens;
             let cost = s.total_cost.unwrap_or(0.0);
 
-            let Some(prev) = self.rates.get_mut(&key) else {
+            let Some(prev) = self.rates.get_mut(key) else {
                 // First sighting: no interval to measure a rate over yet.
                 self.rates.insert(
-                    key,
+                    key.to_string(),
                     RateState {
                         ts_ms: now,
                         tokens,
@@ -617,6 +645,9 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     // re-annotated — the same cadence every other figure on the row has.
     s.cost_hour = data.cost_last_hour(&Utc::now());
     s.cost_today = data.cost_today();
+    // A refcount bump rather than a copy: this runs for every row on every
+    // refresh, the 2-second light one included, and the maps behind them are
+    // written once when the transcript is parsed and only read from there on.
     s.costs_by_day = data.costs_by_day.clone();
     s.costs_by_hour = data.costs_by_hour.clone();
     s.subagents_cost = data.subagents.iter().map(|sa| sa.cost).sum();
@@ -630,13 +661,22 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
 /// [`session::SessionData::recent_writes`] — because the tool history they come
 /// from is not persisted. Only this step needs the cwd, and only this step is
 /// cheap enough to redo on every walk.
+///
+/// Deduplicated by scanning the kept list rather than through a set. The list is
+/// bounded at [`session::MAX_RECENT_WRITES`] paths, so the worst case is a few
+/// hundred string comparisons against strings of the same length, which is
+/// cheaper than the set it replaced: that hashed every path *and* kept a second
+/// copy of each one it had already resolved, on a row, per refresh. A path is
+/// now resolved once and moved into the row that has to hold it.
 fn recent_writes(paths: &[String], cwd: &str) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    paths
-        .iter()
-        .map(|p| crate::collide::normalise(p, cwd))
-        .filter(|p| seen.insert(p.clone()))
-        .collect()
+    let mut out: Vec<String> = Vec::with_capacity(paths.len().min(session::MAX_RECENT_WRITES));
+    for path in paths {
+        let resolved = crate::collide::normalise(path, cwd);
+        if !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    out
 }
 
 fn harness_from_process(session: &Session, command: &str) -> &'static str {
@@ -823,7 +863,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             // A missing total means this provider is included in the selected
             // billing plan. Its retail-equivalent buckets must not leak back
             // into the overview totals.
-            for (day, models) in &s.costs_by_day {
+            for (day, models) in s.costs_by_day.iter() {
                 let amount: f64 = models.values().sum();
                 if day.as_str() >= month_key.as_str() {
                     st.spend_month += amount;
@@ -850,7 +890,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                     st.monthly_daily[day_num - 1] += amount;
                 }
             }
-            for (key, models) in &s.costs_by_hour {
+            for (key, models) in s.costs_by_hour.iter() {
                 let amount: f64 = models.values().sum();
                 if key.starts_with(&today_key)
                     && let Some(hour_part) = key.get(11..13)
@@ -891,8 +931,10 @@ mod tests {
     fn session_with_day(day: &str, amount: f64) -> Session {
         let mut s = Session::new(Provider::Claude, "x".into());
         s.total_cost = Some(amount);
-        s.costs_by_day
-            .insert(day.to_string(), HashMap::from([("m".into(), amount)]));
+        s.costs_by_day = Arc::new(HashMap::from([(
+            day.to_string(),
+            HashMap::from([("m".into(), amount)]),
+        )]));
         s.last_active = Utc::now().to_rfc3339();
         s
     }
@@ -938,10 +980,8 @@ mod tests {
         s.cost_per_min = 1.25;
         let today = util::local_date_key(&Utc::now());
         let hour = util::local_hour_key(&Utc::now());
-        s.costs_by_day
-            .insert(today, HashMap::from([("m".into(), 3.0)]));
-        s.costs_by_hour
-            .insert(hour, HashMap::from([("m".into(), 2.0)]));
+        s.costs_by_day = Arc::new(HashMap::from([(today, HashMap::from([("m".into(), 3.0)]))]));
+        s.costs_by_hour = Arc::new(HashMap::from([(hour, HashMap::from([("m".into(), 2.0)]))]));
         let st = compute_stats(&[s]);
         assert_eq!(st.spend_claude, 0.0);
         assert_eq!(st.spend_today, 0.0);
@@ -1025,6 +1065,22 @@ mod tests {
                 format!("{sep}repo{sep}src{sep}lib.rs"),
             ]
         );
+    }
+
+    /// Annotating happens for every row on every refresh, the 2-second light one
+    /// included, so the cost buckets are shared with the extraction rather than
+    /// copied out of it. This is the claim that makes it cheap, and it is worth
+    /// a test because a copy would look identical from every call site.
+    #[test]
+    fn a_row_shares_the_extractions_cost_buckets() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        let mut data = SessionData::default();
+        data.record_cost(&chrono::Utc::now(), "m", 1.0);
+
+        annotate(&mut s, &data, Plan::Retail);
+
+        assert!(Arc::ptr_eq(&s.costs_by_day, &data.costs_by_day));
+        assert!(Arc::ptr_eq(&s.costs_by_hour, &data.costs_by_hour));
     }
 
     #[test]
