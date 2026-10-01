@@ -10,7 +10,10 @@ use crate::util;
 use chrono::{DateTime, Utc};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 pub const TABS: [&str; 9] = [
     "Info",
@@ -38,6 +41,106 @@ fn dim(text: impl Into<String>) -> Span<'static> {
 
 fn note(text: &str) -> Vec<Line<'static>> {
     vec![Line::from(dim(text.to_string()))]
+}
+
+/// Which credentials file holds `provider`'s account.
+///
+/// The paths are `LazyLock`s rather than read each time because the account is
+/// read on every frame and the home directory does not move under a running
+/// cctop; the file's *contents* are what change, and those are stamped.
+fn account_file(provider: Provider) -> Option<&'static Path> {
+    static CLAUDE: LazyLock<PathBuf> = LazyLock::new(|| crate::config::HOME.join(".claude.json"));
+    static CODEX: LazyLock<PathBuf> = LazyLock::new(|| crate::config::CODEX_HOME.join("auth.json"));
+    match provider {
+        Provider::Claude => Some(CLAUDE.as_path()),
+        Provider::Codex => Some(CODEX.as_path()),
+        _ => None,
+    }
+}
+
+/// The signed-in account for `provider`, read once per change rather than once
+/// per frame.
+fn account(provider: Provider) -> Option<crate::quota::Account> {
+    let read = match provider {
+        Provider::Claude => crate::quota::claude_account,
+        Provider::Codex => crate::quota::codex_account,
+        _ => return None,
+    };
+    account_from(account_file(provider)?, read)
+}
+
+/// `read`'s answer about the account in `path`, held until `path` changes.
+///
+/// Info is the panel that is open by default and the account is two lines near
+/// its top, so this ran on every frame of every session on the machine — reading
+/// and parsing `~/.claude.json`, which is tens of kilobytes of per-project trust
+/// and history, to print one email address. Measured at ~310 us of a ~340 us
+/// panel.
+///
+/// Keyed on the file itself rather than on a clock: signing in or out rewrites
+/// it, and the next frame says so.
+fn account_from(
+    path: &Path,
+    read: impl FnOnce() -> Option<crate::quota::Account>,
+) -> Option<crate::quota::Account> {
+    // A missing file has no stamp, and that is itself the answer: a provider
+    // nobody has signed in has nothing to show, and re-reading a file that is
+    // not there sixty times a second to learn that is the cost this cache
+    // exists to stop. A sign-in creates the file, so the stamp goes from absent
+    // to present and is picked up on the next frame like any other edit.
+    let stamp = stamp_of(path);
+    let mut cache = ACCOUNTS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((seen, account)) = cache.get(path)
+        && *seen == stamp
+    {
+        return account.clone();
+    }
+    let account = read();
+    cache.insert(path.to_path_buf(), (stamp, account.clone()));
+    account
+}
+
+/// The Account and Org lines for `provider`, if it has an account.
+fn account_lines(provider: Provider) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(a) = account(provider) {
+        if let Some(email) = a.email {
+            lines.push(field("Account", email));
+        }
+        if let Some(org) = a.organization {
+            lines.push(field("Org", org));
+        }
+    }
+    lines
+}
+
+/// A file's length and modification time in nanoseconds — what has to change for
+/// a cached read of it to be wrong.
+type FileStamp = (u64, u128);
+
+/// The last answer each credentials file gave, and the stamp that proved it
+/// current — `None` for a file that is not there. See [`account`].
+type Accounts =
+    LazyLock<Mutex<HashMap<PathBuf, (Option<FileStamp>, Option<crate::quota::Account>)>>>;
+
+static ACCOUNTS: Accounts = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Size and mtime of `path`; `None` for a file that is not there.
+///
+/// Both, from one `stat`: an editor that rewrites a file in place can leave its
+/// length unchanged, and a filesystem with coarse timestamps can put two writes
+/// inside one of them. Either alone would leave a file the user has just
+/// changed looking unchanged.
+fn stamp_of(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((
+        meta.len(),
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ))
 }
 
 fn is_free_model(model: &crate::session::ModelBreakdown) -> bool {
@@ -285,23 +388,9 @@ pub fn info(
     if let Some(owner) = &session.owner {
         lines.push(field("User", owner.clone()));
     }
-    let account = match session.provider {
-        _ if session.owner.is_some() => None,
-        Provider::Claude => crate::quota::claude_account(),
-        Provider::Codex => crate::quota::codex_account(),
-        Provider::Cursor
-        | Provider::Devin
-        | Provider::Gemini
-        | Provider::OpenCode
-        | Provider::Pi
-        | Provider::Windsurf => None,
-    };
-    if let Some(a) = account {
-        if let Some(email) = a.email {
-            lines.push(field("Account", email));
-        }
-        if let Some(org) = a.organization {
-            lines.push(field("Org", org));
+    if session.owner.is_none() {
+        for line in account_lines(session.provider) {
+            lines.push(line);
         }
     }
 
@@ -510,15 +599,19 @@ pub fn processes(session: &Session, width: usize) -> Vec<Line<'static>> {
 // ---------------------------------------------------------------------------
 
 /// Tool names for the sidebar, most-used first, with an "All" entry at index 0.
-pub fn tool_tabs(data: &SessionData) -> Vec<(String, u64)> {
-    let mut tools: Vec<(String, u64)> = data
+///
+/// Borrowed rather than owned: the names belong to the extraction worker's answer
+/// and are drawn and discarded, so a fresh `String` per tool was a per-tool
+/// allocation on a panel that is rebuilt every frame.
+pub fn tool_tabs(data: &SessionData) -> Vec<(&str, u64)> {
+    let mut tools: Vec<(&str, u64)> = data
         .metrics
         .tools
         .iter()
-        .map(|(k, v)| (k.clone(), *v))
+        .map(|(k, v)| (k.as_str(), *v))
         .collect();
-    tools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let mut out = vec![("All".to_string(), data.metrics.tool_count)];
+    tools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let mut out = vec![("All", data.metrics.tool_count)];
     out.extend(tools);
     out
 }
@@ -612,12 +705,15 @@ pub fn tool_activity(
     };
     let all = tab == 0;
 
-    let mut rows: Vec<(String, &crate::session::ToolDetail)> = Vec::new();
+    // The tool name rides along borrowed: it is one string for a whole tool's
+    // rows, and it was copied onto every one of them — a session with a few
+    // hundred invocations paid a few hundred allocations per frame to label them.
+    let mut rows: Vec<(&str, &crate::session::ToolDetail)> = Vec::new();
     for (tool, details) in &data.metrics.tool_details {
-        if !all && tool != name {
+        if !all && tool.as_str() != *name {
             continue;
         }
-        rows.extend(details.iter().map(|d| (tool.clone(), d)));
+        rows.extend(details.iter().map(|d| (tool.as_str(), d)));
     }
     if let Some(since) = live_since {
         rows.retain(|(_, d)| d.ts.as_str() >= since);
@@ -672,11 +768,11 @@ pub fn tool_activity(
         spans.push(Span::styled(format!("{origin_tag:<7} "), origin_style));
 
         if all {
-            let pretty = util::pretty_mcp_name(&tool);
+            let pretty = util::pretty_mcp_name(tool);
             used += pretty.chars().count() + 1;
             spans.push(Span::styled(
                 format!("{pretty} "),
-                Style::default().fg(theme::tool_color(&tool)),
+                Style::default().fg(theme::tool_color(tool)),
             ));
         }
 
@@ -814,31 +910,36 @@ impl SubagentSort {
     }
 }
 
-pub fn sort_subagents(list: &mut [Subagent], sort: SubagentSort, asc: bool) {
-    list.sort_by(|a, b| {
-        let ord = match sort {
-            SubagentSort::Last => a
-                .last_active
-                .as_deref()
-                .unwrap_or_default()
-                .cmp(b.last_active.as_deref().unwrap_or_default()),
-            SubagentSort::Type => a.agent_type.cmp(&b.agent_type),
-            SubagentSort::Model => a.model.cmp(&b.model),
-            SubagentSort::Description => a.description.cmp(&b.description),
-            SubagentSort::Cost => a
-                .cost
-                .partial_cmp(&b.cost)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            SubagentSort::Tools => a.tool_count.cmp(&b.tool_count),
-            SubagentSort::Context => {
-                let r = |s: &Subagent| s.context.map(|c| c.percent_to_compact()).unwrap_or(-1.0);
-                r(a).partial_cmp(&r(b)).unwrap_or(std::cmp::Ordering::Equal)
-            }
-            SubagentSort::Duration => a.duration_ms.cmp(&b.duration_ms),
+/// Which of two subagents the panel draws first.
+///
+/// Out of the sort rather than in it, because the panel does not own the list it
+/// draws: it orders the extraction worker's answer in place of copying it, and
+/// one answer to "which of these two" is worth more than a second one that could
+/// drift from the first.
+///
+/// The id breaks every tie, so the order does not depend on the order the
+/// transcripts were read in — two agents that spent the same and finished at the
+/// same instant keep the same rows between refreshes.
+fn subagent_cmp(a: &Subagent, b: &Subagent, sort: SubagentSort, asc: bool) -> Ordering {
+    let ord = match sort {
+        SubagentSort::Last => a
+            .last_active
+            .as_deref()
+            .unwrap_or_default()
+            .cmp(b.last_active.as_deref().unwrap_or_default()),
+        SubagentSort::Type => a.agent_type.cmp(&b.agent_type),
+        SubagentSort::Model => a.model.cmp(&b.model),
+        SubagentSort::Description => a.description.cmp(&b.description),
+        SubagentSort::Cost => a.cost.partial_cmp(&b.cost).unwrap_or(Ordering::Equal),
+        SubagentSort::Tools => a.tool_count.cmp(&b.tool_count),
+        SubagentSort::Context => {
+            let r = |s: &Subagent| s.context.map(|c| c.percent_to_compact()).unwrap_or(-1.0);
+            r(a).partial_cmp(&r(b)).unwrap_or(Ordering::Equal)
         }
-        .then_with(|| a.agent_id.cmp(&b.agent_id));
-        if asc { ord } else { ord.reverse() }
-    });
+        SubagentSort::Duration => a.duration_ms.cmp(&b.duration_ms),
+    }
+    .then_with(|| a.agent_id.cmp(&b.agent_id));
+    if asc { ord } else { ord.reverse() }
 }
 
 pub fn subagents(
@@ -853,8 +954,13 @@ pub fn subagents(
     if data.subagents.is_empty() {
         return note("No subagents.");
     }
-    let mut list = data.subagents.clone();
-    sort_subagents(&mut list, sort, asc);
+    // Ordered as indices into the list rather than as a copy of it: `data` is the
+    // extraction worker's answer, borrowed for the length of this frame, and every
+    // `Subagent` carries eight strings — so sorting it meant deep-copying the
+    // whole list once a frame, to arrange rows. Sorting indices is stable in the
+    // same way a stable sort is, so the rows are the same rows in the same order.
+    let mut order: Vec<usize> = (0..data.subagents.len()).collect();
+    order.sort_by(|&a, &b| subagent_cmp(&data.subagents[a], &data.subagents[b], sort, asc));
 
     let fixed = 6 + 2 + 2 + 12 + 1 + 12 + 1 + 8 + 1 + 6 + 1 + 5 + 1 + 7;
     let desc_w = width.saturating_sub(fixed).max(10);
@@ -868,7 +974,7 @@ pub fn subagents(
     ))];
 
     let now = chrono::Utc::now();
-    for sa in list {
+    for sa in order.iter().map(|&i| &data.subagents[i]) {
         let running = sa.status == SubagentStatus::Running;
         // A ghost's transcript was purged, so its per-agent metrics are gone;
         // showing zeros would read as "did nothing" rather than "unknown".
@@ -1596,9 +1702,51 @@ fn context_footnotes(
 // Config
 // ---------------------------------------------------------------------------
 
+/// How many files the Config tab keeps its reads for.
+///
+/// One entry per directory a session has been read in, and a machine with years
+/// of sessions behind it has one of those per session, so the map is bounded
+/// rather than left to grow with every project ever looked at. Overflowing
+/// empties it, which costs a re-read of what is on screen and nothing else.
+const FILE_HEAD_KEPT: usize = 64;
+
+/// Every file the Config tab has read this run, keyed by path, each with the
+/// stamp that proved the read current and the text it produced. See
+/// [`stamp_of`], and [`account`] for the same bargain on a file read once.
+type FileHeads = LazyLock<Mutex<HashMap<PathBuf, (FileStamp, Arc<str>)>>>;
+
+static FILE_HEADS: FileHeads = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The head of `path`, read once per change rather than once per frame.
+///
+/// The tab shows two or three of these, up to 32 KB each, and rebuilds the whole
+/// panel on every frame it is on screen — sixty times a second inside a tab. The
+/// alternative is a fresh 32 KB buffer and a lossy decode of it per file per
+/// frame, to draw text that has not changed. Freshness is therefore the file
+/// itself rather than a clock: one `stat` a frame, and a read only when the stamp
+/// says the answer would differ.
+///
+/// `Arc` because the panel still copies each line out of the text into a `Span`,
+/// and it should not be holding the cache's lock across its own drawing.
+fn file_head(path: &Path) -> Option<Arc<str>> {
+    let stamp = stamp_of(path)?;
+    let mut cache = FILE_HEADS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((seen, text)) = cache.get(path)
+        && *seen == stamp
+    {
+        return Some(text.clone());
+    }
+    let text: Arc<str> = Arc::from(util::read_head(path, 32 * 1024)?);
+    if cache.len() >= FILE_HEAD_KEPT {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), (stamp, text.clone()));
+    Some(text)
+}
+
 /// Read a file's first `max_lines` lines, prefixed by a header.
 fn file_section(path: &Path, display: &str, max_lines: usize) -> Option<Vec<Line<'static>>> {
-    let content = util::read_head(path, 32 * 1024)?;
+    let content = file_head(path)?;
     let mut out = vec![Line::from(Span::styled(
         display.to_string(),
         Style::default()
@@ -2108,13 +2256,110 @@ mod tests {
         }
     }
 
+    /// The account on the Info panel is two lines out of a panel drawn on every
+    /// frame, and it comes out of a credentials file that is tens of kilobytes of
+    /// per-project history. Held until that file changes — so signing in, or out,
+    /// still reaches the screen on the very next frame — and a file that is not
+    /// there is an answer rather than a reason to keep looking.
     #[test]
-    fn subagent_sort_respects_direction() {
-        let mut list = vec![subagent("a", 1.0, false), subagent("b", 5.0, false)];
-        sort_subagents(&mut list, SubagentSort::Cost, true);
-        assert_eq!(list[0].agent_id, "a");
-        sort_subagents(&mut list, SubagentSort::Cost, false);
-        assert_eq!(list[0].agent_id, "b");
+    fn the_account_is_held_until_its_file_changes() {
+        let dir = std::env::temp_dir().join(format!("cctop-account-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("auth.json");
+        let _ = std::fs::remove_file(&file);
+        // Each call reports a different account, so an answer that changes is a
+        // re-read and one that does not is the cache holding.
+        let signed_in = |email: &str| {
+            let email = email.to_string();
+            move || {
+                Some(crate::quota::Account {
+                    email: Some(email.clone()),
+                    organization: None,
+                })
+            }
+        };
+
+        // No file, so no stamp — and "not signed in" must still be an answer rather
+        // than a reason to look again next frame.
+        let absent = account_from(&file, || None);
+        assert!(absent.is_none());
+        assert!(
+            account_from(&file, || None).is_none(),
+            "a provider with no credentials file is not re-read sixty times a second"
+        );
+
+        std::fs::write(&file, "{}\n").unwrap();
+        let a = account_from(&file, signed_in("a@example.com")).expect("the file is there now");
+        assert_eq!(a.email.as_deref(), Some("a@example.com"));
+
+        // Unchanged file, unchanged answer — and this is the frame that used to
+        // read and parse it.
+        let b = account_from(&file, signed_in("b@example.com")).expect("still there");
+        assert_eq!(
+            b.email.as_deref(),
+            Some("a@example.com"),
+            "an unchanged credentials file must not be re-read"
+        );
+
+        std::fs::write(&file, "{}\n\n\n").unwrap();
+        let c = account_from(&file, signed_in("b@example.com")).expect("still there");
+        assert_eq!(
+            c.email.as_deref(),
+            Some("b@example.com"),
+            "a sign-out has to reach the panel on the next frame"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Config tab's files are read once per change, not once per frame — and
+    /// a file the reader has just edited still has to reach the screen. The cache
+    /// keys on the file's own size and mtime rather than on a clock, so an edit
+    /// is a frame behind at worst and usually not behind at all.
+    #[test]
+    fn a_config_file_is_read_once_and_still_follows_an_edit() {
+        let dir = std::env::temp_dir().join(format!("cctop-filehead-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("CLAUDE.md");
+        std::fs::write(&file, "first version\n").unwrap();
+
+        let first = file_head(&file).expect("the file is there");
+        let again = file_head(&file).expect("still there");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "an unchanged file must come back as the same text, not a second read"
+        );
+
+        std::fs::write(&file, "a second, longer version\n").unwrap();
+        assert_eq!(
+            &*file_head(&file).expect("still there"),
+            "a second, longer version\n",
+            "an edit has to be what the panel shows next frame"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The rows follow the sort the panel was asked for, in both directions.
+    /// It orders a borrowed list by index rather than a copy of it, and an order
+    /// assembled from indices is only the same order if the comparison is.
+    #[test]
+    fn subagent_rows_follow_the_sort_in_both_directions() {
+        let data = SessionData {
+            subagents: vec![subagent("a", 1.0, false), subagent("b", 5.0, false)],
+            ..Default::default()
+        };
+        let costs = |asc| -> Vec<String> {
+            subagents(Some(&data), SubagentSort::Cost, asc, 120)
+                .into_iter()
+                .skip(1)
+                .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        assert!(costs(true)[0].contains("$1.00"), "cheapest first ascending");
+        assert!(
+            costs(false)[0].contains("$5.00"),
+            "dearest first descending"
+        );
     }
 
     #[test]

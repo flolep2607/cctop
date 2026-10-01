@@ -11,6 +11,19 @@ use super::*;
 /// Rows moved by PageUp/PageDown and the fallback for half-page scrolls.
 pub(super) const PAGE: isize = 10;
 
+/// Whether a panels key is the one `Session::key` would make for this session.
+///
+/// `Session::key` is a `format!`, and a key built to be compared and dropped is
+/// still an allocation on a path that runs on every pass of the loop. The panels
+/// already hold the key as a `String`, so the format is stripped off that copy
+/// and what is left compared against the id — the same comparison, with nothing
+/// written to the heap to make it.
+fn keyed_as(key: &str, provider: Provider, session_id: &str) -> bool {
+    key.strip_prefix(provider.as_str())
+        .and_then(|rest| rest.strip_prefix(':'))
+        == Some(session_id)
+}
+
 impl App {
     /// The highlighted session, if there is one.
     ///
@@ -130,6 +143,10 @@ impl App {
     /// file is the same JSONL a session writes, so the whole extraction path —
     /// worker, cache, every panel — reads it without knowing the difference, and
     /// the panels describe the subagent rather than the parent it ran under.
+    ///
+    /// Building this is deliberately the *last* step of [`Self::sync_panel_data`]
+    /// and not the first: what it is built from is borrowed, and a row the panels
+    /// already hold must not be copied to find that out.
     pub(super) fn panel_subject(&self, row: Row) -> Option<Session> {
         let session = self.sessions.get(row.session()?)?;
         let Row::Subagent { index, .. } = row else {
@@ -167,6 +184,32 @@ impl App {
         Some(stand_in)
     }
 
+    /// Whether the panels already hold `row` as it stands.
+    ///
+    /// The question [`Self::sync_panel_data`] has to answer before it sends
+    /// anything, asked against the borrowed session: a `Session` carries two cost
+    /// maps, every subagent and the process tree behind the row, and this runs on
+    /// every pass of the loop — sixty times a second inside a tab — where the
+    /// answer is almost always that nothing has changed.
+    ///
+    /// `false` only means "not settled here": every row this cannot answer for
+    /// falls through to the slow path, which decides it exactly as it always did.
+    /// A child row is one of those, because its newest activity is the mtime of a
+    /// transcript that has to be found on disk first — the same lookup that
+    /// building the stand-in does.
+    fn panels_already_hold(&self, row: Row) -> bool {
+        let Some(session) = row.session().and_then(|i| self.sessions.get(i)) else {
+            return false;
+        };
+        match row {
+            Row::Subagent { .. } => false,
+            _ => {
+                keyed_as(&self.panel_key, session.provider, &session.session_id)
+                    && session.last_active == self.panel_stamp
+            }
+        }
+    }
+
     /// Ask the worker for the selected row's full data if it isn't loaded.
     pub(super) fn sync_panel_data(&mut self) {
         let Some(row) = self.selected_row() else {
@@ -174,6 +217,14 @@ impl App {
             self.panel_key.clear();
             return;
         };
+        // Before the subject, not after it: what decides whether there is
+        // anything to send is the key and the stamp, and both are fields of the
+        // row. Building the session first and comparing it afterwards meant every
+        // pass of the loop deep-copied the session under the cursor — and threw
+        // it away — while the user was looking at a still screen.
+        if self.panels_already_hold(row) {
+            return;
+        }
         let Some(session) = self.panel_subject(row) else {
             self.panel_data = None;
             self.panel_key.clear();
@@ -644,5 +695,56 @@ mod tests {
         app.set_sort(ColumnId::Cpu);
         assert!(app.sort_asc, "new column starts ascending");
         assert_eq!(app.sort_col, ColumnId::Cpu);
+    }
+
+    /// What decides a refresh is the key and the stamp, and both are fields of
+    /// the row — so a session that has not moved is asked for once and then left
+    /// alone. That question used to be answered after building the session to
+    /// compare it against, which meant a still screen deep-copied the session
+    /// under the cursor on every pass of the loop, sixty times a second inside a
+    /// tab, and threw it away.
+    #[test]
+    fn an_unmoved_session_is_asked_for_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.sessions = vec![session("a", true, "/x")];
+        app.refilter();
+        let asked = || {
+            rx.try_iter()
+                .filter(|r| matches!(r, Request::Data(_)))
+                .count()
+        };
+
+        app.sync_panel_data();
+        assert_eq!(asked(), 1, "a row nobody has looked at is asked for");
+        app.sync_panel_data();
+        app.sync_panel_data();
+        assert_eq!(asked(), 0, "nothing moved, so nothing is asked for again");
+
+        // A live session keeps growing, and that is the one thing that has to
+        // bring the panels back: an append moves the stamp.
+        app.sessions[0].last_active = chrono::Utc::now().to_rfc3339();
+        app.sync_panel_data();
+        assert_eq!(asked(), 1, "newest activity moved, so the panels are stale");
+
+        app.sync_panel_data();
+        assert_eq!(asked(), 0);
+
+        // Moving the cursor is the other way a refresh is earned.
+        app.sessions.push(session("b", true, "/y"));
+        app.refilter();
+        app.selected = app
+            .visible
+            .iter()
+            .position(|&row| row == Row::Session(1))
+            .expect("the session just added has a row");
+        app.sync_panel_data();
+        assert_eq!(
+            asked(),
+            1,
+            "a different session is a different set of panels"
+        );
+        app.sync_panel_data();
+        assert_eq!(asked(), 0);
     }
 }
