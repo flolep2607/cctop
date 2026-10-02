@@ -27,6 +27,7 @@ pub struct Row {
     pub edits: u64,
     pub files_edited: u64,
     pub files_one_shot: u64,
+    pub files_reworked: u64,
     pub cache_read: u64,
     pub input_total: u64,
     pub active_ms: u64,
@@ -41,6 +42,14 @@ impl Row {
     pub fn one_shot(&self) -> Option<f64> {
         (self.files_edited >= 5)
             .then(|| self.files_one_shot as f64 * 100.0 / self.files_edited as f64)
+    }
+
+    /// Share of edited files a fix session reopened within a day — see
+    /// [`super::mark_rework`]. The same floor as [`Row::one_shot`], for the
+    /// same reason.
+    pub fn reworked(&self) -> Option<f64> {
+        (self.files_edited >= 5)
+            .then(|| self.files_reworked as f64 * 100.0 / self.files_edited as f64)
     }
 
     /// Cost of each file the model actually changed.
@@ -104,6 +113,7 @@ fn fold<'a>(analyses: impl Iterator<Item = &'a Analysis>, rate: Option<f64>) -> 
         row.edits += a.edits;
         row.files_edited += a.files_edited;
         row.files_one_shot += a.files_one_shot;
+        row.files_reworked += a.files_reworked;
         row.cache_read += a.cache_read;
         row.input_total += a.input_total;
         row.active_ms += a.active_ms;
@@ -188,11 +198,12 @@ impl Layout {
         use std::fmt::Write as _;
         let _ = write!(
             out,
-            "  {:<w$} {:>8} {:>6} {:>7} {:>9} {:>9} {:>6}",
+            "  {:<w$} {:>8} {:>6} {:>7} {:>8} {:>9} {:>9} {:>6}",
             "model",
             "sessions",
             "files",
             "1-shot",
+            "reworked",
             "$/file",
             "time/file",
             "cache",
@@ -209,11 +220,12 @@ impl Layout {
         let model: String = r.model.chars().take(self.model).collect();
         let _ = write!(
             out,
-            "  {:<w$} {:>8} {:>6} {:>7} {:>9} {:>9} {:>6}",
+            "  {:<w$} {:>8} {:>6} {:>7} {:>8} {:>9} {:>9} {:>6}",
             model,
             r.sessions,
             r.files_edited,
             pct(r.one_shot()),
+            pct(r.reworked()),
             money(r.per_edit()),
             r.time_per_edit()
                 .map(crate::util::compact_duration)
@@ -295,6 +307,11 @@ pub fn report_at(analyses: &[&Analysis], rate: Option<f64>) -> String {
         out.push('\n');
     };
     say(&[
+        "1-shot is the share of files edited without a retry: no failed",
+        "command or edit by the same agent between two edits of the file.",
+        "reworked is the share a fix session edited again within a day.",
+    ]);
+    say(&[
         "time/file is the agent's working time per file changed: the gaps",
         "between its tool calls, less any pause of over five minutes that",
         "was not a tool still running.",
@@ -344,6 +361,8 @@ pub fn as_json(analyses: &[&Analysis], rate: Option<f64>) -> String {
             "edits": r.edits,
             "files_edited": r.files_edited,
             "one_shot_pct": r.one_shot(),
+            "files_reworked": r.files_reworked,
+            "reworked_pct": r.reworked(),
             "usd_per_file": r.per_edit(),
             "usd_per_call": r.per_call(),
             "active_ms": r.active_ms,
@@ -410,6 +429,8 @@ mod tests {
             cache_read: 0,
             input_total: 0,
             active_ms,
+            edited: Default::default(),
+            files_reworked: 0,
             truncated: false,
         }
     }

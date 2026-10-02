@@ -660,6 +660,8 @@ mod tests {
             cache_read: 0,
             input_total: 0,
             active_ms: 0,
+            edited: Default::default(),
+            files_reworked: 0,
             truncated: false,
         }
     }
