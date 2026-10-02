@@ -643,6 +643,13 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
         }
     }
 
+    // Both re-parse every transcript, and a parse prices each request as it
+    // reads it, so the table has to be in before the scan rather than after.
+    // Dispatched ahead of `main`'s own load, these ran on the handful of rates
+    // compiled in and priced every newer model at nothing: 9 of 11 models on
+    // `compare` read as unpriced while the cached LiteLLM table listed all 9.
+    crate::pricing::refresh_pricing_blocking();
+
     let analyses = scan(Plan::Retail);
     let selected = only(&analyses, provider);
 
