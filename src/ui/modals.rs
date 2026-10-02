@@ -3469,7 +3469,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let shared = |name: &str, signal: Option<crate::hook::Signal>| {
-            tabs::Tab::shared(&crate::rmux::Running {
+            tabs::Tab::for_agent(&crate::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -3483,6 +3483,9 @@ mod tests {
                     at: crate::rmux::now_secs(),
                 }),
                 color: None,
+                tab: None,
+                pane: None,
+                axis: None,
             })
         };
 

@@ -552,6 +552,9 @@ mod tests {
             order: None,
             state: None,
             color: None,
+            tab: None,
+            pane: None,
+            axis: None,
         }
     }
 

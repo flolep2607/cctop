@@ -2795,7 +2795,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let named = |name: &str, color: Option<&str>, activity: Option<u64>| {
-            crate::ui::tabs::Tab::shared(&crate::rmux::Running {
+            crate::ui::tabs::Tab::for_agent(&crate::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -2806,6 +2806,9 @@ mod tests {
                 order: None,
                 state: None,
                 color: color.map(str::to_string),
+                tab: None,
+                pane: None,
+                axis: None,
             })
         };
 
@@ -2903,7 +2906,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let asking = |name: &str, color: Option<&str>| {
-            crate::ui::tabs::Tab::shared(&crate::rmux::Running {
+            crate::ui::tabs::Tab::for_agent(&crate::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -2917,6 +2920,9 @@ mod tests {
                     at: crate::rmux::now_secs(),
                 }),
                 color: color.map(str::to_string),
+                tab: None,
+                pane: None,
+                axis: None,
             })
         };
         let (tx, _rx) = std::sync::mpsc::channel();

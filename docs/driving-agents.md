@@ -200,9 +200,12 @@ client. Quitting cctop detaches — the agent does not notice and carries on. On
 the way out cctop says how many it left behind.
 
 Opening cctop again restores those rmux-backed tabs automatically, with their
-scrollback intact. Closing a pane is the other thing entirely: `Alt+w` ends the
-agent, because a window you closed should stay closed rather than come back at
-the next launch. The launcher (`t`) still lists any running agents that are
+scrollback intact — and, since a tab's shape is recorded on its sessions, a
+**split comes back as the one tab it was**: same panes, same order, divided the
+same way. A tab's name and colour are stored the same way, so renaming or
+painting a tab (`Alt+r`) and dragging it along the bar survive the restart too.
+Closing a pane is the other thing entirely: `Alt+w` ends the agent, because a
+window you closed should stay closed rather than come back at the next launch. The launcher (`t`) still lists any running agents that are
 not already open, so you can attach to them on demand. `R` on a session's row
 does the same thing by another route — a resumed session's rmux session is named
 after it, so pressing `R` twice reattaches rather than starting a rival agent on
