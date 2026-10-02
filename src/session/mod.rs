@@ -1739,6 +1739,203 @@ pub(crate) mod arc_as_map {
     }
 }
 
+/// What Claude Code loaded into a session before its conversation began, as
+/// the transcript recorded it: the skill listing, the agent listing, the MCP
+/// tools it offered, the instructions MCP servers sent, and the memory files.
+///
+/// The configuration files say what *would* load; this says what *did*. The
+/// difference is everything that makes an "unused" finding wrong — a server
+/// that was disabled, a project `.mcp.json` nobody approved, a skill added
+/// yesterday that has been offered to one session rather than to fifty. So a
+/// thing counts as available to a session only when that session's own
+/// transcript lists it, and the files on disk are read afterwards for the one
+/// question the transcript cannot answer: where to go to remove it.
+///
+/// Every size is in characters of what was spliced into the window — counted,
+/// not guessed — and only becomes tokens at the fitted rate when priced.
+///
+/// ponytail: Claude Code only, and only versions that write these listings.
+/// An MCP server whose tools load eagerly (tool search off) is listed nowhere,
+/// so it is never seen here and never reported.
+#[derive(Debug, Clone, Default)]
+pub struct Loadout {
+    /// Skill name -> characters of its entry in the skill listing.
+    pub skills: HashMap<String, u64>,
+    /// Whether any skill listing was recorded, which tells "no skills" apart
+    /// from a harness that does not say.
+    pub skills_listed: bool,
+    /// Agent type -> characters of its entry, Claude Code's built-in agents
+    /// left out: they cannot be removed, so there is nothing to report.
+    pub agents: HashMap<String, u64>,
+    pub agents_listed: bool,
+    /// MCP server, spelled as its tool names spell it (`claude_ai_Gmail`) ->
+    /// characters it put in the window: its offered tool names and whatever
+    /// instructions it sent.
+    pub mcp: HashMap<String, u64>,
+    pub mcp_listed: bool,
+    /// Memory file path -> characters: `CLAUDE.md` at every level, and the
+    /// auto-memory index.
+    pub memory: HashMap<String, u64>,
+    /// Skills the model invoked through the `Skill` tool. A slash command is
+    /// already in [`Metrics::skills`]; this is the other way in.
+    pub skills_invoked: Vec<String>,
+    /// Servers reached through the MCP resource tools, which name the server
+    /// in an argument rather than in the tool name.
+    pub mcp_resources: Vec<String>,
+    /// Distinct requests the main conversation made. Everything above is part
+    /// of the cached prefix, so it is read again on every one of them.
+    pub requests: u64,
+}
+
+/// An MCP server's name as its tool names spell it.
+///
+/// Claude Code builds `mcp__<server>__<tool>` by replacing everything outside
+/// `[A-Za-z0-9_-]` with `_`, so `claude.ai Gmail` is called as
+/// `mcp__claude_ai_Gmail__…` and `plugin:design:figma` as
+/// `mcp__plugin_design_figma__…`. Every spelling — a config key, a listing's
+/// display name, a disabled-servers entry — goes through this before two are
+/// compared, or the same server would read as three.
+pub fn mcp_server_key(name: &str) -> String {
+    name.chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect()
+}
+
+/// The server half of an `mcp__<server>__<tool>` name.
+pub fn mcp_server_of(tool: &str) -> Option<&str> {
+    let rest = tool.strip_prefix("mcp__")?;
+    let (server, _) = rest.split_once("__")?;
+    (!server.is_empty()).then_some(server)
+}
+
+impl Loadout {
+    /// Whether the transcript recorded any listing at all.
+    pub fn listed(&self) -> bool {
+        self.skills_listed || self.agents_listed || self.mcp_listed
+    }
+
+    /// Fold in one `attachment` entry from the main conversation.
+    pub fn note(&mut self, attachment: &serde_json::Value) {
+        use serde_json::Value;
+        let strs = |key: &str| -> Vec<&str> {
+            attachment
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default()
+        };
+        let grow = |map: &mut HashMap<String, u64>, name: &str, chars: u64| {
+            // The largest it was ever seen at. A listing re-sent after a
+            // compaction replaces the first one in the window; adding the two
+            // would count one entry twice.
+            let e = map.entry(name.to_string()).or_insert(0);
+            *e = (*e).max(chars);
+        };
+        match attachment.get("type").and_then(Value::as_str) {
+            Some("skill_listing") => {
+                self.skills_listed = true;
+                let content = attachment
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                for (name, chars) in listing_entries(content) {
+                    grow(&mut self.skills, name, chars);
+                }
+            }
+            Some("agent_listing_delta") => {
+                self.agents_listed = true;
+                let builtin = strs("builtInTypes");
+                for line in strs("addedLines") {
+                    if let Some((name, chars)) = listing_entries(line).next()
+                        && !builtin.contains(&name)
+                    {
+                        grow(&mut self.agents, name, chars);
+                    }
+                }
+            }
+            Some("deferred_tools_delta") => {
+                self.mcp_listed = true;
+                for tool in strs("addedNames") {
+                    if let Some(server) = mcp_server_of(tool) {
+                        let e = self.mcp.entry(server.to_string()).or_insert(0);
+                        // Names are summed, not maxed: each is its own line.
+                        *e += tool.chars().count() as u64 + 1;
+                    }
+                }
+            }
+            Some("mcp_instructions_delta") => {
+                self.mcp_listed = true;
+                for (name, block) in strs("addedNames").into_iter().zip(strs("addedBlocks")) {
+                    *self.mcp.entry(mcp_server_key(name)).or_insert(0) +=
+                        block.chars().count() as u64;
+                }
+            }
+            Some("instructions") => {
+                for file in attachment
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let path = file.get("path").and_then(Value::as_str).unwrap_or("");
+                    let chars = file
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .map_or(0, |c| c.chars().count() as u64);
+                    if !path.is_empty() {
+                        grow(&mut self.memory, path, chars);
+                    }
+                }
+            }
+            // A CLAUDE.md further down the tree, loaded when the agent first
+            // touched a file beside it.
+            Some("nested_memory") => {
+                let inner = attachment.get("content");
+                let path = attachment.get("path").and_then(Value::as_str).unwrap_or("");
+                let chars = inner
+                    .and_then(|c| c.get("content"))
+                    .and_then(Value::as_str)
+                    .map_or(0, |c| c.chars().count() as u64);
+                if !path.is_empty() {
+                    grow(&mut self.memory, path, chars);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `- name: description` entries, each with its length in characters.
+///
+/// The name ends at the first `": "` rather than the first colon, because a
+/// plugin's skills are spelled `plugin:skill`. A line that does not start an
+/// entry continues the one before it.
+fn listing_entries(content: &str) -> impl Iterator<Item = (&str, u64)> {
+    let mut out: Vec<(&str, u64)> = Vec::new();
+    for line in content.lines() {
+        let chars = line.chars().count() as u64 + 1;
+        match line.strip_prefix("- ") {
+            Some(entry) => {
+                let name = entry.split_once(": ").map_or(entry, |(n, _)| n).trim();
+                if !name.is_empty() {
+                    out.push((name, chars));
+                }
+            }
+            None => {
+                if let Some(last) = out.last_mut() {
+                    last.1 += chars;
+                }
+            }
+        }
+    }
+    out.into_iter()
+}
+
 /// Everything parsed out of a session's transcript(s).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionData {
@@ -1813,6 +2010,11 @@ pub struct SessionData {
     /// sparkline reads it.
     #[serde(skip)]
     pub context_series: Vec<CtxPoint>,
+    /// What the harness put in front of the conversation — see [`Loadout`].
+    ///
+    /// Not persisted: only `cctop optimize` reads it, and that re-parses.
+    #[serde(skip)]
+    pub loadout: Loadout,
     /// Compactions the session has been through.
     ///
     /// Counted as they are seen rather than read back off `context_series`,
