@@ -120,6 +120,67 @@ pub struct Conversation {
     /// Why this is empty or short, when there is a reason worth saying.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub note: Option<String>,
+    /// What the transcript looked like when this was read — see [`stamp_of`].
+    /// A page sends it back as `?since=` so that a poll of an unchanged
+    /// session costs neither side a read.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stamp: Option<String>,
+    /// The page's `since` still holds: nothing was read and nothing is sent.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub unchanged: bool,
+}
+
+/// What a polling page already holds, so the answer can be only what it lacks.
+///
+/// A page following a running session asked for the whole tail every five
+/// seconds, and the server re-read the whole transcript to answer — on a long
+/// session hundreds of kilobytes a poll to a page that then rebuilt every turn
+/// it showed, to learn that one tool result had landed. With this the page says
+/// what it has: the stamp of its last read, and the newest turn it holds.
+#[derive(Debug, Default, Clone)]
+pub struct Since {
+    pub stamp: Option<String>,
+    /// Send turns from this sequence number on. Inclusive, because the newest
+    /// turn a page holds is the one most likely to have grown since: a tool
+    /// result lands on the call made in it.
+    pub after: Option<usize>,
+}
+
+/// A transcript's size and modification time, as a token a page can hold.
+///
+/// Transcripts are appended to, so a file whose size and time are both
+/// unchanged has nothing new in it. ponytail: OpenCode keeps every session in
+/// one database, so its stamp moves when *any* OpenCode session writes — a
+/// poll that reads for nothing, never one that misses a change.
+pub fn stamp_of(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{}-{modified}", meta.len()))
+}
+
+impl Conversation {
+    /// The answer for a page holding `since`: nothing when its stamp still
+    /// holds, and otherwise only the turns from `after` on.
+    pub fn narrowed(mut self, since: &Since) -> Conversation {
+        if since.stamp.is_some() && since.stamp == self.stamp {
+            return Conversation {
+                supported: self.supported,
+                earlier: self.earlier,
+                stamp: self.stamp,
+                unchanged: true,
+                ..Conversation::default()
+            };
+        }
+        if let Some(after) = since.after {
+            self.turns.retain(|t| t.seq >= after);
+        }
+        self
+    }
 }
 
 /// One thing that was said, and what it caused.
@@ -264,7 +325,10 @@ pub fn build(session: &Session, before: Option<usize>) -> Conversation {
     if let Err(e) = read {
         return unsupported(&format!("could not read the transcript: {e}"));
     }
-    sink.finish()
+    Conversation {
+        stamp: stamp_of(path),
+        ..sink.finish()
+    }
 }
 
 /// One OpenCode conversation, out of the database every one of its sessions
@@ -471,6 +535,8 @@ impl Sink {
                 .filter(|turn| !turn.is_empty())
                 .collect(),
             note: None,
+            stamp: None,
+            unchanged: false,
         }
     }
 
@@ -1718,6 +1784,45 @@ mod tests {
         assert!(!is_harness_text("<img src=\"x\">"));
         assert!(!is_harness_text("</closing>"));
         assert!(!is_harness_text("fix the parser"));
+    }
+
+    /// A page that already holds the conversation gets nothing for an
+    /// unchanged transcript, and only its newest turn onward for a changed
+    /// one — the newest included, because a tool result lands on it.
+    #[test]
+    fn a_poll_gets_only_what_the_page_lacks() {
+        let turn = |seq| Turn {
+            seq,
+            ..sink_claude(&[r#"{"type":"user","message":{"content":"hi"}}"#]).turns[0].clone()
+        };
+        let whole = Conversation {
+            supported: true,
+            turns: (0..5).map(turn).collect(),
+            earlier: 10,
+            stamp: Some("100-1".into()),
+            ..Default::default()
+        };
+
+        let same = whole.clone().narrowed(&Since {
+            stamp: Some("100-1".into()),
+            after: Some(4),
+        });
+        assert!(same.unchanged);
+        assert!(same.turns.is_empty());
+        assert_eq!(same.earlier, 10, "the count of earlier turns still holds");
+
+        let moved = whole.clone().narrowed(&Since {
+            stamp: Some("90-0".into()),
+            after: Some(3),
+        });
+        assert!(!moved.unchanged);
+        assert_eq!(
+            moved.turns.iter().map(|t| t.seq).collect::<Vec<_>>(),
+            [3, 4]
+        );
+
+        let first = whole.clone().narrowed(&Since::default());
+        assert_eq!(first.turns.len(), 5, "a first read is the whole window");
     }
 
     fn sink_claude(lines: &[&str]) -> Conversation {

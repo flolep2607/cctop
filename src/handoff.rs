@@ -992,6 +992,7 @@ mod tests {
             turns,
             earlier: 0,
             note: None,
+            ..Default::default()
         }
     }
 
@@ -1231,6 +1232,7 @@ mod tests {
                 turns: vec![turn("user", "message", "the ask"), clipped],
                 earlier: 312,
                 note: None,
+                ..Default::default()
             }),
             ..Brief::default()
         };

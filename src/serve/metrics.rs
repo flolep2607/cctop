@@ -882,6 +882,7 @@ mod tests {
             latest: Mutex::new(Arc::new(Snapshot {
                 version: 1,
                 json: "[]".to_string(),
+                rows: Vec::new(),
                 sessions: vec![live(Provider::Claude, "0123456789")],
                 host_errors: Vec::new(),
             })),

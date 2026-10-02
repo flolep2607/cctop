@@ -1540,6 +1540,7 @@ mod tests {
                 turns: seqs.iter().map(|s| turn(*s)).collect(),
                 earlier,
                 note: None,
+                ..Default::default()
             })
         };
 

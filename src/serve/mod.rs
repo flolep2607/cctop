@@ -306,6 +306,10 @@ struct Snapshot {
     /// same bytes, so they are rendered once per refresh rather than once per
     /// client.
     json: String,
+    /// Each row of `json` on its own, by session id, for a stream that follows
+    /// one session — see [`events`]. `json` is these joined, so the two cannot
+    /// disagree.
+    rows: Vec<(String, String)>,
     /// The rows behind it, kept so the report route can find its session
     /// without re-walking the disk.
     sessions: Vec<Session>,
@@ -579,6 +583,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         latest: Mutex::new(Arc::new(Snapshot {
             version: 0,
             json: "[]".to_string(),
+            rows: Vec::new(),
             sessions: Vec::new(),
             host_errors: Vec::new(),
         })),
@@ -1240,7 +1245,24 @@ fn publish(
     // builder: a browser being shown different figures than the terminal is a
     // bug nobody would think to look for. See [`cli::json_sessions`].
     let document = cli::json_sessions(&sessions, plan, store);
-    let json = serde_json::to_string(&document).unwrap_or_else(|_| "[]".to_string());
+    // Serialised a row at a time and joined, which is byte for byte what the
+    // whole array would serialise to — so the dashboard's document is
+    // unchanged, and a session page's stream can send its one row of it.
+    let rows: Vec<(String, String)> = document
+        .iter()
+        .filter_map(|row| {
+            let value = serde_json::to_value(row).ok()?;
+            let id = value.get("session_id")?.as_str()?.to_string();
+            Some((id, value.to_string()))
+        })
+        .collect();
+    let json = format!(
+        "[{}]",
+        rows.iter()
+            .map(|(_, r)| r.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     // Written through the same lock as the snapshot, so the page's quota panel
     // can never be newer than the rows it sits beside.
@@ -1255,6 +1277,7 @@ fn publish(
     let snapshot = Arc::new(Snapshot {
         version: *version,
         json,
+        rows,
         sessions,
         host_errors,
     });
@@ -1590,14 +1613,91 @@ fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str
         .query
         .get("before")
         .and_then(|v| v.parse::<usize>().ok());
+    let since = chat::Since {
+        stamp: request
+            .query
+            .get("since")
+            .cloned()
+            .filter(|s| !s.is_empty()),
+        after: request.query.get("after").and_then(|v| v.parse().ok()),
+    };
     if session.remote.is_some() {
         let mut args = vec!["--chat".to_string(), session.session_id.clone()];
         if let Some(before) = before {
             args.extend(["--before".to_string(), before.to_string()]);
         }
-        return remote_json(shared, stream, request, session, &args);
+        // The peer is asked the old question, because a cctop older than
+        // `since` would reject the flag and the chat would not open at all.
+        // The narrowing happens here instead: the ssh read is still whole,
+        // but the browser gets — and redraws — only what changed.
+        return remote_chat(shared, stream, request, session, &args, &since);
     }
-    json(stream, request, &chat::build(session, before));
+    // Before the read, because skipping the read is the point: an unchanged
+    // file is answered from its metadata alone.
+    if let Some(path) = session.data_file.as_deref()
+        && since.stamp.is_some()
+        && since.stamp == chat::stamp_of(path)
+    {
+        return json(
+            stream,
+            request,
+            &chat::Conversation {
+                supported: true,
+                stamp: since.stamp,
+                unchanged: true,
+                ..Default::default()
+            },
+        );
+    }
+    json(
+        stream,
+        request,
+        &chat::build(session, before).narrowed(&since),
+    );
+}
+
+/// A remote session's conversation, narrowed to what the page lacks.
+///
+/// A remote row has no file here to stamp, so its stamp is a hash of the
+/// answer itself: the same conversation hashes the same, which is all a stamp
+/// has to do.
+fn remote_chat(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    session: &Session,
+    args: &[String],
+    since: &chat::Since,
+) {
+    if since.stamp.is_none() && since.after.is_none() {
+        return remote_json(shared, stream, request, session, args);
+    }
+    let Some(host) = session
+        .remote
+        .as_ref()
+        .and_then(|r| shared.hosts.get(&r.host))
+    else {
+        return remote_json(shared, stream, request, session, args);
+    };
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let body = match host.run(&argv) {
+        Ok(body) => body,
+        Err(_) => return remote_json(shared, stream, request, session, args),
+    };
+    let Ok(mut conversation) = serde_json::from_str::<chat::Conversation>(&body) else {
+        return http::respond(
+            stream,
+            Some(request),
+            200,
+            "application/json; charset=utf-8",
+            body.as_bytes(),
+        );
+    };
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut hasher);
+    conversation.stamp = Some(format!("r{:016x}", hasher.finish()));
+    json(stream, request, &conversation.narrowed(since));
 }
 
 /// Serve what one session can reach.
@@ -1846,7 +1946,17 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
 }
 
 /// Hold an SSE stream open, sending each new snapshot as it lands.
-fn events(shared: &Shared, stream: &mut TcpStream, _request: &Request) {
+fn events(shared: &Shared, stream: &mut TcpStream, request: &Request) {
+    // A session page asks for its own row only. It used to be sent the whole
+    // table on every refresh — every session on the machine and on every
+    // `--host`, re-parsed in the browser several times a minute — to read one
+    // row's state out of it.
+    let only = request
+        .query
+        .get("session")
+        .cloned()
+        .filter(|s| !s.is_empty());
+    let mut last_row: Option<String> = None;
     let Ok(mut sse) = EventStream::open(stream) else {
         return;
     };
@@ -1882,7 +1992,34 @@ fn events(shared: &Shared, stream: &mut TcpStream, _request: &Request) {
             continue;
         }
 
-        if sse.send("sessions", &snapshot.json).is_err() {
+        let body = match &only {
+            None => Some(snapshot.json.clone()),
+            Some(id) => {
+                let row = snapshot
+                    .rows
+                    .iter()
+                    .find(|(sid, _)| sid == id)
+                    .or_else(|| {
+                        snapshot
+                            .rows
+                            .iter()
+                            .find(|(sid, _)| sid.starts_with(id.as_str()))
+                    })
+                    .map(|(_, r)| r.clone());
+                // Only when it moved: a refresh that changed some other row is
+                // nothing to this page.
+                match row {
+                    Some(row) if last_row.as_ref() != Some(&row) => {
+                        last_row = Some(row.clone());
+                        Some(format!("[{row}]"))
+                    }
+                    _ => None,
+                }
+            }
+        };
+        if let Some(body) = body
+            && sse.send("sessions", &body).is_err()
+        {
             break "send";
         }
         sent = snapshot.version;
@@ -2140,6 +2277,7 @@ mod tests {
             latest: Mutex::new(Arc::new(Snapshot {
                 version: 0,
                 json: "[]".to_string(),
+                rows: Vec::new(),
                 sessions: Vec::new(),
                 host_errors: Vec::new(),
             })),
@@ -2221,6 +2359,7 @@ mod tests {
         *shared.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
             json: "[]".to_string(),
+            rows: Vec::new(),
             sessions: vec![s],
             host_errors: Vec::new(),
         });
