@@ -453,6 +453,48 @@ pub fn resolve_codex(model: &str) -> CodexPricing {
     }
 }
 
+/// What the price tables say about a model, as opposed to what it cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// A built-in table or LiteLLM carries a non-zero rate for it.
+    Priced,
+    /// LiteLLM lists it with both rates at zero: free, and saying so.
+    Free,
+    /// Nobody has a rate for it, so its tokens price at nothing.
+    Unlisted,
+}
+
+/// Whether `model`, as `provider` names it, has a price — the question a
+/// session's `$0.00` cannot answer about itself.
+///
+/// Every resolver above returns a zeroed rate for a model it does not know,
+/// on purpose: a new release must never crash the display. The price of that
+/// is that an unpriced model and a free one cost the same, and only the table
+/// can tell them apart afterwards. `cctop doctor` asks this to say which of
+/// the two a zero is.
+///
+/// The built-in table consulted is the one the provider's parser resolves
+/// through — Gemini prices through [`resolve_codex`], so it shares Codex's.
+/// Everyone else goes straight to LiteLLM, which is also where the harnesses
+/// that report their own cost fall back to when that cost is zero. With no
+/// LiteLLM table loaded, everything outside the built-ins is `Unlisted`, which
+/// is true of this process and is the caller's to qualify.
+pub fn listing(provider: Provider, model: &str) -> Listing {
+    let built_in = match provider {
+        Provider::Claude => CLAUDE_TABLE.contains_key(model),
+        Provider::Codex | Provider::Gemini => CODEX_TABLE.contains_key(model),
+        _ => false,
+    };
+    if built_in {
+        return Listing::Priced;
+    }
+    match litellm_entry(model) {
+        Some(e) if priced(&e) => Listing::Priced,
+        Some(_) => Listing::Free,
+        None => Listing::Unlisted,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Billing plans
 // ---------------------------------------------------------------------------
@@ -523,6 +565,17 @@ impl Provider {
             | Provider::OpenCode => true,
             Provider::Cursor | Provider::Pi | Provider::Windsurf => false,
         }
+    }
+
+    /// Whether this provider's transcript records the tokens it used.
+    ///
+    /// The same kind of fact as [`Self::records_tool_outcomes`], for the same
+    /// reason: a session with no tokens is either a parser that missed them or
+    /// a harness that never wrote them down, and only this tells which. Cursor
+    /// and Windsurf keep their accounting server-side; Devin records tokens but
+    /// no dollars, which is a different question.
+    pub fn records_token_usage(&self) -> bool {
+        !matches!(self, Provider::Cursor | Provider::Windsurf)
     }
 
     /// The provider named by `name`, or `None` for anything else.
@@ -750,5 +803,44 @@ mod tests {
         assert_eq!(Plan::parse("MAX"), Some(Plan::Max));
         assert_eq!(Plan::parse("not-billed"), Some(Plan::Included));
         assert_eq!(Plan::parse("bogus"), None);
+    }
+    /// The distinction `cctop doctor` exists to draw: a zero that LiteLLM
+    /// states is free, a zero nobody stated is unpriced, and a built-in model
+    /// is priced whatever LiteLLM says — including when it says nothing.
+    #[test]
+    fn a_listing_tells_free_from_unpriced() {
+        let _guard = install_test_table(&[
+            (
+                "vendor/paid-model",
+                serde_json::json!({"input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6}),
+            ),
+            (
+                "vendor/free-model",
+                serde_json::json!({"input_cost_per_token": 0.0, "output_cost_per_token": 0.0}),
+            ),
+        ]);
+        assert_eq!(
+            listing(Provider::OpenCode, "vendor/paid-model"),
+            Listing::Priced
+        );
+        assert_eq!(
+            listing(Provider::OpenCode, "vendor/free-model"),
+            Listing::Free
+        );
+        assert_eq!(
+            listing(Provider::OpenCode, "nobody/lists-this"),
+            Listing::Unlisted
+        );
+        assert_eq!(
+            listing(Provider::Claude, "claude-opus-4-7"),
+            Listing::Priced
+        );
+        // Gemini resolves through Codex's table, so a Codex built-in counts.
+        assert_eq!(listing(Provider::Gemini, "gpt-5.2"), Listing::Priced);
+        // But a provider whose parser never reads that table does not get it.
+        assert_eq!(
+            listing(Provider::OpenCode, "codex-auto-review"),
+            Listing::Unlisted
+        );
     }
 }

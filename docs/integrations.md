@@ -257,14 +257,38 @@ cctop --mcp
 
 serves the Model Context Protocol on stdin/stdout, so an agent can ask cctop
 what the *other* agents on the machine are doing — the thing none of them can
-find out for themselves. Point a harness at it the way you would any stdio MCP
-server:
+find out for themselves — and what any of them, past or present, already
+worked out. Register it with the agents you use:
+
+```bash
+cctop --install-mcp            # Claude Code and Codex, every project
+cctop --install-mcp project    # Claude Code, this directory only (.mcp.json)
+```
+
+That runs each agent's own `claude mcp add` / `codex mcp add` rather than
+editing its config file, which Claude Code rewrites while it runs. Anything else
+that speaks MCP takes the usual stanza, which the command also prints:
 
 ```json
 {"mcpServers": {"cctop": {"command": "cctop", "args": ["--mcp"]}}}
 ```
 
-Five tools, all read-only:
+The server tells the agent at start-up what it is for, through MCP's own
+`instructions` field, which a client puts in the agent's instructions. That is
+what makes an agent reach for `recall` unprompted, without cctop editing anybody's
+`CLAUDE.md` or `AGENTS.md`.
+
+Seven tools, all read-only:
+
+- **`recall`** — the passages of past sessions, from any agent, that answer a
+  question: why something was decided, what was found last time a test broke.
+  Ranked by the query's words and by its meaning (when the search model is
+  fetched), with the two rankings fused by rank, at most two passages from one
+  session, each with its session id, agent, directory and date. The caller's own
+  session is left out, since its conversation contains the question. The same
+  thing is `cctop recall` on the command line.
+- **`read_passage`** — one passage from a `recall` answer with its neighbours,
+  to read a hit in context.
 
 - **`list_sessions`** — every session, any harness: model, directory, branch,
   tokens, estimated cost, context occupancy, and whether it is still running.
@@ -277,8 +301,8 @@ Five tools, all read-only:
   for getting wrong, since a lost edit arrives with no error attached.
 - **`get_session_context`** — the same brief `O` writes, for one session.
 - **`search_sessions`** — the full text of every transcript on the machine,
-  with a snippet of each match. Where something was already discussed or
-  attempted, in any harness.
+  with a snippet of each match: which *sessions* mention a string, literally.
+  `recall` is usually the better question; this stays for an exact string.
 - **`wait_for_session`** — [`cctop wait`](driving-agents.md#waiting-for-an-agent-to-finish)
   as a tool: blocks until a session stops working and answers with the same
   JSON. For an agent that handed work to another and wants to pick up when it

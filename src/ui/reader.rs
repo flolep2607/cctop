@@ -988,6 +988,7 @@ mod tests {
             turns,
             earlier: 0,
             note: None,
+            ..Default::default()
         };
         app.got_chat(key, None, Ok(Box::new(conv)));
         app
@@ -1026,6 +1027,7 @@ mod tests {
                 turns,
                 earlier: 0,
                 note: None,
+                ..Default::default()
             })),
         );
         // The layout is made when the reader is drawn, which is also the first
@@ -1077,6 +1079,7 @@ mod tests {
                 turns: Vec::new(),
                 earlier: 0,
                 note: None,
+                ..Default::default()
             })),
         );
         draw_chat(&mut app, 80, 20);

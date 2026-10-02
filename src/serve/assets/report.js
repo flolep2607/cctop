@@ -1407,6 +1407,9 @@ let SESSION = ID;
 let REPORT = null;
 // What the conversation looked like at the last build — see chatSig.
 let CHAT_SIG = null;
+// The server's stamp of the transcript as last read. Sent back as ?since= so
+// a poll of a session that has not moved costs neither side a read.
+let CHAT_STAMP = null;
 // The newest window the server sent, kept for `supported`/`note` and the
 // change signature — the turns drawn come from TURNS, not straight from it.
 let LAST_CHAT = null;
@@ -1769,12 +1772,68 @@ function drawChat() {
   }
 }
 
+// Redraw only the turns a poll sent, in place, instead of the whole
+// conversation. Returns false when the page is not in a state to patch — no
+// drawn card yet — and the caller draws it whole.
+function patchChat(fresh) {
+  const card = document.querySelector("#talk .card");
+  if (!card || !fresh.length) return !!card;
+  const base = seenSeq();
+  let appended = 0;
+  for (const turn of fresh) {
+    const node = turnNode(turn, turn.seq);
+    if (base !== null && turn.seq > base) node.classList.add("new");
+    if (turn.seq === selSeq) node.classList.add("sel");
+    const old = document.getElementById("turn-" + turn.seq);
+    if (old) old.replaceWith(node);
+    else {
+      card.appendChild(node);
+      appended++;
+    }
+  }
+  // Appended turns are drawn turns: without this the next full draw would
+  // hide as many from the top to keep the count where it was.
+  chatShown += appended;
+  applyTools();
+  applySeek();
+  seenRecord();
+  return true;
+}
+
 async function refreshChat() {
   const pane = document.getElementById("talk");
   if (!pane) return;
   try {
-    const response = await ask("/api/chat/" + encodeURIComponent(ID) + QUERY);
+    // Once something is drawn, a poll asks only for what it lacks: nothing at
+    // all when the transcript has not moved, and otherwise the newest held
+    // turn — which a landing tool result changes — and anything after it.
+    const newest = TURNS.length ? TURNS[TURNS.length - 1].seq : null;
+    const narrow = CHAT_STAMP !== null && newest !== null && CHAT_SIG !== null;
+    const url = "/api/chat/" + encodeURIComponent(ID) +
+      (narrow
+        ? (QUERY ? QUERY + "&" : "?") + "since=" + encodeURIComponent(CHAT_STAMP) +
+          "&after=" + newest
+        : QUERY);
+    const response = await ask(url);
     const chat = await asJson(response);
+    if (chat.stamp) CHAT_STAMP = chat.stamp;
+    if (chat.unchanged) {
+      offline(null);
+      return;
+    }
+    if (narrow) {
+      const wasNear = nearBottom();
+      mergeChat(chat);
+      if (!patchChat(chat.turns || [])) drawChat();
+      if (wasNear) {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        moreActivity(false);
+      } else if ((chat.turns || []).some((t) => t.seq > newest)) {
+        moreActivity(true);
+      }
+      offline(null);
+      return;
+    }
     const sig = chatSig(chat);
     if (sig === CHAT_SIG) {
       // A poll that changed nothing must not redraw: every rebuild closes the
@@ -1872,7 +1931,10 @@ function applyLive(list) {
 // end is gone) closes it for good, so a closed source is reopened on a timer.
 let source;
 function connect() {
-  source = new EventSource("/api/events" + QUERY);
+  // This session's row only: the whole table, re-sent and re-parsed on every
+  // refresh, was the page paying for every other session to read one.
+  source = new EventSource("/api/events" + (QUERY ? QUERY + "&" : "?") +
+    "session=" + encodeURIComponent(ID));
   source.addEventListener("sessions", (event) => {
     try { applyLive(JSON.parse(event.data)); } catch (e) { /* a bad event is skipped, not fatal */ }
   });

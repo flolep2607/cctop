@@ -16,6 +16,8 @@
 //! whole rather than reimplemented; the rest of these checks have never had a
 //! home.
 
+mod parsers;
+
 use crate::config;
 use crate::pricing::Provider;
 use std::io::IsTerminal;
@@ -141,6 +143,7 @@ pub fn run(args: &[String]) -> i32 {
         environment(),
         sources(),
         pricing(),
+        parsers(),
         cache(),
         hooks(),
         typing(),
@@ -439,6 +442,24 @@ fn pricing() -> Section {
         title: "Pricing",
         checks,
     }
+}
+
+/// Whether the parsers read what the harnesses wrote — see [`parsers`].
+///
+/// After [`pricing`] and because of it: that check is what loads the rate
+/// table, and every figure judged here was priced against whatever it found.
+/// The walk is the ordinary cached one, so on a machine that has run cctop it
+/// costs what `cctop --list` does; it is saved afterwards for the same reason
+/// `--list` saves it, so the next run of anything starts warm.
+fn parsers() -> Section {
+    let mut loader = crate::loader::Loader::new();
+    let sessions = loader.load(crate::pricing::Plan::Retail);
+    let data: Vec<_> = sessions
+        .iter()
+        .map(|s| loader.store().session_data(s))
+        .collect();
+    loader.store().save();
+    parsers::section(&sessions, &data)
 }
 
 /// The extraction cache: where it is, how big, and whether it can be written.

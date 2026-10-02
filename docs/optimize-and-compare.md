@@ -15,7 +15,11 @@ date such as `2026-09-01`. Models change, and so does what you give them, so
 last month's sessions blur this week's comparison.
 
 Neither writes anything — not to your configuration, not anywhere. They read
-transcripts and print.
+transcripts, and `optimize` reads Claude Code's configuration to say where
+something it found is defined, and print.
+
+Whether the work that money bought was kept is a question for the repository,
+and [`cctop yield`](yield.md) asks it.
 
 ## Why they are slower than everything else
 
@@ -53,6 +57,11 @@ What it currently detects:
   job was to explore
 - Tool calls that failed and were billed anyway
 - Sessions that spent real money and changed no file
+- MCP servers, skills, agents and plugins that Claude Code offered to five or
+  more sessions and nothing ever used — see
+  [below](#what-a-session-was-given-and-never-used)
+- What the memory files — every `CLAUDE.md`, and the auto-memory index — cost
+  by being re-read on every request
 
 Underneath, where the money went by kind of work: coding, debugging, testing,
 exploration, planning, delegation, git, build, conversation.
@@ -84,6 +93,77 @@ left, the headline says so rather than claiming `$0.00 looks recoverable`.
 what a set of sessions *spent*, which is an observation and not a saving — an
 earlier version added them together and advertised $218 of ordinary work as
 though it were waste.
+
+### What a session was given and never used
+
+Before a Claude Code conversation starts, every skill, agent and MCP tool it
+could reach is described in the prompt, along with each `CLAUDE.md` that
+applies. That prefix is cached, and read back from the cache on every request
+the session makes. Something nobody uses is not free just because it never
+runs — though it is usually close to free, which is what the value floor is
+for.
+
+"Never used" is the easiest claim here to get wrong, so each half of it comes
+from the strictest source there is:
+
+- **Offered** is read from the transcript, never from the configuration.
+  Claude Code records the skill listing, the agent listing, the MCP tools it
+  offered and the instructions each server sent, and a session only counts
+  toward a server if its own listing names it. A server switched off, a
+  project `.mcp.json` nobody approved, or one added yesterday is in no listing
+  from before then — so it is judged only by the sessions that had it, and
+  needs five of them.
+- **Used** is any way in: a tool call, an MCP resource read, a slash command,
+  the `Skill` tool, the agent opening the skill's own `SKILL.md`, a delegation
+  to the agent.
+- **Still there** is the configuration as it is now: `~/.claude.json` (user and
+  per-project servers, and `disabledMcpServers`), the project's `.mcp.json` and
+  `disabledMcpjsonServers` in any settings file, `enabledPlugins`, and the
+  skills and agents directories. Something disabled or removed since is not
+  reported from the transcripts of before. For a claude.ai connector or a
+  synced skill, which live on an account cctop cannot read, the newest session
+  stands in: if it was no longer offered the thing, it has been dealt with.
+
+Each finding is one place to act — a file, a plugin, the connectors — and names
+it: `claude mcp remove`, `/mcp` to switch a server off for the projects that
+never call it, `disabledMcpjsonServers` in `settings.local.json` for a shared
+`.mcp.json` (so it stops loading for you without being taken from anyone who
+clones the project), `/plugin` for a plugin. A plugin is reported only when
+*nothing* it adds was used, since it cannot be removed in part.
+
+Anything cctop cannot trace to a file is never reported: Claude Code's own
+built-in skills and agents are in every listing and are not yours to remove.
+Only names and paths are printed. An MCP entry can hold an API key in `env` or
+a token in `headers`, and no value from a configuration file reaches the
+output.
+
+The price is estimated, and how is worth saying: the characters each entry put
+in the window are counted from the transcript, turned into tokens at the same
+fitted 2.75 characters per token the Context panel uses, multiplied by the
+session's requests, and priced at what that session paid per cached token. The
+first request writes the prefix rather than reading it, at a higher price, so
+the figure runs a little low.
+
+**Memory files are a `note`, and a price, not an accusation.** `CLAUDE.md` is
+the cheapest place to tell an agent something — other findings here recommend
+putting more in it — so calling its cost waste would contradict the rest of the
+report. The one objective line is Claude Code's own: it warns about a memory
+file past 40,000 characters, and a file past that is offered as a `habit`, with
+only the part beyond the line counted as a saving.
+
+Limits worth knowing:
+
+- Claude Code only, and only versions that write these listings. Older
+  transcripts, and every other harness, contribute nothing here.
+- An MCP server whose tools load in full rather than through tool search is
+  listed nowhere in the transcript, so it is never seen and never reported.
+  Its tool definitions are also exactly the expensive case; there is simply no
+  record of them to count.
+- One profile: sessions run under another `CLAUDE_CONFIG_DIR` are resolved
+  against this one's files, where their servers usually are not found — and
+  something not found is not reported.
+- A subagent's own copy of the listings is not counted, so the cost is low by
+  that much again.
 
 ## What `compare` measures
 
@@ -200,7 +280,3 @@ Writing to somebody's `~/.claude/` is a different kind of commitment from
 reading it, and it should not arrive in the same release as the detectors that
 decide what to write. The findings come first; automating the ones that turn out
 to be right can follow.
-
-**Config scanning.** Nothing yet reads `CLAUDE.md`, MCP server definitions, or
-agent and skill files to find the ones that are never used. Those detectors need
-a different source of truth from the transcripts and are the obvious next step.

@@ -522,6 +522,12 @@ mod tests {
             slices: Vec::new(),
             files_reworked: 0,
             truncated: false,
+            cwd: String::new(),
+            loadout: Default::default(),
+            used_mcp: Default::default(),
+            used_skills: Default::default(),
+            used_agents: Default::default(),
+            cached_rate: None,
         }
     }
 
