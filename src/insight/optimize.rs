@@ -15,7 +15,8 @@
 //! It writes nothing. Applying fixes — and grading them against later usage —
 //! is a separate feature and a much larger commitment than reading.
 
-use super::{Analysis, Task, plural, substantive};
+use super::inventory::{Inventory, Roots};
+use super::{Analysis, Task, plural, substantive, unused};
 use std::collections::HashMap;
 
 /// How actionable a finding is.
@@ -189,7 +190,7 @@ fn shared_rereads(analyses: &[&Analysis]) -> Option<Finding> {
 }
 
 /// The tail of a path, which is what identifies a file to a person.
-fn short_path(p: &str) -> String {
+pub(super) fn short_path(p: &str) -> String {
     let cleaned = p.replace('\\', "/");
     let parts: Vec<&str> = cleaned.rsplit('/').take(2).collect();
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
@@ -387,13 +388,29 @@ fn spend(analyses: &[&Analysis]) -> f64 {
 /// detector. It gets one line saying what it came to, which is the whole
 /// argument for leaving it out.
 pub fn triage(analyses: &[&Analysis]) -> (Vec<Finding>, Vec<Finding>) {
+    triage_with(analyses, |live| {
+        // Only read the configuration when some transcript listed what it was
+        // offered: without a listing there is nothing for it to explain.
+        live.iter()
+            .any(|a| a.loadout.listed())
+            .then(|| Inventory::load(&Roots::here(), live.iter().map(|a| a.cwd.as_str())))
+    })
+}
+
+/// [`triage`] against a configuration of the caller's choosing, so a test
+/// never reads the machine it runs on.
+pub(super) fn triage_with(
+    analyses: &[&Analysis],
+    inventory: impl FnOnce(&[&Analysis]) -> Option<Inventory>,
+) -> (Vec<Finding>, Vec<Finding>) {
     let live: Vec<&Analysis> = analyses
         .iter()
         .copied()
         .filter(|a| substantive(a))
         .collect();
     let floor = attention_floor(spend(&live));
-    let mut all = detect(&live);
+    let inventory = inventory(&live);
+    let mut all = detect(&live, inventory.as_ref());
     // Class first, then cost. Ranking on cost alone put a `note` at the top,
     // and a note names money that was *spent*, not money that could be saved —
     // so the largest number in the list belonged to the one row nobody could
@@ -409,9 +426,9 @@ pub fn triage(analyses: &[&Analysis]) -> (Vec<Finding>, Vec<Finding>) {
 }
 
 /// Everything the detectors found, before the bar is applied.
-fn detect(live: &[&Analysis]) -> Vec<Finding> {
+fn detect(live: &[&Analysis], inventory: Option<&Inventory>) -> Vec<Finding> {
     let rate = usd_per_token(live);
-    [
+    let mut found: Vec<Finding> = [
         junk_reads(live, rate),
         rereads(live, rate),
         shared_rereads(live),
@@ -421,7 +438,12 @@ fn detect(live: &[&Analysis]) -> Vec<Finding> {
     ]
     .into_iter()
     .flatten()
-    .collect()
+    .collect();
+    found.extend(unused::memory(live));
+    if let Some(inv) = inventory {
+        found.extend(unused::never_used(live, inv));
+    }
+    found
 }
 
 /// Where the session budget went, by kind of work.
@@ -631,12 +653,12 @@ fn ellipsise(s: &str, width: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::insight::Task;
     use crate::pricing::Provider;
 
-    fn session(cost: f64, edits: u64, task: Task) -> Analysis {
+    pub(crate) fn session(cost: f64, edits: u64, task: Task) -> Analysis {
         Analysis {
             provider: Provider::Claude,
             label: "repo".into(),
@@ -665,6 +687,12 @@ mod tests {
             slices: Vec::new(),
             files_reworked: 0,
             truncated: false,
+            cwd: String::new(),
+            loadout: Default::default(),
+            used_mcp: Default::default(),
+            used_skills: Default::default(),
+            used_agents: Default::default(),
+            cached_rate: None,
         }
     }
 

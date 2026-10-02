@@ -11,12 +11,16 @@
 //! are slow in a way the table is not. That is the right trade: the table runs
 //! many times a minute and these run when somebody asks a question.
 //!
-//! Everything here is derived from what the transcript already recorded. There
-//! are no model calls, no heuristic that needs the network, and nothing that
+//! Everything here is derived from what the transcript already recorded, plus
+//! — for `optimize` only — a read of Claude Code's configuration, to say which
+//! file defines a server or skill nothing used (see [`inventory`]). There are
+//! no model calls, no heuristic that needs the network, and nothing that
 //! writes: both commands read and print.
 
 pub mod compare;
+pub mod inventory;
 pub mod optimize;
+mod unused;
 
 use crate::pricing::{Plan, Provider};
 use crate::session::{Session, SessionData, ToolDetail};
@@ -306,6 +310,22 @@ pub struct Analysis {
     pub slices: Vec<Slice>,
     /// The per-tool history hit its cap, so every count here is a floor.
     pub truncated: bool,
+    /// The working directory, unabbreviated: what a project's configuration is
+    /// keyed by.
+    pub cwd: String,
+    /// What the harness loaded before the conversation began — see
+    /// [`crate::session::Loadout`]. Empty for anything but Claude Code.
+    pub loadout: crate::session::Loadout,
+    /// MCP servers this session called, as their tool names spell them.
+    pub used_mcp: HashSet<String>,
+    /// Skills it invoked, by slash command or through the `Skill` tool.
+    pub used_skills: HashSet<String>,
+    /// Agent types it delegated to.
+    pub used_agents: HashSet<String>,
+    /// What this session paid per token read from the cache, which is what
+    /// anything sitting in the prompt prefix costs on each request. `None`
+    /// where it read nothing from a cache or recorded no price.
+    pub cached_rate: Option<f64>,
 }
 
 /// One agent's share of a session: the main agent, or one subagent.
@@ -586,6 +606,40 @@ fn input_split(provider: Provider, data: &SessionData) -> (u64, u64) {
     }
 }
 
+/// The servers a session called, by tool or through its resources.
+fn used_mcp(data: &SessionData) -> HashSet<String> {
+    data.metrics
+        .mcp_tools
+        .iter()
+        .filter_map(|t| crate::session::mcp_server_of(t))
+        .map(str::to_string)
+        .chain(data.loadout.mcp_resources.iter().cloned())
+        .collect()
+}
+
+/// The skills a session invoked: typed as a slash command, or loaded by the
+/// model through the `Skill` tool. Either is a use, and counting only one of
+/// them would call a skill the model reaches for on its own unused.
+fn used_skills(data: &SessionData) -> HashSet<String> {
+    data.metrics
+        .skills
+        .keys()
+        .chain(&data.loadout.skills_invoked)
+        .map(|s| s.trim_start_matches('/').to_string())
+        .collect()
+}
+
+/// Dollars per cached input token, as this session was actually billed.
+///
+/// Read off the session's own split rather than a price table, for the same
+/// reason [`optimize`] prices from the corpus: a bundled plan or a discounted
+/// model should not be charged retail for its prompt prefix.
+fn cached_rate(session: &Session, data: &SessionData) -> Option<f64> {
+    let (t, c) = (&data.tokens, &data.costs);
+    (session.cost_available && t.cache_read > 0 && c.cache_read > 0.0)
+        .then(|| c.cache_read / t.cache_read as f64)
+}
+
 /// Reduce one session's freshly-parsed data to an [`Analysis`].
 pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
     let timeline = timeline(data);
@@ -620,6 +674,17 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         reread_tokens: 0,
         rereads: 0,
         truncated: false,
+        cwd: session.label_source.clone(),
+        loadout: data.loadout.clone(),
+        used_mcp: used_mcp(data),
+        used_skills: used_skills(data),
+        used_agents: data
+            .subagents
+            .iter()
+            .map(|s| s.agent_type.clone())
+            .filter(|t| !t.is_empty())
+            .collect(),
+        cached_rate: cached_rate(session, data),
     };
 
     // A tool whose history filled its cap has older calls dropped, so every

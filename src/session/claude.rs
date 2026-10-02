@@ -440,7 +440,7 @@ struct CtxSegment {
 /// session; it is the mix that moves it, not the length.
 // ponytail: a fitted constant, not a tokenizer. If a category ever needs to be
 // defensible on its own rather than as a share of the panel, swap in tiktoken.
-const CHARS_PER_TOKEN: f64 = 2.75;
+pub(crate) const CHARS_PER_TOKEN: f64 = 2.75;
 
 /// Whether an entry's content sits in the main conversation's context window.
 ///
@@ -532,6 +532,11 @@ struct Extractor {
     ctx_compacted: bool,
     /// How many compactions the transcript has been through, in total.
     compactions: u32,
+    /// See [`super::Loadout`].
+    loadout: super::Loadout,
+    /// Request keys of the main conversation, counted into
+    /// [`super::Loadout::requests`]. A request's streaming partials share one.
+    main_requests: HashSet<String>,
     error: Option<String>,
 }
 
@@ -648,6 +653,27 @@ impl Extractor {
         }
         *self.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
         self.metrics.tool_count += 1;
+        // The two ways in that the tool name alone does not say: a skill the
+        // model loaded itself, and a server read through its resources. Both
+        // are uses, and missing them would report a working skill or server
+        // as one nobody touches.
+        let arg = |key: &str| {
+            input
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        };
+        if name == "Skill"
+            && let Some(skill) = arg("skill")
+        {
+            self.loadout.skills_invoked.push(skill.to_string());
+        } else if name.contains("McpResource")
+            && let Some(server) = arg("server")
+        {
+            self.loadout
+                .mcp_resources
+                .push(super::mcp_server_key(server));
+        }
 
         if !is_main && let Some(stats) = self.sub_stats.get_mut(file) {
             stats.tool_count += 1;
@@ -889,6 +915,9 @@ impl Extractor {
             .and_then(Value::as_str)
             .or_else(|| message.get("id").and_then(Value::as_str))
             .map(str::to_string);
+        if ctx && let Some(key) = &turn_key {
+            self.main_requests.insert(key.clone());
+        }
         // Tool scanning runs independently of the token dedup below: a streaming
         // partial and its final entry share a requestId, but each tool_use block
         // carries its own id, so global id dedup is what prevents double-counting.
@@ -1065,6 +1094,9 @@ impl Extractor {
                     Some(content) => content_chars(Some(content)),
                     None => content_chars(attachment),
                 };
+                if let Some(a) = attachment {
+                    self.loadout.note(a);
+                }
             }
             Some("custom-title") if is_main => {
                 if let Some(t) = item.get("customTitle").and_then(Value::as_str) {
@@ -1266,6 +1298,10 @@ pub fn extract(transcript: &Path) -> SessionData {
         metrics: ext.metrics,
         context_breakdown,
         context_series: ext.ctx_series,
+        loadout: super::Loadout {
+            requests: ext.main_requests.len() as u64,
+            ..ext.loadout
+        },
         compactions: ext.compactions,
         ultracode_at: ext.ultracode_at,
         ultracode_off_at: ext.ultracode_off_at,
@@ -1910,6 +1946,31 @@ mod tests {
             "the gap must be the plain remainder"
         );
         assert!(b.unaccounted() > 0);
+    }
+
+    /// What `cctop optimize` judges "never used" by: the listings the session
+    /// was given, every way a skill or server can be used, and how many times
+    /// the prefix holding them was re-read. A request's streaming partials
+    /// share one id and are one request.
+    #[test]
+    fn the_loadout_records_what_was_offered_and_what_was_reached_for() {
+        let data = extract_lines(
+            "loadout",
+            &[
+                r#"{"type":"attachment","timestamp":"2026-08-05T10:00:00.000Z","attachment":{"type":"skill_listing","content":"- run-cctop: Drive it.\n- simplify: Tidy.","names":["run-cctop","simplify"]}}"#.to_string(),
+                r#"{"type":"attachment","timestamp":"2026-08-05T10:00:00.000Z","attachment":{"type":"deferred_tools_delta","addedNames":["mcp__tracker__list","WebFetch"]}}"#.to_string(),
+                assistant("req_1", 1000, r#"{"type":"tool_use","id":"toolu_1","name":"Skill","input":{"skill":"run-cctop","args":"x"}}"#),
+                assistant("req_1", 1000, r#"{"type":"text","text":"partial"}"#),
+                assistant("req_2", 1200, r#"{"type":"tool_use","id":"toolu_2","name":"ReadMcpResourceTool","input":{"server":"tracker","uri":"t://1"}}"#),
+            ],
+        );
+        let l = &data.loadout;
+        assert!(l.skills_listed && l.mcp_listed && !l.agents_listed);
+        assert_eq!(l.skills.len(), 2);
+        assert!(l.mcp.contains_key("tracker"));
+        assert_eq!(l.skills_invoked, ["run-cctop"]);
+        assert_eq!(l.mcp_resources, ["tracker"]);
+        assert_eq!(l.requests, 2);
     }
 
     /// A compaction throws the conversation away and replaces it with a summary,
