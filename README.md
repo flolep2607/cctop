@@ -132,6 +132,13 @@ a changed file cost and how long it took — `--rate 60` prices that time too. S
 the default branch, which was left on a side branch, and which was never
 committed. See [did the spend ship](docs/yield.md).
 
+**And it remembers for your agents.** `cctop recall "why is the cache sharded"`
+returns the passages of past sessions — Claude Code, Codex, OpenCode, any of
+them — that discussed it, ranked by their words and their meaning.
+`cctop --install-mcp` gives the same to the agents themselves, so one picks up
+a decision another made last week instead of re-deriving it. See
+[letting agents see each other](docs/integrations.md#letting-agents-see-each-other).
+
 **And it can do all the watching in a browser.** `cctop serve` streams the same
 table to a page — useful on a phone, where the sessions waiting on you can find
 *you* — and gives every session a report that says which tool calls it kept

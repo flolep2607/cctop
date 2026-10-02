@@ -28,6 +28,7 @@ mod peek;
 mod pricing;
 mod proc;
 mod quota;
+mod recall;
 mod rmux;
 mod serve;
 mod session;
@@ -166,6 +167,15 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `cctop recall` alongside `doctor`, and for the same reason: a bare word,
+    // and its query is positional, which cctop otherwise has none of.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("recall") {
+            std::process::exit(recall::run(&argv[2..]));
+        }
+    }
+
     // `cctop wait` alongside `doctor`, and for the same reason: a bare word
     // with a positional of its own. Its flags are clap's, parsed from the rest
     // — a usage error exits 2, which is also what an unknown session exits
@@ -293,6 +303,17 @@ fn main() -> anyhow::Result<()> {
 
     if args.clear_cache && cache::clear_session_cache()? {
         eprintln!("Cleared cctop session extraction cache.");
+    }
+
+    if let Some(scope) = args.install_mcp.as_deref() {
+        if !matches!(scope, "user" | "project") {
+            anyhow::bail!("unknown scope '{scope}'; use `user` or `project`");
+        }
+        for line in mcp::install(scope) {
+            eprintln!("{line}");
+        }
+        eprintln!("Agents already running pick it up when restarted.");
+        return Ok(());
     }
 
     if args.mcp {

@@ -39,6 +39,9 @@ Commands:
                           it — one-shot rate, cost per file, cache hit.
   cctop yield             Whether what each session spent ended up in a
                           commit on the default branch. Reads only.
+  cctop recall <query>    What past sessions, from any agent, said about
+                          something — the passages, ranked. Agents get it
+                          through --mcp; --install-mcp sets that up.
   cctop burn              What your subscription windows were paid for and
                           did not use.
   cctop log               Print the event stream CCTOP_LOG writes; -f follows
@@ -61,6 +64,7 @@ Each command takes --help for the details.";
                       cctop as <account> <agent> [args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop optimize | compare | yield | burn | log\n       \
+                      cctop recall <query> [--read SESSION PASSAGE]\n       \
                       cctop wait <session> [--until …] [--timeout …]\n       \
                       cctop why [session]\n       \
                       cctop doctor",
@@ -270,6 +274,14 @@ pub struct Args {
     /// reaches the network
     #[arg(long)]
     pub fetch_search_model: bool,
+
+    /// Register `cctop --mcp` with Claude Code and Codex, and exit
+    ///
+    /// Through each agent's own `mcp add`. Takes `user` (the default) or
+    /// `project` for the current directory. The agents can then recall what
+    /// past sessions decided, and see what the running ones are doing
+    #[arg(long, num_args = 0..=1, default_missing_value = "user", value_name = "SCOPE")]
+    pub install_mcp: Option<String>,
 
     /// Serve the Model Context Protocol on stdin/stdout, and exit
     ///

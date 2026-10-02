@@ -84,6 +84,80 @@ pub fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Register this binary as an MCP server with every agent CLI that can take
+/// one, and say what happened to each.
+///
+/// Through each agent's own `mcp add` rather than by editing its config file.
+/// Claude Code rewrites `~/.claude.json` constantly while it runs, so a second
+/// writer racing it can lose either side's change; the agent's own command is
+/// the one writer it does not race. A harness without such a command gets the
+/// stanza to paste instead of a guess at its file format.
+///
+/// `scope` is `user` (every project) or `project` (this directory only —
+/// Claude Code writes `.mcp.json`; Codex has no per-project servers, and says
+/// so rather than being registered machine-wide by surprise).
+pub fn install(scope: &str) -> Vec<String> {
+    let exe = match std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+    {
+        Some(exe) => exe,
+        None => return vec!["could not find cctop's own path".into()],
+    };
+    let mut out = Vec::new();
+    let mut run = |agent: &str, args: Vec<&str>| {
+        let shown = format!("{agent} {}", args.join(" "));
+        match std::process::Command::new(agent).args(&args).output() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                out.push(format!("{agent}: not installed, skipped"));
+            }
+            Err(e) => out.push(format!("{agent}: could not run `{shown}`: {e}")),
+            Ok(o) if o.status.success() => out.push(format!("{agent}: registered (`{shown}`)")),
+            Ok(o) => {
+                let said = String::from_utf8_lossy(&o.stderr).to_string()
+                    + &String::from_utf8_lossy(&o.stdout);
+                let said = said.trim();
+                // Both CLIs refuse a name that is taken. That is the outcome
+                // asked for, unless it points somewhere else — which `mcp get`
+                // shows, and is the user's to decide, not this command's.
+                if said.to_lowercase().contains("already exists") {
+                    out.push(format!(
+                        "{agent}: a server named cctop is already registered; \
+                         `{agent} mcp get cctop` shows where it points"
+                    ));
+                } else {
+                    out.push(format!("{agent}: `{shown}` failed: {said}"));
+                }
+            }
+        }
+    };
+    match scope {
+        "project" => {
+            run(
+                "claude",
+                vec![
+                    "mcp", "add", "--scope", "project", "cctop", "--", &exe, "--mcp",
+                ],
+            );
+            out.push("codex: has no per-project MCP servers; run --install-mcp user for it".into());
+        }
+        _ => {
+            run(
+                "claude",
+                vec![
+                    "mcp", "add", "--scope", "user", "cctop", "--", &exe, "--mcp",
+                ],
+            );
+            run("codex", vec!["mcp", "add", "cctop", "--", &exe, "--mcp"]);
+        }
+    }
+    out.push(format!(
+        "Anything else that speaks MCP: {}",
+        json!({"mcpServers": {"cctop": {"command": exe, "args": ["--mcp"]}}})
+    ));
+    out
+}
+
 /// Answer one request, or `None` for a notification, which takes no reply.
 fn handle(request: &Value) -> Option<Value> {
     let method = request.get("method").and_then(Value::as_str)?;
@@ -98,6 +172,7 @@ fn handle(request: &Value) -> Option<Value> {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "cctop", "version": env!("CARGO_PKG_VERSION")},
+            "instructions": INSTRUCTIONS,
         })),
         "tools/list" => Ok(json!({"tools": tool_schemas()})),
         "tools/call" => call_tool(request.get("params")),
@@ -115,6 +190,20 @@ fn handle(request: &Value) -> Option<Value> {
         }),
     })
 }
+
+/// What the client is told the server is for, once, at `initialize`.
+///
+/// Clients that support it put this in the agent's own instructions, which is
+/// what makes `recall` something an agent reaches for unprompted rather than a
+/// tool it has to be told about. Saying so here means cctop never has to edit
+/// anybody's CLAUDE.md or AGENTS.md to get the same effect.
+const INSTRUCTIONS: &str = "cctop reads every coding-agent session on this machine — \
+    Claude Code, Codex, OpenCode and others, past and running. Before re-deciding \
+    something, re-investigating a bug, or asking the user what was settled \
+    earlier, call `recall` with the question: it returns the passages of past \
+    sessions, from any agent, that discussed it, and `read_passage` opens one in \
+    context. Cite what you use by its session id. Use `check_conflicts` before \
+    editing files another running agent may also be editing.";
 
 /// What the server offers.
 fn tool_schemas() -> Vec<Value> {
@@ -226,6 +315,54 @@ fn tool_schemas() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "recall",
+            "description": "Recall what past coding sessions on this machine said about \
+                            something — decisions and their reasons, bugs and their fixes, \
+                            findings, plans — from any agent (Claude Code, Codex, OpenCode \
+                            and others). Returns the best-matching passages, ranked by \
+                            their words and by their meaning, each with its session id, \
+                            agent, directory and date. Use it before re-deriving something \
+                            that may already have been worked out. This session is left out.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A question or a few keywords, e.g. 'why is the cache \
+                                        sharded' or 'vast.ai nemotron'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Passages to return. Defaults to 8.",
+                    },
+                },
+                "required": ["query"],
+            },
+        }),
+        json!({
+            "name": "read_passage",
+            "description": "Open one passage that `recall` returned, with the passages either \
+                            side of it, to read a hit in context.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "The session id from a recall result, or a unique prefix.",
+                    },
+                    "passage": {
+                        "type": "integer",
+                        "description": "The passage number from the recall result.",
+                    },
+                    "around": {
+                        "type": "integer",
+                        "description": "Neighbouring passages to include either side. Defaults to 1.",
+                    },
+                },
+                "required": ["session", "passage"],
+            },
+        }),
+        json!({
             "name": "search_sessions",
             "description": "Search the full text of every session transcript on this machine \
                             for a string, and return the sessions that mention it with a \
@@ -273,6 +410,8 @@ fn call_tool(params: Option<&Value>) -> Result<Value, String> {
         "get_session_context" => get_session_context(&sessions, &loader, &args)?,
         "check_conflicts" => check_conflicts(&sessions, &args)?,
         "search_sessions" => search_sessions(&sessions, &args)?,
+        "recall" => recall(&sessions, &args)?,
+        "read_passage" => read_passage(&sessions, &args)?,
         other => return Err(format!("unknown tool '{other}'")),
     };
     // Persisting is worth the write even on a read-only call: an MCP server is
@@ -486,6 +625,42 @@ fn get_session_context(
     )))
 }
 
+/// Passages of past sessions, with the caller's own session left out.
+///
+/// The text form rather than JSON: the reader is a model, which reads prose
+/// at a fraction of the tokens the same answer costs as quoted, escaped JSON.
+fn recall(sessions: &[Session], args: &Value) -> Result<String, String> {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .filter(|q| !q.trim().is_empty())
+        .ok_or("recall needs a query")?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(crate::recall::DEFAULT_LIMIT, |n| n.clamp(1, 50) as usize);
+    let me = crate::recall::caller(sessions);
+    let answer = crate::recall::recall(sessions, query, limit, me.as_deref());
+    Ok(crate::recall::render(&answer))
+}
+
+fn read_passage(sessions: &[Session], args: &Value) -> Result<String, String> {
+    let session = args
+        .get("session")
+        .and_then(Value::as_str)
+        .ok_or("read_passage needs a session")?;
+    let passage = args
+        .get("passage")
+        .and_then(Value::as_u64)
+        .ok_or("read_passage needs a passage number")? as usize;
+    let around = args
+        .get("around")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .min(5) as usize;
+    crate::recall::read(sessions, session, passage, around)
+}
+
 fn search_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
     let query = args
         .get("query")
@@ -557,6 +732,26 @@ mod tests {
         let response = handle(&request).expect("a reply");
         assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(response["id"], 1);
+    }
+
+    /// The instructions are what make an agent reach for `recall` without
+    /// being told to, so they must name it — and the tools they name must be
+    /// ones this server actually offers.
+    #[test]
+    fn the_instructions_point_at_tools_that_exist() {
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
+        let response = handle(&request).expect("a reply");
+        let said = response["result"]["instructions"]
+            .as_str()
+            .expect("instructions");
+        let offered: Vec<String> = tool_schemas()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        for named in ["recall", "read_passage", "check_conflicts"] {
+            assert!(said.contains(named), "instructions do not mention {named}");
+            assert!(offered.iter().any(|t| t == named), "{named} is not a tool");
+        }
     }
 
     /// Every advertised tool needs a name, a description an agent can choose
