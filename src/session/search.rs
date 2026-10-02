@@ -21,7 +21,7 @@
 
 use super::Session;
 use crate::pricing::Provider;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -430,31 +430,12 @@ fn readonly(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 /// Scan the messages OpenCode recorded for one session.
+///
+/// The read happens inside OpenCode's own parser so it shares that harness's
+/// connection pool: search runs on every keystroke, and the database behind
+/// these sessions is one file that may hold thousands of them.
 fn scan_opencode(path: &Path, session_id: &str, progress: &mut Progress) {
-    let Ok(db) = readonly(path) else {
-        return;
-    };
-    // `part` carries the text of a message; `message` carries the envelope, and
-    // the tool calls that are worth finding a session by. Both are per-session
-    // in this schema, so neither can leak another session's text into this hit.
-    for sql in [
-        "SELECT data FROM part WHERE session_id = ?1 ORDER BY id",
-        "SELECT data FROM message WHERE session_id = ?1 ORDER BY time_created, id",
-    ] {
-        // The `part` table is absent in older databases, which is a failed
-        // prepare rather than an empty result — hence trying each in turn.
-        let Ok(mut stmt) = db.prepare(sql) else {
-            continue;
-        };
-        let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0)) else {
-            continue;
-        };
-        for raw in rows.flatten() {
-            if progress.feed(&raw) {
-                return;
-            }
-        }
-    }
+    super::opencode::scan_session(path, session_id, |raw| progress.feed(raw));
 }
 
 /// Scan the Cascade tab holding one Windsurf conversation.

@@ -56,15 +56,27 @@ before the provider answered is still recorded with every count at zero, so
 `context_of` walks back up to 40 assistant rows rather than reading the newest
 one and giving up.
 
-**Connections are pooled per thread, and never revalidated.** Every session in a
-database is asked about separately — its dot, its window, its last tool — and
-each of those used to open its own connection: several thousand opens of a
-555 MB database per walk, costing 240,000 context switches and nine seconds of
-kernel time, almost all of it in file locking. They are thread-local rather than
-shared because `NO_MUTEX` forbids cross-thread use and a shared connection
-behind a mutex would serialise the one path that most needs not to be.
+**Connections are pooled per thread, and never revalidated.** Every read of the
+database goes through one thread-local handle — discovery, extraction, the
+activity dot, the context window, the last tool, and the transcript scan behind
+search — because a connection open of a database this size is not cheap whatever
+the query costs. Opening per read used to mean several thousand opens of a 555 MB
+database per walk, costing 240,000 context switches and nine seconds of kernel
+time, almost all of it in file locking. They are thread-local rather than shared
+because `NO_MUTEX` forbids cross-thread use and a shared connection behind a
+mutex would serialise the one path that most needs not to be.
 *ponytail:* a connection is held for the life of the thread, so a database
 swapped out wholesale underneath cctop is read from the old file until restart.
+
+**`delete` writes through its own connection, and must be able to.** It is the
+one read-write path here, and it opens a second connection on top of the pooled
+read-only one rather than dropping it first — the pooled handle is what makes the
+deletion's own aftermath cheap to read back. It works because a SQLite handle
+holds its lock only while a statement is running, and because the deleting
+connection sets `foreign_keys` so the cascade takes the session's messages and
+parts with it. `a_delete_lands_under_the_handle_the_pool_is_holding` pins both
+halves of that on a rollback-journal database, where WAL's reader-writer
+tolerance would otherwise hide a regression.
 
 **`write` cannot report what it removed.** `tool_delta` counts lines for `edit`
 from the old and new strings and parses `apply_patch` properly, but a `write`
