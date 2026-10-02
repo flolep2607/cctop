@@ -2100,6 +2100,18 @@ impl App {
             }
         }
 
+        // The settings page is asked for by name, as it is for the keyboard:
+        // it is not a tab with panes, so without this the wheel fell through
+        // to the table hidden underneath and moved a selection nobody can see.
+        if self.on_settings() {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.settings_step(-1),
+                MouseEventKind::ScrollDown => self.settings_step(1),
+                _ => {}
+            }
+            return;
+        }
+
         // Inside a tab the rest of the mouse is the agents'.
         if self.tab > 0 {
             // Inside a pane the mouse is the agent's. Claude Code, opencode and
@@ -2444,6 +2456,37 @@ mod tests {
         app.selected = 1;
         app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
         assert_eq!(app.selected, 1);
+    }
+
+    /// The wheel on the settings page moves the page's cursor, not the
+    /// table hidden underneath it.
+    #[test]
+    fn the_wheel_scrolls_the_settings_page() {
+        let mut app = test_app();
+        for id in ["a", "b", "c"] {
+            app.sessions
+                .push(crate::session::Session::new(Provider::Claude, id.into()));
+        }
+        app.visible = vec![Row::Session(0), Row::Session(1), Row::Session(2)];
+        app.goto_settings();
+        let layout = render::Layout {
+            rows_start: 7,
+            rows_end: 12,
+            ..Default::default()
+        };
+        let wheel = |kind| crossterm::event::MouseEvent {
+            kind,
+            column: 5,
+            row: 9,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        app.on_mouse(wheel(event::MouseEventKind::ScrollDown), &layout);
+        app.on_mouse(wheel(event::MouseEventKind::ScrollDown), &layout);
+        assert_eq!(app.settings_cursor, 2, "the wheel did not move the page");
+        assert_eq!(app.selected, 0, "and moved the table underneath instead");
+        app.on_mouse(wheel(event::MouseEventKind::ScrollUp), &layout);
+        assert_eq!(app.settings_cursor, 1);
     }
 
     #[test]

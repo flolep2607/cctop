@@ -238,8 +238,29 @@ pub struct Analysis {
     pub rereads: u64,
     pub cache_read: u64,
     pub input_total: u64,
+    /// Every file edited, resolved against the session's cwd — what
+    /// [`mark_rework`] matches across sessions.
+    pub edited: HashMap<String, Edited>,
+    /// Files this session edited that a later fix session edited again — see
+    /// [`mark_rework`]. Zero until that pass runs over the whole set.
+    pub files_reworked: u64,
+    /// How long the agent was working, in milliseconds — see [`active_ms`].
+    pub active_ms: u64,
     /// The per-tool history hit its cap, so every count here is a floor.
     pub truncated: bool,
+}
+
+/// One file's edits within one session.
+#[derive(Debug, Clone, Default)]
+pub struct Edited {
+    /// Timestamps of the first and last edit.
+    pub first: String,
+    pub last: String,
+    /// The first edit came straight after a shell command by the same agent
+    /// failed: something was run, it broke, and this file is what was changed
+    /// in answer. The language-free half of "this edit was a fix" — see
+    /// [`mark_rework`].
+    pub after_failure: bool,
 }
 
 /// Every tool call in one session, oldest first.
@@ -257,6 +278,46 @@ fn timeline(data: &SessionData) -> Vec<(&str, &ToolDetail)> {
         .collect();
     all.sort_by(|a, b| a.1.ts.cmp(&b.1.ts));
     all
+}
+
+/// A pause between two tool calls longer than this is somebody away from the
+/// keyboard, not the agent working.
+const IDLE_MS: i64 = 5 * 60 * 1000;
+
+/// How long the agent spent working, from the timestamps of its tool calls.
+///
+/// The figure `compare` needs so that a cheap model is not reported as the
+/// better one when it took a day to do what another did in five minutes. The
+/// wall clock between first and last activity cannot answer that: a session
+/// left open overnight is twelve hours long and did no work in eleven of them.
+/// So the gaps between consecutive calls are summed, and a gap past
+/// [`IDLE_MS`] counts only as long as the call before it was itself running —
+/// a ten-minute build is the agent working, ten minutes of nothing is not.
+///
+/// Derived the same way for every harness, deliberately. Claude also records
+/// a `turn_duration` per turn, which is closer to the truth, but not for every
+/// turn and not anywhere else; a comparison whose clock depends on the
+/// provider would be measuring the clock.
+///
+/// ponytail: only the stretch from the first tool call to the last is seen.
+/// The thinking before a turn's first call and the answer after its last are
+/// not, so this undercounts every model — by about the same amount, which is
+/// what a comparison needs.
+fn active_ms(timeline: &[(&str, &ToolDetail)]) -> u64 {
+    let stamps: Vec<(i64, i64)> = timeline
+        .iter()
+        .filter_map(|(_, d)| {
+            crate::util::parse_ts(&d.ts)
+                .map(|t| (t.timestamp_millis(), d.dur_ms.unwrap_or(0).max(0)))
+        })
+        .collect();
+    let mut total: i64 = stamps.last().map_or(0, |&(_, dur)| dur.min(IDLE_MS));
+    for w in stamps.windows(2) {
+        let ((at, dur), (next, _)) = (w[0], w[1]);
+        let gap = (next - at).max(0);
+        total += if gap <= IDLE_MS { gap } else { dur.min(gap) };
+    }
+    total.max(0) as u64
 }
 
 /// Which model to credit a session to: the one that cost the most.
@@ -419,6 +480,9 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         records_outcomes: session.provider.records_tool_outcomes(),
         cache_read: cached,
         input_total: billed_in,
+        active_ms: active_ms(&timeline),
+        edited: HashMap::new(),
+        files_reworked: 0,
         edits: 0,
         bash_writes: 0,
         reads: 0,
@@ -443,14 +507,30 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
 
     let mut seen_reads: HashSet<&str> = HashSet::new();
     // Edits per file in call order, so a file's attempts can be found later.
-    let mut edit_order: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut edit_order: HashMap<String, Vec<usize>> = HashMap::new();
+    // Whether each agent's most recent shell command failed.
+    let mut shell_failed: HashMap<&Option<String>, bool> = HashMap::new();
 
     for (i, (tool, detail)) in timeline.iter().enumerate() {
         let path = detail.d.as_str();
         if is_edit(tool) {
             out.edits += 1;
-            edit_order.entry(path).or_default().push(i);
+            for file in edited_files(detail) {
+                let file = crate::collide::normalise(file, &session.label_source);
+                let after_failure = shell_failed.get(&detail.origin) == Some(&true);
+                let span = out
+                    .edited
+                    .entry(checkout_path(&file))
+                    .or_insert_with(|| Edited {
+                        first: detail.ts.clone(),
+                        last: String::new(),
+                        after_failure,
+                    });
+                span.last.clone_from(&detail.ts);
+                edit_order.entry(file).or_default().push(i);
+            }
         } else if is_shell(tool) {
+            shell_failed.insert(&detail.origin, detail.failed);
             // The full text when there is one: the short form is capped, and a
             // redirect past the cap would go unseen.
             let command = detail.full.as_deref().unwrap_or(path);
@@ -476,19 +556,167 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         }
     }
 
-    // A file is one-shot when its edits form a single run with no other tool
-    // call in between. An intervening call is what makes a second edit a
-    // *retry* — the agent looked at something and came back — where two edits
-    // in a row are one turn writing twice.
     for positions in edit_order.values() {
         out.files_edited += 1;
-        let contiguous = positions.windows(2).all(|w| w[1] == w[0] + 1);
-        if contiguous {
+        let retried = positions
+            .windows(2)
+            .any(|w| is_retry(&timeline, w[0], w[1], out.records_outcomes));
+        if !retried {
             out.files_one_shot += 1;
         }
     }
 
     out
+}
+
+/// The files one edit call wrote: every one a patch names, or the one the
+/// call's detail string is.
+///
+/// A patch displays as `first.rs (+2 more)`, and keying on that counted a
+/// three-file patch as one file that does not exist — so Codex, which edits
+/// almost only through patches, was rated on names rather than files.
+fn edited_files(detail: &ToolDetail) -> Vec<&str> {
+    let files: Vec<&str> = if detail.paths.is_empty() {
+        vec![detail.d.trim()]
+    } else {
+        detail.paths.iter().map(|p| p.trim()).collect()
+    };
+    // Deduplicated, because a patch can name one file twice — one hunk to
+    // add a function and one to call it — and that is one write, not two.
+    let mut out: Vec<&str> = Vec::with_capacity(files.len());
+    for f in files {
+        if !f.is_empty() && !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// Whether the edit at `next` is a second attempt at the edit at `prev` on
+/// the same file.
+///
+/// Where the harness records outcomes, an attempt is a retry when something
+/// told the agent the first one was wrong: the edit itself failed, or a shell
+/// command or another edit failed between the two. Editing, running the tests
+/// green and editing the same file again is the next step, not a retry, and
+/// the older rule — any call in between at all — rated that as a miss.
+///
+/// Only calls by the same agent count. Subagents' calls are interleaved into
+/// the same history, so a subagent's grep landing between two of the main
+/// agent's edits made a clean edit look like a retry.
+///
+/// Where the harness records no outcomes there is no failure to see, and the
+/// old rule stands: any call between the two by the same agent.
+///
+/// ponytail: a failure is the only evidence read. A user typing "no, not
+/// like that" between two edits is a retry this cannot see, and an edit whose
+/// test fails with nothing edited after is counted as a first-time success.
+fn is_retry(timeline: &[(&str, &ToolDetail)], prev: usize, next: usize, outcomes: bool) -> bool {
+    let (_, first) = timeline[prev];
+    let origin = &timeline[next].1.origin;
+    let between = timeline[(prev + 1).min(next)..next]
+        .iter()
+        .filter(|(_, d)| &d.origin == origin);
+    if !outcomes {
+        return between.count() > 0;
+    }
+    first.failed
+        || between
+            .filter(|(_, d)| d.failed)
+            .any(|(tool, _)| is_shell(tool) || is_edit(tool))
+}
+
+/// A path as it would be in the main checkout rather than in a worktree of it.
+///
+/// One file is one file across sessions only if it is spelled the same, and a
+/// session in `repo/.claude/worktrees/agent-x/` edits `src/ui/mod.rs` at a
+/// different absolute path from a session in `repo/`. On this machine that
+/// was every repeat edit of cctop's own files: rework found no file two
+/// sessions had both touched, though they had touched dozens.
+///
+/// ponytail: only the `.claude/worktrees/<name>/` layout Claude Code makes. A
+/// worktree elsewhere is a different directory as far as this can tell, and
+/// asking git which repository it belongs to is a filesystem walk per path.
+fn checkout_path(path: &str) -> String {
+    const MARK: &str = "/.claude/worktrees/";
+    match path.find(MARK) {
+        Some(at) => {
+            let rest = &path[at + MARK.len()..];
+            match rest.find('/') {
+                Some(slash) => format!("{}{}", &path[..at], &rest[slash..]),
+                None => path.to_string(),
+            }
+        }
+        None => path.to_string(),
+    }
+}
+
+/// A day: how long after a session's last edit to a file a fix session can
+/// still be blamed on it.
+const REWORK_WINDOW_SECS: i64 = 24 * 60 * 60;
+
+/// Charge each file a later fix session edited to the session that wrote it
+/// last.
+///
+/// The question 1-shot cannot answer from inside one session: did the work
+/// hold? A file a model wrote that a later session had to fix within a day is
+/// the closest a transcript gets to "it was broken". Only the most recent
+/// writer before the fix is charged — the session whose version was the one
+/// being fixed — and only once per file however many fixes followed.
+///
+/// A later edit is a fix when it came straight after one of that session's
+/// own commands failed ([`Edited::after_failure`]), or when the whole session
+/// is [`Task::Debugging`]. The title alone was the first version, and on this
+/// machine it found no fix session at all: titles say "Improve cctop" and
+/// "cctop merge conflict", hardly ever "fix". A failing command is the same in
+/// every language and needs no title.
+///
+/// An edit that is not a fix charges nobody. Editing `main.rs` every day is
+/// normal, and charging that to whoever touched it last would rate every model
+/// on how central its files were.
+///
+/// ponytail: a failure followed by an edit says the file was changed in
+/// answer, not that it was the file at fault — a test can fail because the
+/// test was wrong. And a project whose test suite was red before the session
+/// began charges its first edit to whoever wrote that file last.
+pub fn mark_rework(analyses: &mut [Analysis]) {
+    use crate::util::parse_ts;
+    // path -> (session, last edit) for every session that edited it.
+    let mut writers: HashMap<&str, Vec<(usize, i64)>> = HashMap::new();
+    for (i, a) in analyses.iter().enumerate() {
+        for (path, e) in &a.edited {
+            if let Some(t) = parse_ts(&e.last) {
+                writers.entry(path).or_default().push((i, t.timestamp()));
+            }
+        }
+    }
+    let mut charged: HashSet<(usize, &str)> = HashSet::new();
+    for (j, fix) in analyses.iter().enumerate() {
+        let debugging = fix.task == Task::Debugging;
+        for (path, e) in &fix.edited {
+            if !debugging && !e.after_failure {
+                continue;
+            }
+            let Some(at) = parse_ts(&e.first).map(|t| t.timestamp()) else {
+                continue;
+            };
+            let blamed = writers.get(path.as_str()).and_then(|ws| {
+                ws.iter()
+                    .filter(|&&(i, t)| i != j && t <= at && at - t <= REWORK_WINDOW_SECS)
+                    .max_by_key(|&&(_, t)| t)
+            });
+            if let Some(&(i, _)) = blamed {
+                charged.insert((i, path.as_str()));
+            }
+        }
+    }
+    let mut counts = vec![0u64; analyses.len()];
+    for (i, _) in charged {
+        counts[i] += 1;
+    }
+    for (a, n) in analyses.iter_mut().zip(counts) {
+        a.files_reworked = n;
+    }
 }
 
 /// Freshly parse and analyse every session, in parallel.
@@ -508,13 +736,15 @@ pub fn scan(plan: Plan) -> Vec<Analysis> {
 /// loader's walk is warm, so opening this from the table costs the fresh
 /// re-parse and nothing else.
 pub fn from_store(sessions: &[Session], store: &crate::cache::Store) -> Vec<Analysis> {
-    sessions
+    let mut analyses: Vec<Analysis> = sessions
         .par_iter()
         .map(|s| {
             let data = store.session_data_fresh(s);
             analyse(s, &data)
         })
-        .collect()
+        .collect();
+    mark_rework(&mut analyses);
+    analyses
 }
 
 /// Sessions worth reasoning about.
@@ -540,7 +770,7 @@ cctop compare  — how each model behaved on the work you gave it
 
 USAGE:
   cctop optimize [--provider NAME] [--json]
-  cctop compare  [--provider NAME] [--json]
+  cctop compare  [--provider NAME] [--rate USD_PER_HOUR] [--json]
 
 Both re-read every transcript rather than using the session cache, because the
 individual tool calls are the thing they reason about and those are never
@@ -549,6 +779,10 @@ cached. Expect them to take a few seconds on a large machine.
 OPTIONS:
   --provider NAME  Only this harness: claude, codex, cursor, gemini, opencode,
                    pi, windsurf.
+  --rate USD       compare only: what an hour of agent time is worth to you.
+                   Adds a column of dollars plus time per file, and ranks by
+                   it — a free model that takes a day can lose to a $10 one
+                   that takes five minutes.
   --json           Machine-readable, for scripting.
   -h, --help       This.
 
@@ -564,6 +798,7 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
     }
 
     let mut provider = None;
+    let mut rate = None;
     let mut json = false;
     let mut args = argv.iter();
     while let Some(a) = args.next() {
@@ -576,6 +811,18 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
                     return 2;
                 }
             },
+            "--rate" if which == "compare" => {
+                match args
+                    .next()
+                    .and_then(|r| r.trim_start_matches('$').parse::<f64>().ok())
+                {
+                    Some(r) if r.is_finite() && r >= 0.0 => rate = Some(r),
+                    _ => {
+                        eprintln!("cctop compare: --rate needs dollars per hour, e.g. --rate 60");
+                        return 2;
+                    }
+                }
+            }
             other => {
                 eprintln!("cctop {which}: unexpected argument `{other}`; see --help");
                 return 2;
@@ -583,14 +830,21 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
         }
     }
 
+    // Both re-parse every transcript, and a parse prices each request as it
+    // reads it, so the table has to be in before the scan rather than after.
+    // Dispatched ahead of `main`'s own load, these ran on the handful of rates
+    // compiled in and priced every newer model at nothing: 9 of 11 models on
+    // `compare` read as unpriced while the cached LiteLLM table listed all 9.
+    crate::pricing::refresh_pricing_blocking();
+
     let analyses = scan(Plan::Retail);
     let selected = only(&analyses, provider);
 
     match (which, json) {
         ("optimize", false) => print!("{}", optimize::report(&selected)),
-        ("compare", false) => print!("{}", compare::report(&selected)),
+        ("compare", false) => print!("{}", compare::report_at(&selected, rate)),
         ("optimize", true) => println!("{}", optimize::as_json(&selected)),
-        (_, true) => println!("{}", compare::as_json(&selected)),
+        (_, true) => println!("{}", compare::as_json(&selected, rate)),
         _ => unreachable!("only optimize and compare reach here"),
     }
     0
@@ -658,12 +912,30 @@ mod tests {
         analyse(&s, &data_of(calls))
     }
 
-    /// The distinction the whole one-shot rate rests on. Editing a file, going
-    /// away to run something, and editing it again is a retry; editing two
-    /// different files in a row is progress and must not be counted as one.
+    fn failing(name: &str, arg: &str, ts: &str) -> (String, ToolDetail) {
+        let (n, mut d) = call(name, arg, ts);
+        d.failed = true;
+        (n, d)
+    }
+
+    /// The distinction the whole one-shot rate rests on. Editing a file, seeing
+    /// something fail, and editing it again is a retry; editing two different
+    /// files is progress, and editing again after the tests passed is the next
+    /// step — neither may be counted as one.
     #[test]
-    fn a_retry_is_the_same_file_edited_after_looking_elsewhere() {
+    fn a_retry_is_the_same_file_edited_after_something_failed() {
         let retried = analysed(
+            Provider::Claude,
+            &[
+                call("Edit", "/a.rs", "01"),
+                failing("Bash", "cargo test", "02"),
+                call("Edit", "/a.rs", "03"),
+            ],
+        );
+        assert_eq!(retried.files_edited, 1);
+        assert_eq!(retried.files_one_shot, 0, "a failure, then the same file");
+
+        let next_step = analysed(
             Provider::Claude,
             &[
                 call("Edit", "/a.rs", "01"),
@@ -671,17 +943,22 @@ mod tests {
                 call("Edit", "/a.rs", "03"),
             ],
         );
-        assert_eq!(retried.files_edited, 1);
+        assert_eq!(next_step.files_one_shot, 1, "the tests passed in between");
+
+        let failed_edit = analysed(
+            Provider::Claude,
+            &[failing("Edit", "/a.rs", "01"), call("Edit", "/a.rs", "02")],
+        );
         assert_eq!(
-            retried.files_one_shot, 0,
-            "the same file, twice, is a retry"
+            failed_edit.files_one_shot, 0,
+            "the first edit itself failed"
         );
 
         let progress = analysed(
             Provider::Claude,
             &[
                 call("Edit", "/a.rs", "01"),
-                call("Bash", "cargo test", "02"),
+                failing("Bash", "cargo test", "02"),
                 call("Edit", "/b.rs", "03"),
             ],
         );
@@ -690,14 +967,149 @@ mod tests {
             progress.files_one_shot, 2,
             "two different files is two first attempts, not a retry"
         );
+    }
 
-        // Two edits in a row are one turn writing twice, not a second attempt:
-        // nothing was learned in between.
-        let burst = analysed(
+    /// A harness that records no outcomes has no failure to see, so any call
+    /// between two edits of a file still makes the second a retry.
+    #[test]
+    fn without_outcomes_any_call_between_is_a_retry() {
+        let calls = [
+            call("Edit", "/a.rs", "01"),
+            call("Bash", "cargo test", "02"),
+            call("Edit", "/a.rs", "03"),
+        ];
+        assert_eq!(analysed(Provider::Cursor, &calls).files_one_shot, 0);
+        let burst = [call("Edit", "/a.rs", "01"), call("Edit", "/a.rs", "02")];
+        assert_eq!(analysed(Provider::Cursor, &burst).files_one_shot, 1);
+    }
+
+    /// Subagents' calls are interleaved into the parent's history. One of
+    /// theirs failing between two of the parent's edits says nothing about the
+    /// parent's attempt.
+    #[test]
+    fn another_agents_failure_is_not_a_retry() {
+        let mut theirs = failing("Bash", "cargo test", "02");
+        theirs.1.origin = Some("sub".into());
+        let a = analysed(
             Provider::Claude,
-            &[call("Edit", "/a.rs", "01"), call("Edit", "/a.rs", "02")],
+            &[
+                call("Edit", "/a.rs", "01"),
+                theirs,
+                call("Edit", "/a.rs", "03"),
+            ],
         );
-        assert_eq!(burst.files_one_shot, 1);
+        assert_eq!(a.files_one_shot, 1);
+    }
+
+    /// A patch displays as its first file and `(+N more)`. Keying on that
+    /// counted a three-file patch as one file that does not exist.
+    #[test]
+    fn a_patch_counts_every_file_it_touched() {
+        let (n, mut d) = call("apply_patch", "a.rs (+2 more)", "01");
+        // `a.rs` twice: two hunks in one file, which once indexed past
+        // itself and panicked on a real transcript.
+        d.paths = vec!["a.rs".into(), "b.rs".into(), "a.rs".into(), "c.rs".into()];
+        let a = analysed(Provider::Codex, &[(n, d)]);
+        assert_eq!(a.files_edited, 3);
+        assert_eq!(a.files_one_shot, 3);
+    }
+
+    fn edited_at(task: Task, files: &[(&str, &str)]) -> Analysis {
+        let mut a = analysed(Provider::Claude, &[]);
+        a.task = task;
+        for (path, ts) in files {
+            a.edited.insert(
+                path.to_string(),
+                Edited {
+                    first: ts.to_string(),
+                    last: ts.to_string(),
+                    after_failure: false,
+                },
+            );
+        }
+        a
+    }
+
+    /// A worktree's file is the main checkout's file, for matching edits
+    /// across sessions.
+    #[test]
+    fn a_worktree_path_folds_into_its_checkout() {
+        assert_eq!(
+            checkout_path("/r/cctop/.claude/worktrees/agent-9/src/ui/mod.rs"),
+            "/r/cctop/src/ui/mod.rs"
+        );
+        assert_eq!(
+            checkout_path("/r/cctop/src/ui/mod.rs"),
+            "/r/cctop/src/ui/mod.rs"
+        );
+        assert_eq!(
+            checkout_path("/r/cctop/.claude/worktrees/agent-9"),
+            "/r/cctop/.claude/worktrees/agent-9"
+        );
+    }
+
+    /// Titles hardly ever say "fix", so a fix is also an edit made straight
+    /// after the session's own command failed — in any session, whatever it
+    /// is called.
+    #[test]
+    fn an_edit_after_a_failure_is_a_fix_without_a_title() {
+        let fix = analysed(
+            Provider::Claude,
+            &[
+                call("Bash", "cargo test", "2026-01-01T12:00:00Z"),
+                failing("Bash", "cargo test", "2026-01-01T12:01:00Z"),
+                call("Edit", "/a.rs", "2026-01-01T12:02:00Z"),
+                call("Bash", "cargo test", "2026-01-01T12:03:00Z"),
+                call("Edit", "/b.rs", "2026-01-01T12:04:00Z"),
+            ],
+        );
+        assert_eq!(fix.task, Task::Coding, "no title says it was a fix");
+        assert!(fix.edited["/a.rs"].after_failure);
+        assert!(!fix.edited["/b.rs"].after_failure, "the tests passed first");
+
+        let mut set = vec![
+            edited_at(
+                Task::Coding,
+                &[
+                    ("/a.rs", "2026-01-01T09:00:00Z"),
+                    ("/b.rs", "2026-01-01T09:00:00Z"),
+                ],
+            ),
+            fix,
+        ];
+        mark_rework(&mut set);
+        assert_eq!(
+            set[0].files_reworked, 1,
+            "a.rs was fixed, b.rs was just changed"
+        );
+    }
+
+    /// A fix session reopening a file within a day charges whoever wrote it
+    /// last — once — and nobody else. Ordinary work reopening it charges no
+    /// one, because editing the same central file every day is normal.
+    #[test]
+    fn rework_is_charged_to_the_last_writer_before_a_fix() {
+        let mut set = vec![
+            edited_at(Task::Coding, &[("/a.rs", "2026-01-01T09:00:00Z")]),
+            edited_at(Task::Coding, &[("/a.rs", "2026-01-01T10:00:00Z")]),
+            edited_at(Task::Coding, &[("/b.rs", "2026-01-01T10:00:00Z")]),
+            edited_at(
+                Task::Debugging,
+                &[
+                    ("/a.rs", "2026-01-01T12:00:00Z"),
+                    ("/c.rs", "2026-01-01T12:00:00Z"),
+                ],
+            ),
+            edited_at(Task::Debugging, &[("/a.rs", "2026-01-01T13:00:00Z")]),
+            // Two days on: too late to blame anyone.
+            edited_at(Task::Debugging, &[("/b.rs", "2026-01-03T12:00:00Z")]),
+        ];
+        mark_rework(&mut set);
+        let charged: Vec<u64> = set.iter().map(|a| a.files_reworked).collect();
+        // The second writer of a.rs is charged once although two fixes
+        // followed — the second fix blames the first fix, which wrote a.rs
+        // last before it.
+        assert_eq!(charged, [0, 1, 0, 1, 0, 0]);
     }
 
     /// Codex reports the whole prompt with the cached part already inside it,
@@ -808,6 +1220,28 @@ mod tests {
         // The path-based figures stay honest: a shell write carries no file
         // name, so it must not inflate the one-shot rate.
         assert_eq!(shell_only.files_edited, 0);
+    }
+
+    /// A session left open overnight did not work overnight. A long pause
+    /// counts only while the call before it was still running.
+    #[test]
+    fn idle_time_is_not_agent_time() {
+        let at = |name: &str, ts: &str, dur: Option<i64>| {
+            let (n, mut d) = call(name, "x", ts);
+            d.dur_ms = dur;
+            (n, d)
+        };
+        let calls = [
+            at("Read", "2026-01-01T10:00:00Z", None),
+            // Thirty seconds of work.
+            at("Edit", "2026-01-01T10:00:30Z", None),
+            // Then a night away from the keyboard.
+            at("Bash", "2026-01-01T22:00:00Z", Some(600_000)),
+            // A ten-minute build is the agent working, however long it is.
+            at("Edit", "2026-01-01T22:10:00Z", None),
+        ];
+        let data = data_of(&calls);
+        assert_eq!(active_ms(&timeline(&data)), 30_000 + 600_000);
     }
 
     /// Either separator: a path in a transcript is spelled however the harness

@@ -675,7 +675,16 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let inner = block.inner(area);
     let max_scroll = height.saturating_sub(inner.height);
-    let scroll = app.settings_scroll.min(max_scroll);
+    // Followed before the page is drawn, not after. Correcting it afterwards
+    // drew every frame at the previous key's offset: the cursor walked off the
+    // bottom and the page caught up one keypress late, or never, if nothing
+    // else asked for a frame.
+    let scroll =
+        settings_follow(app.settings_scroll, cursor, cursor_line, inner.height).min(max_scroll);
+    // The renderer is the only place that knows how tall the page turned out,
+    // and it is what an `End` key needs in order to have a ceiling.
+    app.settings_max_scroll = max_scroll;
+    app.settings_scroll = scroll;
     if max_scroll > 0 {
         // On the border, so it costs no content line and cannot scroll away.
         let count = match app.settings_filter.is_empty() {
@@ -707,20 +716,24 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
         inner.height as usize,
         scroll as usize,
     );
+}
 
-    // The renderer is the only place that knows how tall the page turned out,
-    // and it is what an `End` key needs in order to have a ceiling.
-    app.settings_max_scroll = max_scroll;
-    let Some(room) = inner.height.checked_sub(1).filter(|h| *h > 0) else {
-        return;
-    };
-    app.settings_scroll = if cursor_line < scroll {
+/// The offset that keeps the cursor's line on screen, moving as little as it
+/// can from where the page already is.
+///
+/// The first row pulls the page right back to the top, because above it are the
+/// file it writes to and the first heading, and `Home` landing one line short of
+/// them hides exactly what says where a change will go.
+fn settings_follow(scroll: u16, cursor: usize, cursor_line: u16, room: u16) -> u16 {
+    if cursor == 0 || room == 0 {
+        0
+    } else if cursor_line < scroll {
         cursor_line
     } else if cursor_line >= scroll + room {
         cursor_line + 1 - room
     } else {
         scroll
-    };
+    }
 }
 
 /// The filter, on the border, and the hint for it while it is empty.
@@ -3201,6 +3214,46 @@ mod tests {
             .expect("draw");
         assert_eq!(app.help_max_scroll, 0);
         assert_eq!(thumb_cells(tall.backend().buffer()), 0);
+    }
+
+    /// The frame a key asks for shows where that key put the cursor. The page
+    /// used to correct its scroll after drawing, so `End` drew the top of the
+    /// page with the cursor somewhere below it, and only the next keypress's
+    /// frame caught up.
+    #[test]
+    fn the_settings_page_shows_the_cursor_in_the_frame_that_moved_it() {
+        use crate::ui::settings::Item;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = crate::ui::tests::test_app();
+        app.settings_open = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 15)).expect("backend");
+        let mut frame_text = |app: &mut App| {
+            terminal
+                .draw(|frame| draw_settings(frame, frame.area(), app))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+
+        let rows = app.settings_shown();
+        let Some(Item::Key(last)) = rows.last() else {
+            panic!("the page no longer ends on a keybind")
+        };
+        let last = crate::settings::BINDINGS[*last].0;
+        app.settings_cursor = rows.len() - 1;
+        let text = frame_text(&mut app);
+        assert!(text.contains(last), "End did not bring {last} on screen");
+        assert!(!text.contains("File "), "and the top is still drawn");
+
+        app.settings_cursor = 0;
+        let text = frame_text(&mut app);
+        assert!(text.contains("File "), "Home did not go back to the top");
     }
 
     fn help_text(app: &mut App) -> String {

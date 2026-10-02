@@ -217,7 +217,24 @@ fn output_failed(output: Option<&Value>) -> bool {
 
 fn text_reports_failure(text: &str) -> bool {
     let head = text.trim_start();
-    head.starts_with("Script failed") || head.starts_with("Script error")
+    if head.starts_with("Script failed")
+        || head.starts_with("Script error")
+        || head.starts_with("apply_patch verification failed")
+    {
+        return true;
+    }
+    // The shell's plain-text form: a few header lines, then `Output:` and
+    // whatever the command printed. Only the header is read, so a program that
+    // prints "Process exited with code 1" itself cannot flag its own call.
+    // Unread, a failing `cargo test` counted as a success, and every Codex
+    // session reported no tool errors at all.
+    head.lines()
+        .take_while(|l| !l.starts_with("Output:"))
+        .filter_map(|l| {
+            l.strip_prefix("Process exited with code ")
+                .or_else(|| l.strip_prefix("Exit code: "))
+        })
+        .any(|code| code.trim().parse::<i64>().is_ok_and(|c| c != 0))
 }
 
 /// Resolve the common `const patch = "..."; tools.apply_patch(patch)` shape.
@@ -983,6 +1000,30 @@ const r = await Promise.all([tools.exec_command({cmd:"ls"})]);"#;
         let good = json!(r#"{"output":"Success.","metadata":{"exit_code":0}}"#);
         assert!(output_failed(Some(&bad)));
         assert!(!output_failed(Some(&good)));
+
+        // The plain-text shell form, in both spellings Codex has written, and
+        // a patch that did not apply.
+        let exited = |code: u8| {
+            json!(format!(
+                "Chunk ID: e218ea\nWall time: 2.9 seconds\nProcess exited with code {code}\n\
+                 Original token count: 9\nOutput:\nerror[E0425]\n"
+            ))
+        };
+        assert!(output_failed(Some(&exited(101))));
+        assert!(!output_failed(Some(&exited(0))));
+        assert!(output_failed(Some(&json!(
+            "Exit code: 1\nWall time: 0.3 seconds\nOutput:\n"
+        ))));
+        assert!(!output_failed(Some(&json!(
+            "Exit code: 0\nWall time: 0.3 seconds\nOutput:\nok"
+        ))));
+        assert!(output_failed(Some(&json!(
+            "apply_patch verification failed: Failed to find expected lines in a.py"
+        ))));
+        // What the program printed is not the shell's verdict on it.
+        assert!(!output_failed(Some(&json!(
+            "Exit code: 0\nOutput:\nProcess exited with code 1\n"
+        ))));
 
         // Anything unrecognised stays unflagged rather than falsely marked.
         assert!(!output_failed(Some(&json!("some plain output"))));
