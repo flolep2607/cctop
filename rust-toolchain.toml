@@ -1,0 +1,12 @@
+# The Rust that builds, lints and releases cctop, here and in CI alike.
+#
+# CI used to take whatever `stable` was that day while this machine had
+# whatever stable was when it last updated. Clippy grows lints with every
+# release and CI runs it with `-D warnings`, so the two drifted apart
+# silently: a lint new in 1.99 merged clean locally on 1.98 and left main
+# failing CI until 0.24.0 fixed it. Pinned, a lint can only arrive in a pull
+# request that moves this line — read its clippy output there.
+[toolchain]
+channel = "1.99"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
