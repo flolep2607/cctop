@@ -56,13 +56,14 @@ fn readonly(path: &Path) -> rusqlite::Result<Connection> {
 thread_local! {
     /// Read-only connections, kept open and reused.
     ///
-    /// Every session in a database is asked about separately — its activity
-    /// dot, its context window, its last tool, its costs — and each of those
-    /// used to open a connection of its own. On a machine with 1478 OpenCode
-    /// sessions that came to several thousand opens of a 555 MB database per
-    /// walk, and the cost was not the reading: 240,000 voluntary context
-    /// switches and nine seconds of kernel time, spent almost entirely on
-    /// setting up and tearing down file locks.
+    /// Every read of an OpenCode database goes through here — discovery,
+    /// extraction, the activity dot, the context window, the last tool, and the
+    /// transcript scan behind search. Opening per read came to several thousand
+    /// opens of a 555 MB database per walk, and the cost was not the reading:
+    /// 240,000 voluntary context switches and nine seconds of kernel time, spent
+    /// almost entirely on setting up and tearing down file locks. Extraction
+    /// alone — the one call a walk makes per session, and the heaviest of them by
+    /// a factor of three — had been paying that price per session all along.
     ///
     /// Thread-local rather than shared, which is what makes it safe *and*
     /// fast. `SQLITE_OPEN_NO_MUTEX` means a connection may not be used from two
@@ -268,6 +269,43 @@ pub fn for_each_message(path: &Path, session_id: &str, mut f: impl FnMut(&Value,
     });
 }
 
+/// Feed every stored message and part of one session to `feed`, stopping early
+/// once it says the session is found.
+///
+/// This exists so that searching shares the connection pool rather than opening
+/// the database per candidate: search runs as the user types, and the pool is
+/// what keeps that from costing an open of a database that may be half a
+/// gigabyte, once per session, per keystroke.
+///
+/// `part` carries the text of a message; `message` carries the envelope, and the
+/// tool calls that are worth finding a session by. Both are per-session in this
+/// schema, so neither can leak another session's text into this hit. The `part`
+/// table is absent in older databases, which is a failed prepare rather than an
+/// empty result — hence trying each in turn.
+pub fn scan_session(path: &Path, session_id: &str, mut feed: impl FnMut(&str) -> bool) -> bool {
+    with_db(path, |db| {
+        for sql in [
+            "SELECT data FROM part WHERE session_id = ?1 ORDER BY id",
+            "SELECT data FROM message WHERE session_id = ?1 ORDER BY time_created, id",
+        ] {
+            let Ok(mut stmt) = db.prepare(sql) else {
+                continue;
+            };
+            let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))
+            else {
+                continue;
+            };
+            for raw in rows.flatten() {
+                if feed(&raw) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .unwrap_or(false)
+}
+
 /// When a message was written, in RFC-3339.
 ///
 /// The column is the fallback because `data.time.created` is the envelope's own
@@ -285,53 +323,65 @@ pub fn message_time(message: &Value, column: i64) -> String {
 pub fn list_sessions() -> Vec<Session> {
     let mut sessions = Vec::new();
     for path in database_paths() {
-        let Ok(db) = readonly(&path) else { continue };
-        // A subagent is a session of its own, with `parent_id` naming the one
-        // that spawned it; listed, each stands alone as a conversation. They
-        // are hidden here and folded into their parent by `extract`, the way
-        // Claude's subagents are. A database from before the column existed has
-        // no subagents to hide, so it falls back to the unfiltered query.
-        const COLUMNS: &str =
-            "SELECT id, directory, title, model, time_created, time_updated FROM session";
-        let Ok(mut stmt) = db
-            .prepare(&format!("{COLUMNS} WHERE parent_id IS NULL"))
-            .or_else(|_| db.prepare(COLUMNS))
-        else {
+        // Pooled per database rather than opened per walk: this is the walk's
+        // first and broadest read, and it opens one connection per channel
+        // either way — the table below is then reused by every extract that
+        // follows on the same thread.
+        let Some(found) = with_db(&path, |db| sessions_in(db, &path)) else {
             continue;
         };
-        let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        }) else {
-            continue;
-        };
-        for row in rows.flatten() {
-            let (id, directory, title, model_json, created, updated) = row;
-            let model = model_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
-                .unwrap_or_default();
-            let mut session = Session::new(Provider::OpenCode, id);
-            session.started_at = util::ms_to_rfc3339(created);
-            session.last_active = util::ms_to_rfc3339(updated);
-            session.label_source = directory;
-            session.title = (!title.is_empty()).then_some(title);
-            session.model = model;
-            session.data_file = Some(path.clone());
-            sessions.push(session);
-        }
+        sessions.extend(found);
     }
 
     sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     let mut seen = HashSet::new();
     sessions.retain(|s| seen.insert(s.session_id.clone()));
+    sessions
+}
+
+fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
+    let mut sessions = Vec::new();
+    // A subagent is a session of its own, with `parent_id` naming the one that
+    // spawned it; listed, each stands alone as a conversation. They are hidden
+    // here and folded into their parent by `extract`, the way Claude's subagents
+    // are. A database from before the column existed has no subagents to hide,
+    // so it falls back to the unfiltered query.
+    const COLUMNS: &str =
+        "SELECT id, directory, title, model, time_created, time_updated FROM session";
+    let Ok(mut stmt) = db
+        .prepare(&format!("{COLUMNS} WHERE parent_id IS NULL"))
+        .or_else(|_| db.prepare(COLUMNS))
+    else {
+        return sessions;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    }) else {
+        return sessions;
+    };
+    for row in rows.flatten() {
+        let (id, directory, title, model_json, created, updated) = row;
+        let model = model_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
+        let mut session = Session::new(Provider::OpenCode, id);
+        session.started_at = util::ms_to_rfc3339(created);
+        session.last_active = util::ms_to_rfc3339(updated);
+        session.label_source = directory;
+        session.title = (!title.is_empty()).then_some(title);
+        session.model = model;
+        session.data_file = Some(path.to_path_buf());
+        sessions.push(session);
+    }
     sessions
 }
 
@@ -402,15 +452,19 @@ fn add_usage(target: &mut SessionData, tokens: &Tokens, costs: &Costs) {
 /// it has no pricing for, so a zero falls back to pricing the tokens against
 /// LiteLLM rather than being taken at face value.
 pub fn extract(path: &Path, session_id: &str) -> SessionData {
-    let Ok(db) = readonly(path) else {
-        return SessionData {
-            error: Some(format!(
-                "Could not open OpenCode database {}",
-                path.display()
-            )),
-            ..Default::default()
-        };
-    };
+    // Pooled like every other read of this database, and for the same reason it
+    // matters most here: this is the call a walk makes once per session, so the
+    // one-per-session open this used to pay was the shape of a whole walk's cost.
+    with_db(path, |db| extract_of(db, session_id)).unwrap_or_else(|| SessionData {
+        error: Some(format!(
+            "Could not open OpenCode database {}",
+            path.display()
+        )),
+        ..Default::default()
+    })
+}
+
+fn extract_of(db: &Connection, session_id: &str) -> SessionData {
     let mut data = SessionData::default();
     let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
     let mut saw_usage = false;
@@ -565,7 +619,7 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
         }
     }
 
-    fold_subagents(&db, session_id, &mut data, &mut breakdown, &mut rates);
+    fold_subagents(db, session_id, &mut data, &mut breakdown, &mut rates);
 
     let mut models: Vec<_> = breakdown.into_iter().collect();
     models.sort_by(|a, b| a.0.cmp(&b.0));
@@ -978,6 +1032,96 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// Every other read of this database shares the pool's read-only handle,
+    /// which is then open for the life of the thread. `delete` opens a read-write
+    /// one of its own on top of it, and the two have to coexist: a rollback
+    /// journal grants a writer nothing while a reader holds the database, so a
+    /// handle that outlived its usefulness would turn a deletion into a failure
+    /// and leave the row the user asked to remove on screen.
+    ///
+    /// Read again afterwards through the same pooled handle, which is the other
+    /// half of it — a handle kept open across a write must not answer with the
+    /// row that has just gone.
+    #[test]
+    fn a_delete_lands_under_the_handle_the_pool_is_holding() {
+        let path = temp_db("delete");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            // Rollback rather than WAL on purpose: WAL lets a writer past a
+            // reader, so only this mode can fail for the reason above.
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE session (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT, cost REAL NOT NULL,
+                tokens_input INTEGER NOT NULL, tokens_output INTEGER NOT NULL,
+                tokens_reasoning INTEGER NOT NULL, tokens_cache_read INTEGER NOT NULL,
+                tokens_cache_write INTEGER NOT NULL
+             );
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT,
+                FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE);
+             CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT,
+                FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "ses_doomed",
+                "Doomed",
+                r#"{"id":"claude-test","providerID":"anthropic"}"#,
+                0.5,
+                120u64,
+                30u64,
+                5u64,
+                80u64,
+                10u64
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_1",
+                "ses_doomed",
+                1_785_888_060_000i64,
+                r#"{"role":"assistant","time":{"created":1785888060000},"modelID":"claude-test","cost":0.5,"tokens":{"input":120,"output":30,"reasoning":5,"cache":{"read":80,"write":10}}}"#
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "part_1",
+                "ses_doomed",
+                1_785_888_061_000i64,
+                r#"{"type":"tool","tool":"bash","callID":"call_1","state":{"input":{"command":"ls"},"time":{"start":1785888061000},"status":"completed"}}"#
+            ],
+        )
+        .unwrap();
+        drop(db);
+
+        let mut session = Session::new(Provider::OpenCode, "ses_doomed".to_string());
+        session.data_file = Some(path.clone());
+
+        // Open the pooled handle first, the way a walk has before anyone deletes.
+        let before = extract(&path, "ses_doomed");
+        assert_eq!(before.tokens.total, 240);
+        assert_eq!(before.metrics.tool_count, 1);
+
+        delete(&session).expect("a pooled reader must not lock the writer out");
+
+        // The cascade is what takes the spend with it, so this also pins that
+        // `foreign_keys` is on for the deleting connection — without it the
+        // session's own row would go and its messages would stay behind,
+        // still adding up.
+        let after = extract(&path, "ses_doomed");
+        assert_eq!(after.title, None, "a deleted session must not come back");
+        assert_eq!(after.tokens.total, 0, "and neither must its spend");
+        assert_eq!(after.metrics.tool_count, 0);
+
+        close_databases();
+        std::fs::remove_file(path).unwrap();
+    }
+
     /// A custom provider (any OpenAI-compatible endpoint OpenCode has no rates
     /// for) reports `cost: 0` on every message. Reporting those sessions as free
     /// hid real spend, so the tokens are priced against LiteLLM instead — and the
@@ -1175,6 +1319,92 @@ mod tests {
             ActivityState::ApiError
         );
         // Release the handle this thread holds before removing the file.
+        close_databases();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Search reads both tables, because the text of a message is in `part` and
+    /// its envelope and tool calls are in `message` — a term naming either has
+    /// to find the session. One database holds every session, so the scan is
+    /// also the only thing keeping another session's text out of a hit.
+    #[test]
+    fn a_scan_reads_both_tables_and_stops_where_it_is_told_to() {
+        let path = temp_db("scan");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_1",
+                "ses_mine",
+                1i64,
+                r#"{"role":"assistant","modelID":"claude-test"}"#
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "part_1",
+                "ses_mine",
+                1i64,
+                r#"{"type":"text","text":"the needle is in a part"}"#
+            ],
+        )
+        .unwrap();
+        // Another session's row, in both tables.
+        db.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "msg_2",
+                "ses_theirs",
+                1i64,
+                r#"{"role":"assistant","modelID":"claude-test"}"#
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "part_2",
+                "ses_theirs",
+                1i64,
+                r#"{"type":"text","text":"the needle is not ours"}"#
+            ],
+        )
+        .unwrap();
+        drop(db);
+
+        let collect = |session_id: &str| {
+            let mut seen = Vec::new();
+            let found = scan_session(&path, session_id, |raw| {
+                seen.push(raw.to_string());
+                false
+            });
+            (found, seen)
+        };
+
+        let (found, seen) = collect("ses_mine");
+        assert!(!found, "the feed said no, so the scan must read it all");
+        assert_eq!(seen.len(), 2, "a message and a part, not one of them");
+        assert!(seen.iter().any(|raw| raw.contains("in a part")));
+        assert!(
+            !seen.iter().any(|raw| raw.contains("not ours")),
+            "another session's text must not reach this hit"
+        );
+
+        // The envelope carries no needle of its own here, so a term named in the
+        // message alone is the other half of what makes this worth scanning both.
+        assert!(scan_session(&path, "ses_mine", |raw| raw.contains("modelID")));
+        assert!(
+            !scan_session(&path, "ses_mine", |raw| raw.contains("absent")),
+            "a term nothing holds must not"
+        );
+
         close_databases();
         std::fs::remove_file(path).unwrap();
     }
