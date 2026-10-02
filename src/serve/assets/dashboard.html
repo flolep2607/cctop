@@ -27,6 +27,30 @@
   .quota .qw b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600; color: var(--dim); }
   .quota .ctx { width: 28px; height: 4px; }
 
+  /* The TUI's tab bar, read from rmux: every agent cctop has open, in the
+     order the bar shows them. */
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tabs[hidden] { display: none; }
+  .tabs .tab { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 13px;
+               padding: 5px 11px; border-radius: 99px; border: 1px solid var(--line);
+               background: var(--panel); color: var(--ink); cursor: pointer; max-width: 260px; }
+  .tabs .tab .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tabs .tab:hover, .tabs .tab[aria-pressed="true"] { border-color: var(--accent); }
+  .tabs .tab .dot { margin: 0; }
+  .tabs .tab a { color: var(--faint); font-size: 12px; text-decoration: none; }
+  .tabs .tab a:hover { color: var(--accent); }
+  .termdrawer { margin-bottom: 14px; }
+  .termdrawer[hidden] { display: none; }
+  .termdrawer .head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+                      font-size: 12px; color: var(--faint); }
+  .termdrawer .head .popout { margin-left: auto; color: var(--dim); }
+  .termdrawer .head button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 99px;
+                             border: 1px solid var(--line); background: var(--panel);
+                             color: var(--dim); cursor: pointer; }
+  .termdrawer .head button:hover { color: var(--accent); border-color: var(--accent); }
+  .termframe { width: 100%; height: min(70vh, 720px); border: 1px solid var(--line);
+               border-radius: 8px; background: #060807; display: block; }
+  .termdrawer .why { font-size: 12px; color: var(--faint); margin-top: 7px; }
   .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
   input[type=search] {
     flex: 1 1 200px; min-width: 0; padding: 7px 11px; font: inherit; font-size: 14px;
@@ -231,6 +255,17 @@
   </header>
 
   <div id="banners"></div>
+
+  <nav class="tabs" id="tabs" hidden aria-label="Open tabs"></nav>
+  <section class="card termdrawer" id="termdrawer" hidden>
+    <div class="head">
+      <span id="term-title"></span>
+      <a id="term-popout" class="popout" target="_blank" rel="noopener"
+         title="Open this terminal in a window of its own">pop out</a>
+      <button id="term-close" type="button">Close</button>
+    </div>
+    <div id="term-body"></div>
+  </section>
 
   <div class="controls">
     <input type="search" id="filter" placeholder="Filter on project, model, branch, title…" autocomplete="off" spellcheck="false"

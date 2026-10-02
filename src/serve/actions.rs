@@ -637,7 +637,22 @@ fn local(session: &Session) -> Result<(), Failed> {
 /// loopback link rather than to nothing. Which of the two it got is in the
 /// answer, because a link that only opens on the server's own desk is not a
 /// failure the reader can see.
-pub fn terminal(session: &Session) -> Result<Terminal, Failed> {
+/// The frontend a page asked its terminal to open in: its own origin's copy of
+/// rmux's app at `/term/`. Only a bare `http(s)://host[:port]` is taken — a
+/// path, a query or another scheme is a request this page never sends — and
+/// anything else falls back to `share.rmux.io`, which opens in a window.
+pub fn frontend_for(origin: &str) -> Option<String> {
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))?;
+    let host_ok = !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    host_ok.then(|| format!("{origin}/term/"))
+}
+
+pub fn terminal(session: &Session, frontend: Option<&str>) -> Result<Terminal, Failed> {
     local(session)?;
     let Some(pid) = session.root_pid() else {
         return Err((
@@ -651,7 +666,25 @@ pub fn terminal(session: &Session) -> Result<Terminal, Failed> {
             "only an agent cctop put in a multiplexer has a terminal to show".into(),
         ));
     };
-    let (share, tunnelled) = crate::rmux::share_link(&name, true)
+    let (share, tunnelled) = crate::rmux::share_link(&name, true, frontend)
+        .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
+    let Some(url) = share.operator else {
+        return Err((409, "the share came back without an operator link".into()));
+    };
+    Ok(Terminal { url, tunnelled })
+}
+
+/// A tab's terminal, by its rmux session name — the same share
+/// [`terminal`] mints, for a tab that may have no session row at all (an agent
+/// that has not written a transcript yet, or a shell).
+///
+/// Only one of cctop's own live tabs: the name comes from a request, and an
+/// rmux session the user started themselves is not this page's to hand out.
+pub fn tab_terminal(name: &str, frontend: Option<&str>) -> Result<Terminal, Failed> {
+    if !super::tabs::is_tab(&crate::rmux::running(), name) {
+        return Err((404, "no open tab by that name".into()));
+    }
+    let (share, tunnelled) = crate::rmux::share_link(name, true, frontend)
         .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));

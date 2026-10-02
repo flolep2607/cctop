@@ -2086,6 +2086,24 @@ function terminalButton() {
   return button;
 }
 
+// The share drawn inside this page rather than in a window of its own.
+//
+// rmux's terminal app is served from this origin at /term/ (src/serve/term.rs)
+// precisely so it can be framed — share.rmux.io refuses to be. A share link
+// carries everything in its fragment, `#t=…&navbar=off…`, which a browser
+// never sends to a server, so the same fragment on our copy of the app opens
+// the same terminal. The query carries the token for the frame's own request.
+function terminalFrame(url) {
+  const at = url.indexOf("#");
+  const frame = document.createElement("iframe");
+  frame.className = "termframe";
+  frame.title = "Terminal";
+  // Clipboard for copy and paste inside the terminal; nothing else is granted.
+  frame.allow = "clipboard-read; clipboard-write";
+  frame.src = "/term/" + QUERY + (at >= 0 ? url.slice(at) : "");
+  return frame;
+}
+
 // Closing removes the frame rather than hiding it. The frame holds a live
 // socket to the multiplexer, and one left open behind a `hidden` is a terminal
 // still attached to an agent nobody is watching.
@@ -2114,55 +2132,32 @@ async function toggleTerminal(button) {
   try {
     // Minted per opening, never cached: the link is a shell credential, and a
     // page that kept one would be handing out the last reader's door.
-    const terminal = await act("terminal", {});
+    const terminal = await act("terminal", { origin: location.origin });
     const head = el("div", "head");
     head.appendChild(el("span", null, "This session's terminal"));
+    // A window of its own is still on offer — some people want it on another
+    // screen — and stays a real link, so a popup blocker or a middle click does
+    // the ordinary thing. `noopener` keeps that window off this page.
+    const out = el("a", "popout", "pop out");
+    out.href = terminal.url;
+    out.target = "_blank";
+    out.rel = "noopener";
+    out.title = "Open this terminal in a window of its own";
+    head.appendChild(out);
     const close = el("button", null, "Close");
     close.type = "button";
     close.addEventListener("click", () => closeTerminal(button));
     head.appendChild(close);
 
-    // A link and not a frame, because rmux's browser terminal refuses to be
-    // one: share.rmux.io sends `frame-ancestors 'none'`, so any page that
-    // embeds it gets an empty rectangle and a console error. A window of its
-    // own is the nearest thing to beside-the-conversation that a page is
-    // allowed to open — it floats over the desktop rather than hiding this one
-    // behind a tab, and it can be dragged next to it.
-    const card = el("div", "card pad termcard");
-    const open = el("a", "open", "Open the terminal");
-    open.href = terminal.url;
-    // Still a real link with a real href: a popup blocker, or a middle click,
-    // then does the ordinary thing rather than nothing at all. `noopener` is
-    // named in both places — the window must not get a handle on this page.
-    open.target = "_blank";
-    open.rel = "noopener";
-    open.addEventListener("click", (ev) => {
-      // Opened from inside the click, with no `await` in between, which is what
-      // keeps it a user gesture and out of the blocker.
-      const win = window.open(
-        terminal.url, "cctop-terminal",
-        "popup,noopener,width=1024,height=720,left=" +
-          Math.max(0, screen.availWidth - 1044) + ",top=60"
-      );
-      if (win) ev.preventDefault();
-    });
-    card.appendChild(open);
-    card.appendChild(el(
+    const frame = terminalFrame(terminal.url);
+    const note = el(
       "div", "why",
-      "It opens in a window of its own, which you can put beside this one: " +
-      "rmux's terminal page refuses to be framed, so it cannot be drawn inside."
-    ));
-    card.appendChild(el(
-      "div", "why",
-      terminal.tunnelled
-        ? "It reaches this machine through rmux's own tunnel, so it works from wherever you are."
-        : "It is served from the machine cctop runs on, so it only opens from a browser on it."
-    ));
-    card.appendChild(el(
-      "div", "why bad",
-      "Whoever opens that link can type into this agent — it is a shell, not a prompt box."
-    ));
-    side.replaceChildren(head, card);
+      (terminal.tunnelled
+        ? "Through rmux's own tunnel, so it works from wherever you are. "
+        : "Served from the machine cctop runs on, so it only opens from a browser on it. ") +
+      "Whoever holds this page can type into this agent — it is a shell, not a prompt box."
+    );
+    side.replaceChildren(head, frame, note);
   } catch (e) {
     // Reported where every other failed action reports — under the buttons,
     // at the top. Left in the column instead, the sentence would sit below a
