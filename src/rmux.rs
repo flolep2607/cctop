@@ -382,7 +382,15 @@ pub const SHARE_TUNNEL: &str = "localhost-run";
 ///
 /// So the share gets an ingress that carries what it is made of, and cctop's
 /// tunnel keeps carrying the page, which is plain HTTP and an event stream.
-/// Two ways out of the machine, because one of them cannot do this job.
+/// Two ways out of the machine, because one of them could not do this job.
+///
+/// The 404 was the tunnel client, not Cloudflare: the edge strips `Upgrade` and
+/// `Connection` and marks the stream a WebSocket instead, and
+/// `cloudflare-quick-tunnel` 0.3.1 never read the mark. The copy in
+/// `vendor/cloudflare-quick-tunnel` puts the headers back, and a WebSocket echo
+/// through a real quick tunnel now answers where the published crate gets a
+/// 426. The share stays on rmux's tunnel all the same, for the reason below:
+/// that one carries ciphertext, and Cloudflare's reads what passes through it.
 ///
 /// The share itself is untouched by the route. rmux encrypts operator traffic
 /// end to end and pairs it with a PIN, so the tunnel carries ciphertext it

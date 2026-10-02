@@ -22,7 +22,7 @@ categories = ["command-line-utilities", "development-tools"]
 # mirror on the same terms and belongs on the same side of the line.
 # /RnD is working notes — research, ideas and dead ends. It is for people
 # reading this repository, on the same terms as the mirrors above.
-exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD"]
+exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD", "/vendor"]
 
 # Off by default and never enabled for a release: `debug` compiles in
 # `src/serve/debug.rs`, which can make the server fail on demand. Handy against
@@ -182,3 +182,16 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
 # committed, so CI compares against them and needs no insta CLI; CLAUDE.md
 # says how to accept a change.
 insta = "1.48.0"
+
+# The quick-tunnel client, patched to carry WebSockets. Cloudflare's edge
+# strips `Upgrade`/`Connection` and marks the stream a WebSocket instead;
+# 0.3.1 never reads that mark, so it dialled the origin with a plain GET and an
+# rmux share through the tunnel came back 404. vendor/cloudflare-quick-tunnel
+# is 0.3.1 with the headers put back (search it for "cctop patch"), to drop
+# once upstream carries the same fix.
+#
+# A [patch] applies to builds of this repository — CI, the release binaries —
+# and not to `cargo install cctop` from crates.io, which resolves the published
+# 0.3.1; that path keeps today's behaviour until upstream is fixed.
+[patch.crates-io]
+cloudflare-quick-tunnel = { path = "vendor/cloudflare-quick-tunnel" }

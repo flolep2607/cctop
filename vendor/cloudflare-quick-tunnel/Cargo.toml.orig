@@ -1,0 +1,94 @@
+[workspace]
+members = ["spike"]
+
+# ── Top-level production crate ────────────────────────────────────────────────
+
+[package]
+name        = "cloudflare-quick-tunnel"
+version     = "0.3.1"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Pure-Rust client for Cloudflare quick tunnels (https://*.trycloudflare.com) — no cloudflared subprocess. Speaks QUIC + capnp-RPC to the argotunnel edge directly. HTTP/1.1 + WebSocket Upgrade, HA pool, TCP keep-alive."
+repository  = "https://github.com/lordmacu/cloudflare-quick-tunnel-rs"
+homepage    = "https://github.com/lordmacu/cloudflare-quick-tunnel-rs"
+readme      = "README.md"
+keywords    = ["cloudflare", "tunnel", "quic", "trycloudflare", "argotunnel"]
+categories  = ["network-programming"]
+# MSRV chase log:
+#   0.2 → 0.3: 1.78 → 1.85 (edition2024 on wiremock + idna_adapter)
+#   0.3 → 0.3.1: 1.85 → 1.86 (icu_* crates buried under url→idna→icu)
+# We don't pin the transitive icu / idna chain because url is
+# pulled by reqwest + hickory-resolver; bumping MSRV is cheaper
+# and more honest than the alternative.
+rust-version = "1.86"
+
+include = [
+    "src/**/*",
+    "schemas/**/*",
+    "cf-edge-roots.pem",
+    "README.md",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+[dependencies]
+# Async + diagnostics
+tokio              = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync"] }
+tracing            = "0.1"
+thiserror          = "1"
+anyhow             = "1"
+bytes              = "1"
+futures            = "0.3"
+
+# Data
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+base64             = "0.22"
+uuid               = { version = "1", features = ["v4", "serde"] }
+httparse           = "1"
+
+# HTTP — POST /tunnel
+reqwest            = { version = "0.12", default-features = false, features = ["json", "charset", "rustls-tls"] }
+
+# QUIC + TLS
+quinn              = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
+rustls             = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+rustls-pemfile     = "2"
+rustls-native-certs = "0.7"
+
+# DNS (SRV + DoT fallback)
+hickory-resolver   = { version = "0.24", default-features = false, features = ["dns-over-rustls", "tokio-runtime"] }
+
+# Cap'n Proto RPC over QUIC streams
+capnp              = "0.20"
+capnp-rpc          = "0.20"
+capnp-futures      = "0.20"
+
+# Bridges tokio's AsyncRead/Write to futures-io which capnp-rpc speaks.
+tokio-util         = { version = "0.7", features = ["compat"] }
+
+[dev-dependencies]
+tokio              = { version = "1", features = ["full"] }
+wiremock           = "0.6"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow             = "1"
+
+[[example]]
+name = "serve"
+path = "examples/serve.rs"
+
+# ── Profiles ──────────────────────────────────────────────────────────────────
+# Mirror the nexo-rs convention so consumers via path/git dep don't see
+# surprising drift.
+
+[profile.release]
+lto              = "thin"
+codegen-units    = 1
+strip            = "symbols"
+
+[profile.release-fast]
+inherits         = "release"
+lto              = false
+codegen-units    = 16
