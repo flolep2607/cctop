@@ -238,6 +238,8 @@ pub struct Analysis {
     pub rereads: u64,
     pub cache_read: u64,
     pub input_total: u64,
+    /// How long the agent was working, in milliseconds — see [`active_ms`].
+    pub active_ms: u64,
     /// The per-tool history hit its cap, so every count here is a floor.
     pub truncated: bool,
 }
@@ -257,6 +259,46 @@ fn timeline(data: &SessionData) -> Vec<(&str, &ToolDetail)> {
         .collect();
     all.sort_by(|a, b| a.1.ts.cmp(&b.1.ts));
     all
+}
+
+/// A pause between two tool calls longer than this is somebody away from the
+/// keyboard, not the agent working.
+const IDLE_MS: i64 = 5 * 60 * 1000;
+
+/// How long the agent spent working, from the timestamps of its tool calls.
+///
+/// The figure `compare` needs so that a cheap model is not reported as the
+/// better one when it took a day to do what another did in five minutes. The
+/// wall clock between first and last activity cannot answer that: a session
+/// left open overnight is twelve hours long and did no work in eleven of them.
+/// So the gaps between consecutive calls are summed, and a gap past
+/// [`IDLE_MS`] counts only as long as the call before it was itself running —
+/// a ten-minute build is the agent working, ten minutes of nothing is not.
+///
+/// Derived the same way for every harness, deliberately. Claude also records
+/// a `turn_duration` per turn, which is closer to the truth, but not for every
+/// turn and not anywhere else; a comparison whose clock depends on the
+/// provider would be measuring the clock.
+///
+/// ponytail: only the stretch from the first tool call to the last is seen.
+/// The thinking before a turn's first call and the answer after its last are
+/// not, so this undercounts every model — by about the same amount, which is
+/// what a comparison needs.
+fn active_ms(timeline: &[(&str, &ToolDetail)]) -> u64 {
+    let stamps: Vec<(i64, i64)> = timeline
+        .iter()
+        .filter_map(|(_, d)| {
+            crate::util::parse_ts(&d.ts)
+                .map(|t| (t.timestamp_millis(), d.dur_ms.unwrap_or(0).max(0)))
+        })
+        .collect();
+    let mut total: i64 = stamps.last().map_or(0, |&(_, dur)| dur.min(IDLE_MS));
+    for w in stamps.windows(2) {
+        let ((at, dur), (next, _)) = (w[0], w[1]);
+        let gap = (next - at).max(0);
+        total += if gap <= IDLE_MS { gap } else { dur.min(gap) };
+    }
+    total.max(0) as u64
 }
 
 /// Which model to credit a session to: the one that cost the most.
@@ -419,6 +461,7 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         records_outcomes: session.provider.records_tool_outcomes(),
         cache_read: cached,
         input_total: billed_in,
+        active_ms: active_ms(&timeline),
         edits: 0,
         bash_writes: 0,
         reads: 0,
@@ -540,7 +583,7 @@ cctop compare  — how each model behaved on the work you gave it
 
 USAGE:
   cctop optimize [--provider NAME] [--json]
-  cctop compare  [--provider NAME] [--json]
+  cctop compare  [--provider NAME] [--rate USD_PER_HOUR] [--json]
 
 Both re-read every transcript rather than using the session cache, because the
 individual tool calls are the thing they reason about and those are never
@@ -549,6 +592,10 @@ cached. Expect them to take a few seconds on a large machine.
 OPTIONS:
   --provider NAME  Only this harness: claude, codex, cursor, gemini, opencode,
                    pi, windsurf.
+  --rate USD       compare only: what an hour of agent time is worth to you.
+                   Adds a column of dollars plus time per file, and ranks by
+                   it — a free model that takes a day can lose to a $10 one
+                   that takes five minutes.
   --json           Machine-readable, for scripting.
   -h, --help       This.
 
@@ -564,6 +611,7 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
     }
 
     let mut provider = None;
+    let mut rate = None;
     let mut json = false;
     let mut args = argv.iter();
     while let Some(a) = args.next() {
@@ -576,6 +624,18 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
                     return 2;
                 }
             },
+            "--rate" if which == "compare" => {
+                match args
+                    .next()
+                    .and_then(|r| r.trim_start_matches('$').parse::<f64>().ok())
+                {
+                    Some(r) if r.is_finite() && r >= 0.0 => rate = Some(r),
+                    _ => {
+                        eprintln!("cctop compare: --rate needs dollars per hour, e.g. --rate 60");
+                        return 2;
+                    }
+                }
+            }
             other => {
                 eprintln!("cctop {which}: unexpected argument `{other}`; see --help");
                 return 2;
@@ -588,9 +648,9 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
 
     match (which, json) {
         ("optimize", false) => print!("{}", optimize::report(&selected)),
-        ("compare", false) => print!("{}", compare::report(&selected)),
+        ("compare", false) => print!("{}", compare::report_at(&selected, rate)),
         ("optimize", true) => println!("{}", optimize::as_json(&selected)),
-        (_, true) => println!("{}", compare::as_json(&selected)),
+        (_, true) => println!("{}", compare::as_json(&selected, rate)),
         _ => unreachable!("only optimize and compare reach here"),
     }
     0
@@ -808,6 +868,28 @@ mod tests {
         // The path-based figures stay honest: a shell write carries no file
         // name, so it must not inflate the one-shot rate.
         assert_eq!(shell_only.files_edited, 0);
+    }
+
+    /// A session left open overnight did not work overnight. A long pause
+    /// counts only while the call before it was still running.
+    #[test]
+    fn idle_time_is_not_agent_time() {
+        let at = |name: &str, ts: &str, dur: Option<i64>| {
+            let (n, mut d) = call(name, "x", ts);
+            d.dur_ms = dur;
+            (n, d)
+        };
+        let calls = [
+            at("Read", "2026-01-01T10:00:00Z", None),
+            // Thirty seconds of work.
+            at("Edit", "2026-01-01T10:00:30Z", None),
+            // Then a night away from the keyboard.
+            at("Bash", "2026-01-01T22:00:00Z", Some(600_000)),
+            // A ten-minute build is the agent working, however long it is.
+            at("Edit", "2026-01-01T22:10:00Z", None),
+        ];
+        let data = data_of(&calls);
+        assert_eq!(active_ms(&timeline(&data)), 30_000 + 600_000);
     }
 
     /// Either separator: a path in a transcript is spelled however the harness
