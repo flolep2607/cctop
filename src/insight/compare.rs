@@ -32,6 +32,10 @@ pub struct Row {
     /// [`super::Slice`]. Counted in what its cost and time are spread over,
     /// never in its 1-shot or rework rates, which are about its own writing.
     pub files_delegated: u64,
+    /// Agents of this model that edited something, and how many of them
+    /// stopped with their last check failing — see [`super::Slice::ended_red`].
+    pub agents_editing: u64,
+    pub agents_red: u64,
     pub cache_read: u64,
     pub input_total: u64,
     pub active_ms: u64,
@@ -46,6 +50,28 @@ impl Row {
     pub fn one_shot(&self) -> Option<f64> {
         (self.files_edited >= 5)
             .then(|| self.files_one_shot as f64 * 100.0 / self.files_edited as f64)
+    }
+
+    /// How far either side of [`Row::one_shot`] the true rate could be, at 95%.
+    ///
+    /// Without it 100% on seven files printed with the same weight as 95% on
+    /// two hundred, and the small sample looked like the better model. Wilson's
+    /// interval rather than the textbook ±1.96·√(p(1−p)/n), which collapses to
+    /// ±0 at exactly 0% or 100% — the rates a small sample hits most.
+    pub fn one_shot_margin(&self) -> Option<f64> {
+        self.one_shot()?;
+        let n = self.files_edited as f64;
+        let p = self.files_one_shot as f64 / n;
+        let z2 = 1.96f64 * 1.96;
+        let half = 1.96 * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / (1.0 + z2 / n);
+        Some(half * 100.0)
+    }
+
+    /// Share of this model's editing agents that stopped with their last check
+    /// failing. Below three it is one or two stories, not a rate.
+    pub fn red(&self) -> Option<f64> {
+        (self.agents_editing >= 3)
+            .then(|| self.agents_red as f64 * 100.0 / self.agents_editing as f64)
     }
 
     /// Share of edited files a fix session reopened within a day — see
@@ -135,6 +161,10 @@ fn fold<'a>(analyses: impl Iterator<Item = &'a Analysis>, rate: Option<f64>) -> 
             row.files_one_shot += s.files_one_shot;
             row.files_reworked += s.files_reworked;
             row.files_delegated += s.delegated;
+            if s.files_edited > 0 {
+                row.agents_editing += 1;
+                row.agents_red += u64::from(s.ended_red);
+            }
             // A parent's time is the whole session's, subagents included, so
             // one on the parent's own model would add the same minutes to the
             // same row twice. On another model they are that model's minutes
@@ -229,12 +259,13 @@ impl Layout {
         use std::fmt::Write as _;
         let _ = write!(
             out,
-            "  {:<w$} {:>8} {:>8} {:>7} {:>8} {:>9} {:>9} {:>6}",
+            "  {:<w$} {:>8} {:>8} {:>8} {:>8} {:>5} {:>9} {:>9} {:>6}",
             "model",
             "sessions",
             "files",
             "1-shot",
             "reworked",
+            "red",
             "$/file",
             "time/file",
             "cache",
@@ -251,15 +282,19 @@ impl Layout {
         let model: String = r.model.chars().take(self.model).collect();
         let _ = write!(
             out,
-            "  {:<w$} {:>8} {:>8} {:>7} {:>8} {:>9} {:>9} {:>6}",
+            "  {:<w$} {:>8} {:>8} {:>8} {:>8} {:>5} {:>9} {:>9} {:>6}",
             model,
             r.sessions,
             match r.files_delegated {
                 0 => r.files_edited.to_string(),
                 d => format!("{}+{d}", r.files_edited),
             },
-            pct(r.one_shot()),
+            match (r.one_shot(), r.one_shot_margin()) {
+                (Some(v), Some(m)) => format!("{v:.0}%±{m:.0}"),
+                _ => "—".into(),
+            },
             pct(r.reworked()),
+            pct(r.red()),
             money(r.per_edit()),
             r.time_per_edit()
                 .map(crate::util::compact_duration)
@@ -342,8 +377,12 @@ pub fn report_at(analyses: &[&Analysis], rate: Option<f64>) -> String {
     };
     say(&[
         "1-shot is the share of files edited without a retry: no failed",
-        "command or edit by the same agent between two edits of the file.",
+        "command or edit by the same agent between two edits of the file,",
+        "± the range the true rate is 95% likely to sit in — wide means few",
+        "files, and two rows whose ranges overlap are not told apart.",
         "reworked is the share a fix session edited again within a day.",
+        "red is the share of agents whose last test or build after their",
+        "final edit failed: they stopped with the work broken.",
     ]);
     if table.iter().any(|r| r.files_delegated > 0) {
         say(&[
@@ -405,6 +444,10 @@ pub fn as_json(analyses: &[&Analysis], rate: Option<f64>) -> String {
             "files_edited": r.files_edited,
             "files_delegated": r.files_delegated,
             "one_shot_pct": r.one_shot(),
+            "one_shot_margin_pct": r.one_shot_margin(),
+            "agents_editing": r.agents_editing,
+            "agents_ended_red": r.agents_red,
+            "ended_red_pct": r.red(),
             "files_reworked": r.files_reworked,
             "reworked_pct": r.reworked(),
             "usd_per_file": r.per_edit(),
@@ -454,6 +497,7 @@ mod tests {
         Analysis {
             provider: Provider::Claude,
             label: "repo".into(),
+            last_active: String::new(),
             model: model.into(),
             cost,
             cost_available: true,
@@ -528,6 +572,35 @@ mod tests {
         let text = report_at(&refs, Some(60.0));
         assert!(text.contains("≥$12"), "{text}");
         assert!(!text.contains("$0.00"), "{text}");
+    }
+
+    /// Seven perfect files and two hundred near-perfect ones are not the same
+    /// evidence, and the margin is what says so — including at exactly 100%,
+    /// where the textbook interval claims ±0.
+    #[test]
+    fn a_small_sample_carries_a_wide_margin() {
+        let mut few = Row {
+            files_edited: 7,
+            files_one_shot: 7,
+            ..Default::default()
+        };
+        let many = Row {
+            files_edited: 200,
+            files_one_shot: 190,
+            ..Default::default()
+        };
+        let (f, m) = (
+            few.one_shot_margin().unwrap(),
+            many.one_shot_margin().unwrap(),
+        );
+        assert!(f > 15.0, "seven files: ±{f:.1}");
+        assert!(m < 4.0, "two hundred: ±{m:.1}");
+        few.files_edited = 3;
+        assert_eq!(
+            few.one_shot_margin(),
+            None,
+            "below the floor there is no rate"
+        );
     }
 
     /// The model column used to cut names at 28, which printed a model that

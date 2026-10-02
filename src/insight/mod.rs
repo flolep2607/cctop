@@ -184,6 +184,59 @@ fn bash_writes(command: &str) -> bool {
     false
 }
 
+/// Whether a shell command tests or builds the work — the commands whose
+/// failure says the code is broken, as opposed to a `grep` that found nothing
+/// or a `git diff --quiet` that found a change, which also exit non-zero.
+///
+/// ponytail: a list of the usual runners, so a project that checks itself
+/// through a script of its own (`./ci.sh`) is never seen as checked.
+fn is_check(command: &str) -> bool {
+    const CHECKS: [&str; 20] = [
+        "cargo test",
+        "cargo nextest",
+        "cargo build",
+        "cargo check",
+        "cargo clippy",
+        "pytest",
+        "vitest",
+        "jest",
+        "go test",
+        "go build",
+        "go vet",
+        "npm test",
+        "npm run test",
+        "npm run build",
+        "pnpm test",
+        "yarn test",
+        "tsc",
+        "mypy",
+        "phpunit",
+        "make",
+    ];
+    let cmd = command.to_ascii_lowercase();
+    cmd.split(['&', ';', '|']).any(|part| {
+        // Past the wrappers a check is often run under — `RUST_LOG=x`,
+        // `timeout 60`, `env`, `nice` — but never into another command's
+        // arguments, where `grep cargo test` would read as a test run.
+        let mut rest = part.trim_start();
+        loop {
+            let word = rest.split_whitespace().next().unwrap_or("");
+            let wrapper = word.contains('=')
+                || matches!(word, "env" | "nice" | "time" | "timeout" | "command")
+                // `timeout`'s duration: `60`, `5m`.
+                || word.starts_with(|c: char| c.is_ascii_digit());
+            if !wrapper {
+                break;
+            }
+            rest = rest[word.len()..].trim_start();
+        }
+        CHECKS.iter().any(|c| {
+            rest.strip_prefix(c)
+                .is_some_and(|after| after.is_empty() || after.starts_with(' '))
+        })
+    })
+}
+
 fn is_edit(tool: &str) -> bool {
     EDIT_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(tool))
 }
@@ -207,6 +260,8 @@ fn is_read(tool: &str) -> bool {
 pub struct Analysis {
     pub provider: Provider,
     pub label: String,
+    /// The session's last activity, for `--since`.
+    pub last_active: String,
     pub model: String,
     pub cost: f64,
     /// False where the provider records no usage, so a zero cost means "not
@@ -281,6 +336,10 @@ pub struct Slice {
     /// Filled by [`mark_rework`].
     pub files_reworked: u64,
     pub active_ms: u64,
+    /// The agent edited something, and the last test or build it ran after
+    /// its final edit failed: it stopped with the work broken. False where
+    /// nothing was checked after the last edit, which is "unknown", not "red".
+    pub ended_red: bool,
     /// Main agent only: distinct files its subagents wrote on a *different*
     /// model, and that it did not also write itself. A subagent on the parent's
     /// own model folds into the same row, where counting its files here as well
@@ -492,6 +551,7 @@ impl Analysis {
             files_one_shot: self.files_one_shot,
             files_reworked: self.files_reworked,
             active_ms: self.active_ms,
+            ended_red: false,
             delegated: 0,
         }]
     }
@@ -535,6 +595,7 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
     let mut out = Analysis {
         provider: session.provider,
         label: session.abbrev_label.clone(),
+        last_active: session.last_active.clone(),
         model: dominant_model(data),
         cost: data.costs.total,
         cost_available: session.cost_available,
@@ -692,6 +753,14 @@ fn slices(
                     order.entry(file).or_default().push(i);
                 }
             }
+        }
+        // Whether the last check after the last edit failed. Only where the
+        // harness records outcomes: without them every check reads as passed.
+        if outcomes && let Some(last_edit) = own.iter().rposition(|(t, _)| is_edit(t)) {
+            slice.ended_red = own[last_edit + 1..]
+                .iter()
+                .rfind(|(tool, d)| is_shell(tool) && is_check(d.full.as_deref().unwrap_or(&d.d)))
+                .is_some_and(|(_, d)| d.failed);
         }
         for (file, positions) in order {
             slice.files_edited += 1;
@@ -960,10 +1029,44 @@ pub fn substantive(a: &Analysis) -> bool {
 }
 
 pub fn only(analyses: &[Analysis], provider: Option<Provider>) -> Vec<&Analysis> {
+    since(analyses, provider, None)
+}
+
+/// Sessions of `provider`, active at or after `cutoff`.
+///
+/// A session with no timestamp at all is kept: dropping it would make a filter
+/// meant to narrow the window silently discard whatever cctop could not date.
+pub fn since(
+    analyses: &[Analysis],
+    provider: Option<Provider>,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<&Analysis> {
     analyses
         .iter()
         .filter(|a| provider.is_none_or(|p| a.provider == p))
+        .filter(|a| {
+            cutoff.is_none_or(|c| crate::util::parse_ts(&a.last_active).is_none_or(|t| t >= c))
+        })
         .collect()
+}
+
+/// `--since`: a span back from now (`90m`, `24h`, `7d`, `2w`) or a date
+/// (`2026-09-01`, midnight UTC).
+fn parse_since(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let now = chrono::Utc::now();
+    if let Ok(day) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return day.and_hms_opt(0, 0, 0).map(|t| t.and_utc());
+    }
+    let unit = value.chars().last()?;
+    let n: i64 = value[..value.len() - unit.len_utf8()].parse().ok()?;
+    let span = match unit {
+        'm' => chrono::Duration::minutes(n),
+        'h' => chrono::Duration::hours(n),
+        'd' => chrono::Duration::days(n),
+        'w' => chrono::Duration::weeks(n),
+        _ => return None,
+    };
+    (n > 0).then(|| now - span)
 }
 
 pub const HELP: &str = "\
@@ -971,8 +1074,8 @@ cctop optimize — what your sessions spent and did not get back
 cctop compare  — how each model behaved on the work you gave it
 
 USAGE:
-  cctop optimize [--provider NAME] [--json]
-  cctop compare  [--provider NAME] [--rate USD_PER_HOUR] [--json]
+  cctop optimize [--provider NAME] [--since SPAN] [--json]
+  cctop compare  [--provider NAME] [--since SPAN] [--rate USD_PER_HOUR] [--json]
 
 Both re-read every transcript rather than using the session cache, because the
 individual tool calls are the thing they reason about and those are never
@@ -981,6 +1084,9 @@ cached. Expect them to take a few seconds on a large machine.
 OPTIONS:
   --provider NAME  Only this harness: claude, codex, cursor, gemini, opencode,
                    pi, windsurf.
+  --since SPAN     Only sessions active in the last SPAN — 24h, 7d, 2w — or
+                   since a date, 2026-09-01. Models change, and so does what
+                   you give them; last month's sessions blur this week's.
   --rate USD       compare only: what an hour of agent time is worth to you.
                    Adds a column of dollars plus time per file, and ranks by
                    it — a free model that takes a day can lose to a $10 one
@@ -1000,6 +1106,7 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
     }
 
     let mut provider = None;
+    let mut cutoff = None;
     let mut rate = None;
     let mut json = false;
     let mut args = argv.iter();
@@ -1010,6 +1117,15 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
                 Some(p) => provider = Some(p),
                 None => {
                     eprintln!("cctop {which}: --provider needs a harness name; see --help");
+                    return 2;
+                }
+            },
+            "--since" => match args.next().and_then(|v| parse_since(v)) {
+                Some(c) => cutoff = Some(c),
+                None => {
+                    eprintln!(
+                        "cctop {which}: --since needs a span or a date, e.g. 7d or 2026-09-01"
+                    );
                     return 2;
                 }
             },
@@ -1040,7 +1156,7 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
     crate::pricing::refresh_pricing_blocking();
 
     let analyses = scan(Plan::Retail);
-    let selected = only(&analyses, provider);
+    let selected = since(&analyses, provider, cutoff);
 
     match (which, json) {
         ("optimize", false) => print!("{}", optimize::report(&selected)),
@@ -1338,6 +1454,72 @@ mod tests {
         assert_eq!(big.per_edit(), Some(8.0 / 3.0));
         assert_eq!(small.per_edit(), Some(3.0 / 2.0));
         assert_eq!(big.one_shot(), None, "two files of its own is not a rate");
+    }
+
+    /// Red means the last check after the final edit failed. A failing grep
+    /// is not a check, and a session that never checked is unknown, not red.
+    #[test]
+    fn an_agent_that_stopped_on_a_failing_check_ended_red() {
+        let red = analysed(
+            Provider::Claude,
+            &[
+                call("Edit", "/a.rs", "01"),
+                call("Bash", "cargo test", "02"),
+                call("Edit", "/a.rs", "03"),
+                failing("Bash", "cargo test 2>&1 | tail -5", "04"),
+                failing("Bash", "grep -n nothing src/a.rs", "05"),
+            ],
+        );
+        assert!(red.slices[0].ended_red);
+
+        let fixed = analysed(
+            Provider::Claude,
+            &[
+                call("Edit", "/a.rs", "01"),
+                failing("Bash", "cargo test", "02"),
+                call("Bash", "cargo test", "03"),
+            ],
+        );
+        assert!(!fixed.slices[0].ended_red, "the last check passed");
+
+        let unchecked = analysed(
+            Provider::Claude,
+            &[
+                failing("Bash", "cargo test", "01"),
+                call("Edit", "/a.rs", "02"),
+            ],
+        );
+        assert!(!unchecked.slices[0].ended_red, "nothing ran after the edit");
+
+        assert!(is_check("cd x && cargo clippy --all-targets"));
+        assert!(is_check("make"));
+        assert!(is_check("RUST_LOG=debug timeout 60 cargo test -q"));
+        assert!(!is_check("makefile-lint"), "a check is a whole word");
+        assert!(!is_check("grep -n cargo test src/a.rs | head"));
+        assert!(!is_check("git diff --quiet"));
+    }
+
+    #[test]
+    fn since_takes_a_span_or_a_date() {
+        let now = chrono::Utc::now();
+        let week = parse_since("7d").unwrap();
+        assert!((now - week - chrono::Duration::days(7)).num_seconds().abs() < 5);
+        assert_eq!(
+            parse_since("2026-09-01").unwrap().to_rfc3339(),
+            "2026-09-01T00:00:00+00:00"
+        );
+        for bad in ["", "d", "7", "7y", "-3d", "0d", "yesterday"] {
+            assert!(parse_since(bad).is_none(), "{bad}");
+        }
+
+        let mut old = analysed(Provider::Claude, &[]);
+        old.last_active = "2020-01-01T00:00:00Z".into();
+        let mut undated = analysed(Provider::Claude, &[]);
+        undated.last_active = String::new();
+        let set = [old, undated];
+        let kept = since(&set, None, Some(week));
+        assert_eq!(kept.len(), 1, "the old one goes, the undated one stays");
+        assert!(kept[0].last_active.is_empty());
     }
 
     /// A worktree's file is the main checkout's file, for matching edits
