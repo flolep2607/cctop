@@ -77,6 +77,14 @@ pub struct Search {
     pub query: String,
     /// The query is still being typed; keys go to it, not to the scroll.
     pub typing: bool,
+    /// Land on the first hit as soon as there is a layout to land in.
+    ///
+    /// Set when the reader was opened *for* a match: the table's transcript
+    /// search found this session by a term, and arriving at the top of the
+    /// conversation when the term is two thousand lines down is arriving in the
+    /// wrong place. Cleared as soon as it has been honoured, so a later fold
+    /// does not drag the view back to it.
+    jump: bool,
     /// Rows the query is on, top to bottom.
     hits: Vec<usize>,
     /// Which of `hits` `n` and `N` last landed on.
@@ -84,6 +92,26 @@ pub struct Search {
     /// Where the view stood when `/` was pressed: typing searches forward
     /// from here, and `Esc` puts the view back.
     origin: usize,
+}
+
+impl Search {
+    /// A search already made, waiting for a layout to be made against.
+    ///
+    /// Not typing: the query is not the reader's to edit on arrival, it is the
+    /// answer to a question already asked on the other side of the table.
+    pub fn for_match(query: &str) -> Search {
+        Search {
+            query: query.to_string(),
+            typing: false,
+            jump: true,
+            ..Search::default()
+        }
+    }
+
+    /// Take the pending jump, if one is owed.
+    fn take_jump(&mut self) -> bool {
+        std::mem::take(&mut self.jump)
+    }
 }
 
 impl Laid {
@@ -457,6 +485,18 @@ fn lay_out(view: &mut ChatView, width: usize) {
             .map(|l| l.find(&query))
             .unwrap_or_default();
         view.search.current = view.search.current.filter(|&i| i < view.search.hits.len());
+        // An armed search is waiting to be shown the term it was opened for,
+        // which it could not be until now: the conversation arrives after the
+        // reader is already on screen. Taken here rather than at open so a
+        // layout that turns out to hold no hit leaves the view alone instead of
+        // jumping nowhere.
+        if view.search.take_jump() {
+            view.search.current = None;
+            if let Some(&row) = view.search.hits.first() {
+                view.search.current = Some(0);
+                view.show_row(row);
+            }
+        }
     }
 }
 
@@ -951,6 +991,100 @@ mod tests {
         };
         app.got_chat(key, None, Ok(Box::new(conv)));
         app
+    }
+
+    /// Opening a session the table found *by a term* lands on the term.
+    ///
+    /// The reader is a whole conversation and the table's transcript search can
+    /// have picked this row because of one word in the middle of it, so arriving
+    /// at the top is arriving in the wrong place. The conversation is fetched
+    /// after the reader is already on screen, which is why the jump is owed
+    /// rather than taken at open.
+    #[test]
+    fn a_session_found_by_a_term_is_opened_at_the_term() {
+        let mut turns = vec![turn(0, "user", "nothing of interest here at all")];
+        for i in 1..40 {
+            turns.push(turn(i, "assistant", &format!("filler line {i}")));
+        }
+        turns.push(turn(40, "user", "and then a needle appeared"));
+        let mut app = open_with(Vec::new());
+
+        // A row the table found by its transcript, and the query it was found
+        // by — which is what `i` on that row opens.
+        app.search_content = true;
+        app.search = "needle".into();
+        app.scan_query = "needle".into();
+        let session_key = app.sessions[0].key();
+        app.scan_hits.insert(session_key, "a needle in here".into());
+        app.open_conversation();
+        let key = app.chat.as_ref().expect("view").session.key();
+        app.got_chat(
+            key,
+            None,
+            Ok(Box::new(Conversation {
+                supported: true,
+                turns,
+                earlier: 0,
+                note: None,
+            })),
+        );
+        // The layout is made when the reader is drawn, which is also the first
+        // moment the owed jump can be honoured.
+        draw_chat(&mut app, 80, 20);
+
+        let view = view(&app);
+        assert_eq!(view.search.query, "needle", "the query came along");
+        assert!(!view.search.typing, "and is not the reader's to edit");
+        let hit = *view.search.hits.first().expect("the term is in the text");
+        assert!(!view.search.jump, "the jump is spent once honoured");
+
+        let top = view.top();
+        let laid = view.laid.as_ref().expect("laid");
+        assert!(
+            hit >= top && hit < top + view.visible,
+            "the term is on screen"
+        );
+        assert!(
+            (top..top + view.visible).any(|r| {
+                laid.row(r).is_some_and(|(block, at)| {
+                    block.plain[at]
+                        .iter()
+                        .collect::<String>()
+                        .contains("needle")
+                })
+            }),
+            "no row on screen shows the term"
+        );
+    }
+
+    /// A reader opened for a term that is not in what came back is left where it
+    /// opened, rather than jumping to a hit that does not exist.
+    #[test]
+    fn a_term_that_is_not_there_leaves_the_reader_alone() {
+        let mut app = open_with(vec![turn(0, "user", "nothing of interest")]);
+        app.search_content = true;
+        app.search = "needle".into();
+        app.scan_query = "needle".into();
+        let session_key = app.sessions[0].key();
+        app.scan_hits.insert(session_key, "needle".into());
+        app.open_conversation();
+        let key = app.chat.as_ref().expect("view").session.key();
+        app.got_chat(
+            key,
+            None,
+            Ok(Box::new(Conversation {
+                supported: true,
+                turns: Vec::new(),
+                earlier: 0,
+                note: None,
+            })),
+        );
+        draw_chat(&mut app, 80, 20);
+
+        let view = view(&app);
+        assert_eq!(view.search.query, "needle", "the query is still shown");
+        assert!(view.search.hits.is_empty(), "and there is nothing to show");
+        assert_eq!(view.top(), 0, "the view did not move");
     }
 
     /// The view with one reply in markdown and one coloured tool result.

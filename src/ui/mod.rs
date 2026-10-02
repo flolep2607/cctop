@@ -1204,6 +1204,15 @@ impl App {
             ));
             return;
         }
+        // Opened *for* a match: the table's transcript search picked this row by a
+        // term, so arrive at the term rather than at the top of a conversation
+        // it may be thousands of lines below. Only when the row really is a
+        // content hit — a session that matched its title should open where any
+        // conversation opens.
+        let search = match self.selected_snippet() {
+            Some(_) => reader::Search::for_match(&self.scan_query),
+            None => reader::Search::default(),
+        };
         self.chat = Some(ChatView {
             session: session.clone(),
             host,
@@ -1214,7 +1223,7 @@ impl App {
             raw: false,
             tools_open: false,
             opened: std::collections::HashSet::new(),
-            search: reader::Search::default(),
+            search,
             laid: None,
             visible: 0,
             dirty: false,

@@ -234,14 +234,23 @@ happens to mention it. Transcript matches are added to the metadata matches
 rather than replacing them, and the line each one was found on is shown under
 the prompt.
 
+A row found by a transcript match opens *at the match*: `i` on it puts the term
+on screen with the reader's own highlighting, a third of the way down rather than
+at the top of a conversation it may be thousands of lines below. The footer says
+`“term” 3 of 12 · n N`, so `n` and `N` walk the rest. If the reader cannot see
+the term — the table matches a word with separators folded away, or corrects a
+typo, and the reader matches what is drawn — the footer says so rather than
+moving you anywhere.
+
 This reads every transcript on disk, so it is opt-in, it waits for a pause in
 typing and for a query of at least three characters, and it runs on cctop's
 background thread pool — the table stays live throughout, and the footer says
 `+transcripts…` while a scan is out. Results are remembered per query, so
-refining a search re-reads only what it must. Two limits are worth knowing:
-transcripts store their text as JSON, so a phrase containing a quote or a
-newline is escaped on disk and will not match; and a single session is scanned
-up to 64 MiB.
+refining a search re-reads only what it must: a session cleared for `refacto`
+cannot hold `refactor`, so each letter of a query narrows what there is left to
+read. Two limits are worth knowing: transcripts store their text as JSON, so a
+phrase containing a quote or a newline is escaped on disk and will not match;
+and a single transcript file is scanned up to 64 MiB.
 
 ## The tree view
 
