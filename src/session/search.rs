@@ -162,6 +162,14 @@ struct Progress<'q> {
     found: Vec<Option<String>>,
     /// Terms still unsatisfied.
     remaining: usize,
+    /// The line lowercased, and the shape folded out of it.
+    ///
+    /// Both belong to the scan rather than to a line. Transcripts are one line
+    /// per message, so building either per line allocated the length of the
+    /// whole corpus on every keystroke; held here it is one allocation per scan
+    /// and a reused buffer for every line after the first.
+    lower: String,
+    shape: Shape,
 }
 
 impl<'q> Progress<'q> {
@@ -170,6 +178,14 @@ impl<'q> Progress<'q> {
             query,
             found: vec![None; query.terms.len()],
             remaining: query.terms.len(),
+            lower: String::new(),
+            shape: Shape {
+                folded: String::new(),
+                at: Vec::new(),
+                words: Vec::new(),
+                hard: Vec::new(),
+                rows: [Vec::new(), Vec::new()],
+            },
         }
     }
 
@@ -183,8 +199,10 @@ impl<'q> Progress<'q> {
         if self.remaining == 0 {
             return true;
         }
-        let lower = line.to_ascii_lowercase();
-        let mut shape: Option<Shape> = None;
+        self.lower.clear();
+        self.lower.push_str(line);
+        self.lower.make_ascii_lowercase();
+        let mut shaped = false;
 
         for i in 0..self.query.terms.len() {
             if self.found[i].is_some() {
@@ -195,7 +213,7 @@ impl<'q> Progress<'q> {
             // Tier 1: the query as typed. A plain substring scan, and the only
             // tier that sees punctuation, so a quoted path or a version number
             // still matches the way it always did.
-            if let Some(at) = lower.find(&term.text) {
+            if let Some(at) = self.lower.find(&term.text) {
                 self.found[i] = Some(window(line, at, term.text.len()));
                 self.remaining -= 1;
                 continue;
@@ -203,10 +221,23 @@ impl<'q> Progress<'q> {
             if term.folded.is_empty() {
                 continue;
             }
-            let shape = shape.get_or_insert_with(|| Shape::of(&lower));
+            // Both tiers past this one work off folded text, which keeps only the
+            // alphanumerics, so a term whose first byte is nowhere in the line
+            // cannot match either of them. Asking that is a scan of bytes with
+            // nothing allocated and nothing folded behind it — and it is the
+            // common case by a wide margin, which is what keeps the shape from
+            // being built for most of a corpus.
+            match term.folded.as_bytes().first() {
+                Some(&first) if self.lower.as_bytes().contains(&first) => {}
+                _ => continue,
+            }
+            if !shaped {
+                self.shape.fill(&self.lower);
+                shaped = true;
+            }
 
-            // Tier 2: separators folded away on both sides.
-            if let Some((at, span)) = shape.find_folded(&term.folded) {
+            // Tier 2: separators folded away on both sides, within one word.
+            if let Some((at, span)) = self.shape.find_folded(&term.folded) {
                 self.found[i] = Some(window(line, at, span));
                 self.remaining -= 1;
                 continue;
@@ -214,7 +245,8 @@ impl<'q> Progress<'q> {
 
             // Tier 3: a real typo, one word at a time.
             if term.fuzz > 0
-                && let Some((at, span)) = shape.find_fuzzy(&lower, &term.folded, term.fuzz)
+                && let Some((at, span)) =
+                    self.shape.find_fuzzy(&self.lower, &term.folded, term.fuzz)
             {
                 self.found[i] = Some(window(line, at, span));
                 self.remaining -= 1;
@@ -255,46 +287,102 @@ impl<'q> Progress<'q> {
 /// and package names are written in.
 struct Shape {
     folded: String,
-    at: Vec<usize>,
+    /// Byte offset in the original line of `folded`'s byte `i`.
+    ///
+    /// `u32` rather than `usize`: an offset into one JSONL line, and the widest
+    /// line a transcript is written to fit comfortably in half a `usize` — which
+    /// halves the one table that grows with the length of every line scanned.
+    at: Vec<u32>,
     /// Byte ranges of each word, into the lowercase line.
     words: Vec<(usize, usize)>,
+    /// Where each word begins in `folded` that was *preceded by whitespace*,
+    /// sorted — the boundaries a match may not cross. See
+    /// [`Shape::find_folded`] for why whitespace and punctuation are told apart.
+    hard: Vec<u32>,
+    /// The two rows [`within`] works in, kept between calls.
+    ///
+    /// Every candidate word runs a Levenshtein, and each of those allocated a
+    /// row for the needle and a row for itself. A query with an edit budget
+    /// spends that on a handful of lines per keystroke, and the first version of
+    /// this scan spent more time in the allocator than in the comparison.
+    rows: [Vec<usize>; 2],
 }
 
 impl Shape {
-    fn of(lower: &str) -> Shape {
+    /// Lower the line into `self`, reusing every buffer.
+    fn fill(&mut self, lower: &str) {
         let bytes = lower.as_bytes();
-        let mut folded = String::with_capacity(bytes.len());
-        let mut at = Vec::with_capacity(bytes.len());
-        let mut words = Vec::new();
+        self.folded.clear();
+        self.folded.reserve(bytes.len());
+        self.at.clear();
+        self.at.reserve(bytes.len());
+        self.words.clear();
+        self.hard.clear();
         let mut start = None;
+        let mut spaced = true;
         for (i, &b) in bytes.iter().enumerate() {
             if b.is_ascii_alphanumeric() {
-                folded.push(b as char);
-                at.push(i);
+                self.folded.push(b as char);
+                self.at.push(i as u32);
+                // A word starting after whitespace begins at this folded
+                // character, and no match may cross into it.
+                if spaced {
+                    self.hard.push(self.folded.len() as u32 - 1);
+                }
                 start.get_or_insert(i);
+                spaced = false;
             } else if let Some(s) = start.take() {
-                words.push((s, i));
+                self.words.push((s, i));
+                spaced = b.is_ascii_whitespace();
+            } else {
+                spaced |= b.is_ascii_whitespace();
             }
         }
         if let Some(s) = start {
-            words.push((s, bytes.len()));
+            self.words.push((s, bytes.len()));
         }
-        Shape { folded, at, words }
     }
 
-    /// Where `needle` appears in the folded line, as a range of the original.
+    /// Where `needle` appears as a *whole* word once folded, as a range of the
+    /// original.
+    ///
+    /// Whole word is the whole of what this tier is for. Folding is what lets
+    /// `vastai` match `vast.ai` and `gpt4` match `gpt-4`, and every one of those
+    /// is a single word written with separators inside it. What folding must not
+    /// do is join two neighbouring words — the folded text is every alphanumeric
+    /// in the line run together, so without this `abcd` matches `a b c d`, and a
+    /// query for `wasm` matched a line containing no such word at all.
+    ///
+    /// Every occurrence is tried, not just the first: the first may be an
+    /// accident between two words while a real one sits later on the line.
     fn find_folded(&self, needle: &str) -> Option<(usize, usize)> {
-        let at = self.folded.find(needle)?;
-        let start = *self.at.get(at)?;
-        // The character after the match, or the end of the last one: a folded
-        // match spans the separators it folded away, so the snippet is cut from
-        // the real text rather than from the concatenation.
-        let end = self
-            .at
-            .get(at + needle.len())
-            .copied()
-            .unwrap_or_else(|| self.at.last().map_or(start, |&b| b + 1));
-        Some((start, end.saturating_sub(start)))
+        for (at, _) in self.folded.match_indices(needle) {
+            let end = at + needle.len();
+            // A match may run across punctuation — that is what folds `vast.ai`
+            // and `gpt-4` into the words people type — but not across
+            // whitespace, which is what makes two words two words. The folded
+            // text is every alphanumeric run together, so without this `abcd`
+            // matched `a b c d`, and a query for `wasm` matched a line holding no
+            // such word at all.
+            //
+            // `hard` is sorted, so this is the first boundary strictly inside the
+            // match and nothing more.
+            let crossed = self.hard.partition_point(|&h| h <= at as u32);
+            if self.hard.get(crossed).is_some_and(|&h| (h as usize) < end) {
+                continue;
+            }
+            // Back to the real text: the character after the match, or the end
+            // of the last one. Cut from the original rather than the
+            // concatenation, so a separator folded away is not in the snippet.
+            let start = *self.at.get(at)?;
+            let finish = self
+                .at
+                .get(end)
+                .copied()
+                .unwrap_or_else(|| self.at.last().map_or(start, |&b| b + 1));
+            return Some((start as usize, (finish - start) as usize));
+        }
+        None
     }
 
     /// The first word within `fuzz` edits of `needle`.
@@ -303,9 +391,10 @@ impl Shape {
     /// mistyped first letter is therefore not corrected — which is the rare
     /// typo, and skipping the rest is what keeps this affordable over a
     /// transcript with millions of words in it.
-    fn find_fuzzy(&self, lower: &str, needle: &str, fuzz: usize) -> Option<(usize, usize)> {
+    fn find_fuzzy(&mut self, lower: &str, needle: &str, fuzz: usize) -> Option<(usize, usize)> {
         let first = *needle.as_bytes().first()?;
-        for &(s, e) in &self.words {
+        for i in 0..self.words.len() {
+            let (s, e) = self.words[i];
             let word = &lower[s..e];
             if word.len().abs_diff(needle.len()) > fuzz {
                 continue;
@@ -313,7 +402,7 @@ impl Shape {
             if word.as_bytes().first() != Some(&first) {
                 continue;
             }
-            if within(word, needle, fuzz) {
+            if within(word, needle, fuzz, &mut self.rows) {
                 return Some((s, e - s));
             }
         }
@@ -327,13 +416,21 @@ impl Shape {
 /// this keeps two rows and abandons as soon as every cell in the current one is
 /// already over budget — which, for the length-filtered candidates that reach
 /// it, is almost immediately.
-fn within(a: &str, b: &str, k: usize) -> bool {
+///
+/// The rows are the caller's and are grown rather than allocated: this runs once
+/// per length-plausible word on every line of every transcript, and a query with
+/// an edit budget was spending more time in the allocator than in the
+/// comparison.
+fn within(a: &str, b: &str, k: usize, rows: &mut [Vec<usize>; 2]) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len().abs_diff(b.len()) > k {
         return false;
     }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
+    let [prev, cur] = rows;
+    prev.clear();
+    prev.extend(0..=b.len());
+    cur.clear();
+    cur.resize(b.len() + 1, 0);
     for i in 1..=a.len() {
         cur[0] = i;
         let mut best = i;
@@ -345,7 +442,7 @@ fn within(a: &str, b: &str, k: usize) -> bool {
         if best > k {
             return false;
         }
-        std::mem::swap(&mut prev, &mut cur);
+        std::mem::swap(prev, cur);
     }
     prev[b.len()] <= k
 }
@@ -573,6 +670,75 @@ mod tests {
     use serde_json::json;
     use std::io::Write;
 
+    /// Folding rejoins one term written with separators inside it. It must not
+    /// rejoin two terms that merely sit next to each other.
+    ///
+    /// The folded line is every alphanumeric run together, so before this was
+    /// pinned the two were indistinguishable: `abcd` matched `a b c d`, and a
+    /// query for `wasm` matched a line that held no such word — with a snippet
+    /// cut from somewhere else entirely, which is the worst way for a search to
+    /// be wrong.
+    #[test]
+    fn folding_does_not_run_together_just_the_neighbours() {
+        // Four separate words, and no word among them is "abcd".
+        assert_eq!(find_in("a b c d", "abcd"), None, "whitespace is a boundary");
+        assert_eq!(find_in("x y z", "xyz"), None);
+        assert_eq!(find_in("deploy the parser", "deployparser"), None);
+
+        // What the tier exists for: one term, separators inside it.
+        assert!(find_in("deployed on vast.ai", "vastai").is_some());
+        assert!(find_in("deployed on vastai", "vast.ai").is_some());
+        assert!(find_in("model gpt-4", "gpt4").is_some());
+        assert!(find_in("src/main.rs", "srcmainrs").is_some());
+
+        // A real match later on the line is found even when the first folded
+        // occurrence is an accident: the earliest candidate is not the answer.
+        assert!(find_in("a b c d and then abcd at last", "abcd").is_some());
+    }
+
+    /// The snippet has to show the term, or a hit cannot be trusted — this is
+    /// what a false positive looked like before, and the text handed back is
+    /// the only thing that says so.
+    ///
+    /// The *document's* spelling of the term, not the query's: folding exists so
+    /// that `vastai` finds `vast.ai`, and the snippet quoting it back verbatim
+    /// would be quoting something the transcript never said.
+    #[test]
+    fn a_snippet_shows_the_term_it_matched() {
+        let hit = find_in("a b c d and later a real abcdef here", "abcdef").expect("match");
+        assert!(
+            hit.snippet.contains("abcdef"),
+            "snippet does not contain the term: {}",
+            hit.snippet
+        );
+        for (text, needle, written) in [
+            ("vast.ai is cheap", "vastai", "vast.ai"),
+            ("gpt-4 ran", "gpt4", "gpt-4"),
+        ] {
+            let hit = find_in(text, needle).expect("match");
+            assert!(
+                hit.snippet.contains(written),
+                "{written} not shown in {}",
+                hit.snippet
+            );
+        }
+    }
+
+    /// The buffers belong to the scan rather than the line, and reusing them
+    /// must not carry an answer from one line — or one scan — into the next.
+    #[test]
+    fn a_scan_reuses_its_buffers_without_carrying_state() {
+        let path = temp(
+            "reuse.jsonl",
+            "{\"t\":\"nothing here\"}\n{\"t\":\"vast.ai\"}\n{\"t\":\"nothing either\"}\n",
+        );
+        let s = target(Provider::Codex, &path);
+        assert!(find(&s, "vastai").is_some(), "the middle line has it");
+        assert!(find(&s, "nothing").is_some(), "the first line has it");
+        assert!(find(&s, "nemotron").is_none(), "no line has it");
+        let _ = std::fs::remove_file(path);
+    }
+
     /// A session whose only interesting property is the file behind it.
     fn target(provider: Provider, path: &std::path::Path) -> Target {
         let mut s = Session::new(provider, "a".into());
@@ -761,13 +927,16 @@ mod tests {
     /// Bounded edit distance, checked directly — the yes/no the fuzzy tier asks.
     #[test]
     fn edit_distance_respects_its_budget() {
-        assert!(within("nemotron", "nemotrn", 1));
-        assert!(!within("nemotron", "nemotrn", 0));
-        assert!(within("kitten", "sitting", 3));
-        assert!(!within("kitten", "sitting", 2));
-        assert!(within("same", "same", 0));
+        // The rows are the caller's, exactly as they are in a scan; reusing them
+        // across calls must not carry an answer over.
+        let mut rows = [Vec::new(), Vec::new()];
+        assert!(within("nemotron", "nemotrn", 1, &mut rows));
+        assert!(!within("nemotron", "nemotrn", 0, &mut rows));
+        assert!(within("kitten", "sitting", 3, &mut rows));
+        assert!(!within("kitten", "sitting", 2, &mut rows));
+        assert!(within("same", "same", 0, &mut rows));
         // Length alone can settle it, without walking the table.
-        assert!(!within("a", "abcdefgh", 2));
+        assert!(!within("a", "abcdefgh", 2, &mut rows));
     }
 
     /// Every term contributes its own window, so a multi-term hit shows why it

@@ -125,10 +125,14 @@ pub(super) enum Response {
     },
 }
 
-/// Remembered scan results, keyed by session and query. `None` is a remembered
-/// *miss*, which is the answer worth caching most: a miss costs a full read of
-/// the transcript, a hit usually stops early.
-type ScanCache = HashMap<(String, String), Option<String>>;
+/// Remembered scan results, by query and then by session. `None` is a
+/// remembered *miss*, which is the answer worth caching most: a miss costs a
+/// full read of the transcript, a hit usually stops early.
+///
+/// Keyed by query first so that a shorter query already answered can be found
+/// again in one lookup — which is what lets a query being typed narrow what it
+/// has to read. See [`narrowed`].
+type ScanCache = HashMap<String, HashMap<String, Option<String>>>;
 
 /// Entries kept before the scan cache is dropped wholesale.
 ///
@@ -268,11 +272,13 @@ fn scan(
     // same terms, and splitting and folding them again for each would be the
     // only allocation in the parallel hot path.
     let query = crate::session::search::Query::parse(needle);
+    let narrower = narrowed(cache, needle);
     let found: Vec<(&crate::session::search::Target, Option<String>)> = targets
         .par_iter()
+        .filter(|target| !skippable(&narrower, target))
         .map(|target| {
             let memo = (!target.running)
-                .then(|| cache.get(&(target.key.clone(), needle.to_string())))
+                .then(|| cache.get(needle).and_then(|seen| seen.get(&target.key)))
                 .flatten();
             match memo {
                 Some(remembered) => (target, remembered.clone()),
@@ -284,19 +290,60 @@ fn scan(
         })
         .collect();
 
-    if cache.len() + found.len() > MAX_SCAN_CACHE {
-        cache.clear();
-    }
     let mut hits = HashMap::new();
     for (target, snippet) in found {
-        if !target.running {
-            cache.insert((target.key.clone(), needle.to_string()), snippet.clone());
+        if let Some(snippet) = &snippet {
+            hits.insert(target.key.clone(), snippet.clone());
         }
-        if let Some(snippet) = snippet {
-            hits.insert(target.key.clone(), snippet);
+        if !target.running {
+            let seen = cache.entry(needle.to_string()).or_default();
+            seen.insert(target.key.clone(), snippet);
         }
     }
+    if cache.values().map(HashMap::len).sum::<usize>() > MAX_SCAN_CACHE {
+        cache.clear();
+    }
     hits
+}
+
+/// The sessions a shorter query has already cleared, when one has.
+///
+/// A match for a term contains a match for every prefix of it: a transcript
+/// holding `refactor` holds `refacto`. So a session asked about `refacto` and
+/// found not to have it cannot have `refactor` either, and reading it again to
+/// discover that once per keystroke is the entire cost of typing. Only the
+/// sessions that *did* match the longest prefix with an answer are worth
+/// reading — which is what turns typing a query into a scan of the handful of
+/// sessions that could still match rather than of every session on the machine.
+///
+/// `None` when nothing shorter has been asked, and then everything is read.
+fn narrowed<'c>(cache: &'c ScanCache, needle: &str) -> Option<&'c HashMap<String, Option<String>>> {
+    // Longest first, and only on character boundaries so a multi-byte query
+    // cannot be cut in half.
+    needle
+        .char_indices()
+        .map(|(at, _)| at)
+        .filter(|&at| at > 0)
+        .rev()
+        .find_map(|at| cache.get(&needle[..at]))
+}
+
+/// Whether a session can be passed over without reading it.
+///
+/// True only on a remembered *miss* for a prefix of this query. Running sessions
+/// are never skippable: they are not cached at all, because their transcripts
+/// grow, so an answer about one is only ever true of the moment it was taken.
+fn skippable(
+    narrower: &Option<&HashMap<String, Option<String>>>,
+    target: &crate::session::search::Target,
+) -> bool {
+    if target.running {
+        return false;
+    }
+    match narrower {
+        Some(seen) => seen.get(&target.key).is_some_and(Option::is_none),
+        None => false,
+    }
 }
 
 /// Owns the `Loader` and does all filesystem and parsing work off the UI thread,
@@ -552,6 +599,88 @@ pub(super) fn spawn_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transcript holding `refactor` holds `refacto`, so a query being typed
+    /// only has to read the sessions that could still match. This is what makes
+    /// typing cheap rather than one full pass over every transcript per letter.
+    #[test]
+    fn a_query_is_only_read_where_a_shorter_one_still_could_match() {
+        use std::io::Write;
+        let file = |name: &str, body: &str| {
+            let path =
+                std::env::temp_dir().join(format!("cctop-narrow-{name}-{}", std::process::id()));
+            std::fs::File::create(&path)
+                .unwrap()
+                .write_all(body.as_bytes())
+                .unwrap();
+            path
+        };
+        let target = |name: &str, path: &std::path::Path, running: bool| {
+            let mut s =
+                crate::session::Session::new(crate::pricing::Provider::Claude, name.to_string());
+            s.data_file = Some(path.to_path_buf());
+            let mut t = crate::session::search::Target::of(&s);
+            t.running = running;
+            t
+        };
+
+        let yes = file("yes", "{\"t\":\"a refactor landed here\"}\n");
+        let no = file("no", "{\"t\":\"nothing relevant at all\"}\n");
+        // A live session whose transcript grows, so a miss said about it now is
+        // not a miss about it after the next line.
+        let live = file("live", "{\"t\":\"nothing relevant at all\"}\n");
+        let targets = vec![
+            target("yes", &yes, false),
+            target("no", &no, false),
+            target("live", &live, true),
+        ];
+
+        let mut cache = ScanCache::new();
+        // The short query clears everything but the session that matched.
+        let short = scan(&mut cache, &targets, "refac");
+        assert_eq!(short.keys().cloned().collect::<Vec<_>>(), ["claude:yes"]);
+
+        // The long one reads only what the short one could not rule out, and
+        // still answers the same.
+        let long = scan(&mut cache, &targets, "refactor");
+        assert_eq!(long.keys().cloned().collect::<Vec<_>>(), ["claude:yes"]);
+
+        // And a session the prefix cleared is not read again, because its answer
+        // is remembered.
+        let again = scan(&mut cache, &targets, "refactor");
+        assert_eq!(again.keys().cloned().collect::<Vec<_>>(), ["claude:yes"]);
+
+        // A prefix that has never been asked reads everything, so the answer
+        // does not depend on the order queries arrive in.
+        let mut cold = ScanCache::new();
+        assert_eq!(
+            scan(&mut cold, &targets, "refactor")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["claude:yes"]
+        );
+        assert_eq!(scan(&mut cold, &targets, "nomatch").len(), 0);
+
+        // The live session is the exception, and it is the reason a miss about a
+        // running transcript is not remembered: its file gains the term, and the
+        // next query has to see it rather than trusting the earlier answer.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&live)
+            .unwrap()
+            .write_all(b"{\"t\":\"and now a refactor landed\"}\n")
+            .unwrap();
+        let grown = scan(&mut cache, &targets, "refactor");
+        assert!(
+            grown.contains_key("claude:live"),
+            "a running session's transcript grew and was not looked at again"
+        );
+
+        for path in [yes, no, live] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 
     /// The two doors into the topical tier, and the case that must stay shut.
     #[test]
