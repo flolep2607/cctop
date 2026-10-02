@@ -661,6 +661,7 @@ mod tests {
             input_total: 0,
             active_ms: 0,
             edited: Default::default(),
+            slices: Vec::new(),
             files_reworked: 0,
             truncated: false,
         }
