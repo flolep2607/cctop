@@ -131,14 +131,14 @@
     border: 1px solid var(--line); background: var(--panel); color: var(--dim); cursor: pointer;
   }
   .termside .head button:hover { color: var(--accent); border-color: var(--accent); }
-  .termcard { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-  .termcard .open {
-    font-size: 13px; padding: 6px 14px; border-radius: 7px; text-decoration: none;
-    border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
-  }
-  .termcard .why { font-size: 12px; color: var(--faint); }
-  .termcard .why.bad { color: var(--amber); }
   .termside .note { font-size: 12px; color: var(--amber); margin-top: 7px; }
+  /* The terminal itself. Tall enough for an agent's screen, and no taller
+     than the window, since the column is sticky. */
+  .termframe { width: 100%; height: min(78vh, 760px); border: 1px solid var(--line);
+               border-radius: 8px; background: #060807; }
+  .termside .why { font-size: 12px; color: var(--faint); margin-top: 7px; }
+  .termside .head .popout { font-size: 12px; color: var(--dim); margin-left: auto; }
+  .termside .head .popout + button { margin-left: 0; }
   nav.views button.toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
   nav.views button:disabled { color: var(--faint); cursor: default; }
 

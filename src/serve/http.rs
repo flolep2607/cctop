@@ -370,10 +370,11 @@ fn reason(status: u16) -> &'static str {
 /// and read what it renders, or talk a browser into sniffing a JSON response as
 /// something executable.
 ///
-/// The session's terminal is a link out of this page and not a frame in it:
-/// rmux's browser terminal answers with `frame-ancestors 'none'`, so no policy
-/// written here could embed it. The policy therefore stays at `default-src
-/// 'none'` with nothing framed at all.
+/// `frame-src 'self'` is the one thing these pages may frame: rmux's browser
+/// terminal, served from this origin under `/term/` (see [`super::term`]) so
+/// a session's terminal can sit inside its page. `share.rmux.io` answers with
+/// `frame-ancestors 'none'`, which is why the copy is served here at all.
+/// Nothing off this server can be framed.
 ///
 /// Two same-origin exceptions carry the installable-page furniture: `img-src
 /// 'self'` for `/favicon.svg`, and `manifest-src 'self'` for
@@ -390,11 +391,26 @@ fn common_headers(out: &mut String) {
          img-src 'self' data:; \
          manifest-src 'self'; \
          connect-src 'self'; \
+         frame-src 'self'; \
          base-uri 'none'; \
          form-action 'none'; \
          frame-ancestors 'none'\r\n",
     );
 }
+
+/// The policy rmux's own frontend ships with, except that cctop's page may
+/// frame it.
+///
+/// Copied from what `share.rmux.io` sends rather than loosened from cctop's:
+/// the frontend needs `'wasm-unsafe-eval'` for its crypto module and
+/// `connect-src ws: wss:` for the daemon's socket, which may be a tunnel host
+/// no policy here could name in advance. `frame-ancestors 'self'` is the one
+/// change, and the reason this route exists.
+pub const TERM_POLICY: &str = "default-src 'none'; base-uri 'none'; object-src 'none'; \
+     frame-ancestors 'self'; form-action 'none'; script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'none'; \
+     connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; \
+     media-src 'none'; frame-src 'none'";
 
 /// Write a complete response and let the connection close.
 ///
@@ -421,6 +437,30 @@ pub fn respond_extra(
     body: &[u8],
     extra: &str,
 ) {
+    respond_with(stream, request, status, content_type, body, extra, None);
+}
+
+/// `respond` under a content policy of the caller's instead of
+/// [`common_headers`]' — for the one set of files that is not cctop's own.
+pub fn respond_policy(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    content_type: &str,
+    body: &[u8],
+    policy: &str,
+) {
+    respond_with(stream, request, 200, content_type, body, "", Some(policy));
+}
+
+fn respond_with(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &str,
+    policy: Option<&str>,
+) {
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\n\
          Content-Type: {content_type}\r\n\
@@ -430,7 +470,15 @@ pub fn respond_extra(
         reason(status),
         body.len(),
     );
-    common_headers(&mut head);
+    match policy {
+        None => common_headers(&mut head),
+        Some(policy) => {
+            head.push_str("X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n");
+            head.push_str("Content-Security-Policy: ");
+            head.push_str(policy);
+            head.push_str("\r\n");
+        }
+    }
     head.push_str(extra);
     head.push_str("\r\n");
 

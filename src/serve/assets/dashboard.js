@@ -701,6 +701,108 @@ async function pollQuota() {
 pollQuota();
 setInterval(pollQuota, 60000);
 
+// --- tabs --------------------------------------------------------------------
+
+// The TUI's tab bar, read from rmux by /api/tabs: every agent cctop has open,
+// in the order the bar shows them, whether or not a dashboard is running
+// anywhere. A tab opens its terminal in the drawer below, drawn inside the page
+// from cctop's own copy of rmux's terminal app (src/serve/term.rs).
+let openTab = null;
+
+function tabState(t) {
+  return t.state === "needs-input" ? "asking" : t.state === "working" ? "working" : "idle";
+}
+
+function renderTabs(list) {
+  const bar = document.getElementById("tabs");
+  bar.replaceChildren();
+  bar.hidden = !list.length;
+  for (const t of list) {
+    const tab = el("button", "tab");
+    tab.type = "button";
+    tab.setAttribute("aria-pressed", String(openTab === t.name));
+    tab.title = (t.cwd ? shortPath(t.cwd) + " · " : "") +
+      (CAN_ACT ? "open this tab's terminal" : "this link cannot open terminals");
+    tab.appendChild(el("span", "dot " + tabState(t)));
+    tab.appendChild(el("span", "name", t.label));
+    if (t.session_id) {
+      // The session's own page, for the conversation rather than the screen.
+      const page = el("a", null, "page");
+      page.href = "/session/" + encodeURIComponent(t.session_id) + QUERY;
+      page.addEventListener("click", (ev) => ev.stopPropagation());
+      tab.appendChild(page);
+    }
+    if (CAN_ACT) tab.addEventListener("click", () => openTerminal(t));
+    else tab.disabled = !t.session_id;
+    bar.appendChild(tab);
+  }
+}
+
+async function pollTabs() {
+  try {
+    renderTabs((await ask("/api/tabs" + QUERY).then(asJson)).tabs || []);
+  } catch (e) {
+    // An older cctop has no /api/tabs; the bar simply stays hidden.
+  }
+}
+
+// The share's fragment on our copy of the app — see terminalFrame in
+// report.js, which this mirrors.
+function terminalFrame(url) {
+  const at = url.indexOf("#");
+  const frame = document.createElement("iframe");
+  frame.className = "termframe";
+  frame.title = "Terminal";
+  frame.allow = "clipboard-read; clipboard-write";
+  frame.src = "/term/" + QUERY + (at >= 0 ? url.slice(at) : "");
+  return frame;
+}
+
+function closeTerminal() {
+  // Removed rather than hidden: the frame holds a live socket to the agent.
+  document.getElementById("term-body").replaceChildren();
+  document.getElementById("termdrawer").hidden = true;
+  openTab = null;
+  pollTabs();
+}
+
+async function openTerminal(t) {
+  if (openTab === t.name) return closeTerminal();
+  const drawer = document.getElementById("termdrawer");
+  const body = document.getElementById("term-body");
+  const popout = document.getElementById("term-popout");
+  document.getElementById("term-title").textContent = t.label + (t.cwd ? " · " + shortPath(t.cwd) : "");
+  popout.hidden = true;
+  body.replaceChildren(el("div", "empty", "Opening this tab's terminal…"));
+  drawer.hidden = false;
+  openTab = t.name;
+  pollTabs();
+  try {
+    const terminal = await ask("/api/tab/" + encodeURIComponent(t.name) + "/terminal" + QUERY, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin: location.origin }),
+    }).then(asJson);
+    if (openTab !== t.name) return;
+    popout.href = terminal.url;
+    popout.hidden = false;
+    body.replaceChildren(
+      terminalFrame(terminal.url),
+      el("div", "why",
+        (terminal.tunnelled
+          ? "Through rmux's own tunnel, so it works from wherever you are. "
+          : "Served from the machine cctop runs on, so it only opens from a browser on it. ") +
+        "Whoever holds this page can type into this agent — it is a shell, not a prompt box."),
+    );
+  } catch (e) {
+    if (openTab === t.name) body.replaceChildren(el("div", "empty", String(e.message || e)));
+  }
+}
+
+document.getElementById("term-close").addEventListener("click", closeTerminal);
+pollTabs();
+setInterval(pollTabs, 5000);
+
 // --- transcript search -------------------------------------------------------
 
 // Rides next to the metadata filter, never in place of it: a query of a few

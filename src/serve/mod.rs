@@ -92,6 +92,10 @@ mod quota;
 /// answer for a remote row by running it on the machine that has the file.
 pub(crate) mod report;
 mod search;
+/// The TUI's tabs, read from rmux, for `/api/tabs`.
+mod tabs;
+/// rmux's terminal app, served here so a session page can frame it.
+mod term;
 /// The run's credentials, and `--token-file`, which keeps them across runs.
 mod tokens;
 pub mod tunnel;
@@ -1442,6 +1446,18 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     {
         return;
     }
+    // rmux's terminal app, for a session page to frame — see [`term`]. Static
+    // and behind the same token as everything else, so only someone already
+    // holding the link can load it.
+    if let Some((content_type, body)) = term::file(&path) {
+        return http::respond_policy(
+            stream,
+            Some(&request),
+            content_type,
+            body,
+            http::TERM_POLICY,
+        );
+    }
     match path.as_str() {
         "/" => page(shared, stream, &request, &DASHBOARD, access),
         "/favicon.svg" => http::respond(
@@ -1551,6 +1567,17 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         _ if path.starts_with("/api/access/") => {
             api_access(shared, stream, &request, &path["/api/access/".len()..]);
+        }
+        "/api/tabs" => {
+            let snapshot = current(shared);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let list = tabs::build(crate::rmux::running_in_tab_order(), &snapshot.sessions, now);
+            json(stream, &request, &serde_json::json!({ "tabs": list }))
+        }
+        _ if path.starts_with("/api/tab/") => {
+            api_tab(shared, stream, &request, &path["/api/tab/".len()..], access);
         }
         _ if path.starts_with("/api/act/") => {
             api_act(shared, stream, &request, &path["/api/act/".len()..], access);
@@ -1775,6 +1802,25 @@ fn may_act(
 /// One route for the three verbs rather than three, because the guards in front
 /// of them are the whole security surface and they are identical — a route added
 /// later that forgets one of them is the bug this shape prevents.
+/// `POST /api/tab/<name>/terminal`: a tab's terminal, behind the same guards
+/// as every action — the token, a JSON POST, a serve that allows actions.
+fn api_tab(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &str, access: Access) {
+    let Some(body) = may_act(shared, stream, request, access) else {
+        return;
+    };
+    let Some(name) = rest.strip_suffix("/terminal") else {
+        return http::respond_error(stream, Some(request), 404, "no such action");
+    };
+    let frontend = body
+        .get("origin")
+        .and_then(serde_json::Value::as_str)
+        .and_then(actions::frontend_for);
+    match actions::tab_terminal(name, frontend.as_deref()) {
+        Ok(terminal) => json(stream, request, &terminal),
+        Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
+    }
+}
+
 fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &str, access: Access) {
     let Some(body) = may_act(shared, stream, request, access) else {
         return;
@@ -1807,7 +1853,8 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
     // Answered before the others because it does not answer in their shape: a
     // terminal is a link and a reach, not a sentence about what was done.
     if verb == "terminal" {
-        return match actions::terminal(session) {
+        let frontend = actions::frontend_for(&field("origin"));
+        return match actions::terminal(session, frontend.as_deref()) {
             Ok(terminal) => json(stream, request, &terminal),
             Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
         };

@@ -404,7 +404,7 @@ pub const SHARE_TUNNEL: &str = "localhost-run";
 /// live coding agent should not rest on which file descriptor a line arrived
 /// on, and here it does not — the two links are separate fields.
 fn web_share(name: &str, tunnelled: bool) -> Result<Share, String> {
-    share_with(name, tunnelled, false)
+    share_with(name, tunnelled, false, None)
 }
 
 /// The share for `name`, minted on the first ask and reused after it.
@@ -427,19 +427,25 @@ fn web_share(name: &str, tunnelled: bool) -> Result<Share, String> {
 /// Held for the life of the process. If the session it belongs to ends, the
 /// share ends with it and the cached link stops answering — which is correct,
 /// since there is no terminal left for it to reach either.
-pub fn share_link(name: &str, embedded: bool) -> Result<(Share, bool), String> {
+pub fn share_link(
+    name: &str,
+    embedded: bool,
+    frontend: Option<&str>,
+) -> Result<(Share, bool), String> {
     /// A share and whether its endpoint is reachable off this machine.
     type Reachable = (Share, bool);
-    static CACHE: std::sync::Mutex<Option<HashMap<(String, bool), Reachable>>> =
-        std::sync::Mutex::new(None);
-    let key = (name.to_string(), embedded);
+    /// Session, flavour, and the frontend it opens in: a link minted for
+    /// one origin's copy of the app does not open on another's.
+    type Key = (String, bool, Option<String>);
+    static CACHE: std::sync::Mutex<Option<HashMap<Key, Reachable>>> = std::sync::Mutex::new(None);
+    let key = (name.to_string(), embedded, frontend.map(str::to_string));
     if let Ok(cache) = CACHE.lock()
         && let Some(held) = cache.as_ref().and_then(|c| c.get(&key))
     {
         return Ok(held.clone());
     }
     let mint = |tunnelled| match embedded {
-        true => web_share_embedded(name, tunnelled),
+        true => web_share_embedded(name, tunnelled, frontend),
         false => web_share(name, tunnelled),
     };
     // The tunnel is the half that needs a network and a relay that will have
@@ -482,17 +488,37 @@ pub fn share_link(name: &str, embedded: bool) -> Result<(Share, bool), String> {
 /// **whoever holds the page link can type into this agent's terminal**, not
 /// merely prompt it. That is a shell, and it is why this is behind the same
 /// `--no-actions` switch as everything else that acts.
-fn web_share_embedded(name: &str, tunnelled: bool) -> Result<Share, String> {
-    share_with(name, tunnelled, true)
+///
+/// `frontend` is where the app the link opens in is served, when that is not
+/// `share.rmux.io` — cctop's own copy, at the origin the page asking was
+/// reached on (see [`crate::serve`]'s `term` module). rmux mints the link for
+/// that frontend and names the daemon's endpoint in it, and the daemon accepts
+/// the app from there; a link minted for `share.rmux.io` and opened elsewhere
+/// is refused.
+fn web_share_embedded(
+    name: &str,
+    tunnelled: bool,
+    frontend: Option<&str>,
+) -> Result<Share, String> {
+    share_with(name, tunnelled, true, frontend)
 }
 
-fn share_with(name: &str, tunnelled: bool, embedded: bool) -> Result<Share, String> {
+fn share_with(
+    name: &str,
+    tunnelled: bool,
+    embedded: bool,
+    frontend: Option<&str>,
+) -> Result<Share, String> {
     let name = name.to_string();
+    let frontend = frontend.map(str::to_string);
     on_daemon(move |rmux| async move {
         let session = rmux.session(rmux_sdk::SessionName::new(name)?).await?;
         let mut builder = session.share();
         if tunnelled {
             builder = builder.tunnel_provider(SHARE_TUNNEL);
+        }
+        if let Some(frontend) = frontend {
+            builder = builder.frontend_url(frontend);
         }
         if embedded {
             builder = builder
