@@ -1,7 +1,7 @@
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 [package]
 name = "cctop"
-version = "0.25.1"
+version = "0.25.2"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
