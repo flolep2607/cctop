@@ -1516,7 +1516,7 @@ mod tests {
 
     /// A tab standing for a rmux session nobody here is attached to.
     fn detached(name: &str, pid: u32) -> tabs::Tab {
-        tabs::Tab::shared(&crate::rmux::Running {
+        tabs::Tab::for_agent(&crate::rmux::Running {
             name: name.to_string(),
             pid: Some(pid),
             cwd: None,
@@ -1527,6 +1527,9 @@ mod tests {
             order: None,
             state: None,
             color: None,
+            tab: None,
+            pane: None,
+            axis: None,
         })
     }
 

@@ -826,6 +826,56 @@ pub fn set_color(name: &str, color: &str) {
         .output();
 }
 
+/// Record on the session that it is a pane of a tab led by another session.
+///
+/// The last of the `@cctop_*` options, and the one that makes a split outlive
+/// the cctop that made it. Everything else here describes a tab; this one says
+/// which sessions belong to the same tab, which is what there was no way to
+/// record before.
+///
+/// Written onto every pane of the split, the leading one included, so the name
+/// the others point at does not depend on a pane still existing. An empty `tab`
+/// takes the option off, which is how a pane pulled out of a split stops being
+/// part of it.
+///
+/// Best effort, like its neighbours.
+pub fn set_tab(name: &str, tab: &str) {
+    let _ = Command::new(BIN)
+        .args(["set-option", "-t", &format!("={name}"), "@cctop_tab", tab])
+        .output();
+}
+
+/// Record this session's place among its tab's panes.
+///
+/// Written per pane rather than once per tab, because the tab is not a thing
+/// that can be written to — it is the leading session, and writing its position
+/// there would record the *tab's* position rather than this pane's.
+pub fn set_pane(name: &str, pane: usize) {
+    let _ = Command::new(BIN)
+        .args([
+            "set-option",
+            "-t",
+            &format!("={name}"),
+            "@cctop_pane",
+            &pane.to_string(),
+        ])
+        .output();
+}
+
+/// Record how the tab lays its panes out, on every one of them.
+///
+/// On every pane because the option has to be readable from whichever session
+/// happens to be listed; it is one fact with as many copies as the tab has
+/// panes, and they cannot disagree because one call writes them all.
+pub fn set_axis(names: &[&str], axis: Axis) {
+    let word = axis.as_str();
+    for name in names {
+        let _ = Command::new(BIN)
+            .args(["set-option", "-t", &format!("={name}"), "@cctop_axis", word])
+            .output();
+    }
+}
+
 /// Every cctop-owned session, in the order their tabs were last left in.
 ///
 /// [`running`] answers "which is newest", which is what the launcher wants.
@@ -997,6 +1047,144 @@ pub struct Running {
     /// Opaque here for the reason `label` and `profile` are strings: this
     /// module is the transport, not the palette.
     pub color: Option<String>,
+    /// Which tab this session is a pane of, by that tab's leading session name.
+    ///
+    /// Written by [`set_tab`] and read back to rebuild a split. This is the
+    /// whole of tab *identity*: before it there was none, and a tab was exactly
+    /// "whatever session is attached here" — so a split could not be put down
+    /// and picked up, and two sessions that belonged together came back as two
+    /// tabs that had never met.
+    ///
+    /// Absent means this session is a tab on its own, which is what every
+    /// session started before this option existed still is. Written onto the
+    /// leading pane as well as the others, so that closing or killing the pane
+    /// the name came from does not orphan the rest.
+    pub tab: Option<String>,
+    /// This session's position among its tab's panes, counting from zero.
+    ///
+    /// Not the order the sessions were created in: the second pane of a split
+    /// can be years younger than the first, and a split is not its panes' birth
+    /// order. Read by [`set_pane`]'s writer, and meaningless without `tab`.
+    pub pane: Option<u64>,
+    /// Whether the tab lays its panes out left to right or top to bottom, as
+    /// [`Axis`] writes it. Read back with the tab, since it is a property of the
+    /// tab and every pane records the same answer.
+    pub axis: Option<String>,
+}
+
+impl Running {
+    /// A session cctop has written nothing about yet.
+    ///
+    /// A real state, not a fixture: between rmux creating a session and cctop
+    /// labelling it, every option reads back unset. Which is what a session
+    /// started by a cctop older than any one of these options is forever, so
+    /// this is the shape an unarranged tab has in the wild and not only in a
+    /// test — but nothing in the binary builds one, since the list comes from
+    /// rmux rather than being constructed here.
+    #[cfg(test)]
+    pub fn unrecorded(name: &str) -> Running {
+        Running {
+            name: name.to_string(),
+            pid: None,
+            cwd: None,
+            attached: false,
+            activity: None,
+            label: None,
+            profile: None,
+            order: None,
+            state: None,
+            color: None,
+            tab: None,
+            pane: None,
+            axis: None,
+        }
+    }
+
+    /// How the tab this session belongs to lays its panes out.
+    ///
+    /// Read off the session rather than passed in, because every pane of a
+    /// split records the same answer and so any one of them can answer for the
+    /// tab — which is what lets a tab be rebuilt from whichever of its sessions
+    /// the listing happened to name first. Side by side when nothing says, which
+    /// is what a session nobody ever split is, and not a guess.
+    pub fn axis(&self) -> Axis {
+        self.axis
+            .as_deref()
+            .and_then(Axis::parse)
+            .unwrap_or(Axis::Side)
+    }
+}
+
+/// Group sessions into the tabs they belong to, keeping the bar's order.
+///
+/// One session is one tab until [`set_tab`] says otherwise, so this is a
+/// partition that mostly has one part. A session is its own tab when it records
+/// no tab, and also when the tab it names is not itself present — a pane whose
+/// leader has been closed is a tab again rather than a member of nothing.
+///
+/// Panes are ordered by [`Running::pane`], not by the order they were listed:
+/// `running` answers newest first, which is the launcher's question, and a split
+/// whose panes came back reversed would draw them the wrong way round.
+///
+/// Tabs keep the order [`in_tab_order`] gave the sessions, so a split's bar
+/// position is its leading session's — which is the one it had.
+///
+/// Returns each tab's sessions, leading session first.
+pub fn tabbed(sessions: Vec<Running>) -> Vec<Vec<Running>> {
+    // First pass: which tab each session claims, and every tab anyone claims.
+    // Two passes because a session naming a tab has to find the tab that session
+    // *is* — the leader, which may be listed after it. `running` answers newest
+    // first, so the second pane of a split routinely arrives before its first.
+    let named: Vec<String> = sessions.iter().filter_map(|s| s.tab.clone()).collect();
+    let mut tabs: Vec<(String, Vec<Running>)> = Vec::new();
+    for session in sessions {
+        // Belongs to a tab that is genuinely present. A session naming a tab
+        // nobody else claims is its own tab, which is what a pane whose leader
+        // has been closed becomes.
+        let owner = match session.tab.clone() {
+            Some(tab) if named.iter().filter(|t| **t == tab).count() > 1 => tab,
+            _ => session.name.clone(),
+        };
+        match tabs.iter_mut().find(|(name, _)| *name == owner) {
+            Some((_, panes)) => panes.push(session),
+            None => tabs.push((owner, vec![session])),
+        }
+    }
+    for (_, panes) in &mut tabs {
+        // Numbered position, not the order listed: `running` answers newest
+        // first, and a split whose panes came back reversed draws them the wrong
+        // way round. A pane nobody numbered sorts first, which is the leading
+        // one — so an unnumbered pair keeps its order and the default only ever
+        // decides ties.
+        panes.sort_by_key(|s| s.pane.unwrap_or(0));
+    }
+    tabs.into_iter().map(|(_, panes)| panes).collect()
+}
+
+/// Which way a tab lays out its panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    Side,
+    Stacked,
+}
+
+impl Axis {
+    /// The word [`set_axis`] writes and [`Running::axis`] reads back.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Axis::Side => "side",
+            Axis::Stacked => "stacked",
+        }
+    }
+
+    /// A word this cctop does not know reads as no answer, never a guess.
+    pub fn parse(word: &str) -> Option<Axis> {
+        match word {
+            "side" => Some(Axis::Side),
+            "stacked" => Some(Axis::Stacked),
+            _ => None,
+        }
+    }
 }
 
 /// Every cctop-owned rmux session currently alive, newest first.
@@ -1017,7 +1205,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}",
         ])
         .output()
     else {
@@ -1072,6 +1260,12 @@ pub fn running() -> Vec<Running> {
         // reads as nothing reported rather than as a guess.
         let state = option().as_deref().and_then(State::decode);
         let color = option();
+        // The tab a split is made of. A session without one is a tab of its own,
+        // which is every session started before the option existed — so an older
+        // database of tabs needs no migration, only this reading.
+        let tab = option();
+        let pane = option().and_then(|v| v.parse::<u64>().ok());
+        let axis = option();
         found.push((
             created,
             Running {
@@ -1085,6 +1279,9 @@ pub fn running() -> Vec<Running> {
                 order,
                 state,
                 color,
+                tab,
+                pane,
+                axis,
             },
         ));
     }
@@ -1334,6 +1531,60 @@ mod tests {
         );
     }
 
+    /// A split comes back as one tab, in the order it was left, divided the same
+    /// way — which is the whole of what tab identity is for.
+    ///
+    /// The bug: there was no identity, so a tab was "whatever session is
+    /// attached here". A split could not be put down and picked up, and came
+    /// back from a restart as two tabs that had never met.
+    ///
+    /// Given out of order on purpose: `running` answers newest first, so the
+    /// second pane of a split routinely arrives before its first, and a grouping
+    /// that trusted the listing order would draw them reversed.
+    #[test]
+    fn a_split_comes_back_as_one_tab_in_the_order_it_was_left() {
+        let pane_of = |name: &str, tab: Option<&str>, pane: Option<u64>| Running {
+            tab: tab.map(str::to_string),
+            pane,
+            ..Running::unrecorded(name)
+        };
+
+        let groups = tabbed(vec![
+            // Second pane first, and it is the newer session.
+            pane_of("cctop-shell", Some("cctop-claude"), Some(1)),
+            pane_of("cctop-claude", Some("cctop-claude"), Some(0)),
+        ]);
+        assert_eq!(groups.len(), 1, "two sessions of one tab are one tab");
+        let names: Vec<&str> = groups[0].iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["cctop-claude", "cctop-shell"], "and in pane order");
+
+        // A session nobody split is a tab of one, which is every session that
+        // predates the option — so an older arrangement needs no migration.
+        let groups = tabbed(vec![
+            pane_of("cctop-claude", None, None),
+            pane_of("cctop-codex", None, None),
+        ]);
+        assert_eq!(groups.len(), 2);
+
+        // The axis comes off whichever session carries it, and every pane of a
+        // split records the same answer, so the leader can answer for the tab.
+        assert_eq!(groups[0][0].axis(), Axis::Side, "nothing said");
+        let stacked = pane_of("cctop-stacked", Some("cctop-stacked"), Some(0));
+        let mut stacked = stacked;
+        stacked.axis = Some("stacked".into());
+        assert_eq!(stacked.axis(), Axis::Stacked);
+        // A word this cctop does not know is no answer, never a guess.
+        let mut odd = pane_of("cctop-odd", None, None);
+        odd.axis = Some("diagonal".into());
+        assert_eq!(odd.axis(), Axis::Side);
+
+        // A pane whose leader has been closed is a tab again, rather than a
+        // member of a tab that is not there.
+        let groups = tabbed(vec![pane_of("cctop-orphan", Some("cctop-gone"), Some(1))]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0][0].name, "cctop-orphan");
+    }
+
     /// The claim the whole feature rests on: the state outlives the cctop that
     /// wrote it, because it is on the session and the session is not ours.
     ///
@@ -1414,16 +1665,8 @@ mod tests {
     #[test]
     fn arranged_tabs_lead_and_the_rest_stay_oldest_first() {
         let at = |name: &str, order: Option<u64>| Running {
-            name: name.to_string(),
-            pid: None,
-            cwd: None,
-            attached: false,
-            activity: None,
-            label: None,
-            profile: None,
             order,
-            state: None,
-            color: None,
+            ..Running::unrecorded(name)
         };
         // As `running` gives them: newest first.
         let found = vec![

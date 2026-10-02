@@ -363,6 +363,9 @@ mod tests {
             order: None,
             state: None,
             color: None,
+            tab: None,
+            pane: None,
+            axis: None,
         }
     }
 
@@ -410,8 +413,8 @@ mod tests {
     #[test]
     fn a_detached_tab_is_found_by_pid_or_by_session_name() {
         let tabs = vec![
-            Tab::shared(&running("cctop-claude-one", Some(10))),
-            Tab::shared(&running("cctop-claude-two", None)),
+            Tab::for_agent(&running("cctop-claude-one", Some(10))),
+            Tab::for_agent(&running("cctop-claude-two", None)),
         ];
         assert_eq!(
             target_in(&tabs, Some(10), "cctop-claude-zzz"),

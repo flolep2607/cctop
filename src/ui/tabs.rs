@@ -433,6 +433,27 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// What a [`crate::rmux::Running`] becomes when no client of ours is on it.
+    pub fn of(agent: &crate::rmux::Running) -> Shared {
+        Shared {
+            label: agent.label.clone().unwrap_or_else(|| {
+                // No label recorded: an agent from a cctop older than this,
+                // or one whose `set-option` did not land. The session name is
+                // the fallback, minus the prefix every one of them carries.
+                agent
+                    .name
+                    .strip_prefix("cctop-")
+                    .unwrap_or(&agent.name)
+                    .to_string()
+            }),
+            name: agent.name.clone(),
+            pid: agent.pid,
+            activity: agent.activity,
+            profile: agent.profile.clone(),
+            state: agent.state,
+        }
+    }
+
     /// Whether the session holds an agent rather than a shell.
     ///
     /// Read off the session name, the one thing about it that is never
@@ -494,6 +515,19 @@ pub struct Tab {
     /// back, so the two are never both true and an empty tab with no `shared` is
     /// still an agent that has exited.
     pub shared: Option<Shared>,
+    /// The *rest* of a split's sessions, for a tab holding no client on any of
+    /// them.
+    ///
+    /// `shared` is the leading pane and stays that way; this is the other panes,
+    /// in order. Both are set only while `panes` is empty, and both are traded
+    /// for panes together by [`Tab::attach`].
+    ///
+    /// A split used to have no form here at all: [`Tab::detach`] declined one, so
+    /// a tab of two sessions could not be put down and picked up, and came back
+    /// from a restart as two tabs that had never met. Carrying the rest is what
+    /// lets one tab hold them, and it is why a tab's identity is now recorded on
+    /// rmux rather than implied by what happens to be attached.
+    pub extra: Vec<Shared>,
     /// The colour the tab was painted, if any.
     ///
     /// Kept on the tab rather than on a pane or a `Shared`, because it is the
@@ -523,6 +557,7 @@ impl Tab {
             focus: 0,
             stacked: false,
             shared: None,
+            extra: Vec::new(),
             color: None,
             restarted: None,
             zoom: false,
@@ -531,33 +566,48 @@ impl Tab {
 
     /// A tab for a rmux session this cctop has not attached to — one another
     /// cctop started, or one this cctop left when you switched away.
-    pub fn shared(agent: &crate::rmux::Running) -> Tab {
+    ///
+    /// A tab of one, which is every session nobody has split. It takes its axis
+    /// off the session rather than assuming side by side, so a session carrying
+    /// `@cctop_axis` from a split it has since been pulled out of comes back the
+    /// way it was left.
+    /// A tab for a rmux session this cctop has not attached to — one another
+    /// cctop started, or one this cctop left when you switched away.
+    ///
+    /// A tab of one, which is every session nobody has split. Its axis is read
+    /// off the session rather than assumed, so a session still carrying
+    /// `@cctop_axis` from a split it has since been pulled out of comes back the
+    /// way it was left.
+    #[cfg(test)]
+    pub fn for_agent(agent: &crate::rmux::Running) -> Tab {
+        Tab::split_of(agent, &[], agent.axis())
+    }
+
+    /// A tab standing for one leading session and however many more belong to
+    /// the same tab beside it.
+    ///
+    /// `others` is the rest of the split in pane order, and is empty for every
+    /// session that has never been split — which is the shape the whole codebase
+    /// assumed before this existed, so nothing has to ask which case it is in.
+    ///
+    /// The axis is read off the sessions themselves rather than passed in, so
+    /// that a tab comes back laid out the way it was left and no caller has to
+    /// remember to ask. A word this cctop does not know reads as side by side,
+    /// which is the default and not a claim.
+    pub fn split_of(
+        leader: &crate::rmux::Running,
+        others: &[&crate::rmux::Running],
+        axis: crate::rmux::Axis,
+    ) -> Tab {
         Tab {
             panes: Vec::new(),
             focus: 0,
-            stacked: false,
-            // Read off the session like the label is: a word this cctop does
-            // not know means nothing was painted, never a guess at a colour.
-            color: agent.color.as_deref().and_then(Hue::from_name),
+            stacked: axis == crate::rmux::Axis::Stacked,
+            shared: Some(Shared::of(leader)),
+            extra: others.iter().map(|agent| Shared::of(agent)).collect(),
+            color: leader.color.as_deref().and_then(Hue::from_name),
             restarted: None,
             zoom: false,
-            shared: Some(Shared {
-                label: agent.label.clone().unwrap_or_else(|| {
-                    // No label recorded: an agent from a cctop older than this,
-                    // or one whose `set-option` did not land. The session name is
-                    // the fallback, minus the prefix every one of them carries.
-                    agent
-                        .name
-                        .strip_prefix("cctop-")
-                        .unwrap_or(&agent.name)
-                        .to_string()
-                }),
-                name: agent.name.clone(),
-                pid: agent.pid,
-                activity: agent.activity,
-                profile: agent.profile.clone(),
-                state: agent.state,
-            }),
         }
     }
 
@@ -572,6 +622,7 @@ impl Tab {
             .iter()
             .filter_map(|pane| pane.rmux.as_deref())
             .chain(self.shared.iter().map(|s| s.name.as_str()))
+            .chain(self.extra.iter().map(|s| s.name.as_str()))
     }
 
     /// Put a client of this cctop back on the session this tab stands for.
@@ -580,10 +631,29 @@ impl Tab {
     /// the trade sound: at most one cctop is being *used* on a session at a time,
     /// so at most one of them holds the client whose size rmux fits the window
     /// to.
+    ///
+    /// A split attaches every pane at once, which is what it already does when
+    /// the tab was never put down — the panes are peers and all of them are
+    /// being looked at.
     pub fn attach(&mut self) -> anyhow::Result<()> {
         let Some(shared) = self.shared.clone() else {
             return Ok(());
         };
+        // Leading pane first, so the tab keeps the shape it was left in whatever
+        // order the sessions were listed back in.
+        let mut panes = vec![Self::attach_one(&shared)?];
+        for extra in &self.extra {
+            panes.push(Self::attach_one(extra)?);
+        }
+        self.panes = panes;
+        self.focus = 0;
+        self.shared = None;
+        self.extra.clear();
+        Ok(())
+    }
+
+    /// One `Shared` as the pane it becomes when this cctop takes a client on it.
+    fn attach_one(shared: &Shared) -> anyhow::Result<Pane> {
         // `TmuxExisting` never creates: a session that ended between the sync
         // that found it and this must fail and say so, not silently start a new
         // agent under a dead agent's name.
@@ -591,49 +661,65 @@ impl Tab {
         let mut pane = Pane::launch(&argv, None, Own::TmuxExisting(shared.name.clone()))?;
         // The label the other cctop chose, not one reconstructed from the argv
         // above — which is the label already, but only by coincidence.
-        pane.label = shared.label;
+        pane.label = shared.label.clone();
         // Reattaching is not relaunching, so nothing here chose an account —
         // this is the one the session was started under, read back off rmux by
         // the sweep that found it or kept from the pane this tab last had.
-        pane.profile = shared.profile;
-        self.panes = vec![pane];
-        self.focus = 0;
-        self.shared = None;
-        Ok(())
+        pane.profile = shared.profile.clone();
+        Ok(pane)
     }
 
     /// Give up this cctop's client on the session, keeping the tab.
     ///
     /// Dropping the pane kills the rmux client and nothing else — the session,
     /// and the agent in it, carry on for whichever cctop looks next. Declines for
-    /// anything that could not be rebuilt from a session name: a split, a pty
-    /// cctop owns and would therefore *end* here, or a pane merely looking at
-    /// somebody else's agent.
+    /// anything that could not be rebuilt from a session name: a pty cctop owns
+    /// and would therefore *end* here, or a pane merely looking at somebody
+    /// else's agent.
+    ///
+    /// A split is now rebuildable, so it detaches like anything else — each pane
+    /// keeps its own [`Shared`] and the whole thing comes back together on the
+    /// way in. It used to decline, which is why a split could not survive a
+    /// restart at all: the tab held clients it had no way of giving up, and the
+    /// only record of the arrangement was the process about to exit.
     pub fn detach(&mut self) -> bool {
-        let [pane] = &self.panes[..] else {
+        // Nothing to give up. Without this a tab that was *already* detached —
+        // empty `panes`, holding its `Shared`s — would read as a successful
+        // detach and be cleared into a tab with no session behind it at all,
+        // which `drop_empty_tabs` then throws away.
+        if self.panes.is_empty() {
             return false;
-        };
+        }
         // A recording is fed by this client, so giving it up would end the
         // recording — and switching tabs is not asking for that. The tab keeps
         // its client until the recording is stopped, at the cost of rmux
         // sizing the window for it meanwhile.
-        if pane.view.recording() {
+        if self.panes.iter().any(|pane| pane.view.recording()) {
             return false;
         }
-        let Some(name) = pane.rmux.clone() else {
+        // Every pane has to be one that can come back. A tab with a pty cctop
+        // owns anywhere in it keeps its clients rather than losing the pane.
+        if self.panes.iter().any(|pane| pane.rmux.is_none()) {
             return false;
-        };
-        self.shared = Some(Shared {
-            name,
-            label: pane.label.clone(),
-            pid: Some(pane.agent()),
-            // Nothing has been read off rmux for this tab yet, and the pane it
-            // is replacing was on screen a moment ago. The next sweep fills it.
-            activity: None,
-            profile: pane.profile.clone(),
-            state: None,
-        });
-        self.panes.clear();
+        }
+        let panes = std::mem::take(&mut self.panes);
+        let mut shared = Vec::with_capacity(panes.len());
+        for pane in &panes {
+            shared.push(Shared {
+                name: pane.rmux.clone().expect("checked above"),
+                label: pane.label.clone(),
+                pid: Some(pane.agent()),
+                // Nothing has been read off rmux for this tab yet, and the pane
+                // it is replacing was on screen a moment ago. The next sweep
+                // fills it.
+                activity: None,
+                profile: pane.profile.clone(),
+                state: None,
+            });
+        }
+        // The leading pane is the tab; the rest follow it in order.
+        self.shared = shared.first().cloned();
+        self.extra = shared.into_iter().skip(1).collect();
         self.focus = 0;
         true
     }
@@ -723,11 +809,53 @@ impl Tab {
     /// Unzooms: asking for a split is asking to see both halves of it, and a
     /// new pane born hidden behind a zoom would be an agent started out of
     /// sight.
+    ///
+    /// Records the tab's shape onto rmux as it goes, so this arrangement is
+    /// still here after a restart: which tab each session belongs to, which pane
+    /// of it each is, and which way the tab divides. Written on every pane
+    /// rather than the new one alone, because the two sessions were not a tab
+    /// before this call and both have to be able to say so afterwards.
     pub fn split(&mut self, pane: Pane, stacked: bool) {
         self.stacked = stacked;
         self.panes.push(pane);
         self.focus = self.panes.len() - 1;
         self.zoom = false;
+        self.record_shape();
+    }
+
+    /// Write the tab's membership and layout onto every session it stands for.
+    ///
+    /// The leading pane's name is the tab's name — it is unique already, it is
+    /// stable for as long as the session is, and it costs nothing to mint. It is
+    /// written onto every pane including the leader, so that closing the leader
+    /// leaves the rest still able to say which tab they are.
+    ///
+    /// Best effort and silent, like every other `@cctop_*` write: a shape that
+    /// failed to save is a split that comes back as two tabs, which is where a
+    /// split was before any of this.
+    pub fn record_shape(&self) {
+        let names: Vec<&str> = self.sessions().collect();
+        let Some(leader) = names.first().copied() else {
+            return;
+        };
+        let axis = match self.stacked {
+            true => crate::rmux::Axis::Stacked,
+            false => crate::rmux::Axis::Side,
+        };
+        for (index, name) in names.iter().enumerate() {
+            // A tab of one records nothing: it is the shape every session had
+            // before this option existed, and writing it would mean a later split
+            // has to take it back off.
+            if names.len() < 2 {
+                crate::rmux::set_tab(name, "");
+            } else {
+                crate::rmux::set_tab(name, leader);
+                crate::rmux::set_pane(name, index);
+            }
+        }
+        if names.len() > 1 {
+            crate::rmux::set_axis(&names, axis);
+        }
     }
 
     /// Move the keyboard to the next pane, wrapping.
@@ -924,7 +1052,14 @@ pub fn harnesses() -> Vec<Vec<String>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
     /// An agent cctop left running in rmux, from this run or an earlier one.
-    Waiting(crate::rmux::Running),
+    ///
+    /// Boxed because a launcher row only needs four of a session's dozen fields
+    /// — its name, where it works, what account it runs under, and whether
+    /// somebody is already looking at it — and `Running` grew past the size
+    /// where holding one of these inline doubles the enum. The box is per row,
+    /// there are as many rows as there are live agents, and each is a handful of
+    /// strings.
+    Waiting(Box<crate::rmux::Running>),
     /// A command to start fresh.
     Start(Vec<String>),
 }
@@ -975,7 +1110,7 @@ pub fn choices(open: &[String]) -> Vec<Choice> {
     crate::rmux::running()
         .into_iter()
         .filter(|agent| !open.contains(&agent.name))
-        .map(Choice::Waiting)
+        .map(|agent| Choice::Waiting(Box::new(agent)))
         .chain(harnesses().into_iter().map(Choice::Start))
         .collect()
 }
@@ -1534,6 +1669,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             order: None,
             state: None,
             color: None,
+            tab: None,
+            pane: None,
+            axis: None,
         }
     }
 
@@ -1553,7 +1691,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
                 signal,
                 at: crate::rmux::now_secs().saturating_sub(ago),
             });
-            Tab::shared(&agent)
+            Tab::for_agent(&agent)
         };
         let unheard = &|_| None;
 
@@ -1717,7 +1855,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// for a resume is a sanitised uuid.
     #[test]
     fn a_shared_tab_is_called_what_the_cctop_that_started_it_called_it() {
-        let tab = Tab::shared(&session(
+        let tab = Tab::for_agent(&session(
             "cctop-claude-4ebf1ab4-2ef8-4fb2-a7d5-d445b5026dc9",
             Some("claude · Improve super cctop"),
             0,
@@ -1727,7 +1865,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
         // Nothing recorded — an agent left by a cctop older than this. The
         // session name stands in, minus the prefix every one of them carries.
-        let tab = Tab::shared(&session("cctop-claude-32cca860", None, 0));
+        let tab = Tab::for_agent(&session("cctop-claude-32cca860", None, 0));
         assert_eq!(tab.title(), "claude-32cca860");
     }
 
@@ -1743,7 +1881,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn the_account_a_pane_runs_as_survives_a_tab_switch() {
         let mut running = session("cctop-claude-32cca860", Some("claude"), 0);
         running.profile = Some("work".into());
-        let adopted = Tab::shared(&running);
+        let adopted = Tab::for_agent(&running);
         assert_eq!(
             adopted.shared.as_ref().and_then(|s| s.profile.as_deref()),
             Some("work"),
@@ -1751,7 +1889,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
         // And nothing invented for the ordinary account, which writes no option
         // and so reads back as none.
-        let plain = Tab::shared(&session("cctop-claude-4e2b1c90", Some("claude"), 0));
+        let plain = Tab::for_agent(&session("cctop-claude-4e2b1c90", Some("claude"), 0));
         assert_eq!(plain.shared.as_ref().and_then(|s| s.profile.clone()), None);
     }
 
@@ -1761,8 +1899,8 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// cannot.
     #[test]
     fn an_unwatched_tab_still_says_when_its_agent_wants_you() {
-        let quiet = Tab::shared(&session("cctop-claude-a", None, 30));
-        let busy = Tab::shared(&session("cctop-claude-b", None, 0));
+        let quiet = Tab::for_agent(&session("cctop-claude-a", None, 30));
+        let busy = Tab::for_agent(&session("cctop-claude-b", None, 0));
         let pid = quiet.shared.as_ref().and_then(|s| s.pid).expect("pid");
 
         // A held question outranks everything, and being reported as working
@@ -1807,7 +1945,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// stopped looking.
     #[test]
     fn a_detached_tab_is_not_reaped() {
-        let mut tab = Tab::shared(&session("cctop-claude-a", None, 0));
+        let mut tab = Tab::for_agent(&session("cctop-claude-a", None, 0));
         assert!(
             !tab.reap(&mut Vec::new()),
             "a shared tab was reaped for having no pane"
@@ -1819,18 +1957,11 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
     /// A still-running agent in the launcher, as rmux would have described it.
     fn waiting(name: &str) -> Choice {
-        Choice::Waiting(crate::rmux::Running {
-            name: name.to_string(),
+        Choice::Waiting(Box::new(crate::rmux::Running {
             pid: Some(4321),
             cwd: Some(std::path::PathBuf::from("/home/x/proj")),
-            attached: false,
-            activity: None,
-            label: None,
-            profile: None,
-            order: None,
-            state: None,
-            color: None,
-        })
+            ..crate::rmux::Running::unrecorded(name)
+        }))
     }
 
     /// The tab is named after the agent, not the plumbing that carries it.
@@ -1960,8 +2091,8 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
     /// The trade that keeps several cctops off one rmux window: the tab you
     /// leave gives up its client and keeps everything needed to take one back.
-    /// Only a lone rmux-backed pane may do it — a pty cctop owns would be
-    /// *ended* by this, and a split cannot be rebuilt from one session name.
+    /// Only rmux-backed panes may do it — a pty cctop owns would be *ended* by
+    /// this — and a split of them detaches whole, keeping each session's place.
     #[test]
     fn leaving_a_rmux_tab_gives_up_its_client_and_nothing_else() {
         let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
@@ -1986,16 +2117,123 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         assert!(!owned.detach());
         assert!(owned.shared.is_none());
 
-        // A split has two sessions and one tab; there is nothing to attach back.
+        // A split detaches too, and keeps both of its sessions: the whole point
+        // of the second `Shared` is that a tab of two can be put down and taken
+        // up again, in order, rather than coming back as two tabs that never met.
         let mut split = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
         split.panes[0].rmux = Some("cctop-claude-abc".into());
         split
             .panes
             .push(Pane::view_of(pid, "shell".into()).expect("attach"));
         split.panes[1].rmux = Some("cctop-zsh".into());
-        assert!(!split.detach());
-        assert_eq!(split.panes.len(), 2);
+        assert!(split.detach());
+        assert_eq!(split.panes.len(), 0);
+        assert_eq!(
+            split.shared.as_ref().map(|s| s.name.as_str()),
+            Some("cctop-claude-abc")
+        );
+        assert_eq!(split.extra.len(), 1);
+        assert_eq!(
+            split.extra[0].name, "cctop-zsh",
+            "the second pane kept its place"
+        );
+        // Both halves still answer, which is what a tab bar reads.
+        assert_eq!(
+            split.sessions().collect::<Vec<_>>(),
+            ["cctop-claude-abc", "cctop-zsh"]
+        );
 
+        // One pane with no rmux behind it anywhere in the tab is still the kill,
+        // so a split containing one keeps its clients rather than losing it.
+        let mut mixed = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
+        mixed.panes[0].rmux = Some("cctop-claude-abc".into());
+        mixed
+            .panes
+            .push(Pane::view_of(pid, "local shell".into()).expect("attach"));
+        assert!(!mixed.detach());
+        assert_eq!(mixed.panes.len(), 2, "nothing was given up");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+    }
+
+    /// The whole reason a tab has an identity recorded on rmux rather than
+    /// implied by what happens to be attached: a split put down must come back
+    /// up as the one tab it was, in the order it was, divided the same way.
+    ///
+    /// The bug: a tab was "whatever session is attached here", so a split had
+    /// no form to be stored in — it could not be detached, and came back from a
+    /// restart as two tabs that had never met, with the arrangement lost.
+    #[test]
+    fn a_split_survives_being_put_down_and_picked_up() {
+        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let mut tab = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
+        tab.panes[0].rmux = Some("cctop-claude-abc".into());
+        let mut second = Pane::view_of(pid, "shell".into()).expect("attach");
+        second.rmux = Some("cctop-zsh".into());
+        tab.split(second, true);
+
+        assert!(tab.detach(), "a split of rmux panes is now detachable");
+        assert_eq!(
+            tab.sessions().collect::<Vec<_>>(),
+            ["cctop-claude-abc", "cctop-zsh"]
+        );
+        assert!(tab.stacked, "and it comes back divided the same way");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+    }
+
+    /// `Tab::split` writes the tab's membership onto rmux, so the tab has an
+    /// answer to "which sessions are mine" that does not live in this process.
+    #[test]
+    fn a_split_records_itself_onto_its_sessions() {
+        if !crate::rmux::available() {
+            eprintln!("skipping: rmux not installed");
+            return;
+        }
+        // The daemon is machine-wide, so this serialises against the other
+        // tests that talk to it.
+        let _turn = crate::rmux::test_lock();
+        let leader = format!("cctop-leader-{}", std::process::id());
+        let other = format!("cctop-other-{}", std::process::id());
+        for name in [&leader, &other] {
+            let _ = crate::rmux::start_detached(&["sleep".into(), "30".into()], name, None);
+        }
+        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let mut tab = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
+        tab.panes[0].rmux = Some(leader.clone());
+        let mut second = Pane::view_of(pid, "shell".into()).expect("attach");
+        second.rmux = Some(other.clone());
+        tab.split(second, false);
+        let read = |name: &str| crate::rmux::running().into_iter().find(|s| s.name == name);
+        assert_eq!(
+            read(&leader).as_ref().and_then(|s| s.tab.as_deref()),
+            Some(&leader[..])
+        );
+        assert_eq!(
+            read(&other).as_ref().and_then(|s| s.tab.as_deref()),
+            Some(&leader[..])
+        );
+        // Ordered, so the listing can put them back the right way round.
+        assert_eq!(read(&leader).as_ref().and_then(|s| s.pane), Some(0));
+        assert_eq!(read(&other).as_ref().and_then(|s| s.pane), Some(1));
+        assert_eq!(
+            read(&other).map(|s| s.axis()),
+            Some(crate::rmux::Axis::Side)
+        );
+
+        // A pane pulled back out of the tab stops claiming membership, rather
+        // than pointing at a tab it is no longer part of.
+        let mut alone = Tab::new(Pane::view_of(pid, "shell".into()).expect("attach"));
+        alone.panes[0].rmux = Some(other.clone());
+        alone.record_shape();
+        assert_eq!(read(&other).and_then(|s| s.tab), None);
+
+        let _ = crate::rmux::kill(&leader);
+        let _ = crate::rmux::kill(&other);
         let _ = child.kill();
         let _ = child.wait();
         let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
@@ -2016,10 +2254,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn a_sessions_colour_paints_its_tab() {
         let mut agent = session("cctop-claude-x", Some("claude"), 0);
         agent.color = Some("violet".to_string());
-        assert_eq!(Tab::shared(&agent).color, Some(Hue::Violet));
+        assert_eq!(Tab::for_agent(&agent).color, Some(Hue::Violet));
         agent.color = Some("chartreuse".to_string());
         assert_eq!(
-            Tab::shared(&agent).color,
+            Tab::for_agent(&agent).color,
             None,
             "a newer cctop's hue was guessed at"
         );
