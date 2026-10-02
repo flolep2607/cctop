@@ -10,7 +10,9 @@ cctop compare    # how each model did on the work you gave it
 ```
 
 Both are also `o` and `c` in the TUI, drawn over the table, and both take
-`--json` and `--provider <name>`.
+`--json`, `--provider <name>` and `--since <span>` — `24h`, `7d`, `2w`, or a
+date such as `2026-09-01`. Models change, and so does what you give them, so
+last month's sessions blur this week's comparison.
 
 Neither writes anything — not to your configuration, not anywhere. They read
 transcripts and print.
@@ -89,16 +91,61 @@ Per model, and then per model per kind of work:
 
 | | |
 |---|---|
-| **1-shot** | Share of files that took one contiguous attempt |
-| **$/file** | Cost per file actually changed |
-| **$/call** | Cost per tool call |
+| **files** | Files the model edited; `4+9` adds nine its subagents on another model wrote for it |
+| **1-shot** | Share of its files edited without a retry, with a 95% range: `95%±3` |
+| **reworked** | Share of its files a later session had to fix within a day |
+| **red** | Share of its agents whose last test or build after their final edit failed |
+| **$/file** | Its cost per file, delegated ones included |
+| **time/file** | Its working time per file, delegated ones included |
 | **cache** | Share of input that came from the cache |
 
-The one worth understanding is **1-shot**, because of how a retry is counted.
-Editing a file, going away to run something, and editing that same file again is
-a retry. Editing a *different* file is progress, not a retry. That makes it a
-sharper signal than `ERR%`: a failed call is noise, an agent editing one file
-four times is a story.
+With `--rate 60`, a last column prices the time at $60 an hour and adds it to the
+dollars, and the table ranks by that. A free model that takes a day per file is
+not cheaper than a $10 one that takes five minutes, and dollars alone say it is.
+There is no default rate: what an hour of waiting is worth is your number.
+
+### A retry is a second attempt after something failed
+
+Editing a file, seeing a command or an edit fail, and editing that same file
+again is a retry. Editing it again after the tests passed is the next step, and
+editing a *different* file is progress — neither counts against the model. Only
+the same agent's calls are read, because subagents' calls are interleaved into
+the same history and one of theirs failing says nothing about the parent's
+attempt.
+
+A harness that records no per-call outcome — Cursor, Pi, Windsurf — has no
+failure to see, so there any call between two edits of a file makes the second a
+retry.
+
+The `±` is a Wilson interval: 100% on seven files is `100%±18`, and two rows
+whose ranges overlap are not told apart by this data.
+
+### Did the work hold
+
+1-shot is judged inside one session. **reworked** asks the question it cannot: a
+later session reopening the file to fix it, within a day. A later edit is a fix
+when it came straight after that session's own command failed, or when the
+session is filed as debugging — titles hardly ever say "fix", so a failing
+command is the signal that works in any language. The session that wrote the file
+last is charged, once. Worktrees under `.claude/worktrees/` count as their main
+checkout, or the same file in two worktrees would never match.
+
+**red** is the other end: the agent stopped with its last test or build failing.
+Only test and build commands count — a `grep` that found nothing exits non-zero
+too — and an agent that checked nothing after its last edit is unknown, not red.
+
+### Subagents are credited to their own model
+
+A session that delegates is several models at once. Each subagent is credited
+to its own model with its own cost, calls and 1-shot rate. Responsibility for
+the result is shared, though: a parent that briefs a subagent, waits for it and
+uses what came back did real work towards those files, and paid for it. So the
+parent's cost and time are spread over its own files *and* the delegated ones,
+while its 1-shot and rework rates stay about its own writing.
+
+The parent's clock is the session's end to end, since it was waiting while its
+subagents worked. A subagent on the parent's own model lands in the same row and
+adds nothing twice; one on another model gets its own minutes as well.
 
 ### It is observational, and it says so
 
@@ -111,9 +158,9 @@ the caveat is printed under every table, and the same figures are broken out per
 kind of work — most of "this model is worse" turns out to be "this model was
 given the debugging".
 
-A session that used several models is credited entirely to whichever cost the
-most. The transcript records which model billed a request, not which model asked
-for a given tool call.
+One agent that switched models mid-way is credited to whichever cost it the
+most. The transcript records which model billed a request, not which model
+asked for a given tool call.
 
 ## What counts as editing
 
@@ -136,8 +183,8 @@ of editing a file they only read, and that is the worse mistake.
 
 One consequence to know about: a shell write carries no file name, so it counts
 toward *whether* a session changed anything but not toward the one-shot rate,
-which needs a path. `1-shot` and `$/file` therefore describe edit-tool work
-only.
+which needs a path. `1-shot`, `reworked` and `$/file` therefore describe
+edit-tool work only.
 
 ## Where the numbers are floors
 

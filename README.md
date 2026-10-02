@@ -126,8 +126,8 @@ a *different* harness (`O`), and read the sessions on another machine over ssh.
 reads into `node_modules`, the files fetched again after a compaction, and the
 tool calls that failed and were billed anyway — each with what it cost and
 whether that figure was measured or estimated. `cctop compare` puts your models
-side by side on your own work: how often each got a file right first time, and
-what a changed file cost. See [what it cost you for](docs/optimize-and-compare.md).
+side by side on your own work: how often each got a file right first time, what
+a changed file cost and how long it took — `--rate 60` prices that time too. See [what it cost you for](docs/optimize-and-compare.md).
 
 **And it can do all the watching in a browser.** `cctop serve` streams the same
 table to a page — useful on a phone, where the sessions waiting on you can find

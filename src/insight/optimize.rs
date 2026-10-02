@@ -640,6 +640,7 @@ mod tests {
         Analysis {
             provider: Provider::Claude,
             label: "repo".into(),
+            last_active: String::new(),
             model: "claude-opus-5".into(),
             cost,
             cost_available: true,
@@ -661,6 +662,7 @@ mod tests {
             input_total: 0,
             active_ms: 0,
             edited: Default::default(),
+            slices: Vec::new(),
             files_reworked: 0,
             truncated: false,
         }

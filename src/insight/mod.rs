@@ -184,6 +184,59 @@ fn bash_writes(command: &str) -> bool {
     false
 }
 
+/// Whether a shell command tests or builds the work — the commands whose
+/// failure says the code is broken, as opposed to a `grep` that found nothing
+/// or a `git diff --quiet` that found a change, which also exit non-zero.
+///
+/// ponytail: a list of the usual runners, so a project that checks itself
+/// through a script of its own (`./ci.sh`) is never seen as checked.
+fn is_check(command: &str) -> bool {
+    const CHECKS: [&str; 20] = [
+        "cargo test",
+        "cargo nextest",
+        "cargo build",
+        "cargo check",
+        "cargo clippy",
+        "pytest",
+        "vitest",
+        "jest",
+        "go test",
+        "go build",
+        "go vet",
+        "npm test",
+        "npm run test",
+        "npm run build",
+        "pnpm test",
+        "yarn test",
+        "tsc",
+        "mypy",
+        "phpunit",
+        "make",
+    ];
+    let cmd = command.to_ascii_lowercase();
+    cmd.split(['&', ';', '|']).any(|part| {
+        // Past the wrappers a check is often run under — `RUST_LOG=x`,
+        // `timeout 60`, `env`, `nice` — but never into another command's
+        // arguments, where `grep cargo test` would read as a test run.
+        let mut rest = part.trim_start();
+        loop {
+            let word = rest.split_whitespace().next().unwrap_or("");
+            let wrapper = word.contains('=')
+                || matches!(word, "env" | "nice" | "time" | "timeout" | "command")
+                // `timeout`'s duration: `60`, `5m`.
+                || word.starts_with(|c: char| c.is_ascii_digit());
+            if !wrapper {
+                break;
+            }
+            rest = rest[word.len()..].trim_start();
+        }
+        CHECKS.iter().any(|c| {
+            rest.strip_prefix(c)
+                .is_some_and(|after| after.is_empty() || after.starts_with(' '))
+        })
+    })
+}
+
 fn is_edit(tool: &str) -> bool {
     EDIT_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(tool))
 }
@@ -207,6 +260,8 @@ fn is_read(tool: &str) -> bool {
 pub struct Analysis {
     pub provider: Provider,
     pub label: String,
+    /// The session's last activity, for `--since`.
+    pub last_active: String,
     pub model: String,
     pub cost: f64,
     /// False where the provider records no usage, so a zero cost means "not
@@ -246,8 +301,50 @@ pub struct Analysis {
     pub files_reworked: u64,
     /// How long the agent was working, in milliseconds — see [`active_ms`].
     pub active_ms: u64,
+    /// The session split by which agent did the work — see [`Slice`]. One
+    /// entry for a session with no subagents.
+    pub slices: Vec<Slice>,
     /// The per-tool history hit its cap, so every count here is a floor.
     pub truncated: bool,
+}
+
+/// One agent's share of a session: the main agent, or one subagent.
+///
+/// A session that delegates is several models at once, and crediting all of it
+/// to whichever cost the most put a subagent's edits, retries and minutes under
+/// its parent's name — Opus rated on the work of the Haiku it handed a search
+/// to. Each agent's calls carry who made them, and each subagent records its
+/// own model and cost, so the work splits cleanly.
+///
+/// The responsibility does not. A parent that briefs a subagent, waits for it
+/// and folds the result back in did real work towards those files, and its
+/// tokens paid for it. So the subagent is credited with what it wrote — its
+/// 1-shot rate is its own — while the parent's cost and time are spread over
+/// its own files *and* the ones it delegated ([`Slice::delegated`]). Leaving
+/// the delegated files out would rate a parent that only orchestrates as having
+/// spent money on nothing.
+#[derive(Debug, Clone, Default)]
+pub struct Slice {
+    /// `None` for the main agent, else the subagent's id.
+    pub origin: Option<String>,
+    pub model: String,
+    pub cost: f64,
+    pub calls: u64,
+    pub edits: u64,
+    pub files_edited: u64,
+    pub files_one_shot: u64,
+    /// Filled by [`mark_rework`].
+    pub files_reworked: u64,
+    pub active_ms: u64,
+    /// The agent edited something, and the last test or build it ran after
+    /// its final edit failed: it stopped with the work broken. False where
+    /// nothing was checked after the last edit, which is "unknown", not "red".
+    pub ended_red: bool,
+    /// Main agent only: distinct files its subagents wrote on a *different*
+    /// model, and that it did not also write itself. A subagent on the parent's
+    /// own model folds into the same row, where counting its files here as well
+    /// would count them twice.
+    pub delegated: u64,
 }
 
 /// One file's edits within one session.
@@ -261,6 +358,9 @@ pub struct Edited {
     /// in answer. The language-free half of "this edit was a fix" — see
     /// [`mark_rework`].
     pub after_failure: bool,
+    /// The agent that edited it last — `None` for the main agent — which is
+    /// who rework is charged to.
+    pub by: Option<String>,
 }
 
 /// Every tool call in one session, oldest first.
@@ -326,6 +426,9 @@ fn active_ms(timeline: &[(&str, &ToolDetail)]) -> u64 {
 /// one, because the tool calls cannot be attributed per model — the transcript
 /// records which model billed a request, not which model asked for a given
 /// call. `compare` says so on its output rather than pretending otherwise.
+///
+/// What `optimize` names a session by. `compare` splits subagents off first —
+/// see [`Slice`] — and this is only the main agent's fallback there.
 fn dominant_model(data: &SessionData) -> String {
     data.model_breakdown
         .iter()
@@ -432,6 +535,27 @@ fn classify(data: &SessionData, timeline: &[(&str, &ToolDetail)]) -> Task {
 }
 
 impl Analysis {
+    /// The session by agent, or the whole of it as one main agent when it was
+    /// never split — an `Analysis` built by hand rather than by [`analyse`].
+    pub fn agent_slices(&self) -> Vec<Slice> {
+        if !self.slices.is_empty() {
+            return self.slices.clone();
+        }
+        vec![Slice {
+            origin: None,
+            model: self.model.clone(),
+            cost: self.cost,
+            calls: self.calls,
+            edits: self.edits,
+            files_edited: self.files_edited,
+            files_one_shot: self.files_one_shot,
+            files_reworked: self.files_reworked,
+            active_ms: self.active_ms,
+            ended_red: false,
+            delegated: 0,
+        }]
+    }
+
     /// Every write this session made, however it made it.
     ///
     /// The thing to ask before saying a session changed nothing. `edits` alone
@@ -471,6 +595,7 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
     let mut out = Analysis {
         provider: session.provider,
         label: session.abbrev_label.clone(),
+        last_active: session.last_active.clone(),
         model: dominant_model(data),
         cost: data.costs.total,
         cost_available: session.cost_available,
@@ -481,6 +606,7 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         cache_read: cached,
         input_total: billed_in,
         active_ms: active_ms(&timeline),
+        slices: Vec::new(),
         edited: HashMap::new(),
         files_reworked: 0,
         edits: 0,
@@ -525,8 +651,10 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
                         first: detail.ts.clone(),
                         last: String::new(),
                         after_failure,
+                        by: None,
                     });
                 span.last.clone_from(&detail.ts);
+                span.by.clone_from(&detail.origin);
                 edit_order.entry(file).or_default().push(i);
             }
         } else if is_shell(tool) {
@@ -566,7 +694,129 @@ pub fn analyse(session: &Session, data: &SessionData) -> Analysis {
         }
     }
 
+    out.slices = slices(session, data, &timeline, out.records_outcomes);
     out
+}
+
+/// Split a session by the agent that did each part — see [`Slice`].
+fn slices(
+    session: &Session,
+    data: &SessionData,
+    timeline: &[(&str, &ToolDetail)],
+    outcomes: bool,
+) -> Vec<Slice> {
+    let sub_cost: f64 = data.subagents.iter().map(|s| s.cost).sum();
+    let mut out = vec![Slice {
+        origin: None,
+        model: main_model(data),
+        cost: (data.costs.total - sub_cost).max(0.0),
+        ..Default::default()
+    }];
+    for sub in &data.subagents {
+        let model = match sub.model.as_str() {
+            "" | "?" => out[0].model.clone(),
+            m => m.to_string(),
+        };
+        out.push(Slice {
+            origin: Some(sub.agent_id.clone()),
+            model,
+            cost: sub.cost,
+            ..Default::default()
+        });
+    }
+
+    // Each agent's own calls, in order, and the files each edited.
+    let mut files: Vec<HashSet<String>> = vec![HashSet::new(); out.len()];
+    for (k, slice) in out.iter_mut().enumerate() {
+        let own: Vec<(&str, &ToolDetail)> = timeline
+            .iter()
+            .copied()
+            .filter(|(_, d)| d.origin == slice.origin)
+            .collect();
+        slice.calls = own.len() as u64;
+        // The parent's clock is the session's: while a subagent works the
+        // parent is waiting on it, and a job that took an hour end to end took
+        // its owner an hour however it was divided up. Counting only the
+        // parent's own calls lost every background subagent's run to the idle
+        // cap. A subagent's clock is its own calls.
+        slice.active_ms = match slice.origin {
+            None => active_ms(timeline),
+            Some(_) => active_ms(&own),
+        };
+        let mut order: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, (tool, detail)) in own.iter().enumerate() {
+            if is_edit(tool) {
+                slice.edits += 1;
+                for file in edited_files(detail) {
+                    let file =
+                        checkout_path(&crate::collide::normalise(file, &session.label_source));
+                    order.entry(file).or_default().push(i);
+                }
+            }
+        }
+        // Whether the last check after the last edit failed. Only where the
+        // harness records outcomes: without them every check reads as passed.
+        if outcomes && let Some(last_edit) = own.iter().rposition(|(t, _)| is_edit(t)) {
+            slice.ended_red = own[last_edit + 1..]
+                .iter()
+                .rfind(|(tool, d)| is_shell(tool) && is_check(d.full.as_deref().unwrap_or(&d.d)))
+                .is_some_and(|(_, d)| d.failed);
+        }
+        for (file, positions) in order {
+            slice.files_edited += 1;
+            if !positions
+                .windows(2)
+                .any(|w| is_retry(&own, w[0], w[1], outcomes))
+            {
+                slice.files_one_shot += 1;
+            }
+            files[k].insert(file);
+        }
+    }
+
+    let main_model = out[0].model.clone();
+    let delegated: HashSet<&String> = out
+        .iter()
+        .zip(&files)
+        .skip(1)
+        .filter(|(slice, _)| slice.model != main_model)
+        .flat_map(|(_, f)| f)
+        .filter(|f| !files[0].contains(*f))
+        .collect();
+    out[0].delegated = delegated.len() as u64;
+
+    // A subagent that made no call and cost nothing is a row of zeros.
+    let mut k = 0;
+    out.retain(|s| {
+        k += 1;
+        k == 1 || s.calls > 0 || s.cost > 0.0
+    });
+    out
+}
+
+/// The main agent's model: the one that cost the most once every subagent's
+/// spend is taken off the model it ran on.
+///
+/// Without the subtraction a parent that delegated heavily to a cheaper model
+/// could be named after that model, because the breakdown is the whole
+/// session's.
+fn main_model(data: &SessionData) -> String {
+    let mut by_model: HashMap<&str, f64> = data
+        .model_breakdown
+        .iter()
+        .map(|m| (m.model.as_str(), m.total))
+        .collect();
+    for sub in &data.subagents {
+        if let Some(c) = by_model.get_mut(sub.model.as_str()) {
+            *c -= sub.cost;
+        }
+    }
+    by_model
+        .into_iter()
+        .filter(|(m, c)| !m.is_empty() && *c > 1e-9)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(m, _)| m.to_string())
+        .unwrap_or_else(|| dominant_model(data))
 }
 
 /// The files one edit call wrote: every one a patch names, or the one the
@@ -655,6 +905,10 @@ fn checkout_path(path: &str) -> String {
 /// still be blamed on it.
 const REWORK_WINDOW_SECS: i64 = 24 * 60 * 60;
 
+/// Who last wrote a file in one session, and when: the session's index, the
+/// agent (`None` for the main one), and the Unix second of that last edit.
+type Writer<'a> = (usize, Option<&'a str>, i64);
+
 /// Charge each file a later fix session edited to the session that wrote it
 /// last.
 ///
@@ -681,16 +935,19 @@ const REWORK_WINDOW_SECS: i64 = 24 * 60 * 60;
 /// began charges its first edit to whoever wrote that file last.
 pub fn mark_rework(analyses: &mut [Analysis]) {
     use crate::util::parse_ts;
-    // path -> (session, last edit) for every session that edited it.
-    let mut writers: HashMap<&str, Vec<(usize, i64)>> = HashMap::new();
+    // path -> every (session, agent, last edit) that wrote it.
+    let mut writers: HashMap<&str, Vec<Writer>> = HashMap::new();
     for (i, a) in analyses.iter().enumerate() {
         for (path, e) in &a.edited {
             if let Some(t) = parse_ts(&e.last) {
-                writers.entry(path).or_default().push((i, t.timestamp()));
+                writers
+                    .entry(path)
+                    .or_default()
+                    .push((i, e.by.as_deref(), t.timestamp()));
             }
         }
     }
-    let mut charged: HashSet<(usize, &str)> = HashSet::new();
+    let mut charged: HashSet<(usize, &str, Option<&str>)> = HashSet::new();
     for (j, fix) in analyses.iter().enumerate() {
         let debugging = fix.task == Task::Debugging;
         for (path, e) in &fix.edited {
@@ -702,20 +959,34 @@ pub fn mark_rework(analyses: &mut [Analysis]) {
             };
             let blamed = writers.get(path.as_str()).and_then(|ws| {
                 ws.iter()
-                    .filter(|&&(i, t)| i != j && t <= at && at - t <= REWORK_WINDOW_SECS)
-                    .max_by_key(|&&(_, t)| t)
+                    .filter(|&&(i, _, t)| i != j && t <= at && at - t <= REWORK_WINDOW_SECS)
+                    .max_by_key(|&&(_, _, t)| t)
             });
-            if let Some(&(i, _)) = blamed {
-                charged.insert((i, path.as_str()));
+            if let Some(&(i, by, _)) = blamed {
+                charged.insert((i, path.as_str(), by));
             }
         }
     }
-    let mut counts = vec![0u64; analyses.len()];
-    for (i, _) in charged {
-        counts[i] += 1;
+    // Owned before the counts go back in, since `charged` borrows the set.
+    let charges: Vec<(usize, Option<String>)> = charged
+        .into_iter()
+        .map(|(i, _, by)| (i, by.map(str::to_string)))
+        .collect();
+    for a in analyses.iter_mut() {
+        a.files_reworked = 0;
+        for s in &mut a.slices {
+            s.files_reworked = 0;
+        }
     }
-    for (a, n) in analyses.iter_mut().zip(counts) {
-        a.files_reworked = n;
+    for (i, by) in charges {
+        let a = &mut analyses[i];
+        a.files_reworked += 1;
+        // The agent that wrote it, or the main agent when that subagent's
+        // slice was dropped for having done nothing else.
+        let at = a.slices.iter().position(|s| s.origin == by).unwrap_or(0);
+        if let Some(s) = a.slices.get_mut(at) {
+            s.files_reworked += 1;
+        }
     }
 }
 
@@ -758,10 +1029,44 @@ pub fn substantive(a: &Analysis) -> bool {
 }
 
 pub fn only(analyses: &[Analysis], provider: Option<Provider>) -> Vec<&Analysis> {
+    since(analyses, provider, None)
+}
+
+/// Sessions of `provider`, active at or after `cutoff`.
+///
+/// A session with no timestamp at all is kept: dropping it would make a filter
+/// meant to narrow the window silently discard whatever cctop could not date.
+pub fn since(
+    analyses: &[Analysis],
+    provider: Option<Provider>,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<&Analysis> {
     analyses
         .iter()
         .filter(|a| provider.is_none_or(|p| a.provider == p))
+        .filter(|a| {
+            cutoff.is_none_or(|c| crate::util::parse_ts(&a.last_active).is_none_or(|t| t >= c))
+        })
         .collect()
+}
+
+/// `--since`: a span back from now (`90m`, `24h`, `7d`, `2w`) or a date
+/// (`2026-09-01`, midnight UTC).
+fn parse_since(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let now = chrono::Utc::now();
+    if let Ok(day) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return day.and_hms_opt(0, 0, 0).map(|t| t.and_utc());
+    }
+    let unit = value.chars().last()?;
+    let n: i64 = value[..value.len() - unit.len_utf8()].parse().ok()?;
+    let span = match unit {
+        'm' => chrono::Duration::minutes(n),
+        'h' => chrono::Duration::hours(n),
+        'd' => chrono::Duration::days(n),
+        'w' => chrono::Duration::weeks(n),
+        _ => return None,
+    };
+    (n > 0).then(|| now - span)
 }
 
 pub const HELP: &str = "\
@@ -769,8 +1074,8 @@ cctop optimize — what your sessions spent and did not get back
 cctop compare  — how each model behaved on the work you gave it
 
 USAGE:
-  cctop optimize [--provider NAME] [--json]
-  cctop compare  [--provider NAME] [--rate USD_PER_HOUR] [--json]
+  cctop optimize [--provider NAME] [--since SPAN] [--json]
+  cctop compare  [--provider NAME] [--since SPAN] [--rate USD_PER_HOUR] [--json]
 
 Both re-read every transcript rather than using the session cache, because the
 individual tool calls are the thing they reason about and those are never
@@ -779,6 +1084,9 @@ cached. Expect them to take a few seconds on a large machine.
 OPTIONS:
   --provider NAME  Only this harness: claude, codex, cursor, gemini, opencode,
                    pi, windsurf.
+  --since SPAN     Only sessions active in the last SPAN — 24h, 7d, 2w — or
+                   since a date, 2026-09-01. Models change, and so does what
+                   you give them; last month's sessions blur this week's.
   --rate USD       compare only: what an hour of agent time is worth to you.
                    Adds a column of dollars plus time per file, and ranks by
                    it — a free model that takes a day can lose to a $10 one
@@ -798,6 +1106,7 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
     }
 
     let mut provider = None;
+    let mut cutoff = None;
     let mut rate = None;
     let mut json = false;
     let mut args = argv.iter();
@@ -808,6 +1117,15 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
                 Some(p) => provider = Some(p),
                 None => {
                     eprintln!("cctop {which}: --provider needs a harness name; see --help");
+                    return 2;
+                }
+            },
+            "--since" => match args.next().and_then(|v| parse_since(v)) {
+                Some(c) => cutoff = Some(c),
+                None => {
+                    eprintln!(
+                        "cctop {which}: --since needs a span or a date, e.g. 7d or 2026-09-01"
+                    );
                     return 2;
                 }
             },
@@ -838,7 +1156,7 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
     crate::pricing::refresh_pricing_blocking();
 
     let analyses = scan(Plan::Retail);
-    let selected = only(&analyses, provider);
+    let selected = since(&analyses, provider, cutoff);
 
     match (which, json) {
         ("optimize", false) => print!("{}", optimize::report(&selected)),
@@ -1024,10 +1342,184 @@ mod tests {
                     first: ts.to_string(),
                     last: ts.to_string(),
                     after_failure: false,
+                    by: None,
                 },
             );
         }
         a
+    }
+
+    /// A parent on one model that hands the editing to a subagent on another.
+    /// The subagent is credited with its own work; the parent with its own
+    /// edits plus the files it delegated, which its cost is spread over.
+    fn delegating_session() -> Analysis {
+        let sub_call = |name: &str, arg: &str, ts: &str, failed: bool| {
+            let (n, mut d) = call(name, arg, ts);
+            d.origin = Some("agent-1".into());
+            d.failed = failed;
+            (n, d)
+        };
+        let calls = vec![
+            call("Edit", "/p.rs", "2026-01-01T10:00:00Z"),
+            call("Task", "go", "2026-01-01T10:01:00Z"),
+            sub_call("Edit", "/a.rs", "2026-01-01T10:02:00Z", false),
+            sub_call("Bash", "cargo test", "2026-01-01T10:03:00Z", true),
+            sub_call("Edit", "/a.rs", "2026-01-01T10:04:00Z", false),
+            sub_call("Edit", "/b.rs", "2026-01-01T10:05:00Z", false),
+            // The parent writing the subagent's file is the parent's own edit,
+            // and that file is no longer one it merely delegated.
+            call("Edit", "/b.rs", "2026-01-01T10:06:00Z"),
+        ];
+        let mut data = data_of(&calls);
+        let breakdown = |model: &str, total: f64| crate::session::ModelBreakdown {
+            model: model.into(),
+            tokens: Default::default(),
+            costs: Default::default(),
+            total,
+        };
+        data.model_breakdown = vec![breakdown("big", 8.0), breakdown("small", 3.0)];
+        data.costs.total = 11.0;
+        data.subagents = vec![crate::session::Subagent {
+            agent_id: "agent-1".into(),
+            agent_type: "general-purpose".into(),
+            description: String::new(),
+            model: "small".into(),
+            started_at: None,
+            last_active: None,
+            duration_ms: 0,
+            status: crate::session::SubagentStatus::Done,
+            cost: 3.0,
+            tool_count: 4,
+            tool_use_id: None,
+            context: None,
+            ghost: false,
+        }];
+        let mut s = Session::new(Provider::Claude, "sid".into());
+        s.cost_available = true;
+        analyse(&s, &data)
+    }
+
+    #[test]
+    fn a_subagent_is_credited_to_its_own_model() {
+        let a = delegating_session();
+        assert_eq!(a.slices.len(), 2);
+        let (main, sub) = (&a.slices[0], &a.slices[1]);
+
+        assert_eq!(main.model, "big");
+        assert_eq!(main.cost, 8.0, "the session's cost less the subagent's");
+        assert_eq!((main.files_edited, main.files_one_shot), (2, 2));
+        assert_eq!(main.delegated, 1, "a.rs; b.rs the parent wrote itself");
+        assert_eq!(main.calls, 3);
+
+        assert_eq!(sub.model, "small");
+        assert_eq!(sub.cost, 3.0);
+        assert_eq!(sub.files_edited, 2);
+        assert_eq!(
+            sub.files_one_shot, 1,
+            "a.rs was retried after its test failed"
+        );
+        assert_eq!(sub.active_ms, 3 * 60_000);
+    }
+
+    /// A subagent on its parent's own model lands in the parent's row, so its
+    /// files must not also be counted as delegated there.
+    #[test]
+    fn a_subagent_on_the_parents_model_is_not_delegation() {
+        let mut a = delegating_session();
+        for s in &mut a.slices {
+            s.model = "big".into();
+        }
+        a.slices[0].delegated = 0;
+        let table = compare::rows(&[&a], None);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].files_delegated, 0);
+        assert_eq!(
+            table[0].files_edited, 4,
+            "p, b by the parent; a, b by the subagent"
+        );
+        assert_eq!(table[0].sessions, 1, "one session, however many agents");
+        assert_eq!(
+            table[0].active_ms, a.slices[0].active_ms,
+            "the parent's time already covers its subagent's"
+        );
+    }
+
+    #[test]
+    fn the_parent_spreads_its_cost_over_what_it_delegated() {
+        let a = delegating_session();
+        let table = compare::rows(&[&a], None);
+        let big = table.iter().find(|r| r.model == "big").unwrap();
+        let small = table.iter().find(|r| r.model == "small").unwrap();
+        assert_eq!(big.files_produced(), 3);
+        assert_eq!(big.per_edit(), Some(8.0 / 3.0));
+        assert_eq!(small.per_edit(), Some(3.0 / 2.0));
+        assert_eq!(big.one_shot(), None, "two files of its own is not a rate");
+    }
+
+    /// Red means the last check after the final edit failed. A failing grep
+    /// is not a check, and a session that never checked is unknown, not red.
+    #[test]
+    fn an_agent_that_stopped_on_a_failing_check_ended_red() {
+        let red = analysed(
+            Provider::Claude,
+            &[
+                call("Edit", "/a.rs", "01"),
+                call("Bash", "cargo test", "02"),
+                call("Edit", "/a.rs", "03"),
+                failing("Bash", "cargo test 2>&1 | tail -5", "04"),
+                failing("Bash", "grep -n nothing src/a.rs", "05"),
+            ],
+        );
+        assert!(red.slices[0].ended_red);
+
+        let fixed = analysed(
+            Provider::Claude,
+            &[
+                call("Edit", "/a.rs", "01"),
+                failing("Bash", "cargo test", "02"),
+                call("Bash", "cargo test", "03"),
+            ],
+        );
+        assert!(!fixed.slices[0].ended_red, "the last check passed");
+
+        let unchecked = analysed(
+            Provider::Claude,
+            &[
+                failing("Bash", "cargo test", "01"),
+                call("Edit", "/a.rs", "02"),
+            ],
+        );
+        assert!(!unchecked.slices[0].ended_red, "nothing ran after the edit");
+
+        assert!(is_check("cd x && cargo clippy --all-targets"));
+        assert!(is_check("make"));
+        assert!(is_check("RUST_LOG=debug timeout 60 cargo test -q"));
+        assert!(!is_check("makefile-lint"), "a check is a whole word");
+        assert!(!is_check("grep -n cargo test src/a.rs | head"));
+        assert!(!is_check("git diff --quiet"));
+    }
+
+    #[test]
+    fn since_takes_a_span_or_a_date() {
+        let now = chrono::Utc::now();
+        let week = parse_since("7d").unwrap();
+        assert!((now - week - chrono::Duration::days(7)).num_seconds().abs() < 5);
+        assert_eq!(
+            parse_since("2026-09-01").unwrap().to_rfc3339(),
+            "2026-09-01T00:00:00+00:00"
+        );
+        for bad in ["", "d", "7", "7y", "-3d", "0d", "yesterday"] {
+            assert!(parse_since(bad).is_none(), "{bad}");
+        }
+
+        let mut old = analysed(Provider::Claude, &[]);
+        old.last_active = "2020-01-01T00:00:00Z".into();
+        let mut undated = analysed(Provider::Claude, &[]);
+        undated.last_active = String::new();
+        let set = [old, undated];
+        let kept = since(&set, None, Some(week));
+        assert_eq!(kept.len(), 1, "the old one goes, the undated one stays");
+        assert!(kept[0].last_active.is_empty());
     }
 
     /// A worktree's file is the main checkout's file, for matching edits
