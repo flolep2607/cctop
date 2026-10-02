@@ -90,6 +90,33 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(hook::emit(&argv[2..]));
     }
 
+    // Piped into `head`, `jq` or `less` that stops reading early, every
+    // `println!` in the non-interactive commands panics on the closed pipe and
+    // prints a backtrace hint under output that was otherwise fine — `-l`,
+    // `--json`, `log` and `why` all did. Restoring SIGPIPE's default would
+    // also fix it, and would also kill the TUI the first time a child's pipe
+    // closed under it, so instead exactly that one panic is answered with a
+    // quiet exit and every other panic still reaches the usual hook. After
+    // `hook`, which installs its own and must never be changed by this.
+    {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // A formatted panic carries a `String`, a literal one a `&str`.
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            let closed = message.is_some_and(|m| {
+                m.starts_with("failed printing to stdout") && m.contains("Broken pipe")
+            });
+            if closed {
+                std::process::exit(0);
+            }
+            previous(info);
+        }));
+    }
+
     // `cctop doctor` is intercepted here for the same reason `run` and `attach`
     // are: cctop takes no positionals, so clap would answer a bare word with a
     // usage error. Before the `is_command` check below, so a stray `doctor`
