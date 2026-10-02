@@ -32,6 +32,7 @@ preceded these; where the two disagree, this table is what happened.
 | #15–#18 | Corpus fingerprint, settle window, snapshot cache | **Built** in-process: `src/fingerprint.rs`, warm walk 90–158 ms → 12–14 ms. No persisted snapshot — see the note under #15 |
 | #21 | One dedup set across providers | **Built.** Real cause turned out to be double discovery, not harness mirroring — see the note under #21 |
 | #26 | cctop-authored notes per harness | **Built** as `docs/providers/`. Four findings fell out of it — [follow-ups.md](follow-ups.md) |
+| #3 | `cctop yield` — did the spend ship | **Built.** Commits matched by path overlap inside each session's window, not by clock alone; shipped, reverted, unmerged, uncommitted, in progress. See [docs/yield.md](../docs/yield.md) |
 | #5 | Task classification | **Built** as the prerequisite for both. Ten categories, tool-first |
 | — | Subscription burn | **Built** as `cctop burn` plus a Limits-pane figure. Not from codeburn at all — see [subscription-burn.md](subscription-burn.md) |
 

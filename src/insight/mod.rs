@@ -17,6 +17,7 @@
 
 pub mod compare;
 pub mod optimize;
+pub mod ship;
 
 use crate::pricing::{Plan, Provider};
 use crate::session::{Session, SessionData, ToolDetail};
@@ -1098,10 +1099,13 @@ Both read and print. Neither writes anything, to your configuration or
 anywhere else.
 ";
 
-/// `cctop optimize` and `cctop compare`.
+/// `cctop optimize`, `cctop compare` and `cctop yield`.
 pub fn run(which: &str, argv: &[String]) -> i32 {
     if argv.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{HELP}");
+        match which {
+            "yield" => print!("{}", ship::HELP),
+            _ => print!("{HELP}"),
+        }
         return 0;
     }
 
@@ -1159,11 +1163,18 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
     let selected = since(&analyses, provider, cutoff);
 
     match (which, json) {
+        ("yield", _) => {
+            let report = ship::build(&analyses, &selected, chrono::Utc::now().timestamp());
+            match json {
+                true => println!("{}", ship::as_json(&report)),
+                false => print!("{}", ship::report(&report)),
+            }
+        }
         ("optimize", false) => print!("{}", optimize::report(&selected)),
         ("compare", false) => print!("{}", compare::report_at(&selected, rate)),
         ("optimize", true) => println!("{}", optimize::as_json(&selected)),
         (_, true) => println!("{}", compare::as_json(&selected, rate)),
-        _ => unreachable!("only optimize and compare reach here"),
+        _ => unreachable!("only optimize, compare and yield reach here"),
     }
     0
 }

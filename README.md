@@ -128,6 +128,9 @@ tool calls that failed and were billed anyway — each with what it cost and
 whether that figure was measured or estimated. `cctop compare` puts your models
 side by side on your own work: how often each got a file right first time, what
 a changed file cost and how long it took — `--rate 60` prices that time too. See [what it cost you for](docs/optimize-and-compare.md).
+`cctop yield` asks the repository what became of it: which sessions' work is on
+the default branch, which was left on a side branch, and which was never
+committed. See [did the spend ship](docs/yield.md).
 
 **And it can do all the watching in a browser.** `cctop serve` streams the same
 table to a page — useful on a phone, where the sessions waiting on you can find
@@ -137,6 +140,7 @@ loopback by default. See [In a browser](docs/serve.md).
 
 - [Reading the table](docs/the-table.md) — every column, the status dot, filtering, and the full key list
 - [What it cost you for](docs/optimize-and-compare.md) — `cctop optimize` and `cctop compare`, and how honest each figure is
+- [Did the spend ship](docs/yield.md) — `cctop yield`, which sessions' work reached the default branch, and how a commit is matched to a session
 - [What the subscription bought](docs/subscription-burn.md) — `cctop burn`, and why an unused allowance is a ceiling rather than a measurement
 - [Driving agents](docs/driving-agents.md) — typing into sessions, resuming, tabs and splits, notifications, handoff
 - [In a browser](docs/serve.md) — `cctop serve`, the session report, and reaching it from a phone
