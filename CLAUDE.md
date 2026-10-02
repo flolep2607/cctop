@@ -25,7 +25,10 @@ rather than racing: whoever is further along should finish first.
 ## Verify the way CI does
 
 CI sets `RUSTFLAGS: -D warnings`, so a warning is a build failure. Clippy output
-that looks advisory locally is fatal there. Run the whole gate before pushing:
+that looks advisory locally is fatal there. The Rust version is pinned in
+`rust-toolchain.toml`, which rustup and CI both read, so local clippy is CI's
+clippy — moving to a newer Rust is a pull request that changes that one line.
+Run the whole gate before pushing:
 
 ```bash
 export RUSTFLAGS="-D warnings"
