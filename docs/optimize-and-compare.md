@@ -18,6 +18,9 @@ Neither writes anything — not to your configuration, not anywhere. They read
 transcripts, and `optimize` reads Claude Code's configuration to say where
 something it found is defined, and print.
 
+Whether the work that money bought was kept is a question for the repository,
+and [`cctop yield`](yield.md) asks it.
+
 ## Why they are slower than everything else
 
 They re-read every transcript. The individual tool calls, with their arguments,

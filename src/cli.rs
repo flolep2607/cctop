@@ -37,6 +37,8 @@ Commands:
                           Reads only.
   cctop compare           How each model did on the work you actually gave
                           it — one-shot rate, cost per file, cache hit.
+  cctop yield             Whether what each session spent ended up in a
+                          commit on the default branch. Reads only.
   cctop burn              What your subscription windows were paid for and
                           did not use.
   cctop log               Print the event stream CCTOP_LOG writes; -f follows
@@ -58,7 +60,7 @@ Each command takes --help for the details.";
                       cctop attach [pid]\n       \
                       cctop as <account> <agent> [args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
-                      cctop optimize | compare | burn | log\n       \
+                      cctop optimize | compare | yield | burn | log\n       \
                       cctop wait <session> [--until …] [--timeout …]\n       \
                       cctop why [session]\n       \
                       cctop doctor",

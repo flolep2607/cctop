@@ -492,8 +492,8 @@ pub fn report(analyses: &[&Analysis]) -> String {
     out.push('\n');
     let _ = writeln!(
         out,
-        "  {} sessions  ·  {}  ·  {}",
-        live.len(),
+        "  {}  ·  {}  ·  {}",
+        plural(live.len(), "session"),
         plural(found.len(), "finding"),
         match recoverable > 0.0 {
             true => format!(
@@ -566,9 +566,11 @@ pub fn report(analyses: &[&Analysis]) -> String {
     for (task, n, cost) in by_task(&live) {
         let _ = writeln!(
             out,
-            "  {:<14} {:>4} sessions  {:>9}",
+            // Padded to the plural's width so the dollar column stays put.
+            "  {:<14} {:>4} {:<8}  {:>9}",
             task.as_str(),
             n,
+            if n == 1 { "session" } else { "sessions" },
             crate::util::adaptive_usd(cost)
         );
     }
