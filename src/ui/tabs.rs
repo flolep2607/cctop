@@ -787,7 +787,7 @@ impl Tab {
             // survives this one restarting or having been closed at the time;
             // and `idle()` below is nobody having heard anything, reading a
             // clock instead.
-            let reported = shared.pid.and_then(&known).or_else(|| shared.recorded());
+            let reported = shared.pid.and_then(known).or_else(|| shared.recorded());
             return match reported {
                 Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // The held-prompt shape, read off rmux's record of the session
