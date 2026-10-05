@@ -122,8 +122,17 @@ fn is_opencode(word: &str) -> bool {
 /// run is changed — somebody who wants their tabs back has them back by typing
 /// `opencode` themselves.
 fn tabs_off() -> String {
-    let mut root = std::env::var(CLI_CONFIG_ENV)
-        .ok()
+    tabs_off_from(&|key| std::env::var(key).ok())
+}
+
+/// [`tabs_off`] with the environment handed in rather than read.
+///
+/// A test that wants somebody else's inline settings must not put them in the
+/// process environment to get them: `setenv` beside another thread's `getenv`
+/// is undefined behaviour, and the runner has a thread per test.
+fn tabs_off_from(env: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut root = env(CLI_CONFIG_ENV)
+        .as_deref()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
@@ -204,10 +213,9 @@ mod tests {
     #[test]
     fn an_inline_tab_setting_of_the_users_own_survives() {
         let existing = r#"{"session":{"scrollbar":false},"tabs":{"layout":"vertical"}}"#;
-        // SAFETY: single-threaded test, and the variable is read straight back.
-        unsafe { std::env::set_var(CLI_CONFIG_ENV, existing) };
-        let merged: serde_json::Value = serde_json::from_str(&tabs_off()).unwrap();
-        unsafe { std::env::remove_var(CLI_CONFIG_ENV) };
+        let merged: serde_json::Value =
+            serde_json::from_str(&tabs_off_from(&|key| (key == CLI_CONFIG_ENV).then(|| existing.to_string())))
+                .unwrap();
         assert_eq!(merged["tabs"]["mode"], "off");
         assert_eq!(merged["tabs"]["layout"], "vertical");
         assert_eq!(merged["session"]["scrollbar"], false);
@@ -217,9 +225,10 @@ mod tests {
     /// `mode` would leave the file saying both on and off.
     #[test]
     fn the_legacy_boolean_gives_way_to_the_mode_it_became() {
-        unsafe { std::env::set_var(CLI_CONFIG_ENV, r#"{"tabs":{"enabled":true}}"#) };
-        let merged: serde_json::Value = serde_json::from_str(&tabs_off()).unwrap();
-        unsafe { std::env::remove_var(CLI_CONFIG_ENV) };
+        let existing = r#"{"tabs":{"enabled":true}}"#;
+        let merged: serde_json::Value =
+            serde_json::from_str(&tabs_off_from(&|key| (key == CLI_CONFIG_ENV).then(|| existing.to_string())))
+                .unwrap();
         assert_eq!(merged["tabs"]["mode"], "off");
         assert!(merged["tabs"].get("enabled").is_none());
     }
@@ -227,9 +236,7 @@ mod tests {
     /// An inline value that is not JSON is not something to fail a launch over.
     #[test]
     fn unreadable_inline_settings_are_replaced_rather_than_kept() {
-        unsafe { std::env::set_var(CLI_CONFIG_ENV, "{not json") };
-        let written = tabs_off();
-        unsafe { std::env::remove_var(CLI_CONFIG_ENV) };
+        let written = tabs_off_from(&|key| (key == CLI_CONFIG_ENV).then(|| "{not json".to_string()));
         assert_eq!(written, TABS_OFF);
     }
 }
