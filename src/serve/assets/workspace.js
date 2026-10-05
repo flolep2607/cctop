@@ -127,6 +127,42 @@ function Frame({ src, label }) {
     allow="clipboard-read; clipboard-write" src=${src}></iframe>`;
 }
 
+// What the agent is asking, and the two answers cctop can give for it, between
+// the tile's header and its terminal. The question is shown because Allow
+// without it is approving blind — and the terminal right below has the full
+// menu for anything the two buttons do not cover.
+function PromptBar({ session }) {
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState(null);
+  // A new question is a new prompt: what the last answer said no longer applies.
+  useEffect(() => { setSaid(null); }, [session.asking_for]);
+  const answerable = ANSWERABLE.has(session.provider);
+  const go = async (choice) => {
+    setBusy(true);
+    try {
+      setSaid({ ok: true, text: await answerPrompt(session.session_id, choice) });
+    } catch (e) {
+      setSaid({ ok: false, text: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return html`
+    <div class="promptbar" role="group" aria-label="Permission prompt">
+      <span class="ask trunc" title=${session.asking_for || ""}>
+        ${session.asking_for ? html`<code>${session.asking_for}</code>` : "Waiting on a permission prompt"}
+      </span>
+      ${said && html`<span class=${"said " + (said.ok ? "ok" : "bad")}>${said.text}</span>`}
+      ${answerable && CAN_ACT
+        ? html`
+          <button type="button" class="primary" disabled=${busy} onClick=${() => go("allow")}
+            title="Press the first option — allow this once">Allow</button>
+          <button type="button" disabled=${busy} onClick=${() => go("deny")}
+            title="Press Esc — refuse it">Deny</button>`
+        : html`<span class="faint">answer in the terminal below</span>`}
+    </div>`;
+}
+
 function Tile({ name, tab, session, position, maximized, focused,
                 onClose, onMaximize, onFocus, drag }) {
   const [terminal, setTerminal] = useState(null);
@@ -206,6 +242,7 @@ function Tile({ name, tab, session, position, maximized, focused,
             title="Close this tile — the agent keeps running" aria-label="Close tile">×</button>
         </span>
       </header>
+      ${session && session.running && session.state === "asking" && html`<${PromptBar} session=${session} />`}
       <div class="tilebody">${body}</div>
     </section>`;
 }

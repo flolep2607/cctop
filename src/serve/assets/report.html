@@ -124,7 +124,18 @@
   form.say { display: flex; gap: 8px; padding: 10px; position: sticky; bottom: 10px;
              background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
              box-shadow: var(--shadow); margin-top: 14px; }
+  form.say { flex-wrap: wrap; }
   form.say input { flex: 1 1 auto; font-size: 14px; padding: 8px 10px; background: var(--bg); }
+  /* A whole line of the composer, above the box: the question, then the two
+     answers. In the asking colour's wash, as the dashboard's card is. */
+  form.say .promptbar { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-width: 0;
+                        padding: 6px 8px; border-radius: var(--r);
+                        background: color-mix(in srgb, var(--red) 8%, var(--panel)); font-size: 13px; }
+  form.say .promptbar[hidden] { display: none; }
+  form.say .promptbar .ask { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                             white-space: nowrap; color: var(--dim); }
+  form.say .promptbar code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+  form.say .promptbar button { padding: 4px 14px; flex: 0 0 auto; }
   form.say button { padding: 0 16px; }
 
   /* "New activity" floats rather than sitting in the flow: it is about the
@@ -300,6 +311,35 @@
   .talk[data-density="compact"] .md { font-size: 13px; }
   .talk[data-density="compact"] .md > * { margin-bottom: 5px; }
   .talk[data-density="compact"] details.tool { margin-top: 4px; }
+
+  /* --- the fixed frame -----------------------------------------------------
+     Wider than a phone, the page is an app rather than a document: the header,
+     the subject, the actions and the view buttons stay where they are, and the
+     view below them scrolls by itself — the conversation in #talk, the other
+     views in their own pane. Knowing where you are, opening the terminal and
+     switching to the changes should never need a scroll back up. report.js
+     asks #talk's computed overflow to find what scrolls, so this media query is
+     the only place the choice is made. */
+  @media (min-width: 701px) {
+    body { overflow: hidden; }
+    .wrap { height: 100dvh; display: flex; flex-direction: column; padding-bottom: 10px; }
+    .wrap > header.top { flex: 0 0 auto; }
+    #main { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+    #main > * { flex: 0 0 auto; }
+    .subject { margin-bottom: 10px; }
+    nav.views { margin-bottom: 12px; }
+    #main > .pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 2px 2px; }
+    #main > .pane[hidden] { display: none; }
+    #main > .pane-chat { overflow: hidden; display: flex; flex-direction: column; }
+    .pane-chat > .chattools { flex: 0 0 auto; }
+    .pane-chat > .split { flex: 1 1 auto; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+    .split > .talk { overflow-y: auto; min-height: 0; padding: 0 2px 2px; overscroll-behavior: contain; }
+    .termside { position: static; min-height: 0; }
+    .termside .termframe { height: auto; flex: 1 1 auto; min-height: 0; }
+  }
+  @media (min-width: 701px) and (max-width: 900px) {
+    .split.with-term { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  }
 
   /* --- a phone -------------------------------------------------------------
      The view pills get a scroll lane instead of wrapping into a stack of

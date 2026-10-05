@@ -6,7 +6,9 @@
      routes, so they carry no token of their own. -->
 <meta name="theme-color" content="#16151a">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="manifest" href="/manifest.webmanifest">
+<!-- use-credentials: a manifest is fetched without cookies otherwise, so it
+     reached the token check bare and every load logged a 403 for it. -->
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
 <style>__CCTOP_CSS__
   .totals { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; }
   .totals b { font-family: var(--mono); font-weight: 600; }

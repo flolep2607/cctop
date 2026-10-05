@@ -250,9 +250,8 @@ function answerBox(s) {
   // the highlighted option, "Yes", either way. So those two go to the answer
   // route, which presses the key that harness's own menu names, and only for
   // the harnesses it knows the keys of.
-  const PROMPTED = new Set(["claude", "codex"]);
   const QUICK = {
-    asking: PROMPTED.has(s.provider)
+    asking: ANSWERABLE.has(s.provider)
       ? [["Allow", "answer", { choice: "allow" }], ["Deny", "answer", { choice: "deny" }]]
       : [],
     waiting: [["Continue", "send", { text: "continue" }]],

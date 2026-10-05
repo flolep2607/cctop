@@ -155,6 +155,27 @@ async function ask(url, init) {
   return response;
 }
 
+// --- answering a permission prompt ----------------------------------------
+
+// The harnesses whose prompt menus the server knows the keys of — see
+// `actions::answer`: Allow presses the first option, Deny presses Esc, and for
+// anything else a guessed key could mean the opposite. Every page that draws
+// Allow and Deny asks this first, so a button is never offered that would
+// answer 409.
+const ANSWERABLE = new Set(["claude", "codex"]);
+
+// Allow or deny what a session is asking. Resolves to what the server said
+// ("Allowed", "Denied"); rejects with a sentence worth showing.
+async function answerPrompt(sessionId, choice) {
+  const response = await ask("/api/act/answer/" + encodeURIComponent(sessionId) + QUERY, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ choice }),
+  });
+  const done = await response.json().catch(() => ({}));
+  return done.message || (choice === "allow" ? "Allowed" : "Denied");
+}
+
 // --- the header every page shares ------------------------------------------
 
 // The page links in the header carry the credential this page was opened with,

@@ -902,9 +902,10 @@ async function showEarlier(button) {
       return;
     }
   }
-  const before = document.documentElement.scrollHeight;
+  const box = scroller();
+  const before = box.scrollHeight;
   drawChat();
-  window.scrollTo(0, window.scrollY + document.documentElement.scrollHeight - before);
+  box.scrollTop += box.scrollHeight - before;
 }
 
 // --- talking to the server -------------------------------------------------
@@ -1107,6 +1108,7 @@ function composer(r) {
   const send = el("button", "primary");
   send.type = "submit";
   composerMode(input, send, !!r.running);
+  form.appendChild(promptBar());
   form.appendChild(input);
   form.appendChild(send);
   form.addEventListener("submit", async (event) => {
@@ -1140,6 +1142,35 @@ function composer(r) {
 // live agent, or putting a stopped one back. Shared by the load-time draw and
 // the stream, so a session that starts under you becomes answerable without a
 // reload.
+// Allow and Deny for a permission prompt, riding on the composer because that
+// is where an answer goes and it is already pinned to the bottom of the view.
+// Hidden until the stream says this session is asking; liveComposer shows it
+// with the question, which Allow would otherwise approve unseen.
+function promptBar() {
+  const bar = el("div", "promptbar");
+  bar.id = "promptbar";
+  bar.hidden = true;
+  const ask_ = el("span", "ask");
+  const allow = el("button", "primary", "Allow");
+  const deny = el("button", null, "Deny");
+  for (const [button, choice] of [[allow, "allow"], [deny, "deny"]]) {
+    button.type = "button";
+    button.title = choice === "allow" ? "Press the first option — allow this once" : "Press Esc — refuse it";
+    button.addEventListener("click", async () => {
+      allow.disabled = deny.disabled = true;
+      try {
+        report_said(await answerPrompt(SESSION, choice), true);
+      } catch (e) {
+        report_said(String(e.message || e), false);
+      } finally {
+        allow.disabled = deny.disabled = false;
+      }
+    });
+  }
+  bar.append(ask_, allow, deny);
+  return bar;
+}
+
 function composerMode(input, send, running) {
   input.disabled = !running;
   input.placeholder = running
@@ -1435,10 +1466,24 @@ function chatSig(chat) {
     .join(":");
 }
 
+// What scrolls the conversation. On a screen wide enough for it the page is
+// fixed — header, subject and views stay put — and #talk scrolls on its own; on
+// a phone the page scrolls as a page, because a fixed top would leave the chat
+// a strip. Asked of the stylesheet rather than of the width, so this cannot
+// disagree with the breakpoint that decides it.
+function scroller() {
+  const talk = document.getElementById("talk");
+  if (talk && getComputedStyle(talk).overflowY === "auto") return talk;
+  return document.scrollingElement || document.documentElement;
+}
+const toBottom = () => { const box = scroller(); box.scrollTop = box.scrollHeight; };
+
 // "Following" means within a short scroll of the end: close enough that the
 // reader is clearly watching the tail rather than reading something above it.
-const nearBottom = () =>
-  window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
+const nearBottom = () => {
+  const box = scroller();
+  return box.scrollTop + box.clientHeight >= box.scrollHeight - 80;
+};
 
 // The floating "new activity" pill. Kept inside the chat pane rather than on
 // the page so it hides with the view — a note about the conversation has no
@@ -1448,7 +1493,7 @@ function moreActivity(on) {
     MORE = el("button", "more", "new activity ↓");
     MORE.type = "button";
     MORE.addEventListener("click", () => {
-      window.scrollTo(0, document.documentElement.scrollHeight);
+      toBottom();
       moreActivity(false);
     });
     PANES.chat.appendChild(MORE);
@@ -1458,9 +1503,11 @@ function moreActivity(on) {
 
 // Reaching the bottom is the reader saying they are caught up — the pill's
 // own dismissal, and it has to work for a scroll wheel as much as the click.
-window.addEventListener("scroll", () => {
+// Captured at the document because scroll does not bubble, and the thing
+// scrolling may be the page or #talk depending on the width.
+document.addEventListener("scroll", () => {
   if (MORE && !MORE.hidden && nearBottom()) moreActivity(false);
-}, { passive: true });
+}, { passive: true, capture: true });
 
 // --- finding a turn ---------------------------------------------------------
 
@@ -1726,7 +1773,7 @@ async function refreshChat() {
       mergeChat(chat);
       if (!patchChat(chat.turns || [])) drawChat();
       if (wasNear) {
-        window.scrollTo(0, document.documentElement.scrollHeight);
+        toBottom();
         moreActivity(false);
       } else if ((chat.turns || []).some((t) => t.seq > newest)) {
         moreActivity(true);
@@ -1750,7 +1797,7 @@ async function refreshChat() {
     if (wasNear) {
       // Pinned to the tail: a rebuild must not scroll the newest turn out from
       // under someone watching it arrive.
-      window.scrollTo(0, document.documentElement.scrollHeight);
+      toBottom();
       moreActivity(false);
     } else if (!first) {
       // Scrolled up on purpose: say there is more rather than taking the page
@@ -1800,7 +1847,16 @@ function liveState(s) {
 function liveComposer(s) {
   const form = document.getElementById("say");
   if (!form) return;
-  composerMode(form.querySelector("input"), form.querySelector("button"), !!s.running);
+  composerMode(form.querySelector("input"), form.querySelector("button[type=submit]"), !!s.running);
+  const bar = document.getElementById("promptbar");
+  if (!bar) return;
+  const asking = !!s.running && s.state === "asking" && ANSWERABLE.has(s.provider);
+  bar.hidden = !asking;
+  if (asking) {
+    const ask_ = bar.querySelector(".ask");
+    ask_.replaceChildren(s.asking_for ? el("code", null, s.asking_for) : "Waiting on a permission prompt");
+    ask_.title = s.asking_for || "";
+  }
 }
 
 // One entry of the array every `sessions` event carries.
@@ -1809,7 +1865,9 @@ function applyLive(list) {
             list.find((row) => row.session_id.startsWith(SESSION));
   if (!s) return;
   const was = LIVE;
-  LIVE = { running: !!s.running, state: s.state };
+  // provider and asking_for ride along so the prompt bar can be redrawn from
+  // LIVE when the composer is built after the stream has already spoken.
+  LIVE = { running: !!s.running, state: s.state, provider: s.provider, asking_for: s.asking_for };
   liveState(s);
   liveComposer(s);
   // The poll follows the stream rather than the report's once-read `running`:
@@ -1889,7 +1947,7 @@ function load() {
       if (r.error) main.appendChild(el("div", "banner", "This transcript could not be fully read: " + r.error));
 
       for (const name of ["chat", "changes", "access", "report"]) {
-        const pane = el("div");
+        const pane = el("div", "pane pane-" + name);
         pane.hidden = true;
         PANES[name] = pane;
         main.appendChild(pane);

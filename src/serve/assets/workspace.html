@@ -77,6 +77,17 @@
              border-radius: 4px; padding: 2px 4px; }
   .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  /* The question and its two answers, in the asking colour's wash so it reads
+     as the thing to deal with before anything in the terminal. */
+  .promptbar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px;
+               border-bottom: 1px solid var(--line); font-size: 12px; min-width: 0;
+               background: color-mix(in srgb, var(--red) 8%, var(--panel)); }
+  .promptbar .ask { flex: 1 1 auto; min-width: 0; color: var(--dim); }
+  .promptbar code { font-family: var(--mono); color: var(--ink); }
+  .promptbar button { font-size: 12px; padding: 3px 12px; flex: 0 0 auto; }
+  .promptbar .said { white-space: nowrap; }
+  .promptbar .said.ok { color: var(--green); }
+  .promptbar .said.bad { color: var(--red); white-space: normal; }
   .tilebody { flex: 1 1 auto; min-height: 0; display: flex; background: #060807; }
   .tilebody .empty { margin: auto; padding: 24px; background: transparent; color: var(--faint);
                      display: grid; gap: 12px; justify-items: center; }
