@@ -368,7 +368,12 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
 function Composer({ id, live }: { id: string; live: Session | null }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  if (!CAN_ACT) return null;
+  if (!CAN_ACT)
+    return (
+      <div className="text-muted-foreground shrink-0 border-t px-4 py-2.5 text-xs">
+        View-only link — replies, Allow/Deny and resume need the “serving on” link <code>cctop serve</code> printed first.
+      </div>
+    );
   const running = !!live?.running;
   const asking = running && live?.state === "asking";
   const submit = async (e: React.FormEvent) => {

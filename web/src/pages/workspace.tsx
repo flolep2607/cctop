@@ -85,7 +85,7 @@ const Tile = memo(function Tile({
   // cost the reader their terminal. The header says "closed"; the frame stays.
   let body: React.ReactNode;
   if (terminal) body = <TerminalFrame url={terminal.url} title={"Terminal — " + label} />;
-  else if (!CAN_ACT) body = <Empty>This link is read-only. Terminals open from the full link, which can type into agents.</Empty>;
+  else if (!CAN_ACT) body = <Empty>This is the view-only link, which cannot open terminals. Open the first link <code className="text-neutral-300">cctop serve</code> printed — “serving on …” — to type into agents here.</Empty>;
   else if (!exists) body = <Empty>This tab has closed — its agent exited or was moved.<Button size="sm" variant="secondary" onClick={onClose}>Remove</Button></Empty>;
   else if (error) body = <Empty bad>{error}<Button size="sm" variant="secondary" onClick={() => setAttempt(attempt + 1)}>Retry</Button></Empty>;
   else body = <Empty>Opening the terminal…</Empty>;

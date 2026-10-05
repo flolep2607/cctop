@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { Search } from "lucide-react";
+import { Eye, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { config } from "@/lib/config";
+import { CAN_ACT, config } from "@/lib/config";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
+import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { CommandPalette } from "./command-palette";
 import { ThemeToggle } from "./theme";
 import { go, PAGES } from "./nav";
@@ -54,6 +56,23 @@ export function AppShell({ children, right }: { children: ReactNode; right?: Rea
         </nav>
         <div className="flex-1" />
         {right}
+        {/* Said once, in the header, rather than discovered per button: the
+            read-only link is the second one `cctop serve` prints and the
+            easier one to click by mistake. */}
+        {!CAN_ACT && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge variant="outline" className="text-warning border-warning/40 cursor-help gap-1 font-normal">
+                <Eye className="size-3" />
+                View only
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-72 text-xs leading-relaxed">
+              This link can watch but not act: no answers, terminals or launches. To act, open the first link <code>cctop serve</code> printed — the
+              “serving on” one, not the “read-only link”.
+            </TooltipContent>
+          </Tooltip>
+        )}
         <Button variant="outline" size="sm" className="text-muted-foreground gap-2 max-sm:hidden" onClick={() => setOpen(true)}>
           <Search />
           Go to…
