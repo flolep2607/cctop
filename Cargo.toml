@@ -1,7 +1,7 @@
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 [package]
 name = "cctop"
-version = "0.25.2"
+version = "0.26.0"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -22,7 +22,7 @@ categories = ["command-line-utilities", "development-tools"]
 # mirror on the same terms and belongs on the same side of the line.
 # /RnD is working notes — research, ideas and dead ends. It is for people
 # reading this repository, on the same terms as the mirrors above.
-exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD", "/vendor"]
+exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD", "/vendor", "/web"]
 
 # Off by default and never enabled for a release: `debug` compiles in
 # `src/serve/debug.rs`, which can make the server fail on demand. Handy against

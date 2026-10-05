@@ -110,6 +110,10 @@ pub struct Request {
     /// browser following a link — a script, curl, a status board — and it keeps
     /// the token out of the URL such a client logs and displays.
     bearer: String,
+    /// Whether the client said it takes a gzip body. Only the app page uses
+    /// it: at most a few kilobytes everywhere else, and the one response worth
+    /// compressing is the near-megabyte page with the whole UI inlined in it.
+    accepts_gzip: bool,
 }
 
 impl Request {
@@ -180,6 +184,7 @@ impl Request {
         let mut json_content_type = false;
         let mut cookie_header = String::new();
         let mut bearer = String::new();
+        let mut accepts_gzip = false;
         loop {
             let mut header = String::new();
             match reader.read_line(&mut header) {
@@ -213,6 +218,14 @@ impl Request {
                         // once and the page hands the cookie back, so a reload
                         // — which has no query to present — still gets in.
                         cookie_header = value.to_string();
+                    } else if name.eq_ignore_ascii_case("accept-encoding") {
+                        accepts_gzip = value.split(',').any(|coding| {
+                            let mut parts = coding.split(';');
+                            let name = parts.next().unwrap_or_default().trim();
+                            // `gzip;q=0` is a refusal, not an offer.
+                            let refused = parts.any(|p| p.trim().replace(' ', "") == "q=0");
+                            name.eq_ignore_ascii_case("gzip") && !refused
+                        });
                     } else if name.eq_ignore_ascii_case("authorization") {
                         // Safe to honour on an action as well as a read: a page
                         // on another origin can only send this header after a
@@ -260,6 +273,7 @@ impl Request {
             received: std::time::Instant::now(),
             cookie_header,
             bearer,
+            accepts_gzip,
         })
     }
 
@@ -288,6 +302,11 @@ impl Request {
     }
 
     /// The `Authorization: Bearer` token, or empty.
+    /// Whether a gzip body may be sent back.
+    pub fn accepts_gzip(&self) -> bool {
+        self.accepts_gzip
+    }
+
     pub fn bearer(&self) -> &str {
         &self.bearer
     }
@@ -379,8 +398,9 @@ fn reason(status: u16) -> &'static str {
 /// Two same-origin exceptions carry the installable-page furniture: `img-src
 /// 'self'` for `/favicon.svg`, and `manifest-src 'self'` for
 /// `/manifest.webmanifest`, which `default-src` does not cover. `data:` stays
-/// for images a transcript paste renders inline. Neither opens anything off
-/// this server.
+/// for images a transcript paste renders inline. `font-src data:` is the app
+/// page's fonts, which are inlined into it as data URLs. None of them opens
+/// anything off this server.
 fn common_headers(out: &mut String) {
     out.push_str(
         "X-Content-Type-Options: nosniff\r\n\
@@ -389,6 +409,7 @@ fn common_headers(out: &mut String) {
          style-src 'unsafe-inline'; \
          script-src 'unsafe-inline'; \
          img-src 'self' data:; \
+         font-src data:; \
          manifest-src 'self'; \
          connect-src 'self'; \
          frame-src 'self'; \
@@ -651,6 +672,25 @@ mod tests {
 
     /// Prometheus sends `Authorization: Bearer <token>`; the scheme is
     /// case-insensitive by RFC 9110, and any other scheme is not a token.
+    #[test]
+    fn gzip_is_sent_only_to_a_client_that_offers_it() {
+        let parse = |header: &str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            use std::io::Write;
+            client
+                .write_all(format!("GET / HTTP/1.1\r\n{header}\r\n\r\n").as_bytes())
+                .unwrap();
+            Request::parse(&server).unwrap().accepts_gzip()
+        };
+        assert!(parse("Accept-Encoding: gzip, deflate, br"));
+        assert!(parse("accept-encoding: br;q=1.0, GZIP;q=0.5"));
+        assert!(!parse("Accept-Encoding: gzip;q=0, br"));
+        assert!(!parse("Accept-Encoding: br"));
+        assert!(!parse("X-Other: 1"));
+    }
+
     #[test]
     fn a_bearer_token_is_read_from_the_authorization_header() {
         let parse = |header: &str| {

@@ -996,7 +996,10 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
             );
         }
         let inner = block.inner(slots[i]);
-        pane.view.resize(inner.width, inner.height);
+        // The drawn size, except for the instant of a nudge that takes the
+        // rmux window back from another client; see `tabs::Fit`.
+        let (ask_cols, ask_rows) = pane.fit_request(inner.width, inner.height);
+        pane.view.resize(ask_cols, ask_rows);
 
         // The shim may grant less than was asked for — it has to satisfy every
         // watcher at once — so the answer, not the request, is what gets drawn,
@@ -1012,6 +1015,23 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
             tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()),
             screen,
         );
+        // While another client holds a smaller rmux window, the agent fills
+        // only its top-left corner and rmux redraws nothing around it — what
+        // was there before stays on this client's screen, the agent's own
+        // past frames at the old size. Blanked here, from the window size the
+        // sweep and the keystroke checks keep.
+        if pane.rmux.is_some()
+            && let Some((cols, rows)) = pane.fit.window
+        {
+            let buf = frame.buffer_mut();
+            for y in screen.y..screen.y + screen.height {
+                for x in screen.x..screen.x + screen.width {
+                    if x - screen.x >= cols || y - screen.y >= rows {
+                        buf[(x, y)].reset();
+                    }
+                }
+            }
+        }
         layout.pane_rects.push(screen);
     }
 }
@@ -2809,6 +2829,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
 
@@ -2923,6 +2944,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let (tx, _rx) = std::sync::mpsc::channel();

@@ -72,3 +72,27 @@ jobs:
           cache-key-prefix: kache-package
           pr-comment: false
       - run: cargo publish --dry-run
+
+  # The web UI's built page is committed (src/serve/assets/app/index.html) so
+  # that `cargo install` needs no Node. This rebuilds it from web/ and fails if
+  # the result differs: a change to web/ without `npm run build`, or a build
+  # edited by hand, is caught here rather than shipped.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: The committed build matches web/
+        run: git diff --exit-code --stat -- src/serve/assets/app/

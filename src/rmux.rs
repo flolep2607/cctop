@@ -1104,6 +1104,14 @@ pub struct Running {
     /// [`Axis`] writes it. Read back with the tab, since it is a property of the
     /// tab and every pane records the same answer.
     pub axis: Option<String>,
+    /// The size rmux has fitted the session's window to, columns by rows.
+    ///
+    /// The window is fitted to one attached client at a time, so a client that
+    /// is larger — this cctop's pane, while a browser holds the window — gets
+    /// the window in its top-left corner and nothing rmux redraws around it.
+    /// The pane blanks what lies outside, and knows from this when its own
+    /// client needs to take the window back.
+    pub window: Option<(u16, u16)>,
 }
 
 impl Running {
@@ -1131,6 +1139,7 @@ impl Running {
             tab: None,
             pane: None,
             axis: None,
+            window: None,
         }
     }
 
@@ -1239,7 +1248,7 @@ pub fn running() -> Vec<Running> {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}",
+            "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{window_width}\t#{window_height}",
         ])
         .output()
     else {
@@ -1300,6 +1309,9 @@ pub fn running() -> Vec<Running> {
         let tab = option();
         let pane = option().and_then(|v| v.parse::<u64>().ok());
         let axis = option();
+        let width = option().and_then(|v| v.parse::<u16>().ok());
+        let height = option().and_then(|v| v.parse::<u16>().ok());
+        let window = width.zip(height);
         found.push((
             created,
             Running {
@@ -1316,12 +1328,35 @@ pub fn running() -> Vec<Running> {
                 tab,
                 pane,
                 axis,
+                window,
             },
         ));
     }
     // Descending, so the agent left most recently is the one offered first.
     found.sort_by_key(|(created, _)| std::cmp::Reverse(*created));
     found.into_iter().map(|(_, s)| s).collect()
+}
+
+/// The size rmux has fitted `name`'s window to, columns by rows.
+///
+/// Asked off the draw loop by a pane about to type into a window some other
+/// client may have resized; see [`Running::window`].
+pub fn window_size(name: &str) -> Option<(u16, u16)> {
+    // Pane commands want the trailing colon; see `scroll_key`.
+    let target = format!("={name}:");
+    let out = Command::new(BIN)
+        .args([
+            "display-message",
+            "-t",
+            &target,
+            "-p",
+            "#{window_width} #{window_height}",
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.split_whitespace().map(|v| v.parse::<u16>().ok());
+    parts.next().flatten().zip(parts.next().flatten())
 }
 
 /// Just the names, for the callers that only need to know which exist.

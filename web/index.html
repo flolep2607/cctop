@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#16151a" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>cctop</title>
+    <!-- What the server knows and the page cannot: the token, whether this run
+         may act, the operator's home, the version. cctop substitutes the
+         placeholder with JSON when it serves the page; under `npm run dev` it
+         stays as is and config.ts falls back to defaults. -->
+    <script id="cctop-config" type="application/json">__CCTOP_CONFIG__</script>
+    <!-- Before the first paint, so a reader who chose dark never sees a light
+         frame. The same key the rest of cctop's pages use. -->
+    <script>
+      try {
+        var t = localStorage.getItem("cctop-theme");
+        var dark = t === "dark" || (t !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.classList.add("dark");
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

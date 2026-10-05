@@ -751,6 +751,26 @@ impl Extractor {
                 delta = Some(d);
             }
         }
+        // A Write that creates a file records no patch at all — an empty
+        // `structuredPatch` and the whole file in `content` — so every file a
+        // session created used to be missing from what it changed, however
+        // much of the work it was. It is all added lines, and is counted so.
+        if delta.is_none()
+            && let Some(result) = item.get("toolUseResult")
+            && result.get("type").and_then(Value::as_str) == Some("create")
+            && let Some(content) = result.get("content").and_then(Value::as_str)
+            && !content.is_empty()
+        {
+            let mut d = super::Delta::default();
+            for line in content.lines() {
+                d.added += 1;
+                if d.hunks.len() < crate::config::MAX_DIFF_LINES {
+                    d.hunks.push(format!("+{line}"));
+                }
+            }
+            self.metrics.lines_added += d.added as u64;
+            delta = Some(d);
+        }
 
         let content = item.get("message").and_then(|m| m.get("content"));
         let mut texts: Vec<&str> = Vec::new();
@@ -2201,6 +2221,43 @@ mod tests {
     /// A failed call must be distinguishable from a successful one. Claude
     /// records the outcome on the `tool_result`, which is a separate entry from
     /// the call, linked only by `tool_use_id`.
+    #[test]
+    fn a_file_a_write_created_counts_as_all_added() {
+        // Claude Code records a created file as `type: "create"` with the whole
+        // content and an empty patch; the change view used to show nothing for
+        // it, which hid every new file a session wrote.
+        let path = std::env::temp_dir().join(format!(
+            "cctop-claude-create-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_1","message":{"id":"m1","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_w","name":"Write","input":{"file_path":"/repo/new.rs","content":"fn a() {}\nfn b() {}\n"}}],"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+                "\n",
+                r#"{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_w","content":"File created"}]},"toolUseResult":{"type":"create","filePath":"/repo/new.rs","content":"fn a() {}\nfn b() {}\n","structuredPatch":[]}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(data.metrics.lines_added, 2);
+        let write = &data.metrics.tool_details["Write"][0];
+        let delta = write
+            .delta
+            .as_ref()
+            .expect("a created file carries a delta");
+        assert_eq!((delta.added, delta.removed), (2, 0));
+        assert_eq!(delta.hunks, vec!["+fn a() {}", "+fn b() {}"]);
+    }
+
     #[test]
     fn tool_results_marked_is_error_flag_their_call() {
         let path = std::env::temp_dir().join(format!(
