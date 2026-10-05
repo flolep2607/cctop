@@ -136,7 +136,7 @@ export function SessionPage() {
             <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
               <StateDot state={state} />
               <span className="truncate">{r.title || shortPath(r.project) || r.session_id}</span>
-              <StateBadge state={state} running={running} />
+              <StateBadge state={state} running={running} question={!!live?.asking_question} />
             </h1>
             <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
               {r.title && r.project && <span title={r.project}>{shortPath(r.project)}</span>}
@@ -207,7 +207,7 @@ export function SessionPage() {
                       key: id,
                       title: (r.title || shortPath(r.project) || id) + " — terminal",
                       release: () => setTerm(null),
-                      mint: () => act("terminal", id, { origin: location.origin }) as unknown as Promise<Terminal>,
+                      mint: () => act("terminal", id, { origin: location.origin, fresh: true }) as unknown as Promise<Terminal>,
                       onClosed: () => {},
                     })
                   }
@@ -223,7 +223,17 @@ export function SessionPage() {
               {term === "opening" ? (
                 <div className="m-auto text-sm text-neutral-400">Opening this agent's terminal…</div>
               ) : (
-                <TerminalFrame url={term.url} name={term.name} title="Terminal" />
+                <TerminalFrame
+                  url={term.url}
+                  name={term.name}
+                  title="Terminal"
+                  onBroken={() =>
+                    act("terminal", id, { origin: location.origin, fresh: true }).then(
+                      (t) => setTerm(t as unknown as Terminal),
+                      () => {},
+                    )
+                  }
+                />
               )}
             </div>
             {term !== "opening" && (

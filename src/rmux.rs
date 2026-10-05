@@ -432,17 +432,41 @@ pub fn share_link(
     embedded: bool,
     frontend: Option<&str>,
 ) -> Result<(Share, bool), String> {
-    /// A share and whether its endpoint is reachable off this machine.
-    type Reachable = (Share, bool);
+    share_link_with(name, embedded, frontend, false)
+}
+
+/// How long a minted share is kept and handed out again. Well inside the
+/// share's own lifetime ([`SHARE_TTL`]), so a link is never served after the
+/// daemon has expired it; and short enough that a tunnel which has quietly
+/// died — localhost.run's do — stops being handed out by itself.
+const SHARE_REUSE: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// How long rmux keeps a share cctop minted, stated rather than left to the
+/// daemon's default so [`SHARE_REUSE`] can be measured against it.
+const SHARE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// [`share_link`], with `fresh` to mint a new share even when one is held —
+/// what a page asks for when the link it was given would not connect.
+pub fn share_link_with(
+    name: &str,
+    embedded: bool,
+    frontend: Option<&str>,
+    fresh: bool,
+) -> Result<(Share, bool), String> {
+    /// A share, whether its endpoint is reachable off this machine, and when
+    /// it was minted.
+    type Reachable = (Share, bool, std::time::Instant);
     /// Session, flavour, and the frontend it opens in: a link minted for
     /// one origin's copy of the app does not open on another's.
     type Key = (String, bool, Option<String>);
     static CACHE: std::sync::Mutex<Option<HashMap<Key, Reachable>>> = std::sync::Mutex::new(None);
     let key = (name.to_string(), embedded, frontend.map(str::to_string));
-    if let Ok(cache) = CACHE.lock()
-        && let Some(held) = cache.as_ref().and_then(|c| c.get(&key))
+    if !fresh
+        && let Ok(cache) = CACHE.lock()
+        && let Some((share, tunnelled, at)) = cache.as_ref().and_then(|c| c.get(&key))
+        && at.elapsed() < SHARE_REUSE
     {
-        return Ok(held.clone());
+        return Ok((share.clone(), *tunnelled));
     }
     let mint = |tunnelled| match embedded {
         true => web_share_embedded(name, tunnelled, frontend),
@@ -451,16 +475,118 @@ pub fn share_link(
     // The tunnel is the half that needs a network and a relay that will have
     // it; the loopback share needs neither, so a failure to reach the world is
     // not a failure to open a terminal.
-    let made = match mint(true) {
-        Ok(share) => (share, true),
-        Err(why) => (mint(false).map_err(|_| why)?, false),
+    //
+    // Not for a share that opens in cctop's own page, though. That page already
+    // reached cctop, by whatever road — loopback, the LAN, `--tunnel`'s
+    // trycloudflare host — so the terminal's socket can take the same road:
+    // a loopback share, its endpoint rewritten to cctop's relay at the page's
+    // own origin (see [`relay_link`]). One tunnel instead of two, and not the
+    // localhost.run one, whose drops were behind most refused frames. A page
+    // on this machine needs no relay at all and connects to loopback direct.
+    let made = match frontend.filter(|_| embedded) {
+        Some(origin) => {
+            let share = mint(false)?;
+            match is_loopback_url(origin) {
+                true => (share, false),
+                false => match share
+                    .operator
+                    .as_deref()
+                    .and_then(|url| relay_link(url, origin))
+                {
+                    Some(relayed) => (
+                        Share {
+                            operator: Some(relayed),
+                            pin: share.pin,
+                        },
+                        true,
+                    ),
+                    // An endpoint not shaped as expected: the old road.
+                    None => (mint(true)?, true),
+                },
+            }
+        }
+        None => match mint(true) {
+            Ok(share) => (share, true),
+            Err(why) => (mint(false).map_err(|_| why)?, false),
+        },
     };
     if let Ok(mut cache) = CACHE.lock() {
         cache
             .get_or_insert_with(HashMap::new)
-            .insert(key, made.clone());
+            .insert(key, (made.0.clone(), made.1, std::time::Instant::now()));
     }
     Ok(made)
+}
+
+/// The loopback ports cctop has relayed a share's socket to. The relay route
+/// forwards only to these: a relay that would forward to any local port is a
+/// way into every service on this machine that trusts localhost.
+static RELAYED: std::sync::Mutex<Option<std::collections::HashSet<u16>>> =
+    std::sync::Mutex::new(None);
+
+/// Whether the relay may forward to `port` — one a share of cctop's named.
+pub fn relayable(port: u16) -> bool {
+    RELAYED
+        .lock()
+        .ok()
+        .and_then(|set| set.as_ref().map(|s| s.contains(&port)))
+        .unwrap_or(false)
+}
+
+/// A share link whose socket goes through cctop's relay instead of straight
+/// to the daemon's loopback endpoint, for a page that is not on this machine.
+///
+/// The link's fragment carries `e=ws://127.0.0.1:<port>/<path>`, which a
+/// browser elsewhere cannot reach. It becomes `e=wss://<page host>/rmux-ws/
+/// <port>/<path>` — `ws` for a page served over plain http — and the port is
+/// recorded so the relay will forward to it. `None` for an endpoint that is
+/// not a loopback one, which is then left for the caller to deal with.
+fn relay_link(url: &str, origin: &str) -> Option<String> {
+    let (base, fragment) = url.split_once('#')?;
+    let (scheme, host) = match origin.split_once("://")? {
+        ("https", rest) => ("wss", rest.split('/').next()?),
+        ("http", rest) => ("ws", rest.split('/').next()?),
+        _ => return None,
+    };
+    let mut port_seen = None;
+    let params: Vec<String> = fragment
+        .split('&')
+        .map(|param| match param.strip_prefix("e=") {
+            Some(endpoint) => {
+                let rest = endpoint
+                    .strip_prefix("ws://127.0.0.1:")
+                    .or_else(|| endpoint.strip_prefix("ws://localhost:"));
+                match rest.and_then(|r| r.split_once('/')) {
+                    Some((port, path)) if port.parse::<u16>().is_ok() => {
+                        port_seen = port.parse::<u16>().ok();
+                        format!("e={scheme}://{host}/rmux-ws/{port}/{path}")
+                    }
+                    _ => param.to_string(),
+                }
+            }
+            None => param.to_string(),
+        })
+        .collect();
+    let port = port_seen?;
+    if let Ok(mut set) = RELAYED.lock() {
+        set.get_or_insert_with(Default::default).insert(port);
+    }
+    Some(format!("{base}#{}", params.join("&")))
+}
+
+/// Whether `url` is served from this machine's loopback — `127.0.0.1`,
+/// `localhost`, `::1` — where a browser opening it is on this machine too.
+fn is_loopback_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest.split('/').next().unwrap_or_default();
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    };
+    host == "localhost" || host == "::1" || host.starts_with("127.")
 }
 
 /// The same share, minted to live inside cctop's own page.
@@ -520,8 +646,14 @@ fn share_with(
         if let Some(frontend) = frontend {
             builder = builder.frontend_url(frontend);
         }
+        // Stated, not left to the daemon: the reuse window is measured against it.
+        builder = builder.ttl(SHARE_TTL);
         if embedded {
             builder = builder
+                // Several browsers on one agent at once — the workspace tile,
+                // its session page, a popped-out window. With one operator
+                // allowed, whichever connected second was refused.
+                .max_operators(8)
                 .operator_only()
                 .no_navbar()
                 .no_disclaimer()
@@ -1359,6 +1491,37 @@ pub fn window_size(name: &str) -> Option<(u16, u16)> {
     parts.next().flatten().zip(parts.next().flatten())
 }
 
+/// The clients attached to `name`, as `(is_browser, cols, rows)`.
+///
+/// A browser on a web share is a client with no tty; everything else — this
+/// cctop's pane, an `rmux attach` in a terminal — has one. The web page asks
+/// this to tell whether the window is already a browser's, which is a fact rmux
+/// has rather than one the page would have to measure off its own drawing.
+pub fn clients(name: &str) -> Vec<(bool, u16, u16)> {
+    let Ok(out) = Command::new(BIN)
+        .args([
+            "list-clients",
+            "-t",
+            &format!("={name}"),
+            "-F",
+            "#{client_tty}\t#{client_width}\t#{client_height}",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let tty = parts.next()?.trim();
+            let cols = parts.next()?.trim().parse().ok()?;
+            let rows = parts.next()?.trim().parse().ok()?;
+            Some((tty.is_empty(), cols, rows))
+        })
+        .collect()
+}
+
 /// Just the names, for the callers that only need to know which exist.
 pub fn sessions() -> Vec<String> {
     running().into_iter().map(|s| s.name).collect()
@@ -1512,6 +1675,46 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_share_for_a_page_elsewhere_goes_through_the_pages_own_origin() {
+        let url = "https://x.trycloudflare.com/term/#e=ws://127.0.0.1:45691/share&t=abc&navbar=off";
+        let relayed = super::relay_link(url, "https://x.trycloudflare.com/term/").expect("relayed");
+        assert_eq!(
+            relayed,
+            "https://x.trycloudflare.com/term/#e=wss://x.trycloudflare.com/rmux-ws/45691/share&t=abc&navbar=off"
+        );
+        assert!(super::relayable(45691));
+        assert!(!super::relayable(22), "only ports a share named");
+        let lan = super::relay_link(
+            "http://10.0.0.5:7778/term/#e=ws://127.0.0.1:5000/share&t=x",
+            "http://10.0.0.5:7778/term/",
+        );
+        assert_eq!(
+            lan.as_deref(),
+            Some("http://10.0.0.5:7778/term/#e=ws://10.0.0.5:7778/rmux-ws/5000/share&t=x")
+        );
+        // Already a public endpoint: not ours to rewrite.
+        assert!(
+            super::relay_link(
+                "https://h/term/#e=wss://a.lhr.life/share&t=x",
+                "https://h/term/"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_page_on_this_machine_is_told_from_one_reached_from_elsewhere() {
+        use super::is_loopback_url;
+        assert!(is_loopback_url("http://127.0.0.1:7778/term/"));
+        assert!(is_loopback_url("http://localhost:7778/term/"));
+        assert!(is_loopback_url("http://[::1]:7778/term/"));
+        assert!(!is_loopback_url("http://192.168.1.20:7778/term/"));
+        assert!(!is_loopback_url(
+            "https://quiet-river.trycloudflare.com/term/"
+        ));
+        assert!(!is_loopback_url("http://localhost.example.com/term/"));
+    }
 
     /// A capture replays as the screen it came from: every row on its own line,
     /// nothing scrolled off the top, and a colour that runs across a line break

@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "cctop"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -418,6 +418,7 @@ dependencies = [
  "self-replace",
  "serde",
  "serde_json",
+ "sha2",
  "symphonia",
  "sysinfo",
  "tachyonfx",

@@ -1,7 +1,7 @@
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 [package]
 name = "cctop"
-version = "0.26.0"
+version = "0.26.1"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
@@ -109,6 +109,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 # 1.3 MB of rate tables), which is startup and paid once.
 serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
 sysinfo = "0.39.6"
+# Hashes the binary `--update` downloaded as the user, so the root step that
+# installs it can check it is the same file. Already in the tree under the TLS
+# stack, so this adds no dependency.
+sha2 = "0.10.9"
 tar = "0.4.46"
 tempfile = "3.27.0"
 # How many colours the terminal can show, read from the environment the way

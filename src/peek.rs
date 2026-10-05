@@ -30,6 +30,9 @@ pub(crate) struct Screened {
     /// command under Codex's question, the tool box over Claude's. `None`
     /// when the prompt carries nothing readable — never something made up.
     pub ask: Option<String>,
+    /// Whether the prompt on screen is a question with choices rather than a
+    /// permission prompt; see [`screen_question`](crate::ui::tabs::screen_question).
+    pub question: bool,
 }
 
 /// A tick's worth of screen borrows, sharing the lookups that cost.
@@ -120,10 +123,16 @@ fn finish(harness: &str, rows: &[String]) -> Option<Screened> {
     let signal = crate::ui::tabs::screen_state(harness, rows)?;
     // A prompt's detail is only worth reading when there is a prompt: the
     // extractor reads the same footer window the recognizer did.
-    let ask = (signal == crate::hook::Signal::NeedsInput)
+    let asking = signal == crate::hook::Signal::NeedsInput;
+    let ask = asking
         .then(|| crate::ui::tabs::screen_ask(harness, rows))
         .flatten();
-    Some(Screened { signal, ask })
+    let question = asking && crate::ui::tabs::screen_question(harness, rows);
+    Some(Screened {
+        signal,
+        ask,
+        question,
+    })
 }
 
 /// What `cctop run`'s shim replays to a watcher, read once and dropped.

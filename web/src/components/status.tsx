@@ -43,8 +43,8 @@ const WORDS: Partial<Record<Dot, [string, string]>> = {
   error: ["api error", "text-destructive border-destructive/40"],
 };
 
-export function StateBadge({ state, running }: { state: Dot; running?: boolean }) {
-  const w = WORDS[state];
+export function StateBadge({ state, running, question }: { state: Dot; running?: boolean; question?: boolean }) {
+  const w = question && state === "asking" ? (["has a question", "text-warning border-warning/40 bg-warning/5"] as [string, string]) : WORDS[state];
   if (!w) return null;
   // Present tense is a claim about now; a stopped session's error is history.
   const text = state === "error" && running === false ? "ended on an api error" : w[0];

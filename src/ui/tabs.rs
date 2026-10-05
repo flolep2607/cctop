@@ -117,6 +117,9 @@ const FIT_QUIET: std::time::Duration = std::time::Duration::from_millis(1500);
 /// rmux sees two resizes rather than coalescing them into none.
 const FIT_NUDGE: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// How long after a nudge to look whether rmux took it.
+const FIT_VERIFY: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// Taking a rmux window back for this pane.
 ///
 /// A session can have two clients at once — this pane, and a browser opened on
@@ -139,6 +142,15 @@ pub struct Fit {
     nudged_at: Option<Instant>,
     typed_at: Option<Instant>,
     asking: Option<std::sync::mpsc::Receiver<Option<(u16, u16)>>>,
+    /// When to look whether the last nudge took, and whether the check in
+    /// flight is that look.
+    verify_at: Option<Instant>,
+    verifying: bool,
+    /// The size this pane was at when a nudge did not take. While it still is,
+    /// no nudge is tried again: something other than "which client was used
+    /// last" is holding the window, and nudging on every keystroke would only
+    /// make the agent reflow on every keystroke.
+    gave_up: Option<(u16, u16)>,
 }
 
 impl Fit {
@@ -175,31 +187,52 @@ impl Pane {
     /// window — off the draw loop, since it is a subprocess. `force` is for
     /// arriving at the pane, which counts whatever the clock says.
     pub fn note_input(&mut self, force: bool) {
+        let back = force || self.fit.typed_at.is_none_or(|t| t.elapsed() >= FIT_QUIET);
+        self.fit.typed_at = Some(Instant::now());
+        if !back || self.fitting() || self.fit.gave_up == Some(self.view.size) {
+            return;
+        }
+        self.ask_window(false);
+    }
+
+    /// Ask rmux for the window's size off the draw loop; `verifying` marks the
+    /// look that follows a nudge.
+    fn ask_window(&mut self, verifying: bool) {
         let Some(name) = self.rmux.clone() else {
             return;
         };
-        let back = force || self.fit.typed_at.is_none_or(|t| t.elapsed() >= FIT_QUIET);
-        self.fit.typed_at = Some(Instant::now());
-        if !back || self.fitting() {
-            return;
-        }
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(crate::rmux::window_size(&name));
         });
         self.fit.asking = Some(rx);
+        self.fit.verifying = verifying;
     }
 
     /// The size to ask this pane's client to be, given the `(cols, rows)` it
     /// is drawn in — which is that size, except for the moment of a nudge.
     pub fn fit_request(&mut self, cols: u16, rows: u16) -> (u16, u16) {
+        // Compared against what this client was granted, not what the pane
+        // asked for: another watcher can hold the client smaller, and then the
+        // window rightly matches the grant — measuring it against the request
+        // would read as stolen on every check and nudge forever.
+        let (granted_cols, granted_rows) = self.view.size;
+        if self.fit.gave_up.is_some_and(|size| size != self.view.size) {
+            self.fit.gave_up = None;
+        }
         if let Some(rx) = &self.fit.asking {
             match rx.try_recv() {
                 Ok(window) => {
                     self.fit.asking = None;
+                    let verifying = std::mem::take(&mut self.fit.verifying);
                     if let Some(window) = window {
                         self.fit.window = Some(window);
-                        if !Fit::matches(window, cols, rows) && cols > 1 {
+                        let held = Fit::matches(window, granted_cols, granted_rows);
+                        if verifying {
+                            if !held {
+                                self.fit.gave_up = Some(self.view.size);
+                            }
+                        } else if !held && cols > 1 && self.fit.gave_up.is_none() {
                             self.fit.nudged_at = Some(Instant::now());
                         }
                     }
@@ -213,15 +246,19 @@ impl Pane {
                 return (cols - 1, rows);
             }
             self.fit.nudged_at = None;
-            // What rmux is about to report; the next sweep confirms it.
-            self.fit.window = Some((cols, rows));
+            self.fit.verify_at = Some(Instant::now() + FIT_VERIFY);
+        }
+        if self.fit.verify_at.is_some_and(|at| Instant::now() >= at) && self.fit.asking.is_none() {
+            self.fit.verify_at = None;
+            self.ask_window(true);
         }
         (cols, rows)
     }
 
-    /// Whether a check or a nudge is under way, which needs frames to finish.
+    /// Whether a check, a nudge or the look after one is under way, which
+    /// needs frames to finish.
     pub fn fitting(&self) -> bool {
-        self.fit.asking.is_some() || self.fit.nudged_at.is_some()
+        self.fit.asking.is_some() || self.fit.nudged_at.is_some() || self.fit.verify_at.is_some()
     }
 
     /// What this pane's agent says it is doing, read off its screen.
@@ -245,10 +282,14 @@ impl Pane {
         let rows: Vec<String> = screen.rows(0, cols).collect();
         let signal = screen_state(self.harness(), &rows)
             .or_else(|| self.idle().then_some(crate::hook::Signal::Idle))?;
-        let ask = (signal == crate::hook::Signal::NeedsInput)
-            .then(|| screen_ask(self.harness(), &rows))
-            .flatten();
-        Some(crate::peek::Screened { signal, ask })
+        let asking = signal == crate::hook::Signal::NeedsInput;
+        let ask = asking.then(|| screen_ask(self.harness(), &rows)).flatten();
+        let question = asking && screen_question(self.harness(), &rows);
+        Some(crate::peek::Screened {
+            signal,
+            ask,
+            question,
+        })
     }
 
     /// Whether the agent has gone quiet long enough to count as waiting for you.
@@ -1395,6 +1436,40 @@ pub(crate) fn screen_state(harness: &str, rows: &[String]) -> Option<crate::hook
     }
 }
 
+/// Whether the prompt on `harness`'s screen is a question with choices — Claude
+/// Code's AskUserQuestion — rather than a permission prompt.
+///
+/// Both end in `Esc to cancel`, which is all [`screen_state`] needs to know
+/// something is being asked. Which kind it is matters to what may be offered:
+/// Allow presses the first option and Deny presses Esc, which on a question
+/// pick an answer nobody chose or throw the question away. A question draws its
+/// own escape hatches — "Type something." and "Chat about this" — and its
+/// footer says `Enter to select`; a permission prompt asks "Do you want …" and
+/// offers `Tab to amend`. Both captured off real Claude Code screens.
+///
+/// ponytail: claude only, the one harness whose questions were seen.
+pub(crate) fn screen_question(harness: &str, rows: &[String]) -> bool {
+    if harness != "claude" {
+        return false;
+    }
+    let text: String = rows
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .rev()
+        .take(30)
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let question = ["chat about this", "type something.", "enter to select"]
+        .iter()
+        .any(|p| text.contains(p));
+    let permission = ["do you want", "tab to amend"]
+        .iter()
+        .any(|p| text.contains(p));
+    question && !permission
+}
+
 /// What a prompt on `harness`'s screen is asking for, when the prompt draws
 /// the answer on it.
 ///
@@ -1427,6 +1502,19 @@ pub(crate) fn screen_ask(harness: &str, rows: &[String]) -> Option<String> {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         })?,
+        // A question's own words: the row above its options that ends in a
+        // question mark, past the `☐ Header` chip of a multi-question form.
+        // Nothing else — a guess here is shown as the thing being asked.
+        "claude" if screen_question(harness, rows) => {
+            let top = bottom
+                .iter()
+                .position(|row| row.starts_with('❯') || row.starts_with('›'))?;
+            bottom[top + 1..]
+                .iter()
+                .take(4)
+                .map(|row| unbox(row))
+                .find(|row| row.ends_with('?'))?
+        }
         "claude" => {
             // The highlighted option (`❯ 1. Yes`) is the menu's top edge; the
             // question and the tool's box are the rows above it. The first one
@@ -1493,6 +1581,57 @@ fn starts_an_agent(argv: &[String]) -> bool {
 mod tests {
 
     #[test]
+    fn a_question_with_choices_is_told_from_a_permission_prompt() {
+        let rows = |text: &str| -> Vec<String> { text.lines().map(String::from).collect() };
+        // The shape of the screen that had Allow put next to it: the agent's
+        // message, a multi-question chip, the question, and its menu.
+        let question = rows(
+            "\
+ 2. What would ship. None of this is committed, and the working tree holds other work.
+──────────────────────────────────────
+ ☐ Deploy
+
+How should the deploy step (between migration 1 and the rest) happen?
+
+❯ 1. You deploy, I run SQL (Recommended)
+     I run step 1 now and tell you; you deploy the code your usual way.
+  2. I restart the worker
+  3. Hold everything
+  4. Type something.
+──────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel",
+        );
+        assert_eq!(
+            super::screen_state("claude", &question),
+            Some(crate::hook::Signal::NeedsInput)
+        );
+        assert!(super::screen_question("claude", &question));
+        assert_eq!(
+            super::screen_ask("claude", &question).as_deref(),
+            Some("How should the deploy step (between migration 1 and the rest) happen?"),
+            "the question's own words, never the agent's message above it"
+        );
+        let permission = rows(
+            "\
+ Bash command
+   rm -rf build
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to this folder
+   3. No
+
+ Esc to cancel · Tab to amend",
+        );
+        assert!(!super::screen_question("claude", &permission));
+        assert!(
+            !super::screen_question("codex", &question),
+            "claude's menus only"
+        );
+    }
+
+    #[test]
     fn a_window_counts_as_this_panes_when_only_a_status_line_differs() {
         assert!(Fit::matches((120, 40), 120, 40));
         // rmux's status line takes a row of the client, where a session shows one.
@@ -1509,30 +1648,48 @@ mod tests {
         tx.send(Some((60, 15))).expect("send");
         pane.fit.asking = Some(rx);
         assert_eq!(
-            pane.fit_request(120, 40),
-            (119, 40),
+            pane.fit_request(80, 24),
+            (79, 24),
             "the nudge narrows by one column"
         );
         assert!(pane.fitting());
         assert_eq!(
-            pane.fit_request(120, 40),
-            (119, 40),
+            pane.fit_request(80, 24),
+            (79, 24),
             "and holds it until rmux has seen it"
         );
         std::thread::sleep(FIT_NUDGE + std::time::Duration::from_millis(20));
-        assert_eq!(pane.fit_request(120, 40), (120, 40));
+        assert_eq!(pane.fit_request(80, 24), (80, 24));
+        // Then a look a moment later at whether it took.
+        assert!(pane.fit.verify_at.is_some());
+    }
+
+    #[test]
+    fn a_nudge_that_did_not_take_is_not_tried_again_at_the_same_size() {
+        let mut pane = Pane::for_test("agent");
+        let size = pane.view.size;
+        // The look after a nudge finds the window still someone else's.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some((size.0.saturating_sub(10), size.1)))
+            .expect("send");
+        pane.fit.asking = Some(rx);
+        pane.fit.verifying = true;
+        pane.fit_request(size.0, size.1);
+        assert_eq!(pane.fit.gave_up, Some(size));
+        // A later keystroke at the same size asks nothing, so nudges nothing.
+        pane.fit.typed_at = None;
+        pane.note_input(false);
         assert!(!pane.fitting());
-        assert_eq!(pane.fit.window, Some((120, 40)));
     }
 
     #[test]
     fn a_window_that_is_already_this_panes_is_left_alone() {
         let mut pane = Pane::for_test("agent");
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(Some((120, 40))).expect("send");
+        tx.send(Some((80, 24))).expect("send");
         pane.fit.asking = Some(rx);
         // No nudge: one would make the agent redraw on every keystroke.
-        assert_eq!(pane.fit_request(120, 40), (120, 40));
+        assert_eq!(pane.fit_request(80, 24), (80, 24));
         assert!(!pane.fitting());
     }
     /// The screens below are Claude Code 2.1.283's own, captured from a real
