@@ -199,6 +199,28 @@ const ANALYTICS: Page = Page {
     html: include_str!("assets/analytics.html"),
     js: include_str!("assets/analytics.js"),
 };
+const WORKSPACE: Page = Page {
+    name: "workspace",
+    html: include_str!("assets/workspace.html"),
+    js: include_str!("assets/workspace.js"),
+};
+
+/// Preact, its hooks and htm, for the one page that renders with them.
+///
+/// The workspace holds a live terminal frame per tile under headers that change
+/// every few seconds, and moving or rebuilding a frame drops its socket — the
+/// one thing the other pages' rebuild-on-refresh cannot be made to avoid. So
+/// that page diffs instead. Pinned copies, unmodified, with provenance in
+/// `assets/vendor/SOURCE.md`; inlined only where used, so the other pages pay
+/// nothing for it. Newlines between because each file ends in a `//` comment.
+const PREACT_JS: &str = concat!(
+    include_str!("assets/vendor/preact.umd.js"),
+    "\n",
+    include_str!("assets/vendor/preact-hooks.umd.js"),
+    "\n",
+    include_str!("assets/vendor/htm.umd.js"),
+    "\n",
+);
 
 /// The stylesheet both pages share, substituted into each at send time.
 ///
@@ -1523,6 +1545,10 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         "/insight/optimize" => api_insight(shared, stream, &request, "optimize"),
         "/insight/compare" => api_insight(shared, stream, &request, "compare"),
         "/analytics" => page(shared, stream, &request, &ANALYTICS, access),
+        // Every tab's terminal, tiled. The page itself is harmless to a
+        // read-only link — opening a terminal is the action, and that route
+        // checks the credential as every action does.
+        "/workspace" => page(shared, stream, &request, &WORKSPACE, access),
         // The whole fleet's history in one document — the analytics page
         // filters and charts it client-side, so this one read-only route is
         // all the server owes it. Untrimmed buckets are affordable here
@@ -1959,6 +1985,7 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
         // Before the values, like the page's own script: the token and the
         // home directory are read in here now.
         .replace("__CCTOP_COMMON_JS__", COMMON_JS)
+        .replace("__CCTOP_PREACT_JS__", PREACT_JS)
         // The page's own script goes in before the values it reads, so a token or
         // a home directory inside it is substituted the same way it was while the
         // script was part of the page.
@@ -2267,7 +2294,7 @@ mod tests {
         // If an asset is edited and the placeholder goes with it, the page ships
         // with no token and fails at the first fetch — in the browser, where
         // nothing here would have noticed.
-        for page in [&DASHBOARD, &REPORT, &ANALYTICS] {
+        for page in [&DASHBOARD, &REPORT, &ANALYTICS, &WORKSPACE] {
             assert!(page.html.contains("__CCTOP_CSS__"));
             assert!(page.html.contains("__CCTOP_VERSION__"));
             // The page's own script, by name. A page that loses it ships markup
@@ -2303,7 +2330,9 @@ mod tests {
         // grow a string containing the tag that ends it — most easily by being
         // handed one, or by a test fixture that quotes a whole page.
         assert!(!COMMON_JS.contains("</script"));
-        for page in [&DASHBOARD, &REPORT, &ANALYTICS] {
+        assert!(!PREACT_JS.contains("</script"));
+        assert!(WORKSPACE.html.contains("__CCTOP_PREACT_JS__"));
+        for page in [&DASHBOARD, &REPORT, &ANALYTICS, &WORKSPACE] {
             assert!(
                 !page.js.contains("</script"),
                 "{} would end its own block",
@@ -2338,7 +2367,7 @@ mod tests {
         // would say so, and only to someone who opened the console.
         let shared = top_level_names(COMMON_JS);
         assert!(shared.contains(&"ask") && shared.contains(&"TOKEN"));
-        for page in [&DASHBOARD, &REPORT, &ANALYTICS] {
+        for page in [&DASHBOARD, &REPORT, &ANALYTICS, &WORKSPACE] {
             for name in top_level_names(page.js) {
                 assert!(
                     !shared.contains(&name),

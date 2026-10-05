@@ -1,0 +1,117 @@
+<title>cctop — workspace</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#16151a">
+<style>__CCTOP_CSS__
+  /* Terminals want every pixel the window has, so this page drops the reading
+     width the others keep and fills the viewport, header and all. */
+  .wrap.full { max-width: none; padding-bottom: 12px; min-height: 100dvh;
+               display: flex; flex-direction: column; }
+  #app { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+
+  .wsbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .dock { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; min-width: 0; font-size: 13px; }
+  .dock .tab { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px;
+               border-radius: var(--r-pill); max-width: 240px; color: var(--ink); }
+  .dock .tab .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dock .tab .plus { color: var(--faint); }
+  .dock .tab:hover .plus { color: var(--accent); }
+
+  /* A segmented control: one bordered group, the pressed segment washed. */
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 5px 10px; font-size: 12px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+
+  /* The tiles. Placed by `order` (see workspace.js on why the DOM order is
+     fixed), sized so the grid fills what is left of the window. */
+  .grid {
+    flex: 1 1 auto; min-height: 420px; display: grid; gap: 10px;
+    grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr));
+    grid-auto-rows: minmax(260px, 1fr);
+  }
+  .grid.maxed { grid-template-columns: minmax(0, 1fr); grid-auto-rows: 1fr; }
+  .slotwrap { min-width: 0; min-height: 0; display: flex; }
+  .slotwrap[hidden] { display: none; }
+  /* While a header is being dragged the frames would swallow the drag events
+     the grid needs, so they stop taking the pointer until it ends. */
+  .grid.dragging iframe { pointer-events: none; }
+
+  .tile { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+          background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+          box-shadow: var(--shadow); overflow: hidden;
+          /* The header sizes itself to its tile, not to the window: four
+             columns on a wide screen and one on a phone are the same tile
+             width, and it is that width that decides what fits. */
+          container-type: inline-size;
+          transition: border-color var(--ease), box-shadow var(--ease); }
+  .tile.focused { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+  .tile.dropping { box-shadow: 0 0 0 2px var(--accent); }
+  /* Waiting on a person is the one state worth interrupting for: a ring in
+     the asking colour that breathes, so it is seen from across the grid. */
+  .tile.asking { border-color: var(--red); animation: ask 2.4s ease-in-out infinite; }
+  @keyframes ask {
+    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 22%, transparent); }
+  }
+  .tile.gone { opacity: .75; }
+
+  .tilehead { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px;
+              border-bottom: 1px solid var(--line); font-size: 13px; min-width: 0;
+              cursor: grab; user-select: none; }
+  .tilehead:active { cursor: grabbing; }
+  .tilehead .grip { color: var(--faint); font-size: 12px; }
+  .tilehead .label { font-weight: 600; white-space: nowrap; }
+  .tilehead .where { color: var(--faint); font-size: 12px; min-width: 0; flex: 0 1 auto; }
+  .tilehead .fig { color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .tilehead .acts { display: inline-flex; gap: 2px; margin-left: 4px; flex: 0 0 auto; }
+  .tilehead .label, .tilehead .pill, kbd.slot { flex: 0 0 auto; }
+  /* What goes first as a tile narrows: the model name, then the slot number
+     and drag grip, then the cost — never the controls, never the state. */
+  @container (max-width: 560px) { .tilehead .fig.model { display: none; } }
+  @container (max-width: 440px) { kbd.slot, .tilehead .grip { display: none; } }
+  @container (max-width: 360px) { .tilehead .fig, .tilehead .where { display: none; } }
+  .tilehead .act { font-size: 14px; line-height: 1; padding: 4px 7px; border-radius: var(--r-sm);
+                   color: var(--faint); text-decoration: none; cursor: pointer; }
+  .tilehead a.act:hover { color: var(--ink); background: var(--wash); }
+  kbd.slot { font: 11px/1 var(--mono); color: var(--faint); border: 1px solid var(--line);
+             border-radius: 4px; padding: 2px 4px; }
+  .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .tilebody { flex: 1 1 auto; min-height: 0; display: flex; background: #060807; }
+  .tilebody .empty { margin: auto; padding: 24px; background: transparent; color: var(--faint);
+                     display: grid; gap: 12px; justify-items: center; }
+  .tilebody .empty.bad { color: var(--red); }
+  .termframe { flex: 1 1 auto; width: 100%; height: 100%; border: 0; display: block; background: #060807; }
+
+  .card.empty { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
+  .hint { font-size: 11px; margin: 10px 0 0; }
+
+  /* A phone: one column that scrolls, each terminal a usable height, the
+     drag handle gone because there is nothing beside a tile to drag it to. */
+  @media (max-width: 700px) {
+    .grid, .grid.maxed { grid-template-columns: minmax(0, 1fr); grid-auto-rows: 70vh; }
+    .hint, .seg { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) { .tile.asking { animation: none; } }
+</style>
+<script>__CCTOP_THEME_JS__</script>
+
+<div class="wrap full">
+  <header class="top">
+    <a class="brand" data-nav="/" href="/">cctop<span class="v mono">__CCTOP_VERSION__</span></a>
+    <nav class="pages" aria-label="Pages">
+      <a data-nav="/" href="/">Sessions</a>
+      <a data-nav="/workspace" href="/workspace" aria-current="page">Workspace</a>
+      <a data-nav="/analytics" href="/analytics">Analytics</a>
+    </nav>
+    <div class="spacer"></div>
+  </header>
+  <main id="app"><div class="empty">Reading the tabs…</div></main>
+</div>
+
+<script>__CCTOP_COMMON_JS__</script>
+<!-- Preact, its hooks and htm: this page alone renders with them. See
+     vendor/SOURCE.md for what they are and why only here. -->
+<script>__CCTOP_PREACT_JS__</script>
+<script>
+__CCTOP_WORKSPACE_JS__</script>

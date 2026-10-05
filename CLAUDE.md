@@ -130,6 +130,13 @@ What keeps that from becoming three copies of everything:
   copy. A page redeclaring one of those names is a SyntaxError that kills the
   whole page script; a test in `src/serve/mod.rs` catches it.
 - Links between pages use `data-nav="/path"`, and `common.js` adds the token.
+  A new page goes in the header nav, in `pages()` in the command palette
+  (`common.js`, Ctrl+K), and in the page lists of the tests in `mod.rs`.
+- **Preact + htm** (pinned in `assets/vendor/`, no build step) render the
+  workspace page, and only it: it is the page whose DOM must survive live
+  updates. Reach for them on a new page when that is true of it too — live data
+  under state the reader is holding — not for a page that reads and redraws.
+  Inline them with the `__CCTOP_PREACT_JS__` placeholder.
 
 Check a visual change in both schemes and at phone width:
 `CCTOP_SCHEME=dark` and `CCTOP_WIDTH=390` in front of `web.sh shot`.
