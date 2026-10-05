@@ -19,7 +19,7 @@ import { TerminalFrame } from "@/components/terminal";
 import { useSessions, useTick } from "@/hooks/use-live";
 import type { Report } from "@/lib/types";
 import { AccessView } from "./access-view";
-import { ChangesView } from "./changes-view";
+import { ChangesView, diffFiles } from "./changes-view";
 import { Conversation } from "./conversation";
 import { ReportView, reportMarkdown } from "./report-view";
 
@@ -125,7 +125,7 @@ export function SessionPage() {
 
   const spans = new Date(r.started_at).toDateString() !== new Date(r.last_active).toDateString();
   const when = [clock(r.started_at, spans), r.duration, running ? "still going" : ago(live?.last_active ?? r.last_active)].filter(Boolean).join(" · ");
-  const changes = (r.diffs ?? []).length;
+  const changes = diffFiles(r).length;
 
   return (
     <AppShell>
