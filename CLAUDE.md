@@ -110,10 +110,9 @@ body` shows what they would see now.
 
 ## The web UI is a React app in `web/`, committed built
 
-`cctop serve`'s pages are moving to one React app: **Vite + React + TypeScript
-+ Tailwind + shadcn/ui** in `web/`. The session page (`/session/:id`) and the
-workspace (`/workspace`) are already there; the dashboard and analytics are
-still the older plain pages in `src/serve/assets/` and will follow.
+`cctop serve` is one React app: **Vite + React + TypeScript + Tailwind +
+shadcn/ui** in `web/`, with a route per page — the table (`/`), a session
+(`/session/:id`), the workspace (`/workspace`) and analytics (`/analytics`).
 
 ```bash
 cd web && npm ci          # Node from web/.nvmrc
@@ -140,9 +139,7 @@ How it ships, and why:
 - **A moved iframe reloads.** The terminal frames (workspace tiles, the session
   page's terminal) must keep their place in the DOM; reorder with CSS `order`.
 
-The older pages still use `common.css` and `common.js` (inlined into each,
-shared header, palette, formatters). Don't extend them; move a page to the app
-instead. Check a visual change in both themes and at phone width:
+Check a visual change in both themes and at phone width:
 `CCTOP_SCHEME=dark` and `CCTOP_WIDTH=390` in front of `web.sh shot`.
 
 ## Conventions

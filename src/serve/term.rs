@@ -37,7 +37,7 @@ const WASM: &[u8] =
 /// The file at `path`, and its content type, when it is part of the app.
 ///
 /// `/term/` is the page a frame opens, with a share link's fragment appended
-/// by the page that frames it — see `terminalFrame` in `report.js`.
+/// by the page that frames it — see `TerminalFrame` in `web/src/components/terminal.tsx`.
 pub fn file(path: &str) -> Option<(&'static str, &'static [u8])> {
     match path {
         "/term" | "/term/" => Some(("text/html; charset=utf-8", INDEX)),

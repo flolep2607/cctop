@@ -16,9 +16,12 @@ export interface Session {
   last_active?: string;
   started_at?: string;
   asking_for?: string | null;
-  cost?: { available: boolean; included: boolean; total: string | number | null; today?: number; this_hour?: number };
+  cost?: { available: boolean; included: boolean; total: string | number | null; today?: number; this_hour?: number; last_hour?: number };
   tokens?: { input: number; output: number; total: number };
   context?: { used: number; max: number; compacted?: boolean } | null;
+  activity?: { tool_count: number; tool_errors: number };
+  conflict?: { level: "file" | "repo" | string } | null;
+  user?: string | null;
 }
 
 export interface Tab {

@@ -158,73 +158,17 @@ const SSE_KEEPALIVE: Duration = Duration::from_secs(20);
 /// how a page comes to show three different messages for the same mistake.
 const NO_SUCH_SESSION: &str = "no session with that id, or the prefix matches more than one";
 
-/// A page, and the script it runs.
+/// The web UI: the React app in `web/`, built by `npm run build` into one HTML
+/// file with every script, stylesheet and font inlined, and committed.
 ///
-/// `include_str!` rather than a directory served off disk: an installed cctop is
-/// one binary, and a page that loads its own CSS is a page that breaks the
+/// `include_str!` rather than a directory served off disk: an installed cctop
+/// is one binary, and a page that loads its own files is a page that breaks the
 /// moment the binary is moved. It is also what lets the response promise a
-/// content policy that forbids loading anything at all.
-///
-/// The script is a file rather than a `<script>` in the markup for the same
-/// reason the stylesheet is one, and more: a thousand lines of JavaScript is a
-/// program, and while it is markup no editor can highlight it, no formatter can
-/// be run over it and no diff of it can be read. The page keeps saying which
-/// script it wants, by name, through a placeholder — so lifting a script out and
-/// putting it back does not touch a line of markup.
-struct Page {
-    name: &'static str,
-    html: &'static str,
-    js: &'static str,
-}
-
-impl Page {
-    /// Where this page's script sits until [`page`] pastes it in.
-    fn script_placeholder(&self) -> String {
-        format!("__CCTOP_{}_JS__", self.name.to_uppercase())
-    }
-}
-
-const DASHBOARD: Page = Page {
-    name: "dashboard",
-    html: include_str!("assets/dashboard.html"),
-    js: include_str!("assets/dashboard.js"),
-};
-const ANALYTICS: Page = Page {
-    name: "analytics",
-    html: include_str!("assets/analytics.html"),
-    js: include_str!("assets/analytics.js"),
-};
-/// The React app (`web/`, built into one file by `npm run build`): the session
-/// page and the workspace today, the rest as they move over.
-///
-/// One HTML file with every script, stylesheet and font inlined, for the same
-/// reasons the older pages inline theirs — one binary, and a content policy
-/// that loads nothing from any URL. What the server knows and the page cannot
-/// reaches it as JSON in place of `__CCTOP_CONFIG__`; see [`app_config`].
-const APP: Page = Page {
-    name: "app",
-    html: include_str!("assets/app/index.html"),
-    js: "",
-};
-
-/// The stylesheet both pages share, substituted into each at send time.
-///
-/// One file rather than two copies, and still not a second request: the content
-/// policy this server sends forbids loading anything at all, which is only
-/// affordable because everything is already in the page.
-const COMMON_CSS: &str = include_str!("assets/common.css");
-
-/// The theme picker all three pages share, inlined for the same reason the
-/// stylesheet is — and placed early in each page so a chosen theme is on
-/// `<html>` before the first paint rather than one frame behind it.
-const THEME_JS: &str = include_str!("assets/theme.js");
-
-/// What every page's script builds on — the substituted values, the request
-/// helpers, the formatters, the shared header's links — inlined just ahead of
-/// the page's own script. It exists because three pages each carried a copy,
-/// and the copies had drifted apart: the same cost rounded differently on two
-/// pages of one cctop.
-const COMMON_JS: &str = include_str!("assets/common.js");
+/// content policy that forbids loading anything at all. What the server knows
+/// and the page cannot reaches it as JSON in place of `__CCTOP_CONFIG__`; see
+/// [`app_config`]. Every page — the table, a session, the workspace, analytics
+/// — is a route inside it.
+const APP_HTML: &str = include_str!("assets/app/index.html");
 
 /// A favicon small enough to keep inline: the table's dark tile with the amber
 /// dot it draws on a session that is waiting.
@@ -1473,7 +1417,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         );
     }
     match path.as_str() {
-        "/" => page(shared, stream, &request, &DASHBOARD, access),
+        "/" => app_page(shared, stream, &request, access),
         "/favicon.svg" => http::respond(
             stream,
             Some(&request),
@@ -1529,11 +1473,11 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         "/api/events" => events(shared, stream, &request),
         "/insight/optimize" => api_insight(shared, stream, &request, "optimize"),
         "/insight/compare" => api_insight(shared, stream, &request, "compare"),
-        "/analytics" => page(shared, stream, &request, &ANALYTICS, access),
+        "/analytics" => app_page(shared, stream, &request, access),
         // Every tab's terminal, tiled. The page itself is harmless to a
         // read-only link — opening a terminal is the action, and that route
         // checks the credential as every action does.
-        "/workspace" => page(shared, stream, &request, &APP, access),
+        "/workspace" => app_page(shared, stream, &request, access),
         // The whole fleet's history in one document — the analytics page
         // filters and charts it client-side, so this one read-only route is
         // all the server owes it. Untrimmed buckets are affordable here
@@ -1576,7 +1520,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 Err((status, why)) => http::respond_error(stream, Some(&request), status, &why),
             }
         }
-        _ if path.starts_with("/session/") => page(shared, stream, &request, &APP, access),
+        _ if path.starts_with("/session/") => app_page(shared, stream, &request, access),
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
@@ -1933,7 +1877,7 @@ fn current(shared: &Shared) -> Arc<Snapshot> {
 /// or being handed it. It is handed it, because the same page is fetched with
 /// no token at all under `--no-token` and a single substitution keeps both
 /// cases on one code path.
-fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page, access: Access) {
+fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: Access) {
     // Which credential the page carries — and whether it may act — is decided
     // by the one the request arrived with, not by the run: the read-only link
     // opens the same page wired to the narrower token, so a page it hands out
@@ -1942,50 +1886,7 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
         Access::Full => (shared.token.as_str(), shared.actions),
         Access::ReadOnly => (shared.readonly.as_str(), false),
     };
-    // JSON-encoded rather than pasted between quotes: the token is hex today,
-    // and a literal substituted into script is exactly the shape of bug that
-    // outlives the reason it was safe.
-    let token = serde_json::to_string(&credential).unwrap_or_else(|_| "\"\"".to_string());
-    // The report page links back to the table, and the link has to carry the
-    // credential or it lands on a 403. Hex, so nothing in it needs escaping —
-    // asserted by the tests rather than assumed, since the generator could change.
-    let back = match credential.is_empty() {
-        true => String::new(),
-        false => format!("?t={credential}"),
-    };
-    // The page spells working directories with `~` the way the table does, and
-    // cannot work out where home is on its own — the browser may not even be on
-    // this machine. Escaped as JSON for the same reason the token is: it is a
-    // path, and paths are allowed to contain the characters that end a string.
-    let home = serde_json::to_string(
-        &dirs::home_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    )
-    .unwrap_or_else(|_| "\"\"".to_string());
-    let body = page
-        .html
-        .replace("__CCTOP_CSS__", COMMON_CSS)
-        .replace("__CCTOP_THEME_JS__", THEME_JS)
-        // Before the values, like the page's own script: the token and the
-        // home directory are read in here now.
-        .replace("__CCTOP_COMMON_JS__", COMMON_JS)
-        // The page's own script goes in before the values it reads, so a token or
-        // a home directory inside it is substituted the same way it was while the
-        // script was part of the page.
-        .replace(&page.script_placeholder(), page.js)
-        .replace(
-            "\"__CCTOP_ACTIONS__\"",
-            match actions {
-                true => "true",
-                false => "false",
-            },
-        )
-        .replace("\"__CCTOP_TOKEN__\"", &token)
-        .replace("\"__CCTOP_HOME__\"", &home)
-        .replace("__CCTOP_BACK__", &back)
-        .replace("__CCTOP_VERSION__", env!("CARGO_PKG_VERSION"))
-        .replace("__CCTOP_CONFIG__", &app_config(credential, actions));
+    let body = APP_HTML.replace("__CCTOP_CONFIG__", &app_config(credential, actions));
 
     // Hand the credential back as a cookie so a reload — which has no `?t=`
     // left, the page having stripped it — still gets in. Only a request that
@@ -2316,103 +2217,17 @@ mod tests {
     }
 
     #[test]
-    fn the_pages_carry_the_placeholders_the_server_substitutes() {
-        // If an asset is edited and the placeholder goes with it, the page ships
-        // with no token and fails at the first fetch — in the browser, where
-        // nothing here would have noticed.
-        for page in [&DASHBOARD, &ANALYTICS] {
-            assert!(page.html.contains("__CCTOP_CSS__"));
-            assert!(page.html.contains("__CCTOP_VERSION__"));
-            // The page's own script, by name. A page that loses it ships markup
-            // that renders and does nothing, which is worse than a 500 because
-            // it looks like a cctop that has gone quiet.
-            assert!(page.html.contains(&page.script_placeholder()));
-            // The shared script declares the token, the helpers and the header
-            // links; a page without it fails on its first `ask`.
-            assert!(page.html.contains("__CCTOP_COMMON_JS__"));
-            // ...and must come first, since the page's script uses what it
-            // declares at the top level.
-            assert!(
-                page.html.find("__CCTOP_COMMON_JS__") < page.html.find(&page.script_placeholder()),
-                "{} runs its own script before the shared one",
-                page.name
-            );
-        }
-        // The values the scripts read are substituted into the shared script,
-        // which every page inlines — so this is where they have to be.
-        //
-        // Without the token a page ships with none and fails at the first
-        // fetch, in the browser, where nothing here would have noticed.
-        assert!(COMMON_JS.contains("\"__CCTOP_TOKEN__\""));
-        // Without this one a page decides for itself that the action routes
-        // exist, draws the controls, and every one of them answers 403.
-        assert!(COMMON_JS.contains("\"__CCTOP_ACTIONS__\""));
-        assert!(COMMON_JS.contains("\"__CCTOP_HOME__\""));
-        // The stylesheet is pasted into a `<style>` element, so a `</style>` in
-        // it would end the block early and spill CSS into the document.
-        assert!(!COMMON_CSS.contains("</style>"));
-        // The same for each page's own script, which is a file now and could
-        // grow a string containing the tag that ends it — most easily by being
-        // handed one, or by a test fixture that quotes a whole page.
-        assert!(!COMMON_JS.contains("</script"));
-        for page in [&DASHBOARD, &ANALYTICS] {
-            assert!(
-                !page.js.contains("</script"),
-                "{} would end its own block",
-                page.name
-            );
-        }
-    }
-
-    /// The names a script declares at its top level, read off the start of
-    /// each line — the shape this codebase writes them in, not a parser.
-    fn top_level_names(script: &str) -> Vec<&str> {
-        script
-            .lines()
-            .filter_map(|line| {
-                ["const ", "let ", "function ", "async function "]
-                    .iter()
-                    .find_map(|kw| line.strip_prefix(kw))
-            })
-            .filter_map(|rest| {
-                rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .next()
-            })
-            .filter(|name| !name.is_empty())
-            .collect()
-    }
-
-    #[test]
-    fn no_page_redeclares_a_name_the_shared_script_has() {
-        // Classic scripts share one top level, so a page that declares `money`
-        // again does not shadow the shared one — it is a SyntaxError, and the
-        // whole page script never runs. The browser is the only place that
-        // would say so, and only to someone who opened the console.
-        let shared = top_level_names(COMMON_JS);
-        assert!(shared.contains(&"ask") && shared.contains(&"TOKEN"));
-        for page in [&DASHBOARD, &ANALYTICS] {
-            for name in top_level_names(page.js) {
-                assert!(
-                    !shared.contains(&name),
-                    "{}.js declares `{name}`, which common.js already does",
-                    page.name
-                );
-            }
-        }
-    }
-
-    #[test]
     fn the_app_page_is_built_and_takes_its_config() {
         // The built app is committed (web/ is its source); a checkout where it
         // is missing or stale-shaped would serve a page that cannot start.
-        assert!(APP.html.contains(
+        assert!(APP_HTML.contains(
             r#"<script id="cctop-config" type="application/json">__CCTOP_CONFIG__</script>"#
         ));
-        assert!(APP.html.contains("<div id=\"root\"></div>"));
+        assert!(APP_HTML.contains("<div id=\"root\"></div>"));
         // Everything inlined: a page that loads a file of its own breaks under
         // the content policy, which allows no URL at all.
-        assert!(!APP.html.contains(" src=\"/assets/"));
-        assert!(!APP.html.contains("<link rel=\"stylesheet\""));
+        assert!(!APP_HTML.contains(" src=\"/assets/"));
+        assert!(!APP_HTML.contains("<link rel=\"stylesheet\""));
     }
 
     #[test]
@@ -2426,8 +2241,9 @@ mod tests {
 
     #[test]
     fn a_token_is_safe_to_paste_into_a_url_unescaped() {
-        // `page` builds the back-link by interpolation rather than by escaping.
-        // That is only correct while the generator stays hex.
+        // The links cctop prints, and the `Set-Cookie` value `app_page` writes,
+        // carry the token by interpolation rather than by escaping. That is
+        // only correct while the generator stays hex.
         let token = new_token();
         assert!(
             token.chars().all(|c| c.is_ascii_hexdigit()),
