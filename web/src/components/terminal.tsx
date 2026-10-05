@@ -20,79 +20,127 @@ export const termSrc = (url: string) => {
 };
 
 // How long after the last touch of the terminal the next one counts as coming
-// back to it, and how long the nudge holds the frame narrower.
+// back to it, how long the nudge holds the frame narrower, and how long after
+// a nudge to look whether it took.
 const QUIET_MS = 1500;
 const NUDGE_MS = 220;
+const VERIFY_MS = 1200;
 
-// The grid the frame's xterm is showing, read off its DOM: rows from the row
-// elements, columns from the screen's width over one character's. `null` when
-// the renderer draws without those elements, and then no nudge is attempted.
-function grid(frame: HTMLIFrameElement): { cols: number; rows: number } | null {
-  try {
-    const doc = frame.contentDocument;
-    const screen = doc?.querySelector<HTMLElement>(".xterm-screen");
-    const rows = doc?.querySelector(".xterm-rows")?.children.length;
-    const measure = doc?.querySelector<HTMLElement>(".xterm-char-measure-element");
-    if (!screen || !rows || !measure?.textContent?.length) return null;
-    const cell = measure.offsetWidth / measure.textContent.length;
-    return cell > 0 ? { cols: Math.round(screen.offsetWidth / cell), rows } : null;
-  } catch {
-    return null;
-  }
-}
+type WindowInfo = { cols: number; rows: number; web?: [number, number][] };
+
+// Whether the window is already a browser's: rmux lists each browser client
+// with its exact size, so this is read from rmux, not measured off the frame.
+// Any browser counts — two frames on one agent must not take it in turns.
+const heldByBrowser = (w: WindowInfo) => (w.web ?? []).some(([c, r]) => c === w.cols && r === w.rows);
 
 /**
  * The terminal frame, which also takes the rmux window back when you use it.
  *
- * rmux fits a window to one client — the TUI's or this browser's — and its
+ * rmux fits a window to one client — the TUI's or a browser's — and its
  * `latest` setting only moves on attach or resize, never on input. So on the
- * first key, click, scroll or focus after a pause, the frame asks the server
- * how big the window is; if that is not this frame's grid, it narrows itself
- * for a moment and back, and xterm's resize is what rmux listens to.
+ * first key, click or scroll after a pause, the frame asks the server for the
+ * window's size and the browsers' sizes. Only if no browser holds the window
+ * does it narrow itself for a moment and back: xterm's resize is what rmux
+ * listens to.
+ *
+ * And it gives up rather than loop. If the window still is not a browser's a
+ * moment after a nudge — something else keeps it, or this browser cannot be
+ * found among the clients — no further nudge is tried until the frame's own
+ * size changes. A nudge that does not work, repeated, is a terminal that
+ * reflows on every keystroke, which is worse than one at the wrong size.
  */
-export const TerminalFrame = memo(function TerminalFrame({ url, title, name }: { url: string; title: string; name?: string }) {
+export const TerminalFrame = memo(function TerminalFrame({ url, title, name, onBroken }: {
+  url: string; title: string; name?: string;
+  /** The frame says its link would not connect; the caller mints a fresh one. */
+  onBroken?: () => void;
+}) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [narrow, setNarrow] = useState(false);
+  // rmux's app says so in its own words when its socket is refused or lost —
+  // an expired share, a dropped tunnel — and offers only "try refreshing",
+  // which reloads the same dead link. Reported once per link instead, so the
+  // caller can mint a fresh share rather than leave a dead frame up.
+  // The latest callback, so a parent re-rendering with a new closure does not
+  // restart the watch — and with it the once-per-link promise.
+  const broken = useRef(onBroken);
+  useEffect(() => {
+    broken.current = onBroken;
+  });
+  useEffect(() => {
+    let told = false;
+    const look = setInterval(() => {
+      try {
+        const text = ref.current?.contentDocument?.body?.innerText ?? "";
+        if (!told && broken.current && /connection refused|lost connection|could not connect|handshake/i.test(text)) {
+          told = true;
+          broken.current();
+        }
+      } catch {
+        /* a frame mid-navigation has no document to read */
+      }
+    }, 1500);
+    return () => clearInterval(look);
+  }, [url]);
   useEffect(() => {
     const frame = ref.current;
     if (!frame || !name) return;
     let last = 0;
-    let checking = false;
+    let busy = false;
+    let gaveUp = false;
+    let gone = false;
+    const ask = () => getJson<WindowInfo>("/api/window/" + encodeURIComponent(name));
     const touched = async () => {
       const now = Date.now();
       const back = now - last >= QUIET_MS;
       last = now;
-      if (!back || checking) return;
-      checking = true;
+      if (!back || busy || gaveUp) return;
+      busy = true;
       try {
-        const own = grid(frame);
-        if (!own) return;
-        const win = await getJson<{ cols: number; rows: number }>("/api/window/" + encodeURIComponent(name));
-        if (win.cols === own.cols && win.rows === own.rows) return;
+        const w = await ask();
+        if (!(w.web ?? []).length || heldByBrowser(w)) return;
         setNarrow(true);
-        setTimeout(() => setNarrow(false), NUDGE_MS);
+        await new Promise((done) => setTimeout(done, NUDGE_MS));
+        if (gone) return;
+        setNarrow(false);
+        await new Promise((done) => setTimeout(done, VERIFY_MS));
+        if (gone) return;
+        if (!heldByBrowser(await ask())) gaveUp = true;
       } catch {
         /* an older cctop, or a tab that just closed: nothing to take back */
       } finally {
-        checking = false;
+        busy = false;
       }
     };
+    // A different size is a new situation: the give-up applied to the old one.
+    // Ignores the nudge's own resizes, which come and go while `busy`.
+    const sized = new ResizeObserver(() => {
+      if (!busy) gaveUp = false;
+    });
+    sized.observe(frame);
     // Same-origin, so the frame's own events are ours to hear. Re-wired on
-    // every load, since a reconnect replaces the frame's document.
+    // every load, since a reconnect replaces the frame's document. Not
+    // `focus`: it fires on every switch of window and on xterm's own
+    // refocusing, which is not someone starting to use this terminal.
     const wire = () => {
       const win = frame.contentWindow;
       if (!win) return;
-      for (const kind of ["keydown", "pointerdown", "wheel", "focus"]) win.addEventListener(kind, touched, { capture: true, passive: true });
+      for (const kind of ["keydown", "pointerdown", "wheel"]) win.addEventListener(kind, touched, { capture: true, passive: true });
     };
     frame.addEventListener("load", wire);
     wire();
-    return () => frame.removeEventListener("load", wire);
+    return () => {
+      gone = true;
+      sized.disconnect();
+      frame.removeEventListener("load", wire);
+    };
   }, [name, url]);
   return (
     <iframe
       ref={ref}
       className="bg-terminal block h-full min-h-0 flex-1 border-0"
-      style={{ width: narrow ? "calc(100% - 24px)" : "100%" }}
+      // The frame grows to fill a flex row, where a width alone changes
+      // nothing; the nudge has to take the growing away too.
+      style={narrow ? { flex: "0 0 calc(100% - 24px)", width: "calc(100% - 24px)" } : { width: "100%" }}
       title={title}
       allow="clipboard-read; clipboard-write"
       src={termSrc(url)}

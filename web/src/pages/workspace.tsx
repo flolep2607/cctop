@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { ExternalLink, GripVertical, Maximize2, MessageSquareText, Minimize2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -32,11 +32,11 @@ const autoCols = (n: number) => (n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4);
 // page load — kept by name so a re-render does not ask again, forgotten on
 // failure so Retry does.
 const opening = new Map<string, Promise<Terminal>>();
-const mintShare = (name: string): Promise<Terminal> =>
+const mintShare = (name: string, fresh = false): Promise<Terminal> =>
   ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ origin: location.origin }),
+    body: JSON.stringify({ origin: location.origin, fresh }),
   }).then((r) => r.json());
 function openTerminal(name: string) {
   if (!opening.has(name)) {
@@ -64,6 +64,7 @@ const Tile = memo(function Tile({
   // In a window of its own: the tile lets go of its frame (one browser per
   // share) and takes a fresh one back when that window closes.
   const [popped, setPopped] = useState(false);
+  const retries = useRef(0);
   const pop = () =>
     popOut({
       key: name,
@@ -73,7 +74,7 @@ const Tile = memo(function Tile({
         setTerminal(null);
         opening.delete(name);
       },
-      mint: () => mintShare(name),
+      mint: () => mintShare(name, true),
       onClosed: () => {
         setPopped(false);
         setAttempt((a) => a + 1);
@@ -103,7 +104,27 @@ const Tile = memo(function Tile({
   // cost the reader their terminal. The header says "closed"; the frame stays.
   let body: React.ReactNode;
   if (popped) body = <Empty>In a window of its own. Close that window to bring the terminal back here.</Empty>;
-  else if (terminal) body = <TerminalFrame url={terminal.url} name={terminal.name ?? name} title={"Terminal — " + label} />;
+  else if (terminal)
+    body = (
+      <TerminalFrame
+        url={terminal.url}
+        name={terminal.name ?? name}
+        title={"Terminal — " + label}
+        onBroken={() => {
+          // Twice at most: a share that will not connect when fresh is not
+          // fixed by a third.
+          if (retries.current >= 2) return;
+          retries.current += 1;
+          mintShare(name, true).then(
+            (t) => {
+              opening.set(name, Promise.resolve(t));
+              setTerminal(t);
+            },
+            (e) => setError(String(e.message || e)),
+          );
+        }}
+      />
+    );
   else if (!CAN_ACT) body = <Empty>This is the view-only link, which cannot open terminals. Open the first link <code className="text-neutral-300">cctop serve</code> printed — “serving on …” — to type into agents here.</Empty>;
   else if (!exists) body = <Empty>This tab has closed — its agent exited or was moved.<Button size="sm" variant="secondary" onClick={onClose}>Remove</Button></Empty>;
   else if (error) body = <Empty bad>{error}<Button size="sm" variant="secondary" onClick={() => setAttempt(attempt + 1)}>Retry</Button></Empty>;

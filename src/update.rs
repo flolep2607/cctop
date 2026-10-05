@@ -486,6 +486,8 @@ fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
     // Claim the staging directory before downloading: whether the new binary can
     // be put in place is a permission question with an answer already available,
     // and finding out afterwards means having spent the download for nothing.
+    // `None` is a directory only root can write, which the user agreed to
+    // elevate for: the download still happens here, as them.
     let staging = staging_dir()?;
 
     println!("Downloading {}…", asset.name);
@@ -499,6 +501,11 @@ fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
         .read_to_end(&mut body)
         .context("could not read the release archive")?;
 
+    let Some(staging) = staging else {
+        install_as_root(&body)?;
+        println!("Updated {current} -> {latest}.");
+        return Ok(show_changes(current, latest));
+    };
     let new_binary = unpack(&body, staging.path())?;
     self_replace::self_replace(&new_binary).context("could not replace the running executable")?;
 
@@ -757,16 +764,19 @@ const ELEVATE: &str = "re-run it as `sudo cctop --update`";
 /// Replacing an executable is a rename and a rename cannot cross a filesystem
 /// boundary, so this has to sit next to the current binary rather than in a temp
 /// dir — which makes it a permission question wherever that binary lives.
-fn staging_dir() -> Result<tempfile::TempDir> {
+fn staging_dir() -> Result<Option<tempfile::TempDir>> {
     let exe = std::env::current_exe().context("could not locate the running executable")?;
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow!("the running executable has no parent directory"))?;
     match raw_stage_in(dir) {
-        Ok(staged) => Ok(staged),
+        Ok(staged) => Ok(Some(staged)),
         // The one failure the user can do something about without going back to
         // the shell, so it is worth handling rather than only reporting.
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(elevate(dir)),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => match elevate(dir) {
+            Some(failed) => Err(failed),
+            None => Ok(None),
+        },
         Err(error) => Err(anyhow::Error::new(error)
             .context(format!("could not stage an update in {}", dir.display()))),
     }
@@ -951,22 +961,6 @@ fn already_elevated() -> bool {
     std::env::var_os("SUDO_USER").is_some()
 }
 
-/// The command that re-runs this exact binary as root.
-///
-/// The resolved path from `current_exe`, never argv[0]: sudo resets `PATH` to
-/// its own `secure_path`, so a bare `cctop` would be looked up somewhere else or
-/// nowhere at all — and the binary to replace is the one at *this* path, which is
-/// the same one `self_replace` will go for on the other side. `--` so a path that
-/// begins with a dash can never be read as an option of sudo's.
-fn sudo_argv(exe: &Path) -> Vec<String> {
-    vec![
-        "sudo".to_string(),
-        "--".to_string(),
-        exe.to_string_lossy().into_owned(),
-        "--update".to_string(),
-    ]
-}
-
 /// Handle an install directory this process cannot write into, elevating if the
 /// user asks for it.
 ///
@@ -975,44 +969,125 @@ fn sudo_argv(exe: &Path) -> Vec<String> {
 /// privileged run to finish, and exits with whatever that run made of it — there
 /// is nothing sensible left for this process to do afterwards, since the update
 /// it was asked for has either already happened or already been reported.
-fn elevate(dir: &Path) -> anyhow::Error {
+fn elevate(dir: &Path) -> Option<anyhow::Error> {
     match recourse(
         is_root(),
         already_elevated(),
         crate::shim::is_command("sudo"),
         interactive(),
     ) {
-        Recourse::Privileged => return read_only(dir),
-        Recourse::Explain => return unwritable(dir),
+        Recourse::Privileged => return Some(read_only(dir)),
+        Recourse::Explain => return Some(unwritable(dir)),
         Recourse::Ask => {}
     }
 
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
-        Err(_) => return unwritable(dir),
+        Err(_) => return Some(unwritable(dir)),
     };
     if !confirm(dir, &exe) {
-        return anyhow!(
+        return Some(anyhow!(
             "Not updated: {} is not writable by this user. \
              If a package manager installed cctop, update it with that instead.",
             dir.display()
-        );
+        ));
     }
+    // Agreed: the caller downloads as this user and hands only the install to
+    // root — see [`install_as_root`].
+    None
+}
 
-    let argv = sudo_argv(&exe);
-    // Inherited stdio, which is the whole reason this is a child process and not
-    // an exec of something quieter: sudo asks for a password on the terminal, and
-    // a captured stderr is a prompt the user never sees.
-    match std::process::Command::new(&argv[0])
+/// Install a downloaded release through sudo, without root touching the network.
+///
+/// The whole update used to re-run under sudo, download included — and sudo
+/// resets the environment, proxy variables with it, so on a network that only
+/// reaches GitHub through a proxy the user's own run got through and the root
+/// one failed to resolve github.com at all. Now the user's process, which has
+/// the network, downloads and unpacks into a directory only it can write,
+/// hashes the binary, and asks root only to check that hash and move the file
+/// into place: `sudo cctop --install-update <path> <sha256>`. The hash is what
+/// stops anything else running as the user from swapping the file between the
+/// two steps and having root install the swap.
+fn install_as_root(archive: &[u8]) -> Result<()> {
+    let private = tempfile::Builder::new()
+        .prefix("cctop-update-")
+        .tempdir()
+        .context("could not make a private directory to download into")?;
+    let new_binary = unpack(archive, private.path())?;
+    let digest = sha256_of(&new_binary)?;
+    let exe = std::env::current_exe().context("could not locate the running executable")?;
+    let argv = sudo_install_argv(&exe, &new_binary, &digest);
+    // Inherited stdio: sudo asks for a password on the terminal.
+    let status = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .status()
-    {
-        // The privileged run has already printed everything there is to say,
-        // including its own failures, so this adds nothing and only forwards how
-        // it went.
-        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-        Err(error) => anyhow!("could not run sudo ({error}): {ELEVATE}."),
+        .map_err(|error| anyhow!("could not run sudo ({error}): {ELEVATE}."))?;
+    match status.success() {
+        true => Ok(()),
+        // The root half has already said what went wrong.
+        false => Err(anyhow!("the update was not installed")),
     }
+}
+
+/// The command that installs `staged` as root, checked against `digest`.
+///
+/// The resolved path from `current_exe`, never argv[0]: sudo resets `PATH`, and
+/// the binary to replace is the one at *this* path. `--` so a path beginning
+/// with a dash is never read as an option of sudo's.
+fn sudo_install_argv(exe: &Path, staged: &Path, digest: &str) -> Vec<String> {
+    vec![
+        "sudo".to_string(),
+        "--".to_string(),
+        exe.to_string_lossy().into_owned(),
+        "--install-update".to_string(),
+        staged.to_string_lossy().into_owned(),
+        digest.to_string(),
+    ]
+}
+
+/// The file's SHA-256, as lowercase hex.
+fn sha256_of(path: &Path) -> Result<String> {
+    use sha2::Digest;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
+    Ok(sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// The root half of an update: put `staged` in place of the running binary,
+/// if it is the file the user's half hashed. No network, no release lookup —
+/// everything that needed either was done by the user, who has both.
+pub fn install_staged(staged: &str, digest: &str) -> Result<()> {
+    let staged = Path::new(staged);
+    let found = sha256_of(staged)?;
+    if !found.eq_ignore_ascii_case(digest) {
+        bail!(
+            "not installed: {} changed after it was downloaded (expected sha256 {digest}, found {found})",
+            staged.display()
+        );
+    }
+    let exe = std::env::current_exe().context("could not locate the running executable")?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("the running executable has no parent directory"))?;
+    // Beside the binary, because replacing it is a rename and a rename cannot
+    // cross filesystems — and the user's private directory is in /tmp.
+    let staging = raw_stage_in(dir).map_err(|_| read_only(dir))?;
+    let local = staging.path().join("cctop");
+    std::fs::copy(staged, &local).context("could not copy the update into place")?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755))?;
+    // Checked again on the copy this process made, which is what gets installed.
+    if !sha256_of(&local)?.eq_ignore_ascii_case(digest) {
+        bail!(
+            "not installed: the copy of {} does not match what was downloaded",
+            staged.display()
+        );
+    }
+    self_replace::self_replace(&local).context("could not replace the running executable")?;
+    Ok(())
 }
 
 /// Whether there is a user at the other end to answer a question.
@@ -1377,8 +1452,45 @@ mod tests {
     /// is not a way to name it.
     #[test]
     fn the_elevated_command_names_the_running_binary_by_path() {
-        let argv = sudo_argv(Path::new("/usr/local/bin/cctop"));
-        assert_eq!(argv, ["sudo", "--", "/usr/local/bin/cctop", "--update"]);
+        let argv = sudo_install_argv(
+            Path::new("/usr/local/bin/cctop"),
+            Path::new("/tmp/cctop-update-x/cctop"),
+            "ab12",
+        );
+        assert_eq!(
+            argv,
+            [
+                "sudo",
+                "--",
+                "/usr/local/bin/cctop",
+                "--install-update",
+                "/tmp/cctop-update-x/cctop",
+                "ab12"
+            ]
+        );
+        // And never `--update`: that would make root download, and root may
+        // have no route to GitHub that the user's proxy settings gave them.
+        assert!(!argv.iter().any(|a| a == "--update"));
+    }
+
+    /// The root half installs only the file the user's half hashed.
+    #[test]
+    fn a_staged_binary_that_changed_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged = dir.path().join("cctop");
+        std::fs::write(&staged, b"the downloaded release").expect("write");
+        let digest = sha256_of(&staged).expect("hash");
+        assert_eq!(digest.len(), 64);
+        // Swapped between the two halves.
+        std::fs::write(&staged, b"something else").expect("write");
+        let error = format!(
+            "{:#}",
+            install_staged(staged.to_str().expect("utf-8"), &digest).unwrap_err()
+        );
+        assert!(
+            error.contains("changed after it was downloaded"),
+            "got: {error}"
+        );
     }
 
     /// Root has no fix to suggest, so it must not send the user back to sudo —

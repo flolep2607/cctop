@@ -77,7 +77,12 @@ export const SessionRow = memo(function SessionRow({
               figure worth keeping, so it moves into this line there. */}
           <span className="text-foreground font-mono sm:hidden">{rowCost(s)}</span>
           {s.running && s.state === "waiting" && <Badge variant="outline" className="text-warning border-warning/40 font-normal">waiting on you</Badge>}
-          {s.running && s.state === "asking" && <Badge variant="outline" className="text-destructive border-destructive/40 bg-destructive/5 font-normal">needs permission</Badge>}
+          {s.running && s.state === "asking" &&
+            (s.asking_question ? (
+              <Badge variant="outline" className="text-warning border-warning/40 bg-warning/5 font-normal">has a question</Badge>
+            ) : (
+              <Badge variant="outline" className="text-destructive border-destructive/40 bg-destructive/5 font-normal">needs permission</Badge>
+            ))}
           {s.state === "error" && <Badge variant="outline" className="text-destructive border-destructive/40 font-normal">{s.running ? "api error" : "ended on an api error"}</Badge>}
           {errRate >= 0.25 && <Badge variant="outline" className="text-destructive border-destructive/40 font-normal">{Math.round(errRate * 100)}% tool errors</Badge>}
           {s.conflict && (
@@ -154,7 +159,14 @@ export function WantingRow({ s, picked, onPick, onDismiss }: { s: Session; picke
       </Button>
       {asking && s.asking_for && (
         <div className="px-4 pb-2 sm:pl-12">
-          <code className="bg-muted/60 block rounded-md border px-2.5 py-1.5 font-mono text-xs break-words whitespace-pre-wrap">{s.asking_for}</code>
+          {s.asking_question ? (
+            <p className="bg-warning/5 border-warning/30 rounded-md border px-2.5 py-1.5 text-sm">
+              {s.asking_for}
+              <span className="text-muted-foreground block text-xs">A question with choices — pick an answer in its terminal or session page.</span>
+            </p>
+          ) : (
+            <code className="bg-muted/60 block rounded-md border px-2.5 py-1.5 font-mono text-xs break-words whitespace-pre-wrap">{s.asking_for}</code>
+          )}
         </div>
       )}
       {CAN_ACT && s.running && (
@@ -165,7 +177,7 @@ export function WantingRow({ s, picked, onPick, onDismiss }: { s: Session; picke
             if (text.trim() && (await post("send", { text: text.trim() }))) setText("");
           }}
         >
-          {asking && ANSWERABLE.has(s.provider) && (
+          {asking && ANSWERABLE.has(s.provider) && !s.asking_question && (
             <>
               <Button type="button" size="sm" disabled={busy} onClick={() => post("answer", { choice: "allow" }, "Allowed")}>
                 <Check /> Allow

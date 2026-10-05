@@ -361,11 +361,11 @@ function HostBanners() {
 function Tabs() {
   const { tabs } = useTabs(5000);
   const [open, setOpen] = useState<{ tab: Tab; term?: Terminal; error?: string } | null>(null);
-  const mint = (name: string): Promise<Terminal> =>
+  const mint = (name: string, fresh = false): Promise<Terminal> =>
     ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ origin: location.origin }),
+      body: JSON.stringify({ origin: location.origin, fresh }),
     }).then((r) => r.json());
   const toggle = async (t: Tab) => {
     if (open?.tab.name === t.name) return setOpen(null);
@@ -416,7 +416,7 @@ function Tabs() {
                 title="Open in a window of its own — the drawer closes, since a share admits one browser"
                 onClick={() => {
                   const tab = open.tab;
-                  popOut({ key: tab.name, title: tab.label + " — cctop", release: () => setOpen(null), mint: () => mint(tab.name), onClosed: () => {} });
+                  popOut({ key: tab.name, title: tab.label + " — cctop", release: () => setOpen(null), mint: () => mint(tab.name, true), onClosed: () => {} });
                 }}
               >
                 <ExternalLink className="size-3" /> pop out
@@ -428,7 +428,15 @@ function Tabs() {
           </div>
           <div className="bg-terminal flex h-[min(60vh,640px)]">
             {open.term ? (
-              <TerminalFrame url={open.term.url} name={open.term.name ?? open.tab.name} title="Terminal" />
+              <TerminalFrame
+                url={open.term.url}
+                name={open.term.name ?? open.tab.name}
+                title="Terminal"
+                onBroken={() => {
+                  const tab = open.tab;
+                  mint(tab.name, true).then((term) => setOpen((o) => (o?.tab.name === tab.name && o.term?.url !== term.url ? { tab, term } : o)), () => {});
+                }}
+              />
             ) : (
               <div className={cn("m-auto text-sm", open.error ? "text-red-400" : "text-neutral-400")}>{open.error || "Opening this tab's terminal…"}</div>
             )}

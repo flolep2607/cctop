@@ -1404,6 +1404,11 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     {
         return;
     }
+    // A terminal's socket, for a page that reached cctop from elsewhere; see
+    // [`relay_terminal`]. Before the app's files because it is not one.
+    if let Some(rest) = path.strip_prefix("/rmux-ws/") {
+        return relay_terminal(shared, stream, &request, rest, access);
+    }
     // rmux's terminal app, for a session page to frame — see [`term`]. Static
     // and behind the same token as everything else, so only someone already
     // holding the link can load it.
@@ -1548,11 +1553,20 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 );
             }
             match crate::rmux::window_size(name) {
-                Some((cols, rows)) => json(
-                    stream,
-                    &request,
-                    &serde_json::json!({ "cols": cols, "rows": rows }),
-                ),
+                // The browsers' own sizes ride along, so the page can tell the
+                // window is already a browser's without measuring its drawing.
+                Some((cols, rows)) => {
+                    let web: Vec<[u16; 2]> = crate::rmux::clients(name)
+                        .into_iter()
+                        .filter(|(browser, _, _)| *browser)
+                        .map(|(_, c, r)| [c, r])
+                        .collect();
+                    json(
+                        stream,
+                        &request,
+                        &serde_json::json!({ "cols": cols, "rows": rows, "web": web }),
+                    )
+                }
                 None => http::respond_error(stream, Some(&request), 404, "that tab has no window"),
             }
         }
@@ -1803,7 +1817,8 @@ fn api_tab(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
         .get("origin")
         .and_then(serde_json::Value::as_str)
         .and_then(actions::frontend_for);
-    match actions::tab_terminal(name, frontend.as_deref()) {
+    let fresh = body.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
+    match actions::tab_terminal(name, frontend.as_deref(), fresh) {
         Ok(terminal) => json(stream, request, &terminal),
         Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
     }
@@ -1842,7 +1857,8 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
     // terminal is a link and a reach, not a sentence about what was done.
     if verb == "terminal" {
         let frontend = actions::frontend_for(&field("origin"));
-        return match actions::terminal(session, frontend.as_deref()) {
+        let fresh = body.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
+        return match actions::terminal(session, frontend.as_deref(), fresh) {
             Ok(terminal) => json(stream, request, &terminal),
             Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
         };
@@ -1960,6 +1976,108 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: 
         body.as_bytes(),
         &headers,
     );
+}
+
+/// Carry a terminal's WebSocket from the page to rmux's loopback endpoint.
+///
+/// A page opened from another machine — the LAN, or `--tunnel`'s
+/// trycloudflare host — cannot reach `ws://127.0.0.1:<port>`, which is where
+/// rmux serves a share. It used to get a second tunnel for that, through
+/// localhost.run, which dropped often enough to be most of the refused frames.
+/// Instead the share's endpoint is rewritten to this route at the page's own
+/// origin (see `rmux::relay_link`), and the socket rides whatever road the page
+/// came in on, the quick tunnel included: it carries WebSocket upgrades.
+///
+/// Only to a port a share of cctop's named — anything else would make this a
+/// way into every local service that trusts localhost — and only for a link
+/// that may act, since the far end is a shell. The handshake is passed on
+/// whole, Host rewritten, and then the bytes are pumped both ways until either
+/// side closes. The connection holds one of [`MAX_CONNECTIONS`] while it lives.
+fn relay_terminal(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    rest: &str,
+    access: Access,
+) {
+    use std::io::{Read, Write};
+    if access != Access::Full || !shared.actions {
+        return http::respond_error(
+            stream,
+            Some(request),
+            403,
+            "this link cannot open terminals",
+        );
+    }
+    if !request.is_websocket() {
+        return http::respond_error(
+            stream,
+            Some(request),
+            400,
+            "a terminal socket is a WebSocket",
+        );
+    }
+    let Some((port, tail)) = rest.split_once('/') else {
+        return http::respond_error(stream, Some(request), 404, "no such terminal");
+    };
+    let Some(port) = port
+        .parse::<u16>()
+        .ok()
+        .filter(|p| crate::rmux::relayable(*p))
+    else {
+        return http::respond_error(stream, Some(request), 404, "no such terminal");
+    };
+    let Ok(mut upstream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return http::respond_error(
+            stream,
+            Some(request),
+            502,
+            "the terminal's share has closed",
+        );
+    };
+    let query = match request.raw_query() {
+        "" => String::new(),
+        q => format!("?{q}"),
+    };
+    let mut head = format!("GET /{tail}{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+    for (name, value) in request.headers() {
+        if !name.eq_ignore_ascii_case("host") {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+    }
+    head.push_str("\r\n");
+    if upstream.write_all(head.as_bytes()).is_err() {
+        return http::respond_error(
+            stream,
+            Some(request),
+            502,
+            "the terminal's share has closed",
+        );
+    }
+    // A terminal sits quiet for minutes at a time; the request deadlines that
+    // guard every other route would cut it off mid-session.
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+    let (Ok(mut down_read), Ok(mut up_write)) = (stream.try_clone(), upstream.try_clone()) else {
+        return;
+    };
+    let pump = std::thread::spawn(move || {
+        let mut buf = [0u8; 16 * 1024];
+        while let Ok(n) = upstream.read(&mut buf) {
+            if n == 0 || down_read.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+        let _ = down_read.shutdown(std::net::Shutdown::Both);
+    });
+    let mut buf = [0u8; 16 * 1024];
+    while let Ok(n) = stream.read(&mut buf) {
+        if n == 0 || up_write.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
+    let _ = up_write.shutdown(std::net::Shutdown::Both);
+    let _ = pump.join();
 }
 
 /// What the app page is told about this run, as the JSON that replaces

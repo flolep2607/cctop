@@ -16,6 +16,8 @@ export interface Session {
   last_active?: string;
   started_at?: string;
   asking_for?: string | null;
+  /** The held prompt is a question with choices, not a permission prompt. */
+  asking_question?: boolean;
   cost?: { available: boolean; included: boolean; total: string | number | null; today?: number; this_hour?: number; last_hour?: number };
   tokens?: { input: number; output: number; total: number };
   context?: { used: number; max: number; compacted?: boolean } | null;

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ShieldAlert, X } from "lucide-react";
+import { Check, MessageCircleQuestion, ShieldAlert, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ANSWERABLE, answerPrompt } from "@/lib/api";
 import { CAN_ACT } from "@/lib/config";
@@ -14,7 +14,11 @@ import type { Session } from "@/lib/types";
 export function PromptBar({ session, className, compact }: { session: Session; className?: string; compact?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
-  const answerable = CAN_ACT && ANSWERABLE.has(session.provider);
+  // A question with choices is answered by picking one, which only its own
+  // terminal can do: Allow would press `1` — the first answer — and Deny
+  // would press Esc and throw the question away.
+  const question = !!session.asking_question;
+  const answerable = CAN_ACT && ANSWERABLE.has(session.provider) && !question;
   const go = async (choice: "allow" | "deny") => {
     setBusy(true);
     try {
@@ -29,11 +33,17 @@ export function PromptBar({ session, className, compact }: { session: Session; c
     <div
       role="group"
       aria-label="Permission prompt"
-      className={cn("bg-destructive/[0.07] border-destructive/30 flex min-w-0 items-center gap-2 rounded-md border px-2.5 py-1.5", className)}
+      className={cn(
+        "flex min-w-0 items-center gap-2 rounded-md border px-2.5 py-1.5",
+        question ? "bg-warning/[0.08] border-warning/40" : "bg-destructive/[0.07] border-destructive/30",
+        className,
+      )}
     >
-      <ShieldAlert className="text-destructive size-4 shrink-0" />
+      {question ? <MessageCircleQuestion className="text-warning size-4 shrink-0" /> : <ShieldAlert className="text-destructive size-4 shrink-0" />}
       <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs" title={session.asking_for ?? ""}>
-        {session.asking_for ? <code className="text-foreground font-mono">{session.asking_for}</code> : "Waiting on a permission prompt"}
+        {session.asking_for ? (
+          question ? <span className="text-foreground">{session.asking_for}</span> : <code className="text-foreground font-mono">{session.asking_for}</code>
+        ) : question ? "Asking you a question" : "Waiting on a permission prompt"}
       </span>
       {said && <span className={cn("shrink-0 text-xs", said.ok ? "text-success" : "text-destructive")}>{said.text}</span>}
       {answerable ? (
@@ -48,7 +58,7 @@ export function PromptBar({ session, className, compact }: { session: Session; c
           </Button>
         </>
       ) : (
-        <span className="text-muted-foreground shrink-0 text-xs">answer it in its terminal</span>
+        <span className="text-muted-foreground shrink-0 text-xs">{question ? "pick an answer in its terminal" : "answer it in its terminal"}</span>
       )}
     </div>
   );

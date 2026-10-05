@@ -114,6 +114,13 @@ pub struct Request {
     /// it: at most a few kilobytes everywhere else, and the one response worth
     /// compressing is the near-megabyte page with the whole UI inlined in it.
     accepts_gzip: bool,
+    /// The query string as it arrived, undecoded, for the one route that
+    /// forwards a request rather than answering it: the terminal relay.
+    raw_query: String,
+    /// Every header as it arrived, in order, bounded by [`MAX_HEADER_BYTES`].
+    /// Only the terminal relay reads these — a WebSocket handshake has to be
+    /// passed on whole or the far side refuses it.
+    headers: Vec<(String, String)>,
 }
 
 impl Request {
@@ -185,6 +192,7 @@ impl Request {
         let mut cookie_header = String::new();
         let mut bearer = String::new();
         let mut accepts_gzip = false;
+        let mut headers: Vec<(String, String)> = Vec::new();
         loop {
             let mut header = String::new();
             match reader.read_line(&mut header) {
@@ -198,6 +206,7 @@ impl Request {
                     let Some((name, value)) = header.split_once(':') else {
                         continue;
                     };
+                    headers.push((name.trim().to_string(), value.trim().to_string()));
                     let value = value.trim();
                     if name.eq_ignore_ascii_case("content-length") {
                         // A length that is not a number is not a length. Left
@@ -274,6 +283,8 @@ impl Request {
             cookie_header,
             bearer,
             accepts_gzip,
+            raw_query: raw_query.to_string(),
+            headers,
         })
     }
 
@@ -302,6 +313,23 @@ impl Request {
     }
 
     /// The `Authorization: Bearer` token, or empty.
+    /// The query string as it arrived, undecoded.
+    pub fn raw_query(&self) -> &str {
+        &self.raw_query
+    }
+
+    /// Every header, in the order it arrived.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// Whether this asks to become a WebSocket.
+    pub fn is_websocket(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket"))
+    }
+
     /// Whether a gzip body may be sent back.
     pub fn accepts_gzip(&self) -> bool {
         self.accepts_gzip

@@ -169,6 +169,11 @@ pub struct Args {
     #[arg(long)]
     pub update: bool,
 
+    /// Internal: the root half of `--update`. Installs the binary at PATH, which
+    /// the user's half downloaded and verified, if it still hashes to SHA256
+    #[arg(long, num_args = 2, value_names = ["PATH", "SHA256"], hide = true)]
+    pub install_update: Option<Vec<String>>,
+
     /// Start on the version already installed, even if a newer one is known
     #[arg(long)]
     pub no_auto_update: bool,
@@ -597,6 +602,11 @@ pub struct JsonSession {
     /// What an `asking` session wants to do, when its hook or its screen said.
     #[serde(skip_serializing_if = "Option::is_none")]
     asking_for: Option<String>,
+    /// Present, and true, when what an `asking` session holds is a question
+    /// with choices rather than a permission prompt: Allow and Deny do not
+    /// apply to it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    asking_question: bool,
     session_id: String,
     started_at: String,
     last_active: String,
@@ -1156,6 +1166,7 @@ pub fn json_sessions(
                     crate::session::ActivityState::ApiError => "error",
                 },
                 asking_for: s.asking_for.clone(),
+                asking_question: s.asking_question,
                 surface: match s.surface {
                     crate::session::Surface::Cli => "cli",
                     crate::session::Surface::Editor => "editor",

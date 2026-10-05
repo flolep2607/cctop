@@ -418,6 +418,7 @@ dependencies = [
  "self-replace",
  "serde",
  "serde_json",
+ "sha2",
  "symphonia",
  "sysinfo",
  "tachyonfx",

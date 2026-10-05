@@ -239,6 +239,9 @@ fn main() -> anyhow::Result<()> {
         trace::enable();
     }
 
+    if let Some(staged) = &args.install_update {
+        return update::install_staged(&staged[0], &staged[1]);
+    }
     if args.update {
         return update::run(false);
     }
