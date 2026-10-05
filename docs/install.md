@@ -140,7 +140,11 @@ Answering `y` runs exactly that command, with cargo's own output on screen, and
 starts the new version when it finishes. The objection was never the file —
 `~/.cargo/bin` is writable — but the bookkeeping, and `cargo install` is what
 keeps cargo's record straight. It builds from source, so it takes minutes, which
-is why it is a question and not a default. Answering `n` is remembered against
+is why it is a question and not a default. With
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) on your `PATH`
+the command offered is `cargo binstall cctop --version … --locked --no-confirm`
+instead, which fetches the release archive in seconds and keeps the same
+record. Answering `n` is remembered against
 that version and the question waits for the next release; `cctop --update` asks
 again whenever you want it.
 
@@ -154,6 +158,15 @@ whatever replaced it the build it produced — the update would land, and
 `cargo install cctop --force` is how the release reaches PATH.
 
 ## With cargo
+
+```bash
+cargo binstall cctop
+```
+
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) downloads the
+release archive, the same static binary the script installs, and records it
+the way `cargo install` would — so nothing has to compile. Without binstall,
+cargo builds it from crates.io:
 
 ```bash
 cargo install cctop

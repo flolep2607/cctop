@@ -47,10 +47,10 @@ whatever directory you happen to be standing in, and without it this stops at
 `Cannot open: File exists` for anyone running it inside a cctop checkout,
 because the crate directory is already named `cctop`.
 
-Or with cargo:
+Or with cargo — `binstall` fetches the release binary, `install` compiles it:
 
 ```bash
-cargo install cctop
+cargo binstall cctop   # or: cargo install cctop
 ```
 
 Checksums and `cctop --update` are in [Installing cctop](docs/install.md).

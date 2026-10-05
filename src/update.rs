@@ -641,12 +641,17 @@ fn offer_cargo_upgrade(latest: &str, prefs: &mut crate::cache::UiPrefs) {
         return;
     }
     let current = current_version();
-    let command = cargo_install_argv(latest).join(" ");
+    let binstall = has_binstall();
+    let command = cargo_install_argv(latest, binstall).join(" ");
     eprintln!(
         "cctop {latest} is out, and cargo installed this one ({current}) — replacing the \
          binary here would leave `cargo install --list` naming a version that is gone."
     );
-    eprint!("Run `{command}`? It builds from source. [y] update / [n] not now: ");
+    let cost = match binstall {
+        true => "It downloads the release binary.",
+        false => "It builds from source.",
+    };
+    eprint!("Run `{command}`? {cost} [y] update / [n] not now: ");
     let _ = std::io::Write::flush(&mut std::io::stderr());
 
     let mut answer = String::new();
@@ -661,7 +666,7 @@ fn offer_cargo_upgrade(latest: &str, prefs: &mut crate::cache::UiPrefs) {
         return;
     }
 
-    match cargo_upgrade(latest) {
+    match cargo_upgrade(latest, binstall) {
         Ok(()) => {
             println!("Updated {current} -> {latest}.");
             if show_changes(current, latest) {
@@ -677,23 +682,45 @@ fn offer_cargo_upgrade(latest: &str, prefs: &mut crate::cache::UiPrefs) {
     }
 }
 
+/// Whether `cargo binstall` is there to do the upgrade.
+///
+/// Its record is cargo's own `.crates2.json`, so an install from `cargo install`
+/// and one from `cargo binstall` look the same from here, and either can be
+/// upgraded by either. Binstall wins when it is present because it fetches the
+/// archive the release workflow already built — seconds against minutes, and
+/// the same binary a downloaded install runs.
+fn has_binstall() -> bool {
+    crate::shim::is_command("cargo-binstall")
+}
+
 /// The command that replaces a cargo install, in its own words.
 ///
 /// Pinned to the version being announced rather than left as "whatever is newest
 /// now": that is the version the user was told about and agreed to. `--locked` so
-/// the build is the one the release was tested with.
-fn cargo_install_argv(latest: &str) -> Vec<String> {
-    ["cargo", "install", "cctop", "--version", latest, "--locked"]
-        .iter()
-        .map(|part| part.to_string())
-        .collect()
+/// the build is the one the release was tested with — binstall passes it on to
+/// the `cargo install` it falls back to. `--no-confirm` because the question
+/// binstall would ask has just been asked and answered.
+fn cargo_install_argv(latest: &str, binstall: bool) -> Vec<String> {
+    let argv: &[&str] = match binstall {
+        true => &[
+            "cargo",
+            "binstall",
+            "cctop",
+            "--version",
+            latest,
+            "--locked",
+            "--no-confirm",
+        ],
+        false => &["cargo", "install", "cctop", "--version", latest, "--locked"],
+    };
+    argv.iter().map(|part| part.to_string()).collect()
 }
 
 /// Run it, with cargo's own output left on screen: a build that takes minutes
 /// has to look like it is doing something, and cargo already says so better than
 /// anything here would.
-fn cargo_upgrade(latest: &str) -> Result<()> {
-    let argv = cargo_install_argv(latest);
+fn cargo_upgrade(latest: &str, binstall: bool) -> Result<()> {
+    let argv = cargo_install_argv(latest, binstall);
     let status = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .status()
@@ -854,7 +881,7 @@ fn cargo_managed() -> anyhow::Error {
         "cctop was installed by cargo, so replacing the binary here would put it out of step \
          with what cargo has recorded: `cargo install --list` would go on reporting {}, and the \
          next `cargo install-update` would undo the update. Run `cargo install cctop --force` \
-         instead.",
+         instead, or `cargo binstall cctop` to fetch the release rather than compile it.",
         current_version()
     )
 }
@@ -1070,8 +1097,12 @@ mod tests {
     #[test]
     fn a_cargo_install_is_upgraded_by_cargo_and_pinned_to_what_was_offered() {
         assert_eq!(
-            cargo_install_argv("0.9.0").join(" "),
+            cargo_install_argv("0.9.0", false).join(" "),
             "cargo install cctop --version 0.9.0 --locked"
+        );
+        assert_eq!(
+            cargo_install_argv("0.9.0", true).join(" "),
+            "cargo binstall cctop --version 0.9.0 --locked --no-confirm"
         );
     }
 

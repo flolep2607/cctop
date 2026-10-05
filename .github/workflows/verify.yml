@@ -16,6 +16,16 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# kache sits in front of rustc as RUSTC_WRAPPER and restores each crate's
+# compiled output by content hash, so a dependency that has not changed is never
+# compiled again. It replaced rust-cache, which saved the whole target/ keyed on
+# Cargo.lock and so started from scratch whenever one dependency moved.
+#
+# Each job gets its own cache key: they share a Cargo.lock, so one key would let
+# whichever job finished first save and the other two never would — and test,
+# clippy and `cargo package` compile with different flags and want different
+# artifacts. pr-comment is off because the stats are in each job's summary
+# already, and a sticky comment per job would be three of them.
 jobs:
   # cctop is Linux-only: it reads process tables, ptys and unix sockets that
   # only Linux gives it, so Linux is the one platform to build and test on.
@@ -26,7 +36,10 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          cache-key-prefix: kache-test
+          pr-comment: false
       - run: cargo test --all-targets
 
   lint:
@@ -38,7 +51,10 @@ jobs:
       # The version, clippy and rustfmt all come from rust-toolchain.toml,
       # so CI lints with exactly the Rust a contributor has locally.
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          cache-key-prefix: kache-lint
+          pr-comment: false
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets
 
@@ -51,5 +67,8 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          cache-key-prefix: kache-package
+          pr-comment: false
       - run: cargo publish --dry-run
