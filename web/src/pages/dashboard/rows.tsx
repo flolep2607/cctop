@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StateDot, dotOf } from "@/components/status";
+import { stripAnsi } from "@/components/ansi";
 import type { Session } from "@/lib/types";
 
 // The cost a row shows. `incl`, `—` and a figure are three different claims —
@@ -87,7 +88,7 @@ export const SessionRow = memo(function SessionRow({
           {s.user && <span>{s.user}</span>}
           {s.profile && s.profile !== "default" && <span>{s.profile}</span>}
           {s.context?.max ? <ContextBar used={s.context.used} max={s.context.max} /> : null}
-          {snippet && <span className="basis-full truncate italic">“{snippet}”</span>}
+          {snippet && <span className="basis-full truncate italic">“{stripAnsi(snippet)}”</span>}
         </div>
       </Link>
       <div className="shrink-0 text-right font-mono text-[13px] tabular-nums max-sm:hidden">

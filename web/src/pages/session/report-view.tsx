@@ -1,6 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { DataTable, Panel, Section, Stat } from "@/components/section";
 import { clock, money, secs, tokens } from "@/lib/format";
+import { Ansi, stripAnsi } from "@/components/ansi";
 import type { Report } from "@/lib/types";
 
 const when = (ts?: string) => (ts || "").replace("T", " ").replace(/\..*$/, "");
@@ -57,7 +58,7 @@ function Failures({ r }: { r: Report }) {
               <span className="text-muted-foreground font-mono text-xs">{f.tool}</span>
               {f.samples?.[0]?.ts && <span className="text-muted-foreground text-xs">first at {when(f.samples[0].ts)}</span>}
             </div>
-            <pre className="bg-muted/50 mt-1.5 overflow-x-auto rounded-md border px-2.5 py-2 font-mono text-xs break-words whitespace-pre-wrap">{f.detail}</pre>
+            <pre className="bg-muted/50 mt-1.5 overflow-x-auto rounded-md border px-2.5 py-2 font-mono text-xs break-words whitespace-pre-wrap"><Ansi text={f.detail} /></pre>
           </div>
         ))}
       </Panel>
@@ -196,7 +197,7 @@ type Call = { tool: string; detail: string; failed?: boolean; origin?: string; d
 
 const callCell = (c: Call, extra?: string | null) => (
   <span className="flex flex-wrap items-baseline gap-1.5">
-    <span className="font-mono text-xs break-all">{c.detail}</span>
+    <span className="font-mono text-xs break-all">{stripAnsi(c.detail)}</span>
     {c.failed && <Badge variant="destructive">failed</Badge>}
     {extra && <Badge variant="outline">{extra}</Badge>}
     {c.origin && <Badge variant="outline">{c.origin}</Badge>}

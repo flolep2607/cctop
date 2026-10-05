@@ -5,6 +5,7 @@ import { clock } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Markdown } from "@/components/markdown";
 import { Patch } from "@/components/patch";
+import { Ansi, stripAnsi } from "@/components/ansi";
 import type { Tool, Turn } from "@/lib/types";
 
 const WHO: Record<string, string> = { user: "you", assistant: "agent", system: "harness" };
@@ -25,7 +26,7 @@ function ToolCall({ tool, openAll }: { tool: Tool; openAll: boolean }) {
       >
         <ChevronRight className={cn("text-muted-foreground size-3 shrink-0 self-center transition-transform", open && "rotate-90")} />
         <span className={cn("font-mono font-semibold", tool.failed && "text-destructive", running && "text-warning")}>{tool.name}</span>
-        {tool.detail && <span className="text-muted-foreground min-w-0 truncate font-mono">{tool.detail}</span>}
+        {tool.detail && <span className="text-muted-foreground min-w-0 truncate font-mono">{stripAnsi(tool.detail)}</span>}
         {(tool.added || tool.removed) ? (
           <span className="shrink-0 font-mono text-xs">
             <span className="text-success">+{tool.added || 0}</span> <span className="text-destructive">−{tool.removed || 0}</span>
@@ -43,12 +44,12 @@ function ToolCall({ tool, openAll }: { tool: Tool; openAll: boolean }) {
       {open && (
         <div className="border-t">
           {tool.full && tool.full !== tool.detail && (
-            <pre className="text-muted-foreground px-3 py-2 font-mono text-xs break-words whitespace-pre-wrap">{tool.full}</pre>
+            <pre className="text-muted-foreground px-3 py-2 font-mono text-xs break-words whitespace-pre-wrap"><Ansi text={tool.full} /></pre>
           )}
           {tool.diff && tool.diff.length > 0 && <Patch lines={tool.diff} className="border-t first:border-t-0" />}
           {!running && tool.result !== "" && (
             <pre className="text-muted-foreground max-h-96 overflow-y-auto border-t px-3 py-2 font-mono text-xs break-words whitespace-pre-wrap first:border-t-0">
-              {tool.result}
+              <Ansi text={tool.result ?? ""} />
             </pre>
           )}
         </div>
