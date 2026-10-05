@@ -189,38 +189,23 @@ const DASHBOARD: Page = Page {
     html: include_str!("assets/dashboard.html"),
     js: include_str!("assets/dashboard.js"),
 };
-const REPORT: Page = Page {
-    name: "report",
-    html: include_str!("assets/report.html"),
-    js: include_str!("assets/report.js"),
-};
 const ANALYTICS: Page = Page {
     name: "analytics",
     html: include_str!("assets/analytics.html"),
     js: include_str!("assets/analytics.js"),
 };
-const WORKSPACE: Page = Page {
-    name: "workspace",
-    html: include_str!("assets/workspace.html"),
-    js: include_str!("assets/workspace.js"),
-};
-
-/// Preact, its hooks and htm, for the one page that renders with them.
+/// The React app (`web/`, built into one file by `npm run build`): the session
+/// page and the workspace today, the rest as they move over.
 ///
-/// The workspace holds a live terminal frame per tile under headers that change
-/// every few seconds, and moving or rebuilding a frame drops its socket — the
-/// one thing the other pages' rebuild-on-refresh cannot be made to avoid. So
-/// that page diffs instead. Pinned copies, unmodified, with provenance in
-/// `assets/vendor/SOURCE.md`; inlined only where used, so the other pages pay
-/// nothing for it. Newlines between because each file ends in a `//` comment.
-const PREACT_JS: &str = concat!(
-    include_str!("assets/vendor/preact.umd.js"),
-    "\n",
-    include_str!("assets/vendor/preact-hooks.umd.js"),
-    "\n",
-    include_str!("assets/vendor/htm.umd.js"),
-    "\n",
-);
+/// One HTML file with every script, stylesheet and font inlined, for the same
+/// reasons the older pages inline theirs — one binary, and a content policy
+/// that loads nothing from any URL. What the server knows and the page cannot
+/// reaches it as JSON in place of `__CCTOP_CONFIG__`; see [`app_config`].
+const APP: Page = Page {
+    name: "app",
+    html: include_str!("assets/app/index.html"),
+    js: "",
+};
 
 /// The stylesheet both pages share, substituted into each at send time.
 ///
@@ -1548,7 +1533,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         // Every tab's terminal, tiled. The page itself is harmless to a
         // read-only link — opening a terminal is the action, and that route
         // checks the credential as every action does.
-        "/workspace" => page(shared, stream, &request, &WORKSPACE, access),
+        "/workspace" => page(shared, stream, &request, &APP, access),
         // The whole fleet's history in one document — the analytics page
         // filters and charts it client-side, so this one read-only route is
         // all the server owes it. Untrimmed buckets are affordable here
@@ -1591,7 +1576,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 Err((status, why)) => http::respond_error(stream, Some(&request), status, &why),
             }
         }
-        _ if path.starts_with("/session/") => page(shared, stream, &request, &REPORT, access),
+        _ if path.starts_with("/session/") => page(shared, stream, &request, &APP, access),
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
@@ -1985,7 +1970,6 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
         // Before the values, like the page's own script: the token and the
         // home directory are read in here now.
         .replace("__CCTOP_COMMON_JS__", COMMON_JS)
-        .replace("__CCTOP_PREACT_JS__", PREACT_JS)
         // The page's own script goes in before the values it reads, so a token or
         // a home directory inside it is substituted the same way it was while the
         // script was part of the page.
@@ -2000,7 +1984,8 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
         .replace("\"__CCTOP_TOKEN__\"", &token)
         .replace("\"__CCTOP_HOME__\"", &home)
         .replace("__CCTOP_BACK__", &back)
-        .replace("__CCTOP_VERSION__", env!("CARGO_PKG_VERSION"));
+        .replace("__CCTOP_VERSION__", env!("CARGO_PKG_VERSION"))
+        .replace("__CCTOP_CONFIG__", &app_config(credential, actions));
 
     // Hand the credential back as a cookie so a reload — which has no `?t=`
     // left, the page having stripped it — still gets in. Only a request that
@@ -2019,6 +2004,27 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
             );
         }
     }
+    // The app page carries the whole UI and is most of a megabyte; a browser
+    // that takes gzip gets a third of that, which is the difference that
+    // matters over a tunnel to a phone. Compressed per request because the
+    // body differs per credential, and fast because it is per request.
+    if request.accepts_gzip() && body.len() > 64 * 1024 {
+        use std::io::Write;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        if gz.write_all(body.as_bytes()).is_ok()
+            && let Ok(packed) = gz.finish()
+        {
+            headers.push_str("Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n");
+            return http::respond_extra(
+                stream,
+                Some(request),
+                200,
+                "text/html; charset=utf-8",
+                &packed,
+                &headers,
+            );
+        }
+    }
     http::respond_extra(
         stream,
         Some(request),
@@ -2027,6 +2033,26 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
         body.as_bytes(),
         &headers,
     );
+}
+
+/// What the app page is told about this run, as the JSON that replaces
+/// `__CCTOP_CONFIG__` inside a `<script type="application/json">`.
+///
+/// `<` is escaped because the JSON sits inside a script element, and a home
+/// directory is free to contain `</script>`: the browser would end the element
+/// there, whatever the JSON parser would have made of it.
+fn app_config(credential: &str, actions: bool) -> String {
+    let home = dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    serde_json::json!({
+        "token": credential,
+        "actions": actions,
+        "home": home,
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+    .to_string()
+    .replace('<', "\\u003c")
 }
 
 /// Hold an SSE stream open, sending each new snapshot as it lands.
@@ -2294,7 +2320,7 @@ mod tests {
         // If an asset is edited and the placeholder goes with it, the page ships
         // with no token and fails at the first fetch — in the browser, where
         // nothing here would have noticed.
-        for page in [&DASHBOARD, &REPORT, &ANALYTICS, &WORKSPACE] {
+        for page in [&DASHBOARD, &ANALYTICS] {
             assert!(page.html.contains("__CCTOP_CSS__"));
             assert!(page.html.contains("__CCTOP_VERSION__"));
             // The page's own script, by name. A page that loses it ships markup
@@ -2322,7 +2348,6 @@ mod tests {
         // exist, draws the controls, and every one of them answers 403.
         assert!(COMMON_JS.contains("\"__CCTOP_ACTIONS__\""));
         assert!(COMMON_JS.contains("\"__CCTOP_HOME__\""));
-        assert!(REPORT.html.contains("__CCTOP_BACK__"));
         // The stylesheet is pasted into a `<style>` element, so a `</style>` in
         // it would end the block early and spill CSS into the document.
         assert!(!COMMON_CSS.contains("</style>"));
@@ -2330,9 +2355,7 @@ mod tests {
         // grow a string containing the tag that ends it — most easily by being
         // handed one, or by a test fixture that quotes a whole page.
         assert!(!COMMON_JS.contains("</script"));
-        assert!(!PREACT_JS.contains("</script"));
-        assert!(WORKSPACE.html.contains("__CCTOP_PREACT_JS__"));
-        for page in [&DASHBOARD, &REPORT, &ANALYTICS, &WORKSPACE] {
+        for page in [&DASHBOARD, &ANALYTICS] {
             assert!(
                 !page.js.contains("</script"),
                 "{} would end its own block",
@@ -2367,7 +2390,7 @@ mod tests {
         // would say so, and only to someone who opened the console.
         let shared = top_level_names(COMMON_JS);
         assert!(shared.contains(&"ask") && shared.contains(&"TOKEN"));
-        for page in [&DASHBOARD, &REPORT, &ANALYTICS, &WORKSPACE] {
+        for page in [&DASHBOARD, &ANALYTICS] {
             for name in top_level_names(page.js) {
                 assert!(
                     !shared.contains(&name),
@@ -2376,6 +2399,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_app_page_is_built_and_takes_its_config() {
+        // The built app is committed (web/ is its source); a checkout where it
+        // is missing or stale-shaped would serve a page that cannot start.
+        assert!(APP.html.contains(
+            r#"<script id="cctop-config" type="application/json">__CCTOP_CONFIG__</script>"#
+        ));
+        assert!(APP.html.contains("<div id=\"root\"></div>"));
+        // Everything inlined: a page that loads a file of its own breaks under
+        // the content policy, which allows no URL at all.
+        assert!(!APP.html.contains(" src=\"/assets/"));
+        assert!(!APP.html.contains("<link rel=\"stylesheet\""));
+    }
+
+    #[test]
+    fn the_app_config_cannot_end_its_script_element() {
+        let json = app_config("abc", true);
+        assert!(!json.contains('<'));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["token"], "abc");
+        assert_eq!(v["actions"], true);
     }
 
     #[test]

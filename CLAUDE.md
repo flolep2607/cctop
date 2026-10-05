@@ -108,37 +108,41 @@ one can be fixed after the fact: edit the release body on GitHub and everyone wh
 has not updated yet gets the better version. `gh release view v<version> --json
 body` shows what they would see now.
 
-## The web pages share one stylesheet and one script
+## The web UI is a React app in `web/`, committed built
 
-`cctop serve` has three pages (`src/serve/assets/`), each a `.html` and a
-`.js`, all compiled into the binary and served under a content policy that
-loads nothing from outside the page. There is no framework and no build step,
-on purpose: `cargo install` users have no Node, and a committed bundle is a
-diff nobody can review.
+`cctop serve`'s pages are moving to one React app: **Vite + React + TypeScript
++ Tailwind + shadcn/ui** in `web/`. The session page (`/session/:id`) and the
+workspace (`/workspace`) are already there; the dashboard and analytics are
+still the older plain pages in `src/serve/assets/` and will follow.
 
-What keeps that from becoming three copies of everything:
+```bash
+cd web && npm ci          # Node from web/.nvmrc
+npm run dev               # hot reload, proxied to `cctop serve --no-token --port 7778`
+npm run build             # writes src/serve/assets/app/index.html — commit it
+npm run lint
+```
 
-- **`common.css`** holds the tokens (colours per scheme, `--r-sm/--r/--r-lg`
-  radii, `--wash`) and the components — `button` (`.primary`, `.quiet`,
-  `[aria-pressed]`), fields, `select`, `.card`, `.tiles`, `section.block`,
-  `.pill`, the shared `header.top` with its `nav.pages`. A page restyles one only
-  where it means something different there.
-- **`common.js`** is inlined before each page's script and declares `TOKEN`,
-  `QUERY`, `CAN_ACT`, `HOME`, `el`, `svg`, `block`, the formatters (`money`,
-  `tokens`, `ago`, `shortPath`, `shortModel`) and the request helpers (`ask`,
-  `asJson`, `problem`). Anything a second page wants goes there, not into a
-  copy. A page redeclaring one of those names is a SyntaxError that kills the
-  whole page script; a test in `src/serve/mod.rs` catches it.
-- Links between pages use `data-nav="/path"`, and `common.js` adds the token.
-  A new page goes in the header nav, in `pages()` in the command palette
-  (`common.js`, Ctrl+K), and in the page lists of the tests in `mod.rs`.
-- **Preact + htm** (pinned in `assets/vendor/`, no build step) render the
-  workspace page, and only it: it is the page whose DOM must survive live
-  updates. Reach for them on a new page when that is true of it too — live data
-  under state the reader is holding — not for a page that reads and redraws.
-  Inline them with the `__CCTOP_PREACT_JS__` placeholder.
+How it ships, and why:
 
-Check a visual change in both schemes and at phone width:
+- **One file, everything inlined.** `vite-plugin-singlefile` builds the whole
+  app — scripts, styles, fonts — into `src/serve/assets/app/index.html`, which
+  `include_str!` puts in the binary. The content policy loads nothing from any
+  URL, and an installed cctop is one binary. The server gzips it per request.
+- **The build is committed**, so `cargo install` needs no Node. CI's
+  `verify / web` job rebuilds it and fails if it differs — change `web/` and
+  run `npm run build` in the same commit.
+- **The server's values arrive as JSON** in `<script id="cctop-config">`
+  (`app_config` in `src/serve/mod.rs`): token, whether actions are allowed,
+  home, version. `web/src/lib/config.ts` reads it; every request goes through
+  `web/src/lib/api.ts`, which adds the token.
+- **Size is paid on every load**, so heavy dependencies need a reason: `wouter`
+  rather than react-router, Latin font subsets only.
+- **A moved iframe reloads.** The terminal frames (workspace tiles, the session
+  page's terminal) must keep their place in the DOM; reorder with CSS `order`.
+
+The older pages still use `common.css` and `common.js` (inlined into each,
+shared header, palette, formatters). Don't extend them; move a page to the app
+instead. Check a visual change in both themes and at phone width:
 `CCTOP_SCHEME=dark` and `CCTOP_WIDTH=390` in front of `web.sh shot`.
 
 ## Conventions

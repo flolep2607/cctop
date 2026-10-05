@@ -1,0 +1,199 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+/* Latin and Latin Extended only, upright only: every other subset would be
+   inlined into the page too, and a character outside these falls back to the
+   system font rather than costing every reader another 150 KB. */
+@font-face {
+  font-family: "Geist Variable"; font-style: normal; font-display: swap; font-weight: 100 900;
+  src: url(@fontsource-variable/geist/files/geist-latin-wght-normal.woff2) format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Geist Variable"; font-style: normal; font-display: swap; font-weight: 100 900;
+  src: url(@fontsource-variable/geist/files/geist-latin-ext-wght-normal.woff2) format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Geist Mono Variable"; font-style: normal; font-display: swap; font-weight: 100 900;
+  src: url(@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2) format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --color-success: var(--success);
+    --color-warning: var(--warning);
+    --color-terminal: var(--terminal);
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    --background: oklch(0.988 0.002 90);
+    --foreground: oklch(0.2 0.006 70);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.2 0.006 70);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.2 0.006 70);
+    --primary: oklch(0.56 0.15 50);
+    --primary-foreground: oklch(0.99 0 0);
+    --secondary: oklch(0.965 0.004 80);
+    --secondary-foreground: oklch(0.25 0.006 70);
+    --muted: oklch(0.962 0.004 80);
+    --muted-foreground: oklch(0.52 0.01 75);
+    --accent: oklch(0.955 0.025 60);
+    --accent-foreground: oklch(0.3 0.06 50);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.91 0.006 80);
+    --input: oklch(0.9 0.006 80);
+    --ring: oklch(0.56 0.15 50);
+    --chart-1: oklch(0.62 0.16 50);
+    --chart-2: oklch(0.6 0.12 240);
+    --chart-3: oklch(0.62 0.14 150);
+    --chart-4: oklch(0.65 0.15 85);
+    --chart-5: oklch(0.58 0.15 320);
+    --radius: 0.625rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: oklch(0.205 0 0);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+    --success: oklch(0.55 0.14 145);
+    --warning: oklch(0.68 0.15 70);
+    --terminal: #060807;
+}
+
+.dark {
+    --background: oklch(0.17 0.008 290);
+    --foreground: oklch(0.95 0.006 290);
+    --card: oklch(0.205 0.009 290);
+    --card-foreground: oklch(0.95 0.006 290);
+    --popover: oklch(0.21 0.009 290);
+    --popover-foreground: oklch(0.95 0.006 290);
+    --primary: oklch(0.72 0.15 55);
+    --primary-foreground: oklch(0.18 0.02 50);
+    --secondary: oklch(0.26 0.01 290);
+    --secondary-foreground: oklch(0.95 0.006 290);
+    --muted: oklch(0.25 0.01 290);
+    --muted-foreground: oklch(0.68 0.015 290);
+    --accent: oklch(0.28 0.03 55);
+    --accent-foreground: oklch(0.92 0.03 60);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 9%);
+    --input: oklch(1 0 0 / 14%);
+    --ring: oklch(0.72 0.15 55);
+    --chart-1: oklch(0.72 0.15 55);
+    --chart-2: oklch(0.7 0.12 240);
+    --chart-3: oklch(0.72 0.15 150);
+    --chart-4: oklch(0.78 0.14 85);
+    --chart-5: oklch(0.68 0.15 320);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+    --success: oklch(0.74 0.16 145);
+    --warning: oklch(0.8 0.15 80);
+    --terminal: #060807;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor: pointer;
+    }
+  html {
+    @apply font-sans;
+    }
+}
+/* Text from a transcript keeps the line breaks it was written with. */
+.prose-chat p { white-space: pre-wrap; }
+
+/* --- markdown from a transcript ------------------------------------------- */
+.md { @apply text-sm leading-relaxed break-words; overflow-wrap: anywhere; }
+.md > * + * { @apply mt-2.5; }
+.md p { white-space: pre-wrap; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { @apply mt-4 font-semibold leading-snug; }
+.md h1 { @apply text-base; }
+.md h2 { font-size: 0.95rem; }
+.md h3, .md h4, .md h5, .md h6 { @apply text-sm; }
+.md ul { @apply list-disc pl-5; }
+.md ol { @apply list-decimal pl-5; }
+.md li + li { @apply mt-0.5; }
+.md li > ul, .md li > ol { @apply mt-1; }
+.md a { @apply text-primary underline underline-offset-2; }
+.md code { @apply bg-muted rounded px-1 py-px font-mono text-[0.85em]; }
+.md pre { @apply bg-muted/60 overflow-x-auto rounded-md border px-3 py-2; }
+.md pre code { @apply bg-transparent p-0 text-xs; white-space: pre; }
+.md blockquote { @apply text-muted-foreground border-l-2 pl-3; }
+.md hr { @apply border-t; }
+.md table { @apply w-auto text-[13px]; overflow-wrap: normal; }
+.md th { @apply border-b px-2.5 pb-1.5 text-left font-semibold; }
+.md td { @apply border-t px-2.5 py-1.5 align-top; }
+.md table code { white-space: nowrap; }
+.md input[type=checkbox] { @apply mr-1 align-[-2px]; }
+
+/* Compact density: tighter turns and smaller text. */
+[data-density="compact"] .turn { @apply py-1.5; }
+[data-density="compact"] .md { @apply text-[13px]; }
+[data-density="compact"] .md > * + * { @apply mt-1.5; }
+
+/* A tile whose agent is waiting on you breathes, so it is seen across the grid. */
+@keyframes ask {
+  50% { box-shadow: 0 0 0 4px color-mix(in oklch, var(--destructive) 22%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
