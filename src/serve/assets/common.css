@@ -17,6 +17,21 @@
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
+/* The scale the components below are cut from, and the same in both schemes.
+   Three radii because there are three sizes of thing: a chip of text, a
+   control, a card. A new component picks from these rather than inventing a
+   seventh border-radius — that is how the pages came to have six. */
+:root {
+  --r-sm: 6px;
+  --r: 8px;
+  --r-lg: 10px;
+  --r-pill: 999px;
+  /* The accent at the strengths it is used as a wash: a row under the pointer,
+     a pressed toggle, a selected row. Derived, so a scheme only sets --accent. */
+  --wash: color-mix(in srgb, var(--accent) 7%, transparent);
+  --wash-strong: color-mix(in srgb, var(--accent) 12%, transparent);
+  --ease: 120ms ease-out;
+}
 /* Dark reaches :root two ways: the system asks for it, or the reader asked
    for it on a page's theme button, which writes data-theme onto <html>. The
    `:not([data-theme="light"])` is the same button's other direction — a
@@ -53,14 +68,6 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 14px rgba(0, 0, 0, .22);
 }
 
-/* The theme button each page's header places with themeToggle() (theme.js).
-   Quiet — a header control, not a call to action. */
-button.theme {
-  font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 99px;
-  border: 1px solid var(--line); background: var(--panel); color: var(--faint);
-  cursor: pointer; white-space: nowrap;
-}
-button.theme:hover { color: var(--accent); border-color: var(--accent); }
 
 * { box-sizing: border-box; }
 body {
@@ -81,18 +88,114 @@ h1, h2, h3 { font-weight: 600; letter-spacing: -.01em; margin: 0; }
    The page body must never scroll sideways on a phone. */
 .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
-header.top {
-  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
-  padding-bottom: 14px; border-bottom: 1px solid var(--line); margin-bottom: 16px;
+/* --- controls ---------------------------------------------------------------
+   One button, one field, one select, for every page. A page restyles a control
+   only where it means something different there — the filled Send, the view
+   pills — and inherits the rest, so hover, focus, pressed and disabled look the
+   same everywhere without each page having to remember all four. */
+button, select, input[type=text], input[type=search] {
+  font: inherit; font-size: 13px; line-height: 1.4;
+  padding: 6px 11px; border-radius: var(--r);
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
 }
-header.top h1 { font-size: 17px; }
-header.top h1 .v { color: var(--faint); font-weight: 400; font-size: 12px; margin-left: 6px; }
+button, select {
+  color: var(--dim); cursor: pointer;
+  transition: color var(--ease), border-color var(--ease), background-color var(--ease);
+}
+button:hover:enabled, select:hover:enabled { color: var(--ink); border-color: var(--faint); }
+/* A toggle that is on. Accent text on a wash, so "on" reads at a glance
+   without being as loud as the one filled button a form gets. */
+button[aria-pressed="true"] {
+  color: var(--accent); border-color: var(--accent); background: var(--wash);
+}
+button:disabled { color: var(--faint); cursor: default; opacity: .6; }
+/* The deliberate act in a group — Send, Start. One per form at most. */
+button.primary {
+  color: var(--panel); background: var(--accent); border-color: var(--accent);
+}
+button.primary:hover:enabled {
+  color: var(--panel); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 86%, var(--ink));
+}
+/* Borderless until hovered: a dismiss ×, a deep-link #. */
+button.quiet { background: transparent; border-color: transparent; color: var(--faint); }
+button.quiet:hover:enabled { border-color: var(--line); color: var(--ink); }
+input[type=text], input[type=search] { min-width: 0; }
+input::placeholder { color: var(--faint); opacity: 1; }
+
+/* Focus is drawn for the keyboard and not for the mouse — except in a field,
+   where knowing which one is taking your typing matters however you got
+   there, and where the browser counts every focus as visible anyway. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:is(input, select, textarea):focus-visible { outline-offset: -1px; }
+:focus:not(:focus-visible) { outline: none; }
+
+/* A row of controls above whatever they filter. */
+.controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+
+/* --- the header every page shares ------------------------------------------
+   Name and version, the pages, then whatever the page puts at the right end
+   (spend, a refresh clock) and the theme switch last. The links are relative
+   in the markup and given the token by common.js. */
+header.top {
+  display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap;
+  padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 16px;
+}
+header.top .brand {
+  font-size: 17px; font-weight: 650; letter-spacing: -.01em; text-decoration: none;
+  display: inline-flex; align-items: baseline; gap: 6px;
+}
+header.top .brand .v { color: var(--faint); font-weight: 400; font-size: 12px; }
+nav.pages { display: flex; gap: 2px; }
+nav.pages a {
+  font-size: 13px; padding: 4px 10px; border-radius: var(--r-pill);
+  color: var(--dim); text-decoration: none;
+  transition: color var(--ease), background-color var(--ease);
+}
+nav.pages a:hover { color: var(--ink); background: var(--wash); }
+nav.pages a[aria-current="page"] {
+  color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
 .spacer { flex: 1 1 auto; }
+/* The theme switch (theme.js): one glyph, quiet — a header control, not a
+   call to action. Its name is on aria-label and title. */
+button.theme {
+  font-size: 14px; line-height: 1; width: 30px; height: 30px; padding: 0;
+  border-radius: var(--r-pill); color: var(--faint);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+
 
 .card {
   background: var(--panel); border: 1px solid var(--line);
-  border-radius: 10px; box-shadow: var(--shadow);
+  border-radius: var(--r-lg); box-shadow: var(--shadow);
 }
+.pad { padding: 12px 14px; }
+
+/* A titled section of a page: a small uppercase heading, an optional note
+   saying how to read what follows, then usually a card. */
+section.block { margin-bottom: 26px; }
+section.block > h3 { font-size: 12px; font-weight: 600; text-transform: uppercase;
+                     letter-spacing: .07em; color: var(--faint); margin-bottom: 8px; }
+section.block > .note { font-size: 12px; color: var(--faint); margin: -3px 0 9px; max-width: 62ch; }
+
+/* The headline figures: a label, a number, and a line saying what it means. */
+.tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); margin-bottom: 18px; }
+.tile { padding: 12px 14px; }
+.tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+.tile .v { font-family: var(--mono); font-size: 21px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.tile .n { font-size: 11px; color: var(--faint); margin-top: 2px; }
+.tile.bad .v { color: var(--red); }
+.tile.warn .v { color: var(--amber); }
+
+/* Charts. Drawn as SVG by the page; these are the parts every chart has. */
+svg { display: block; max-width: 100%; }
+.axis { fill: var(--faint); font-size: 10px; font-family: var(--mono); }
+.gridline { stroke: var(--line); stroke-width: 1; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 11px; font-size: 12px; }
+.legend .item { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 9px; }
+.legend .amt { color: var(--faint); font-family: var(--mono); }
 
 /* Status dot, the same three states the table's dot has. */
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; display: inline-block; }
@@ -109,6 +212,7 @@ header.top h1 .v { color: var(--faint); font-weight: 400; font-size: 12px; margi
   border: 1px solid var(--line); font-size: 11px; color: var(--dim);
   white-space: nowrap;
 }
+.pill.ok   { color: var(--green); border-color: var(--green); }
 .pill.warn { color: var(--amber); border-color: var(--amber); }
 .pill.bad  { color: var(--red); border-color: var(--red); }
 
@@ -122,7 +226,25 @@ td { padding: 7px 10px; border-top: 1px solid var(--line); vertical-align: top; 
 td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 .empty { padding: 40px 16px; text-align: center; color: var(--faint); }
+.empty.bad { color: var(--red); }
 .banner {
   padding: 9px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px;
   border: 1px solid var(--red); color: var(--red);
+}
+
+/* A phone: a narrower gutter, and fields at 16px, below which a phone zooms
+   the whole page in when one takes focus and leaves it zoomed. */
+@media (max-width: 700px) {
+  .wrap { padding: 12px 12px 56px; }
+  input[type=text], input[type=search], select { font-size: 16px; }
+  /* A button may stay smaller than a field, but not so much smaller that the
+     select beside it looks like it belongs to another page. */
+  button { font-size: 14px; }
+  select { padding-block: 5px; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile .v { font-size: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
 }

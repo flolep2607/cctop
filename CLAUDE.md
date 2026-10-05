@@ -108,6 +108,32 @@ one can be fixed after the fact: edit the release body on GitHub and everyone wh
 has not updated yet gets the better version. `gh release view v<version> --json
 body` shows what they would see now.
 
+## The web pages share one stylesheet and one script
+
+`cctop serve` has three pages (`src/serve/assets/`), each a `.html` and a
+`.js`, all compiled into the binary and served under a content policy that
+loads nothing from outside the page. There is no framework and no build step,
+on purpose: `cargo install` users have no Node, and a committed bundle is a
+diff nobody can review.
+
+What keeps that from becoming three copies of everything:
+
+- **`common.css`** holds the tokens (colours per scheme, `--r-sm/--r/--r-lg`
+  radii, `--wash`) and the components — `button` (`.primary`, `.quiet`,
+  `[aria-pressed]`), fields, `select`, `.card`, `.tiles`, `section.block`,
+  `.pill`, the shared `header.top` with its `nav.pages`. A page restyles one only
+  where it means something different there.
+- **`common.js`** is inlined before each page's script and declares `TOKEN`,
+  `QUERY`, `CAN_ACT`, `HOME`, `el`, `svg`, `block`, the formatters (`money`,
+  `tokens`, `ago`, `shortPath`, `shortModel`) and the request helpers (`ask`,
+  `asJson`, `problem`). Anything a second page wants goes there, not into a
+  copy. A page redeclaring one of those names is a SyntaxError that kills the
+  whole page script; a test in `src/serve/mod.rs` catches it.
+- Links between pages use `data-nav="/path"`, and `common.js` adds the token.
+
+Check a visual change in both schemes and at phone width:
+`CCTOP_SCHEME=dark` and `CCTOP_WIDTH=390` in front of `web.sh shot`.
+
 ## Conventions
 
 - **`ponytail:` comments** mark a deliberate, documented limit — a thing this

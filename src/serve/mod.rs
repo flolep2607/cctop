@@ -212,6 +212,13 @@ const COMMON_CSS: &str = include_str!("assets/common.css");
 /// `<html>` before the first paint rather than one frame behind it.
 const THEME_JS: &str = include_str!("assets/theme.js");
 
+/// What every page's script builds on — the substituted values, the request
+/// helpers, the formatters, the shared header's links — inlined just ahead of
+/// the page's own script. It exists because three pages each carried a copy,
+/// and the copies had drifted apart: the same cost rounded differently on two
+/// pages of one cctop.
+const COMMON_JS: &str = include_str!("assets/common.js");
+
 /// A favicon small enough to keep inline: the table's dark tile with the amber
 /// dot it draws on a session that is waiting.
 ///
@@ -1949,6 +1956,9 @@ fn page(shared: &Shared, stream: &mut TcpStream, request: &Request, page: &Page,
         .html
         .replace("__CCTOP_CSS__", COMMON_CSS)
         .replace("__CCTOP_THEME_JS__", THEME_JS)
+        // Before the values, like the page's own script: the token and the
+        // home directory are read in here now.
+        .replace("__CCTOP_COMMON_JS__", COMMON_JS)
         // The page's own script goes in before the values it reads, so a token or
         // a home directory inside it is substituted the same way it was while the
         // script was part of the page.
@@ -2264,30 +2274,78 @@ mod tests {
             // that renders and does nothing, which is worse than a 500 because
             // it looks like a cctop that has gone quiet.
             assert!(page.html.contains(&page.script_placeholder()));
-            // The values the script reads are substituted into the script, which
-            // is a file of its own now — so this is where they have to be.
-            //
-            // Without the token a page ships with none and fails at the first
-            // fetch, in the browser, where nothing here would have noticed.
-            assert!(page.js.contains("\"__CCTOP_TOKEN__\""));
-            // Without this one a page decides for itself that the action routes
-            // exist, draws the controls, and every one of them answers 403.
-            assert!(page.js.contains("\"__CCTOP_ACTIONS__\""));
+            // The shared script declares the token, the helpers and the header
+            // links; a page without it fails on its first `ask`.
+            assert!(page.html.contains("__CCTOP_COMMON_JS__"));
+            // ...and must come first, since the page's script uses what it
+            // declares at the top level.
+            assert!(
+                page.html.find("__CCTOP_COMMON_JS__") < page.html.find(&page.script_placeholder()),
+                "{} runs its own script before the shared one",
+                page.name
+            );
         }
+        // The values the scripts read are substituted into the shared script,
+        // which every page inlines — so this is where they have to be.
+        //
+        // Without the token a page ships with none and fails at the first
+        // fetch, in the browser, where nothing here would have noticed.
+        assert!(COMMON_JS.contains("\"__CCTOP_TOKEN__\""));
+        // Without this one a page decides for itself that the action routes
+        // exist, draws the controls, and every one of them answers 403.
+        assert!(COMMON_JS.contains("\"__CCTOP_ACTIONS__\""));
+        assert!(COMMON_JS.contains("\"__CCTOP_HOME__\""));
         assert!(REPORT.html.contains("__CCTOP_BACK__"));
-        assert!(DASHBOARD.js.contains("\"__CCTOP_HOME__\""));
         // The stylesheet is pasted into a `<style>` element, so a `</style>` in
         // it would end the block early and spill CSS into the document.
         assert!(!COMMON_CSS.contains("</style>"));
         // The same for each page's own script, which is a file now and could
         // grow a string containing the tag that ends it — most easily by being
         // handed one, or by a test fixture that quotes a whole page.
+        assert!(!COMMON_JS.contains("</script"));
         for page in [&DASHBOARD, &REPORT, &ANALYTICS] {
             assert!(
                 !page.js.contains("</script"),
                 "{} would end its own block",
                 page.name
             );
+        }
+    }
+
+    /// The names a script declares at its top level, read off the start of
+    /// each line — the shape this codebase writes them in, not a parser.
+    fn top_level_names(script: &str) -> Vec<&str> {
+        script
+            .lines()
+            .filter_map(|line| {
+                ["const ", "let ", "function ", "async function "]
+                    .iter()
+                    .find_map(|kw| line.strip_prefix(kw))
+            })
+            .filter_map(|rest| {
+                rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+            })
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn no_page_redeclares_a_name_the_shared_script_has() {
+        // Classic scripts share one top level, so a page that declares `money`
+        // again does not shadow the shared one — it is a SyntaxError, and the
+        // whole page script never runs. The browser is the only place that
+        // would say so, and only to someone who opened the console.
+        let shared = top_level_names(COMMON_JS);
+        assert!(shared.contains(&"ask") && shared.contains(&"TOKEN"));
+        for page in [&DASHBOARD, &REPORT, &ANALYTICS] {
+            for name in top_level_names(page.js) {
+                assert!(
+                    !shared.contains(&name),
+                    "{}.js declares `{name}`, which common.js already does",
+                    page.name
+                );
+            }
         }
     }
 

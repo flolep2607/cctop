@@ -6,31 +6,11 @@
      flash a light chrome around it. -->
 <meta name="theme-color" content="#16151a">
 <style>__CCTOP_CSS__
-  .back { font-size: 13px; color: var(--dim); text-decoration: none; }
-  .back:hover { color: var(--accent); }
-
   .subject { margin-bottom: 18px; }
   .subject h2 { font-size: 20px; margin-bottom: 4px; }
   .subject .where { color: var(--dim); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
-  /* The green end of the pill range. common.css carries warn and bad because
-     the dashboard's live state is a dot and only the problems are pills; here
-     the state itself is a pill, so "working" needs a colour too. */
-  .pill.ok { color: var(--green); border-color: var(--green); }
-
-  .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); margin-bottom: 22px; }
-  .tile { padding: 12px 14px; }
-  .tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
-  .tile .v { font-family: var(--mono); font-size: 21px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; }
-  .tile .n { font-size: 11px; color: var(--faint); margin-top: 2px; }
-  .tile.bad .v { color: var(--red); }
-  .tile.warn .v { color: var(--amber); }
-
-  section.block { margin-bottom: 26px; }
-  section.block > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
-                       color: var(--faint); margin-bottom: 9px; }
-  section.block > .note { font-size: 12px; color: var(--faint); margin: -4px 0 9px; max-width: 62ch; }
-  .pad { padding: 12px 14px; }
+  .tiles { margin-bottom: 22px; }
 
   /* The one finding worth leading with, so it is styled like one. */
   .failure { border-top: 1px solid var(--line); padding: 11px 14px; }
@@ -45,14 +25,6 @@
   /* Stacked proportion bar for the context breakdown. */
   .stack { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: var(--line); }
   .stack span { display: block; height: 100%; min-width: 0; }
-  .legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 11px; font-size: 12px; }
-  .legend .item { display: flex; align-items: center; gap: 6px; }
-  .legend .swatch { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 9px; }
-  .legend .amt { color: var(--faint); font-family: var(--mono); }
-
-  svg { display: block; max-width: 100%; }
-  .axis { fill: var(--faint); font-size: 10px; font-family: var(--mono); }
-  .gridline { stroke: var(--line); stroke-width: 1; }
 
   .files { columns: 2 260px; column-gap: 22px; font-family: var(--mono); font-size: 12px; }
   .files div { break-inside: avoid; color: var(--dim); padding: 1px 0; overflow-wrap: anywhere; }
@@ -99,13 +71,9 @@
      should not be a navigation, because the report behind it was expensive to
      build and going back would build it again. */
   nav.views { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 18px; }
-  nav.views button {
-    font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 99px;
-    border: 1px solid var(--line); background: var(--panel); color: var(--dim);
-    cursor: pointer;
-  }
-  nav.views button:hover { color: var(--ink); }
-  nav.views button[aria-selected="true"] { color: var(--panel); background: var(--accent); border-color: var(--accent); }
+  nav.views button { padding: 5px 12px; border-radius: var(--r-pill); }
+  nav.views button[aria-selected="true"],
+  nav.views button[aria-selected="true"]:hover { color: var(--panel); background: var(--accent); border-color: var(--accent); }
   nav.views button .n { font-family: var(--mono); font-size: 11px; opacity: .75; margin-left: 5px; }
   /* Copy reads what is already on the page rather than switching it, so it is
      not a view — pushed to the far end to keep the four views at the left. */
@@ -126,11 +94,7 @@
   .termside[hidden] { display: none; }
   .termside .head { display: flex; align-items: center; gap: 10px; margin-bottom: 7px;
                     font-size: 12px; color: var(--faint); }
-  .termside .head button {
-    font: inherit; font-size: 12px; margin-left: auto; padding: 3px 10px; border-radius: 99px;
-    border: 1px solid var(--line); background: var(--panel); color: var(--dim); cursor: pointer;
-  }
-  .termside .head button:hover { color: var(--accent); border-color: var(--accent); }
+  .termside .head button { font-size: 12px; margin-left: auto; padding: 3px 10px; border-radius: var(--r-pill); }
   .termside .note { font-size: 12px; color: var(--amber); margin-top: 7px; }
   /* The terminal itself. Tall enough for an agent's screen, and no taller
      than the window, since the column is sticky. */
@@ -139,8 +103,6 @@
   .termside .why { font-size: 12px; color: var(--faint); margin-top: 7px; }
   .termside .head .popout { font-size: 12px; color: var(--dim); margin-left: auto; }
   .termside .head .popout + button { margin-left: 0; }
-  nav.views button.toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
-  nav.views button:disabled { color: var(--faint); cursor: default; }
 
   /* Two columns need a screen. On a phone the terminal goes under the
      conversation at a readable height rather than into a 40-column strip. */
@@ -152,12 +114,7 @@
   /* --- acting on the session -------------------------------------------- */
 
   .acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
-  .acts button, .acts select {
-    font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 7px;
-    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer;
-  }
-  .acts button:hover:enabled { border-color: var(--accent); color: var(--accent); }
-  .acts button:disabled { color: var(--faint); cursor: default; }
+  .acts button, .acts select { color: var(--ink); }
   .said { font-size: 13px; margin-top: 10px; }
   .said.bad { color: var(--red); }
   .said.ok { color: var(--green); }
@@ -165,18 +122,10 @@
   /* The prompt box. Sticky at the bottom of the conversation, which is where
      the thing being replied to is. */
   form.say { display: flex; gap: 8px; padding: 10px; position: sticky; bottom: 10px;
-             background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+             background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
              box-shadow: var(--shadow); margin-top: 14px; }
-  form.say input {
-    flex: 1 1 auto; font: inherit; font-size: 14px; padding: 8px 10px; min-width: 0;
-    border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
-  }
-  form.say input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  form.say button {
-    font: inherit; font-size: 13px; padding: 0 16px; border-radius: 7px; cursor: pointer;
-    border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
-  }
-  form.say button:disabled { opacity: .5; cursor: default; }
+  form.say input { flex: 1 1 auto; font-size: 14px; padding: 8px 10px; background: var(--bg); }
+  form.say button { padding: 0 16px; }
 
   /* "New activity" floats rather than sitting in the flow: it is about the
      scroll position, not the transcript. Fixed above the composer — bottom
@@ -184,9 +133,7 @@
      reads as the page's pill, not a turn's. */
   .more {
     position: fixed; left: 50%; bottom: 78px; transform: translateX(-50%); z-index: 5;
-    font: inherit; font-size: 12px; padding: 5px 14px; border-radius: 99px;
-    border: 1px solid var(--line); background: var(--panel); color: var(--dim);
-    box-shadow: var(--shadow); cursor: pointer;
+    font-size: 12px; padding: 5px 14px; border-radius: var(--r-pill); box-shadow: var(--shadow);
   }
   .more:hover { color: var(--accent); border-color: var(--accent); }
   .earlier { display: block; width: 100%; padding: 10px 14px; border: 0;
@@ -202,18 +149,9 @@
      #talk because the poll rebuilds #talk every five seconds — a control in
      there would be thrown away under a typing reader. */
   .chattools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-  .chattools input {
-    flex: 1 1 180px; min-width: 0; font: inherit; font-size: 13px; padding: 6px 10px;
-    border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
-  }
-  .chattools input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .chattools input { flex: 1 1 180px; }
   .chattools .n { font-size: 12px; color: var(--faint); white-space: nowrap; }
-  .chattools button {
-    font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 99px;
-    border: 1px solid var(--line); background: var(--panel); color: var(--dim); cursor: pointer;
-  }
-  .chattools button:hover:enabled { color: var(--accent); border-color: var(--accent); }
-  .chattools button:disabled { color: var(--faint); cursor: default; }
+  .chattools button { font-size: 12px; padding: 5px 11px; border-radius: var(--r-pill); }
 
   /* --- the conversation -------------------------------------------------- */
 
@@ -264,6 +202,11 @@
   /* Sized to its contents, not to the pane: a two-column table stretched to
      full width reads as a layout rather than a table. */
   .md table { font-size: 13px; width: auto; max-width: 100%; }
+  /* `.md` breaks anywhere so a long path cannot widen the pane, but inside a
+     table that splits "presses" into "pres / ses" and a key name across two
+     lines; the table's own scroll box is what keeps it in bounds there. */
+  .md table, .md table code { overflow-wrap: normal; }
+  .md table code { white-space: nowrap; }
   .md th {
     text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 600;
     color: var(--ink); padding: 0 10px 7px; white-space: normal;
@@ -364,14 +307,12 @@
      composer stay usable — 16px inputs because a phone zooms the page on
      anything smaller. */
   @media (max-width: 700px) {
-    .wrap { padding: 14px 10px 56px; }
     nav.views { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
     nav.views button { white-space: nowrap; }
     .subject h2 { font-size: 18px; }
-    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .files { columns: 1; }
     .turn { padding: 10px 10px; }
-    .chattools input, form.say input { font-size: 16px; }
+    form.say input { font-size: 16px; }
     form.say { bottom: 6px; }
   }
 </style>
@@ -381,12 +322,19 @@
 
 <div class="wrap">
   <header class="top">
-    <a class="back" href="/__CCTOP_BACK__">← all sessions</a>
+    <a class="brand" href="/__CCTOP_BACK__">cctop<span class="v mono">__CCTOP_VERSION__</span></a>
+    <!-- Neither link is current: a session report is a page under Sessions,
+         reached from it, and the token rides on __CCTOP_BACK__ so the way back
+         works even before the shared script has run. -->
+    <nav class="pages" aria-label="Pages">
+      <a href="/__CCTOP_BACK__">Sessions</a>
+      <a data-nav="/analytics" href="/analytics">Analytics</a>
+    </nav>
     <div class="spacer"></div>
-    <span class="faint mono" style="font-size:12px">cctop __CCTOP_VERSION__</span>
   </header>
   <main id="main"><div class="empty">Reading the transcript…</div></main>
 </div>
 
+<script>__CCTOP_COMMON_JS__</script>
 <script>
 __CCTOP_REPORT_JS__</script>

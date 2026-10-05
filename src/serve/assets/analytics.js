@@ -8,44 +8,6 @@
 // so asking the server to re-answer every <select> change would add a route
 // for nothing.
 
-const TOKEN = "__CCTOP_TOKEN__";
-const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
-// Substituted on every page the server sends, whether or not that page can
-// act on a session. This one never does — it is kept for the contract, not
-// consulted.
-const CAN_ACT = "__CCTOP_ACTIONS__";
-// The operator's home, so written paths read `~/…` the way they do elsewhere
-// in cctop. Substituted because a browser cannot know it — the machine this
-// page is open on may not be the one cctop runs on.
-const HOME = "__CCTOP_HOME__";
-
-// Every string the payload carries — project names, paths, model names — goes
-// through textContent or this. None of it is trusted markup.
-const el = (tag, cls, text) => {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined && text !== null) node.textContent = String(text);
-  return node;
-};
-const svg = (tag, attrs) => {
-  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, String(v));
-  return node;
-};
-
-const money = (v) => {
-  const n = Number(v) || 0;
-  if (n === 0) return "$0";
-  if (n < 0.01) return "<$0.01";
-  return "$" + (n < 100 ? n.toFixed(2) : Math.round(n).toLocaleString());
-};
-const tokens = (v) => {
-  const n = Number(v) || 0;
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + "G";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
-  return String(Math.round(n));
-};
 const count = (v) => (Number(v) || 0).toLocaleString();
 
 // --- time ------------------------------------------------------------------
@@ -72,18 +34,6 @@ const clock3 = (iso) => {
   const d = new Date(t);
   return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
 };
-// How long ago a timestamp was. The sessions table lists "when" this way —
-// "3h ago" is the part a reader holds; a clock time would ask them to do the
-// subtraction against a clock they may not be looking at.
-const ago = (iso) => {
-  const then = Date.parse(iso);
-  if (!isFinite(then)) return "";
-  const s = Math.max(0, (Date.now() - then) / 1000);
-  if (s < 60) return Math.floor(s) + "s ago";
-  if (s < 3600) return Math.floor(s / 60) + "m ago";
-  if (s < 86400) return Math.floor(s / 3600) + "h ago";
-  return Math.floor(s / 86400) + "d ago";
-};
 // Every day key from `a` to `b` inclusive, as local dates.
 function daysBetween(a, b) {
   const out = [];
@@ -102,13 +52,6 @@ function daysBetween(a, b) {
 const who = (s) => s.user || s.account || s.host || "local";
 const projKey = (s) => s.project_name || s.project || "—";
 
-// Model names arrive fully qualified from gateways and proxies
-// (`vendor/publisher/model`). The last segment is the part anyone reads.
-const shortModel = (model) => {
-  const parts = String(model).split("/").filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : model;
-};
-
 // The three claims the cost fields make, kept distinct: `cost_available` says
 // the provider records billable usage at all, `cost_included` says the plan
 // bundles it (any figure is the recorded retail equivalent, not money spent),
@@ -116,52 +59,7 @@ const shortModel = (model) => {
 const measurable = (s) => s.cost_available && !s.cost_included && typeof s.cost === "number";
 const hasRecorded = (s) => s.cost_available && typeof s.cost === "number";
 
-// A working directory under home reads as `~/…`; the whole path stays on the
-// element's title.
-const shortPath = (path) => {
-  const full = String(path);
-  if (HOME && full.startsWith(HOME + "/")) return "~" + full.slice(HOME.length);
-  if (HOME && full === HOME) return "~";
-  const parts = full.split("/").filter(Boolean);
-  return parts.length <= 2 ? full : "…/" + parts.slice(-2).join("/");
-};
-
 // --- talking to the server --------------------------------------------------
-
-// What went wrong, in words worth showing. A cctop error is short and arrives
-// as text/plain; anything else in the body was written by something between
-// this page and the server.
-async function problem(response) {
-  const kind = (response.headers.get("content-type") || "").split(";")[0].trim();
-  const said = kind === "text/plain" ? (await response.text()).trim() : "";
-  if (said) return said.length > 400 ? said.slice(0, 400) + "…" : said;
-  if (response.status >= 502 && response.status <= 504) return "cctop is not answering";
-  if (response.status === 401 || response.status === 403) return "this link is no longer authorised";
-  return "the server answered " + response.status;
-}
-
-// The body as JSON, or a sentence saying why it is not. A 200 is not a
-// promise of JSON — a proxy or a dead tunnel answers with an HTML page and a
-// good status, and the parser's complaint about that is not worth showing.
-async function asJson(response) {
-  const text = await response.text();
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    throw new Error("whatever answered this page, it was not cctop");
-  }
-}
-
-async function ask(url, init) {
-  let response;
-  try {
-    response = await fetch(url, init);
-  } catch (e) {
-    throw new Error("cctop is unreachable");
-  }
-  if (!response.ok) throw new Error(await problem(response));
-  return response;
-}
 
 // A page whose server has gone says so once, at the top, and keeps what it
 // already had on screen.
@@ -351,12 +249,6 @@ const PALETTE = [
 
 // --- charts ------------------------------------------------------------------
 
-const block = (heading, note) => {
-  const s = el("section", "block");
-  s.appendChild(el("h3", null, heading));
-  if (note) s.appendChild(el("p", "note", note));
-  return s;
-};
 
 const emptyCard = (text) => {
   const card = el("div", "card");
@@ -957,14 +849,7 @@ async function refresh() {
   }
 }
 
-// The back link carries the same credential this page was fetched with, or it
-// lands on a 403.
-document.getElementById("back").href = "/" + QUERY;
-
-// Inlined ahead of this script; if it ever is not, the header simply goes
-// without the button.
-const themeButton = window.themeToggle && window.themeToggle();
-if (themeButton) document.querySelector("header.top").appendChild(themeButton);
+placeThemeButton();
 
 for (const [id, key] of [
   ["f-provider", "provider"], ["f-project", "project"],

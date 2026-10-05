@@ -1,60 +1,12 @@
 "use strict";
-const TOKEN = "__CCTOP_TOKEN__";
-const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
 const ID = decodeURIComponent(location.pathname.replace(/^\/session\//, ""));
-// Whether this cctop serves the routes that act on a session. Substituted by
-// the server rather than discovered, so the controls are never drawn for a run
-// that would refuse them.
-const CAN_ACT = "__CCTOP_ACTIONS__";
 
 // A "?find=" on the opening URL seeds the conversation's find box — the
-// dashboard's global search links here with one. Read now: the token scrub
-// in load() rewrites the address bar before the chat view exists to use it.
-let findSeed = new URLSearchParams(location.search).get("find") || "";
+// dashboard's global search links here with one. Read from the query as it
+// arrived: the address bar is rewritten long before the chat view exists.
+let findSeed = OPENING_QUERY.get("find") || "";
 
-// The light/dark/system switch, at the header's right end. The inlined
-// theme.js defines window.themeToggle when the page is served; a copy opened
-// as a bare file has none, so this is guarded rather than assumed.
-const topBar = document.querySelector("header.top");
-const themeButton = window.themeToggle && window.themeToggle();
-if (topBar && themeButton) topBar.appendChild(themeButton);
-
-const el = (tag, cls, text) => {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined && text !== null) node.textContent = String(text);
-  return node;
-};
-const svg = (tag, attrs) => {
-  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, String(v));
-  return node;
-};
-
-const money = (v) => {
-  const n = Number(v) || 0;
-  if (n === 0) return "$0";
-  if (n < 0.01) return "<$0.01";
-  return "$" + (n < 100 ? n.toFixed(2) : Math.round(n).toLocaleString());
-};
-const tokens = (v) => {
-  const n = Number(v) || 0;
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + "G";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
-  return String(n);
-};
-// How long ago, for a session that has stopped. The clock time says when; this
-// says how long ago, which is the part a reader actually holds in their head.
-const ago = (iso) => {
-  const then = Date.parse(iso);
-  if (!isFinite(then)) return "";
-  const s = Math.max(0, (Date.now() - then) / 1000);
-  if (s < 60) return Math.floor(s) + "s ago";
-  if (s < 3600) return Math.floor(s / 60) + "m ago";
-  if (s < 86400) return Math.floor(s / 3600) + "h ago";
-  return Math.floor(s / 86400) + "d ago";
-};
+placeThemeButton();
 
 const secs = (ms) => {
   const n = Number(ms) || 0;
@@ -63,12 +15,6 @@ const secs = (ms) => {
   return n + "ms";
 };
 
-const block = (heading, note) => {
-  const s = el("section", "block");
-  s.appendChild(el("h3", null, heading));
-  if (note) s.appendChild(el("p", "note", note));
-  return s;
-};
 
 // --- the pieces ------------------------------------------------------------
 
@@ -963,52 +909,6 @@ async function showEarlier(button) {
 
 // --- talking to the server -------------------------------------------------
 
-// What went wrong, in words worth showing. A cctop error is short and arrives
-// as text/plain; anything else in the body was written by something between
-// this page and the server — a tunnel whose far end has gone answers with a
-// whole HTML error page, and that page used to land in the pane verbatim.
-async function problem(response) {
-  const kind = (response.headers.get("content-type") || "").split(";")[0].trim();
-  const said = kind === "text/plain" ? (await response.text()).trim() : "";
-  if (said) return said.length > 400 ? said.slice(0, 400) + "…" : said;
-  if (response.status >= 502 && response.status <= 504) return "cctop is not answering. The link is up but nothing is behind it — the terminal it runs in may have stopped.";
-  if (response.status === 401 || response.status === 403) return "This link is no longer authorised. Open a fresh one from the terminal.";
-  return "The server answered " + response.status + (response.statusText ? " " + response.statusText : "") + ".";
-}
-
-// The body as JSON, or a sentence saying why it is not.
-//
-// A 200 is not a promise of JSON. A captive portal, a proxy, or a tunnel that
-// has been repointed all answer with an HTML page and a perfectly good status,
-// and `response.json()` then throws a parser's complaint — `Unexpected token
-// '<', "<html><bod"... is not valid JSON` — which is machinery, shown to
-// somebody who wanted to read a conversation. The status is not enough on its
-// own; what came back has to be looked at.
-async function asJson(response) {
-  const text = await response.text();
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    throw new Error(
-      "cctop answered with something that is not its own: whatever replied to " +
-        "this page, it was not the session it was asked about."
-    );
-  }
-}
-
-// Every request the page makes. A dropped connection rejects the fetch itself
-// with nothing in it worth reading, so it is named here instead.
-async function ask(url, init) {
-  let response;
-  try {
-    response = await fetch(url, init);
-  } catch (e) {
-    throw new Error("cctop is unreachable — the connection dropped.");
-  }
-  if (!response.ok) throw new Error(await problem(response));
-  return response;
-}
-
 // A page whose server has gone says so once, at the top, and keeps everything
 // it had already read. The alternative — replacing a conversation with the
 // reason it could not be refreshed — throws away the part that was still true.
@@ -1204,7 +1104,7 @@ function composer(r) {
   input.type = "text";
   input.maxLength = 4000;
   input.autocomplete = "off";
-  const send = el("button");
+  const send = el("button", "primary");
   send.type = "submit";
   composerMode(input, send, !!r.running);
   form.appendChild(input);

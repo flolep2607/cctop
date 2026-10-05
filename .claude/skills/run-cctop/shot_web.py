@@ -35,7 +35,12 @@ CLOUDFLARE_502 = (
 def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=BROWSER)
-        page = browser.new_page(viewport={"width": 1100, "height": 1000})
+        # A phone and a dark scheme are where a stylesheet change goes wrong
+        # unseen, so both are one variable away: CCTOP_WIDTH=390 CCTOP_SCHEME=dark.
+        page = browser.new_page(
+            viewport={"width": int(os.environ.get("CCTOP_WIDTH", "1100")), "height": 1000},
+            color_scheme=os.environ.get("CCTOP_SCHEME", "light"),
+        )
         problems: list[str] = []
         page.on("pageerror", lambda e: problems.append(f"page error: {e}"))
         page.on(

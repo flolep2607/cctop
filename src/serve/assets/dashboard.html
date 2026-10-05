@@ -44,40 +44,16 @@
   .termdrawer .head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
                       font-size: 12px; color: var(--faint); }
   .termdrawer .head .popout { margin-left: auto; color: var(--dim); }
-  .termdrawer .head button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 99px;
-                             border: 1px solid var(--line); background: var(--panel);
-                             color: var(--dim); cursor: pointer; }
-  .termdrawer .head button:hover { color: var(--accent); border-color: var(--accent); }
+  .termdrawer .head button { font-size: 12px; padding: 3px 10px; border-radius: var(--r-pill); }
   .termframe { width: 100%; height: min(70vh, 720px); border: 1px solid var(--line);
                border-radius: 8px; background: #060807; display: block; }
   .termdrawer .why { font-size: 12px; color: var(--faint); margin-top: 7px; }
-  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
-  input[type=search] {
-    flex: 1 1 200px; min-width: 0; padding: 7px 11px; font: inherit; font-size: 14px;
-    background: var(--panel); color: var(--ink);
-    border: 1px solid var(--line); border-radius: 8px;
-  }
-  input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  button {
-    padding: 7px 11px; font: inherit; font-size: 13px; cursor: pointer;
-    background: var(--panel); color: var(--dim);
-    border: 1px solid var(--line); border-radius: 8px;
-  }
-  button[aria-pressed=true] { color: var(--accent); border-color: var(--accent); }
-  select {
-    padding: 7px 9px; font: inherit; font-size: 13px; cursor: pointer;
-    background: var(--panel); color: var(--dim);
-    border: 1px solid var(--line); border-radius: 8px;
-  }
+  #filter { flex: 1 1 200px; font-size: 14px; }
   /* Starting a fresh agent from the page — the launcher the terminal has on
      `n`, carried to the one place a phone can reach. */
   form.launch { display: flex; gap: 8px; align-items: center; margin: 0; }
   form.launch[hidden] { display: none; }
-  form.launch input[type=text] {
-    width: 180px; padding: 7px 11px; font: inherit; font-size: 14px;
-    background: var(--panel); color: var(--ink);
-    border: 1px solid var(--line); border-radius: 8px;
-  }
+  form.launch input[type=text] { width: 180px; }
   form.launch .said { font-size: 12px; }
 
   /* Sessions waiting on a person get their own block at the top. The whole
@@ -138,31 +114,18 @@
      cannot be inside the row — a button inside an anchor is not valid — so
      the row narrows a little to make room for it instead. */
   .wanting .row { border-top: 0; padding-right: 38px; }
-  .wanting .dismiss {
+  .wanting .dismiss, .find .dismiss {
     position: absolute; top: 9px; right: 8px; padding: 3px 7px;
-    font-size: 14px; line-height: 1; border-radius: 6px;
+    font-size: 14px; line-height: 1; border-radius: var(--r-sm);
     color: var(--faint); background: transparent; border-color: transparent;
   }
-  .wanting .dismiss:hover { color: var(--ink); border-color: var(--line); }
+  .wanting .dismiss:hover, .find .dismiss:hover { color: var(--ink); border-color: var(--line); }
   form.say { display: flex; gap: 8px; padding: 0 14px 11px 32px; }
-  form.say input {
-    flex: 1 1 auto; min-width: 0; font: inherit; font-size: 13px; padding: 6px 9px;
-    border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
-  }
-  form.say input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  form.say button {
-    font: inherit; font-size: 13px; padding: 0 13px; border-radius: 7px; cursor: pointer;
-    border: 1px solid var(--accent); background: var(--accent); color: var(--panel);
-  }
-  form.say button:disabled { opacity: .5; cursor: default; }
+  form.say input { flex: 1 1 auto; background: var(--bg); }
   /* The one-word replies. Quieter than Send — bordered rather than filled —
      because they answer for you, and the filled button stays the deliberate
      act. */
-  form.say .chip {
-    font: inherit; font-size: 12px; padding: 0 10px; border-radius: 7px; cursor: pointer;
-    border: 1px solid var(--line); background: var(--panel); color: var(--dim);
-    flex: 0 0 auto;
-  }
+  form.say .chip { font-size: 12px; padding: 0 10px; flex: 0 0 auto; }
   .wanting .asked { padding: 0 14px 8px 32px; min-width: 0; }
   .wanting .asked code {
     display: block; font-size: 12px; padding: 5px 9px; border-radius: 7px;
@@ -193,13 +156,6 @@
   .find { position: relative; }
   .find h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
              color: var(--faint); padding: 11px 14px 0; }
-  .find .dismiss {
-    position: absolute; top: 9px; right: 8px; padding: 3px 7px;
-    font-size: 14px; line-height: 1; border-radius: 6px;
-    color: var(--faint); background: transparent; border-color: transparent;
-  }
-  .find .dismiss:hover { color: var(--ink); border-color: var(--line); }
-  .empty.bad { color: var(--red); }
 
   /* The bulk bar: nothing while the set is empty, then the few verbs the set
      answers to, between the table and the footer. */
@@ -211,12 +167,7 @@
   .bulk .sep { color: var(--faint); }
   .bulk form { display: flex; gap: 8px; flex: 1 1 260px; min-width: 0; margin: 0; }
   .bulk form[hidden] { display: none; }
-  .bulk input[type=text] {
-    flex: 1 1 auto; min-width: 0; font: inherit; font-size: 13px; padding: 6px 9px;
-    border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
-  }
-  .bulk input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  .bulk button:disabled { opacity: .5; cursor: default; }
+  .bulk input[type=text] { flex: 1 1 auto; }
   .bulk .said { font-size: 12px; }
   .bulk .said.bad { color: var(--red); }
 
@@ -224,8 +175,8 @@
      figures under the metadata instead of squeezing the name column, and the
      answer box lets its input take a line of its own. */
   @media (max-width: 700px) {
-    .wrap { padding: 12px 10px 48px; }
     .controls { gap: 6px; }
+    #filter { flex-basis: 100%; }
     form.launch { flex-basis: 100%; flex-wrap: wrap; }
     form.launch input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
     .row { grid-template-columns: 8px minmax(0, 1fr); }
@@ -248,7 +199,11 @@
 
 <div class="wrap">
   <header class="top">
-    <h1>cctop<span class="v mono">__CCTOP_VERSION__</span></h1>
+    <a class="brand" data-nav="/" href="/">cctop<span class="v mono">__CCTOP_VERSION__</span></a>
+    <nav class="pages" aria-label="Pages">
+      <a data-nav="/" href="/" aria-current="page">Sessions</a>
+      <a data-nav="/analytics" href="/analytics">Analytics</a>
+    </nav>
     <div class="spacer"></div>
     <div class="totals" id="totals"></div>
     <div class="quota" id="quota"></div>
@@ -282,7 +237,7 @@
     <form id="launch" class="launch" hidden>
       <select id="launch-agent" title="Which agent to start"></select>
       <input id="launch-cwd" type="text" placeholder="directory — default ~" autocomplete="off" spellcheck="false">
-      <button type="submit" title="Start the agent, in the multiplexer">Start</button>
+      <button type="submit" class="primary" title="Start the agent, in the multiplexer">Start</button>
       <span id="launch-said" class="said"></span>
     </form>
   </div>
@@ -317,21 +272,21 @@
     <form id="bulk-form" hidden>
       <input id="bulk-text" type="text" maxlength="4000" autocomplete="off" spellcheck="false"
              placeholder="One line, sent to each selected session">
-      <button type="submit">Send</button>
+      <button type="submit" class="primary">Send</button>
     </form>
     <span class="said" id="bulk-said"></span>
   </div>
 
   <footer>
     <span class="live"><span class="dot idle" id="link"></span><span id="link-text">connecting…</span></span>
-    <a id="analytics-link" href="/analytics">analytics</a>
     <span class="spacer"></span>
     <span id="counts"></span>
     <span class="hint" id="keys">j/k select · Enter opens · p pins · / filters · Enter in the filter searches transcripts</span>
-    <a id="insight-optimize" href="/insight/optimize">optimize</a>
-    <a id="insight-compare" href="/insight/compare">compare</a>
+    <a data-nav="/insight/optimize" href="/insight/optimize">optimize</a>
+    <a data-nav="/insight/compare" href="/insight/compare">compare</a>
   </footer>
 </div>
 
+<script>__CCTOP_COMMON_JS__</script>
 <script>
 __CCTOP_DASHBOARD_JS__</script>

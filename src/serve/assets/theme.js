@@ -24,11 +24,16 @@
     const button = document.createElement("button");
     button.type = "button";
     button.className = "theme";
+    // A glyph rather than "Theme: system": the words took a tenth of a phone's
+    // header to say something the reader looks for once. The name is still
+    // there for anyone who hovers or uses a screen reader.
+    const GLYPH = { light: "☀", dark: "☾", system: "◐" };
     const paint = () => {
-      const set = document.documentElement.dataset.theme;
-      button.textContent = set ? "Theme: " + set : "Theme: system";
+      const set = document.documentElement.dataset.theme || "system";
+      button.textContent = GLYPH[set];
+      button.setAttribute("aria-label", "Theme: " + set);
       button.title =
-        "Light, dark, or the system's choice — applies to every cctop page";
+        "Theme: " + set + " — light, dark, or the system's choice, for every cctop page";
     };
     button.addEventListener("click", () => {
       const now = document.documentElement.dataset.theme;

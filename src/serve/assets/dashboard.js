@@ -1,59 +1,4 @@
 "use strict";
-const TOKEN = "__CCTOP_TOKEN__";
-const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
-// Whether this run serves the routes that act on a session. Substituted by the
-// server, so the answer box is never drawn for a page that could not send it.
-const CAN_ACT = "__CCTOP_ACTIONS__";
-
-// The token reaches the script embedded in the page, so once it is running the
-// `?t=` in the address bar is only a credential sitting in history, in
-// screenshots, and in any link copied without thinking. Drop it as soon as the
-// page is up. Some embedded contexts refuse replaceState — then the URL stays
-// as it arrived, which is the most that can be done there anyway.
-try {
-  const here = new URL(location.href);
-  if (here.searchParams.has("t")) {
-    here.searchParams.delete("t");
-    history.replaceState(null, "", here.pathname + here.search + here.hash);
-  }
-} catch (e) {}
-
-// Every string from a transcript — titles, branches, paths, model names — is
-// written through textContent or this. None of it is trusted markup, and a
-// project directory is perfectly free to be called `<img onerror=…>`.
-const el = (tag, cls, text) => {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined && text !== null) node.textContent = String(text);
-  return node;
-};
-
-const money = (n) => {
-  if (n === null || n === undefined) return "—";
-  const v = Number(n);
-  if (!isFinite(v)) return "—";
-  if (v === 0) return "$0";
-  if (v < 0.01) return "<$0.01";
-  return "$" + (v < 10 ? v.toFixed(2) : Math.round(v).toLocaleString());
-};
-
-const tokens = (n) => {
-  const v = Number(n) || 0;
-  if (v >= 1e9) return (v / 1e9).toFixed(1) + "G";
-  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + "k";
-  return String(v);
-};
-
-const ago = (iso) => {
-  const then = Date.parse(iso);
-  if (!isFinite(then)) return "";
-  const secs = Math.max(0, (Date.now() - then) / 1000);
-  if (secs < 60) return Math.floor(secs) + "s";
-  if (secs < 3600) return Math.floor(secs / 60) + "m";
-  if (secs < 86400) return Math.floor(secs / 3600) + "h";
-  return Math.floor(secs / 86400) + "d";
-};
 
 // A reset timestamp as a wall-clock time — "resets 14:05" is read at a glance,
 // where "in 40m" asks the reader to do the sum against a clock they may not be
@@ -77,29 +22,6 @@ const rowCost = (s) => {
   if (!s.cost.available) return "—";
   if (s.cost.total === null || s.cost.total === undefined) return "—";
   return money(Number(s.cost.total));
-};
-
-// The home directory, so paths under it read as `~/…` the way they do in the
-// terminal. Substituted by the server rather than derived here, because a
-// browser cannot know it — and this page may be open on a different machine.
-const HOME = "__CCTOP_HOME__";
-
-// A working directory is often deep enough to fill a phone's width on its own,
-// and the part that says which checkout this is lives at the end. The whole
-// path stays on the element's title.
-const shortPath = (path) => {
-  const full = String(path);
-  if (HOME && full.startsWith(HOME + "/")) return "~" + full.slice(HOME.length);
-  if (HOME && full === HOME) return "~";
-  const parts = full.split("/").filter(Boolean);
-  return parts.length <= 2 ? full : "…/" + parts.slice(-2).join("/");
-};
-
-// Model names arrive fully qualified from gateways and proxies
-// (`vendor/publisher/model`). The last segment is the part anyone reads.
-const shortModel = (model) => {
-  const parts = String(model).split("/").filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : model;
 };
 
 // When each session's chat was last opened: `{id: {seq, at}}` written by
@@ -234,7 +156,7 @@ function rowFor(s) {
   tag(s.provider);
   if (s.model) tag(shortModel(s.model));
   if (s.branch) tag(s.branch);
-  tag(ago(s.last_active) + " ago");
+  tag(ago(s.last_active));
   if (s.running && s.state === "waiting") tag("waiting on you", "pill warn");
   // Louder than "waiting on you", and deliberately so: that one is your move
   // whenever you get to it, this one is an agent stopped mid-tool until you say.
@@ -275,44 +197,6 @@ function rowFor(s) {
 
 // --- talking to the server -------------------------------------------------
 
-// What went wrong, in words worth showing. A cctop error is short and arrives
-// as text/plain; anything else in the body was written by something between
-// this page and the server — a tunnel whose far end has gone answers with a
-// whole HTML error page, and that page used to land on screen verbatim.
-async function problem(response) {
-  const kind = (response.headers.get("content-type") || "").split(";")[0].trim();
-  const said = kind === "text/plain" ? (await response.text()).trim() : "";
-  if (said) return said.length > 400 ? said.slice(0, 400) + "…" : said;
-  if (response.status >= 502 && response.status <= 504) return "cctop is not answering";
-  if (response.status === 401 || response.status === 403) return "this link is no longer authorised";
-  return "the server answered " + response.status;
-}
-
-// The body as JSON, or a sentence saying why it is not. A 200 is not a promise
-// of JSON: a captive portal or a proxy answers with an HTML page and a good
-// status, and the parser's complaint about it is not something to show anyone.
-async function asJson(response) {
-  const text = await response.text();
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    throw new Error("whatever answered this page, it was not cctop");
-  }
-}
-
-// Every request the page makes. A dropped connection rejects the fetch itself
-// with nothing in it worth reading, so it is named here instead.
-async function ask(url, init) {
-  let response;
-  try {
-    response = await fetch(url, init);
-  } catch (e) {
-    throw new Error("cctop is unreachable");
-  }
-  if (!response.ok) throw new Error(await problem(response));
-  return response;
-}
-
 // Answering a waiting agent from the list, which is the whole point of the
 // card it sits in: a page that says "this one needs you" and cannot be replied
 // to has shown someone a problem and kept the fix.
@@ -327,7 +211,7 @@ function answerBox(s) {
   input.maxLength = 4000;
   input.autocomplete = "off";
   input.placeholder = "Answer this session…";
-  const send = el("button", null, "Send");
+  const send = el("button", "primary", "Send");
   send.type = "submit";
   const said = el("span", "said", "");
   // The one POST, shared by the typed answer and the one-tap chips below: a
@@ -878,7 +762,7 @@ function findRowFor(hit, q) {
   const model = (s && s.model) || hit.model;
   if (provider) meta.appendChild(el("span", null, provider));
   if (model) meta.appendChild(el("span", null, shortModel(model)));
-  if (s && s.last_active) meta.appendChild(el("span", null, ago(s.last_active) + " ago"));
+  if (s && s.last_active) meta.appendChild(el("span", null, ago(s.last_active)));
   if (hit.snippet) {
     meta.appendChild(el("span", "snip trunc", "“" + hit.snippet + "”"));
   }
@@ -1053,9 +937,6 @@ function setLink(state, text) {
   link.className = "dot " + state;
   linkText.textContent = text;
 }
-
-// The analytics page needs the same credential in its URL or it lands on 403.
-document.getElementById("analytics-link").href = "/analytics" + QUERY;
 
 let source;
 function connect() {
@@ -1315,8 +1196,7 @@ document.addEventListener("keydown", (e) => {
 // shared theme script inlined above, so a page served without it has one
 // fewer button rather than an error. It lands after the totals — #quota
 // claims a whole flex line, so this closes the first.
-const themeButton = window.themeToggle && window.themeToggle();
-if (themeButton) document.getElementById("quota").before(themeButton);
+placeThemeButton(document.getElementById("quota"));
 
 // The hint names only keys that do something on this page: a read-only serve
 // never draws the bulk bar, so it never mentions the mark key either.
@@ -1329,10 +1209,5 @@ document.getElementById("keys").textContent =
 // keeps "4m ago" honest without waiting on the next refresh.
 setInterval(() => { if (sessions.length) render(); }, 15000);
 
-// The plain-text reports the server renders on request. The token goes in the
-// href because the address bar may no longer be holding it.
-for (const [id, path] of [["insight-optimize", "/insight/optimize"], ["insight-compare", "/insight/compare"]]) {
-  document.getElementById(id).href = path + QUERY;
-}
 
 connect();
