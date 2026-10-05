@@ -31,6 +31,15 @@ exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD", "/ven
 [features]
 debug = []
 
+# `cargo binstall cctop` fetches the release archive instead of compiling. Its
+# default guesses would find these names too, but only after probing a dozen
+# URLs that 404; spelled out, it asks once. Only musl archives are built, and
+# binstall already falls back from a gnu host to the musl target on its own.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
 [profile.release]
 # A monitoring tool is launched often and lives in the terminal; a smaller,
 # faster binary is worth the extra link time on release builds only.
