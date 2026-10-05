@@ -72,6 +72,9 @@ pub struct Terminal {
     /// resolves to this machine's loopback and works only in a browser already
     /// on it — which the page says rather than showing an empty frame.
     pub tunnelled: bool,
+    /// The rmux session the terminal is a client of, so the page can ask
+    /// `/api/window/<name>` whether its client holds the window.
+    pub name: String,
 }
 
 /// Where an image the page sent was written, for the prompt to name.
@@ -671,7 +674,11 @@ pub fn terminal(session: &Session, frontend: Option<&str>) -> Result<Terminal, F
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));
     };
-    Ok(Terminal { url, tunnelled })
+    Ok(Terminal {
+        url,
+        tunnelled,
+        name,
+    })
 }
 
 /// A tab's terminal, by its rmux session name — the same share
@@ -689,7 +696,11 @@ pub fn tab_terminal(name: &str, frontend: Option<&str>) -> Result<Terminal, Fail
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));
     };
-    Ok(Terminal { url, tunnelled })
+    Ok(Terminal {
+        url,
+        tunnelled,
+        name: name.to_string(),
+    })
 }
 
 #[cfg(test)]

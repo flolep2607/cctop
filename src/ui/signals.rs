@@ -669,6 +669,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            window: None,
         };
         let now = 1_700_000_000;
         let recorded = |signal, ago: u64| {

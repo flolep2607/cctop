@@ -105,6 +105,48 @@ pub struct Pane {
     /// When this pane's screen last changed, which is how idleness is told
     /// without asking the agent or its transcript anything.
     drew_at: Instant,
+    /// Whether this pane's rmux client holds the window; see [`Fit`].
+    pub fit: Fit,
+}
+
+/// How long after a pane's last keystroke the next one counts as coming back
+/// to it — the moment worth checking whether another client took the window.
+const FIT_QUIET: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How long the nudge holds the client one column narrower. Long enough that
+/// rmux sees two resizes rather than coalescing them into none.
+const FIT_NUDGE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Taking a rmux window back for this pane.
+///
+/// A session can have two clients at once — this pane, and a browser opened on
+/// the same agent — and rmux fits the window to one of them. `window-size
+/// latest` is meant to mean the one last used, but rmux only moves it when a
+/// client attaches or resizes, never on input: type into the pane while the
+/// browser holds the window and the agent stays drawn at the browser's size.
+/// (tmux follows input; this is rmux's gap, checked against a real server.)
+///
+/// So the pane does what rmux would have: on the first keystroke after a pause
+/// it asks rmux how big the window is, and if that is not this pane's size it
+/// resizes its own client one column narrower and back. rmux takes the resize
+/// as this client being the latest and fits the window to it. Only on a real
+/// mismatch — a nudge on every keystroke would make the agent redraw on each.
+#[derive(Default)]
+pub struct Fit {
+    /// The window's size as rmux last reported it, from the tab sweep or from
+    /// the check a keystroke started.
+    pub window: Option<(u16, u16)>,
+    nudged_at: Option<Instant>,
+    typed_at: Option<Instant>,
+    asking: Option<std::sync::mpsc::Receiver<Option<(u16, u16)>>>,
+}
+
+impl Fit {
+    /// Whether rmux's window already is this pane's `(cols, rows)`. rmux's
+    /// status line, where a session has one, takes a row of the client.
+    fn matches(window: (u16, u16), cols: u16, rows: u16) -> bool {
+        window.0 == cols && (window.1 == rows || window.1 + 1 == rows)
+    }
 }
 
 impl Pane {
@@ -124,7 +166,62 @@ impl Pane {
             is_agent: true,
             view: crate::attach::Attach::for_test(),
             drew_at: Instant::now(),
+            fit: Fit::default(),
         }
+    }
+
+    /// Someone typed, clicked or scrolled in this pane. On the first such
+    /// after a pause, ask rmux whether this pane's client still holds the
+    /// window — off the draw loop, since it is a subprocess. `force` is for
+    /// arriving at the pane, which counts whatever the clock says.
+    pub fn note_input(&mut self, force: bool) {
+        let Some(name) = self.rmux.clone() else {
+            return;
+        };
+        let back = force || self.fit.typed_at.is_none_or(|t| t.elapsed() >= FIT_QUIET);
+        self.fit.typed_at = Some(Instant::now());
+        if !back || self.fitting() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::rmux::window_size(&name));
+        });
+        self.fit.asking = Some(rx);
+    }
+
+    /// The size to ask this pane's client to be, given the `(cols, rows)` it
+    /// is drawn in — which is that size, except for the moment of a nudge.
+    pub fn fit_request(&mut self, cols: u16, rows: u16) -> (u16, u16) {
+        if let Some(rx) = &self.fit.asking {
+            match rx.try_recv() {
+                Ok(window) => {
+                    self.fit.asking = None;
+                    if let Some(window) = window {
+                        self.fit.window = Some(window);
+                        if !Fit::matches(window, cols, rows) && cols > 1 {
+                            self.fit.nudged_at = Some(Instant::now());
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.fit.asking = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(at) = self.fit.nudged_at {
+            if at.elapsed() < FIT_NUDGE {
+                return (cols - 1, rows);
+            }
+            self.fit.nudged_at = None;
+            // What rmux is about to report; the next sweep confirms it.
+            self.fit.window = Some((cols, rows));
+        }
+        (cols, rows)
+    }
+
+    /// Whether a check or a nudge is under way, which needs frames to finish.
+    pub fn fitting(&self) -> bool {
+        self.fit.asking.is_some() || self.fit.nudged_at.is_some()
     }
 
     /// What this pane's agent says it is doing, read off its screen.
@@ -348,6 +445,7 @@ impl Pane {
             asked_at: None,
             hosted: Some(hosted),
             drew_at: Instant::now(),
+            fit: Fit::default(),
         })
     }
 
@@ -370,6 +468,7 @@ impl Pane {
             is_agent: true,
             view: crate::attach::attach(pid)?,
             drew_at: Instant::now(),
+            fit: Fit::default(),
         })
     }
 
@@ -1392,6 +1491,50 @@ fn starts_an_agent(argv: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_window_counts_as_this_panes_when_only_a_status_line_differs() {
+        assert!(Fit::matches((120, 40), 120, 40));
+        // rmux's status line takes a row of the client, where a session shows one.
+        assert!(Fit::matches((120, 39), 120, 40));
+        assert!(!Fit::matches((80, 24), 120, 40));
+        assert!(!Fit::matches((120, 38), 120, 40));
+    }
+
+    #[test]
+    fn a_mismatched_window_is_taken_back_with_one_narrow_frame_and_then_the_real_size() {
+        let mut pane = Pane::for_test("agent");
+        // What a keystroke's check reports when a browser holds the window.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some((60, 15))).expect("send");
+        pane.fit.asking = Some(rx);
+        assert_eq!(
+            pane.fit_request(120, 40),
+            (119, 40),
+            "the nudge narrows by one column"
+        );
+        assert!(pane.fitting());
+        assert_eq!(
+            pane.fit_request(120, 40),
+            (119, 40),
+            "and holds it until rmux has seen it"
+        );
+        std::thread::sleep(FIT_NUDGE + std::time::Duration::from_millis(20));
+        assert_eq!(pane.fit_request(120, 40), (120, 40));
+        assert!(!pane.fitting());
+        assert_eq!(pane.fit.window, Some((120, 40)));
+    }
+
+    #[test]
+    fn a_window_that_is_already_this_panes_is_left_alone() {
+        let mut pane = Pane::for_test("agent");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some((120, 40))).expect("send");
+        pane.fit.asking = Some(rx);
+        // No nudge: one would make the agent redraw on every keystroke.
+        assert_eq!(pane.fit_request(120, 40), (120, 40));
+        assert!(!pane.fitting());
+    }
     /// The screens below are Claude Code 2.1.283's own, captured from a real
     /// session: at its prompt, mid-turn, on a permission prompt and on an
     /// AskUserQuestion — plus a reply quoting the phrases, which must not count.
@@ -1672,6 +1815,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             tab: None,
             pane: None,
             axis: None,
+            window: None,
         }
     }
 
@@ -1743,6 +1887,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             is_agent,
             view: crate::attach::Attach::for_test(),
             drew_at: Instant::now() - Duration::from_secs(ago),
+            fit: Fit::default(),
         }
     }
 

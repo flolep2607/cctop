@@ -12,7 +12,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { AppShell } from "@/components/app-shell";
 import { PromptBar } from "@/components/prompt-bar";
 import { StateDot, dotOfTab } from "@/components/status";
-import { TerminalFrame } from "@/components/terminal";
+import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
 import { useSessions, useStored, useTabs } from "@/hooks/use-live";
 import type { Session, Tab } from "@/lib/types";
 
@@ -31,21 +31,21 @@ const autoCols = (n: number) => (n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4);
 // Opening a terminal asks rmux for a share, so it happens once per tile per
 // page load — kept by name so a re-render does not ask again, forgotten on
 // failure so Retry does.
-const opening = new Map<string, Promise<{ url: string; tunnelled: boolean }>>();
+const opening = new Map<string, Promise<Terminal>>();
+const mintShare = (name: string): Promise<Terminal> =>
+  ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ origin: location.origin }),
+  }).then((r) => r.json());
 function openTerminal(name: string) {
   if (!opening.has(name)) {
     opening.set(
       name,
-      ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ origin: location.origin }),
-      })
-        .then((r) => r.json())
-        .catch((e) => {
-          opening.delete(name);
-          throw e;
-        }),
+      mintShare(name).catch((e) => {
+        opening.delete(name);
+        throw e;
+      }),
     );
   }
   return opening.get(name)!;
@@ -58,15 +58,33 @@ const Tile = memo(function Tile({
   onClose: () => void; onMaximize: () => void; onFocus: () => void;
   dragProps: React.HTMLAttributes<HTMLElement>;
 }) {
-  const [terminal, setTerminal] = useState<{ url: string; tunnelled: boolean } | null>(null);
+  const [terminal, setTerminal] = useState<Terminal | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  // In a window of its own: the tile lets go of its frame (one browser per
+  // share) and takes a fresh one back when that window closes.
+  const [popped, setPopped] = useState(false);
+  const pop = () =>
+    popOut({
+      key: name,
+      title: label + " — cctop",
+      release: () => {
+        setPopped(true);
+        setTerminal(null);
+        opening.delete(name);
+      },
+      mint: () => mintShare(name),
+      onClosed: () => {
+        setPopped(false);
+        setAttempt((a) => a + 1);
+      },
+    });
   const exists = !!tab;
   const state = dotOfTab(tab?.state);
   const label = tab?.label ?? name.replace(/^cctop-/, "");
 
   useEffect(() => {
-    if (!CAN_ACT || !exists) return;
+    if (!CAN_ACT || !exists || popped) return;
     let live = true;
     openTerminal(name).then(
       (t) => {
@@ -79,12 +97,13 @@ const Tile = memo(function Tile({
     return () => {
       live = false;
     };
-  }, [name, attempt, exists]);
+  }, [name, attempt, exists, popped]);
 
   // An open frame outranks everything: a tab missing from one poll must not
   // cost the reader their terminal. The header says "closed"; the frame stays.
   let body: React.ReactNode;
-  if (terminal) body = <TerminalFrame url={terminal.url} title={"Terminal — " + label} />;
+  if (popped) body = <Empty>In a window of its own. Close that window to bring the terminal back here.</Empty>;
+  else if (terminal) body = <TerminalFrame url={terminal.url} name={terminal.name ?? name} title={"Terminal — " + label} />;
   else if (!CAN_ACT) body = <Empty>This is the view-only link, which cannot open terminals. Open the first link <code className="text-neutral-300">cctop serve</code> printed — “serving on …” — to type into agents here.</Empty>;
   else if (!exists) body = <Empty>This tab has closed — its agent exited or was moved.<Button size="sm" variant="secondary" onClick={onClose}>Remove</Button></Empty>;
   else if (error) body = <Empty bad>{error}<Button size="sm" variant="secondary" onClick={() => setAttempt(attempt + 1)}>Retry</Button></Empty>;
@@ -126,11 +145,9 @@ const Tile = memo(function Tile({
               </Link>
             </Button>
           )}
-          {terminal && (
-            <Button variant="ghost" size="icon-xs" asChild title="Open in a window of its own">
-              <a href={terminal.url} target="_blank" rel="noopener" aria-label="Pop out">
-                <ExternalLink />
-              </a>
+          {terminal && !popped && (
+            <Button variant="ghost" size="icon-xs" onClick={pop} title="Open in a window of its own — it leaves the grid until that window closes" aria-label="Pop out">
+              <ExternalLink />
             </Button>
           )}
           <Button variant="ghost" size="icon-xs" onClick={onMaximize} title={maximized ? "Back to the grid (Esc)" : "Maximise (Alt+Enter)"} aria-label={maximized ? "Restore" : "Maximise"}>

@@ -1521,6 +1521,8 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             }
         }
         _ if path.starts_with("/session/") => app_page(shared, stream, &request, access),
+        // A popped-out terminal: the same app, drawing only the terminal.
+        _ if path.starts_with("/window/") => app_page(shared, stream, &request, access),
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
@@ -1529,6 +1531,30 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         _ if path.starts_with("/api/access/") => {
             api_access(shared, stream, &request, &path["/api/access/".len()..]);
+        }
+        // The size rmux has fitted a tab's window to. The page's terminal asks
+        // when you come back to it, compares it with its own grid, and if the
+        // window is some other client's — the TUI's, typically — nudges its
+        // own size so rmux hands the window over; rmux's `latest` does not
+        // follow input on its own. Read-only, and only for cctop's tabs.
+        _ if path.starts_with("/api/window/") => {
+            let name = &path["/api/window/".len()..];
+            if !tabs::is_tab(&crate::rmux::running(), name) {
+                return http::respond_error(
+                    stream,
+                    Some(&request),
+                    404,
+                    "no open tab by that name",
+                );
+            }
+            match crate::rmux::window_size(name) {
+                Some((cols, rows)) => json(
+                    stream,
+                    &request,
+                    &serde_json::json!({ "cols": cols, "rows": rows }),
+                ),
+                None => http::respond_error(stream, Some(&request), 404, "that tab has no window"),
+            }
         }
         "/api/tabs" => {
             let snapshot = current(shared);

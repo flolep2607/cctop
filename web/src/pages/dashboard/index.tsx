@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AppShell } from "@/components/app-shell";
 import { StateDot, dotOfTab } from "@/components/status";
-import { TerminalFrame } from "@/components/terminal";
+import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
 import { useSessions, useStored, useTabs, useTick } from "@/hooks/use-live";
 import type { Session, Tab } from "@/lib/types";
 import { SessionRow, WantingRow } from "./rows";
@@ -360,7 +360,13 @@ function HostBanners() {
 // its terminal in a drawer under the bar.
 function Tabs() {
   const { tabs } = useTabs(5000);
-  const [open, setOpen] = useState<{ tab: Tab; term?: { url: string; tunnelled: boolean }; error?: string } | null>(null);
+  const [open, setOpen] = useState<{ tab: Tab; term?: Terminal; error?: string } | null>(null);
+  const mint = (name: string): Promise<Terminal> =>
+    ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin: location.origin }),
+    }).then((r) => r.json());
   const toggle = async (t: Tab) => {
     if (open?.tab.name === t.name) return setOpen(null);
     setOpen({ tab: t });
@@ -404,9 +410,17 @@ function Tabs() {
             {open.tab.cwd && <span>· {shortPath(open.tab.cwd)}</span>}
             <span className="flex-1" />
             {open.term && (
-              <a href={open.term.url} target="_blank" rel="noopener" className="hover:text-foreground inline-flex items-center gap-1">
+              <button
+                type="button"
+                className="hover:text-foreground inline-flex items-center gap-1"
+                title="Open in a window of its own — the drawer closes, since a share admits one browser"
+                onClick={() => {
+                  const tab = open.tab;
+                  popOut({ key: tab.name, title: tab.label + " — cctop", release: () => setOpen(null), mint: () => mint(tab.name), onClosed: () => {} });
+                }}
+              >
                 <ExternalLink className="size-3" /> pop out
-              </a>
+              </button>
             )}
             <Button variant="ghost" size="icon-xs" onClick={() => setOpen(null)} aria-label="Close the terminal">
               <X />
@@ -414,7 +428,7 @@ function Tabs() {
           </div>
           <div className="bg-terminal flex h-[min(60vh,640px)]">
             {open.term ? (
-              <TerminalFrame url={open.term.url} title="Terminal" />
+              <TerminalFrame url={open.term.url} name={open.term.name ?? open.tab.name} title="Terminal" />
             ) : (
               <div className={cn("m-auto text-sm", open.error ? "text-red-400" : "text-neutral-400")}>{open.error || "Opening this tab's terminal…"}</div>
             )}

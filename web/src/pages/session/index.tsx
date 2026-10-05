@@ -15,7 +15,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/app-shell";
 import { StateBadge, StateDot, dotOf } from "@/components/status";
-import { TerminalFrame } from "@/components/terminal";
+import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
 import { useSessions, useTick } from "@/hooks/use-live";
 import type { Report } from "@/lib/types";
 import { AccessView } from "./access-view";
@@ -42,7 +42,7 @@ export function SessionPage() {
   // Views are drawn on first sight and kept: each is another read, and
   // switching back must not repeat it.
   const [seen, setSeen] = useState<Set<View>>(() => new Set([viewFromHash()]));
-  const [term, setTerm] = useState<{ url: string; tunnelled: boolean } | "opening" | null>(null);
+  const [term, setTerm] = useState<Terminal | "opening" | null>(null);
   useTick();
 
   // The page's one blocking read, retried on its own: a connection that drops
@@ -105,7 +105,7 @@ export function SessionPage() {
     if (term) return setTerm(null);
     setTerm("opening");
     try {
-      const t = (await act("terminal", id, { origin: location.origin })) as unknown as { url: string; tunnelled: boolean };
+      const t = (await act("terminal", id, { origin: location.origin })) as unknown as Terminal;
       setTerm(t);
     } catch (e) {
       setTerm(null);
@@ -198,9 +198,22 @@ export function SessionPage() {
               This session's terminal
               <span className="flex-1" />
               {term !== "opening" && (
-                <a href={term.url} target="_blank" rel="noopener" className="hover:text-foreground inline-flex items-center gap-1" title="Open in a window of its own">
+                <button
+                  type="button"
+                  className="hover:text-foreground inline-flex items-center gap-1"
+                  title="Open in a window of its own — the panel closes, since a share admits one browser"
+                  onClick={() =>
+                    popOut({
+                      key: id,
+                      title: (r.title || shortPath(r.project) || id) + " — terminal",
+                      release: () => setTerm(null),
+                      mint: () => act("terminal", id, { origin: location.origin }) as unknown as Promise<Terminal>,
+                      onClosed: () => {},
+                    })
+                  }
+                >
                   <ExternalLink className="size-3" /> pop out
-                </a>
+                </button>
               )}
               <Button variant="ghost" size="icon-xs" onClick={() => setTerm(null)} aria-label="Close the terminal">
                 <X />
@@ -210,7 +223,7 @@ export function SessionPage() {
               {term === "opening" ? (
                 <div className="m-auto text-sm text-neutral-400">Opening this agent's terminal…</div>
               ) : (
-                <TerminalFrame url={term.url} title="Terminal" />
+                <TerminalFrame url={term.url} name={term.name} title="Terminal" />
               )}
             </div>
             {term !== "opening" && (
