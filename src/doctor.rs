@@ -308,6 +308,26 @@ fn environment() -> Section {
     }
 }
 
+/// Where one harness keeps the sessions cctop reads for it.
+///
+/// A `match` rather than a table beside the report because the thing that
+/// goes stale is exactly a hand-written pair: Devin was absent from this list
+/// for a release, which meant a machine that only ever ran Devin was told it
+/// had no session source at all. The directory per provider is not something
+/// both halves of a pair can disagree about when only one of them is written.
+pub(crate) fn sessions_root(provider: Provider) -> std::path::PathBuf {
+    match provider {
+        Provider::Claude => config::CLAUDE_PROJECTS_ROOT.clone(),
+        Provider::Codex => config::CODEX_SESSIONS_ROOT.clone(),
+        Provider::Cursor => config::CURSOR_PROJECTS_ROOT.clone(),
+        Provider::Devin => config::DEVIN_CLI_DIR.clone(),
+        Provider::Gemini => config::GEMINI_CHATS_ROOT.clone(),
+        Provider::OpenCode => config::OPENCODE_DATA_DIR.clone(),
+        Provider::Pi => config::PI_SESSIONS_ROOT.clone(),
+        Provider::Windsurf => config::WINDSURF_USER_DIR.clone(),
+    }
+}
+
 /// Where each harness's sessions live, and how many were found.
 ///
 /// A directory that is missing is reported as such rather than as zero
@@ -315,57 +335,25 @@ fn environment() -> Section {
 /// look different or every report has five red lines in it.
 fn sources() -> Section {
     let sessions = crate::session::list_all();
-    let roots: &[(Provider, &str, std::path::PathBuf)] = &[
-        (
-            Provider::Claude,
-            "Claude Code",
-            config::CLAUDE_PROJECTS_ROOT.clone(),
-        ),
-        (
-            Provider::Codex,
-            "Codex",
-            config::CODEX_SESSIONS_ROOT.clone(),
-        ),
-        (
-            Provider::Cursor,
-            "Cursor",
-            config::CURSOR_PROJECTS_ROOT.clone(),
-        ),
-        (
-            Provider::Gemini,
-            "Gemini CLI",
-            config::GEMINI_CHATS_ROOT.clone(),
-        ),
-        (
-            Provider::OpenCode,
-            "OpenCode",
-            config::OPENCODE_DATA_DIR.clone(),
-        ),
-        (Provider::Pi, "Pi", config::PI_SESSIONS_ROOT.clone()),
-        (
-            Provider::Windsurf,
-            "Windsurf",
-            config::WINDSURF_USER_DIR.clone(),
-        ),
-    ];
-
-    let mut checks: Vec<Check> = roots
-        .iter()
-        .map(|(provider, name, root)| {
-            let found = sessions.iter().filter(|s| s.provider == *provider).count();
+    let mut checks: Vec<Check> = Provider::ALL
+        .into_iter()
+        .map(|provider| {
+            let name = provider.display_name();
+            let root = sessions_root(provider);
+            let found = sessions.iter().filter(|s| s.provider == provider).count();
             // Sessions can come from another user's home while this one has no
             // such directory at all, which is the ordinary case for root.
-            match (config::dir_exists(root) || found > 0, found) {
-                (false, _) => ok(*name, format!("not installed ({})", root.display())),
+            match (config::dir_exists(&root) || found > 0, found) {
+                (false, _) => ok(name, format!("not installed ({})", root.display())),
                 (true, 0) => warn(
-                    *name,
+                    name,
                     format!(
                         "directory exists but holds no sessions ({})",
                         root.display()
                     ),
                     "if that is wrong, check the environment overrides above",
                 ),
-                (true, n) => ok(*name, format!("{n} session(s)")),
+                (true, n) => ok(name, format!("{n} session(s)")),
             }
         })
         .collect();

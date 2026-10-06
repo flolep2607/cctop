@@ -1135,6 +1135,10 @@ fn parse_since(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     (n > 0).then(|| now - span)
 }
 
+/// `--help` for `optimize` and `compare`; `yield` prints `ship`'s own.
+///
+/// A template rather than a literal because the harness names come from
+/// [`Provider::ALL`]; see [`help`], which fills them in.
 pub const HELP: &str = "\
 cctop optimize — what your sessions spent and did not get back
 cctop compare  — how each model behaved on the work you gave it
@@ -1148,8 +1152,7 @@ individual tool calls are the thing they reason about and those are never
 cached. Expect them to take a few seconds on a large machine.
 
 OPTIONS:
-  --provider NAME  Only this harness: claude, codex, cursor, gemini, opencode,
-                   pi, windsurf.
+  --provider NAME  Only this harness: {PROVIDERS}
   --since SPAN     Only sessions active in the last SPAN — 24h, 7d, 2w — or
                    since a date, 2026-09-01. Models change, and so does what
                    you give them; last month's sessions blur this week's.
@@ -1164,12 +1167,49 @@ Both read and print. Neither writes anything, to your configuration or
 anywhere else.
 ";
 
+/// [`HELP`] with the harness names filled in.
+///
+/// Written out of [`Provider::ALL`] because this text is the only place a
+/// reader learns the spelling of `--provider`, and a name missing from it is a
+/// harness nobody knows they can ask about: Devin's sessions were already in
+/// every figure printed here while its name was on no list.
+pub fn help() -> String {
+    HELP.replace("{PROVIDERS}", &provider_names())
+}
+
+/// The `--provider` names, wrapped under the option they belong to.
+fn provider_names() -> String {
+    /// Where the help's own option column starts, which is what a wrapped
+    /// value hangs under.
+    const INDENT: &str = "                   ";
+    /// The help is wrapped at 76 columns; the names get what the indent leaves.
+    const WIDTH: usize = 76 - INDENT.len();
+
+    let mut out = String::new();
+    let mut line = String::new();
+    for p in Provider::ALL {
+        if !line.is_empty() && line.len() + 2 + p.as_str().len() > WIDTH {
+            out.push_str(&line);
+            out.push_str(",\n");
+            out.push_str(INDENT);
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push_str(", ");
+        }
+        line.push_str(p.as_str());
+    }
+    out.push_str(&line);
+    out.push('.');
+    out
+}
+
 /// `cctop optimize`, `cctop compare` and `cctop yield`.
 pub fn run(which: &str, argv: &[String]) -> i32 {
     if argv.iter().any(|a| a == "-h" || a == "--help") {
         match which {
             "yield" => print!("{}", ship::HELP),
-            _ => print!("{HELP}"),
+            _ => print!("{}", help()),
         }
         return 0;
     }
@@ -1254,19 +1294,15 @@ pub fn plural(n: usize, noun: &str) -> String {
 }
 
 /// A harness name as somebody would type it at `--provider`.
-fn provider_named(name: &str) -> Option<Provider> {
-    let name = name.to_ascii_lowercase();
-    [
-        Provider::Claude,
-        Provider::Codex,
-        Provider::Cursor,
-        Provider::Gemini,
-        Provider::OpenCode,
-        Provider::Pi,
-        Provider::Windsurf,
-    ]
-    .into_iter()
-    .find(|p| p.as_str() == name)
+///
+/// Its own function rather than [`Provider::parse`] inline because this is the
+/// one call site that folds case: a reader who types `Devin` has named the
+/// harness, and failing them over a capital letter helps nobody. The parse
+/// itself is shared — a hand-written list of the seven names it once spelled
+/// here had already dropped Devin, whose sessions were in every figure printed
+/// below all along.
+pub(crate) fn provider_named(name: &str) -> Option<Provider> {
+    Provider::parse(&name.to_ascii_lowercase())
 }
 
 #[cfg(test)]

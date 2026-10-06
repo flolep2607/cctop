@@ -68,32 +68,6 @@ const UNPRICED_MIN_TOKENS: u64 = 10_000;
 /// what is wrong, and the rest only make the section scroll.
 const UNPRICED_SHOWN: usize = 8;
 
-/// The order providers are reported in: the order the sources section above
-/// lists them, so the two read against each other.
-const ORDER: &[Provider] = &[
-    Provider::Claude,
-    Provider::Codex,
-    Provider::Cursor,
-    Provider::Devin,
-    Provider::Gemini,
-    Provider::OpenCode,
-    Provider::Pi,
-    Provider::Windsurf,
-];
-
-fn name(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "Claude Code",
-        Provider::Codex => "Codex",
-        Provider::Cursor => "Cursor",
-        Provider::Devin => "Devin",
-        Provider::Gemini => "Gemini CLI",
-        Provider::OpenCode => "OpenCode",
-        Provider::Pi => "Pi",
-        Provider::Windsurf => "Windsurf",
-    }
-}
-
 const REPORT: &str = "https://github.com/flolep2607/cctop/issues";
 
 /// One provider's sessions, added up.
@@ -143,7 +117,7 @@ pub(super) fn outcomes_unseen(provider: Provider, t: &Tally) -> Option<Check> {
     (provider.records_tool_outcomes() && t.calls >= OUTCOMES_MIN_CALLS && t.errors == 0).then(
         || {
             warn(
-                name(provider),
+                provider.display_name(),
                 format!(
                     "{} tool calls and not one failed — the parser is probably not \
                      reading failures, so its error rates read 0%",
@@ -167,7 +141,7 @@ pub(super) fn outcomes_inverted(provider: Provider, t: &Tally) -> Option<Check> 
         && share > OUTCOMES_MAX_SHARE)
         .then(|| {
             warn(
-                name(provider),
+                provider.display_name(),
                 format!(
                     "{} of {} tool calls counted as failed ({:.0}%) — more likely the \
                      parser is reading successes as failures",
@@ -185,7 +159,7 @@ pub(super) fn calls_unseen(provider: Provider, t: &Tally) -> Option<Check> {
     let active = t.active(provider);
     (active >= MIN_ACTIVE_SESSIONS && t.calls == 0).then(|| {
         warn(
-            name(provider),
+            provider.display_name(),
             format!(
                 "{active} active session(s) and not one tool call recorded — the parser \
                  is probably not reading its calls"
@@ -204,7 +178,7 @@ pub(super) fn tokens_unseen(provider: Provider, t: &Tally) -> Option<Check> {
     (provider.records_token_usage() && t.with_calls >= MIN_ACTIVE_SESSIONS && t.tokens == 0).then(
         || {
             warn(
-                name(provider),
+                provider.display_name(),
                 format!(
                     "{} session(s) made tool calls and none recorded a token — the \
                      parser is probably not reading usage",
@@ -238,7 +212,7 @@ fn provider_ok(provider: Provider, t: &Tally) -> Check {
         false => String::new(),
     };
     ok(
-        name(provider),
+        provider.display_name(),
         format!("{} session(s), {calls}{tokens}", t.sessions),
     )
 }
@@ -309,7 +283,7 @@ pub(super) fn zero_checks(
         let what = format!(
             "{} ({}): {} session(s), {} tokens at $0.00",
             display_model(&z.model),
-            name(z.provider),
+            z.provider.display_name(),
             z.sessions,
             compact_tokens(z.tokens)
         );
@@ -393,7 +367,10 @@ pub(super) fn section(
 ) -> Section {
     let tallies = tally(sessions);
     let mut checks = Vec::new();
-    for &provider in ORDER {
+    // `Provider::ALL` rather than an order of its own: the sources section
+    // above walks the same list in the same order, so the two read against each
+    // other, and there is now one list rather than two that have to agree.
+    for provider in Provider::ALL {
         let Some(t) = tallies.get(&provider) else {
             continue;
         };

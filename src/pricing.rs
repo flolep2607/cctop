@@ -549,6 +549,78 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Every provider, in declaration order.
+    ///
+    /// The one list. A hand-written copy of this enum is a list that goes
+    /// stale, and one had: `--provider devin` was rejected while Devin's
+    /// sessions were already priced into every figure `optimize` printed,
+    /// because the names accepted there were a copy nobody had to keep in step.
+    /// Everything that wants all of them iterates this instead.
+    pub const ALL: [Provider; 8] = [
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Cursor,
+        Provider::Devin,
+        Provider::Gemini,
+        Provider::OpenCode,
+        Provider::Pi,
+        Provider::Windsurf,
+    ];
+
+    /// The harness's own name, as its vendor writes it.
+    ///
+    /// Not [`Self::as_str`], which is the key cctop files things under, and not
+    /// the name of the process either — `Claude Code` and `Claude` are one
+    /// harness, and only one of them is what it calls itself. A reader
+    /// choosing `--provider claude` should see the same name doctor calls it.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
+            Provider::Devin => "Devin",
+            Provider::Gemini => "Gemini CLI",
+            Provider::OpenCode => "OpenCode",
+            Provider::Pi => "Pi",
+            Provider::Windsurf => "Windsurf",
+        }
+    }
+
+    /// The `trace` label for parsing this provider's transcripts.
+    ///
+    /// Split per provider because the figure across every harness cannot say
+    /// whether a slow walk is one transcript format or all of them. Spelled
+    /// here rather than at the loop that opens the span, which is the only way
+    /// the extraction and tail labels can be sure to name a harness the same
+    /// way — they were two copies of this table and had begun to differ.
+    pub fn extract_trace_name(self) -> &'static str {
+        match self {
+            Provider::Claude => "extract.claude",
+            Provider::Codex => "extract.codex",
+            Provider::Cursor => "extract.cursor",
+            Provider::Devin => "extract.devin",
+            Provider::Gemini => "extract.gemini",
+            Provider::OpenCode => "extract.opencode",
+            Provider::Pi => "extract.pi",
+            Provider::Windsurf => "extract.windsurf",
+        }
+    }
+
+    /// The `trace` label for reading this provider's transcript tails — the
+    /// [`Self::extract_trace_name`] of the other loop that dominates a walk.
+    pub fn tails_trace_name(self) -> &'static str {
+        match self {
+            Provider::Claude => "tails.claude",
+            Provider::Codex => "tails.codex",
+            Provider::Cursor => "tails.cursor",
+            Provider::Devin => "tails.devin",
+            Provider::Gemini => "tails.gemini",
+            Provider::OpenCode => "tails.opencode",
+            Provider::Pi => "tails.pi",
+            Provider::Windsurf => "tails.windsurf",
+        }
+    }
+
     /// Whether this provider's transcript says, per call, that it failed.
     ///
     /// Kept as a fact about the provider rather than a flag on the extraction:
@@ -608,6 +680,105 @@ impl Provider {
             Provider::Pi => "pi",
             Provider::Windsurf => "windsurf",
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_lists {
+    use super::*;
+
+    /// The test class that was missing: a hand-written list of providers with
+    /// nothing to cross-check it against the enum.
+    ///
+    /// Every list below was correct the day it was written and each one had to
+    /// be remembered separately, so they drifted apart — `--provider devin`
+    /// was rejected while Devin's sessions were already priced into every
+    /// figure, and doctor's sources section left Devin out entirely. A `match`
+    /// with no wildcard cannot drift, because the compiler names the missing
+    /// arm; a `Vec` of eight names can, and did. So this walks the enum and
+    /// asks each of those lists what it does with each member.
+    #[test]
+    fn every_hand_written_list_answers_for_every_provider() {
+        for p in Provider::ALL {
+            let where_ = p.as_str();
+
+            // `--provider` on `optimize`, `compare` and `yield`: the bug this
+            // whole change exists for.
+            assert_eq!(
+                crate::insight::provider_named(where_),
+                Some(p),
+                "`--provider {where_}` is not accepted"
+            );
+            // …and the help that is supposed to say so.
+            assert!(
+                crate::insight::help().contains(where_),
+                "`{where_}` is missing from optimize's --help"
+            );
+
+            // `--list` groups, which iterate the same list.
+            assert!(
+                crate::cli::list_order().any(|q| q == p),
+                "`--list` has no group for {where_}"
+            );
+
+            // Doctor's parsers section, which iterates the enum now, and the
+            // sources section above it, which names a directory per provider.
+            assert!(!p.display_name().is_empty(), "{where_} has no display name");
+            assert!(
+                !crate::doctor::sessions_root(p).as_os_str().is_empty(),
+                "{where_} has no session directory"
+            );
+
+            // The two per-provider trace spans, whose spelling used to be
+            // written out in `cache` and `loader` separately.
+            assert_eq!(p.extract_trace_name(), format!("extract.{where_}"));
+            assert_eq!(p.tails_trace_name(), format!("tails.{where_}"));
+
+            // `as_str` is what everything is filed under, and `parse` is what
+            // reads it back off the wire: the two are the same list written
+            // twice, so they are checked against each other.
+            assert_eq!(
+                Provider::parse(where_),
+                Some(p),
+                "`{where_}` does not parse"
+            );
+        }
+    }
+
+    /// Each variant's position among the enum's own variants.
+    ///
+    /// A `match` with no wildcard, deliberately: `ALL` is a const array, so a
+    /// variant added to the enum without being added to `ALL` would compile and
+    /// stay missing from every list that derives from it. Spelling the arms
+    /// here makes that a build error, and the rank is what lets the test below
+    /// notice without writing the count of eight down a second time.
+    fn variant_rank(p: Provider) -> usize {
+        match p {
+            Provider::Claude => 0,
+            Provider::Codex => 1,
+            Provider::Cursor => 2,
+            Provider::Devin => 3,
+            Provider::Gemini => 4,
+            Provider::OpenCode => 5,
+            Provider::Pi => 6,
+            Provider::Windsurf => 7,
+        }
+    }
+
+    /// `ALL` carries every provider, once, in declaration order.
+    ///
+    /// Nothing else here can notice that it does not: every consumer iterates
+    /// whatever `ALL` happens to say, so an omission is invisible rather than
+    /// wrong. The ranks are what a variant added to the enum would have to
+    /// earn a place in.
+    #[test]
+    fn all_carries_every_provider_exactly_once() {
+        let ranks: Vec<usize> = Provider::ALL.iter().copied().map(variant_rank).collect();
+        assert_eq!(
+            ranks,
+            (0..ranks.len()).collect::<Vec<usize>>(),
+            "Provider::ALL is not the enum's variants, each once, in order"
+        );
     }
 }
 
