@@ -56,7 +56,7 @@ impl Sound {
     /// Never under test: a test that starts the party would otherwise play
     /// the radio through the speakers of whoever runs `cargo test`.
     pub fn start() -> Option<Self> {
-        if cfg!(test) {
+        if !permitted() {
             return None;
         }
         let sound = Self {
@@ -72,6 +72,13 @@ impl Sound {
             .ok()?;
         Some(sound)
     }
+}
+
+/// Whether the radio may be tuned in at all, which is a question rather than
+/// an `if` so a test can ask it: under `cargo test` the answer is no, and a
+/// party started there is silent.
+fn permitted() -> bool {
+    !cfg!(test)
 }
 
 impl Drop for Sound {
@@ -222,8 +229,15 @@ mod tests {
     use super::*;
 
     /// A test can start a party without the radio coming on.
+    ///
+    /// The first assertion is the one that could fail: a build of the suite that
+    /// somehow permitted the radio would play it through the speakers of whoever
+    /// ran `cargo test`. The second says the refusal is what produced the `None`,
+    /// rather than a spawn that failed for some other reason — which is the only
+    /// thing that stops this being true of the assertion alone.
     #[test]
     fn no_music_under_test() {
+        assert!(!permitted(), "the suite is permitted to play the radio");
         assert!(Sound::start().is_none());
     }
 }

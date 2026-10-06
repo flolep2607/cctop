@@ -224,17 +224,55 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    /// Asserted by glyph rather than by width, because a sparkline that ignored its
+    /// input and drew one repeated character would be exactly the width asked
+    /// for: the count says only that `width` characters came out.
     #[test]
     fn sparkline_pads_left_when_underfilled() {
         let l = sparkline(&[1.0, 2.0], 6, 0.0, Gradient::Cpu, None);
-        assert_eq!(text(&l).chars().count(), 6);
+        let baseline = braille(LEFT_COL_BITS[0]).to_string();
+        let height = |filled: usize| {
+            braille(LEFT_COL_BITS[..filled].iter().fold(0u16, |a, b| a | b)).to_string()
+        };
+        assert_eq!(
+            text(&l),
+            // Four columns of "nothing yet", then the two samples — and the
+            // taller of the two last, because 2.0 is the larger of them.
+            format!("{baseline}{baseline}{baseline}{baseline}{}{}", height(3), height(4))
+        );
     }
 
+    /// Clipping keeps the *newest* samples, which is the whole point of a
+    /// sparkline: the current hour is at the right, so keeping the oldest would
+    /// draw a chart about yesterday.
     #[test]
     fn sparkline_clips_to_newest_samples() {
         let values: Vec<f64> = (1..=20).map(|v| v as f64).collect();
-        let l = sparkline(&values, 5, 0.0, Gradient::Cpu, None);
-        assert_eq!(text(&l).chars().count(), 5);
+        let clipped = sparkline(&values, 5, 0.0, Gradient::Cpu, None);
+        let last_five: Vec<f64> = values[15..].to_vec();
+        assert_eq!(text(&clipped), text(&sparkline(&last_five, 5, 0.0, Gradient::Cpu, None)));
+        // …and not the oldest five, which is what a chart about the wrong window
+        // would look like.
+        let first_five: Vec<f64> = values[..5].to_vec();
+        assert_ne!(text(&clipped), text(&sparkline(&first_five, 5, 0.0, Gradient::Cpu, None)));
+    }
+
+    /// A rising series and a falling one are the same numbers the other way
+    /// round, so anything that drew one glyph for both — or for either — would
+    /// pass a test that only counted characters.
+    #[test]
+    fn a_rising_series_is_not_a_falling_one() {
+        let rising = sparkline(&[1.0, 2.0, 3.0, 4.0], 4, 10.0, Gradient::Cpu, None);
+        let falling = sparkline(&[4.0, 3.0, 2.0, 1.0], 4, 10.0, Gradient::Cpu, None);
+        assert_ne!(text(&rising), text(&falling));
+        // Newest at the right: the tall end is the last column of the rising
+        // one and the first column of the falling one.
+        let glyphs: Vec<String> = rising
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert_ne!(glyphs[0], glyphs[3]);
     }
 
     #[test]
