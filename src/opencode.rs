@@ -133,7 +133,7 @@ fn tabs_off() -> String {
 fn tabs_off_from(env: &dyn Fn(&str) -> Option<String>) -> String {
     let mut root = env(CLI_CONFIG_ENV)
         .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     if let Some(object) = root.as_object_mut() {

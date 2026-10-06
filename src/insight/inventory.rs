@@ -540,7 +540,7 @@ mod tests {
             r#"{"mcpServers": {"my.server": {"command": "x"}}}"#,
         );
         m.write(
-            &format!("work/app/.claude/settings.json"),
+            "work/app/.claude/settings.json",
             r#"{"disabledMcpjsonServers": ["my.server"]}"#,
         );
         let inv = Inventory::load(&m.roots(), [project.as_str()]);
