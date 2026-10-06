@@ -2551,9 +2551,28 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         assert_eq!(tab.attention(false, &unreported), None);
 
         // Past the threshold, only the one that stopped drawing is idle.
-        let deadline = Instant::now() + QUIET_IS_IDLE + Duration::from_secs(2);
-        while Instant::now() < deadline {
+        //
+        // Waiting for the precondition rather than for a span of time: the
+        // assertion is about the quiet pane going idle while the busy one has
+        // not, and those are two observable facts. A fixed wait instead hopes
+        // the loop below painted often enough over four seconds, which under
+        // load it sometimes does not, and then the busy pane reads as idle too
+        // and the assertion fails for a reason that has nothing to do with what
+        // it is testing.
+        let deadline = Instant::now() + QUIET_IS_IDLE * 4;
+        loop {
             tab.pump();
+            let (busy_pane, quiet_pane) = (&tab.panes[0], &tab.panes[1]);
+            let quiet_gone = quiet_pane.drew_at.elapsed() >= QUIET_IS_IDLE;
+            let busy_live = busy_pane.drew_at.elapsed() < QUIET_IS_IDLE;
+            if quiet_gone && busy_live {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the quiet pane never went quiet ({quiet_gone}) while the busy one \
+                 stayed live ({busy_live})"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(tab.attention(false, &unreported), Some(Attention::Idle));

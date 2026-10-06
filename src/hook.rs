@@ -206,7 +206,7 @@ pub fn emit(args: &[String]) -> i32 {
     });
     // Returning exits the process, which takes the thread with it wherever it
     // got to. A dropped event is a cheaper failure than a stalled agent.
-    answer(&event, settle(&rx, &advice_rx));
+    answer(&event, settle(&rx, &advice_rx, DEADLINE));
     0
 }
 
@@ -215,11 +215,18 @@ pub fn emit(args: &[String]) -> i32 {
 ///
 /// Nothing it had not: an answer still being worked out at the deadline is no
 /// answer, and one made before a delivery that wedged is still good.
+///
+/// The deadline is a parameter rather than [`DEADLINE`] itself so the test can
+/// make the same choice against a shorter wait. Asserting on real time with the
+/// production deadline leaves only two hundred and fifty milliseconds of headroom
+/// for a scheduler that was busy running the rest of the suite, which is a
+/// failure about the machine rather than about this code.
 fn settle(
     done: &std::sync::mpsc::Receiver<()>,
     advice: &std::sync::mpsc::Receiver<Option<String>>,
+    deadline: std::time::Duration,
 ) -> Option<String> {
-    let _ = done.recv_timeout(DEADLINE);
+    let _ = done.recv_timeout(deadline);
     advice.try_recv().ok().flatten()
 }
 
@@ -4561,8 +4568,20 @@ mod tests {
         // Whether the connect blocked or not, the caller is released on time.
         // That release is what `emit` turns into an exit-0, and it is the only
         // property the agent cares about.
+        //
+        // Three numbers, in order of how long each is allowed to take. The
+        // hang detector above allows four deadlines, because the point of it is
+        // to catch a `deliver` that never returns at all. This allows two,
+        // because `deliver_to` spends up to one deadline by design — it hands
+        // the connect whatever is left of `DEADLINE` — so an assertion at
+        // exactly `DEADLINE` has no room for the scheduler at all and reports on
+        // the machine rather than on the code. Two is still half the hang
+        // bound, so a `deliver` that lost its bound still fails here.
         assert!(returned, "`deliver` did not come back at all");
-        assert!(waited < DEADLINE, "the agent was held up for {waited:?}");
+        assert!(
+            waited < DEADLINE * 2,
+            "the agent was held up for {waited:?}"
+        );
     }
 
     /// How long the fixture's filler may make no connection before the queue
@@ -4639,41 +4658,55 @@ mod tests {
     /// The advice is bounded by the same deadline as everything else: made
     /// in time, it survives a delivery that then wedges; still being worked
     /// out at the deadline, it is dropped and the agent hears nothing.
+    ///
+    /// The wait is a tenth of the real one and the budget below it is generous,
+    /// which is the whole point of handing `settle` its deadline. Against
+    /// [`DEADLINE`] the assertion had a quarter of a second of headroom over a
+    /// wait it also had to perform, so it reported on the scheduler rather than
+    /// on the code, and went red whenever the rest of the suite ran alongside.
     #[test]
     fn advice_is_kept_only_if_it_beat_the_deadline() {
         use std::sync::mpsc::channel;
         use std::time::Instant;
+
+        // Short enough that the three cases below cost milliseconds, long
+        // enough that a thread which has already sent is not racing the clock.
+        let wait = DEADLINE / 10;
+        let wedged = DEADLINE * 8;
+        // Twenty times the wait, so it is a statement about the order of
+        // magnitude rather than a stopwatch.
+        let budget = wait * 20;
 
         // Advice made, then a delivery that never returns.
         let (done_tx, done) = channel::<()>();
         let (advice_tx, advice) = channel();
         std::thread::spawn(move || {
             let _ = advice_tx.send(Some("{}".to_string()));
-            std::thread::sleep(DEADLINE * 8);
+            std::thread::sleep(wedged);
             drop(done_tx);
         });
         let started = Instant::now();
-        assert_eq!(settle(&done, &advice).as_deref(), Some("{}"));
-        assert!(started.elapsed() < DEADLINE * 2, "{:?}", started.elapsed());
+        assert_eq!(settle(&done, &advice, wait).as_deref(), Some("{}"));
+        assert!(started.elapsed() < budget, "{:?}", started.elapsed());
 
         // A ledger stuck past the deadline: silence, on time.
         let (done_tx, done) = channel::<()>();
         let (advice_tx, advice) = channel::<Option<String>>();
         std::thread::spawn(move || {
-            std::thread::sleep(DEADLINE * 8);
+            std::thread::sleep(wedged);
             let _ = advice_tx.send(Some("late".to_string()));
             drop(done_tx);
         });
         let started = Instant::now();
-        assert_eq!(settle(&done, &advice), None);
-        assert!(started.elapsed() < DEADLINE * 2, "{:?}", started.elapsed());
+        assert_eq!(settle(&done, &advice, wait), None);
+        assert!(started.elapsed() < budget, "{:?}", started.elapsed());
 
         // And a worker that panicked before advising is the ordinary silence.
         let (done_tx, done) = channel::<()>();
         let (advice_tx, advice) = channel::<Option<String>>();
         drop(advice_tx);
         let _ = done_tx.send(());
-        assert_eq!(settle(&done, &advice), None);
+        assert_eq!(settle(&done, &advice, wait), None);
     }
 
     /// With no cctop listening at all — the ordinary case, on every tool call of

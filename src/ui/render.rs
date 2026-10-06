@@ -3575,6 +3575,43 @@ mod tests {
         false
     }
 
+    /// Draw until `text` appears on the screen, or the budget runs out.
+    ///
+    /// The resize above is one write from the shim and the agent's own output is
+    /// another, and nothing orders them: a pane can be granted the right size
+    /// while its content is still in flight. A test that asserted on the screen
+    /// straight after the resize was therefore asserting on a race, and under
+    /// load it lost.
+    ///
+    /// Bounded like the resize wait, and for the same reason — a failure has to
+    /// be a failure rather than a hang, and the screen it gives up on is the
+    /// evidence of what did arrive.
+    fn draw_until_text(
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        app: &mut App,
+        text: &str,
+    ) -> bool {
+        for _ in 0..50 {
+            app.tabs.iter_mut().for_each(|tab| {
+                tab.pump();
+            });
+            terminal
+                .draw(|frame| {
+                    draw(frame, app);
+                })
+                .expect("draw");
+            let area = terminal.backend().buffer().area;
+            if screen(terminal, area.width, area.height)
+                .iter()
+                .any(|row| row.contains(text))
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
     /// The way in has to be on screen before anyone has used it: with no tabs
     /// open the bar still names the dashboard and offers the new-tab button, and
     /// clicking that button is what `t` does.
@@ -3986,6 +4023,9 @@ mod tests {
         let want = (cols - 2, rows - 1 - 6 - 1 - 2);
         let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
         let sized = draw_until_sized(&mut terminal, &mut app, &[want]);
+        // The pane being the right size is not the pane having been drawn into:
+        // the shim's resize and the agent's own output are separate writes.
+        let arrived = draw_until_text(&mut terminal, &mut app, "HELLO-FROM-AGENT");
         let screen = screen(&terminal, cols, rows);
 
         app.tabs.clear();
@@ -3997,6 +4037,7 @@ mod tests {
             sized,
             "the pty was never resized to the pane; wanted {want:?}"
         );
+        assert!(arrived, "the agent's output never arrived: {screen:#?}");
         assert!(
             screen[0].starts_with(" 1:Dashboard │ 2:HELLO-FROM"),
             "the tab bar is not the top row: {:?}",
@@ -4110,6 +4151,10 @@ mod tests {
         let want = (cols / 2 - 2, rows - 1 - 6 - 1 - 2);
         let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
         let sized = draw_until_sized(&mut terminal, &mut app, &[want, want]);
+        // Both agents, for the reason the single-pane test gives: a granted
+        // resize is a different write from the agent's own output.
+        let left = draw_until_text(&mut terminal, &mut app, "LEFT-AGENT");
+        let right = draw_until_text(&mut terminal, &mut app, "RIGHT-AGENT");
         let screen = screen(&terminal, cols, rows);
 
         app.tabs.clear();
@@ -4124,6 +4169,10 @@ mod tests {
         assert!(
             sized,
             "one of the split panes was never resized; wanted {want:?} each"
+        );
+        assert!(
+            left && right,
+            "an agent's output never arrived: {screen:#?}"
         );
         // Both agents on one row, each starting just inside its own border.
         let split_row = &screen[8];
