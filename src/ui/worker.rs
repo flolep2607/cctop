@@ -52,6 +52,14 @@ pub(super) enum Request {
         query: String,
         targets: Vec<crate::session::search::Target>,
     },
+    /// The git repositories under the home directory, for the launcher's
+    /// directory field.
+    ///
+    /// Sent once per session rather than per keystroke, and answered from the
+    /// gentle pool: it walks the home directory, which on a machine with a large
+    /// `~/code` is thousands of `stat` calls, and nothing else should wait
+    /// behind it.
+    Repos,
     /// Run `cctop --update` on a remote machine, which the user has confirmed.
     UpdateRemote(crate::fleet::Host),
     Shutdown,
@@ -73,6 +81,9 @@ pub(super) enum Response {
     /// which is the one place that copies — see there.
     Data(String, Arc<SessionData>),
     Quota(Box<Quota>),
+    /// Repositories on disk, newest first. Sent when the directory field opens,
+    /// and only when the field is open to be helped by them.
+    Repos(Vec<std::path::PathBuf>),
     /// Pricing landed, so cached costs are stale and a reload is due.
     PricingReady,
     /// A newer release exists. Reported once; cctop never updates itself.
@@ -571,6 +582,17 @@ pub(super) fn spawn_worker(
                     let mut hits = loader.gently(|| scan(&mut scans, &targets, &needle));
                     loader.gently(|| topical(&mut topics, &needle, &targets, &mut hits));
                     if tx.send(Response::Scanned { query, hits }).is_err() {
+                        break;
+                    }
+                }
+                Request::Repos => {
+                    // On the gentle pool rather than inline: the walk is tens of
+                    // milliseconds measured, but it is a `stat` per directory and
+                    // this loop is what every refresh and every keystroke's work
+                    // queues behind.
+                    let home = crate::config::HOME.clone();
+                    let found = loader.gently(move || super::dirs::repos_under(&home));
+                    if tx.send(Response::Repos(found)).is_err() {
                         break;
                     }
                 }

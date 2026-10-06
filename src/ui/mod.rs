@@ -456,6 +456,21 @@ pub struct App {
     /// list that reshuffles under the cursor while a walk lands means Enter
     /// takes a directory other than the one highlighted.
     pub launch_cwd_known: Vec<std::path::PathBuf>,
+    /// Repositories found on disk that no agent has run in, newest first.
+    ///
+    /// The other half of `launch_cwd_known`, and the answer to a repository
+    /// somebody has just pulled: cctop learns about projects from the agents
+    /// that ran in them, so the one you have not tried yet is the one it has no
+    /// evidence for. Filled by a scan on the worker — it walks the home
+    /// directory, which is not something to do on the thread that draws — and
+    /// empty until it lands, which is fine: the field offers what it has and
+    /// shows more a moment later.
+    ///
+    /// Kept apart from `launch_cwd_known` rather than merged into it because
+    /// the two arrive at different times and from different places. Merging on
+    /// arrival would reshuffle the list under the cursor, which is the one thing
+    /// the snapshot above exists to prevent.
+    pub launch_cwd_repos: Vec<std::path::PathBuf>,
     /// What the field is currently offering for what has been typed. Every one
     /// of them is a directory that exists, which is what lets a picked
     /// suggestion skip the check the typed path gets.
@@ -1114,6 +1129,7 @@ impl App {
             launch_cwd_input: Default::default(),
             launch_cwd_bad: false,
             launch_cwd_known: Vec::new(),
+            launch_cwd_repos: Vec::new(),
             launch_cwd_hits: Vec::new(),
             launch_cwd_pick: None,
             rmux_install: None,
