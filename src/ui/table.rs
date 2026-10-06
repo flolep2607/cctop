@@ -29,23 +29,30 @@ fn column_widths(cols: &[&'static columns::Column], total: u16) -> Vec<u16> {
 /// the list is genuinely empty, since "found nothing" is only useful next to
 /// "here is what I looked for".
 fn provider_search_paths() -> Vec<(&'static str, String)> {
+    let dir = |p: &std::path::Path| p.display().to_string();
+    Provider::ALL
+        .into_iter()
+        .map(|p| (p.display_name(), dir(provider_root(p))))
+        .collect()
+}
+
+/// Where one harness's sessions are looked for.
+///
+/// Split from the list above for the same reason doctor's is: the name and the
+/// directory are two halves of one fact, and a hand-written pair of them is a
+/// pair that can go out of step.
+fn provider_root(provider: Provider) -> &'static std::path::Path {
     use crate::config;
-    vec![
-        (
-            "Claude Code",
-            config::CLAUDE_PROJECTS_ROOT.display().to_string(),
-        ),
-        ("Codex", config::CODEX_SESSIONS_ROOT.display().to_string()),
-        ("Cursor", config::CURSOR_PROJECTS_ROOT.display().to_string()),
-        ("Devin", config::DEVIN_TRANSCRIPTS_DIR.display().to_string()),
-        (
-            "Gemini CLI",
-            config::GEMINI_CHATS_ROOT.display().to_string(),
-        ),
-        ("OpenCode", config::OPENCODE_DATA_DIR.display().to_string()),
-        ("Pi", config::PI_SESSIONS_ROOT.display().to_string()),
-        ("Windsurf", config::WINDSURF_USER_DIR.display().to_string()),
-    ]
+    match provider {
+        Provider::Claude => &config::CLAUDE_PROJECTS_ROOT,
+        Provider::Codex => &config::CODEX_SESSIONS_ROOT,
+        Provider::Cursor => &config::CURSOR_PROJECTS_ROOT,
+        Provider::Devin => &config::DEVIN_TRANSCRIPTS_DIR,
+        Provider::Gemini => &config::GEMINI_CHATS_ROOT,
+        Provider::OpenCode => &config::OPENCODE_DATA_DIR,
+        Provider::Pi => &config::PI_SESSIONS_ROOT,
+        Provider::Windsurf => &config::WINDSURF_USER_DIR,
+    }
 }
 
 #[cfg(test)]
@@ -890,16 +897,7 @@ mod tests {
     /// to `Provider` without a line here would look unsupported.
     #[test]
     fn the_empty_state_accounts_for_every_provider() {
-        for p in [
-            Provider::Claude,
-            Provider::Codex,
-            Provider::Cursor,
-            Provider::Devin,
-            Provider::Gemini,
-            Provider::OpenCode,
-            Provider::Pi,
-            Provider::Windsurf,
-        ] {
+        for p in Provider::ALL {
             assert!(
                 provider_is_listed(p),
                 "{p:?} is missing from the empty state"
