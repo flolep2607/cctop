@@ -24,6 +24,29 @@ cargo test
 cargo publish --dry-run --allow-dirty   # what `verify / package` runs
 ```
 
+### While iterating, run the tests that could have broken
+
+`cargo test --all-targets` is 1295 tests and takes 58 seconds of wall time for
+about 11 seconds of CPU — it spends most of its life waiting on `thread::sleep`,
+real ptys and real subprocesses. Two of those tests assert wall-clock margins
+(`hook::tests::advice_is_kept_only_if_it_beat_the_deadline`,
+`ui::tabs::tests::a_tab_asks_for_attention_only_when_it_has_something_you_cannot_see`),
+so running the full suite concurrently with other builds makes it fail for
+reasons that have nothing to do with your change.
+
+`tools/targeted-test.sh` maps what you changed to the tests worth running:
+
+```bash
+./tools/targeted-test.sh                    # diff against main, run what it names
+./tools/targeted-test.sh src/ui/filter.rs   # or name the files yourself
+./tools/targeted-test.sh --all              # force the full suite
+```
+
+A test's module path is its file's module path, so `src/ui/filter.rs` runs
+`ui::filter::`. Changing `src/main.rs`, `build.rs` or anything non-Rust runs
+everything, because those reach the whole crate. Use it while you work and the
+full suite once, at the end, on its own.
+
 ## cctop is Linux-only
 
 There is one platform, and it is Linux (including WSL). macOS and Windows were
