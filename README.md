@@ -1,40 +1,55 @@
 # cctop
 
-**An htop for your AI coding agents.** One screen showing every Claude Code,
-Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi and Windsurf session on your
-machine — what each is doing, what it has spent, and which one is waiting on
-you.
+> An htop for your AI coding agents. One screen for every Claude Code, Codex,
+> Cursor, Devin, Gemini CLI, OpenCode, Pi and Windsurf session on your machine:
+> what each is doing, what it has spent, and which one needs you.
 
-![The dashboard: a spend overview, the session table, and a tab bar along the top](docs/assets/dashboard.png)
+[![crates.io](https://img.shields.io/crates/v/cctop?style=flat-square)](https://crates.io/crates/cctop)
+[![CI](https://github.com/flolep2607/cctop/actions/workflows/ci.yml/badge.svg)](https://github.com/flolep2607/cctop/actions/workflows/ci.yml)
+[![Linux](https://img.shields.io/badge/platform-Linux-blue?style=flat-square)](#installation)
+[![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 ![cctop: walking the session table, opening the context breakdown, then filtering](docs/assets/demo.gif)
 
-<sub>A real recording — [play it in a terminal](docs/assets/demo.cast) with
+<sub>A real recording. [Play it in a terminal](docs/assets/demo.cast) with
 `asciinema play docs/assets/demo.cast`.</sub>
 
 It reads what the agents leave on disk, so it sees sessions it did not start,
 including ones that ended weeks ago. Nothing to configure, nothing to run
 alongside it.
 
-A Rust rewrite of an earlier Node implementation.
+## Features
 
-## Install
+- **Cost.** Tokens times published rates, per session, hour, day and model.
+- **Context.** `CTX%` tells you when a window is 68% full. The Context panel
+  shows what is in it, including an Unaccounted bar that never claims to be
+  smaller than it is.
+- **Waiting on you.** The status dot goes amber when an agent needs a reply, and
+  turns to a `✓` when a turn ended while you looked elsewhere.
+- **Stuck work.** `ERR%` is the share of a session's tool calls that failed. A
+  quarter of them means an agent is retrying something that will not work, and
+  paying for every attempt.
+- **Collisions.** Two agents in one checkout do not cause a merge conflict. They
+  cause one agent to overwrite a file the other still holds. The `!` column
+  warns you first.
+- **Terminals.** A tab is a real terminal you can type into, split and drag.
+  `Alt+b` jumps to whichever agent is waiting on you.
 
-**cctop runs on Linux, including WSL.** It reads Linux process tables and drives
-agents over ptys and unix sockets; there is no macOS or Windows build.
+## Installation
+
+> [!IMPORTANT]
+> cctop runs on Linux, including WSL. It reads Linux process tables and drives
+> agents over ptys and unix sockets. There is no macOS or Windows build.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/flolep2607/cctop/main/install.sh | sh
 ```
 
-That works out your architecture, fetches the right archive, checks it against
-the checksum the release publishes, and puts the binary on your `PATH` —
-`/usr/local/bin` when you can write there, `~/.local/bin` when you cannot, with
-a line to add to your profile if that one is not on it already. It asks for
-`sudo` only when the install genuinely needs it.
+<details>
+<summary>Other ways to install</summary>
 
-Prefer to do it by hand? A release is one statically linked archive, x86_64 or
-aarch64, holding a single file called `cctop`:
+By hand, from a statically linked release archive. Swap in the aarch64 name on
+that architecture.
 
 ```bash
 d=$(mktemp -d)
@@ -42,38 +57,30 @@ curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x8
 sudo install -m755 "$d/cctop" /usr/local/bin/cctop && rm -rf "$d"
 ```
 
-Swap in `cctop-aarch64-unknown-linux-musl.tar.gz` on aarch64. The `-C "$d"`
-carries its weight: it unpacks into a temporary directory rather than into
-whatever directory you happen to be standing in, and without it this stops at
-`Cannot open: File exists` for anyone running it inside a cctop checkout,
-because the crate directory is already named `cctop`.
-
-Or with cargo — `binstall` fetches the release binary, `install` compiles it:
-
 ```bash
-cargo binstall cctop   # or: cargo install cctop
+cargo binstall cctop   # fetches the release binary
+cargo install cctop    # or compiles it; needs Rust 1.88 or newer
 ```
 
-### From source
-
-```bash
-git clone https://github.com/flolep2607/cctop
-cd cctop
-cargo build --release
-```
-
-The binary lands at `target/release/cctop`. Building needs Rust 1.88 or newer.
+From source: `git clone`, `cd cctop`, `cargo build --release`. The binary lands
+in `target/release/cctop`.
 
 Checksums and `cctop --update` are in [Installing cctop](docs/install.md).
 
-## Start here
+</details>
+
+## Usage
+
+Run it:
 
 ```bash
 cctop
 ```
 
 That is the whole first run. It finds your sessions, prices them, and draws the
-table above. The keys worth knowing before anything else:
+table you saw above.
+
+Six keys are worth knowing before anything else:
 
 | Key | |
 |---|---|
@@ -84,95 +91,46 @@ table above. The keys worth knowing before anything else:
 | `F12` or `Alt+1` | back to the dashboard, leaving the tab running |
 | `q` | quit |
 
-A tab is a real terminal: type into it, split it with `Alt+v`/`Alt+s`, drag it
-along the bar. Right-click a tab — or press `Alt+r` — to give it a name and a
-colour, which every cctop on the machine then shows. Once there are more tabs
-than digits, `Alt+t` picks one from a list you narrow by typing, and `Alt+b`
-jumps straight to whichever agent is waiting on you — or, when none is, to one
-whose turn ended while you were looking elsewhere. `Alt+z` zooms a pane over
-the whole tab and back.
+> [!TIP]
+> Run `cctop --install-hooks` once. The agents then report their own state live
+> instead of cctop inferring it from disk. Run `cctop doctor` when something
+> looks wrong and it will tell you what.
 
-Then two commands worth running once:
+## Beyond the dashboard
 
-```bash
-cctop --install-hooks   # let the agents report their own state, live
-cctop doctor            # check the installation and say what is wrong with it
-```
+`cctop` can answer an agent (`s`), hand a session's context to a different
+harness (`O`), read the sessions on another machine over ssh (`--host`), and
+stream the table to a browser. On a phone that last one earns its place, since
+the sessions waiting on you can find *you*.
 
-## What it tells you
+It can also tell you what the money bought.
 
-**What everything costs.** Tokens times published rates, per session, per hour,
-per day, per model. The numbers are estimates and the
-[cost page](docs/costs.md) is honest about which providers report real figures
-and which are inferred.
+- [`cctop optimize`](docs/optimize-and-compare.md) finds the reads into
+  `node_modules`, the files fetched again after a compaction, and the tool calls
+  that failed and were billed anyway. Each finding carries its cost and says
+  whether that figure was measured or estimated.
+- [`cctop compare`](docs/optimize-and-compare.md) puts your models side by side
+  on your own work: how often each got a file right first time, what a changed
+  file cost, how long it took. `--rate 60` prices that time too.
+- [`cctop yield`](docs/yield.md) asks the repository what became of the spend:
+  which sessions' work reached the default branch, which sits on a side branch,
+  which was never committed.
+- [`cctop recall "why is the cache sharded"`](docs/integrations.md) returns the
+  passages of past sessions that discussed it. `cctop --install-mcp` gives the
+  same to the agents themselves.
 
-**What is in the context window.** `CTX%` says it is 68% full; the Context panel
-says what is *in* it — startup, tool output, attachments, and an
-Unaccounted bar that never pretends to be smaller than it is. Under it, a chart
-of how the window filled across the whole session, compactions included.
-See [The bottom panels](docs/panels.md).
+> [!NOTE]
+> Most costs are estimates: tokens multiplied by published per-token rates.
+> Subscription plans (Claude Max, Pro, Team) charge a flat rate or bundle a
+> fixed allowance, so these numbers will not match your invoice. Treat the `$`
+> column as a measure of resource consumption rather than billing. `--plan max`
+> shows bundled usage as `incl`. [What the cost figures mean](docs/costs.md) is
+> honest about which providers report real figures and which get inferred.
 
-**Which session needs you.** The status dot goes amber when an agent is waiting
-on input and red on an API error, and turns to a `✓` when a turn ended while
-you were looking at something else — the ones with news. `w` turns on the terminal bell and a desktop
-notification for the moment a session crosses into waiting.
+## Reference
 
-**Which sessions are stuck.** `ERR%` is the share of a session's tool calls that
-failed — a quarter of them is an agent retrying something that will not work and
-paying for each attempt. Compaction cadence catches the other kind of waste, a
-session rebuilding a window it keeps refilling.
-
-**When two agents are about to collide.** Two agents in one checkout is not a
-merge conflict — git would announce that. It is one of them writing a file the
-other still holds, and the loser finds out when the work is gone. The `!` column
-says so first. See [Reading the table](docs/the-table.md#-when-two-agents-are-in-one-repository).
-
-## What it can do
-
-Beyond watching, cctop can answer an agent (`s`), reopen any session in a tab of
-its own (`R`), hold several agents side by side, hand a session's context over to
-a *different* harness (`O`), and read the sessions on another machine over ssh.
-
-**And it can tell you what the money bought.** `cctop optimize` finds the
-reads into `node_modules`, the files fetched again after a compaction, and the
-tool calls that failed and were billed anyway — each with what it cost and
-whether that figure was measured or estimated. `cctop compare` puts your models
-side by side on your own work: how often each got a file right first time, what
-a changed file cost and how long it took — `--rate 60` prices that time too. See [what it cost you for](docs/optimize-and-compare.md).
-`cctop yield` asks the repository what became of it: which sessions' work is on
-the default branch, which was left on a side branch, and which was never
-committed. See [did the spend ship](docs/yield.md).
-
-**And it remembers for your agents.** `cctop recall "why is the cache sharded"`
-returns the passages of past sessions — Claude Code, Codex, OpenCode, any of
-them — that discussed it, ranked by their words and their meaning.
-`cctop --install-mcp` gives the same to the agents themselves, so one picks up
-a decision another made last week instead of re-deriving it. See
-[letting agents see each other](docs/integrations.md#letting-agents-see-each-other).
-
-**And it can do all the watching in a browser.** `cctop serve` streams the same
-table to a page — useful on a phone, where the sessions waiting on you can find
-*you* — and gives every session a report that says which tool calls it kept
-retrying, where its context window went, and what each model cost. Read-only,
-loopback by default. See [In a browser](docs/serve.md).
-
-- [Reading the table](docs/the-table.md) — every column, the status dot, filtering, and the full key list
-- [What it cost you for](docs/optimize-and-compare.md) — `cctop optimize` and `cctop compare`, and how honest each figure is
-- [Did the spend ship](docs/yield.md) — `cctop yield`, which sessions' work reached the default branch, and how a commit is matched to a session
-- [What the subscription bought](docs/subscription-burn.md) — `cctop burn`, and why an unused allowance is a ceiling rather than a measurement
-- [Driving agents](docs/driving-agents.md) — typing into sessions, resuming, tabs and splits, notifications, handoff
-- [In a browser](docs/serve.md) — `cctop serve`, the session report, and reaching it from a phone
-- [The bottom panels](docs/panels.md) — Tool Activity and the context breakdown
-- [What the cost figures mean](docs/costs.md) — how each provider is priced, and where the data comes from
-- [Provider by provider](docs/providers/) — what each harness records, where its sessions live, and which columns it can fill
-- [Integrations](docs/integrations.md) — agent hooks, the MCP server, and `--host`
-- [Troubleshooting](docs/troubleshooting.md) — `cctop doctor` and the usual causes
-
-Two directories of other people's documentation, mirrored so a format change can
-be read against a copy that does not move: [the harnesses](docs/harnesses/) cctop
-reads, and [rmux](docs/rmux/), the multiplexer it hands agents to.
-
-## Which agents it reads
+<details>
+<summary>Which agents it reads, and what each one records</summary>
 
 | Agent | Cost | Tokens | Context | Tools | Live process |
 |---|---|---|---|---|---|
@@ -185,19 +143,15 @@ reads, and [rmux](docs/rmux/), the multiplexer it hands agents to.
 | Cursor | ─ | ─ | ─ | ✓ | inferred |
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 
-A `─` is a gap in what that harness records, not in cctop — the details are on
-each [provider's page](docs/providers/). Devin's is the price: it records tokens,
-context, tools and a live process, and not one dollar.
+A `─` marks something the harness does not record, which is a different thing
+from something cctop cannot show. Each [provider's page](docs/providers/) has the
+detail. Devin records tokens, context, tools and a live process, and no money at
+all.
 
-## A note on cost figures
+</details>
 
-Most costs are **estimates**: tokens multiplied by published per-token rates.
-Subscription plans — Claude Max, Pro, Team — are flat-rate or bundle tokens
-differently, so these numbers will not match your invoice. Treat the `$` column
-as a measure of resource consumption, not as billing. `--plan max` displays
-bundled usage as `incl` instead.
-
-## Usage
+<details>
+<summary>Commands</summary>
 
 ```bash
 cctop                 # interactive UI
@@ -213,15 +167,19 @@ cctop claude          # start an agent on a pty cctop can watch and type into
 
 `cctop --help` has the rest.
 
-## Contributing
+</details>
 
-Bug reports and patches welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), which
-also has the architecture notes and the things about this codebase that are not
-obvious from reading it. If you are sending a pull request, name it after what
-changes for someone using cctop: the title becomes the release note that
-`cctop --update` prints, and [CLAUDE.md](CLAUDE.md) — which applies to coding
-agents as much as to people — says what reads well there and what does not.
+## Documentation
 
-## License
+- [Reading the table](docs/the-table.md) - every column, the status dot,
+  filtering, and the full key list
+- [Driving agents](docs/driving-agents.md) - typing into sessions, resuming,
+  tabs and splits, notifications
+- [In a browser](docs/serve.md) - `cctop serve`, the session report, and
+  reaching it from a phone
+- [The bottom panels](docs/panels.md) - Tool Activity and the context breakdown
 
-[MIT](LICENSE).
+Then, if you want the detail: [what it cost you for](docs/optimize-and-compare.md)
+· [did the spend ship](docs/yield.md) · [what the subscription bought](docs/subscription-burn.md)
+· [what the cost figures mean](docs/costs.md) · [provider by provider](docs/providers/)
+· [integrations](docs/integrations.md) · [troubleshooting](docs/troubleshooting.md)
