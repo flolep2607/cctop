@@ -1,4 +1,10 @@
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
+#
+# The commit that bumps this must bump `Cargo.lock` with it, in the same commit.
+# `verify / package` runs `cargo publish --dry-run`, which refuses a dirty tree,
+# and cargo rewrites the lock the moment it reads a version that disagrees with
+# it — so a bump on its own leaves one file changed and fails the release before
+# anything is tagged. 0.26.2 shipped that way once.
 [package]
 name = "cctop"
 version = "0.26.2"
