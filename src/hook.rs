@@ -104,10 +104,30 @@ pub fn save_claims(claims: &std::collections::HashMap<String, Vec<u32>>) {
     };
     // Nothing here is worth reporting: the map is an optimisation over waiting
     // for the next hook event, and a cctop that cannot write it simply waits.
-    let tmp = path.with_extension("json.tmp");
+    let tmp = temp_beside(&path, "json");
     if std::fs::write(&tmp, &json).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
+}
+
+/// A temporary name beside `path` that no other writer can already be holding.
+///
+/// `save_claims` runs on every change to the claims map — many times a minute —
+/// and every cctop on the machine reads the file it produces, so two writers
+/// arriving at one fixed temporary name is not a rare interleaving but the
+/// ordinary case. They `File::create` the same inode, and whichever renames
+/// first publishes a file the other is still writing into: what lands is
+/// neither map, `load_claims` finds JSON it cannot read, and sessions go back
+/// to pairing their processes against transcripts by recency.
+///
+/// The pid separates processes, which is the direction that matters here since
+/// each cctop is its own writer; the counter separates threads inside one,
+/// which a pid alone would call the same writer.
+fn temp_beside(path: &Path, extension: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let seq = WRITES.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("{extension}.{}.{seq}", std::process::id()))
 }
 
 /// What the agents had reported when some cctop last heard from them.
@@ -164,13 +184,23 @@ pub fn emit(args: &[String]) -> i32 {
     // operation also covers whatever else turns out to block that this comment
     // does not predict.
     let event = args.first().cloned().unwrap_or_default();
-    crate::elog::event("hook", "fire", serde_json::json!({ "name": event }));
+    let fired = event.clone();
     let args = args.to_vec();
     let (tx, rx) = std::sync::mpsc::channel();
     // Its own channel, because the advice is ready before delivery starts and
     // must not be lost to a cctop that is slow to accept.
     let (advice_tx, advice_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        // The log line is written here rather than above, and not because it is
+        // tidier. `elog` opens its file on the first event, and that is a
+        // `create_dir_all`, a `stat` and an `open` — calls a cache directory on
+        // a hung NFS or FUSE mount can sit inside for as long as the kernel
+        // keeps retrying, on the thread whose return is the agent's tool call.
+        // Nothing about the deadline covers work done before the deadline
+        // starts, so this is work that has to happen on the abandonable thread
+        // to be covered at all. It is opt-in behind `CCTOP_LOG`, which is
+        // exactly the thing somebody turns on while a hook misbehaves.
+        crate::elog::event("hook", "fire", serde_json::json!({ "name": fired }));
         let _ = std::panic::catch_unwind(|| forward(&args, &advice_tx));
         let _ = tx.send(());
     });
@@ -295,34 +325,46 @@ fn answer_line(session_id: &str, allowed: bool) -> Vec<u8> {
 
 /// Write one framed event to every cctop that will take it.
 fn deliver(line: &[u8]) {
-    use std::io::Write;
-    use std::os::unix::net::UnixStream;
-
     let Some(dir) = socket_dir() else { return };
+    deliver_to(&dir, line);
+}
+
+/// [`deliver`] against a named directory.
+///
+/// Split in two so the connect below can be asserted against a fixture built to
+/// be a wedge. The real thing fans out over `$XDG_RUNTIME_DIR`, which on the
+/// machine running the tests belongs to whoever is running them, so pointing a
+/// test at one of its own peers is the only way to have a peer at all.
+fn deliver_to(dir: &Path, line: &[u8]) {
+    use std::io::Write;
+
     let started = std::time::Instant::now();
     let mut reached = 0usize;
-    let peers = peers(&dir);
+    let peers = peers(dir);
     for path in &peers {
         // Whatever is left of the agent's patience. Stopping here rather than
         // starting another connect is what keeps the fan-out from turning one
         // wedged cctop into a slow hook for everyone.
-        if started.elapsed() >= DEADLINE {
+        let left = DEADLINE.saturating_sub(started.elapsed());
+        if left.is_zero() {
             break;
         }
-        match UnixStream::connect(path) {
+        match connect(path, left) {
             Ok(mut stream) => {
                 let _ = stream.set_write_timeout(Some(DEADLINE));
                 let _ = stream.write_all(line);
                 let _ = stream.flush();
                 reached += 1;
             }
-            // A socket file whose owner is gone refuses connections but stays on
-            // disk. Nobody else can be about to bind this name — an address is
-            // stamped with the instant it was created and never reused — so the
-            // process that finds it dead is the one that can clean it up.
-            Err(_) => {
+            Err(Unreachable::Dead) => {
                 let _ = std::fs::remove_file(path);
             }
+            // A peer that is listening and not answering keeps its address.
+            // Something behind it is alive and holding the socket it is still
+            // answering on, so unlinking would deafen a live cctop over one
+            // slow moment — the difference between dropping an event and
+            // dropping every event after it.
+            Err(Unreachable::Wedged) => {}
         }
     }
     crate::elog::event(
@@ -334,6 +376,157 @@ fn deliver(line: &[u8]) {
             "ms": started.elapsed().as_millis() as u64,
         }),
     );
+}
+
+/// What a peer that did not take the event turned out to be.
+enum Unreachable {
+    /// Nothing is listening on that address.
+    ///
+    /// The socket file outlived the process that bound it. Nobody else can be
+    /// about to bind this name — an address is stamped with the instant it was
+    /// created and never reused — so the process that finds it dead is the one
+    /// that can clean it up.
+    Dead,
+    /// A peer that is there and did not answer in the time left.
+    Wedged,
+}
+
+/// Reach one peer inside `limit`, or say what it was instead of answering.
+///
+/// [`std::os::unix::net::UnixStream::connect`] has no timeout, and on a unix
+/// socket the wait it can take is not a timeout-shaped thing: a listener that
+/// is alive with a full queue and nobody draining it holds the connection in the
+/// kernel until it does, for as long as it likes. From outside, that is
+/// indistinguishable from a cctop whose own thread has stalled — and `emit` can
+/// walk away from it, because returning exits the process and takes the thread
+/// with it. [`announce_answer`] cannot: it runs on one of `serve`'s bounded
+/// pool of connection threads, and `--tunnel` puts those behind a URL anybody
+/// can reach.
+///
+/// So the connect is issued on a non-blocking socket, which on AF_UNIX turns the
+/// wait into an answer: the kernel does not queue a connection it has no room
+/// for, it reports `EAGAIN` at once. `poll` is what keeps the one case that
+/// could still be in flight honest — waited for, never for longer than the
+/// fan-out has left.
+fn connect(
+    path: &Path,
+    limit: std::time::Duration,
+) -> Result<std::os::unix::net::UnixStream, Unreachable> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    // A name the kernel could not have taken is not a cctop that died, so it is
+    // neither waited for nor cleaned up.
+    let bytes = path.as_os_str().as_bytes();
+    let room = std::mem::size_of::<libc::sockaddr_un>()
+        - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+        - 1;
+    if bytes.is_empty() || bytes.len() > room || bytes.contains(&0) {
+        return Err(Unreachable::Wedged);
+    }
+    // SAFETY: zeroed is a valid `sockaddr_un` once the family and the path are
+    // written, and the length below covers exactly those bytes — plus the NUL
+    // `zeroed` left at the end, which is what makes it a C string.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let len =
+        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+
+    // SAFETY: a fresh descriptor, non-blocking so the connect cannot wait and
+    // close-on-exec so nothing this process spawns inherits it. It is owned
+    // from here on: every arm below either closes it or hands it to the stream
+    // that takes it over.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if raw < 0 {
+        return Err(Unreachable::Wedged);
+    }
+
+    // SAFETY: `addr` is fully initialised and `len` its true length; the
+    // descriptor is this function's and blocking is never requested.
+    let asked =
+        unsafe { libc::connect(raw, std::ptr::from_ref(&addr).cast::<libc::sockaddr>(), len) };
+    if asked != 0 {
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINPROGRESS) => {}
+            // The two refusals that mean the file outlived its owner, and only
+            // those two: everything else is one peer being strange, which is
+            // not evidence that it has gone.
+            Some(libc::ENOENT | libc::ECONNREFUSED) => {
+                // SAFETY: an open descriptor this function owns, closed once.
+                unsafe { libc::close(raw) };
+                return Err(Unreachable::Dead);
+            }
+            _ => {
+                // EAGAIN is the queue being full — the wedge itself, reported
+                // rather than entered, which is the whole reason for the
+                // non-blocking socket.
+                // SAFETY: as above.
+                unsafe { libc::close(raw) };
+                return Err(Unreachable::Wedged);
+            }
+        }
+        let mut waiting = libc::pollfd {
+            fd: raw,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let millis = i32::try_from(limit.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: one descriptor, owned, with a timeout — `poll` cannot outlive
+        // the limit it was handed.
+        if unsafe { libc::poll(&mut waiting, 1, millis) } <= 0 {
+            // SAFETY: as above.
+            unsafe { libc::close(raw) };
+            return Err(Unreachable::Wedged);
+        }
+        // Writable only means the connect finished; SO_ERROR is what says how.
+        let mut refused: libc::c_int = 0;
+        let mut errlen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `SO_ERROR` writes one `c_int`, whose length is passed in.
+        let err = unsafe {
+            libc::getsockopt(
+                raw,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                std::ptr::from_mut(&mut refused).cast(),
+                &mut errlen,
+            )
+        };
+        if err != 0 || refused != 0 {
+            // SAFETY: an open descriptor this function owns, closed once.
+            unsafe { libc::close(raw) };
+            return Err(
+                if refused == libc::ENOENT || refused == libc::ECONNREFUSED {
+                    Unreachable::Dead
+                } else {
+                    Unreachable::Wedged
+                },
+            );
+        }
+    }
+
+    // SAFETY: the descriptor is this function's; clearing one flag on a socket
+    // it has just connected cannot fail. Without it the write below would take
+    // `EAGAIN` rather than the timeout, and a dropped write would look like a
+    // delivered event.
+    unsafe {
+        let flags = libc::fcntl(raw, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(raw, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
+            libc::close(raw);
+            return Err(Unreachable::Wedged);
+        }
+    }
+    // SAFETY: a connected socket this function owns and nobody else holds, so
+    // the stream takes it over exactly once.
+    Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) })
 }
 
 /// How far up the process tree the hook looks for the agent that spawned it.
@@ -2104,7 +2297,7 @@ fn write_settings(
     // Written beside the target and renamed: a crash mid-write would otherwise
     // leave the user with no settings at all, which breaks their agent far more
     // thoroughly than a missing hook.
-    let tmp = path.with_extension("json.cctop-tmp");
+    let tmp = temp_beside(path, "json");
     std::fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(root)?))?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -2195,7 +2388,7 @@ fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> 
         std::fs::create_dir_all(parent)?;
     }
     let path = &through_link(path);
-    let tmp = path.with_extension("toml.cctop-tmp");
+    let tmp = temp_beside(path, "toml");
     std::fs::write(&tmp, doc.to_string())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -2397,7 +2590,7 @@ fn plugin_install(path: &Path, exe: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("ts.cctop-tmp");
+    let tmp = temp_beside(path, "ts");
     std::fs::write(&tmp, plugin_source(exe))?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -4219,49 +4412,137 @@ mod tests {
     /// has stopped accepting must not hold the agent up.
     ///
     /// Regression. `UnixStream::connect` takes no timeout, and connecting to a
-    /// socket whose backlog is full blocks until someone accepts — so bounding
+    /// socket whose queue is full blocks until someone accepts — so bounding
     /// only the write left the agent hanging indefinitely on every hook fire.
     /// Measured at over ten seconds before the deadline moved to cover the whole
     /// operation.
+    ///
+    /// It calls `deliver` itself rather than a copy of its body. The version
+    /// before this one re-implemented the connect in the test and asserted the
+    /// test's own thread came back, so a `deliver` that lost its bound would
+    /// have gone on passing — and the wedge was eight connections against a
+    /// backlog `UnixListener::bind` sets to `SOMAXCONN`, which is 4096 on the
+    /// machine this was found on. Connection nine had room and the premise was
+    /// quietly false.
     #[test]
     fn a_wedged_cctop_does_not_hold_the_agent_up() {
-        use std::io::Write;
-
-        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::os::unix::net::UnixStream;
 
         let dir = scratch("wedge");
-        let path = dir.join("hooks.sock");
-        // Listening, never accepting, with the backlog stuffed — a cctop whose
-        // UI thread has stalled looks exactly like this from the outside.
-        let listener = UnixListener::bind(&path).expect("bind");
-        let _wedge: Vec<UnixStream> = (0..8)
-            .filter_map(|_| UnixStream::connect(&path).ok())
-            .collect();
+        let hooks = dir.join("hooks.d");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let path = hooks.join("wedged.sock");
+        // A cctop whose own thread has stalled looks exactly like this from the
+        // outside: bound, listening, and not taking anything.
+        let listener = listen_with_backlog(&path, 1);
 
-        let started = std::time::Instant::now();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let target = path.clone();
-        std::thread::spawn(move || {
-            // The same shape `deliver` uses, against the wedged address.
-            if let Ok(mut stream) = UnixStream::connect(&target) {
-                let _ = stream.set_write_timeout(Some(DEADLINE));
-                let _ = stream.write_all(b"{}\n");
+        // Fill the queue by connecting until the connection does not come back.
+        // Deliberately a plain blocking connect rather than the hook's own: a
+        // fixture built with the function under test hangs when that function
+        // loses its bound, and a test that hangs reports nothing at all. This
+        // loop is expected to block, and `FILL_WAIT` is what says it did.
+        let (queued_tx, queued) = std::sync::mpsc::channel::<()>();
+        let filler = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                let mut held = Vec::new();
+                while let Ok(stream) = UnixStream::connect(&path) {
+                    held.push(stream);
+                    if queued_tx.send(()).is_err() {
+                        break;
+                    }
+                }
+                held
             }
-            let _ = tx.send(());
         });
-        let finished = rx.recv_timeout(DEADLINE).is_ok();
+        assert!(
+            queued.recv_timeout(FILL_WAIT).is_ok(),
+            "the fixture never reached its own listener"
+        );
+        // How many connections it takes to fill a queue is the kernel's
+        // business rather than this test's, so the wedge is a window with
+        // nothing in it rather than a count.
+        let mut quiet = 0;
+        while quiet < 2 {
+            quiet = if queued.recv_timeout(FILL_WAIT).is_ok() {
+                0
+            } else {
+                quiet + 1
+            };
+        }
+        assert!(
+            !filler.is_finished(),
+            "the fixture gave up rather than wedging"
+        );
+
+        // On a thread, because a `deliver` that has lost its bound does not come
+        // back — it waits on the queue the filler above is still inside. A
+        // test that hangs reports less than one that fails, so the wait here is
+        // bounded and the regression arrives with a line number.
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let target = hooks.clone();
+        std::thread::spawn(move || {
+            deliver_to(&target, b"{\"event\":\"cctop.answered.allow\"}\n");
+            let _ = done_tx.send(());
+        });
+        let started = std::time::Instant::now();
+        let returned = done.recv_timeout(DEADLINE * 4).is_ok();
         let waited = started.elapsed();
 
-        drop(listener);
+        // The peer is alive and holding the socket it answers on, so the
+        // address stays. Dropping it would deafen a live cctop over one slow
+        // moment, which is a far worse failure than the one being tested.
+        assert!(path.exists(), "the hook deleted a live cctop's socket");
+
+        // SAFETY: the fixture's listener, owned by this test, closed once. This
+        // is also what releases the filler thread above, which is inside the
+        // connect it was never going to come back from.
+        unsafe { libc::close(listener) };
+        drop(filler);
         let _ = std::fs::remove_dir_all(&dir);
 
         // Whether the connect blocked or not, the caller is released on time.
         // That release is what `emit` turns into an exit-0, and it is the only
         // property the agent cares about.
-        assert!(
-            waited < DEADLINE * 2,
-            "the agent was held up for {waited:?} (finished={finished})"
-        );
+        assert!(returned, "`deliver` did not come back at all");
+        assert!(waited < DEADLINE, "the agent was held up for {waited:?}");
+    }
+
+    /// How long the fixture's filler may make no connection before the queue
+    /// counts as full rather than the machine counting as slow.
+    const FILL_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// A listener bound at `path` listening on `backlog`, as a raw descriptor.
+    ///
+    /// Hand-rolled because `UnixListener::bind` listens on `SOMAXCONN` and
+    /// offers no other backlog. Two connections fill a backlog of one; the third
+    /// is the one that blocks.
+    fn listen_with_backlog(path: &Path, backlog: i32) -> std::os::fd::RawFd {
+        use std::os::unix::ffi::OsStrExt;
+
+        let bytes = path.as_os_str().as_bytes();
+        // SAFETY: zeroed is a valid `sockaddr_un` once the family and the path
+        // are written, and the length passed covers exactly those bytes.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as libc::c_char;
+        }
+        let len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+            as libc::socklen_t;
+        // SAFETY: each call is given a descriptor this test owns and a fully
+        // initialised address; the descriptor is returned for the test to close.
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            assert!(fd >= 0, "socket");
+            assert_eq!(
+                libc::bind(fd, std::ptr::from_ref(&addr).cast(), len),
+                0,
+                "bind"
+            );
+            assert_eq!(libc::listen(fd, backlog), 0, "listen");
+            fd
+        }
     }
 
     /// The only stdout `cctop hook` ever writes, and the reason it writes it.
