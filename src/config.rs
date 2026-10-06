@@ -75,9 +75,75 @@ fn cache_base() -> PathBuf {
 /// perfectly good home for sockets (it is what the fallback already was), so an
 /// unusable runtime directory is treated as an absent one.
 pub fn runtime_base() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_runtime_base() {
+        return dir;
+    }
     own_dir(dirs::runtime_dir())
         .filter(|dir| writable_dir(dir))
         .unwrap_or_else(cache_base)
+}
+
+/// A runtime directory of this test's own, installed for as long as the guard is
+/// held.
+///
+/// The runtime directory is shared with every cctop actually running on the
+/// machine, and what the tests put in it is real: a bound socket a hook event is
+/// delivered to, and a claims file rewritten from empty. Left pointed at the
+/// real one, the suite delivers its own events into a live dashboard and
+/// truncates the `agents.json` it uses to remember process trees.
+///
+/// Thread-local rather than one directory for the run, because two tests sharing
+/// one is the same collision a smaller: a fake address left for the cleanup test
+/// to find is a second live listener's socket to somebody else. The fallback for
+/// a test that claims nothing is still a temporary directory, so no test reaches
+/// the real one by forgetting.
+#[cfg(test)]
+pub struct RuntimeBase {
+    previous: Option<PathBuf>,
+    #[allow(dead_code)]
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RUNTIME_BASE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A directory no test outside this process can see, as the fallback for a test
+/// that claims none of its own. Kept rather than removed so a failing run leaves
+/// something to look at.
+#[cfg(test)]
+static TEST_RUNTIME_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::temp_dir().join(format!("cctop-runtime-{}", std::process::id()))
+});
+
+#[cfg(test)]
+fn test_runtime_base() -> Option<PathBuf> {
+    let claimed = TEST_RUNTIME_BASE.with(|dir| dir.borrow().clone());
+    if claimed.is_none() {
+        let _ = std::fs::create_dir_all(&*TEST_RUNTIME_ROOT);
+    }
+    Some(claimed.unwrap_or_else(|| TEST_RUNTIME_ROOT.clone()))
+}
+
+/// Point this thread's runtime directory at a subdirectory of its own.
+///
+/// `name` is only a label: two tests that pass the same one are in the same
+/// directory, which is what makes it a collision rather than a sharing.
+#[cfg(test)]
+pub fn claim_test_runtime_base(name: &str) -> RuntimeBase {
+    let dir = TEST_RUNTIME_ROOT.join(name);
+    std::fs::create_dir_all(&dir).expect("a runtime directory for this test");
+    let previous = TEST_RUNTIME_BASE.with(|claimed| claimed.replace(Some(dir.clone())));
+    RuntimeBase { previous, dir }
+}
+
+#[cfg(test)]
+impl Drop for RuntimeBase {
+    fn drop(&mut self) {
+        TEST_RUNTIME_BASE.with(|claimed| *claimed.borrow_mut() = self.previous.take());
+    }
 }
 
 fn writable_dir(dir: &std::path::Path) -> bool {

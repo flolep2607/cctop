@@ -257,17 +257,60 @@ fn install(raw: HashMap<String, serde_json::Value>) {
 /// rates.
 #[cfg(test)]
 #[must_use = "hold the guard until the test is done reading the table"]
-pub fn install_test_table(
-    rows: &[(&str, serde_json::Value)],
-) -> std::sync::MutexGuard<'static, ()> {
+pub fn install_test_table(rows: &[(&str, serde_json::Value)]) -> TestTable {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Taken under the lock, and put back on the way out. The table is read by
+    // every test that asks a cost, not only by the tests holding this guard, so
+    // an empty one installed for a single test is an answer from an empty table
+    // for the rest of the run — which passes only where the answer is already
+    // `None`, and so depends on the order the runner picked.
+    let previous = snapshot();
     let raw = rows
         .iter()
         .map(|(k, v)| ((*k).to_string(), v.clone()))
         .collect();
     install(raw);
-    guard
+    TestTable {
+        lock,
+        previous,
+    }
+}
+
+#[cfg(test)]
+type Snapshot = (Option<HashMap<String, LitellmEntry>>, u64);
+
+#[cfg(test)]
+fn snapshot() -> Snapshot {
+    let entries = LITELLM.read().ok().and_then(|guard| guard.clone());
+    (entries, pricing_epoch())
+}
+
+#[cfg(test)]
+fn restore(snapshot: &Snapshot) {
+    let (entries, epoch) = snapshot;
+    if let Ok(mut guard) = LITELLM.write() {
+        *guard = entries.clone();
+    }
+    PRICING_EPOCH.store(*epoch, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The installed table, put back however the test ends.
+///
+/// A plain "put it back at the end" line is skipped by every panic before it,
+/// and a failing assertion is the most likely way to reach one.
+#[cfg(test)]
+pub struct TestTable {
+    #[allow(dead_code)]
+    lock: std::sync::MutexGuard<'static, ()>,
+    previous: Snapshot,
+}
+
+#[cfg(test)]
+impl Drop for TestTable {
+    fn drop(&mut self) {
+        restore(&self.previous);
+    }
 }
 
 /// Load pricing from the disk cache if it is fresh. Returns `true` on success.
@@ -883,6 +926,34 @@ mod tests {
             serde_json::json!({"input_cost_per_token": 1.5e-4, "output_cost_per_token": 6e-4}),
         )]);
         assert!(resolve_generic("o1-pro").is_some());
+    }
+
+    /// The guard restores what was there before, not merely the lock. Every test
+    /// that asks a cost reads this table without taking the lock, so an empty
+    /// table installed for one of them is an answer from an empty table for the
+    /// rest of the run — and a test that tolerates `None` passes for the wrong
+    /// reason, in an order the runner picks.
+    #[test]
+    fn a_test_table_is_put_back_when_its_test_is_done() {
+        let before = snapshot();
+        {
+            let _guard = install_test_table(&[(
+                "cctop-restores-this",
+                serde_json::json!({"input_cost_per_token": 1e-6}),
+            )]);
+            assert!(resolve_generic("cctop-restores-this").is_some());
+        }
+        let after = snapshot();
+        assert_eq!(
+            format!("{:?}", after.0),
+            format!("{:?}", before.0),
+            "the table outlived its test"
+        );
+        assert_eq!(pricing_epoch(), before.1, "and so did its epoch");
+        assert!(
+            resolve_generic("cctop-restores-this").is_none(),
+            "the row is still being priced from"
+        );
     }
 
     #[test]

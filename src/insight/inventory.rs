@@ -415,3 +415,288 @@ impl Inventory {
         self.claude_dir.join("settings.json")
     }
 }
+
+/// A configuration root of its own, so no test reads the real one.
+///
+/// `Roots` is the only seam into this module, so a directory tree under a
+/// `TempDir` is a whole Claude Code installation as far as the resolvers are
+/// concerned.
+#[cfg(test)]
+pub(crate) struct Machine {
+    dir: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl Machine {
+    pub(crate) fn new() -> Machine {
+        Machine {
+            dir: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    pub(crate) fn path(&self, rel: &str) -> PathBuf {
+        self.dir.path().join(rel)
+    }
+
+    pub(crate) fn write(&self, rel: &str, body: &str) {
+        let p = self.path(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    pub(crate) fn roots(&self) -> Roots {
+        Roots {
+            account: self.path("home/.claude.json"),
+            claude_dir: self.path("home/.claude"),
+        }
+    }
+
+    /// A project directory inside the machine, as the loaders spell one.
+    pub(crate) fn project(&self) -> String {
+        self.path("work/app").to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Four levels, and the one that answers is not the one that defines it: a
+    /// name the user switched off is nothing to point at, whichever file the
+    /// definition is in.
+    #[test]
+    fn a_server_resolves_to_the_most_local_definition_that_defines_it() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "home/.claude.json",
+            &format!(
+                r#"{{"mcpServers": {{"everywhere": {{"command": "x"}}, "shared": {{"command": "x"}}}},
+                    "projects": {{"{project}": {{"mcpServers": {{"shared": {{"command": "x"}}}}}}}}}}"#
+            ),
+        );
+        m.write(
+            "work/app/.mcp.json",
+            r#"{"mcpServers": {"shared": {"command": "x"}, "checked-in": {"command": "x"}}}"#,
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+
+        // The project's own shadows the user's, so the file to edit is the
+        // account file's project entry rather than its top-level list.
+        assert_eq!(
+            inv.mcp(&project, "shared"),
+            Resolved::At(Source::McpLocal {
+                account: m.path("home/.claude.json"),
+                project: project.clone(),
+            })
+        );
+        // `.mcp.json` shadows both for a name it alone defines.
+        assert_eq!(
+            inv.mcp(&project, "checked-in"),
+            Resolved::At(Source::McpProject(PathBuf::from(format!("{project}/.mcp.json"))))
+        );
+        // And the user's is what is left.
+        assert_eq!(
+            inv.mcp(&project, "everywhere"),
+            Resolved::At(Source::McpUser(m.path("home/.claude.json")))
+        );
+        assert_eq!(inv.mcp(&project, "never-configured"), Resolved::Unknown);
+    }
+
+    /// `disabledMcpServers` switches off a server wherever it was defined, so
+    /// precedence must not decide it: a name that resolves to three files and is
+    /// switched off in this one resolves to nothing.
+    #[test]
+    fn a_server_switched_off_for_a_project_is_not_defined_at_all() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "home/.claude.json",
+            &format!(
+                r#"{{"mcpServers": {{"tracker": {{"command": "x"}}}},
+                    "projects": {{"{project}": {{"disabledMcpServers": ["tracker"]}}}}}}"#
+            ),
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(inv.mcp(&project, "tracker"), Resolved::Disabled);
+        // …and only for that project: it is a directory's switch, not the user's.
+        assert!(matches!(
+            inv.mcp("/somewhere-else", "tracker"),
+            Resolved::At(Source::McpUser(_))
+        ));
+    }
+
+    /// A `.mcp.json` server switched off by name is the same refusal, and the
+    /// name it is listed under is the one as written in the file rather than the
+    /// key a tool name would use.
+    #[test]
+    fn a_project_server_switched_off_by_its_written_name_is_disabled() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "work/app/.mcp.json",
+            r#"{"mcpServers": {"my.server": {"command": "x"}}}"#,
+        );
+        m.write(
+            &format!("work/app/.claude/settings.json"),
+            r#"{"disabledMcpjsonServers": ["my.server"]}"#,
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        // `my.server` keys as `my_server` in a tool name, and only the written
+        // form is switched off.
+        assert_eq!(inv.mcp(&project, "my_server"), Resolved::Disabled);
+    }
+
+    /// A plugin's servers arrive as `plugin_<plugin>_<server>`, and a plugin name
+    /// may itself end in what the suffix looks like. The longest match wins, or
+    /// `data-tools` would be read as the `data` plugin with a `tools` server.
+    #[test]
+    fn a_plugin_server_resolves_to_the_longest_plugin_name() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "home/.claude/plugins/installed_plugins.json",
+            r#"{"plugins": {"data@marketplace": {}, "data-tools@marketplace": {}}}"#,
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(
+            inv.mcp(&project, "plugin_data-tools_fetch_x"),
+            Resolved::At(Source::Plugin("data-tools".into()))
+        );
+        assert_eq!(
+            inv.mcp(&project, "plugin_data_fetch_x"),
+            Resolved::At(Source::Plugin("data".into()))
+        );
+        // A server under a plugin that is not installed is nothing to point at.
+        assert_eq!(inv.mcp(&project, "plugin_absent_fetch"), Resolved::Unknown);
+    }
+
+    /// A plugin switched off in the user's settings is off for every directory;
+    /// a project that switches it back on is on for its own, because the
+    /// project's own settings file is read last.
+    #[test]
+    fn a_projects_plugin_switch_wins_over_the_users() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "home/.claude/plugins/installed_plugins.json",
+            r#"{"plugins": {"web@marketplace": {}}}"#,
+        );
+        m.write(
+            "home/.claude/settings.json",
+            r#"{"enabledPlugins": {"web@marketplace": false}}"#,
+        );
+        m.write(
+            "work/app/.claude/settings.local.json",
+            r#"{"enabledPlugins": {"web@marketplace": true}}"#,
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(
+            inv.mcp(&project, "plugin_web_fetch"),
+            Resolved::At(Source::Plugin("web".into()))
+        );
+
+        // With no project override it is the user's switch that decides.
+        m.write("work/app/.claude/settings.local.json", "{}");
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(inv.mcp(&project, "plugin_web_fetch"), Resolved::Disabled);
+    }
+
+    /// A skill's name is prefixed by its plugin, and a prefix that is not a
+    /// plugin on this machine is not a dead end: claude.ai syncs skills down
+    /// without a plugin, and there is no file here to point at.
+    #[test]
+    fn a_synced_skill_is_reached_through_a_prefix_that_is_not_a_plugin() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "home/.claude/skills/synced/org/guidance/SKILL.md",
+            "---\nname: guidance\ndescription: how to\n---\n",
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(
+            inv.skill(&project, "claude.ai:guidance"),
+            Resolved::At(Source::SyncedSkills)
+        );
+        // A prefix that is a plugin wins over the synced fallback.
+        m.write(
+            "home/.claude/plugins/installed_plugins.json",
+            r#"{"plugins": {"org@marketplace": {}}}"#,
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(
+            inv.skill(&project, "org:guidance"),
+            Resolved::At(Source::Plugin("org".into()))
+        );
+        // A name nothing knows is not a finding about a file.
+        assert_eq!(inv.skill(&project, "nothing:absent"), Resolved::Unknown);
+    }
+
+    /// An unprefixed skill belongs to whichever directory has it, and the
+    /// project's own shadows the user's — the same precedence the servers use.
+    #[test]
+    fn a_skills_directory_is_the_project_ones_or_the_users() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "home/.claude/skills/everywhere/SKILL.md",
+            "---\nname: everywhere\n---\n",
+        );
+        m.write(
+            "work/app/.claude/skills/here/SKILL.md",
+            "---\nname: here\n---\n",
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(
+            inv.skill(&project, "here"),
+            Resolved::At(Source::Skills(PathBuf::from(format!(
+                "{project}/.claude/skills"
+            ))))
+        );
+        assert_eq!(
+            inv.skill(&project, "everywhere"),
+            Resolved::At(Source::Skills(m.path("home/.claude/skills")))
+        );
+        assert_eq!(inv.skill(&project, "neither"), Resolved::Unknown);
+    }
+
+    /// An agent's front matter names it; without one the file's stem is the name,
+    /// which is the fallback Claude Code itself uses.
+    #[test]
+    fn an_agent_is_named_by_its_front_matter_or_its_file() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write("home/.claude/agents/reviewer.md", "---\nname: review\n---\n");
+        m.write("home/.claude/agents/planner.md", "no front matter here\n");
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(
+            inv.agent(&project, "review"),
+            Resolved::At(Source::Agents(m.path("home/.claude/agents")))
+        );
+        assert_eq!(
+            inv.agent(&project, "planner"),
+            Resolved::At(Source::Agents(m.path("home/.claude/agents")))
+        );
+        assert_eq!(inv.agent(&project, "nobody"), Resolved::Unknown);
+    }
+
+    /// Nothing here keeps a value: a server entry can carry an API key in `env` or
+    /// a bearer token in `headers`, and the module says the only things that
+    /// leave it are names and paths. The answer for a user-wide server is the
+    /// account file and nothing else, which is what makes that true rather than
+    /// a promise.
+    #[test]
+    fn no_resolved_source_carries_a_secret() {
+        let m = Machine::new();
+        let project = m.project();
+        m.write(
+            "home/.claude.json",
+            r#"{"mcpServers": {"tracker": {"command": "npx", "env": {"TOKEN": "sk-live-SECRET"}}}}"#,
+        );
+        let inv = Inventory::load(&m.roots(), [project.as_str()]);
+        assert_eq!(
+            inv.mcp(&project, "tracker"),
+            Resolved::At(Source::McpUser(m.path("home/.claude.json")))
+        );
+    }
+}

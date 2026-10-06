@@ -533,7 +533,7 @@ impl App {
     fn setting_activate(&mut self, name: &str) {
         let (current, _) = self.settings.value_of(name);
         match name {
-            "notify" | "auto_update" | "warn_agents" | "read_screen" => {
+            _ if crate::settings::is_toggle(name) => {
                 let on = current != "true";
                 self.write_setting("settings", name, Some(on.into()));
                 // The one setting with a live switch of its own, so the file
@@ -543,6 +543,8 @@ impl App {
                     self.save_prefs();
                 }
             }
+            // Reached only because a theme is a choice and not a boolean, so
+            // the guard above does not take it.
             "theme" => {
                 const THEMES: [&str; 4] = ["auto", "light", "dark", "mono"];
                 let at = THEMES.iter().position(|t| current.trim_matches('"') == *t);

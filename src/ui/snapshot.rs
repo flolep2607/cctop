@@ -17,9 +17,9 @@
 //!   sparklines mark the current local hour and day, so their series are left
 //!   empty, and this month's spend is zero so its per-day average does not
 //!   divide by today's date.
-//! * **Disk.** `App::with_prefs` loads the burn log and the hook claims from
-//!   `$HOME`; both are replaced with empty ones, and so is the limits panel's
-//!   list of profiles, which is read from the same place. Working directories live under
+//! * **Disk.** The fixture itself — `App::with_prefs` — reads nothing: the burn
+//!   log, the hook claims and the accounts under `$HOME` are all filled in by
+//!   `App::new`, which no test here goes through. Working directories live under
 //!   `/nonexistent`, so the branch column finds no repository to read and
 //!   `tildify` has no home directory to shorten them against. The Info tab is
 //!   never drawn, because it names the account signed in on this machine.
@@ -204,10 +204,6 @@ fn web_data() -> SessionData {
 /// The dashboard with the fixture loaded and the first row selected.
 fn fixture() -> App {
     let mut app = tests::test_app();
-    // Loaded from `$HOME` by `with_prefs`; a developer's history must not
-    // reach the frame.
-    app.burn = crate::burn::Log::default();
-    app.reports.claims = Default::default();
     app.hidden_columns = Vec::new();
     app.launch_root = Some("/nonexistent".into());
     // `Quota::default` lists one pending entry per profile found under

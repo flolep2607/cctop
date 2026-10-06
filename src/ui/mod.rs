@@ -887,6 +887,10 @@ impl App {
             prefs.notify = notify;
         }
         let mut app = Self::with_prefs(plan, tx, prefs);
+        app.burn = crate::burn::Log::load();
+        app.reports = crate::hook::Reports::new();
+        app.quota = Quota::default();
+        app.launch_root = std::env::current_dir().ok();
         if std::env::var_os("CCTOP_COLUMNS_HIDE").is_none()
             && let Some(hide) = &settings.hide_columns
         {
@@ -901,6 +905,11 @@ impl App {
     ///
     /// Tests use this with `UiPrefs::default()`; going through `new` would load
     /// whatever is on the developer's disk and make results machine-dependent.
+    ///
+    /// Nothing here reads the disk either — the burn log and the hook claims are
+    /// both `$HOME` — so a frame drawn from this owes nothing to the machine the
+    /// test runs on. [`App::new`] loads the burn log itself, because that is the
+    /// one that has to be there.
     fn with_prefs(plan: Plan, tx: Sender<Request>, prefs: UiPrefs) -> Self {
         let age_filter = prefs
             .inactivity_filter
@@ -1039,7 +1048,13 @@ impl App {
             mem_history: HashMap::new(),
             global_cpu: History::default(),
             global_spend: History::default(),
-            quota: Quota::default(),
+            // The accounts found under `$HOME`, listed as pending until a fetch
+            // says otherwise; [`App::new`] fills it in.
+            quota: Quota {
+                fetched: false,
+                claude: Vec::new(),
+                codex: Vec::new(),
+            },
             notify: crate::notify::Notifier::new(prefs.notify),
             alerts: crate::alert::Alerts::default(),
             seen: seen::Seen::default(),
@@ -1064,11 +1079,12 @@ impl App {
             tab: 0,
             shared_at: None,
             drag_tab: None,
-            // Loaded rather than started empty, because the row most likely to
-            // want a tab blinking is the one blocked on a question — and that
-            // is exactly the row that sends nothing until it is answered. See
-            // [`Reports::new`](crate::hook::Reports::new).
-            reports: crate::hook::Reports::new(),
+            // Empty rather than seeded from the claims file, which is the
+            // other `$HOME` read here; [`App::new`] seeds it, because the row
+            // most likely to want a tab blinking is the one blocked on a
+            // question — and that is exactly the row that sends nothing until
+            // it is answered. See [`Reports::new`](crate::hook::Reports::new).
+            reports: crate::hook::Reports::default(),
             screen_read: HashMap::new(),
             peeked: HashMap::new(),
             peeked_at: None,
