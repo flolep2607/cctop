@@ -1,8 +1,9 @@
 # cctop
 
 **An htop for your AI coding agents.** One screen showing every Claude Code,
-Codex, Cursor, Gemini CLI, OpenCode, Pi and Windsurf session on your machine —
-what each is doing, what it has spent, and which one is waiting on you.
+Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi and Windsurf session on your
+machine — what each is doing, what it has spent, and which one is waiting on
+you.
 
 ![The dashboard: a spend overview, the session table, and a tab bar along the top](docs/assets/dashboard.png)
 
@@ -52,6 +53,16 @@ Or with cargo — `binstall` fetches the release binary, `install` compiles it:
 ```bash
 cargo binstall cctop   # or: cargo install cctop
 ```
+
+### From source
+
+```bash
+git clone https://github.com/flolep2607/cctop
+cd cctop
+cargo build --release
+```
+
+The binary lands at `target/release/cctop`. Building needs Rust 1.88 or newer.
 
 Checksums and `cctop --update` are in [Installing cctop](docs/install.md).
 
@@ -170,11 +181,13 @@ reads, and [rmux](docs/rmux/), the multiplexer it hands agents to.
 | OpenCode | reported | ✓ | ✓ | ✓ | ✓ |
 | Pi | reported | ✓ | ─ | ✓ | ✓ |
 | Gemini CLI | estimated | ✓ | ─ | ✓ | ─ |
+| Devin | ─ | ✓ | ✓ | ✓ | ✓ |
 | Cursor | ─ | ─ | ─ | ✓ | inferred |
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 
 A `─` is a gap in what that harness records, not in cctop — the details are on
-each [provider's page](docs/providers/).
+each [provider's page](docs/providers/). Devin's is the price: it records tokens,
+context, tools and a live process, and not one dollar.
 
 ## A note on cost figures
 

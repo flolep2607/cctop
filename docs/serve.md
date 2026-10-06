@@ -313,10 +313,16 @@ these flags — the route says so with a 502 rather than an empty page.
 |---|---|
 | `GET /` | The dashboard |
 | `GET /session/<id>` | The report page for one session |
+| `GET /analytics` | The fleet's history, filtered and charted in the page |
 | `GET /api/sessions` | The same document `cctop --json` prints |
+| `GET /api/analytics` | The whole fleet's history as one document, untrimmed — the page fetches it on its own cadence rather than every refresh |
 | `GET /api/report/<id>` | The report, as JSON |
+| `GET /api/chat/<id>` | The conversation, as JSON — what `cctop --chat` prints |
+| `GET /api/access/<id>` | What one session can reach: instructions, skills, MCP servers — what `cctop --access` prints |
 | `GET /api/events` | Server-sent events; one `sessions` event per refresh |
 | `GET /api/hosts` | Which `--host` machines could not be read, and why |
+| `GET /api/agents` | What this run can hand work to, and whether it will act at all — the page hides the controls it cannot use rather than offering buttons that answer 403 |
+| `GET /api/tabs` | The tabs cctop is running, for the page's tab strip |
 | `GET /api/quota` | Each account's rate-limit status and windows — `{"claude":[…],"codex":[…]}`, each profile with `status`, `detail`, `plan` and `windows` |
 | `GET /api/search?q=<query>` | Both search tiers over every session: `{"hits":[{key, session_id, snippet, score}]}`. Literal matches carry the matching text; topical-only hits carry `~NN% ` plus the chunk head |
 | `GET /metrics` | The same table as Prometheus text exposition. **Needs no token** — see [Scraping it](#scraping-it-with-prometheus) |
@@ -324,6 +330,19 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /insight/compare` | The text `cctop compare` prints, as `text/plain` |
 | `GET /favicon.svg` | The page's icon |
 | `GET /manifest.webmanifest` | Installable-page metadata, so a browser can add the dashboard as an app |
+
+The four that act rather than read, all `POST`, all refused on a read-only link:
+
+| | |
+|---|---|
+| `/api/launch` | Start an agent. Not under `/api/act/`, because a launch names no session |
+| `/api/tab/<name>/terminal` | The link that reaches one tab's terminal |
+| `/api/act/send/<id>` | Type a prompt into a live session's terminal |
+| `/api/act/answer/<id>` | Answer a permission prompt |
+| `/api/act/resume/<id>` | Resume a dead session |
+| `/api/act/handoff/<id>` | Hand one session's work to another agent |
+| `/api/act/image/<id>` | File a pasted image and say where. Names a session, but the file lands on this machine |
+| `/api/act/terminal/<id>` | The link that reaches one session's terminal |
 
 `/api/sessions` is byte-for-byte the document `--json` prints and `--host` parses
 — one builder, so a browser is never shown different figures than the terminal.

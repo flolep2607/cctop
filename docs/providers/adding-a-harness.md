@@ -46,7 +46,7 @@ pub fn extract_last_tool(session: &Session) -> String;              // optional
 pub fn delete(session: &Session) -> std::io::Result<()>;
 ```
 
-Two of the seven take a session id as well as a path — `opencode::extract(path,
+Two of the eight take a session id as well as a path — `opencode::extract(path,
 id)` and `windsurf::extract(path, id)` — because their file holds every session
 at once. That is the only shape variation.
 
@@ -72,7 +72,7 @@ it handles oversized lines, salvaging their `usage` instead of dropping the
 turn's cost, and it skips the truncated tail a crashed writer leaves. Summarise
 tool arguments through `extract::tool_detail`, and rename your harness's tool
 names into the common vocabulary at parse time, the way Codex's
-`normalise_exec_tool` does; one activity renderer serves all seven.
+`normalise_exec_tool` does; one activity renderer serves all eight.
 
 Where the harness reports a cost of its own, price it through `FallbackRates`
 when it reports zero against non-zero tokens. Every harness that supports
@@ -90,7 +90,7 @@ the same as free.
 | `doctor.rs` | a row in `sources()`, so a missing directory reports as "not installed" rather than as zero sessions |
 | `access.rs` | rules files, config files, and the `hook::Harness` mapping if there is one |
 | `session/search.rs` | how `/` searches its transcripts — the default line scan, or a query if the store is shared |
-| `serve/chat.rs` | a conversation reader, if you want the browser view; Claude and Codex are the only two today, and everything else says so rather than looking empty |
+| `serve/chat.rs` | a conversation reader, if you want the browser view; Windsurf is the only one without one today, and it says so rather than looking empty |
 | `cli.rs` | the `--list` grouping and the `--json` account block |
 | `hook.rs` | `Harness` and its `configs`, if the harness has hooks to install into |
 
