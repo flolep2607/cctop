@@ -1004,10 +1004,27 @@ mod tests {
         assert!(matches!(image_over_bridge(&dest, port), Attempt::Empty));
 
         // A port whose listener has gone away is refusal, not emptiness.
-        let gone = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            listener.local_addr().expect("addr").port()
-        };
-        assert!(matches!(image_over_bridge(&dest, gone), Attempt::Missing));
+        //
+        // Retried, because "the listener is gone" is not a state a port can be
+        // held in: the number goes back into the pool the moment the listener
+        // drops, and this suite runs 1300-odd tests at once, so another test can
+        // take it and answer. That shows up as an unexpected `Empty`, which says
+        // the port was taken rather than that the code is wrong, so a fresh
+        // number is drawn and the question asked again.
+        let mut refused = false;
+        for _ in 0..5 {
+            let gone = {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                listener.local_addr().expect("addr").port()
+            };
+            match image_over_bridge(&dest, gone) {
+                Attempt::Missing => {
+                    refused = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(refused, "a port with nothing listening was never refused");
     }
 }
