@@ -350,8 +350,8 @@ Name the binary instead:
 cctop --host devbox:/usr/local/bin/cctop
 ```
 
-Remote rows are **read-only**. `d`, `k`, `s`, `a`, `R` and `O` all refuse them by
-name, because every one of them reaches into *this* machine — a signal to a
+Remote rows are **read-only**. `d`, `Ctrl+K`, `s`, `a`, `R` and `O` all refuse
+them by name, because every one of them reaches into *this* machine — a signal to a
 process, a transcript on disk, a pty — and the same path on this filesystem is a
 different file. For the same reason the branch shown is the one that machine
 read, not whatever happens to sit at that path here, and the `!` conflict column

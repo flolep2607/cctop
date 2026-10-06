@@ -26,8 +26,8 @@ to be true, and tries them in this order:
 
 The first is the one worth adopting — no root, no multiplexer, and the session
 looks and behaves exactly like one started directly. cctop sets it up for you: on
-its first interactive run it aliases `claude`, `codex`, `opencode`, and `pi` to
-`cctop <agent>` — a marked block appended to `~/.zshrc` and `~/.bashrc`, and
+its first interactive run it aliases `claude`, `codex`, `devin`, `opencode` and
+`pi` to `cctop <agent>` — a marked block appended to `~/.zshrc` and `~/.bashrc`, and
 `~/.config/fish/conf.d/cctop.fish` for fish (each only where that shell is
 already configured; the fish file is unverified, having been written on a machine
 without fish).
@@ -56,8 +56,8 @@ or the root path applies.
 
 `R` reopens the selected session in a tab of its own, running the harness's own
 resume command — `claude --resume <id>`, `codex resume <id>`,
-`opencode --session <id>`, `pi --session <id>` — in the directory the session
-was working in. This is the way into a session cctop did not start: `a` can only
+`devin --resume <id>`, `opencode --session <id>`, `pi --session <id>` — in the
+directory the session was working in. This is the way into a session cctop did not start: `a` can only
 show the terminal of an agent cctop is already hosting, while resuming starts a
 fresh agent from the transcript and so works for any session in the table,
 however it was launched and however long ago it ended.
@@ -88,8 +88,8 @@ sessions](the-table.md#idle-sessions-and-the-memory-they-hold) for the details.
 ## Tabs and splits
 
 The session table is tab 1. `t` opens another: pick an agent — whichever of
-`claude`, `codex`, `opencode`, and `pi` you have installed — or your shell, and
-it starts on a pty cctop owns and draws in the window.
+`claude`, `codex`, `devin`, `opencode` and `pi` you have installed — or your
+shell, and it starts on a pty cctop owns and draws in the window.
 
 The launcher says where the agent will start, and `c` makes that line editable:
 type or paste a path, `~` included, `Enter` to take it and `Esc` to keep the one
@@ -519,7 +519,7 @@ receiving agent should gather first-hand anyway. What does not survive a restart
 is the intent, and that is what gets carried.
 
 Because it is built from the normalised session data rather than from any one
-transcript format, it works from and to all seven harnesses.
+transcript format, it works from and to all eight harnesses.
 
 ### Claude to Claude, the conversation goes whole
 

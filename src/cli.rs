@@ -77,7 +77,7 @@ Each command takes --help for the details.";
     // they are commands.
     after_long_help = COMMANDS,
     long_about = "cctop — an htop-like monitor for AI coding agent sessions\n\n\
-Tracks Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, and Windsurf\n\
+Tracks Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, and\n    Windsurf\n\
 sessions on your machine, showing real-time cost estimation, token usage, tool\n\
 invocations, and OS-level metrics.\n\n\
 COST ESTIMATION\n  \

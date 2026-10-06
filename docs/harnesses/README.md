@@ -1,9 +1,12 @@
 # The harnesses, in their own words
 
-cctop reads what seven different coding agents leave on disk. None of them
-promises to keep that shape: a transcript field gets renamed, a session moves
-out of `~/.config`, a hook grows a new event, and the first cctop hears of it is
-a column that has gone blank.
+cctop reads what eight different coding agents leave on disk, and this directory
+mirrors seven of them. Devin is the eighth and is not here — `pull.sh` has no
+entry for it — so its notes are in
+[`docs/providers/devin.md`](../providers/devin.md) instead. None of the seven
+promises to keep its shape: a transcript field gets renamed, a session moves out
+of `~/.config`, a hook grows a new event, and the first cctop hears of it is a
+column that has gone blank.
 
 This directory is each harness's own documentation, mirrored. It is here so a
 change can be read against a copy that does not move under you — and so the

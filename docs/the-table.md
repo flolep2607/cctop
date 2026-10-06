@@ -35,6 +35,7 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `!` | `conflict` | Another agent is on the same ground — see below |
 | `HOST` | `host` | Which machine, when [reading more than one](integrations.md#more-than-one-machine). Hidden otherwise |
 | `USER` | `user` | Whose session it is, when [watching every user](integrations.md#every-user-on-the-machine). Shown only while more than one user's sessions are on the table |
+| `PROFILE` | `profile` | Which Claude or Codex login the session was read from, blank for the harnesses that have no such thing. Shown only when there is more than one |
 | `BRANCH` | `branch` | Branch checked out in the working directory, `@<commit>` when detached, `─` when not a repository |
 | `PROJECT` | `project` | The session's title if it has one, otherwise its working directory |
 
@@ -72,7 +73,9 @@ nothing for a while. See [alerts](driving-agents.md#alerts-on-spend-error-loops-
 unasked), `plan` (cannot act at all), or a red `BYPASS` for one started with
 `--dangerously-skip-permissions`. Read from the transcript, and kept current by
 the session's own hooks when it has them. `─` means the harness does not record
-it — today only Claude Code does.
+it — today Claude Code and Devin do. Devin's is its `--permission-mode`, read out
+of the session row in its database, and its `smart` mode reports nothing rather
+than picking the nearest bucket.
 
 ## `ERR%` and compaction cadence — sessions that are not getting anywhere
 
@@ -89,7 +92,9 @@ marks the individual calls with `✗`.
 
 It reads `─` where the harness records no per-call outcome — Cursor, Pi and
 Windsurf — rather than `0%`, which would claim a clean run cctop cannot see.
-Claude, Codex, Gemini and OpenCode all report one.
+Claude, Codex, Devin, Gemini and OpenCode all report one. Devin's comes from its
+database rather than its transcript: a step records that a call was made, and the
+call's own row records how it ended.
 
 **Compaction cadence** is under the Context panel's chart. The sawtooth in that
 chart is already the shape of a session living on compactions, but three of them
@@ -430,7 +435,7 @@ reach them was to remember which key pressed which one.
 | `w` | Toggle notifications (see below) |
 | `W` | Share the agent's terminal to a browser (needs rmux, see [Driving agents](driving-agents.md)) |
 | `b` | Jump to the session that rang last |
-| `←`, `→` | Move between bottom panels |
+| `←`, `→`, `Tab` | Move between bottom panels, `Shift+Tab` the other way |
 | `1`–`9` | Jump to a panel directly; `9` is Preview, the selected row's tab live (see [The bottom panels](panels.md#preview)) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
 | `Shift+Home`/`End` | Jump to the top / bottom of that panel |
@@ -447,21 +452,26 @@ reach them was to remember which key pressed which one.
 | `L` | Toggle the Tool Activity live filter |
 | `T` | Tree view: group by repository and worktree (see above) |
 | `F` | Fork a git worktree and launch an agent in it (see above) |
-| `+`, `-`, `=` | Speed up / slow down / reset refresh interval |
+| `+` | Add a Claude account, by running its login or `setup-token` in a tab |
 | `Space` | Mark / unmark the selected session |
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |
 | `U` | Clear all marks |
 | `h` or `F8` | Agent integration: what reports to cctop, and install it |
 | `i` | Read the conversation, full-screen (see [Panels](panels.md#reading-the-conversation)) |
 | `y` | Copy resume command or transcript path |
+| `e`, `E` | Show its subagents / show all subagents; on a tree heading, `e` folds and unfolds instead |
 | `d` | Delete the selected session (not running) |
-| `k` | Terminate the selected live session (with confirmation) |
+| `Ctrl+K` | Terminate the selected live session (with confirmation) |
 | `s` | Type a line into the selected session's terminal (see below) |
 | `R` | Resume the selected session in a tab of its own (see below) |
 | `Ctrl+R` | Restart every agent tab on the same session, skipping any mid-turn |
 | `O` | Hand the selected session's context off to a different agent (see below) |
 | `a` | Open that session's terminal in a tab and drive it |
+| `A` | Open the agent this cctop launched itself, rather than one it found on disk |
 | `t` | New tab: run an agent or a shell (see below) |
+| `r` or `F5` | Refresh now |
+| `o`, `c` | What the spend was and not got back (`optimize`), and how each model did (`compare`) — see [what it cost you for](optimize-and-compare.md) |
+| `B` | Serve this table to a browser while cctop keeps running — see [In a browser](serve.md) |
 | `Esc` | Clear the active filter |
 | `?` or `F1` | Help: every key on one page, as `[keys]` has bound them, with the version and commit on its border; `/` in it narrows the page (see below) |
 | `q` or `F10` | Quit |
@@ -743,6 +753,11 @@ account: it gets its own column in the limits panel, and its sessions stay in
 the one `~/.claude` with everything else, sharing the history, the settings and
 the project trust rather than splitting them across a second directory. Start
 one with `CLAUDE_CODE_OAUTH_TOKEN` set and that is the subscription it spends.
+
+`+` in the TUI is the same thing without leaving the dashboard: it asks for the
+name, then offers `claude auth login` into a `~/.claude-<name>` of its own or
+`claude setup-token`, and runs whichever you pick in a tab of its own so you can
+watch it and see the link when it prints.
 
 Such an account is not offered in the launcher's profile picker, and cctop's
 `R` never resumes under it: both work by putting the account in front of the

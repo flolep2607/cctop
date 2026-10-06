@@ -2,7 +2,7 @@
 
 [← all harnesses](README.md) · parser: [`src/session/windsurf.rs`](../../src/session/windsurf.rs)
 
-The least legible of the seven, and the only page here with a standing caveat on
+The least legible of the eight, and the only page here with a standing caveat on
 its own accuracy. Windsurf is a VS Code fork, so its conversations live inside
 the editor's per-workspace settings database, and its accounting lives on
 Codeium's servers where nothing local can see it.
@@ -46,7 +46,7 @@ Both fail *closed*: an unrecognised key yields no rows, an unrecognised bubble
 yields no tool calls. So a wrong guess costs visibility and never produces a
 wrong number. If you can read the real key off a live install, add it to
 `CHAT_DATA_KEYS`. Until then, the README's `✓` in Windsurf's Tools column is
-provisional in a way the other six are not.
+provisional in a way the other seven are not.
 
 ## What cannot be extracted
 
