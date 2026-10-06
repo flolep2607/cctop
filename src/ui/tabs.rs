@@ -64,6 +64,9 @@ pub struct Pane {
     /// Its presence is what separates closing a pane from ending an agent: with
     /// it, the two are different acts and only the second needs asking about.
     pub rmux: Option<String>,
+    /// The `list-panes` asking which process the agent is, if it has not
+    /// answered. Off the draw loop — see [`Pane::find_agent`].
+    asked: Option<std::sync::mpsc::Receiver<Option<u32>>>,
     /// The session this pane was opened to resume, named as
     /// [`rmux::name_for_session`](crate::rmux::name_for_session) names it.
     ///
@@ -105,7 +108,33 @@ pub struct Pane {
     /// When this pane's screen last changed, which is how idleness is told
     /// without asking the agent or its transcript anything.
     drew_at: Instant,
+    /// What the footer rules said the last time this screen was laid out, and
+    /// where on the screen that was: the last draw, the width, and how far back
+    /// it was scrolled. See [`Pane::read_screen`].
+    ///
+    /// `read_screen` runs per pane per tick — sixty times a second inside a tab —
+    /// and laying a vt100 screen out as a `Vec<String>`, lowercasing the footer
+    /// rows and joining them is the whole cost of it. A screen in the same place
+    /// cannot have a different answer, so the reading is kept and the layout only
+    /// redone when the pane has actually moved.
+    read: Option<(ScreenPlace, ScreenReading)>,
 }
+
+/// Where on a screen a reading was taken: the last time it was drawn to, how
+/// wide it is, and how far back it is scrolled.
+///
+/// The last of those three is here because the rows a read sees are the visible
+/// window rather than the whole scrollback — so scrolling is a change to what
+/// the screen says even though the agent drew nothing.
+type ScreenPlace = (Instant, u16, usize);
+
+/// What the footer rules made of a screen: a signal if one of them matched,
+/// and the question if the screen was asking one.
+///
+/// `None` for the signal is not an answer, it is an absence — the still-screen
+/// fallback in [`Pane::read_screen`] is what turns it into one, and that is
+/// decided by a clock rather than by the pixels.
+type ScreenReading = (Option<crate::hook::Signal>, Option<String>);
 
 impl Pane {
     /// A pane labelled `label` with no process behind it, for tests elsewhere
@@ -120,10 +149,12 @@ impl Pane {
             pid: 4321,
             agent: None,
             asked_at: None,
+            asked: None,
             label: label.into(),
             is_agent: true,
             view: crate::attach::Attach::for_test(),
             drew_at: Instant::now(),
+            read: None,
         }
     }
 
@@ -139,24 +170,54 @@ impl Pane {
     /// works, so a still screen with no working hint on it is a turn that ended.
     /// Still, and not merely unmatched: see [`FOOTERS`] for the frame mid-turn
     /// that has neither.
-    pub fn read_screen(&self) -> Option<crate::peek::Screened> {
+    pub fn read_screen(&mut self) -> Option<crate::peek::Screened> {
         if !screenable(self.harness()) {
             return None;
         }
+        // Only a screen that has changed since the last reading can have a
+        // different answer, so an unchanged one is answered from what was
+        // already read. This is the per-tick path: `runloop` asks every pane
+        // every tick, sixty times a second inside a tab, and laying the screen
+        // out again for the same pixels is what made it expensive.
+        //
+        // "Changed" is the last draw, the width the rows are cut to, and how far
+        // back the screen is scrolled: the rows a read sees are the visible
+        // window, and a resize or a scrollback move changes that window without
+        // the agent having drawn anything.
         let screen = self.view.parser.screen();
         let (_, cols) = screen.size();
-        let rows: Vec<String> = screen.rows(0, cols).collect();
-        let signal = screen_state(self.harness(), &rows)
-            .or_else(|| self.idle().then_some(crate::hook::Signal::Idle))?;
-        let ask = (signal == crate::hook::Signal::NeedsInput)
-            .then(|| screen_ask(self.harness(), &rows))
-            .flatten();
+        let at = (self.drew_at, cols, screen.scrollback());
+        let read = match self.read.as_ref() {
+            Some((where_, found)) if *where_ == at => found.clone(),
+            _ => {
+                let rows: Vec<String> = screen.rows(0, cols).collect();
+                let signal = screen_state(self.harness(), &rows);
+                let ask = (signal == Some(crate::hook::Signal::NeedsInput))
+                    .then(|| screen_ask(self.harness(), &rows))
+                    .flatten();
+                let found = (signal, ask);
+                self.read = Some((at, found.clone()));
+                found
+            }
+        };
+        let (signal, ask) = read;
+        let signal = signal.or_else(|| self.idle().then_some(crate::hook::Signal::Idle))?;
         Some(crate::peek::Screened { signal, ask })
     }
 
     /// Whether the agent has gone quiet long enough to count as waiting for you.
     fn idle(&self) -> bool {
         self.drew_at.elapsed() >= QUIET_IS_IDLE
+    }
+
+    /// Drop the cached reading, so the next [`Self::read_screen`] lays the
+    /// screen out again.
+    ///
+    /// For the one thing that changes what a reading means without the screen
+    /// changing: the harness a pane with no rmux session is named for, which a
+    /// rename moves.
+    fn forget_screen(&mut self) {
+        self.read = None;
     }
 
     /// Whether the agent in this pane has rung and not yet been looked at.
@@ -198,18 +259,49 @@ impl Pane {
     /// every client that ever looks at it, so the answer cannot go stale while
     /// this pane is alive to hold it.
     fn find_agent(&mut self) {
-        let Some(name) = self.rmux.as_deref() else {
+        if self.agent.is_some() || self.rmux.is_none() {
             return;
-        };
-        if self.agent.is_some()
-            || self
-                .asked_at
-                .is_some_and(|at| at.elapsed() < FIND_AGENT_EVERY)
+        }
+        // An answer already on its way: take it, or wait for it. This is the
+        // whole of the cost — the question is a `list-panes` subprocess, and it
+        // used to be run on the thread that draws, from a path every pane takes
+        // every tick, so a slow rmux stalled the frame rather than this pane's
+        // own pid. Nothing is asked here that was not asked before.
+        if let Some(rx) = &mut self.asked {
+            match rx.try_recv() {
+                Ok(found) => {
+                    self.asked = None;
+                    let name = self.rmux.clone().expect("checked above");
+                    self.settle_agent(&name, found);
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                // The thread died without answering; fall through and ask again
+                // on the interval rather than never.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.asked = None,
+            }
+        }
+        if self
+            .asked_at
+            .is_some_and(|at| at.elapsed() < FIND_AGENT_EVERY)
         {
             return;
         }
         self.asked_at = Some(Instant::now());
-        self.agent = crate::rmux::agent_pid(name);
+        let name = self.rmux.clone().expect("checked above");
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.asked = Some(rx);
+        std::thread::spawn(move || {
+            // The receiver is gone if the pane closed while rmux was thinking;
+            // the answer is then simply not wanted any more.
+            let _ = tx.send(crate::rmux::agent_pid(&name));
+        });
+    }
+
+    /// Record what rmux said the agent is, and settle the session now that it
+    /// is known.
+    fn settle_agent(&mut self, name: &str, found: Option<u32>) {
+        self.agent = found;
         // The first moment the session is known to be there is the first moment
         // its options can be set, and settling it here means it is done once per
         // pane rather than on a timer. Every attach passes through, so a session
@@ -346,8 +438,10 @@ impl Pane {
             profile: None,
             agent: None,
             asked_at: None,
+            asked: None,
             hosted: Some(hosted),
             drew_at: Instant::now(),
+            read: None,
         })
     }
 
@@ -364,12 +458,14 @@ impl Pane {
             // is the agent's, which is what makes this the answer already.
             agent: Some(pid),
             asked_at: None,
+            asked: None,
             label,
             // `a` on a session row is the only way here, and a session row is
             // an agent.
             is_agent: true,
             view: crate::attach::attach(pid)?,
             drew_at: Instant::now(),
+            read: None,
         })
     }
 
@@ -739,6 +835,10 @@ impl Tab {
                 crate::rmux::set_label(session, &name);
             }
             pane.label = name;
+            // A pane with no rmux session takes its harness from the label, so
+            // the rename can change which footer's rules its cached reading was
+            // made under. See [`Pane::read_screen`].
+            pane.forget_screen();
         } else if let Some(shared) = self.shared.as_mut() {
             crate::rmux::set_label(&shared.name, &name);
             shared.label = name;
@@ -1739,10 +1839,12 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             pid: 4321,
             agent: None,
             asked_at: None,
+            asked: None,
             label: label.into(),
             is_agent,
             view: crate::attach::Attach::for_test(),
             drew_at: Instant::now() - Duration::from_secs(ago),
+            read: None,
         }
     }
 
@@ -1846,6 +1948,99 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         assert_eq!(
             ringing.attention(true, &|_| Some(crate::hook::Signal::Busy)),
             None,
+        );
+    }
+
+    /// The reading is kept for as long as the screen is in the same place, so
+    /// it must be redone whenever the screen moves — and an unmoved screen must
+    /// not be re-read either, since that is the whole of the per-tick cost.
+    ///
+    /// What the shortcut must never do is answer from a screen that has since
+    /// changed: an agent that finished its turn is idle now, not working then.
+    #[test]
+    fn a_reading_follows_the_screen_it_was_made_from() {
+        let busy = " \u{280f} Reading files (esc to interrupt)".as_bytes();
+        let mut pane = pane("claude", true, 0);
+        pane.view.parser.process(busy);
+        assert_eq!(
+            pane.read_screen().map(|read| read.signal),
+            Some(crate::hook::Signal::Busy),
+            "a working hint on the footer"
+        );
+
+        // The same pixels, read again: the same answer, and nothing laid out.
+        assert_eq!(
+            pane.read_screen().map(|read| read.signal),
+            Some(crate::hook::Signal::Busy)
+        );
+
+        // A pane that draws again is read afresh, so the answer moves with it.
+        pane.view
+            .parser
+            .process(" Esc to cancel \u{b7} Tab to amend".as_bytes());
+        pane.drew_at = Instant::now();
+        assert_eq!(
+            pane.read_screen().map(|read| read.signal),
+            Some(crate::hook::Signal::NeedsInput),
+            "the footer changed under a pane that drew"
+        );
+    }
+
+    /// A pane with no rmux session is named for its harness, so a rename moves
+    /// which rules its cached reading was made under — and a reading kept across
+    /// one would answer for a harness this pane is no longer.
+    #[test]
+    fn a_rename_makes_the_pane_read_again() {
+        let mut pane = pane("claude", true, 0);
+        pane.view
+            .parser
+            .process(" \u{280f} Reading files (esc to interrupt)".as_bytes());
+        assert_eq!(
+            pane.read_screen().map(|read| read.signal),
+            Some(crate::hook::Signal::Busy)
+        );
+
+        // The same screen under a harness with no footer rules to read is no
+        // longer a screen worth reading.
+        let mut tab = Tab::new(pane);
+        tab.panes[0].forget_screen();
+        tab.rename("zsh".into());
+        assert_eq!(
+            tab.panes[0].read_screen().map(|read| read.signal),
+            None,
+            "read under the harness it is now named for"
+        );
+    }
+
+    /// A resize and a scroll move the window the rows are read from without the
+    /// agent drawing anything, so a reading taken before either is a reading of
+    /// a screen that is no longer on the pane.
+    #[test]
+    fn a_moved_screen_is_read_again() {
+        let working = " \u{280f} Reading files (esc to interrupt)";
+        let asking = " Esc to cancel \u{b7} Tab to amend";
+        // Four rows, six lines: the last two are a prompt on the live screen,
+        // and the two the scrollback reveals above it are a turn in flight.
+        let mut screen =
+            vt100::Parser::new_with_callbacks(4, 80, 5_000, crate::attach::Signals::default());
+        screen.process(
+            format!("{working}\r\n{working}\r\n{working}\r\n{working}\r\n{asking}\r\n{asking}")
+                .as_bytes(),
+        );
+        let mut pane = pane("claude", true, 0);
+        pane.view.parser = screen;
+        assert_eq!(
+            pane.read_screen().map(|read| read.signal),
+            Some(crate::hook::Signal::NeedsInput),
+            "the prompt is the last line on screen"
+        );
+
+        // Scrolled back off it, the same screen is showing a turn in flight.
+        pane.view.parser.screen_mut().set_scrollback(2);
+        assert_eq!(
+            pane.read_screen().map(|read| read.signal),
+            Some(crate::hook::Signal::Busy),
+            "a screen scrolled onto other lines says what they say"
         );
     }
 

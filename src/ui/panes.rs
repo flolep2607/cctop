@@ -437,11 +437,46 @@ impl App {
     /// agreement — and with them what Alt+3 means — rather than a cctop opened
     /// later listing the same tabs backwards.
     pub(super) fn sync_shared_tabs(&mut self) {
-        if self.shared_at.is_some_and(|at| at.elapsed() < SHARE_EVERY) {
-            return;
-        }
-        self.shared_at = Some(Instant::now());
-        let running = crate::rmux::running();
+        // The listing is a `rmux list-panes` subprocess, and this runs on the
+        // thread that draws, so it is asked for on a thread of its own and
+        // folded in here when it lands — the shape the Preview panel's capture
+        // already uses. A slow or wedged rmux now delays the tab bar rather than
+        // every frame.
+        let landed = match &self.shared_listing {
+            Some(rx) => match rx.try_recv() {
+                Ok(running) => {
+                    self.shared_listing = None;
+                    Some(running)
+                }
+                // Still being asked: nothing new to reconcile yet.
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.shared_listing = None;
+                    None
+                }
+            },
+            None => None,
+        };
+        let running = match landed {
+            Some(running) => running,
+            // Nothing has landed: ask, if the interval is up and no listing is
+            // already in flight. Asking is what `shared_at` times, so a wedged
+            // rmux costs one unanswered sweep rather than a spawn per tick.
+            None => {
+                if self.shared_listing.is_some()
+                    || self.shared_at.is_some_and(|at| at.elapsed() < SHARE_EVERY)
+                {
+                    return;
+                }
+                self.shared_at = Some(Instant::now());
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.shared_listing = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::rmux::running());
+                });
+                return;
+            }
+        };
 
         let was = self.tab;
         let mut index = 0;

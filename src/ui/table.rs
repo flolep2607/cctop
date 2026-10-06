@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use std::borrow::Cow;
 
 // ---------------------------------------------------------------------------
 // Session table
@@ -166,8 +167,8 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     } else {
         &[]
     };
-    let hidden = columns::hidden_for(&app.hidden_columns, &app.sessions);
-    let cols = columns::visible_columns(inner.width, &hidden, keep);
+    let cols =
+        columns::visible_columns_among(inner.width, &app.hidden_columns, keep, &app.sessions);
     let widths = column_widths(&cols, inner.width);
 
     // Header, recording click spans as we go.
@@ -225,6 +226,11 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
 
     let now = chrono::Utc::now();
     let query = app.search.to_ascii_lowercase();
+    // One buffer for the whole frame. `Session::key` is a `format!`, and every
+    // row here does five lookups by it — so a fresh `String` per visible row
+    // per frame is an allocation per row for a key that is dropped a line
+    // later. See `Session::key_into`, and the same idiom in `select.rs`.
+    let mut key = String::new();
     let lines: Vec<Line> = app
         .visible
         .iter()
@@ -248,7 +254,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                 };
             };
             let s = &app.sessions[at];
-            let key = s.key();
+            let key = s.key_into(&mut key);
             match row {
                 crate::ui::Row::Group(_) => Line::default(),
                 crate::ui::Row::Session(_) => session_row(
@@ -257,18 +263,22 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                     &widths,
                     &RowState {
                         selected,
-                        marked: app.marked.contains(&key),
-                        deleting: app.deleting.contains(&key),
-                        rang: app.notify.rang_recently(&key),
-                        alert: app.alerts.marker(&key),
-                        done: app.seen.is_done(&key),
+                        marked: app.marked.contains(key),
+                        deleting: app.deleting.contains(key),
+                        rang: app.notify.rang_recently(key),
+                        alert: app.alerts.marker(key),
+                        done: app.seen.is_done(key),
                         query: &query,
                         // Only sessions that have subagents get a marker, so the
-                        // glyph is an offer rather than decoration on every row.
-                        expand: match (s.subagents.is_empty(), app.is_expanded(s)) {
-                            (true, _) => None,
-                            (false, true) => Some('▾'),
-                            (false, false) => Some('▸'),
+                        // glyph is an offer rather than decoration on every row
+                        // — and the emptiness test comes first, because
+                        // `is_expanded` formats the key to ask.
+                        expand: match s.subagents.is_empty() {
+                            true => None,
+                            false => match app.is_expanded(s) {
+                                true => Some('▾'),
+                                false => Some('▸'),
+                            },
                         },
                         indent,
                     },
@@ -400,22 +410,22 @@ fn session_row(
         // every one above is either leaving or a threshold with money on it,
         // and this one keeps until you look.
         let done = done && !deleting && !bell && alert.is_none() && c.id == ColumnId::Status;
-        let text = if deleting && c.id == ColumnId::Status {
-            "…".to_string()
+        let text: Cow<'_, str> = if deleting && c.id == ColumnId::Status {
+            Cow::Borrowed("…")
         } else if bell {
-            "◉".to_string()
+            Cow::Borrowed("◉")
         } else if let Some(kind) = alert {
-            kind.glyph().to_string()
+            Cow::Owned(kind.glyph().to_string())
         } else if done {
-            "✓".to_string()
+            Cow::Borrowed("✓")
         } else if c.id == ColumnId::Project {
             // Prefixed on the label rather than given a column of its own: one
             // more column costs every row two cells of width to serve the few
             // rows that have children.
-            match expand {
+            Cow::Owned(match expand {
                 Some(glyph) => format!("{indent}{glyph} {}", columns::render_cell(c.id, s, now)),
                 None => format!("{indent}{}", columns::render_cell(c.id, s, now)),
-            }
+            })
         } else {
             columns::render_cell(c.id, s, now)
         };
