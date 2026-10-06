@@ -86,7 +86,17 @@ fn main() -> anyhow::Result<()> {
     // clap would exit non-zero, which Claude Code reads as a decision to block
     // the tool call and feed stderr back to the model. Answering here is what
     // keeps the guarantee the hook module is built around — see its docs.
-    if std::env::args().nth(1).as_deref() == Some("hook") {
+    //
+    // `args_os`, because `args` panics on an argument that is not valid Unicode
+    // and this runs before any panic hook of cctop's own is installed: a panic
+    // here exits 101, which is the one answer the agent reads as "block". A hook
+    // invocation's first argument is the bare word `hook`, so comparing the OS
+    // string is all this needs, and the guard below covers the rest.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("hook")) {
+        // Installed here rather than left to `emit`, because reading argv is
+        // itself what can unwind. `emit` installs the same hook again, which is
+        // idempotent and leaves it safe to call on its own.
+        std::panic::set_hook(Box::new(|_| std::process::exit(0)));
         let argv: Vec<String> = std::env::args().collect();
         std::process::exit(hook::emit(&argv[2..]));
     }
