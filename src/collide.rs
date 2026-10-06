@@ -329,15 +329,33 @@ static ROOTS: LazyLock<Mutex<HashMap<String, (PathBuf, Instant)>>> =
 /// matters — otherwise every agent running outside a checkout would be reported
 /// as colliding with every other one.
 fn ground(dir: &str) -> PathBuf {
-    let mut cache = ROOTS.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((root, at)) = cache.get(dir)
-        && at.elapsed() < ROOT_TTL
-    {
-        return root.clone();
+    let fresh = {
+        let cache = ROOTS.lock().unwrap_or_else(PoisonError::into_inner);
+        match cache.get(dir) {
+            Some((root, at)) if at.elapsed() < ROOT_TTL => Some(root.clone()),
+            _ => None,
+        }
+    };
+    if let Some(root) = fresh {
+        return root;
     }
+    // The ancestor walk is a dozen `stat`s on the worst day, and this is asked
+    // per live session on every refresh — so it happens with the lock off, and
+    // the lock is taken afterwards only to record the answer. Under it, every
+    // other thread comparing roots against any directory waits for this one.
     let root = repo_root(Path::new(dir)).unwrap_or_else(|| PathBuf::from(dir));
-    cache.insert(dir.to_string(), (root.clone(), Instant::now()));
-    root
+    let mut cache = ROOTS.lock().unwrap_or_else(PoisonError::into_inner);
+    // Another thread may have got here first; its reading is no older than this
+    // one, and the point of the TTL is that nobody re-reads, not that this
+    // thread must be the one to.
+    let answered = cache.get(dir).filter(|(_, at)| at.elapsed() < ROOT_TTL);
+    match answered {
+        Some((cached, _)) => cached.clone(),
+        None => {
+            cache.insert(dir.to_string(), (root.clone(), Instant::now()));
+            root
+        }
+    }
 }
 
 /// The nearest ancestor holding a `.git`, which for a linked worktree is the

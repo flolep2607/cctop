@@ -528,38 +528,43 @@ pub(super) fn spawn_worker(
                     host,
                     before,
                 } => {
-                    let result = match host {
-                        // The transcript lives on the far side — ask the cctop
-                        // there for the same document the local build would
-                        // make, rather than parsing a local file that happens
-                        // to share the path.
-                        Some(host) => {
-                            let marker = before.map(|b| b.to_string());
-                            let mut args = vec!["--chat", session.session_id.as_str()];
-                            if let Some(marker) = marker.as_deref() {
-                                args.extend(["--before", marker]);
-                            }
-                            host.run(&args).and_then(|json| {
-                                serde_json::from_str(&json).map_err(|e| {
-                                    format!(
-                                        "{} returned an unreadable conversation: {e}",
-                                        host.target
-                                    )
+                    // Off the request loop, for the same reason as
+                    // `Request::Data`: building the conversation re-reads a
+                    // whole transcript, and a remote one waits on another
+                    // machine entirely. Everything queued behind it on this
+                    // thread — refreshes, searches, the next keystroke's work —
+                    // would wait with it. The view drops an answer for a
+                    // selection it has already left, so a late one is safe.
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let result = match host {
+                            // The transcript lives on the far side — ask the
+                            // cctop there for the same document the local build
+                            // would make, rather than parsing a local file that
+                            // happens to share the path.
+                            Some(host) => {
+                                let marker = before.map(|b| b.to_string());
+                                let mut args = vec!["--chat", session.session_id.as_str()];
+                                if let Some(marker) = marker.as_deref() {
+                                    args.extend(["--before", marker]);
+                                }
+                                host.run(&args).and_then(|json| {
+                                    serde_json::from_str(&json).map_err(|e| {
+                                        format!(
+                                            "{} returned an unreadable conversation: {e}",
+                                            host.target
+                                        )
+                                    })
                                 })
-                            })
-                        }
-                        None => Ok(crate::serve::chat::build(&session, before)),
-                    };
-                    if tx
-                        .send(Response::Chat {
+                            }
+                            None => Ok(crate::serve::chat::build(&session, before)),
+                        };
+                        let _ = tx.send(Response::Chat {
                             key: session.key(),
                             before,
                             result: result.map(Box::new),
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
+                        });
+                    });
                 }
                 Request::Scan { query, targets } => {
                     let needle = query.to_ascii_lowercase();

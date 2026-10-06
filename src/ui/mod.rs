@@ -688,6 +688,12 @@ pub struct App {
     /// When the tab bar was last reconciled against the rmux sessions on this
     /// machine. See [`App::sync_shared_tabs`].
     shared_at: Option<Instant>,
+    /// The `rmux list-panes` asked for by the last sweep, if it has not answered.
+    ///
+    /// The listing is a subprocess and this runs on the thread that draws, so it
+    /// is asked on a thread of its own and folded in here when it lands — the
+    /// shape [`preview::Capture`] uses for its own capture.
+    shared_listing: Option<std::sync::mpsc::Receiver<Vec<crate::rmux::Running>>>,
     /// The tab being dragged along the bar, indexed as the bar is: `1..=len`,
     /// and never `0` because the dashboard does not move.
     ///
@@ -703,17 +709,25 @@ pub struct App {
     /// rather than "nothing is happening". See [`crate::hook::Reports`].
     pub reports: crate::hook::Reports,
     /// What each tab's agent says on its own screen, by agent pid, while
-    /// `read_screen` is on — see [`App::read_screens`].
+    /// `read_screen` is on — see [`App::read_screens`]. Pane reads only: a
+    /// detached tab's answer is in `peeked`, and the two are looked up together
+    /// rather than copied into one map every tick.
     pub screen_read: HashMap<u32, crate::peek::Screened>,
     /// What detached tabs' screens last said, by agent pid.
     ///
     /// Kept apart from the pane reads because it is refreshed on a slower
-    /// clock: each one is a `capture-pane`, which is not a per-frame cost the
-    /// way reading a parser this process owns is. Merged into `screen_read`
-    /// every tick so the rows see one map.
+    /// clock: each one is a `capture-pane` subprocess, which is not a per-frame
+    /// cost the way reading a parser this process owns is. Merged in at the
+    /// lookup so nothing is copied per tick to answer "what is this agent
+    /// doing" — see [`App::read_screens`].
     pub(super) peeked: HashMap<u32, crate::peek::Screened>,
     /// When `peeked` was last rebuilt. `None` until the first detached read.
     pub(super) peeked_at: Option<Instant>,
+    /// The `capture-pane` sweep asked for on the last due tick, if it has not
+    /// answered. A subprocess on a thread of its own, for the same reason as
+    /// [`Self::shared_listing`].
+    pub(super) peeked_listing:
+        Option<std::sync::mpsc::Receiver<HashMap<u32, crate::peek::Screened>>>,
     /// The integration's state, as of the last time the panel was opened.
     ///
     /// Rebuilt on opening and after every action rather than every frame: it
@@ -1063,6 +1077,7 @@ impl App {
             preview: preview::Capture::default(),
             tab: 0,
             shared_at: None,
+            shared_listing: None,
             drag_tab: None,
             // Loaded rather than started empty, because the row most likely to
             // want a tab blinking is the one blocked on a question — and that
@@ -1072,6 +1087,7 @@ impl App {
             screen_read: HashMap::new(),
             peeked: HashMap::new(),
             peeked_at: None,
+            peeked_listing: None,
             hooks: None,
             listener: None,
             launch_cursor: 0,
