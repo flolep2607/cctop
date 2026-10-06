@@ -4343,6 +4343,7 @@ mod tests {
     /// succeeds, silently and promptly.
     #[test]
     fn the_hook_succeeds_when_nothing_is_listening() {
+        let _dir = crate::config::claim_test_runtime_base("nothing-listening");
         let started = std::time::Instant::now();
         deliver(b"{\"event\":\"Stop\",\"session_id\":\"a\"}\n");
         assert!(
@@ -4357,6 +4358,7 @@ mod tests {
     /// run.
     #[test]
     fn every_running_cctop_hears_the_same_event() {
+        let _dir = crate::config::claim_test_runtime_base("two-cctops");
         let a = Listener::start().expect("first listener");
         let b = Listener::start().expect("second listener");
         assert!(a.peer_count() >= 1, "the second cctop was not advertised");
@@ -4364,8 +4366,8 @@ mod tests {
         deliver(b"{\"event\":\"Stop\",\"session_id\":\"shared\"}\n");
 
         // Delivery is a connect and a write on another thread; give it a moment.
-        // Filtered by session, because the address directory is the real one and
-        // the other tests in this file are delivering into it at the same time.
+        // Filtered by session, because the other tests in this file are still
+        // delivering into the address directory.
         let mine = |events: &[Event]| events.iter().any(|e| e.session_id == "shared");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let (mut got_a, mut got_b) = (Vec::new(), Vec::new());
@@ -4383,6 +4385,7 @@ mod tests {
     /// quiet waiting for an answer and will report nothing until it gets one.
     #[test]
     fn a_remembered_process_tree_survives_the_cctop_that_heard_it() {
+        let _dir = crate::config::claim_test_runtime_base("claims");
         let mut claims = std::collections::HashMap::new();
         claims.insert("waiting".to_string(), vec![41, 42]);
         save_claims(&claims);
@@ -4399,6 +4402,7 @@ mod tests {
     /// fixture, because the whole value of the field is that it describes one.
     #[test]
     fn the_tree_a_hook_walks_is_the_tree_cctop_receives() {
+        let _dir = crate::config::claim_test_runtime_base("ancestry");
         let listener = Listener::start().expect("listener");
         let walked = ancestry();
         assert!(!walked.is_empty(), "this process has parents");
@@ -4425,6 +4429,7 @@ mod tests {
     /// hook next finds it dead, so the directory does not grow forever.
     #[test]
     fn a_dead_address_is_cleaned_up_by_the_next_event() {
+        let _dir = crate::config::claim_test_runtime_base("stale-address");
         let dir = socket_dir().expect("socket dir");
         std::fs::create_dir_all(&dir).unwrap();
         // A plain file with the right extension refuses connections exactly the
