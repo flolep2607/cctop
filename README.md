@@ -52,11 +52,6 @@ curl -fsSL https://github.com/flolep2607/cctop/releases/latest/download/cctop-x8
 sudo install -m755 "$d/cctop" /usr/local/bin/cctop && rm -rf "$d"
 ```
 
-The `-C "$d"` carries its weight: it unpacks into a temporary directory rather
-than into whatever directory you happen to be standing in, and without it this
-stops at `Cannot open: File exists` for anyone running it inside a cctop
-checkout, because the crate directory is already named `cctop`.
-
 ```bash
 cargo binstall cctop   # fetches the release binary
 cargo install cctop    # or compiles it; needs Rust 1.88 or newer
