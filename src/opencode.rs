@@ -213,9 +213,10 @@ mod tests {
     #[test]
     fn an_inline_tab_setting_of_the_users_own_survives() {
         let existing = r#"{"session":{"scrollbar":false},"tabs":{"layout":"vertical"}}"#;
-        let merged: serde_json::Value =
-            serde_json::from_str(&tabs_off_from(&|key| (key == CLI_CONFIG_ENV).then(|| existing.to_string())))
-                .unwrap();
+        let merged: serde_json::Value = serde_json::from_str(&tabs_off_from(&|key| {
+            (key == CLI_CONFIG_ENV).then(|| existing.to_string())
+        }))
+        .unwrap();
         assert_eq!(merged["tabs"]["mode"], "off");
         assert_eq!(merged["tabs"]["layout"], "vertical");
         assert_eq!(merged["session"]["scrollbar"], false);
@@ -226,9 +227,10 @@ mod tests {
     #[test]
     fn the_legacy_boolean_gives_way_to_the_mode_it_became() {
         let existing = r#"{"tabs":{"enabled":true}}"#;
-        let merged: serde_json::Value =
-            serde_json::from_str(&tabs_off_from(&|key| (key == CLI_CONFIG_ENV).then(|| existing.to_string())))
-                .unwrap();
+        let merged: serde_json::Value = serde_json::from_str(&tabs_off_from(&|key| {
+            (key == CLI_CONFIG_ENV).then(|| existing.to_string())
+        }))
+        .unwrap();
         assert_eq!(merged["tabs"]["mode"], "off");
         assert!(merged["tabs"].get("enabled").is_none());
     }
@@ -236,7 +238,8 @@ mod tests {
     /// An inline value that is not JSON is not something to fail a launch over.
     #[test]
     fn unreadable_inline_settings_are_replaced_rather_than_kept() {
-        let written = tabs_off_from(&|key| (key == CLI_CONFIG_ENV).then(|| "{not json".to_string()));
+        let written =
+            tabs_off_from(&|key| (key == CLI_CONFIG_ENV).then(|| "{not json".to_string()));
         assert_eq!(written, TABS_OFF);
     }
 }

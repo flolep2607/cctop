@@ -114,9 +114,8 @@ thread_local! {
 /// that claims none of its own. Kept rather than removed so a failing run leaves
 /// something to look at.
 #[cfg(test)]
-static TEST_RUNTIME_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join(format!("cctop-runtime-{}", std::process::id()))
-});
+static TEST_RUNTIME_ROOT: LazyLock<PathBuf> =
+    LazyLock::new(|| std::env::temp_dir().join(format!("cctop-runtime-{}", std::process::id())));
 
 #[cfg(test)]
 fn test_runtime_base() -> Option<PathBuf> {

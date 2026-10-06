@@ -271,10 +271,7 @@ pub fn install_test_table(rows: &[(&str, serde_json::Value)]) -> TestTable {
         .map(|(k, v)| ((*k).to_string(), v.clone()))
         .collect();
     install(raw);
-    TestTable {
-        lock,
-        previous,
-    }
+    TestTable { lock, previous }
 }
 
 #[cfg(test)]

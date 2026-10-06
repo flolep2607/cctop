@@ -493,7 +493,9 @@ mod tests {
         // `.mcp.json` shadows both for a name it alone defines.
         assert_eq!(
             inv.mcp(&project, "checked-in"),
-            Resolved::At(Source::McpProject(PathBuf::from(format!("{project}/.mcp.json"))))
+            Resolved::At(Source::McpProject(PathBuf::from(format!(
+                "{project}/.mcp.json"
+            ))))
         );
         // And the user's is what is left.
         assert_eq!(
@@ -666,7 +668,10 @@ mod tests {
     fn an_agent_is_named_by_its_front_matter_or_its_file() {
         let m = Machine::new();
         let project = m.project();
-        m.write("home/.claude/agents/reviewer.md", "---\nname: review\n---\n");
+        m.write(
+            "home/.claude/agents/reviewer.md",
+            "---\nname: review\n---\n",
+        );
         m.write("home/.claude/agents/planner.md", "no front matter here\n");
         let inv = Inventory::load(&m.roots(), [project.as_str()]);
         assert_eq!(

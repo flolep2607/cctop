@@ -238,7 +238,11 @@ mod tests {
             text(&l),
             // Four columns of "nothing yet", then the two samples — and the
             // taller of the two last, because 2.0 is the larger of them.
-            format!("{baseline}{baseline}{baseline}{baseline}{}{}", height(3), height(4))
+            format!(
+                "{baseline}{baseline}{baseline}{baseline}{}{}",
+                height(3),
+                height(4)
+            )
         );
     }
 
@@ -250,11 +254,17 @@ mod tests {
         let values: Vec<f64> = (1..=20).map(|v| v as f64).collect();
         let clipped = sparkline(&values, 5, 0.0, Gradient::Cpu, None);
         let last_five: Vec<f64> = values[15..].to_vec();
-        assert_eq!(text(&clipped), text(&sparkline(&last_five, 5, 0.0, Gradient::Cpu, None)));
+        assert_eq!(
+            text(&clipped),
+            text(&sparkline(&last_five, 5, 0.0, Gradient::Cpu, None))
+        );
         // …and not the oldest five, which is what a chart about the wrong window
         // would look like.
         let first_five: Vec<f64> = values[..5].to_vec();
-        assert_ne!(text(&clipped), text(&sparkline(&first_five, 5, 0.0, Gradient::Cpu, None)));
+        assert_ne!(
+            text(&clipped),
+            text(&sparkline(&first_five, 5, 0.0, Gradient::Cpu, None))
+        );
     }
 
     /// A rising series and a falling one are the same numbers the other way

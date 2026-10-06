@@ -178,18 +178,18 @@ mod tests {
         let sessions = sessions();
         let matched = resolve(&sessions, "2222").expect("an unambiguous prefix");
         assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].session_id, "22222222-bbbb-4000-8000-000000000002");
+        assert_eq!(
+            matched[0].session_id,
+            "22222222-bbbb-4000-8000-000000000002"
+        );
     }
 
     #[test]
     fn a_prefix_that_names_several_says_which_ones() {
-        let sessions = [
-            ("abc-1", Provider::Claude),
-            ("abc-2", Provider::Codex),
-        ]
-        .into_iter()
-        .map(|(id, provider)| Session::new(provider, id.to_string()))
-        .collect::<Vec<_>>();
+        let sessions = [("abc-1", Provider::Claude), ("abc-2", Provider::Codex)]
+            .into_iter()
+            .map(|(id, provider)| Session::new(provider, id.to_string()))
+            .collect::<Vec<_>>();
         let why = resolve(&sessions, "abc").expect_err("two sessions share the prefix");
         assert!(why.contains("2 sessions"), "{why}");
         // Both named, with their harness, so the user can lengthen the prefix.

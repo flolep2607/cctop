@@ -924,10 +924,11 @@ mod tests {
     fn a_hosted_agent_inherits_no_pane_of_its_own_parent() {
         let dir = tempfile::tempdir().expect("temp dir");
         let seen = dir.path().join("env.txt");
-        let leaked: Vec<(String, String)> = ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"]
-            .iter()
-            .map(|var| (var.to_string(), "leaked".to_string()))
-            .collect();
+        let leaked: Vec<(String, String)> =
+            ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"]
+                .iter()
+                .map(|var| (var.to_string(), "leaked".to_string()))
+                .collect();
         let argv: Vec<String> = ["sh", "-c", &format!("env > {}", seen.display())]
             .iter()
             .map(|s| s.to_string())
