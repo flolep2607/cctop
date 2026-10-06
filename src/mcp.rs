@@ -45,6 +45,30 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// recent slice, and a caller that genuinely wants the tail asks for it.
 const DEFAULT_LIMIT: usize = 25;
 
+/// The most rows a listing will return, whatever it is asked for.
+///
+/// [`DEFAULT_LIMIT`] is a default, not a ceiling: a caller that wants the tail
+/// asks for it. But `limit` arrives from a model, and the largest number it can
+/// write is not a request for a long list — it is one call that serialises every
+/// session on the machine into a single JSON-RPC response, or, for
+/// `search_sessions`, one that reads every transcript instead of stopping.
+const MAX_LIMIT: u64 = 200;
+
+/// A caller's `limit`, or [`DEFAULT_LIMIT`], held inside the range a listing can
+/// answer.
+///
+/// Both ends matter, and the floor is the one `recall` already uses: a zero
+/// would answer with nothing at all, which reads to an agent as "no sessions
+/// exist here" rather than "you asked for none". Anything no listing could
+/// honour — a float, a negative, a string — is not a limit at all, and falls
+/// back to the default.
+fn limit_of(args: &Value) -> usize {
+    match args.get("limit").and_then(Value::as_u64) {
+        Some(n) => n.clamp(1, MAX_LIMIT) as usize,
+        None => DEFAULT_LIMIT,
+    }
+}
+
 /// The longest `wait_for_session` blocks, whatever it is asked for.
 ///
 /// A tool call holds the calling agent's turn, and most clients give up on a
@@ -231,7 +255,8 @@ fn tool_schemas() -> Vec<Value> {
                         "type": "integer",
                         "description":
                             "Maximum sessions to return, most recently active first. \
-                             Defaults to 25.",
+                             Defaults to 25, and is capped at 200 however large a \
+                             number is passed.",
                     },
                 },
             },
@@ -377,7 +402,8 @@ fn tool_schemas() -> Vec<Value> {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum matching sessions to return. Defaults to 25.",
+                        "description": "Maximum matching sessions to return. Defaults to 25, \
+                                       and is capped at 200 however large a number is passed.",
                     },
                 },
                 "required": ["query"],
@@ -458,11 +484,7 @@ fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let directory = args.get("directory").and_then(Value::as_str);
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize)
-        .unwrap_or(DEFAULT_LIMIT);
+    let limit = limit_of(args);
 
     let mut matched: Vec<&Session> = sessions
         .iter()
@@ -669,11 +691,7 @@ fn search_sessions(sessions: &[Session], args: &Value) -> Result<String, String>
     if query.trim().is_empty() {
         return Err("search_sessions needs a non-empty query".into());
     }
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize)
-        .unwrap_or(DEFAULT_LIMIT);
+    let limit = limit_of(args);
 
     let needle = query.to_lowercase();
     let mut ordered: Vec<&Session> = sessions.iter().collect();
@@ -800,5 +818,126 @@ mod tests {
         let bad = wait_for_session(&json!({"session": "x", "until": "never"}));
         assert!(bad.unwrap_err().contains("until must be"));
         assert!(wait_for_session(&json!({})).is_err());
+    }
+
+    /// A `limit` is a model's number, and the biggest one it can write is not a
+    /// request for a long list. Unclamped, `"limit": 18446744073709551615` puts
+    /// every session on the machine — or every transcript, for a search — into
+    /// one answer, and `0` answers "nothing exists" to an agent that asked for
+    /// nothing.
+    #[test]
+    fn a_limit_from_the_model_is_clamped_rather_than_obeyed() {
+        assert_eq!(limit_of(&json!({"limit": u64::MAX})), MAX_LIMIT as usize);
+        assert_eq!(
+            limit_of(&json!({"limit": MAX_LIMIT * 1_000})),
+            MAX_LIMIT as usize
+        );
+        assert_eq!(limit_of(&json!({"limit": 0})), 1);
+        // `as_u64` refuses a negative outright, so the default is what is left.
+        assert_eq!(limit_of(&json!({"limit": -1})), DEFAULT_LIMIT);
+        assert_eq!(limit_of(&json!({"limit": i64::MIN})), DEFAULT_LIMIT);
+        // Nor a float or a string, which no listing would honour either.
+        assert_eq!(limit_of(&json!({"limit": 1e30})), DEFAULT_LIMIT);
+        assert_eq!(
+            limit_of(&json!({"limit": "18446744073709551615"})),
+            DEFAULT_LIMIT
+        );
+        assert_eq!(limit_of(&json!({})), DEFAULT_LIMIT);
+        // A number inside the range is still the caller's.
+        assert_eq!(limit_of(&json!({"limit": 3})), 3);
+        assert_eq!(limit_of(&json!({"limit": MAX_LIMIT})), MAX_LIMIT as usize);
+    }
+
+    /// The cap has to be in the schema, not only in the handler: the schema is
+    /// what a model reads *before* choosing a number, so a limit enforced
+    /// silently is one it can only discover by getting fewer rows than it asked
+    /// for. A description that drifted from the clamp is worse than no cap.
+    #[test]
+    fn the_advertised_limit_agrees_with_the_enforced_one() {
+        for name in ["list_sessions", "search_sessions"] {
+            let tool = tool_schemas()
+                .into_iter()
+                .find(|tool| tool["name"] == name)
+                .expect("the tool is listed");
+            let said = tool["inputSchema"]["properties"]["limit"]["description"]
+                .as_str()
+                .expect("a description");
+            assert!(
+                said.contains(&format!("{DEFAULT_LIMIT}")) && said.contains(&MAX_LIMIT.to_string()),
+                "{name} advertises {said:?}, which does not name {DEFAULT_LIMIT} and {MAX_LIMIT}"
+            );
+        }
+    }
+
+    /// Enough rows that an unbounded limit and a clamped one cannot both be
+    /// satisfied: the point of the clamp is that a huge number does not reach
+    /// the whole machine.
+    fn many_sessions(n: usize) -> Vec<Session> {
+        (0..n)
+            .map(|i| {
+                let mut s = Session::new(crate::pricing::Provider::Claude, format!("s{i:04}"));
+                s.label_source = "/tmp/proj".into();
+                s.last_active = format!("2026-09-28T00:00:{:02}.000Z", i % 60);
+                s
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_listing_stops_at_the_cap_however_large_a_limit_is() {
+        let sessions = many_sessions(MAX_LIMIT as usize + 10);
+        let text = list_sessions(&sessions, &json!({"limit": u64::MAX})).expect("an answer");
+        let out: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(out["returned"], MAX_LIMIT);
+        // Said out loud, because an agent handed a truncated list otherwise
+        // reasons as though it has seen everything.
+        assert_eq!(out["truncated"], true);
+        assert_eq!(out["total_matching"], MAX_LIMIT as usize + 10);
+
+        // The other end: a zero limit still answers with a row, rather than with
+        // nothing, which would read as "this machine has no sessions".
+        let text = list_sessions(&sessions, &json!({"limit": 0})).expect("an answer");
+        let out: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(out["returned"], 1);
+    }
+
+    /// A search stops at the cap too, which is the expensive half: each row past
+    /// the limit costs a transcript read, and the corpus is every transcript on
+    /// the machine.
+    #[test]
+    fn a_search_stops_at_the_cap_however_large_a_limit_is() {
+        let dir = std::env::temp_dir().join(format!("cctop-mcp-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hit.jsonl");
+        std::fs::write(&file, "{\"text\":\"the needle is here\"}\n").unwrap();
+
+        let sessions: Vec<Session> = many_sessions(MAX_LIMIT as usize + 10)
+            .into_iter()
+            .map(|mut s| {
+                s.data_file = Some(file.clone());
+                s
+            })
+            .collect();
+
+        let text = search_sessions(&sessions, &json!({"query": "needle", "limit": u64::MAX}))
+            .expect("an answer");
+        let out: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(out["matches"].as_array().unwrap().len(), MAX_LIMIT as usize);
+        // The note names the limit the scan actually stopped at, which is the
+        // clamped one.
+        assert!(
+            out["note"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("at {MAX_LIMIT} matches")),
+            "note is {:?}",
+            out["note"]
+        );
+
+        let text =
+            search_sessions(&sessions, &json!({"query": "needle", "limit": 0})).expect("an answer");
+        let out: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(out["matches"].as_array().unwrap().len(), 1);
     }
 }
