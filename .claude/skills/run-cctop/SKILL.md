@@ -129,6 +129,7 @@ web.sh down
 | `serve [--token\|--tunnel]` | `cctop serve` against the fixture; waits for the table to have a row, not just for the port to answer |
 | `chat` | appends turns to the fixture transcript covering markdown, a table, fenced code, a tool call, a slash command and a reminder — the bare fixture is two lines of plain text and exercises none of the view |
 | `shot <name> [path] [--dead]` | PNG **and** the rendered text into `$SHOTS`; exits non-zero on a JS exception |
+| `CCTOP_WIDTH=390` / `CCTOP_SCHEME=dark` | env for `shot`: a phone viewport, the dark scheme — where a stylesheet change breaks unseen |
 | `--dead` | answers every `/api/**` with a Cloudflare 502 page — what a trycloudflare tunnel serves once the cctop behind it is gone |
 | `ids` / `api` / `url` | the small things every recipe needs |
 

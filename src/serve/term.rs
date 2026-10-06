@@ -34,10 +34,13 @@ const JS: &[u8] = include_bytes!(
 const WASM: &[u8] =
     include_bytes!("assets/rmux-share/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm");
 
+/// A picture of nothing, for the logos the app asks for and nobody ships.
+const EMPTY_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
+
 /// The file at `path`, and its content type, when it is part of the app.
 ///
 /// `/term/` is the page a frame opens, with a share link's fragment appended
-/// by the page that frames it — see `terminalFrame` in `report.js`.
+/// by the page that frames it — see `TerminalFrame` in `web/src/components/terminal.tsx`.
 pub fn file(path: &str) -> Option<(&'static str, &'static [u8])> {
     match path {
         "/term" | "/term/" => Some(("text/html; charset=utf-8", INDEX)),
@@ -48,6 +51,10 @@ pub fn file(path: &str) -> Option<(&'static str, &'static [u8])> {
         // `application/wasm` exactly: `WebAssembly.instantiateStreaming`
         // refuses any other type, and the app falls back to nothing.
         "/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm" => Some(("application/wasm", WASM)),
+        // The app asks for a logo in each theme that `share.rmux.io` does not
+        // have either (it answers them with its own HTML). An empty picture,
+        // so the console stops reporting a 404 per frame.
+        "/rose-dark.svg" | "/rose-light.svg" => Some(("image/svg+xml", EMPTY_SVG)),
         _ => None,
     }
 }

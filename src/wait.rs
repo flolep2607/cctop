@@ -555,6 +555,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            window: None,
         }
     }
 

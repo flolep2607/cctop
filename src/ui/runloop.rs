@@ -829,6 +829,11 @@ fn event_loop(
         // The party is on no clock but its own.
         app.needs_redraw |= app.raving() || app.reeling() || app.tripping();
 
+        // A pane taking its rmux window back draws two sizes in a row; the
+        // second is only asked for on a frame, so it needs frames to happen.
+        if app.tabs.iter().any(|t| t.panes.iter().any(|p| p.fitting())) {
+            app.needs_redraw = true;
+        }
         if app.needs_redraw {
             terminal.draw(|frame| layout = render::draw(frame, app))?;
             app.needs_redraw = false;

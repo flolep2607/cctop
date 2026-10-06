@@ -35,7 +35,12 @@ CLOUDFLARE_502 = (
 def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=BROWSER)
-        page = browser.new_page(viewport={"width": 1100, "height": 1000})
+        # A phone and a dark scheme are where a stylesheet change goes wrong
+        # unseen, so both are one variable away: CCTOP_WIDTH=390 CCTOP_SCHEME=dark.
+        page = browser.new_page(
+            viewport={"width": int(os.environ.get("CCTOP_WIDTH", "1100")), "height": 1000},
+            color_scheme=os.environ.get("CCTOP_SCHEME", "light"),
+        )
         problems: list[str] = []
         page.on("pageerror", lambda e: problems.append(f"page error: {e}"))
         page.on(
@@ -68,6 +73,8 @@ def main() -> int:
         # The pages build themselves from a fetch, so "loaded" is when something
         # other than the placeholder is on screen. Either outcome is a real
         # answer — an error banner is what the dead-tunnel run is here to see.
+        # `[data-rendered]` is the React app's marker for a page that has
+        # answered — content, or the sentence saying why there is none.
         # `.card` is the fallback for a state the other selectors do not name —
         # a session with no transcript renders a card explaining that, and it
         # is still a page that worked.
@@ -82,7 +89,7 @@ def main() -> int:
             rendered = any(
                 e.is_visible()
                 for e in page.query_selector_all(
-                    ".turn, .row, tbody tr, .empty, .banner, .card"
+                    ".turn, .row, tbody tr, .empty, .banner, .card, [data-rendered]"
                 )
             )
             if not rendered:

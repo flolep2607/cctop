@@ -468,6 +468,7 @@ fn row(host: &str, v: &Value) -> Option<Session> {
         .and_then(Value::as_str)
         .filter(|a| !a.is_empty())
         .map(str::to_string);
+    s.asking_question = v.get("asking_question").and_then(Value::as_bool) == Some(true);
 
     // There is no local process, and nothing may go looking for one — but the
     // row still has to read as live and still has the far side's figures. The

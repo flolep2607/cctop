@@ -653,6 +653,9 @@ fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
         // What a permission prompt is asking for, so whoever answers it from
         // somewhere other than the agent's own terminal is not approving blind.
         "ask": ask_of(&body),
+        // A question with choices, which Allow and Deny must never answer: see
+        // [`Reported::question`].
+        "question": is_question(&body),
         // The one fact the agent does not state and only this process can: see
         // [`ancestry`]. Absent from any harness whose hook cctop does not
         // spawn, which the reader treats as "no claim" rather than as an empty
@@ -681,6 +684,13 @@ pub(crate) const MAX_ASK: usize = 300;
 /// from a tool name: OpenCode 2 puts the agent's own sentence in `message` for
 /// the questions it asks, and `question: <the question>` is a worse line than
 /// the question. So `message` is taken whole when it is there.
+/// Whether a permission event is really Claude Code's AskUserQuestion: a
+/// menu of answers, where the keys Allow and Deny press would pick an option
+/// or cancel the question rather than approve anything.
+fn is_question(body: &serde_json::Value) -> bool {
+    body.get("tool_name").and_then(|v| v.as_str()) == Some("AskUserQuestion")
+}
+
 fn ask_of(body: &serde_json::Value) -> Option<String> {
     let event = body
         .get("hook_event_name")
@@ -689,10 +699,24 @@ fn ask_of(body: &serde_json::Value) -> Option<String> {
     if !matches!(event, "PermissionRequest" | "permission.asked") {
         return None;
     }
-    let said = body
-        .get("message")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    // A question says what it asks in its own words — the first one, when it
+    // asks several — and that is the line worth showing.
+    let asked = is_question(body)
+        .then(|| {
+            body.get("tool_input")?
+                .get("questions")?
+                .as_array()?
+                .first()?
+                .get("question")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .flatten();
+    let said = asked.or_else(|| {
+        body.get("message")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
     let tool = body
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -912,6 +936,10 @@ pub struct Reported {
     pub provisional: bool,
     /// What the prompt is asking to do, when this is one: see [`ask_of`].
     pub ask: Option<String>,
+    /// Whether what is held is a question with choices — Claude Code's
+    /// AskUserQuestion — rather than a permission prompt. Allow and Deny would
+    /// press keys that *pick an option* there, so nothing may offer them.
+    pub question: bool,
 }
 
 /// How long a permission prompt is given to answer itself before it is somebody
@@ -1049,6 +1077,9 @@ impl Reports {
                     && before.signal == Signal::NeedsInput
                 {
                     reported.ask = before.ask.clone();
+                    // And what kind of prompt it is: the notification knows
+                    // even less about that than about the question's words.
+                    reported.question = reported.question || before.question;
                 }
                 self.hooked.insert(event.session_id.clone(), reported);
             }
@@ -1581,6 +1612,7 @@ fn parse(line: &str) -> Option<Event> {
                 .get("ask")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            question: value.get("question").and_then(|v| v.as_bool()) == Some(true),
             at: std::time::Instant::now(),
         },
     })
@@ -3237,6 +3269,30 @@ mod tests {
     /// and quietly — so a session blocked on one read as idle. `Elicitation`
     /// says it outright, and `ElicitationResult` is the answer arriving.
     #[test]
+    fn an_ask_user_question_is_a_question_and_says_its_own_words() {
+        let body = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "AskUserQuestion",
+            "tool_input": { "questions": [
+                { "question": "How should the deploy step happen?", "header": "Deploy",
+                  "options": [{ "label": "You deploy" }, { "label": "Hold" }] }
+            ] },
+        });
+        assert!(is_question(&body));
+        assert_eq!(
+            ask_of(&body).as_deref(),
+            Some("How should the deploy step happen?")
+        );
+        let bash = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": { "command": "rm -rf build" },
+        });
+        assert!(!is_question(&bash));
+        assert_eq!(ask_of(&bash).as_deref(), Some("Bash: rm -rf build"));
+    }
+
+    #[test]
     fn an_mcp_elicitation_is_a_session_waiting_on_you() {
         assert_eq!(signal_of("Elicitation", ""), Some(Signal::NeedsInput));
         assert_eq!(signal_of("ElicitationResult", ""), Some(Signal::Busy));
@@ -3373,6 +3429,7 @@ mod tests {
         let aged = |signal: Signal, ago: std::time::Duration| Reported {
             provisional: false,
             ask: None,
+            question: false,
             signal,
             cwd: "/w".into(),
             permission: None,

@@ -121,6 +121,40 @@ one can be fixed after the fact: edit the release body on GitHub and everyone wh
 has not updated yet gets the better version. `gh release view v<version> --json
 body` shows what they would see now.
 
+## The web UI is a React app in `web/`, committed built
+
+`cctop serve` is one React app: **Vite + React + TypeScript + Tailwind +
+shadcn/ui** in `web/`, with a route per page — the table (`/`), a session
+(`/session/:id`), the workspace (`/workspace`) and analytics (`/analytics`).
+
+```bash
+cd web && npm ci          # Node from web/.nvmrc
+npm run dev               # hot reload, proxied to `cctop serve --no-token --port 7778`
+npm run build             # writes src/serve/assets/app/index.html — commit it
+npm run lint
+```
+
+How it ships, and why:
+
+- **One file, everything inlined.** `vite-plugin-singlefile` builds the whole
+  app — scripts, styles, fonts — into `src/serve/assets/app/index.html`, which
+  `include_str!` puts in the binary. The content policy loads nothing from any
+  URL, and an installed cctop is one binary. The server gzips it per request.
+- **The build is committed**, so `cargo install` needs no Node. CI's
+  `verify / web` job rebuilds it and fails if it differs — change `web/` and
+  run `npm run build` in the same commit.
+- **The server's values arrive as JSON** in `<script id="cctop-config">`
+  (`app_config` in `src/serve/mod.rs`): token, whether actions are allowed,
+  home, version. `web/src/lib/config.ts` reads it; every request goes through
+  `web/src/lib/api.ts`, which adds the token.
+- **Size is paid on every load**, so heavy dependencies need a reason: `wouter`
+  rather than react-router, Latin font subsets only.
+- **A moved iframe reloads.** The terminal frames (workspace tiles, the session
+  page's terminal) must keep their place in the DOM; reorder with CSS `order`.
+
+Check a visual change in both themes and at phone width:
+`CCTOP_SCHEME=dark` and `CCTOP_WIDTH=390` in front of `web.sh shot`.
+
 ## Conventions
 
 - **`ponytail:` comments** mark a deliberate, documented limit — a thing this

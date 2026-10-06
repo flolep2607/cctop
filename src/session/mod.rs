@@ -340,6 +340,11 @@ pub struct Session {
     /// hook said — `Bash: rm -rf build`. `None` in every other state, so a
     /// stale question cannot outlive the prompt it came from.
     pub asking_for: Option<String>,
+    /// Whether what an [`ActivityState::Asking`] session holds is a question
+    /// with choices rather than a permission prompt — the difference between
+    /// a prompt Allow and Deny may answer and one where they would pick an
+    /// option or throw the question away. `false` in every other state.
+    pub asking_question: bool,
     /// How much this session asks before it acts, when its own hooks have said.
     ///
     /// Read from the transcript, which Claude Code stamps with the mode on
@@ -554,6 +559,7 @@ impl Session {
             launch_id: String::new(),
             activity_state: ActivityState::Working,
             asking_for: None,
+            asking_question: false,
             permission: None,
             converted_from: None,
             recent_writes: Vec::new(),
@@ -735,6 +741,12 @@ impl Session {
                 .or_else(|| screened.and_then(|s| s.ask.clone())),
             _ => None,
         };
+        // Either witness is enough: the hook knows the tool, the screen sees
+        // the menu. Erring towards "question" only costs a button.
+        self.asking_question = self.activity_state == ActivityState::Asking
+            && (reported
+                .is_some_and(|r| r.signal == crate::hook::Signal::NeedsInput && r.question)
+                || screened.is_some_and(|s| s.question));
     }
 
     /// The working directory a resumed session should start in.

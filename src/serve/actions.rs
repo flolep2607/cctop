@@ -72,6 +72,9 @@ pub struct Terminal {
     /// resolves to this machine's loopback and works only in a browser already
     /// on it — which the page says rather than showing an empty frame.
     pub tunnelled: bool,
+    /// The rmux session the terminal is a client of, so the page can ask
+    /// `/api/window/<name>` whether its client holds the window.
+    pub name: String,
 }
 
 /// Where an image the page sent was written, for the prompt to name.
@@ -185,6 +188,16 @@ pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
     };
     if session.activity_state != crate::session::ActivityState::Asking {
         return Err((409, "this session is not asking anything right now".into()));
+    }
+    // A question with choices is not a permission prompt: `1` there picks the
+    // first answer and Esc throws the question away. Refused here as well as
+    // never offered by the page, since a page from before this knew no better.
+    if session.asking_question {
+        return Err((
+            409,
+            "this is a question with choices, not a permission prompt — answer it in its terminal"
+                .into(),
+        ));
     }
     // ponytail: Claude Code and Codex only, the two whose menus were driven and
     // checked. Gemini and OpenCode report prompts too, but pressing a guessed
@@ -652,7 +665,13 @@ pub fn frontend_for(origin: &str) -> Option<String> {
     host_ok.then(|| format!("{origin}/term/"))
 }
 
-pub fn terminal(session: &Session, frontend: Option<&str>) -> Result<Terminal, Failed> {
+/// `fresh` mints a new share instead of handing out the one held — what the
+/// page asks for when the link it was given would not connect.
+pub fn terminal(
+    session: &Session,
+    frontend: Option<&str>,
+    fresh: bool,
+) -> Result<Terminal, Failed> {
     local(session)?;
     let Some(pid) = session.root_pid() else {
         return Err((
@@ -666,12 +685,16 @@ pub fn terminal(session: &Session, frontend: Option<&str>) -> Result<Terminal, F
             "only an agent cctop put in a multiplexer has a terminal to show".into(),
         ));
     };
-    let (share, tunnelled) = crate::rmux::share_link(&name, true, frontend)
+    let (share, tunnelled) = crate::rmux::share_link_with(&name, true, frontend, fresh)
         .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));
     };
-    Ok(Terminal { url, tunnelled })
+    Ok(Terminal {
+        url,
+        tunnelled,
+        name,
+    })
 }
 
 /// A tab's terminal, by its rmux session name — the same share
@@ -680,16 +703,20 @@ pub fn terminal(session: &Session, frontend: Option<&str>) -> Result<Terminal, F
 ///
 /// Only one of cctop's own live tabs: the name comes from a request, and an
 /// rmux session the user started themselves is not this page's to hand out.
-pub fn tab_terminal(name: &str, frontend: Option<&str>) -> Result<Terminal, Failed> {
+pub fn tab_terminal(name: &str, frontend: Option<&str>, fresh: bool) -> Result<Terminal, Failed> {
     if !super::tabs::is_tab(&crate::rmux::running(), name) {
         return Err((404, "no open tab by that name".into()));
     }
-    let (share, tunnelled) = crate::rmux::share_link(name, true, frontend)
+    let (share, tunnelled) = crate::rmux::share_link_with(name, true, frontend, fresh)
         .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));
     };
-    Ok(Terminal { url, tunnelled })
+    Ok(Terminal {
+        url,
+        tunnelled,
+        name: name.to_string(),
+    })
 }
 
 #[cfg(test)]

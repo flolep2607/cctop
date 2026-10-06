@@ -266,6 +266,7 @@ impl App {
         // The agent this key is going to, taken before the borrow ends:
         // answering its question is the one thing no hook reports.
         let agent = pane.agent();
+        pane.note_input(false);
         let alive = pane.view.send_key(pane.translate_key(key));
         self.mark_answered(agent);
         if !alive {
@@ -348,6 +349,7 @@ impl App {
                 // agent is an answer to whatever it asked, and no hook reports
                 // that.
                 let agent = pane.agent();
+                pane.note_input(false);
                 let alive = pane.view.send_paste(text);
                 self.mark_answered(agent);
                 if !alive {
@@ -537,6 +539,7 @@ impl App {
             return;
         };
         let agent = pane.agent();
+        pane.note_input(false);
         let alive = pane.view.send_paste(text);
         self.mark_answered(agent);
         if !alive {
@@ -2163,6 +2166,7 @@ impl App {
                         // A failed send means that agent has gone, which the
                         // reaper already watches for.
                         if wanted {
+                            pane.note_input(false);
                             let _ = pane.view.mouse(kind, b, col, row);
                         }
                     }
@@ -2186,6 +2190,7 @@ impl App {
                 // A failed send means that agent is gone, which the reaper is
                 // already watching for. Unlike a keystroke there is nothing to
                 // report: a scroll that landed on a dead pane asked for nothing.
+                pane.note_input(false);
                 let _ = pane.view.wheel(up, col, row);
             }
             return;

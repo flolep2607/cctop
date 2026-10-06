@@ -645,6 +645,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -711,6 +712,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            window: None,
         };
         let now = 1_700_000_000;
         let recorded = |signal, ago: u64| {
@@ -743,6 +745,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -792,6 +795,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -830,6 +834,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -930,6 +935,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -948,6 +954,7 @@ mod tests {
             crate::peek::Screened {
                 signal: Signal::NeedsInput,
                 ask: None,
+                question: false,
             },
         );
         app.apply_reports();
@@ -960,6 +967,7 @@ mod tests {
             crate::peek::Screened {
                 signal: Signal::Busy,
                 ask: None,
+                question: false,
             },
         );
         app.apply_reports();
@@ -988,6 +996,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: mode,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -1038,6 +1047,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
             },
             // This test is about the session's own state; subagent events are
@@ -1097,6 +1107,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now() - std::time::Duration::from_secs(60 * 60),
             },
             finished_agent: None,
@@ -1139,6 +1150,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -1196,6 +1208,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -1220,6 +1233,7 @@ mod tests {
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
@@ -1252,6 +1266,7 @@ mod tests {
                 cwd: String::new(),
                 permission: None,
                 ask: ask.map(str::to_string),
+                question: false,
                 at: std::time::Instant::now(),
                 provisional: false,
             },
@@ -1293,6 +1308,7 @@ mod tests {
                 cwd: String::new(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
                 provisional,
             },
@@ -1430,6 +1446,7 @@ mod tests {
             cwd: String::new(),
             permission: None,
             ask: None,
+            question: false,
             at: Instant::now() - std::time::Duration::from_secs(age),
             provisional: false,
         };

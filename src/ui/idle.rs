@@ -398,6 +398,7 @@ mod tests {
                 cwd: "/x".into(),
                 permission: None,
                 ask: None,
+                question: false,
                 at: std::time::Instant::now(),
             },
         );

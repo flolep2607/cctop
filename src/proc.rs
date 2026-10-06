@@ -8,7 +8,9 @@
 use crate::session::Session;
 use crate::util;
 use std::collections::{HashMap, HashSet};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
+use sysinfo::{
+    Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal, System, UpdateKind,
+};
 
 /// Cycles an exited child stays visible before being dropped from the list.
 /// Without this, short-lived tool subprocesses flicker in and out.
@@ -115,6 +117,21 @@ fn is_daemon(tokens: &[String]) -> bool {
             || tok.ends_with("/app-server")
             || tok.ends_with("/daemon")
     })
+}
+
+/// OpenCode's server modes: `opencode serve` (often installed as a background
+/// service) and `opencode web` run for days with no conversation of their own,
+/// and each showed up as a session row with nothing in it.
+///
+/// Only the subcommand position counts — the first argument, or the second
+/// for a node-hosted build whose first is the script — so a session that was
+/// merely asked about serving something is still a session.
+fn is_opencode_service(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .skip(1)
+        .take(2)
+        .any(|t| t == "serve" || t == "web")
 }
 
 /// macOS `.app` bundle paths, excluding the Claude Code binary that Claude for
@@ -492,6 +509,13 @@ impl Collector {
             if !could_be_agent(&name, argv0.as_deref()) {
                 continue;
             }
+            // A zombie has exited and is only waiting for its parent to reap
+            // it — rmux has been seen to leave an opencode in that state for
+            // days. It is not running anything, so it is not a running agent;
+            // it stays in `procs` only so the tree around it is intact.
+            if matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead) {
+                continue;
+            }
             // On a shared machine every user's agents are in the process table,
             // but only ours can own a row unless we are root; see `visible_to`.
             // The rest stay in `procs`, since an ancestor walk may still pass
@@ -560,8 +584,9 @@ impl Collector {
             let is_claude = is_claude_binary(&snap.name, &snap.tokens);
             let is_codex = is_codex_process(&snap.name, &snap.tokens)
                 && (snap.name != "bwrap" || current_ancestors.contains(&snap.pid));
-            let is_opencode = matches!(snap.name.as_str(), "opencode" | "opencode-cli")
-                || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "opencode"));
+            let is_opencode = (matches!(snap.name.as_str(), "opencode" | "opencode-cli")
+                || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "opencode")))
+                && !is_opencode_service(&snap.tokens);
             let is_pi = snap.name == "pi"
                 || (snap.name == "node" && is_node_hosted_agent(&snap.tokens, "pi"));
             // The `acp` subcommand is the agent backend; the bare `devin` CLI
@@ -1517,6 +1542,23 @@ mod tests {
             &toks("node app.js --config /home/f/.pi/settings.json"),
             "pi"
         ));
+    }
+
+    #[test]
+    fn opencode_servers_are_not_sessions() {
+        assert!(is_opencode_service(&toks(
+            "/home/u/.opencode/bin/opencode serve --service"
+        )));
+        assert!(is_opencode_service(&toks("opencode web --port 4096")));
+        assert!(is_opencode_service(&toks(
+            "node /usr/lib/opencode.js serve"
+        )));
+        // The sessions themselves.
+        assert!(!is_opencode_service(&toks("opencode")));
+        assert!(!is_opencode_service(&toks("opencode --session ses_1")));
+        assert!(!is_opencode_service(&toks(
+            "opencode run how do I serve static files"
+        )));
     }
 
     #[test]

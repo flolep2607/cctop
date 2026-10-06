@@ -417,6 +417,14 @@ impl App {
             tab.detach();
         }
         self.tab = want;
+        // A tab that kept its client while away — a recording, a pane cctop
+        // owns — did not attach just now, which is the one event rmux refits
+        // the window on. Arriving is coming back to it, so it checks.
+        if let Some(tab) = want.checked_sub(1).and_then(|i| self.tabs.get_mut(i))
+            && let Some(pane) = tab.panes.get_mut(tab.focus)
+        {
+            pane.note_input(true);
+        }
     }
 
     /// Reconcile the tab bar against every cctop-owned rmux session on this
@@ -521,6 +529,19 @@ impl App {
                 .map(|agent| agent.color.as_deref().and_then(theme::Hue::from_name));
             if let Some(color) = painted {
                 tab.color = color;
+            }
+            // The window each held pane's agent is drawn at, so a pane can
+            // blank what a smaller window leaves stale around it. Not over a
+            // check or nudge in flight, which knows better than the sweep.
+            for pane in &mut tab.panes {
+                if pane.fitting() {
+                    continue;
+                }
+                if let Some(name) = pane.rmux.as_deref()
+                    && let Some(agent) = running.iter().find(|a| a.name == name)
+                {
+                    pane.fit.window = agent.window;
+                }
             }
             let Some(shared) = tab.shared.as_mut() else {
                 continue;
@@ -850,6 +871,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let mut app = test_app();
@@ -1076,6 +1098,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let mut app = test_app();
@@ -1131,6 +1154,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let mut app = test_app();
@@ -1300,6 +1324,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let titles = |app: &App| -> Vec<String> { app.tabs.iter().map(tabs::Tab::title).collect() };
@@ -1360,6 +1385,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let layout = render::Layout {
@@ -1445,6 +1471,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let layout = render::Layout {
@@ -1534,6 +1561,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let layout = render::Layout {
@@ -1642,6 +1670,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            window: None,
         }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every
@@ -1684,6 +1713,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let mut app = test_app();
@@ -1749,6 +1779,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            window: None,
         })
     }
 
@@ -1852,6 +1883,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
@@ -1889,6 +1921,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
@@ -1959,6 +1992,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                window: None,
             })
         };
         let alt = |code| event::KeyEvent::new(code, event::KeyModifiers::ALT);
