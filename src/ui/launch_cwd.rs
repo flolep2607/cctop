@@ -34,7 +34,7 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Directories agents are known to have run in, newest first.
+    /// Directories agents are known to have run in, last used first.
     ///
     /// Drawn from the dashboard's own rows, which is the list of projects cctop
     /// has any evidence of, plus where it was started and where this launch was
@@ -42,14 +42,34 @@ impl App {
     /// field replaces already meant, and a suggestion list that omitted them
     /// would look like it had forgotten them.
     ///
+    /// A session that ran inside a repository offers the repository, not the
+    /// directory it was sitting in. `label_source` is a working directory, and
+    /// an agent that started in `cctop/src/ui` records exactly that — which
+    /// answers a question nobody asked, and with the deeper of the two paths to
+    /// remember. The checkout is found through [`tree::locate_cached`], the same
+    /// resolution the tree view groups by, so a linked worktree is understood
+    /// here exactly as it is there. Two checkouts of one repository stay two
+    /// answers: they are two directories to start an agent in.
+    ///
+    /// A directory that is in no repository is offered as itself. Work outside a
+    /// checkout is real work, and this list exists to avoid the refusal that a
+    /// directory cctop would itself accept would only invite.
+    ///
     /// Only directories that still exist: a session's recorded project can have
     /// been moved or deleted since, and offering one leads to the refusal this
     /// list exists to avoid.
     pub(super) fn known_dirs(&self) -> Vec<std::path::PathBuf> {
         let mut recent: Vec<&Session> = self.sessions.iter().collect();
-        // Newest first, so the projects worked on today are the ones on screen
-        // before anything is typed.
-        recent.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        // Last used first, so the projects worked on today are the ones on
+        // screen before anything is typed. Ties go to the session that began
+        // more recently, which is the only thing left that separates them: two
+        // sessions touched in the same refresh would otherwise come out in
+        // whichever order the rows arrived, and that order changes.
+        recent.sort_by(|a, b| {
+            b.last_active
+                .cmp(&a.last_active)
+                .then_with(|| b.started_at.cmp(&a.started_at))
+        });
 
         let mut seen = HashSet::new();
         self.launch_cwd
@@ -65,7 +85,13 @@ impl App {
                 recent
                     .iter()
                     .filter(|s| !s.label_source.is_empty())
-                    .map(|s| std::path::PathBuf::from(&s.label_source)),
+                    // `locate` answers (common git dir, checkout root); the root
+                    // is the directory, and `None` — a relative path, or a
+                    // directory in no repository — leaves it as it was.
+                    .map(|s| match tree::locate_cached(&s.label_source) {
+                        Some((_, root)) => root,
+                        None => std::path::PathBuf::from(&s.label_source),
+                    }),
             )
             .filter(|dir| seen.insert(dir.clone()) && dir.is_dir())
             .take(MAX_KNOWN_DIRS)
@@ -352,6 +378,137 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.launch_cwd_bad);
         assert_eq!(app.mode, Mode::LaunchCwd);
+    }
+
+    /// The field offers the repository, not the directory inside it that an
+    /// agent happened to be sitting in.
+    ///
+    /// A session's `cwd` is whatever it was launched in, and an agent that
+    /// started in `cctop/src/ui` records exactly that. Offering it back answers
+    /// a question nobody asked: nobody means "the ui directory of cctop" when
+    /// they want to work on cctop, and it is the deeper of the two paths to
+    /// have to remember.
+    #[test]
+    fn the_directory_field_offers_the_repository_and_not_the_directory_inside_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = root.path().join("cctop");
+        let deep = repo.join("src/ui");
+        // The `.git` sits at the checkout root, and the agent ran two levels
+        // below it — which is the whole point.
+        std::fs::create_dir_all(&deep).expect("deep");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+        // A second checkout of the same repository, so the two are told apart.
+        let other = root.path().join("cctop-worktree");
+        std::fs::create_dir_all(other.join(".git")).expect("worktree");
+        std::fs::write(other.join(".git/HEAD"), "ref: refs/heads/wip\n").expect("HEAD");
+        let plain = root.path().join("not-a-repo");
+        std::fs::create_dir_all(&plain).expect("plain");
+
+        let mut app = test_app();
+        app.sessions = vec![
+            session("a", true, &deep.to_string_lossy()),
+            session("b", false, &other.to_string_lossy()),
+            session("c", false, &plain.to_string_lossy()),
+        ];
+        app.launch_root = None;
+        app.launch_cwd = None;
+
+        let known = app.known_dirs();
+        assert!(
+            known.contains(&repo),
+            "the repository is not offered: {known:?}"
+        );
+        assert!(
+            !known.contains(&deep),
+            "the subdirectory is offered instead of the repository: {known:?}"
+        );
+        // A second checkout is its own answer: it is a different directory to
+        // start an agent in, even though it is the same repository.
+        assert!(known.contains(&other), "{known:?}");
+        // And work outside any repository is still offered — it is real work,
+        // and refusing it here would refuse a directory the launch itself takes.
+        assert!(known.contains(&plain), "{known:?}");
+    }
+
+    /// A linked worktree is offered as itself, because it is a directory to
+    /// start an agent in — and it is where this gets subtle, since a worktree's
+    /// `.git` is a *file* naming a private git dir rather than a directory.
+    #[test]
+    fn the_directory_field_understands_a_linked_worktree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = root.path().join("cctop");
+        std::fs::create_dir_all(repo.join(".git/worktrees/wip")).expect("gitdir");
+        std::fs::write(repo.join(".git/worktrees/wip/commondir"), "../..\n").expect("commondir");
+        std::fs::write(
+            repo.join(".git/worktrees/wip/HEAD"),
+            "ref: refs/heads/wip\n",
+        )
+        .expect("HEAD");
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+        // What `git worktree add` leaves behind: a `.git` file, not a directory.
+        let tree = root.path().join("cctop-wip");
+        std::fs::create_dir_all(&tree).expect("worktree");
+        std::fs::write(
+            tree.join(".git"),
+            format!("gitdir: {}\n", repo.join(".git/worktrees/wip").display()),
+        )
+        .expect(".git file");
+        // And an agent one level inside it.
+        let deep = tree.join("src");
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, &deep.to_string_lossy())];
+        app.launch_root = None;
+        app.launch_cwd = None;
+
+        let known = app.known_dirs();
+        assert_eq!(
+            known,
+            vec![tree],
+            "the worktree, not the main checkout and not the directory inside it"
+        );
+    }
+
+    /// The order is last used, then when the session began.
+    ///
+    /// `last_active` is the useful half and it was already there; `started_at`
+    /// is what makes two sessions that were last touched at the same instant
+    /// come out in a fixed order rather than whatever the rows happened to be in
+    /// — which changes under a refresh, and a list that reshuffles while it is
+    /// being read is a list nobody can point at.
+    #[test]
+    fn the_directory_field_orders_by_last_used_then_by_when_the_session_began() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        let c = root.path().join("c");
+        for d in [&a, &b, &c] {
+            std::fs::create_dir(d).expect("dir");
+        }
+
+        let mut app = test_app();
+        // `a` and `b` were last touched at the same instant, and began an hour
+        // apart, so only `started_at` can say which was first.
+        let mut older = session("a", false, &a.to_string_lossy());
+        older.last_active = "2026-10-06T12:00:00Z".into();
+        older.started_at = "2026-10-06T09:00:00Z".into();
+        let mut newer = session("b", false, &b.to_string_lossy());
+        newer.last_active = "2026-10-06T12:00:00Z".into();
+        newer.started_at = "2026-10-06T11:00:00Z".into();
+        // Touched most recently of all, so it leads regardless of when it began.
+        let mut touched = session("c", false, &c.to_string_lossy());
+        touched.last_active = "2026-10-06T13:00:00Z".into();
+        touched.started_at = "2026-10-05T08:00:00Z".into();
+        app.sessions = vec![older, newer, touched];
+        app.launch_root = None;
+        app.launch_cwd = None;
+
+        assert_eq!(
+            app.known_dirs(),
+            vec![c, b, a],
+            "last used first, and the newer of two equally-touched sessions ahead"
+        );
     }
 
     /// Esc has to leave the launch as it was found, or it becomes a way to lose

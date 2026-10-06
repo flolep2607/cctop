@@ -128,7 +128,13 @@ static PLACES: LazyLock<Mutex<HashMap<String, (Located, Instant)>>> =
 
 /// The repository's common git directory and the checkout root, for a
 /// directory inside one. Cached, since the tree is rebuilt on every refresh.
-fn locate_cached(dir: &str) -> Located {
+///
+/// `pub(super)` because the launcher's directory list resolves the same way —
+/// see [`super::launch_cwd::App::known_dirs`], which offers the repository
+/// rather than the subdirectory an agent happened to be sitting in. One
+/// resolution of what a `.git` means, so the two cannot answer differently
+/// about a worktree.
+pub(super) fn locate_cached(dir: &str) -> Located {
     let mut cache = PLACES.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((found, at)) = cache.get(dir)
         && at.elapsed() < PLACE_TTL
