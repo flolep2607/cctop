@@ -186,3 +186,71 @@ fn replay(capture: &crate::rmux::Capture) -> Vec<String> {
     parser.process(&capture.bytes);
     parser.screen().rows(0, capture.cols).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rmux::Capture;
+
+    fn capture(rows: u16, cols: u16, lines: &[&str]) -> Capture {
+        Capture {
+            rows,
+            cols,
+            cursor: None,
+            bytes: lines.join("\r\n").into_bytes(),
+        }
+    }
+
+    /// A capture is read back at the size it was taken at, which is what makes
+    /// it interchangeable with an attached pane's screen: the recognizer takes
+    /// the last few rows, so a replay that came back one row short would drop
+    /// the footer row and read every agent as quiet.
+    #[test]
+    fn a_capture_replays_at_the_size_it_was_taken_at() {
+        let c = capture(24, 80, &["first", "second", "third"]);
+        let rows = replay(&c);
+        assert_eq!(rows.len(), 24, "the parser is not the capture's height");
+        assert_eq!(rows[0], "first".to_string());
+        assert_eq!(rows[2], "third".to_string());
+        assert!(
+            rows.iter().all(|r| r.chars().count() <= 80),
+            "a row came back wider than the pane"
+        );
+    }
+
+    /// The two halves of [`finish`]: a harness with no footer row of its own is
+    /// refused before the screen is read, and a prompt's detail is only asked
+    /// for when the screen said there is one — the extractor reads the same
+    /// window, and a working agent's screen has nothing in it to find.
+    #[test]
+    fn a_screen_is_only_answered_for_a_harness_that_has_one() {
+        let asking = vec![
+            String::new(),
+            String::from("Do you want to make this edit to src/main.rs?"),
+            String::from("Esc to cancel"),
+        ];
+        let claude = finish("claude", &asking).expect("a claude screen");
+        assert_eq!(claude.signal, crate::hook::Signal::NeedsInput);
+        // Not a login shell: `Esc to cancel` in a shell is nobody's question.
+        assert!(finish("bash", &asking).is_none());
+
+        // Working, not asking: no prompt to describe, and asking for one anyway
+        // would report the tool box of whatever it happened to be editing.
+        let working = finish(
+            "claude",
+            &[String::from("Esc to interrupt"), String::from("thinking")],
+        )
+        .expect("a working claude screen");
+        assert_eq!(working.signal, crate::hook::Signal::Busy);
+        assert!(working.ask.is_none());
+    }
+
+    /// A screen the recognizer matches nothing on is not an answer: the caller
+    /// falls back to hooks and then to the transcript, which is a better guess
+    /// than silence dressed as a read.
+    #[test]
+    fn a_screen_with_no_footer_on_it_reads_as_nothing() {
+        let quiet = vec![String::from("the quick brown fox")];
+        assert!(finish("claude", &quiet).is_none());
+    }
+}

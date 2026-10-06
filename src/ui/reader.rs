@@ -278,12 +278,19 @@ impl App {
                 if let Some(laid) = &view.laid {
                     let b = laid.block_at(top);
                     // The header of the turn being read, when it is above the
-                    // top; the one before it when it is the top.
-                    let row = match laid.starts[b] < top {
-                        true => laid.starts[b],
-                        false => laid.starts[b.saturating_sub(1)],
-                    };
-                    view.set_top(row);
+                    // top; the one before it when it is the top. A conversation
+                    // that laid out nothing readable has no starts at all, and
+                    // `block_at` still answers 0 for it — so the row is looked
+                    // up rather than indexed, as `row` and `turn_to_open` do.
+                    let row = laid.starts.get(b).and_then(|&here| {
+                        Some(match here < top {
+                            true => here,
+                            false => *laid.starts.get(b.checked_sub(1)?)?,
+                        })
+                    });
+                    if let Some(row) = row {
+                        view.set_top(row);
+                    }
                 }
             }
             KeyCode::Char(']') => {
@@ -1230,6 +1237,25 @@ mod tests {
         assert!(first_row(&screen(&mut app, 80, 20)).contains("Claude"));
         press(&mut app, KeyCode::Char(']'));
         assert_eq!(view(&app).back, 0);
+    }
+
+    /// A transcript with nothing readable in it answers with no turns and no
+    /// note, so the reader lays out no blocks at all — and `block_at` still
+    /// answers a block for a layout that has none. Pressing `[` has to leave the
+    /// view where it is rather than index into it.
+    #[test]
+    fn brackets_do_nothing_in_an_empty_conversation() {
+        let mut app = open_with(Vec::new());
+        draw_chat(&mut app, 80, 20);
+        assert!(view(&app).laid.as_ref().expect("laid").starts.is_empty());
+
+        press(&mut app, KeyCode::Char('['));
+        press(&mut app, KeyCode::Char(']'));
+        press(&mut app, KeyCode::Enter);
+        let text = screen(&mut app, 80, 20);
+        assert_eq!(view(&app).top(), 0);
+        assert_eq!(view(&app).back, 0, "the view was moved");
+        assert!(text.contains("conversation"), "{text}");
     }
 
     /// `g` is the start and `G` the end; `k` from the end is one row back.

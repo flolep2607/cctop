@@ -348,7 +348,7 @@ impl App {
     ///
     /// Applied on every reload rather than once at startup, so hiding a column
     /// takes effect on the keypress that saved it. The table asks for the list
-    /// on every frame — see [`columns::hidden_for`] — so this is a re-parse
+    /// on every frame — see [`columns::visible_columns_among`] — so this is a re-parse
     /// and nothing more. The environment variable still wins, as an override
     /// should.
     pub(super) fn apply_columns(&mut self) {
@@ -533,7 +533,7 @@ impl App {
     fn setting_activate(&mut self, name: &str) {
         let (current, _) = self.settings.value_of(name);
         match name {
-            "notify" | "auto_update" | "warn_agents" | "read_screen" => {
+            _ if crate::settings::is_toggle(name) => {
                 let on = current != "true";
                 self.write_setting("settings", name, Some(on.into()));
                 // The one setting with a live switch of its own, so the file
@@ -543,6 +543,8 @@ impl App {
                     self.save_prefs();
                 }
             }
+            // Reached only because a theme is a choice and not a boolean, so
+            // the guard above does not take it.
             "theme" => {
                 const THEMES: [&str; 4] = ["auto", "light", "dark", "mono"];
                 let at = THEMES.iter().position(|t| current.trim_matches('"') == *t);

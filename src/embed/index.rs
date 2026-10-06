@@ -552,7 +552,11 @@ mod tests {
 
         // The transcript grows: it is embedded again, and the stale vectors for
         // that session are replaced rather than added to.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        //
+        // No sleep waiting for the mtime to tick: a `Fingerprint` is a length
+        // and a time, and appending makes the length differ at once — which is
+        // why the sleep that used to be here cost every run of the suite a
+        // second for nothing.
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)

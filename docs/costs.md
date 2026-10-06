@@ -29,6 +29,16 @@ Codeium's servers. Those sessions report cost as unavailable rather than as free
 and their timestamps come from the workspace database's mtime, which is the only
 clock Windsurf leaves behind.
 
+Devin is the third harness with no figure of its own, and the only one that
+still fills every other column: its ATIF transcript records per-step token
+metrics and its database records which model ran them, so `CTX%`, `TOOLS`,
+`TOKENS` and `ERR%` are all real. Neither store holds a dollar amount, so a
+Devin row's cost reads as unavailable rather than as an estimate — the price of
+its tokens is not something cctop can know, only guess, and a guess printed in
+the `$` column would be indistinguishable from one. `--plan max` counts Devin as
+bundled, but that changes nothing on screen: `incl` stands for a figure cctop
+computed and then withheld, and a Devin row has no figure to withhold.
+
 Subscription plans — Claude Max, Pro, Team — are flat-rate or bundle tokens
 differently, so these numbers will not match your invoice. Treat the `$` column
 as a measure of resource consumption, not as billing. Use `--plan max` or
@@ -55,13 +65,18 @@ percentages.
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | Cursor | `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` |
 | Gemini CLI | `~/.gemini/tmp/<project>/chats/session-*.json{,l}` |
+| Devin | `~/.local/share/devin/cli/sessions.db` (platform data directory), with `transcripts/<id>.json` beside it |
 | OpenCode | `~/.local/share/opencode/opencode*.db` (platform data directory) |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` |
 | Windsurf | `<Windsurf User dir>/workspaceStorage/*/state.vscdb` |
 
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`, `GEMINI_DIR`,
 `OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and
-`WINDSURF_USER_DIR` are honoured. Caches live in `~/.cache/cctop/`.
+`WINDSURF_USER_DIR` are honoured, along with `OPENCODE_CONFIG_DIR` for the
+plugin `--install-hooks` writes. `CHISEL_SESSION_DB` moves Devin's, and is the
+only one that names a **file** rather than a directory: cctop takes the parent
+of the database it points at, because the transcript has to sit beside it.
+Caches live in `~/.cache/cctop/`.
 
 Gemini and Windsurf sessions are read from disk but not matched to a running
 process: neither takes a session id on its command line, so there is nothing to

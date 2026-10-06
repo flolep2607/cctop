@@ -463,39 +463,14 @@ pub(super) fn memory(live: &[&Analysis]) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::inventory::Roots;
+    use super::super::inventory::Machine;
     use super::*;
     use crate::insight::Task;
     use crate::pricing::Provider;
 
-    /// A configuration root of its own, so no test reads the real one.
-    struct Machine {
-        dir: tempfile::TempDir,
-    }
-
     impl Machine {
-        fn new() -> Machine {
-            Machine {
-                dir: tempfile::tempdir().unwrap(),
-            }
-        }
-        fn path(&self, rel: &str) -> std::path::PathBuf {
-            self.dir.path().join(rel)
-        }
-        fn write(&self, rel: &str, body: &str) {
-            let p = self.path(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, body).unwrap();
-        }
-        fn roots(&self) -> Roots {
-            Roots {
-                account: self.path("home/.claude.json"),
-                claude_dir: self.path("home/.claude"),
-            }
-        }
-        fn project(&self) -> String {
-            self.path("work/app").to_string_lossy().into_owned()
-        }
+        /// What the findings here read against: the same fixture, loaded for
+        /// the directories these sessions actually ran in.
         fn inventory(&self, sessions: &[Analysis]) -> Inventory {
             Inventory::load(&self.roots(), sessions.iter().map(|a| a.cwd.as_str()))
         }

@@ -676,9 +676,20 @@ pub fn ground_rgb() -> Color {
 /// change reuse the terminal's reply rather than asking a terminal that is, by
 /// then, in raw mode and in the middle of a draw.
 pub fn init_from_env(configured: Option<&str>) {
-    let no_color = std::env::var("NO_COLOR").ok();
-    let colorfgbg = std::env::var("COLORFGBG").ok();
-    let depth = detect_depth(&termprofile::Env, &std::io::stdout());
+    init_from_env_with(configured, &|key| std::env::var(key).ok())
+}
+
+/// [`init_from_env`] with the environment handed in rather than read.
+///
+/// Reading the process environment is only a problem for a caller that wants to
+/// answer for a different one: `setenv` beside another thread's `getenv` is
+/// undefined behaviour, and the test runner has a thread per test. A test that
+/// needs a `NO_COLOR` or a `TERM` that the machine running it does not have
+/// passes a map instead of writing one.
+fn init_from_env_with(configured: Option<&str>, env: &dyn Fn(&str) -> Option<String>) {
+    let no_color = env("NO_COLOR");
+    let colorfgbg = env("COLORFGBG");
+    let depth = detect_depth(&VarSource(env), &std::io::stdout());
     let theme = configured;
     // Asked once, before the palette, and kept — see the note on `Env`. Doing
     // it after `select` would mean a second round trip for a terminal that
@@ -687,7 +698,7 @@ pub fn init_from_env(configured: Option<&str>) {
     let colourless = no_color.as_deref().is_some_and(|v| !v.is_empty());
     let ground = match colourless || depth == Depth::Colorless {
         true => None,
-        false => query_ground(),
+        false => query_ground(env),
     };
     let palette = select(
         no_color.as_deref(),
@@ -712,6 +723,17 @@ pub fn init_from_env(configured: Option<&str>) {
         });
     });
     publish(palette);
+}
+
+/// A [`termprofile::EnvVarSource`] over the lookup [`init_from_env_with`] was
+/// handed, so the depth detection reads the same environment the rest of the
+/// palette does rather than the process's.
+struct VarSource<'a>(&'a dyn Fn(&str) -> Option<String>);
+
+impl termprofile::EnvVarSource for VarSource<'_> {
+    fn var(&self, key: &str) -> Option<String> {
+        (self.0)(key)
+    }
 }
 
 /// The terminal's colour depth, from the environment alone.
@@ -832,12 +854,12 @@ const GROUND_TIMEOUT: Duration = Duration::from_millis(500);
 /// Waiting longer only moves that line, and it takes a terminal that answers
 /// DA1 slower than half a second to reach it. Keys typed during the exchange
 /// are consumed with the reply, the same price the clipboard read pays.
-fn query_ground() -> Option<Ground> {
+fn query_ground(env: &dyn Fn(&str) -> Option<String>) -> Option<Ground> {
     use std::io::{IsTerminal, Write};
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return None;
     }
-    if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
+    if env("TERM").is_some_and(|t| t == "dumb") {
         return None;
     }
     crossterm::terminal::enable_raw_mode().ok()?;
@@ -1546,15 +1568,12 @@ pub(super) mod tests {
     /// reason the test exists to rule out.
     #[test]
     fn the_environment_cannot_name_a_theme() {
-        // SAFETY: the runner is the only thread that reads these, and both are
-        // restored before returning. A panic in between leaves the variable
-        // set, which costs this test and not any other.
-        unsafe {
-            std::env::remove_var("NO_COLOR");
-            std::env::set_var("CCTOP_THEME", "mono");
-        }
-        init_from_env(Some("light"));
-        unsafe { std::env::remove_var("CCTOP_THEME") };
+        // Handed in rather than written into the process environment, which is
+        // undefined behaviour beside the runner's other threads reading it. The
+        // variable is set for exactly as long as a real one would be: every
+        // lookup this function makes goes through the map.
+        let env: HashMap<&str, &str> = HashMap::from([("CCTOP_THEME", "mono")]);
+        init_from_env_with(Some("light"), &|key| env.get(key).map(|v| v.to_string()));
 
         // The palette is what `init_from_env` published, not a stale one from
         // another test: `mono` and `light` are the two most distant variants,

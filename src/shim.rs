@@ -147,7 +147,7 @@ pub fn host(
     if argv.is_empty() {
         anyhow::bail!("usage: cctop <command> [args…]  (e.g. cctop claude)");
     }
-    let (child, master) = spawn_on_pty_at(argv, cwd, size)?;
+    let (child, master) = spawn_on_pty_at_env(argv, cwd, size, &[])?;
     let pid = child.id();
     crate::elog::event(
         "shim",
@@ -565,7 +565,23 @@ fn spawn_on_pty(
 fn spawn_on_pty_at(
     argv: &[String],
     cwd: Option<&std::path::Path>,
+    size: (u16, u16),
+) -> anyhow::Result<(std::process::Child, File)> {
+    spawn_on_pty_at_env(argv, cwd, size, &[])
+}
+
+/// [`spawn_on_pty_at`] with `inherited` applied to the child as though this
+/// process's environment had it, and then scrubbed like everything else.
+///
+/// The scrubbing is a fixed list of names rather than a general filter, so what
+/// a test can usefully do is put the names there and watch them go: writing them
+/// into this process's own environment to get them into the child would be
+/// `setenv` beside every other thread's `getenv`, which is undefined behaviour.
+fn spawn_on_pty_at_env(
+    argv: &[String],
+    cwd: Option<&std::path::Path>,
     (cols, rows): (u16, u16),
+    inherited: &[(String, String)],
 ) -> anyhow::Result<(std::process::Child, File)> {
     let mut size = winsize(cols, rows);
     let mut master_fd = -1;
@@ -604,6 +620,9 @@ fn spawn_on_pty_at(
     // three behind is how a cctop running inside rmux hands the whole set to
     // its agent — and `RMUX` alone is refused with "no current client", which
     // reads like a broken launch rather than a nested one.
+    for (var, value) in inherited {
+        cmd.env(var, value);
+    }
     for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
         cmd.env_remove(var);
     }
@@ -905,30 +924,28 @@ mod tests {
     fn a_hosted_agent_inherits_no_pane_of_its_own_parent() {
         let dir = tempfile::tempdir().expect("temp dir");
         let seen = dir.path().join("env.txt");
-        // SAFETY: single-threaded at this point in the test, and the values are
-        // read back out of the child rather than by anything here.
-        unsafe {
-            for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
-                std::env::set_var(var, "leaked");
-            }
-        }
+        let leaked: Vec<(String, String)> =
+            ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"]
+                .iter()
+                .map(|var| (var.to_string(), "leaked".to_string()))
+                .collect();
         let argv: Vec<String> = ["sh", "-c", &format!("env > {}", seen.display())]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let mut hosted = host(&argv, None, (80, 24)).expect("a pty for the child");
+        // Same five names, handed in rather than written into this process's
+        // environment where every other test thread would be reading them.
+        let (mut child, _master) =
+            spawn_on_pty_at_env(&argv, None, (80, 24), &leaked).expect("a pty for the child");
         // `sh` writes the file and exits at once; poll rather than sleep.
         for _ in 0..200 {
-            if hosted.finished().is_some() {
+            if child.try_wait().ok().flatten().is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        unsafe {
-            for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {
-                std::env::remove_var(var);
-            }
-        }
+        let _ = child.kill();
+        let _ = child.wait();
 
         let env = std::fs::read_to_string(&seen).expect("the child wrote its environment");
         for var in ["RMUX", "RMUX_PANE", "TMUX", "TMUX_PANE", "TMUX_PROGRAM"] {

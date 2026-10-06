@@ -24,6 +24,72 @@ cargo test
 cargo publish --dry-run --allow-dirty   # what `verify / package` runs
 ```
 
+### While iterating, run the tests that could have broken
+
+`cargo test --all-targets` is 1295 tests and takes 58 seconds of wall time for
+about 11 seconds of CPU — it spends most of its life waiting on `thread::sleep`,
+real ptys and real subprocesses. Two of those tests assert wall-clock margins
+(`hook::tests::advice_is_kept_only_if_it_beat_the_deadline`,
+`ui::tabs::tests::a_tab_asks_for_attention_only_when_it_has_something_you_cannot_see`),
+so running the full suite concurrently with other builds makes it fail for
+reasons that have nothing to do with your change.
+
+`tools/targeted-test.sh` maps what you changed to the tests worth running:
+
+```bash
+./tools/targeted-test.sh                    # diff against main, run what it names
+./tools/targeted-test.sh src/ui/filter.rs   # or name the files yourself
+./tools/targeted-test.sh --all              # force the full suite
+```
+
+A test's module path is its file's module path, so `src/ui/filter.rs` runs
+`ui::filter::`. Changing `src/main.rs`, `build.rs` or anything non-Rust runs
+everything, because those reach the whole crate. Use it while you work and the
+full suite once, at the end, on its own.
+
+## The `debug` feature
+
+`src/serve/debug.rs` is behind `#[cfg(feature = "debug")]`, which is off by
+default and never enabled for a release — so an ordinary build contains neither
+the routes nor the strings that name them. That is the condition for having them:
+a debug surface reachable in a shipped binary is a debug surface somebody else
+can reach, and the serve token is one link away from anyone you shared a page
+with.
+
+Three things live behind it, all reachable only from a build that asked:
+
+- `/api/debug/state` and `/api/debug/why` — what the server is holding, and how
+  it decided which sessions are running. Both are answerable from outside
+  (`cctop -j`, `cctop why`), but not from the serving process itself, which is
+  where a disagreement between the page and the terminal would show.
+- `/api/debug/fault` — makes subsequent `/api/` responses fail in a chosen way
+  (`502`, `slow`, `html`, `empty`). The pages have to survive a tunnel whose far
+  end has gone and a proxy answering HTML where JSON was asked for, and neither
+  can be produced on demand by a correct server.
+- `/api/debug/log?level=io` — turns `CCTOP_LOG` on for a server that was not
+  started with it.
+
+```bash
+cargo run --features debug -- serve --no-token
+```
+
+Because the feature is off by default, `cargo clippy --all-targets` and
+`cargo test --all-targets` never compile that module — a change to
+`src/serve/mod.rs` that breaks the debug routes is green, and nothing finds out
+until someone runs it by hand. So `verify` runs both commands a second time
+with `--features debug`, and a change that touches those routes should pass both
+locally:
+
+```bash
+export RUSTFLAGS="-D warnings"
+cargo clippy --all-targets --features debug
+cargo test --all-targets --features debug
+```
+
+The tests do not exercise the fault routes — arming `slow` sleeps for 30
+seconds by design — so the extra run is a compile check, not a timing one. If you
+add tests here, keep them off `slow`, or the suite grows half a minute per case.
+
 ## cctop is Linux-only
 
 There is one platform, and it is Linux (including WSL). macOS and Windows were

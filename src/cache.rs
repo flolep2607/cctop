@@ -608,16 +608,7 @@ impl Store {
         // Split by provider too. The aggregate says extraction is slow; it
         // cannot say whether that is one harness's transcripts or all of them,
         // and the two have nothing in common to fix.
-        let _by_provider = crate::trace::span(match session.provider {
-            crate::pricing::Provider::Claude => "extract.claude",
-            crate::pricing::Provider::Codex => "extract.codex",
-            crate::pricing::Provider::Cursor => "extract.cursor",
-            crate::pricing::Provider::Devin => "extract.devin",
-            crate::pricing::Provider::Gemini => "extract.gemini",
-            crate::pricing::Provider::OpenCode => "extract.opencode",
-            crate::pricing::Provider::Pi => "extract.pi",
-            crate::pricing::Provider::Windsurf => "extract.windsurf",
-        });
+        let _by_provider = crate::trace::span(session.provider.extract_trace_name());
         crate::trace::add("transcripts parsed", 1);
         // Only where the file backs this session alone. OpenCode keeps every
         // session in one database and Windsurf every conversation in one blob,
@@ -845,6 +836,7 @@ mod build_script {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::Provider;
 
     #[test]
     fn reparse_backoff_scales_with_parse_cost() {
@@ -925,10 +917,8 @@ mod tests {
     fn the_hashed_set_covers_every_parser_and_the_shipped_hash_matches_it() {
         let sources = hashed_sources();
         let names: Vec<&str> = sources.iter().map(|(p, _)| p.as_str()).collect();
-        for provider in [
-            "claude", "codex", "cursor", "devin", "gemini", "opencode", "pi", "windsurf",
-        ] {
-            let expected = format!("src/session/{provider}.rs");
+        for provider in Provider::ALL {
+            let expected = format!("src/session/{}.rs", provider.as_str());
             assert!(names.contains(&expected.as_str()), "{expected} not hashed");
         }
         assert!(names.contains(&"src/session/mod.rs"));

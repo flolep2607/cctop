@@ -456,6 +456,21 @@ pub struct App {
     /// list that reshuffles under the cursor while a walk lands means Enter
     /// takes a directory other than the one highlighted.
     pub launch_cwd_known: Vec<std::path::PathBuf>,
+    /// Repositories found on disk that no agent has run in, newest first.
+    ///
+    /// The other half of `launch_cwd_known`, and the answer to a repository
+    /// somebody has just pulled: cctop learns about projects from the agents
+    /// that ran in them, so the one you have not tried yet is the one it has no
+    /// evidence for. Filled by a scan on the worker — it walks the home
+    /// directory, which is not something to do on the thread that draws — and
+    /// empty until it lands, which is fine: the field offers what it has and
+    /// shows more a moment later.
+    ///
+    /// Kept apart from `launch_cwd_known` rather than merged into it because
+    /// the two arrive at different times and from different places. Merging on
+    /// arrival would reshuffle the list under the cursor, which is the one thing
+    /// the snapshot above exists to prevent.
+    pub launch_cwd_repos: Vec<std::path::PathBuf>,
     /// What the field is currently offering for what has been typed. Every one
     /// of them is a directory that exists, which is what lets a picked
     /// suggestion skip the check the typed path gets.
@@ -688,6 +703,12 @@ pub struct App {
     /// When the tab bar was last reconciled against the rmux sessions on this
     /// machine. See [`App::sync_shared_tabs`].
     shared_at: Option<Instant>,
+    /// The `rmux list-panes` asked for by the last sweep, if it has not answered.
+    ///
+    /// The listing is a subprocess and this runs on the thread that draws, so it
+    /// is asked on a thread of its own and folded in here when it lands — the
+    /// shape [`preview::Capture`] uses for its own capture.
+    shared_listing: Option<std::sync::mpsc::Receiver<Vec<crate::rmux::Running>>>,
     /// The tab being dragged along the bar, indexed as the bar is: `1..=len`,
     /// and never `0` because the dashboard does not move.
     ///
@@ -703,17 +724,25 @@ pub struct App {
     /// rather than "nothing is happening". See [`crate::hook::Reports`].
     pub reports: crate::hook::Reports,
     /// What each tab's agent says on its own screen, by agent pid, while
-    /// `read_screen` is on — see [`App::read_screens`].
+    /// `read_screen` is on — see [`App::read_screens`]. Pane reads only: a
+    /// detached tab's answer is in `peeked`, and the two are looked up together
+    /// rather than copied into one map every tick.
     pub screen_read: HashMap<u32, crate::peek::Screened>,
     /// What detached tabs' screens last said, by agent pid.
     ///
     /// Kept apart from the pane reads because it is refreshed on a slower
-    /// clock: each one is a `capture-pane`, which is not a per-frame cost the
-    /// way reading a parser this process owns is. Merged into `screen_read`
-    /// every tick so the rows see one map.
+    /// clock: each one is a `capture-pane` subprocess, which is not a per-frame
+    /// cost the way reading a parser this process owns is. Merged in at the
+    /// lookup so nothing is copied per tick to answer "what is this agent
+    /// doing" — see [`App::read_screens`].
     pub(super) peeked: HashMap<u32, crate::peek::Screened>,
     /// When `peeked` was last rebuilt. `None` until the first detached read.
     pub(super) peeked_at: Option<Instant>,
+    /// The `capture-pane` sweep asked for on the last due tick, if it has not
+    /// answered. A subprocess on a thread of its own, for the same reason as
+    /// [`Self::shared_listing`].
+    pub(super) peeked_listing:
+        Option<std::sync::mpsc::Receiver<HashMap<u32, crate::peek::Screened>>>,
     /// The integration's state, as of the last time the panel was opened.
     ///
     /// Rebuilt on opening and after every action rather than every frame: it
@@ -887,6 +916,10 @@ impl App {
             prefs.notify = notify;
         }
         let mut app = Self::with_prefs(plan, tx, prefs);
+        app.burn = crate::burn::Log::load();
+        app.reports = crate::hook::Reports::new();
+        app.quota = Quota::default();
+        app.launch_root = std::env::current_dir().ok();
         if std::env::var_os("CCTOP_COLUMNS_HIDE").is_none()
             && let Some(hide) = &settings.hide_columns
         {
@@ -901,6 +934,11 @@ impl App {
     ///
     /// Tests use this with `UiPrefs::default()`; going through `new` would load
     /// whatever is on the developer's disk and make results machine-dependent.
+    ///
+    /// Nothing here reads the disk either — the burn log and the hook claims are
+    /// both `$HOME` — so a frame drawn from this owes nothing to the machine the
+    /// test runs on. [`App::new`] loads the burn log itself, because that is the
+    /// one that has to be there.
     fn with_prefs(plan: Plan, tx: Sender<Request>, prefs: UiPrefs) -> Self {
         let age_filter = prefs
             .inactivity_filter
@@ -1039,7 +1077,13 @@ impl App {
             mem_history: HashMap::new(),
             global_cpu: History::default(),
             global_spend: History::default(),
-            quota: Quota::default(),
+            // The accounts found under `$HOME`, listed as pending until a fetch
+            // says otherwise; [`App::new`] fills it in.
+            quota: Quota {
+                fetched: false,
+                claude: Vec::new(),
+                codex: Vec::new(),
+            },
             notify: crate::notify::Notifier::new(prefs.notify),
             alerts: crate::alert::Alerts::default(),
             seen: seen::Seen::default(),
@@ -1063,15 +1107,18 @@ impl App {
             preview: preview::Capture::default(),
             tab: 0,
             shared_at: None,
+            shared_listing: None,
             drag_tab: None,
-            // Loaded rather than started empty, because the row most likely to
-            // want a tab blinking is the one blocked on a question — and that
-            // is exactly the row that sends nothing until it is answered. See
-            // [`Reports::new`](crate::hook::Reports::new).
-            reports: crate::hook::Reports::new(),
+            // Empty rather than seeded from the claims file, which is the
+            // other `$HOME` read here; [`App::new`] seeds it, because the row
+            // most likely to want a tab blinking is the one blocked on a
+            // question — and that is exactly the row that sends nothing until
+            // it is answered. See [`Reports::new`](crate::hook::Reports::new).
+            reports: crate::hook::Reports::default(),
             screen_read: HashMap::new(),
             peeked: HashMap::new(),
             peeked_at: None,
+            peeked_listing: None,
             hooks: None,
             listener: None,
             launch_cursor: 0,
@@ -1082,6 +1129,7 @@ impl App {
             launch_cwd_input: Default::default(),
             launch_cwd_bad: false,
             launch_cwd_known: Vec::new(),
+            launch_cwd_repos: Vec::new(),
             launch_cwd_hits: Vec::new(),
             launch_cwd_pick: None,
             rmux_install: None,

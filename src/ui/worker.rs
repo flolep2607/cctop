@@ -52,6 +52,14 @@ pub(super) enum Request {
         query: String,
         targets: Vec<crate::session::search::Target>,
     },
+    /// The git repositories under the home directory, for the launcher's
+    /// directory field.
+    ///
+    /// Sent once per session rather than per keystroke, and answered from the
+    /// gentle pool: it walks the home directory, which on a machine with a large
+    /// `~/code` is thousands of `stat` calls, and nothing else should wait
+    /// behind it.
+    Repos,
     /// Run `cctop --update` on a remote machine, which the user has confirmed.
     UpdateRemote(crate::fleet::Host),
     Shutdown,
@@ -73,6 +81,9 @@ pub(super) enum Response {
     /// which is the one place that copies — see there.
     Data(String, Arc<SessionData>),
     Quota(Box<Quota>),
+    /// Repositories on disk, newest first. Sent when the directory field opens,
+    /// and only when the field is open to be helped by them.
+    Repos(Vec<std::path::PathBuf>),
     /// Pricing landed, so cached costs are stale and a reload is due.
     PricingReady,
     /// A newer release exists. Reported once; cctop never updates itself.
@@ -528,44 +539,60 @@ pub(super) fn spawn_worker(
                     host,
                     before,
                 } => {
-                    let result = match host {
-                        // The transcript lives on the far side — ask the cctop
-                        // there for the same document the local build would
-                        // make, rather than parsing a local file that happens
-                        // to share the path.
-                        Some(host) => {
-                            let marker = before.map(|b| b.to_string());
-                            let mut args = vec!["--chat", session.session_id.as_str()];
-                            if let Some(marker) = marker.as_deref() {
-                                args.extend(["--before", marker]);
-                            }
-                            host.run(&args).and_then(|json| {
-                                serde_json::from_str(&json).map_err(|e| {
-                                    format!(
-                                        "{} returned an unreadable conversation: {e}",
-                                        host.target
-                                    )
+                    // Off the request loop, for the same reason as
+                    // `Request::Data`: building the conversation re-reads a
+                    // whole transcript, and a remote one waits on another
+                    // machine entirely. Everything queued behind it on this
+                    // thread — refreshes, searches, the next keystroke's work —
+                    // would wait with it. The view drops an answer for a
+                    // selection it has already left, so a late one is safe.
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let result = match host {
+                            // The transcript lives on the far side — ask the
+                            // cctop there for the same document the local build
+                            // would make, rather than parsing a local file that
+                            // happens to share the path.
+                            Some(host) => {
+                                let marker = before.map(|b| b.to_string());
+                                let mut args = vec!["--chat", session.session_id.as_str()];
+                                if let Some(marker) = marker.as_deref() {
+                                    args.extend(["--before", marker]);
+                                }
+                                host.run(&args).and_then(|json| {
+                                    serde_json::from_str(&json).map_err(|e| {
+                                        format!(
+                                            "{} returned an unreadable conversation: {e}",
+                                            host.target
+                                        )
+                                    })
                                 })
-                            })
-                        }
-                        None => Ok(crate::serve::chat::build(&session, before)),
-                    };
-                    if tx
-                        .send(Response::Chat {
+                            }
+                            None => Ok(crate::serve::chat::build(&session, before)),
+                        };
+                        let _ = tx.send(Response::Chat {
                             key: session.key(),
                             before,
                             result: result.map(Box::new),
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
+                        });
+                    });
                 }
                 Request::Scan { query, targets } => {
                     let needle = query.to_ascii_lowercase();
                     let mut hits = loader.gently(|| scan(&mut scans, &targets, &needle));
                     loader.gently(|| topical(&mut topics, &needle, &targets, &mut hits));
                     if tx.send(Response::Scanned { query, hits }).is_err() {
+                        break;
+                    }
+                }
+                Request::Repos => {
+                    // On the gentle pool rather than inline: the walk is tens of
+                    // milliseconds measured, but it is a `stat` per directory and
+                    // this loop is what every refresh and every keystroke's work
+                    // queues behind.
+                    let home = crate::config::HOME.clone();
+                    let found = loader.gently(move || super::dirs::repos_under(&home));
+                    if tx.send(Response::Repos(found)).is_err() {
                         break;
                     }
                 }

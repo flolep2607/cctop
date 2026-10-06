@@ -75,9 +75,74 @@ fn cache_base() -> PathBuf {
 /// perfectly good home for sockets (it is what the fallback already was), so an
 /// unusable runtime directory is treated as an absent one.
 pub fn runtime_base() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_runtime_base() {
+        return dir;
+    }
     own_dir(dirs::runtime_dir())
         .filter(|dir| writable_dir(dir))
         .unwrap_or_else(cache_base)
+}
+
+/// A runtime directory of this test's own, installed for as long as the guard is
+/// held.
+///
+/// The runtime directory is shared with every cctop actually running on the
+/// machine, and what the tests put in it is real: a bound socket a hook event is
+/// delivered to, and a claims file rewritten from empty. Left pointed at the
+/// real one, the suite delivers its own events into a live dashboard and
+/// truncates the `agents.json` it uses to remember process trees.
+///
+/// Thread-local rather than one directory for the run, because two tests sharing
+/// one is the same collision a smaller: a fake address left for the cleanup test
+/// to find is a second live listener's socket to somebody else. The fallback for
+/// a test that claims nothing is still a temporary directory, so no test reaches
+/// the real one by forgetting.
+#[cfg(test)]
+pub struct RuntimeBase {
+    previous: Option<PathBuf>,
+    #[allow(dead_code)]
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RUNTIME_BASE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A directory no test outside this process can see, as the fallback for a test
+/// that claims none of its own. Kept rather than removed so a failing run leaves
+/// something to look at.
+#[cfg(test)]
+static TEST_RUNTIME_ROOT: LazyLock<PathBuf> =
+    LazyLock::new(|| std::env::temp_dir().join(format!("cctop-runtime-{}", std::process::id())));
+
+#[cfg(test)]
+fn test_runtime_base() -> Option<PathBuf> {
+    let claimed = TEST_RUNTIME_BASE.with(|dir| dir.borrow().clone());
+    if claimed.is_none() {
+        let _ = std::fs::create_dir_all(&*TEST_RUNTIME_ROOT);
+    }
+    Some(claimed.unwrap_or_else(|| TEST_RUNTIME_ROOT.clone()))
+}
+
+/// Point this thread's runtime directory at a subdirectory of its own.
+///
+/// `name` is only a label: two tests that pass the same one are in the same
+/// directory, which is what makes it a collision rather than a sharing.
+#[cfg(test)]
+pub fn claim_test_runtime_base(name: &str) -> RuntimeBase {
+    let dir = TEST_RUNTIME_ROOT.join(name);
+    std::fs::create_dir_all(&dir).expect("a runtime directory for this test");
+    let previous = TEST_RUNTIME_BASE.with(|claimed| claimed.replace(Some(dir.clone())));
+    RuntimeBase { previous, dir }
+}
+
+#[cfg(test)]
+impl Drop for RuntimeBase {
+    fn drop(&mut self) {
+        TEST_RUNTIME_BASE.with(|claimed| *claimed.borrow_mut() = self.previous.take());
+    }
 }
 
 fn writable_dir(dir: &std::path::Path) -> bool {
@@ -1263,8 +1328,22 @@ pub fn rglob(dir: &Path, ext: &str) -> Vec<PathBuf> {
 
 /// Modification time in milliseconds since the Unix epoch, or 0 if unavailable.
 pub fn file_mtime_ms(p: &Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
+    match std::fs::metadata(p) {
+        Ok(meta) => mtime_ms_of(&meta),
+        Err(_) => 0,
+    }
+}
+
+/// [`file_mtime_ms`] for a `Metadata` the caller already holds.
+///
+/// A walk that has just read a directory entry into its `Metadata` wants the
+/// time off that, not off a second `stat` of the same path: the whole point of
+/// the entry's metadata is that it came free with the directory read, and
+/// asking for the path again puts that back. The 0-on-unavailable fallback is
+/// [`file_mtime_ms`]'s, kept here so a caller holding a `Metadata` reads the
+/// time exactly as one that went looking for it would.
+pub fn mtime_ms_of(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)

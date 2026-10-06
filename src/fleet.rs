@@ -417,7 +417,10 @@ pub fn parse(host: &str, json: &str) -> Result<Vec<Session>, String> {
 }
 
 fn row(host: &str, v: &Value) -> Option<Session> {
-    let provider = provider_of(text(v, "provider"))?;
+    // A provider this build has never heard of: the far side is newer. Dropping
+    // the row loses one session; guessing would file it under a harness it is
+    // not and put its cost in the wrong column.
+    let provider = Provider::parse(text(v, "provider"))?;
     let id = text(v, "session_id");
     if id.is_empty() {
         return None;
@@ -580,23 +583,6 @@ fn text<'a>(v: &'a Value, key: &str) -> &'a str {
 
 fn num(v: &Value, key: &str) -> f64 {
     v.get(key).and_then(Value::as_f64).unwrap_or(0.0)
-}
-
-fn provider_of(name: &str) -> Option<Provider> {
-    Some(match name {
-        "claude" => Provider::Claude,
-        "codex" => Provider::Codex,
-        "cursor" => Provider::Cursor,
-        "devin" => Provider::Devin,
-        "gemini" => Provider::Gemini,
-        "opencode" => Provider::OpenCode,
-        "pi" => Provider::Pi,
-        "windsurf" => Provider::Windsurf,
-        // A provider this build has never heard of: the far side is newer.
-        // Dropping the row loses one session; guessing would file it under a
-        // harness it is not and put its cost in the wrong column.
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

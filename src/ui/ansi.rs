@@ -47,6 +47,14 @@ pub(super) fn wrapped(text: &str, base: Style, width: usize, indent: &str) -> Ve
 /// `text` with every escape sequence and control character taken out, for a
 /// one-line cell where colour has no room to mean anything.
 pub(super) fn strip(text: &str) -> String {
+    // Nothing for the state machine to take out: the state machine costs a
+    // `Vec<(char, Style)>` — 24 bytes a character — a `String` per styled run,
+    // a `Vec<String>` of lines and a `join`, all to copy a string that had no
+    // escapes in it. That is the common case: a tool's argument, which is what
+    // this is called for, is usually plain.
+    if plain(text) {
+        return text.to_owned();
+    }
     lines_with(text, Style::default(), |c| c)
         .iter()
         .map(|line| {
@@ -57,6 +65,17 @@ pub(super) fn strip(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Whether [`lines_with`] would hand `text` back unchanged.
+///
+/// Every escape this module eats begins with ESC or the eight-bit CSI, and both
+/// are control characters, so "no control character at all" is the whole test —
+/// and it is also exactly the test for "no escape", since a SGR needs one. It
+/// is stricter than it needs to be for a string holding a bare tab or newline,
+/// which is the rare side and still correct.
+fn plain(text: &str) -> bool {
+    !text.chars().any(char::is_control)
 }
 
 /// [`lines`] with the colour fold handed in, so the sixteen-colour path is
@@ -413,5 +432,37 @@ mod tests {
     #[test]
     fn strip_leaves_only_the_text() {
         assert_eq!(strip("\x1b[31mcargo\x1b[0m test\x07"), "cargo test");
+    }
+
+    /// The path that skips the state machine has to agree with it on every
+    /// input, not merely on plain ones — a tool argument with a newline in it
+    /// is the case that would catch a shortcut which took `\n` for escape-free.
+    #[test]
+    fn the_shortcut_agrees_with_the_state_machine() {
+        for text in [
+            "",
+            "cargo test",
+            "  indented  ",
+            "a\nb",
+            "trailing\n",
+            "\n",
+            "tab\there",
+            "\x1b[31mcargo\x1b[0m test",
+            "\x07bell",
+            "\rprogress",
+            "café — plain",
+        ] {
+            let through = lines_with(text, Style::default(), |c| c)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(strip(text), through, "{text:?}");
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 [← all harnesses](README.md) · parser: [`src/session/pi.rs`](../../src/session/pi.rs)
 
-The simplest of the seven to read, and the one that records its own costs most
+The simplest of the eight to read, and the one that records its own costs most
 completely. What it does not record is anything about the context window or the
 outcome of a tool call, and those two gaps are the whole of its `─` column.
 

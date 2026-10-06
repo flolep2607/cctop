@@ -190,8 +190,11 @@ impl App {
             .any(|session| self.seen.is_done(&session.key()))
     }
 
-    /// The session being looked at, as [`seen`](super::seen) counts looking:
-    /// the focused pane's agent in a tab, the selected row on the dashboard.
+    /// The key of the session being looked at, as [`seen`](super::seen) counts
+    /// looking: the focused pane's agent in a tab, the selected row on the
+    /// dashboard.
+    ///
+    /// One `String`, where the walk below used to build one per live session.
     fn viewed_session(&self) -> Option<String> {
         let pid = match self.tab {
             0 => return self.selected_session().map(Session::key),
@@ -214,14 +217,11 @@ impl App {
     /// be a mark on the thing you are reading.
     pub(super) fn observe_seen(&mut self) -> bool {
         let viewed = self.viewed_session();
-        let live: Vec<(String, seen::Phase)> = self
-            .sessions
-            .iter()
-            .filter(|session| session.is_running())
-            .map(|session| (session.key(), seen::Phase::of(session.activity_state)))
-            .collect();
         self.seen.observe(
-            live.iter().map(|(key, phase)| (key.as_str(), *phase)),
+            self.sessions
+                .iter()
+                .filter(|session| session.is_running())
+                .map(|session| (session, seen::Phase::of(session.activity_state))),
             viewed.as_deref(),
         )
     }
@@ -306,17 +306,29 @@ impl App {
         // Always run, even with nothing new to stamp: `asking_for` is only
         // ever set here, and a row has to lose it when the prompt that named
         // it went away — including by the last report being swept.
+        let peeked = &self.peeked;
+        let screens = &self.screen_read;
         for session in &mut self.sessions {
             // The screen, when it is being read and says something, outranks
             // every report: it is what the agent is showing *now*, where a hook
             // event is what it said last — late for a permission prompt, stale
             // for a question already answered, absent when hooks are not
-            // installed at all. See [`App::read_screens`].
+            // installed at all. See [`App::read_screens`] and [`Self::screened`].
             let screened = session
                 .root_pid()
-                .and_then(|pid| self.screen_read.get(&pid));
+                .and_then(|pid| peeked.get(&pid).or_else(|| screens.get(&pid)));
             session.apply_reports(self.reports.report(&session.session_id), screened);
         }
+    }
+
+    /// What the screen of the agent running as `pid` last said, from whichever
+    /// of the two sources has it.
+    ///
+    /// The detached sweep wins, as it did when its answers were copied over the
+    /// pane reads into one map — a pid it can name is a pane rmux owns the
+    /// screen of, not one this process has a parser for.
+    fn screened(&self, pid: u32) -> Option<&crate::peek::Screened> {
+        self.peeked.get(&pid).or_else(|| self.screen_read.get(&pid))
     }
 
     /// Read every tab's agent off its screen, when the setting asks for it. True when any verdict changed, so the rows are restamped.
@@ -331,37 +343,67 @@ impl App {
     ///
     /// A detached rmux tab's screen is read too, just on a slower clock: each
     /// one is a `capture-pane` of a session this cctop holds no parser for,
-    /// where an attached pane's screen is already in memory. The reads merge
-    /// into one map — a pid knows one verdict however its screen was reached.
+    /// where an attached pane's screen is already in memory. Both answers are
+    /// merged by [`Self::screened`] — a pid knows one verdict however its screen
+    /// was reached — rather than into one map rebuilt every tick.
     pub(super) fn read_screens(&mut self) -> bool {
         if self.settings.read_screen != Some(true) {
-            let had = !self.screen_read.is_empty();
+            let had = !self.screen_read.is_empty() || !self.peeked.is_empty();
             self.screen_read.clear();
             self.peeked.clear();
             self.peeked_at = None;
+            self.peeked_listing = None;
             return had;
         }
-        let mut read: HashMap<u32, crate::peek::Screened> = self
+        let read: HashMap<u32, crate::peek::Screened> = self
             .tabs
-            .iter()
-            .flat_map(|tab| &tab.panes)
+            .iter_mut()
+            .flat_map(|tab| tab.panes.iter_mut())
             .filter_map(|pane| Some((pane.agent(), pane.read_screen()?)))
             .collect();
+        // A detached sweep that has landed. Its answers are merged at the lookup
+        // rather than copied into `screen_read` every tick: with two panes at
+        // 60 Hz that is 120 copies a second of a map nothing has changed, and
+        // the comparison that decides whether a row is restamped wanted the
+        // answer to have moved, not a fresh copy of it.
+        let mut peeked_changed = false;
+        if let Some(rx) = &self.peeked_listing {
+            match rx.try_recv() {
+                Ok(peeked) => {
+                    self.peeked_listing = None;
+                    peeked_changed = peeked != self.peeked;
+                    self.peeked = peeked;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.peeked_listing = None,
+            }
+        }
         let due = self.peeked_at.is_none_or(|at| at.elapsed() >= PEEK_EVERY);
-        if due {
+        if due && self.peeked_listing.is_none() {
             self.peeked_at = Some(Instant::now());
-            self.peeked = self
+            let names: Vec<(u32, String)> = self
                 .tabs
                 .iter()
                 .filter_map(|tab| {
-                    let shared = tab.shared.as_ref()?;
-                    let screened = crate::peek::named(&shared.name)?;
-                    Some((shared.pid?, screened))
+                    Some((tab.shared.as_ref()?.pid?, tab.shared.as_ref()?.name.clone()))
                 })
                 .collect();
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.peeked_listing = Some(rx);
+            std::thread::spawn(move || {
+                // Each one is a `capture-pane` subprocess, so the sweep is off
+                // the draw loop: a slow rmux delays the reading, never the frame.
+                let peeked = names
+                    .into_iter()
+                    .filter_map(|(pid, name)| Some((pid, crate::peek::named(&name)?)))
+                    .collect();
+                let _ = tx.send(peeked);
+            });
         }
-        read.extend(self.peeked.iter().map(|(pid, read)| (*pid, read.clone())));
-        let changed = read != self.screen_read;
+        // The pane half on its own: it is what moved, and comparing it is what
+        // says whether anything needs restamping. A changed detached reading
+        // counts too, which is why both are folded in before the verdict.
+        let changed = peeked_changed || read != self.screen_read;
         self.screen_read = read;
         changed
     }
@@ -410,7 +452,7 @@ impl App {
     /// panes and this runs once per frame, so a map would be state to keep
     /// correct in exchange for nothing measurable.
     pub(super) fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
-        let screen = self.screen_read.get(&pid).map(|read| read.signal);
+        let screen = self.screened(pid).map(|read| read.signal);
         screen.or_else(|| self.reported_by(pid)).or_else(|| {
             self.sessions
                 .iter()

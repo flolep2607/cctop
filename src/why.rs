@@ -19,6 +19,7 @@
 
 use crate::loader::Loader;
 use crate::pricing::Plan;
+use crate::session::Session;
 
 pub const HELP: &str = "\
 cctop why — why cctop thinks a session is running, or is not
@@ -33,6 +34,36 @@ that session: whether a process was matched to it, which one, and by which rule
 A session id may be shortened, as long as it is unambiguous.
 ";
 
+/// The sessions `id` names, or the sentence explaining why it names none or too
+/// many.
+///
+/// A prefix that matches two is refused rather than printed twice: this answers
+/// "why does this row say so", and the answer for a prefix of somebody else's
+/// session is a confident lie about the wrong one. The list is what makes the
+/// refusal actionable — the same bargain [`crate::cli`] makes, since a prefix is
+/// ambiguous only relative to sessions the user cannot see from here.
+fn resolve<'a>(sessions: &'a [Session], id: &str) -> Result<Vec<&'a Session>, String> {
+    let matched: Vec<_> = sessions
+        .iter()
+        .filter(|s| s.session_id.starts_with(id))
+        .collect();
+    match matched.as_slice() {
+        [] => Err(format!(
+            "No session here starts with {id}.\n`cctop -l` lists them; `cctop doctor` \
+             says where they are read from."
+        )),
+        [only] => Ok(vec![*only]),
+        many => Err(format!(
+            "`{id}` matches {} sessions:\n{}",
+            many.len(),
+            many.iter()
+                .map(|s| format!("  {} ({})", s.session_id, s.provider.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
+    }
+}
+
 pub fn run(argv: &[String]) -> i32 {
     if argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{HELP}");
@@ -46,20 +77,16 @@ pub fn run(argv: &[String]) -> i32 {
     let sessions = loader.load(Plan::Retail);
     let attributions = loader.attributions().to_vec();
 
-    let matching: Vec<_> = match wanted {
+    let matching: Vec<&Session> = match wanted {
         None => sessions.iter().collect(),
-        Some(id) => sessions
-            .iter()
-            .filter(|s| s.session_id.starts_with(id.as_str()))
-            .collect(),
+        Some(id) => match resolve(&sessions, id) {
+            Ok(matched) => matched,
+            Err(why) => {
+                println!("{why}");
+                return 1;
+            }
+        },
     };
-    if let Some(id) = wanted
-        && matching.is_empty()
-    {
-        println!("No session here starts with {id}.");
-        println!("`cctop -l` lists them; `cctop doctor` says where they are read from.");
-        return 1;
-    }
 
     println!("{} agent process(es) attributed:", attributions.len());
     if attributions.is_empty() {
@@ -126,4 +153,54 @@ pub fn run(argv: &[String]) -> i32 {
         println!();
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pricing::Provider;
+
+    fn sessions() -> Vec<Session> {
+        [
+            ("11111111-aaaa-4000-8000-000000000001", Provider::Claude),
+            ("22222222-bbbb-4000-8000-000000000002", Provider::Codex),
+        ]
+        .into_iter()
+        .map(|(id, provider)| Session::new(provider, id.to_string()))
+        .collect()
+    }
+
+    /// The help says a prefix is allowed, and it is — as long as it picks out
+    /// one session, which is what the whole command is about: a confident
+    /// explanation of somebody else's row is worse than no explanation.
+    #[test]
+    fn a_prefix_that_names_one_session_explains_it() {
+        let sessions = sessions();
+        let matched = resolve(&sessions, "2222").expect("an unambiguous prefix");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(
+            matched[0].session_id,
+            "22222222-bbbb-4000-8000-000000000002"
+        );
+    }
+
+    #[test]
+    fn a_prefix_that_names_several_says_which_ones() {
+        let sessions = [("abc-1", Provider::Claude), ("abc-2", Provider::Codex)]
+            .into_iter()
+            .map(|(id, provider)| Session::new(provider, id.to_string()))
+            .collect::<Vec<_>>();
+        let why = resolve(&sessions, "abc").expect_err("two sessions share the prefix");
+        assert!(why.contains("2 sessions"), "{why}");
+        // Both named, with their harness, so the user can lengthen the prefix.
+        assert!(why.contains("abc-1 (claude)"), "{why}");
+        assert!(why.contains("abc-2 (codex)"), "{why}");
+    }
+
+    #[test]
+    fn a_prefix_that_names_nothing_says_where_to_look() {
+        let why = resolve(&sessions(), "zzz").expect_err("no such session");
+        assert!(why.contains("No session here starts with zzz"), "{why}");
+        assert!(why.contains("doctor"), "{why}");
+    }
 }

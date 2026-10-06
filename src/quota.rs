@@ -4,7 +4,7 @@ use crate::config;
 use crate::util;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -647,7 +647,7 @@ pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
     // Written through a temporary file so an interrupted write cannot truncate
     // the config, and created unreadable to anyone else from the start:
     // widening a file that already holds a secret is a window, however short.
-    let tmp = path.with_extension("toml.cctop-tmp");
+    let tmp = temp_beside(path, "toml");
     std::fs::write(&tmp, doc.to_string())?;
     restrict(&tmp)?;
     std::fs::rename(&tmp, path)?;
@@ -938,8 +938,14 @@ struct Cached {
 /// the token itself is not written to a directory `--clear-cache` treats as
 /// disposable.
 ///
-/// ponytail: no lock, so two processes due in the same instant both fetch —
-/// one extra request per interval at worst.
+/// ponytail: the lock is held around the file and not around the request, so
+/// two processes due in the same instant both fetch — one extra request per
+/// interval at worst. It is held at all because that is the difference between
+/// an extra request and a lost entry: the re-read below has to be a snapshot of
+/// a file nobody is rewriting, or the writer that finishes second publishes a
+/// map that never saw the first one's account. That price was documented in
+/// requests and paid in entries, which with several accounts converges on
+/// nothing being cached at all — the 429 storm the interval exists to prevent.
 fn cached(token: &str, fetch: impl FnOnce() -> ProviderStatus) -> ProviderStatus {
     cached_in(
         &config::CACHE_DIR.join("usage.json"),
@@ -971,8 +977,19 @@ fn cached_in(
         return hit.status;
     }
     let status = fetch();
-    // Read again rather than reusing the first read: the request took a while,
-    // and another cctop may have stored its own accounts in the meantime.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Some(_held) = Writer::take(path, LOCK_PATIENCE) else {
+        // Another cctop on the machine is rewriting the file, and it has the
+        // same directory. Standing aside loses this answer for one interval,
+        // which is a request; writing anyway would lose the account that
+        // process just stored.
+        return status;
+    };
+    // Read here rather than above: the request took a while, another cctop may
+    // have stored its own accounts in the meantime, and this is the first read
+    // taken while nobody else can be writing one.
     let mut all = read();
     // A day past due is a token nobody polls any more.
     all.retain(|_, c| c.due > now - 86_400);
@@ -984,13 +1001,69 @@ fn cached_in(
         },
     );
     // Best effort: a cache that cannot be written costs a request, not an answer.
-    if let (Some(parent), Ok(json)) = (path.parent(), serde_json::to_vec(&all)) {
-        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-        let _ = std::fs::create_dir_all(parent)
-            .and_then(|()| std::fs::write(&tmp, json))
-            .and_then(|()| std::fs::rename(&tmp, path));
+    if let Ok(json) = serde_json::to_vec(&all) {
+        let tmp = temp_beside(path, "json");
+        let _ = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path));
     }
     status
+}
+
+/// How long a writer waits for the file to be free before deciding it is not
+/// worth having.
+///
+/// Long enough that the cctop that is usually mid-write is nearly always waited
+/// out, short enough that it is not worth a UI thread parked on it. The lock is
+/// only ever held for the write itself — a poll of the provider takes seconds,
+/// and holding across that would serialise every account on the machine behind
+/// the slowest one.
+const LOCK_PATIENCE: Duration = Duration::from_millis(200);
+
+/// An exclusive `flock` on the usage cache, released when this is dropped — or
+/// when the process is, since the kernel releases a lock on the last close of
+/// its descriptor.
+struct Writer {
+    _held: std::fs::File,
+}
+
+impl Writer {
+    /// Take the lock on `path`'s cache, or `None` if it is still held after
+    /// `patience`. Never blocks on it: the holder may be a cctop that is itself
+    /// wedged, and a quota figure is not worth waiting for anything for.
+    fn take(path: &Path, patience: Duration) -> Option<Writer> {
+        use std::os::fd::AsRawFd;
+        let lock = path.with_extension("json.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock)
+            .ok()?;
+        let started = std::time::Instant::now();
+        loop {
+            // SAFETY: flock on a descriptor this function owns for the call.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Some(Writer { _held: file });
+            }
+            if started.elapsed() >= patience {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// A temporary name beside `path` that no other writer can already be holding.
+///
+/// A fixed one is a race between processes, not between threads: two cctops
+/// `File::create` the same inode, and whichever renames first publishes a file
+/// the other is still writing into. The pid separates processes — one usage
+/// cache is shared by every cctop on the machine — and the counter separates
+/// threads inside one.
+fn temp_beside(path: &Path, extension: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let seq = WRITES.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("{extension}.{}.{seq}", std::process::id()))
 }
 
 pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
@@ -1299,6 +1372,71 @@ mod tests {
         });
         cached_in(&path, "tok-c", t0 + INTERVAL_SECS as i64 + 1, fetch);
         assert_eq!(asked.get(), 3);
+    }
+
+    /// The file is read, changed and written whole, so two writers that both
+    /// got that far without knowing about each other do not merge: the second
+    /// one to rename publishes a map it read before the first one's entry was
+    /// in it. Every account but one is then uncached and asked for again on
+    /// every interval, which is the 429 the interval exists to avoid.
+    ///
+    /// This is the cost the `ponytail:` note above used to price in requests and
+    /// was paying in entries.
+    #[test]
+    fn accounts_stored_at_the_same_time_all_survive() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let t0 = chrono::Utc::now().timestamp();
+        let accounts = 6;
+
+        // Every writer is released from its fetch at the same instant, so they
+        // all reach the read-modify-write together — the interleaving that
+        // loses entries, rather than three comfortable turns of a lock file.
+        let together = Arc::new(Barrier::new(accounts));
+        let writers: Vec<_> = (0..accounts)
+            .map(|n| {
+                let path = path.clone();
+                let together = Arc::clone(&together);
+                std::thread::spawn(move || {
+                    cached_in(&path, &format!("tok-{n}"), t0, || {
+                        together.wait();
+                        ProviderStatus::Ok(ProviderQuota::default())
+                    })
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("each writer returns");
+        }
+
+        // Every account is cached, which is the only thing the file is for.
+        for n in 0..accounts {
+            let again = cached_in(&path, &format!("tok-{n}"), t0 + 60, || {
+                panic!("tok-{n} was dropped from the file by another writer");
+            });
+            assert!(matches!(again, ProviderStatus::Ok(_)), "tok-{n}: {again:?}");
+        }
+    }
+
+    /// The temporary file is named for the writer, not fixed, so two cctops
+    /// writing the same cache cannot land on one inode. What is left behind is
+    /// the cache and its lock, and nothing half-written.
+    #[test]
+    fn a_stored_cache_leaves_no_temporary_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let t0 = chrono::Utc::now().timestamp();
+        cached_in(&path, "tok-a", t0, || {
+            ProviderStatus::Ok(ProviderQuota::default())
+        });
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["usage.json", "usage.json.lock"]);
     }
 
     /// The token comes back whole however the screen wrapped it: by the

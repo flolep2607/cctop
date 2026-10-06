@@ -3,6 +3,7 @@
 use crate::session::{ActivityState, Session, Subagent, SubagentStatus};
 use crate::util;
 use chrono::{DateTime, Utc};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -309,31 +310,43 @@ pub fn parse_hidden(list: &str) -> Vec<ColumnId> {
 /// root that reads eight homes, of which only one holds any sessions, has one
 /// user on screen — and a column naming that one on every row answers nothing.
 pub fn users_in_view<'a>(sessions: impl IntoIterator<Item = &'a Session>) -> usize {
-    let mut seen: Vec<Option<&str>> = Vec::new();
+    // Two slots rather than a Vec: this is asked per frame by the table, and the
+    // answer is never more than two, so a heap for it would be one allocation a
+    // frame to hold a pair of borrowed names.
+    let mut seen: [Option<&str>; 2] = [None, None];
+    let mut n = 0;
     for s in sessions {
         let owner = s.owner.as_deref();
-        if !seen.contains(&owner) {
-            seen.push(owner);
+        if !seen[..n].contains(&owner) {
+            seen[n] = owner;
+            n += 1;
             // Two is the whole question; counting on is a walk for nothing.
-            if seen.len() > 1 {
+            if n > 1 {
                 break;
             }
         }
     }
-    seen.len()
+    n
 }
 
-/// `hidden` plus the columns the data itself has nothing to put in.
+/// [`visible_columns`] with the columns the data itself has nothing to put in.
+///
+/// That is the USER column while there is one user in view, and it is asked of
+/// the sessions rather than folded into `hidden` first, because the table asks
+/// on every frame: it used to build a `Vec` of hidden columns per frame to
+/// carry a fact that is one column being in or out.
 ///
 /// Separate from the list the user and `$CCTOP_COLUMNS_HIDE` control, because
 /// it changes as sessions come and go: another user's first session, landing
 /// mid-run, has to bring USER in without anyone asking.
-pub fn hidden_for(hidden: &[ColumnId], sessions: &[Session]) -> Vec<ColumnId> {
-    let mut out = hidden.to_vec();
-    if users_in_view(sessions) < 2 && !out.contains(&ColumnId::User) {
-        out.push(ColumnId::User);
-    }
-    out
+pub fn visible_columns_among(
+    total: u16,
+    hidden: &[ColumnId],
+    keep: &[ColumnId],
+    sessions: &[Session],
+) -> Vec<&'static Column> {
+    let one_user = users_in_view(sessions) < 2;
+    layout(total, hidden, keep, |c| one_user && c.id == ColumnId::User)
 }
 
 /// The columns to draw in `total` cells of width, widest-first casualties last.
@@ -348,9 +361,26 @@ pub fn hidden_for(hidden: &[ColumnId], sessions: &[Session]) -> Vec<ColumnId> {
 /// show one figure: the idle view is sorted by memory, and MEM is among the
 /// first columns a narrow table gives up. A column the user hid stays hidden —
 /// `keep` outranks width, not their choice.
+///
+/// This is the plain form, with nothing ruled out by the data; the table asks
+/// [`visible_columns_among`], and the tests ask for this.
+#[cfg(test)]
 pub fn visible_columns(total: u16, hidden: &[ColumnId], keep: &[ColumnId]) -> Vec<&'static Column> {
-    let mut cols: Vec<&'static Column> =
-        COLUMNS.iter().filter(|c| !hidden.contains(&c.id)).collect();
+    layout(total, hidden, keep, |_| false)
+}
+
+/// [`visible_columns`]'s rule, with the columns the data itself rules out
+/// dropped through `drop` as well.
+fn layout(
+    total: u16,
+    hidden: &[ColumnId],
+    keep: &[ColumnId],
+    drop: impl Fn(&Column) -> bool,
+) -> Vec<&'static Column> {
+    let mut cols: Vec<&'static Column> = COLUMNS
+        .iter()
+        .filter(|c| !hidden.contains(&c.id) && !drop(c))
+        .collect();
 
     // Drop the least important column until the rest fit, keeping display order.
     while cols.len() > 1 && required_width(&cols) > total {
@@ -381,123 +411,118 @@ fn age_secs(s: &Session, now: &DateTime<Utc>) -> Option<i64> {
 }
 
 /// Cell text for one column. Empty means "nothing worth showing".
-pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
+///
+/// Borrowed where the text is already on the session — the harness, the
+/// profile, the label, and every fixed glyph — because this is asked per cell
+/// per visible row per frame, and an owned `String` per cell is an allocation
+/// per cell for text that already existed.
+pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow<'a, str> {
+    use Cow::{Borrowed, Owned};
     match id {
         ColumnId::Status => match s.activity_state {
             // A ring rather than a disc, so the one row that is actually
             // blocking an agent is findable without relying on colour alone.
-            ActivityState::Asking => "◉".into(),
-            ActivityState::WaitingForInput | ActivityState::ApiError => "●".into(),
-            ActivityState::Working if s.is_running() => "●".into(),
-            ActivityState::Working => "○".into(),
+            ActivityState::Asking => Borrowed("◉"),
+            ActivityState::WaitingForInput | ActivityState::ApiError => Borrowed("●"),
+            ActivityState::Working if s.is_running() => Borrowed("●"),
+            ActivityState::Working => Borrowed("○"),
         },
-        ColumnId::Last => util::relative_age(&s.last_active, now),
-        ColumnId::Duration => util::session_duration(&s.started_at, &s.last_active),
+        ColumnId::Last => Owned(util::relative_age(&s.last_active, now)),
+        ColumnId::Duration => Owned(util::session_duration(&s.started_at, &s.last_active)),
         ColumnId::Cost => match s.total_cost {
-            _ if !s.cost_available => "─".into(),
-            _ if s.cost_is_free => "FREE".into(),
-            Some(c) => util::compact_usd(c),
-            None => "incl".into(),
+            _ if !s.cost_available => Borrowed("─"),
+            _ if s.cost_is_free => Borrowed("FREE"),
+            Some(c) => Owned(util::compact_usd(c)),
+            None => Borrowed("incl"),
         },
         ColumnId::CostHour => {
             if !s.cost_available {
-                "─".into()
+                Borrowed("─")
             } else if s.cost_is_free {
-                "FREE".into()
+                Borrowed("FREE")
             } else if s.total_cost.is_none() {
-                "incl".into()
+                Borrowed("incl")
             } else if s.cost_hour > 0.0 {
-                util::compact_usd(s.cost_hour)
+                Owned(util::compact_usd(s.cost_hour))
             } else {
-                "─".into()
+                Borrowed("─")
             }
         }
         ColumnId::CostToday => {
             if !s.cost_available {
-                "─".into()
+                Borrowed("─")
             } else if s.cost_is_free {
-                "FREE".into()
+                Borrowed("FREE")
             } else if s.total_cost.is_none() {
-                "incl".into()
+                Borrowed("incl")
             } else if s.cost_today > 0.0 {
-                util::compact_usd(s.cost_today)
+                Owned(util::compact_usd(s.cost_today))
             } else {
-                "─".into()
+                Borrowed("─")
             }
         }
         ColumnId::Context => match &s.context {
-            None => "─".into(),
+            None => Borrowed("─"),
             // Only while something is there to finish it. A session that
             // compacted and stopped keeps its last measured percentage, which is
             // what the context panel breaks down for the same session.
-            Some(_) if s.is_compacting() => "COMPCT".into(),
+            Some(_) if s.is_compacting() => Borrowed("COMPCT"),
             Some(c) => {
                 let pct = c.percent_to_compact().round() as i64;
                 if pct > 100 {
-                    ">100%".into()
+                    Borrowed(">100%")
                 } else {
-                    format!("{pct}%")
+                    Owned(format!("{pct}%"))
                 }
             }
         },
         ColumnId::Cpu => match &s.process {
-            Some(p) => format!("{:.1}", p.cpu),
-            None => "─".into(),
+            Some(p) => Owned(format!("{:.1}", p.cpu)),
+            None => Borrowed("─"),
         },
-        ColumnId::Memory => s
-            .process
-            .as_ref()
-            .map(|p| util::compact_bytes(p.memory))
-            .unwrap_or_default(),
-        ColumnId::Tools => {
-            if s.tool_count > 0 {
-                s.tool_count.to_string()
-            } else {
-                String::new()
-            }
-        }
+        ColumnId::Memory => match &s.process {
+            Some(p) => Owned(util::compact_bytes(p.memory)),
+            None => Borrowed(""),
+        },
+        ColumnId::Tools => match s.tool_count > 0 {
+            true => Owned(s.tool_count.to_string()),
+            false => Borrowed(""),
+        },
         // Zero is drawn as a dash rather than as `0%`: a clean session is the
         // norm, and a column of noughts is a column nobody reads.
         ColumnId::Errors => match s.error_rate() {
-            None | Some(0.0) => "─".into(),
-            Some(rate) => format!("{}%", (rate * 100.0).round() as i64),
+            None | Some(0.0) => Borrowed("─"),
+            Some(rate) => Owned(format!("{}%", (rate * 100.0).round() as i64)),
         },
         ColumnId::TokenTotal => {
             let total = s.input_tokens + s.output_tokens;
-            if total > 0 {
-                util::compact_tokens(total)
-            } else {
-                String::new()
+            match total > 0 {
+                true => Owned(util::compact_tokens(total)),
+                false => Borrowed(""),
             }
         }
-        ColumnId::TokenRate => {
-            if s.tokens_per_min > 0.0 {
-                util::compact_tokens(s.tokens_per_min.round() as u64)
-            } else {
-                String::new()
-            }
-        }
-        ColumnId::Model => util::short_model(&s.model),
-        ColumnId::Harness => {
-            if s.harness.is_empty() {
-                "─".into()
-            } else {
-                s.harness.clone()
-            }
-        }
+        ColumnId::TokenRate => match s.tokens_per_min > 0.0 {
+            true => Owned(util::compact_tokens(s.tokens_per_min.round() as u64)),
+            false => Borrowed(""),
+        },
+        ColumnId::Model => Owned(util::short_model(&s.model)),
+        ColumnId::Harness => match s.harness.is_empty() {
+            true => Borrowed("─"),
+            false => Borrowed(s.harness.as_str()),
+        },
         // A session with no hooks cannot report this, and "─" is the honest
         // answer: not "it asks about everything", which would be a guess about
         // the one column whose whole job is not to guess.
         ColumnId::Permission => match s.permission {
-            Some(p) => p.label().into(),
-            None => "─".into(),
+            Some(p) => Borrowed(p.label()),
+            None => Borrowed("─"),
         },
         // Blank rather than a dash for the ordinary case. This column is a
         // warning light, and a light that is on in every row is off.
         ColumnId::Conflict => match s.conflict {
-            Some(crate::collide::Overlap::File) => "⚠".into(),
-            Some(crate::collide::Overlap::Directory) => "·".into(),
-            None => String::new(),
+            Some(crate::collide::Overlap::File) => Borrowed("⚠"),
+            Some(crate::collide::Overlap::Directory) => Borrowed("·"),
+            None => Borrowed(""),
         },
         // The marker leads rather than trails: the column is ten cells wide
         // and a host name long enough to be cut would take a trailing one
@@ -505,21 +530,24 @@ pub fn render_cell(id: ColumnId, s: &Session, now: &DateTime<Utc>) -> String {
         // something to do, from the row's menu.
         ColumnId::Host => match &s.remote {
             Some(r) if matches!(r.skew, Some(crate::fleet::Skew::Older(_))) => {
-                format!("↑{}", r.host)
+                Owned(format!("↑{}", r.host))
             }
-            Some(r) => r.host.clone(),
-            None => "local".into(),
+            Some(r) => Borrowed(r.host.as_str()),
+            None => Borrowed("local"),
         },
         // Named for your own rows too. The column is only drawn once a second
         // user is in view (see `users_in_view`), and there a blank reads as
         // "nobody" rather than "you" — root's own rows most of all.
-        ColumnId::User => crate::config::user_label(s.owner.as_deref()).to_string(),
+        ColumnId::User => Borrowed(crate::config::user_label(s.owner.as_deref())),
         // Blank rather than a dash for a provider with no profiles: the column
         // is about Claude's config directories, and every other harness is not
         // missing one so much as not having the idea.
-        ColumnId::Profile => s.profile.clone().unwrap_or_default(),
-        ColumnId::Branch => branch_of(s).unwrap_or_else(|| "─".into()),
-        ColumnId::Project => s.display_label().to_string(),
+        ColumnId::Profile => Borrowed(s.profile.as_deref().unwrap_or_default()),
+        ColumnId::Branch => match branch_of(s) {
+            Some(branch) => Owned(branch),
+            None => Borrowed("─"),
+        },
+        ColumnId::Project => Borrowed(s.display_label()),
     }
 }
 
@@ -680,25 +708,41 @@ pub fn branch_of(s: &crate::session::Session) -> Option<String> {
 ///
 /// `git rev-parse` would be a subprocess per row per frame, and `git2` is a C
 /// library and a build step for what is one short file in a documented format.
+///
+/// The read happens with the lock *not* held: this is asked per visible row per
+/// frame and once per non-matching session per keystroke, and [`read_head`]
+/// walks the ancestors stat-ing for a `.git` before it reads a file — so paying
+/// that under a process-global mutex turned every expiry into a stall for every
+/// other thread asking any directory at all. Compute, then take the lock only to
+/// record the answer.
 fn branch(dir: &str) -> Option<String> {
+    let (cached, fresh) = {
+        let cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
+        let (name, fresh) = reading(&cache, dir);
+        (name.map(str::to_string), fresh)
+    };
+    if fresh {
+        return cached;
+    }
+    let read = read_uncached(dir);
     let mut cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
-    refresh(&mut cache, dir);
-    let (name, _) = reading(&cache, dir);
-    name.map(str::to_string)
+    // Another thread may have read it while the lock was off. Its answer is at
+    // least as recent as this one, so it is kept — the point of the TTL is that
+    // nobody re-reads for a while, not that this thread must be the one.
+    if !is_fresh(cache.get(dir)) {
+        cache.insert(dir.to_string(), (read.clone(), Instant::now()));
+    }
+    read
 }
 
-/// Bring `dir`'s reading up to date in the cache, reading `HEAD` if it has to.
-///
-/// Split out of [`branch`] so [`cmp_branch`] can put the same question to two
-/// directories under one lock rather than two.
-fn refresh(cache: &mut HashMap<String, Reading>, dir: &str) {
+/// The branch of `dir` from disk, and nothing else — no cache, no lock.
+fn read_uncached(dir: &str) -> Option<String> {
     // A row with no directory has no repository to ask, and reading one anyway
     // would ask about whichever checkout cctop itself was started in.
-    if dir.is_empty() || is_fresh(cache.get(dir)) {
-        return;
+    if dir.is_empty() {
+        return None;
     }
-    let branch = read_head(Path::new(dir));
-    cache.insert(dir.to_string(), (branch, Instant::now()));
+    read_head(Path::new(dir))
 }
 
 /// Whether a reading is still inside the TTL.
@@ -736,20 +780,29 @@ fn cmp_branch(a: &Session, b: &Session) -> Ordering {
         return branch_of(a).cmp(&branch_of(b));
     }
     let (ad, bd) = (a.label_source.as_str(), b.label_source.as_str());
-    let mut cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
     // One lookup per side rather than two: asking whether a name is fresh and
     // then asking for it hashes the same key twice, and the answer cannot come
     // out differently — a name inside the TTL is the answer for as long as it
-    // has been inside it.
+    // has been inside it. One lock for both sides for the same reason: the two
+    // names are compared against one snapshot of the cache, not two.
     {
+        let cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
         let (left, left_fresh) = reading(&cache, ad);
         let (right, right_fresh) = reading(&cache, bd);
         if left_fresh && right_fresh {
             return left.cmp(&right);
         }
     }
-    refresh(&mut cache, ad);
-    refresh(&mut cache, bd);
+    // Off the lock, because a read is an ancestor walk and a file read and this
+    // is a comparison inside a sort: see [`branch`]. Both sides are read before
+    // either is written back, so the two answers still describe one moment.
+    let reads = (read_uncached(ad), read_uncached(bd));
+    let mut cache = BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    for (dir, read) in [(ad, reads.0), (bd, reads.1)] {
+        if !dir.is_empty() {
+            cache.insert(dir.to_string(), (read, Instant::now()));
+        }
+    }
     let (left, _) = reading(&cache, ad);
     let (right, _) = reading(&cache, bd);
     left.cmp(&right)
@@ -991,17 +1044,22 @@ mod tests {
         let mut theirs = session("b");
         theirs.owner = Some("winshen".into());
 
+        let shown = |hidden: &[ColumnId], sessions: &[Session]| {
+            visible_columns_among(500, hidden, &[], sessions)
+                .iter()
+                .any(|c| c.id == ColumnId::User)
+        };
         let only_mine = [mine.clone(), mine.clone()];
         assert_eq!(users_in_view(&only_mine), 1);
-        assert!(hidden_for(&[], &only_mine).contains(&ColumnId::User));
+        assert!(!shown(&[], &only_mine), "one user in view hides USER");
         // Somebody else's sessions alone are still one user.
-        assert!(hidden_for(&[], std::slice::from_ref(&theirs)).contains(&ColumnId::User));
+        assert!(!shown(&[], std::slice::from_ref(&theirs)));
 
         let both = [mine.clone(), theirs.clone()];
         assert_eq!(users_in_view(&both), 2);
-        assert!(!hidden_for(&[], &both).contains(&ColumnId::User));
+        assert!(shown(&[], &both), "a second user brings USER in");
         // An explicit hide still wins.
-        assert!(hidden_for(&[ColumnId::User], &both).contains(&ColumnId::User));
+        assert!(!shown(&[ColumnId::User], &both));
 
         let now = Utc::now();
         assert_eq!(render_cell(ColumnId::User, &theirs, &now), "winshen");

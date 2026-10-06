@@ -45,6 +45,19 @@ accept it with `cargo insta review` (needs `cargo install cargo-insta`) or with
 `INSTA_UPDATE=always cargo test`, and commit the `.snap` files that changed. CI
 only compares against the committed files and never writes new ones.
 
+## Run only the tests your change can break
+
+`cargo test --all-targets` is 1295 tests: 58 seconds of wall time for about 11
+seconds of CPU. Nearly all of that is waiting — `thread::sleep`, real ptys,
+real subprocesses — which means it is both slow and *load-sensitive*: two of
+those tests assert wall-clock margins, so several lanes running the suite at
+once turn them red for reasons unrelated to anyone's change. On a busy machine a
+full-suite failure is not evidence until you have re-run it alone.
+
+While working, run `tools/targeted-test.sh`, which maps changed files to the
+tests that cover them (`src/ui/filter.rs` → `ui::filter::`), and saves the full
+suite for one final run on its own. `CONTRIBUTING.md` has the details.
+
 ## cctop is Linux-only
 
 There is one platform, and it is Linux. macOS and Windows were supported once

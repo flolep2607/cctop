@@ -898,10 +898,13 @@ fn live_sessions_for_group<'a>(
     process_count: usize,
     claimed: &HashMap<String, u32>,
 ) -> Vec<&'a Session> {
+    let mut key = String::new();
     let mut live: Vec<&Session> = candidates
         .iter()
         .copied()
-        .filter(|s| !claimed.contains_key(&s.key()))
+        // One buffer for the whole filter: a candidate's key is looked up and
+        // dropped, and this runs for every process group on every refresh.
+        .filter(|s| !claimed.contains_key(s.key_into(&mut key)))
         .take(process_count)
         .collect();
     live.sort_by_key(|s| util::parse_ts(&s.started_at));
@@ -986,10 +989,13 @@ fn resumed_key(
     uuid: &str,
     claimed: &HashMap<String, u32>,
 ) -> String {
+    // Written into a buffer this reuses: the key is looked up and dropped for
+    // every candidate, and this runs for every process with a `--resume` on it.
+    let mut key = String::new();
     candidates
         .unwrap_or_default()
         .iter()
-        .find(|s| !claimed.contains_key(&s.key()))
+        .find(|s| !claimed.contains_key(s.key_into(&mut key)))
         .map(|s| s.key())
         .unwrap_or_else(|| format!("{}:{uuid}", provider.as_str()))
 }
@@ -1153,6 +1159,60 @@ mod tests {
 
         // Nothing is attributed when no process is running in the directory.
         assert!(live_sessions_for_group(&candidates, 0, &HashMap::new()).is_empty());
+    }
+
+    /// The two lookups above write each candidate's key into one buffer the pass
+    /// reuses, rather than formatting a `String` per row. What that must not
+    /// change is the comparison itself: keys that are prefixes of one another are
+    /// the case where a stale or half-copied buffer would match the wrong session,
+    /// so a session is skipped only on its own exact key.
+    #[test]
+    fn a_reused_key_buffer_matches_exactly_the_key_a_fresh_one_would() {
+        let short = session_at("a", "t0", "t1");
+        let long = session_at("a-long", "t2", "t3");
+        let candidates = vec![&short, &long];
+
+        // Claiming the longer key must not take the shorter one with it.
+        let claimed = HashMap::from([(long.key(), 7u32)]);
+        let live = live_sessions_for_group(&candidates, 2, &claimed);
+        assert_eq!(
+            live.iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+
+        // And claiming neither leaves both, so the buffer is not being reused
+        // with anything still in it.
+        let both = live_sessions_for_group(&candidates, 2, &HashMap::new());
+        assert_eq!(both.len(), 2);
+
+        // The same for a resume: a forked session's key is the one compared, and
+        // a claimed id that merely contains it claims nothing.
+        let mut original = session_at(UUID, "t0", "t1");
+        original.launch_id = UUID.to_string();
+        let mut forked = session_at("forked", "t2", "t3");
+        forked.launch_id = UUID.to_string();
+        let unrelated = HashMap::from([("codex:unrelated".to_string(), 9u32)]);
+        assert_eq!(
+            resumed_key(
+                Some(&[&forked, &original]),
+                crate::pricing::Provider::Claude,
+                UUID,
+                &unrelated
+            ),
+            "claude:forked"
+        );
+        assert_eq!(
+            resumed_key(
+                Some(&[&forked, &original]),
+                crate::pricing::Provider::Claude,
+                UUID,
+                &HashMap::from([(forked.key(), 9u32)])
+            ),
+            format!("claude:{UUID}"),
+            "the claimed candidate is skipped and the one below it is taken"
+        );
     }
 
     /// An exact UUID or title match owns its session; a shared working directory

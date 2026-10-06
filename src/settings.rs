@@ -323,6 +323,19 @@ impl Settings {
     }
 }
 
+/// Whether this setting is a switch the page flips, rather than a value it opens
+/// a field for.
+///
+/// Asked of the parser rather than listed by name here, because the three places
+/// that have to agree — the parser, [`Settings::value_of`] and the settings page
+/// — would otherwise be a list of the booleans in each. A knob added as `false`
+/// is then a toggle without a fourth edit, and one added as a number is not a
+/// toggle without a list entry that says so.
+pub fn is_toggle(name: &str) -> bool {
+    let as_true = Settings::parse(&format!("[settings]\n{name} = true"));
+    as_true.problems.is_empty() && as_true.value_of(name) == ("true".to_string(), true)
+}
+
 /// A threshold as the file may spell it: a number, whole or not, and never
 /// negative — a limit below zero would be a limit everything is always over.
 fn amount(item: &toml_edit::Item) -> Option<f64> {
@@ -705,6 +718,41 @@ mod tests {
             map.remap.is_empty(),
             "a default rebound onto itself is no change"
         );
+    }
+
+    /// The module doc says [`SETTINGS`] and [`BINDINGS`] are the whole schema,
+    /// so a knob cannot be documented in one place and missing from another.
+    /// Three places have to be kept in step with them and nothing enforced it:
+    /// the parser, which answers "no such setting" for a name it does not know,
+    /// [`Settings::value_of`], and the settings page. A name added to
+    /// [`SETTINGS`] and not to the first appears in the template and on the page
+    /// and is then refused on every subsequent load — silently, forever.
+    #[test]
+    fn every_setting_name_is_understood_by_the_parser_and_the_page() {
+        for (name, default, _) in SETTINGS {
+            let s = Settings::parse(&format!("[settings]\n{name} = {default}"));
+            assert!(s.problems.is_empty(), "{name}: {:?}", s.problems);
+            // And read back as what the file says, rather than as a field left
+            // unset — the same spelling, so a default cannot differ from itself.
+            assert_eq!(
+                s.value_of(name),
+                (default.to_string(), true),
+                "{name} did not survive a round trip"
+            );
+        }
+    }
+
+    /// A toggle has to be one the parser read as a boolean, because that is what
+    /// the page flips rather than opening a field for. Derived rather than listed
+    /// in the page, so this is the check that the derivation is right.
+    #[test]
+    fn a_toggle_is_a_setting_that_parses_as_a_boolean() {
+        for (name, _, _) in SETTINGS {
+            let parsed = Settings::parse(&format!("[settings]\n{name} = true"));
+            let expected = parsed.value_of(name) == ("true".to_string(), true);
+            assert_eq!(is_toggle(name), expected, "{name} and the parser disagree");
+        }
+        assert!(!is_toggle("no_such_setting"));
     }
 
     #[test]

@@ -105,7 +105,7 @@ reclaimed, so `compacted` is always false and the CTX% chart has no markers.
 
 ## Liveness
 
-The hardest of the seven, and the only one where cctop deliberately refuses to
+The hardest of the eight, and the only one where cctop deliberately refuses to
 guess. `codex resume <uuid>` matches directly. But the app-server — which is
 what actually runs most sessions — carries no rollout UUID on its command line,
 so an unmatched Codex PID falls through to the working-directory match, walking

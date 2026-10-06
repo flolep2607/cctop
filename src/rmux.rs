@@ -1863,6 +1863,7 @@ mod tests {
     /// Against a real daemon for the same reason the order test is — only rmux
     /// can say whether the option survived a process that has since gone.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn a_state_written_onto_a_session_survives_in_it() {
         if !available() {
             eprintln!("skipping: rmux not installed");
@@ -1901,6 +1902,7 @@ mod tests {
     /// it did. The unit above tests the sorting; this tests that there is
     /// anything to sort by.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn an_order_written_onto_a_session_survives_in_it() {
         if !available() {
             eprintln!("skipping: rmux not installed");
@@ -1973,6 +1975,7 @@ mod tests {
     /// answers and that what comes back is the operator's link and not the
     /// spectator's.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn a_real_rmux_session_comes_back_with_an_operator_link() {
         let _guard = test_lock();
         if !available() {
@@ -2139,6 +2142,7 @@ mod tests {
     /// every hook, transcript, and table row is keyed by. Nothing smaller than a
     /// real server tests it, since the answer comes from rmux itself.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn a_session_reports_the_agent_inside_it() {
         if !available() {
             eprintln!("skipping: rmux not installed");
@@ -2209,6 +2213,7 @@ mod tests {
     /// a missing field, and reading them in the wrong order would put an account
     /// name in the tab bar.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn a_session_remembers_which_account_its_agent_runs_as() {
         if !available() {
             eprintln!("skipping: rmux not installed");
@@ -2241,6 +2246,7 @@ mod tests {
     /// comes back as nothing — the empty string and the absent option read
     /// alike, which is what makes "no colour" writable at all.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn a_session_remembers_the_colour_its_tab_was_painted() {
         if !available() {
             eprintln!("skipping: rmux not installed");
@@ -2284,6 +2290,7 @@ mod tests {
     /// [`prepare`] works is a real session reporting what its pane actually got
     /// — the option can read back as set while the pane still holds rmux's 2000.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn a_prepared_session_holds_the_agent_with_room_to_scroll_back() {
         if !available() {
             eprintln!("skipping: rmux not installed");
@@ -2339,6 +2346,7 @@ mod tests {
     /// against real panes: one whose program emitted `?1000h` reads as wanting
     /// the mouse, and one running a plain `sleep` does not.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn mouse_wanted_is_the_pane_programs_own_answer() {
         if !available() {
             eprintln!("skipping: rmux not installed");
@@ -2371,6 +2379,7 @@ mod tests {
     /// blinked every unwatched working tab as if it were asking a question.
     /// Only a real detached session producing output shows the difference.
     #[test]
+    #[ignore = "needs a real rmux server"]
     fn a_detached_session_that_is_printing_never_reads_as_quiet() {
         if !available() {
             eprintln!("skipping: rmux not installed");

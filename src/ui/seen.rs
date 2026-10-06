@@ -36,6 +36,7 @@
 //! work, so it does not mark it. "Done" means a transition this process
 //! watched happen, not a guess about what you have read elsewhere.
 
+use crate::session::Session;
 use std::collections::HashSet;
 
 /// What a session is doing, as far as the unseen mark cares.
@@ -74,6 +75,9 @@ pub struct Seen {
     working: HashSet<String>,
     /// Stopped while nobody was looking.
     done: HashSet<String>,
+    /// This pass's keys, kept so the buffers are reused rather than formatted
+    /// afresh. See [`Seen::observe`].
+    live: Vec<String>,
 }
 
 impl Seen {
@@ -86,20 +90,39 @@ impl Seen {
     /// this says, and a pid reused by a later agent must not inherit it.
     pub fn observe<'a>(
         &mut self,
-        live: impl IntoIterator<Item = (&'a str, Phase)>,
+        live: impl IntoIterator<Item = (&'a Session, Phase)>,
         viewed: Option<&str>,
     ) -> bool {
         let before = self.done.len();
         let mut changed = false;
-        let mut present = HashSet::new();
-        for (key, phase) in live {
-            present.insert(key);
+        // The keys written first, into the buffer this struct keeps and reuses:
+        // the caller used to hand over a `Vec` holding a fresh `String` per live
+        // session, on a path that runs every pass of the loop. The `present` set
+        // below borrows them, which is why they are all written before it is
+        // built rather than as they are walked.
+        let live: Vec<(&Session, Phase)> = live.into_iter().collect();
+        self.live.clear();
+        self.live.reserve(live.len());
+        for (session, _) in &live {
+            let next = self.live.len();
+            self.live.push(String::new());
+            session.key_into(&mut self.live[next]);
+        }
+        let present: HashSet<&str> = self.live.iter().map(String::as_str).collect();
+        for ((_, phase), key) in live.iter().zip(&self.live) {
+            let key = key.as_str();
             let looking = viewed == Some(key);
-            match phase {
+            match *phase {
                 // Working again is a turn in progress, not one waiting to be
                 // read: the mark goes, and comes back when this one ends.
                 Phase::Working => {
-                    self.working.insert(key.to_string());
+                    // Asked first, because `insert` would format the key either
+                    // way: a session already known to be working — nearly all of
+                    // them, nearly always — would pay a `String` per pass to be
+                    // told what it already knew.
+                    if !self.working.contains(key) {
+                        self.working.insert(key.to_string());
+                    }
                     changed |= self.done.remove(key);
                 }
                 // Only a stop this process watched happen. Watched while you
@@ -131,27 +154,36 @@ impl Seen {
 mod tests {
     use super::*;
 
+    /// A row named `id`, which is what `observe` now takes rather than a key:
+    /// the key is written once per pass, into a buffer, where before it was a
+    /// `String` per live session handed over by the caller.
+    fn row(id: &str) -> Session {
+        Session::new(crate::pricing::Provider::Claude, id.into())
+    }
+
     /// The whole life of the mark: armed by working, fired by stopping
     /// unwatched, cleared by looking — and not re-fired by the same stop.
     #[test]
     fn a_turn_that_ends_unwatched_is_marked_until_looked_at() {
         let mut seen = Seen::default();
-        assert!(!seen.observe([("a", Phase::Working)], None));
-        assert!(!seen.is_done("a"), "working is not done");
+        let a = row("a");
+        let key = a.key();
+        assert!(!seen.observe([(&a, Phase::Working)], None));
+        assert!(!seen.is_done(&key), "working is not done");
 
-        assert!(seen.observe([("a", Phase::Stopped)], None), "no frame owed");
-        assert!(seen.is_done("a"), "an unwatched stop was not marked");
+        assert!(seen.observe([(&a, Phase::Stopped)], None), "no frame owed");
+        assert!(seen.is_done(&key), "an unwatched stop was not marked");
 
         // Still stopped, still unwatched: nothing new.
-        assert!(!seen.observe([("a", Phase::Stopped)], None));
-        assert!(seen.is_done("a"));
+        assert!(!seen.observe([(&a, Phase::Stopped)], None));
+        assert!(seen.is_done(&key));
 
-        assert!(seen.observe([("a", Phase::Stopped)], Some("a")));
-        assert!(!seen.is_done("a"), "looking did not clear it");
+        assert!(seen.observe([(&a, Phase::Stopped)], Some(key.as_str())));
+        assert!(!seen.is_done(&key), "looking did not clear it");
 
         // Looked away again: the turn was read, and stays read.
-        seen.observe([("a", Phase::Stopped)], None);
-        assert!(!seen.is_done("a"), "the same stop was marked twice");
+        seen.observe([(&a, Phase::Stopped)], None);
+        assert!(!seen.is_done(&key), "the same stop was marked twice");
     }
 
     /// A session already sitting at its prompt when cctop starts has no turn
@@ -159,30 +191,34 @@ mod tests {
     #[test]
     fn a_stop_nobody_saw_begin_is_not_marked() {
         let mut seen = Seen::default();
-        seen.observe([("a", Phase::Stopped)], None);
-        assert!(!seen.is_done("a"));
+        let a = row("a");
+        seen.observe([(&a, Phase::Stopped)], None);
+        assert!(!seen.is_done(&a.key()));
     }
 
     /// Watching a turn end is having seen it.
     #[test]
     fn a_turn_that_ends_while_watched_is_not_marked() {
         let mut seen = Seen::default();
-        seen.observe([("a", Phase::Working)], Some("a"));
-        seen.observe([("a", Phase::Stopped)], Some("a"));
-        seen.observe([("a", Phase::Stopped)], None);
-        assert!(!seen.is_done("a"));
+        let a = row("a");
+        let key = a.key();
+        seen.observe([(&a, Phase::Working)], Some(key.as_str()));
+        seen.observe([(&a, Phase::Stopped)], Some(key.as_str()));
+        seen.observe([(&a, Phase::Stopped)], None);
+        assert!(!seen.is_done(&a.key()));
     }
 
     /// Working again takes the mark down; the next stop puts it back.
     #[test]
     fn a_new_turn_clears_the_mark_until_it_ends() {
         let mut seen = Seen::default();
-        seen.observe([("a", Phase::Working)], None);
-        seen.observe([("a", Phase::Stopped)], None);
-        assert!(seen.observe([("a", Phase::Working)], None));
-        assert!(!seen.is_done("a"));
-        seen.observe([("a", Phase::Stopped)], None);
-        assert!(seen.is_done("a"));
+        let a = row("a");
+        seen.observe([(&a, Phase::Working)], None);
+        seen.observe([(&a, Phase::Stopped)], None);
+        assert!(seen.observe([(&a, Phase::Working)], None));
+        assert!(!seen.is_done(&a.key()));
+        seen.observe([(&a, Phase::Stopped)], None);
+        assert!(seen.is_done(&a.key()));
     }
 
     /// A question mid-turn neither ends the turn nor forgets that it began:
@@ -190,25 +226,28 @@ mod tests {
     #[test]
     fn a_question_mid_turn_leaves_the_turn_armed() {
         let mut seen = Seen::default();
-        seen.observe([("a", Phase::Working)], None);
-        seen.observe([("a", Phase::Other)], None);
-        assert!(!seen.is_done("a"), "a question is not a finished turn");
-        seen.observe([("a", Phase::Stopped)], None);
-        assert!(seen.is_done("a"));
+        let a = row("a");
+        seen.observe([(&a, Phase::Working)], None);
+        seen.observe([(&a, Phase::Other)], None);
+        assert!(!seen.is_done(&a.key()), "a question is not a finished turn");
+        seen.observe([(&a, Phase::Stopped)], None);
+        assert!(seen.is_done(&a.key()));
     }
 
     /// A session that ends is forgotten, mark and all.
     #[test]
     fn an_ended_session_is_forgotten() {
         let mut seen = Seen::default();
-        seen.observe([("a", Phase::Working), ("b", Phase::Working)], None);
-        seen.observe([("a", Phase::Stopped), ("b", Phase::Working)], None);
-        assert!(seen.is_done("a"));
-        assert!(seen.observe([("b", Phase::Working)], None), "no frame owed");
-        assert!(!seen.is_done("a"));
+        let a = row("a");
+        let b = row("b");
+        seen.observe([(&a, Phase::Working), (&b, Phase::Working)], None);
+        seen.observe([(&a, Phase::Stopped), (&b, Phase::Working)], None);
+        assert!(seen.is_done(&a.key()));
+        assert!(seen.observe([(&b, Phase::Working)], None), "no frame owed");
+        assert!(!seen.is_done(&a.key()));
         // And coming back under the same key starts from nothing.
-        seen.observe([("a", Phase::Stopped)], None);
-        assert!(!seen.is_done("a"));
+        seen.observe([(&a, Phase::Stopped)], None);
+        assert!(!seen.is_done(&a.key()));
     }
 
     #[test]

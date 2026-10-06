@@ -23,9 +23,10 @@ supports it — what it did:
   Subagent activity is interleaved into the same log, so without this there's no
   way to tell an agent's edits from the parent's.
 - **`✗` and a red row** — the call reported an error. Claude records this per
-  call, OpenCode and Gemini record a tool status, and Codex is read from the
-  sandbox's own result line and exit code. Cursor and Windsurf transcripts don't
-  record tool outcomes, so their calls are never marked.
+  call, OpenCode and Gemini record a tool status, Devin's comes from its database
+  rather than its transcript, and Codex is read from the sandbox's own result line
+  and exit code. Cursor, Pi and Windsurf record no tool outcome at all, so their
+  calls are never marked.
 - **`+N -M`** — lines added and removed, from the edit result's patch.
   Press `v` to expand the diff inline beneath the row.
 - **duration** — wall time from the call being issued to its result arriving.

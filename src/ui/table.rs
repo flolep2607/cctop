@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use std::borrow::Cow;
 
 // ---------------------------------------------------------------------------
 // Session table
@@ -29,23 +30,30 @@ fn column_widths(cols: &[&'static columns::Column], total: u16) -> Vec<u16> {
 /// the list is genuinely empty, since "found nothing" is only useful next to
 /// "here is what I looked for".
 fn provider_search_paths() -> Vec<(&'static str, String)> {
+    let dir = |p: &std::path::Path| p.display().to_string();
+    Provider::ALL
+        .into_iter()
+        .map(|p| (p.display_name(), dir(provider_root(p))))
+        .collect()
+}
+
+/// Where one harness's sessions are looked for.
+///
+/// Split from the list above for the same reason doctor's is: the name and the
+/// directory are two halves of one fact, and a hand-written pair of them is a
+/// pair that can go out of step.
+fn provider_root(provider: Provider) -> &'static std::path::Path {
     use crate::config;
-    vec![
-        (
-            "Claude Code",
-            config::CLAUDE_PROJECTS_ROOT.display().to_string(),
-        ),
-        ("Codex", config::CODEX_SESSIONS_ROOT.display().to_string()),
-        ("Cursor", config::CURSOR_PROJECTS_ROOT.display().to_string()),
-        ("Devin", config::DEVIN_TRANSCRIPTS_DIR.display().to_string()),
-        (
-            "Gemini CLI",
-            config::GEMINI_CHATS_ROOT.display().to_string(),
-        ),
-        ("OpenCode", config::OPENCODE_DATA_DIR.display().to_string()),
-        ("Pi", config::PI_SESSIONS_ROOT.display().to_string()),
-        ("Windsurf", config::WINDSURF_USER_DIR.display().to_string()),
-    ]
+    match provider {
+        Provider::Claude => &config::CLAUDE_PROJECTS_ROOT,
+        Provider::Codex => &config::CODEX_SESSIONS_ROOT,
+        Provider::Cursor => &config::CURSOR_PROJECTS_ROOT,
+        Provider::Devin => &config::DEVIN_TRANSCRIPTS_DIR,
+        Provider::Gemini => &config::GEMINI_CHATS_ROOT,
+        Provider::OpenCode => &config::OPENCODE_DATA_DIR,
+        Provider::Pi => &config::PI_SESSIONS_ROOT,
+        Provider::Windsurf => &config::WINDSURF_USER_DIR,
+    }
 }
 
 #[cfg(test)]
@@ -159,8 +167,8 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     } else {
         &[]
     };
-    let hidden = columns::hidden_for(&app.hidden_columns, &app.sessions);
-    let cols = columns::visible_columns(inner.width, &hidden, keep);
+    let cols =
+        columns::visible_columns_among(inner.width, &app.hidden_columns, keep, &app.sessions);
     let widths = column_widths(&cols, inner.width);
 
     // Header, recording click spans as we go.
@@ -218,6 +226,11 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
 
     let now = chrono::Utc::now();
     let query = app.search.to_ascii_lowercase();
+    // One buffer for the whole frame. `Session::key` is a `format!`, and every
+    // row here does five lookups by it — so a fresh `String` per visible row
+    // per frame is an allocation per row for a key that is dropped a line
+    // later. See `Session::key_into`, and the same idiom in `select.rs`.
+    let mut key = String::new();
     let lines: Vec<Line> = app
         .visible
         .iter()
@@ -241,7 +254,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                 };
             };
             let s = &app.sessions[at];
-            let key = s.key();
+            let key = s.key_into(&mut key);
             match row {
                 crate::ui::Row::Group(_) => Line::default(),
                 crate::ui::Row::Session(_) => session_row(
@@ -250,18 +263,22 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                     &widths,
                     &RowState {
                         selected,
-                        marked: app.marked.contains(&key),
-                        deleting: app.deleting.contains(&key),
-                        rang: app.notify.rang_recently(&key),
-                        alert: app.alerts.marker(&key),
-                        done: app.seen.is_done(&key),
+                        marked: app.marked.contains(key),
+                        deleting: app.deleting.contains(key),
+                        rang: app.notify.rang_recently(key),
+                        alert: app.alerts.marker(key),
+                        done: app.seen.is_done(key),
                         query: &query,
                         // Only sessions that have subagents get a marker, so the
-                        // glyph is an offer rather than decoration on every row.
-                        expand: match (s.subagents.is_empty(), app.is_expanded(s)) {
-                            (true, _) => None,
-                            (false, true) => Some('▾'),
-                            (false, false) => Some('▸'),
+                        // glyph is an offer rather than decoration on every row
+                        // — and the emptiness test comes first, because
+                        // `is_expanded` formats the key to ask.
+                        expand: match s.subagents.is_empty() {
+                            true => None,
+                            false => match app.is_expanded(s) {
+                                true => Some('▾'),
+                                false => Some('▸'),
+                            },
                         },
                         indent,
                     },
@@ -393,22 +410,22 @@ fn session_row(
         // every one above is either leaving or a threshold with money on it,
         // and this one keeps until you look.
         let done = done && !deleting && !bell && alert.is_none() && c.id == ColumnId::Status;
-        let text = if deleting && c.id == ColumnId::Status {
-            "…".to_string()
+        let text: Cow<'_, str> = if deleting && c.id == ColumnId::Status {
+            Cow::Borrowed("…")
         } else if bell {
-            "◉".to_string()
+            Cow::Borrowed("◉")
         } else if let Some(kind) = alert {
-            kind.glyph().to_string()
+            Cow::Owned(kind.glyph().to_string())
         } else if done {
-            "✓".to_string()
+            Cow::Borrowed("✓")
         } else if c.id == ColumnId::Project {
             // Prefixed on the label rather than given a column of its own: one
             // more column costs every row two cells of width to serve the few
             // rows that have children.
-            match expand {
+            Cow::Owned(match expand {
                 Some(glyph) => format!("{indent}{glyph} {}", columns::render_cell(c.id, s, now)),
                 None => format!("{indent}{}", columns::render_cell(c.id, s, now)),
-            }
+            })
         } else {
             columns::render_cell(c.id, s, now)
         };
@@ -890,16 +907,7 @@ mod tests {
     /// to `Provider` without a line here would look unsupported.
     #[test]
     fn the_empty_state_accounts_for_every_provider() {
-        for p in [
-            Provider::Claude,
-            Provider::Codex,
-            Provider::Cursor,
-            Provider::Devin,
-            Provider::Gemini,
-            Provider::OpenCode,
-            Provider::Pi,
-            Provider::Windsurf,
-        ] {
+        for p in Provider::ALL {
             assert!(
                 provider_is_listed(p),
                 "{p:?} is missing from the empty state"

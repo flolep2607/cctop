@@ -22,10 +22,16 @@ Pricing
 ```
 
 It covers the version and binary path, any `CLAUDE_CONFIG_DIR`-style overrides
-in the environment, every harness's session directory and how many it found,
+in the environment, each harness's session directory and how many it found,
 pricing, whether the parsers are reading what they found (below), the cache and
 whether it is writable, the hooks report, and which of the three backends
 behind `s` this machine actually has.
+
+One harness is missing from that list: Devin has no row in the Session sources
+section, so a Devin install that is not being read says nothing here. Its
+directory is `~/.local/share/devin/cli` (or the parent of `$CHISEL_SESSION_DB`),
+and the count is the sessions that have both a database row and a transcript
+beside it.
 
 `cctop doctor --host devbox` adds a section that makes the ssh round trip for
 real, which is the only honest test of it — and reports ssh's own words back
@@ -94,8 +100,12 @@ The usual causes, in order of how often they turn out to be it:
 
 - **An environment override.** `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`,
   `GEMINI_DIR`, `OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`,
-  `PI_CODING_AGENT_SESSION_DIR` and `WINDSURF_USER_DIR` all move where cctop
-  looks. `doctor` lists the ones that are set.
+  `PI_CODING_AGENT_SESSION_DIR`, `WINDSURF_USER_DIR` and `CHISEL_SESSION_DB` all
+  move where cctop looks. `doctor` lists the ones it knows about that are set —
+  everything above but `CHISEL_SESSION_DB`, which it does not report, so check it
+  yourself with `env | grep CHISEL` if a Devin install is not showing up. That one
+  is the odd shape of the set: it names Devin's database *file*, and the
+  transcripts are read from the directory beside it.
 - **The agent has not written a transcript yet.** cctop reads what the harnesses
   leave on disk; a session that has just started may not be there for a moment.
 - **A filter is on.** `Esc` clears one layer at a time, and the table's title

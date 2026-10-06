@@ -379,6 +379,24 @@ struct Snapshot {
     main_ctx: bool,
 }
 
+impl Snapshot {
+    /// Everything this request held in context: the whole window without its
+    /// output, which is differenced separately when the growth of the window is
+    /// measured.
+    ///
+    /// Saturating, and so is every other sum of token counts in this file. A
+    /// transcript is a file any process on the machine can write, so a count is
+    /// untrusted input; a request claiming more tokens than a `u64` holds has no
+    /// total to report, and one that has wrapped is a number that reads as
+    /// plausible and is not.
+    fn held(&self) -> u64 {
+        self.input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cw5m)
+            .saturating_add(self.cw1h)
+    }
+}
+
 /// Order two transcript timestamps as instants.
 ///
 /// String comparison is wrong the moment a transcript carries a non-`Z` offset
@@ -577,11 +595,11 @@ impl Extractor {
         };
         let call_cost = c.input + c.cache_read + c.output + c.cache_write_5m + c.cache_write_1h;
 
-        self.token_totals.input += inp;
-        self.token_totals.cache_read += cache_r;
-        self.token_totals.output += out;
-        self.token_totals.cache_write_5m += cw5m;
-        self.token_totals.cache_write_1h += cw1h;
+        self.token_totals.input = self.token_totals.input.saturating_add(inp);
+        self.token_totals.cache_read = self.token_totals.cache_read.saturating_add(cache_r);
+        self.token_totals.output = self.token_totals.output.saturating_add(out);
+        self.token_totals.cache_write_5m = self.token_totals.cache_write_5m.saturating_add(cw5m);
+        self.token_totals.cache_write_1h = self.token_totals.cache_write_1h.saturating_add(cw1h);
 
         self.cost_totals.input += c.input;
         self.cost_totals.cache_read += c.cache_read;
@@ -590,11 +608,11 @@ impl Extractor {
         self.cost_totals.cache_write_1h += c.cache_write_1h;
 
         let tm = self.tokens_by_model.entry(model.to_string()).or_default();
-        tm.input += inp;
-        tm.cache_read += cache_r;
-        tm.output += out;
-        tm.cache_write_5m += cw5m;
-        tm.cache_write_1h += cw1h;
+        tm.input = tm.input.saturating_add(inp);
+        tm.cache_read = tm.cache_read.saturating_add(cache_r);
+        tm.output = tm.output.saturating_add(out);
+        tm.cache_write_5m = tm.cache_write_5m.saturating_add(cw5m);
+        tm.cache_write_1h = tm.cache_write_1h.saturating_add(cw1h);
 
         let cm = self.costs_by_model.entry(model.to_string()).or_default();
         cm.input += c.input;
@@ -615,7 +633,11 @@ impl Extractor {
             );
             // Everything this request was billed for, whatever the plan priced
             // it at.
-            let billed = inp + cache_r + out + cw5m + cw1h;
+            let billed = inp
+                .saturating_add(cache_r)
+                .saturating_add(out)
+                .saturating_add(cw5m)
+                .saturating_add(cw1h);
             *self
                 .tokens_by_day
                 .entry(util::local_date_key(&dt))
@@ -866,8 +888,9 @@ impl Extractor {
             return;
         };
         let u = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let window =
-            u("input_tokens") + u("cache_read_input_tokens") + u("cache_creation_input_tokens");
+        let window = u("input_tokens")
+            .saturating_add(u("cache_read_input_tokens"))
+            .saturating_add(u("cache_creation_input_tokens"));
         if window == 0 {
             return;
         }
@@ -1019,7 +1042,13 @@ impl Extractor {
             .unwrap_or(0);
         // Older transcripts report only the aggregate; attribute the remainder
         // to the 5m tier, which is the default TTL.
-        let cw5m = cw5m_raw + total_cw.saturating_sub(cw5m_raw + cw1h);
+        //
+        // Saturating throughout, because these are numbers read out of a file
+        // any process on the machine can write: a `saturating_sub` wrapped
+        // around a plain `+` reads as guarded, and then one transcript
+        // claiming `ephemeral_5m_input_tokens` of u64::MAX panics every debug
+        // build and wraps to a nonsense cost in a release one.
+        let cw5m = cw5m_raw.saturating_add(total_cw.saturating_sub(cw5m_raw.saturating_add(cw1h)));
 
         if input == 0 && cache_read == 0 && output == 0 && cw5m == 0 && cw1h == 0 {
             return;
@@ -1039,7 +1068,7 @@ impl Extractor {
             && let Some(stats) = self.sub_stats.get_mut(file)
             && (stats.latest_used_ts.is_empty() || !ts_before(ts, &stats.latest_used_ts))
         {
-            stats.latest_used = input + cache_read + total_cw;
+            stats.latest_used = input.saturating_add(cache_read).saturating_add(total_cw);
             stats.latest_used_ts = ts.to_string();
         }
 
@@ -1189,10 +1218,9 @@ pub fn extract(transcript: &Path) -> SessionData {
             for pair in same.windows(2) {
                 let (key, this) = pair[0];
                 let next = &pair[1].1;
-                let held = |s: &Snapshot| s.input + s.cache_read + s.cw5m + s.cw1h;
                 // Signed on purpose: a compaction makes this deeply negative and
                 // cache accounting makes it slightly so, and neither is a size.
-                let grew = held(next) as i64 - held(this) as i64 - this.output as i64;
+                let grew = next.held() as i64 - this.held() as i64 - this.output as i64;
                 if grew > 0 {
                     ext.req_growth.insert(key.clone(), grew as u64);
                 }
@@ -1200,8 +1228,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         }
 
         for (key, s) in snapshots {
-            ext.req_usage
-                .insert(key, (s.input + s.cache_read + s.cw5m + s.cw1h, s.output));
+            ext.req_usage.insert(key, (s.held(), s.output));
             ext.accumulate(
                 file,
                 &s.model,
@@ -1241,11 +1268,12 @@ pub fn extract(transcript: &Path) -> SessionData {
     let subagents = build_subagents(&files, &ext);
 
     let mut tokens = ext.token_totals;
-    tokens.total = tokens.input
-        + tokens.cache_read
-        + tokens.output
-        + tokens.cache_write_5m
-        + tokens.cache_write_1h;
+    tokens.total = tokens
+        .input
+        .saturating_add(tokens.cache_read)
+        .saturating_add(tokens.output)
+        .saturating_add(tokens.cache_write_5m)
+        .saturating_add(tokens.cache_write_1h);
 
     let mut costs = ext.cost_totals;
     costs.total =
@@ -2490,6 +2518,34 @@ mod tests {
         let session = summarize(&path).expect("a transcript with a model");
         assert!(session.launch_id.is_empty());
         assert_eq!(session.launched_as(), "first");
+    }
+
+    /// The cache-write tiers are added up from numbers a transcript supplies, and
+    /// a transcript is a file any process on the machine can write. One claiming
+    /// `ephemeral_5m_input_tokens` of `u64::MAX` alongside a single 1h token used
+    /// to panic on `attempt to add with overflow` in every debug build, and to
+    /// wrap into a nonsense cost in a release one — while `saturating_sub`
+    /// wrapped around the addition made it look guarded.
+    #[test]
+    fn a_transcript_cannot_overflow_the_cache_write_tiers() {
+        let path = temp_path("overflow").with_extension("jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":"req_1","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":18446744073709551615,"cache_creation":{"ephemeral_5m_input_tokens":18446744073709551615,"ephemeral_1h_input_tokens":1}}}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+
+        // Saturated rather than wrapped: a total that large has no meaning, but
+        // one that has overflowed reads as a small plausible number.
+        assert_eq!(data.tokens.cache_write_5m, u64::MAX);
+        assert_eq!(data.tokens.cache_write_1h, 1);
+        assert_eq!(data.tokens.total, u64::MAX);
+        assert!(data.error.is_none(), "{:?}", data.error);
     }
 
     /// A single transcript entry can be hundreds of kilobytes — a big file read,

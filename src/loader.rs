@@ -573,16 +573,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
     // Split by provider and by step: this is the dominant cost of a walk once
     // extraction is cached, and "the tails are slow" cannot say whether that is
     // reading transcript text or querying a database.
-    let _by_provider = crate::trace::span(match s.provider {
-        Provider::Claude => "tails.claude",
-        Provider::Codex => "tails.codex",
-        Provider::Cursor => "tails.cursor",
-        Provider::Devin => "tails.devin",
-        Provider::Gemini => "tails.gemini",
-        Provider::OpenCode => "tails.opencode",
-        Provider::Pi => "tails.pi",
-        Provider::Windsurf => "tails.windsurf",
-    });
+    let _by_provider = crate::trace::span(s.provider.tails_trace_name());
     let (state, permission) = {
         let _span = crate::trace::span("tails.state");
         session::live_state(s)

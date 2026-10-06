@@ -77,7 +77,7 @@ Each command takes --help for the details.";
     // they are commands.
     after_long_help = COMMANDS,
     long_about = "cctop — an htop-like monitor for AI coding agent sessions\n\n\
-Tracks Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Pi, and Windsurf\n\
+Tracks Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, and\n    Windsurf\n\
 sessions on your machine, showing real-time cost estimation, token usage, tool\n\
 invocations, and OS-level metrics.\n\n\
 COST ESTIMATION\n  \
@@ -459,6 +459,18 @@ fn print_group(
     }
 }
 
+/// The provider groups `--list` prints, in the order it prints them.
+///
+/// [`Provider::ALL`], so there is one list of harnesses rather than two that
+/// have to be kept in step. This one had grown by insertion and read as
+/// Codex, Claude, Cursor, Devin, OpenCode, Pi, Gemini, Windsurf — an order no
+/// comment claimed to mean anything, and doctor's parsers section above its
+/// partner listed the same eight differently. Group order is a presentation
+/// choice rather than a fact about any harness, so it follows the enum.
+pub fn list_order() -> impl Iterator<Item = Provider> {
+    Provider::ALL.into_iter()
+}
+
 pub fn run_list(sessions: &[Session], plan: Plan) {
     let width = crossterm::terminal::size()
         .map(|(w, _)| w as usize)
@@ -467,16 +479,7 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
     let cost_label = if plan == Plan::Retail { "est" } else { "cost" };
 
     let mut offset = 0;
-    for (name, provider) in [
-        ("Codex", Provider::Codex),
-        ("Claude", Provider::Claude),
-        ("Cursor", Provider::Cursor),
-        ("Devin", Provider::Devin),
-        ("OpenCode", Provider::OpenCode),
-        ("Pi", Provider::Pi),
-        ("Gemini", Provider::Gemini),
-        ("Windsurf", Provider::Windsurf),
-    ] {
+    for provider in list_order() {
         let group: Vec<&Session> = sessions.iter().filter(|s| s.provider == provider).collect();
         if group.is_empty() {
             continue;
@@ -484,7 +487,7 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
         if offset > 0 {
             println!();
         }
-        print_group(name, &group, offset, cost_label, width);
+        print_group(provider.display_name(), &group, offset, cost_label, width);
         offset += group.len();
     }
 }

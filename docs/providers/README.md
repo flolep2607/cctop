@@ -2,7 +2,7 @@
 
 [← back to the README](../../README.md)
 
-Seven harnesses, seven pages. Each one says where that harness's sessions live,
+Eight harnesses, eight pages. Each one says where that harness's sessions live,
 what shape they are in, which columns cctop can fill from them, and — the part
 worth writing down — where the format says something other than what it appears
 to say.
@@ -17,18 +17,19 @@ should be traceable to a function you can open.
 | [Claude Code](claude.md) | `src/session/claude.rs` | `~/.claude/projects/<slug>/<uuid>.jsonl` |
 | [Codex](codex.md) | `src/session/codex.rs` | `~/.codex/sessions/**/rollout-*.jsonl` |
 | [Cursor](cursor.md) | `src/session/cursor.rs` | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` |
+| [Devin](devin.md) | `src/session/devin.rs` | `~/.local/share/devin/cli/{sessions.db,transcripts/}` |
 | [Gemini CLI](gemini-cli.md) | `src/session/gemini.rs` | `~/.gemini/tmp/<project>/chats/session-*.json{,l}` |
 | [OpenCode](opencode.md) | `src/session/opencode.rs` | `~/.local/share/opencode/opencode*.db` |
 | [Pi](pi.md) | `src/session/pi.rs` | `~/.pi/agent/sessions/**/*.jsonl` |
 | [Windsurf](windsurf.md) | `src/session/windsurf.rs` | `<Windsurf User>/workspaceStorage/*/state.vscdb` |
 
-And [adding a harness](adding-a-harness.md), which is the list of places an
-eighth one has to be registered before it works — derived from what the seven
+And [adding a harness](adding-a-harness.md), which is the list of places a
+ninth one has to be registered before it works — derived from what the eight
 already touch, not from a design.
 
 ## Why this is not `docs/harnesses/`
 
-[`docs/harnesses/`](../harnesses/) is a **mirror**: each of these seven
+[`docs/harnesses/`](../harnesses/) is a **mirror**: seven of these eight
 projects' own documentation, pulled wholesale by `pull.sh` and overwritten
 wholesale on the next pull. Nothing in it is edited by hand, because the next
 refresh would delete the edit — and its value is precisely that it does not
@@ -52,12 +53,19 @@ record. That table is deliberately terse; the reason lives here.
 | OpenCode | reported | ✓ | ✓ | ✓ | ✓ |
 | Pi | reported | ✓ | ─ | ✓ | ✓ |
 | Gemini CLI | estimated | ✓ | ─ | ✓ | ─ |
+| Devin | ─ | ✓ | ✓ | ✓ | ✓ |
 | Cursor | ─ | ─ | ─ | ✓ | inferred |
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 
-Two of those cells are conditional rather than absolute, and the pages say so:
+Devin is the odd one out in the other direction: it records everything except
+the price. Neither its transcript nor its database holds a dollar figure, so its
+`$` is a `─` rather than an estimate — and `doctor` skips it in the unpriced-model
+check for the same reason, since a blank is not a price of zero.
+
+Three of those cells are conditional rather than absolute, and the pages say so:
 OpenCode's context needs LiteLLM to know the model's window, since OpenCode
-records no ceiling of its own, and Windsurf's tool count is read from a bubble
+records no ceiling of its own; Devin's is the same case, its `num_tokens_preceding`
+without a window of its own; and Windsurf's tool count is read from a bubble
 shape nobody has yet confirmed against a live install.
 
 "Estimated" against "reported" is a policy, not a per-harness accident —

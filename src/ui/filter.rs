@@ -91,7 +91,13 @@ impl App {
         let anchor = self.selected_row().map(|r| self.row_key(r));
         let now = chrono::Utc::now();
         let now_ms = now.timestamp_millis();
-        let query = self.search.to_ascii_lowercase();
+        let lowered = self.search.to_ascii_lowercase();
+        // Parsed once for the whole pass rather than once per row: a `Query` is
+        // a split and at least one `String`, it is the same for every session,
+        // and this runs on every refresh *and* on every keystroke in the search
+        // box — so the per-row form was two allocations and a split per session
+        // to compute a value that cannot differ between them.
+        let query = Query::parse(&lowered);
 
         let mut visible: Vec<usize> = (0..self.sessions.len())
             .filter(|&i| {
@@ -115,7 +121,7 @@ impl App {
                         return false;
                     }
                 }
-                if !self.matches_query(s, &query) {
+                if !self.admits(s, &query) {
                     return false;
                 }
                 if self.cost_floor > 0.0 {
@@ -145,9 +151,19 @@ impl App {
         // Sessions are sorted first, then each expanded one has its children
         // spliced in beneath it: subagents belong to their parent's position in
         // the table, not to the ordering the sort column would give them.
+        // One buffer for the whole pass, and asked at most once per visible row:
+        // `Session::key` is a `format!`, so this was an allocation per row on
+        // the path that runs on every refresh *and* on every keystroke. The
+        // empty check first, because most rows are of sessions nobody expanded.
+        let scratch = std::cell::RefCell::new(String::new());
         let children = |i: usize| {
             let session = &self.sessions[i];
-            if self.expanded.contains(&session.key()) {
+            if self.expanded.is_empty() {
+                return 0;
+            }
+            let mut buf = scratch.borrow_mut();
+            let key = session.key_into(&mut buf);
+            if self.expanded.contains(key) {
                 session.subagents.len()
             } else {
                 0
@@ -206,16 +222,8 @@ impl App {
         }
     }
 
-    /// Whether the session matches the active text search.
-    ///
-    /// `refilter` calls [`matches_query`] directly with a query it lowercases
-    /// once; this is the same predicate for callers that only have one session
-    /// in hand, so the live filter and the `n`/`N` jump cannot drift apart.
-    pub(super) fn matches_search(&self, s: &Session) -> bool {
-        self.matches_query(s, &self.search.to_ascii_lowercase())
-    }
-
-    /// Whether a session matches `query`, which must already be lowercase.
+    /// Whether a session matches `query`, the search box's own query already
+    /// parsed and lowercased once by the caller.
     ///
     /// Content search widens the filter rather than replacing it: a query that
     /// names a project still finds that project's sessions, and the transcripts
@@ -223,8 +231,7 @@ impl App {
     /// query being typed — until the scan for a longer query lands, its rows are
     /// the metadata matches alone, which is a filter narrowing as you type
     /// rather than showing results for a query you have moved on from.
-    pub(super) fn matches_query(&self, s: &Session, query: &str) -> bool {
-        let parsed = Query::parse(query);
+    pub(super) fn admits(&self, s: &Session, parsed: &Query) -> bool {
         if !parsed.admits(s) {
             return false;
         }
@@ -448,6 +455,11 @@ impl App {
         if self.visible.is_empty() {
             return;
         }
+        // Lowercased and parsed once for the walk, not once per row: this asks
+        // the same question of every visible row, and a `String` per answer was
+        // an allocation per row for a value identical across all of them.
+        let lowered = self.search.to_ascii_lowercase();
+        let query = Query::parse(&lowered);
         // Positions rather than rows: a child row matches on its parent's text,
         // so several rows can share one session and `position` would keep
         // sending the cursor back to the first of them.
@@ -457,7 +469,7 @@ impl App {
             .enumerate()
             .filter(|(_, row)| {
                 row.session()
-                    .is_some_and(|i| self.matches_search(&self.sessions[i]))
+                    .is_some_and(|i| self.admits(&self.sessions[i], &query))
             })
             .map(|(at, _)| at)
             .collect();
@@ -842,19 +854,21 @@ mod tests {
     }
 
     /// The live filter and the n/N jump must agree, because they are now the
-    /// same predicate.
+    /// same predicate asked with the same parsed query.
     #[test]
-    fn refilter_and_matches_search_agree() {
+    fn refilter_and_the_row_predicate_agree() {
         let mut app = test_app();
         app.sessions = vec![
             session("aaa", false, "/home/x/Alpha"),
             session("bbb", false, "/home/x/beta"),
         ];
-        for query in ["alpha", "ALPHA", "x/", "", "nomatch"] {
+        for query in ["alpha", "ALPHA", "x/", "", "nomatch", "user:winshen alpha"] {
             app.search = query.into();
             app.refilter();
+            let lowered = app.search.to_ascii_lowercase();
+            let parsed = Query::parse(&lowered);
             let by_predicate: Vec<usize> = (0..app.sessions.len())
-                .filter(|&i| app.matches_search(&app.sessions[i]))
+                .filter(|&i| app.admits(&app.sessions[i], &parsed))
                 .collect();
             assert_eq!(app.visible.len(), by_predicate.len(), "query {query:?}");
         }
