@@ -3,5 +3,11 @@
 # Scratch worktrees the agent harness creates.
 .claude/worktrees/
 
+# Scratch state the agent harness writes in the checkout. Untracked but not
+# ignored, which is the problem: `cargo publish --dry-run` reports a dirty tree
+# over anything untracked, so the gate in CONTRIBUTING fails locally for anyone
+# running an agent against this repository.
+.opencode/
+
 # Byte-code from the screenshot tool
 __pycache__/
