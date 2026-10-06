@@ -576,6 +576,12 @@ fn event_loop(
                     app.burn = crate::burn::Log::load();
                     app.needs_redraw = true;
                 }
+                Ok(Response::Repos(repos)) => {
+                    // Kept, not offered: see `App::got_repos`. Rebuilding the
+                    // list here would move the highlight under a cursor that is
+                    // already in the field.
+                    app.got_repos(repos);
+                }
                 Ok(Response::UpdateAvailable(version)) => {
                     app.update_available = Some(version);
                     app.needs_redraw = true;

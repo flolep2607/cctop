@@ -30,8 +30,26 @@ impl App {
         self.launch_cwd_bad = false;
         self.launch_cwd_known = self.known_dirs();
         self.launch_cwd_suggest();
+        // Asked for as the field opens, and answered a moment later by a worker
+        // walking the home directory. Sent every time rather than once per
+        // session: a repository pulled while cctop is running is the case this
+        // exists for, and the walk is tens of milliseconds on a thread of its
+        // own. The list is not rebuilt when the answer lands — see
+        // [`App::got_repos`] — so the suggestions under the cursor stay valid.
+        let _ = self.tx.send(worker::Request::Repos);
         self.mode = Mode::LaunchCwd;
         self.needs_redraw = true;
+    }
+
+    /// Repositories the worker found, kept for the next time the field opens.
+    ///
+    /// Deliberately not re-suggesting from here. The list is a snapshot so that
+    /// Enter takes the directory that is highlighted, and a walk landing a
+    /// moment after the field opened would move the highlight under the cursor
+    /// without the arrow keys having been pressed. The repositories are there
+    /// for the next opening, which is the one after the pull.
+    pub(super) fn got_repos(&mut self, repos: Vec<std::path::PathBuf>) {
+        self.launch_cwd_repos = repos;
     }
 
     /// Directories agents are known to have run in, last used first.
@@ -93,6 +111,12 @@ impl App {
                         None => std::path::PathBuf::from(&s.label_source),
                     }),
             )
+            // Repositories found on disk, after the ones an agent has run in:
+            // a project you worked in today is the likelier answer, and a
+            // repository nobody has tried yet is a fallback rather than a
+            // headline. The `seen` set does the rest — one a session has already
+            // contributed is not offered twice.
+            .chain(self.launch_cwd_repos.iter().cloned())
             .filter(|dir| seen.insert(dir.clone()) && dir.is_dir())
             .take(MAX_KNOWN_DIRS)
             .collect()
@@ -468,6 +492,51 @@ mod tests {
             vec![tree],
             "the worktree, not the main checkout and not the directory inside it"
         );
+    }
+
+    /// A repository nobody has launched an agent in is offered anyway.
+    ///
+    /// This is the case the scan exists for: cctop learns about projects from
+    /// the agents that ran in them, so a repository you have just pulled is
+    /// exactly the one it has no evidence for. And it is offered after the ones
+    /// an agent has run in — a project you worked in today is the likelier
+    /// answer, and an untried repository is a fallback.
+    #[test]
+    fn a_repository_with_no_agent_history_is_offered_after_the_ones_that_have_one() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let worked = root.path().join("worked");
+        let fresh = root.path().join("fresh");
+        std::fs::create_dir_all(worked.join(".git")).expect("worked repo");
+        std::fs::create_dir_all(fresh.join(".git")).expect("fresh repo");
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, &worked.to_string_lossy())];
+        app.launch_root = None;
+        app.launch_cwd = None;
+        app.launch_cwd_repos = vec![fresh.clone(), worked.clone()];
+
+        assert_eq!(
+            app.known_dirs(),
+            vec![worked, fresh],
+            "the one with history first, and the repository nobody has tried is offered at all"
+        );
+    }
+
+    /// A repository already offered because an agent ran in it is not offered
+    /// again as a discovery — the list would otherwise show the same path twice.
+    #[test]
+    fn a_repository_known_from_a_session_is_not_offered_again_by_the_scan() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = root.path().join("project");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, &repo.to_string_lossy())];
+        app.launch_root = None;
+        app.launch_cwd = None;
+        app.launch_cwd_repos = vec![repo.clone()];
+
+        assert_eq!(app.known_dirs(), vec![repo]);
     }
 
     /// The order is last used, then when the session began.

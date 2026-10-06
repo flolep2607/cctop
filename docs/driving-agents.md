@@ -99,9 +99,22 @@ by then the launcher is gone, and the failure arrives from inside the pty as a
 message about spawning.
 
 You do not have to remember the path. The field lists what it can see under
-itself: with nothing typed, the projects cctop has seen agents run in, newest
-first; type part of a name and the list narrows by substring, so `api` finds
-`~/work/api` without the `~/work`. Once the text reads as a path — anything with
+itself: with nothing typed, the projects cctop has seen agents run in, most
+recently used first; type part of a name and the list narrows by substring, so
+`api` finds `~/work/api` without the `~/work`. A session that ran inside a
+repository offers the repository rather than the directory it was sitting in, so
+an agent that started in `~/work/api/src` lists `~/work/api` — the thing you
+would name. Two checkouts of one repository are two answers, because they are
+two directories to start an agent in.
+
+After those come the repositories cctop found on disk: your `git pull` of this
+morning is offered even though no agent has run in it yet, newest first. The
+scan looks two levels down from your home directory, which covers `~/project` and
+`~/code/project` and stops there — a deeper walk finds nothing new and pays for
+every directory on the machine. It happens on a worker, so the list appears a
+moment after the field opens rather than holding it up.
+
+Once the text reads as a path — anything with
 a `/` in it — the list comes off the disk instead: the directories under it,
 hidden ones only once you type the dot. `Tab` fills in as far as the entries
 agree (one match completes outright and adds the `/`, so you can walk down a
