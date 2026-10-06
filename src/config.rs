@@ -1263,8 +1263,22 @@ pub fn rglob(dir: &Path, ext: &str) -> Vec<PathBuf> {
 
 /// Modification time in milliseconds since the Unix epoch, or 0 if unavailable.
 pub fn file_mtime_ms(p: &Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
+    match std::fs::metadata(p) {
+        Ok(meta) => mtime_ms_of(&meta),
+        Err(_) => 0,
+    }
+}
+
+/// [`file_mtime_ms`] for a `Metadata` the caller already holds.
+///
+/// A walk that has just read a directory entry into its `Metadata` wants the
+/// time off that, not off a second `stat` of the same path: the whole point of
+/// the entry's metadata is that it came free with the directory read, and
+/// asking for the path again puts that back. The 0-on-unavailable fallback is
+/// [`file_mtime_ms`]'s, kept here so a caller holding a `Metadata` reads the
+/// time exactly as one that went looking for it would.
+pub fn mtime_ms_of(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)

@@ -251,7 +251,10 @@ fn collect(dir: &Path, out: &mut Vec<(String, u64, u64, u64, u64)>) {
             path.to_string_lossy().replace('\\', "/"),
             dev,
             ino,
-            crate::config::file_mtime_ms(&path),
+            // Off the metadata already in hand. `file_mtime_ms` would stat the
+            // path a second time, and this pass runs over every file under every
+            // transcript root on the machine.
+            crate::config::mtime_ms_of(&meta),
             meta.len(),
         ));
     }
@@ -349,6 +352,33 @@ mod tests {
         let two = fingerprint_of(dir.path());
         std::fs::remove_file(&file).unwrap();
         assert_ne!(two.hash, fingerprint_of(dir.path()).hash);
+    }
+
+    /// The walk records each file's own modification time, and it is the same
+    /// number one would get by asking the path for it.
+    ///
+    /// The pair has to agree: the settle window and the "newest write" figure are
+    /// both read off this, and the settle window decides whether a change is a
+    /// settled change worth recomputing for. A walk that recorded 0 for a file it
+    /// had just read would make every corpus look years old.
+    #[test]
+    fn the_walk_reads_the_mtime_off_the_metadata_it_already_had() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("project")).unwrap();
+        let file = dir.path().join("project").join("a.jsonl");
+        std::fs::write(&file, b"{}\n").unwrap();
+
+        let mut files = Vec::new();
+        collect(dir.path(), &mut files);
+        assert_eq!(files.len(), 1);
+        let (path, _, _, mtime, size) = &files[0];
+        assert_eq!(*size, 3);
+        assert_eq!(
+            *mtime,
+            crate::config::file_mtime_ms(Path::new(path)),
+            "the walk's mtime and a path lookup's must be the same number"
+        );
+        assert!(*mtime > 0, "a file that exists has a modification time");
     }
 
     /// The directory a provider fills with tool output is not a transcript, and
