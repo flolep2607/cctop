@@ -664,13 +664,21 @@ pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
                     cut = Some(i);
                 }
             }
-            let cut = cut.unwrap_or_else(|| {
+            // The hard cut is a character count too: `line.len()` is bytes, and
+            // slicing at it lands inside a multi-byte character, which panics.
+            // A line starting with a space is the case that reaches this — its
+            // only break candidate in range is byte 0, which would emit an
+            // empty line and never make progress, so the fallback stands in.
+            let hard = || {
                 line.char_indices()
                     .nth(width)
                     .map(|(i, _)| i)
                     .unwrap_or(line.len())
-            });
-            let cut = if cut == 0 { line.len().min(width) } else { cut };
+            };
+            let cut = match cut {
+                Some(0) | None => hard(),
+                Some(at) => at,
+            };
             out.push(line[..cut].to_string());
             line = line[cut..].trim_start();
         }
@@ -756,7 +764,10 @@ pub fn tool_activity(
             None => "main".to_string(),
             Some(agent) => {
                 let short = agent.strip_prefix("agent-").unwrap_or(agent);
-                format!("↳{}", &short[..short.len().min(6)])
+                // Six characters, not six bytes: the name is a transcript file
+                // stem read with `to_string_lossy`, so it can hold anything, and
+                // a byte split inside a multi-byte character panics the frame.
+                format!("↳{}", short.chars().take(6).collect::<String>())
             }
         };
         let origin_style = if d.origin.is_some() {
@@ -2389,6 +2400,66 @@ mod tests {
         assert_eq!(tabs[0].1, 12);
         assert_eq!(tabs[1].0, "Bash");
         assert_eq!(tabs[2].0, "Read");
+    }
+
+    /// Wrapping counts characters, and the hard cut has to as well: a line whose
+    /// only space in range is the one it starts with fell back to a byte offset
+    /// and sliced a multi-byte character in half, panicking the whole frame.
+    #[test]
+    fn wrapping_survives_a_line_that_starts_with_a_space() {
+        for width in 4..=8 {
+            let lines = wrap(" ab日本x", width);
+            assert!(
+                lines.iter().all(|l| l.chars().count() <= width),
+                "width {width}: {lines:?}"
+            );
+            assert_eq!(
+                lines.concat().split_whitespace().collect::<String>(),
+                "ab日本x",
+                "width {width}: nothing was lost or doubled"
+            );
+        }
+    }
+
+    /// Wrapping a user turn is what the conversation reader does with every line
+    /// a human typed, so the same multi-byte case arrives there too.
+    #[test]
+    fn wrapping_a_multi_byte_turn_breaks_it_on_a_boundary() {
+        assert_eq!(wrap("ab日本x", 4), ["ab日本", "x"]);
+        assert_eq!(wrap(" one two", 4), [" one", "two"]);
+        // A leading space must not become a line of its own — the hard cut
+        // stands in for it, exactly as it does in ASCII.
+        assert_eq!(wrap(" one", 4), [" one"]);
+    }
+
+    /// A subagent's tag is a transcript file stem read lossily, so it can hold a
+    /// character that is more than one byte. Six of them is what fits the field.
+    #[test]
+    fn a_subagent_tag_counts_characters_not_bytes() {
+        let mut data = SessionData::default();
+        data.metrics.tool_count = 2;
+        data.metrics.tool_details.insert("Bash".into(), vec![]);
+        for origin in ["agent-abcdeé", "agent-abcde日", "agent-abcdefgh"] {
+            let mut d = crate::session::ToolDetail {
+                d: format!("run {origin}"),
+                ts: "2026-08-05T10:00:00+00:00".into(),
+                ..Default::default()
+            };
+            d.origin = Some(origin.into());
+            data.metrics
+                .tool_details
+                .get_mut("Bash")
+                .expect("the tool is there")
+                .push(d);
+        }
+
+        let (lines, _) = tool_activity(&data, 0, None, false, None, 120);
+        let tags: Vec<String> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .filter(|s| s.starts_with('↳'))
+            .collect();
+        assert_eq!(tags, ["↳abcdeé ", "↳abcde日 ", "↳abcdef "]);
     }
 
     #[test]
