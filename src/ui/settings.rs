@@ -348,7 +348,7 @@ impl App {
     ///
     /// Applied on every reload rather than once at startup, so hiding a column
     /// takes effect on the keypress that saved it. The table asks for the list
-    /// on every frame — see [`columns::hidden_for`] — so this is a re-parse
+    /// on every frame — see [`columns::visible_columns_among`] — so this is a re-parse
     /// and nothing more. The environment variable still wins, as an override
     /// should.
     pub(super) fn apply_columns(&mut self) {
