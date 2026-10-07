@@ -208,8 +208,13 @@ jobs:
           ref: refs/tags/${{ needs.prepare-release.outputs.tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # Beside `build`, not after it: the crate is source, and the binaries are
+  # cross-compiles of it, so neither proves anything the other needs. What
+  # proves the crate is `verify / package` — the same packaging, built — which
+  # passed before `prepare-release` cut the tag. Waiting on the aarch64 build
+  # only made every release that much slower to reach crates.io.
   publish-crate:
-    needs: [prepare-release, build]
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -224,7 +229,8 @@ jobs:
             echo "::error::CARGO_REGISTRY_TOKEN is not configured"
             exit 1
           fi
-          # Every target above has already built successfully. Cargo normally
-          # builds the package again before uploading; skip that redundant
-          # verification on this fresh runner.
+          # `verify / package` already built this exact package with
+          # `cargo publish --dry-run` before the tag existed. Cargo normally
+          # builds it again before uploading; skip that redundant verification
+          # on this fresh runner.
           cargo publish --locked --no-verify
