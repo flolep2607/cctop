@@ -192,6 +192,12 @@ const FAVICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 6
 ///
 /// Its own route rather than a data: URL in a `<link>` because manifest fetches
 /// are governed by `manifest-src`, which `data:` is not a part of here.
+static FAVICON_P: std::sync::LazyLock<http::Packed> =
+    std::sync::LazyLock::new(|| http::Packed::new(FAVICON));
+
+static MANIFEST_P: std::sync::LazyLock<http::Packed> =
+    std::sync::LazyLock::new(|| http::Packed::new(MANIFEST));
+
 const MANIFEST: &str = concat!(
     r#"{"name":"cctop","short_name":"cctop","display":"standalone","#,
     r#""start_url":"/","icons":[{"src":"/favicon.svg","sizes":"any","#,
@@ -267,6 +273,10 @@ struct Shared {
     /// Present even when `scan` is off: a dashboard-hosted serve still owes
     /// its remote rows an answer.
     hosts: HashMap<String, fleet::Host>,
+    /// The app page as each credential is served it, compressed once — see
+    /// [`app_page`]. Indexed by [`Access`]: the page differs only in which
+    /// token and actions flag it carries, both fixed for the run.
+    pages: [std::sync::OnceLock<http::Packed>; 2],
 }
 
 /// One publish of the whole table.
@@ -572,6 +582,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
                     .filter(|url| !url.is_empty())
             })
             .map(|target| notify::Webhook::new(target, origin.clone(), token.clone())),
+        pages: Default::default(),
         hosts: options
             .hosts
             .iter()
@@ -1429,30 +1440,38 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // rmux's terminal app, for a session page to frame — see [`term`]. Static
     // and behind the same token as everything else, so only someone already
     // holding the link can load it.
-    if let Some((content_type, body)) = term::file(&path) {
-        return http::respond_policy(
+    if let Some(file) = term::file(&path) {
+        return http::respond_packed(
             stream,
-            Some(&request),
-            content_type,
-            body,
-            http::TERM_POLICY,
+            &request,
+            file.content_type,
+            file.body,
+            file.cache,
+            "",
+            Some(http::TERM_POLICY),
         );
     }
     match path.as_str() {
         "/" => app_page(shared, stream, &request, access),
-        "/favicon.svg" => http::respond(
+        // Fixed for a build but not named by one, so revalidated rather than
+        // kept: a `304` is as cheap as a cache hit and survives an upgrade.
+        "/favicon.svg" => http::respond_packed(
             stream,
-            Some(&request),
-            200,
+            &request,
             "image/svg+xml",
-            FAVICON.as_bytes(),
+            &FAVICON_P,
+            http::REVALIDATE,
+            "",
+            None,
         ),
-        "/manifest.webmanifest" => http::respond(
+        "/manifest.webmanifest" => http::respond_packed(
             stream,
-            Some(&request),
-            200,
+            &request,
             "application/manifest+json",
-            MANIFEST.as_bytes(),
+            &MANIFEST_P,
+            http::REVALIDATE,
+            "",
+            None,
         ),
         "/api/sessions" => {
             let snapshot = current(shared);
@@ -1625,7 +1644,17 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             let list = tabs::build(crate::rmux::running_in_tab_order(), &snapshot.sessions, now);
-            json(stream, &request, &serde_json::json!({ "tabs": list }))
+            // Polled every few seconds by every open page and nearly always
+            // the same answer, so it goes out tagged and comes back a `304`.
+            // Tab names, titles and states — what the page shows in its bar,
+            // nothing from a transcript — so it may sit in the browser cache.
+            let body = serde_json::json!({ "tabs": list }).to_string();
+            http::respond_revalidated(
+                stream,
+                &request,
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+            );
         }
         _ if path.starts_with("/api/tab/") => {
             api_tab(shared, stream, &request, &path["/api/tab/".len()..], access);
@@ -2057,13 +2086,37 @@ fn current(shared: &Shared) -> Arc<Snapshot> {
     }
 }
 
-/// Serve one of the two HTML pages, with the token stitched in.
+/// Serve the app page, with the token stitched in.
 ///
 /// The page needs the token to make its own requests, and it cannot read the
 /// one in its URL without either parsing `location` in script — which is fine —
 /// or being handed it. It is handed it, because the same page is fetched with
 /// no token at all under `--no-token` and a single substitution keeps both
 /// cases on one code path.
+///
+/// What it costs to send is decided by the fact that it changes only with the
+/// credential. There are two of those per run, so the page is built and
+/// compressed once for each — most of a megabyte, a third of that compressed,
+/// and it used to be gzipped again on every request — and sent from then on as
+/// it was packed.
+///
+/// Cached as `private, no-cache` with an ETag, which is the most a page holding
+/// the token can safely be:
+///
+/// - **Not `no-store`.** That made every reload download the whole UI again —
+///   300 KB over a tunnel to a phone — for a page that had not changed. With
+///   an ETag a reload is a `304` and no body.
+/// - **Not `max-age`.** The page is the one thing that knows which cctop it
+///   was built by; kept without asking, it would go on running the old UI
+///   against an upgraded server, or a token a restart had already replaced.
+///   `no-cache` asks every time, and the answer is free when nothing moved.
+/// - **`private`.** The body carries a credential, so no shared cache between
+///   here and the browser — the tunnel's CDN, a proxy — may keep it. The
+///   browser's own copy adds little to what it already holds: the token is in
+///   its history, in the access cookie, and in the page it is showing.
+///
+/// The tag is a hash of the body, so it differs per credential: the read-only
+/// link's page never answers a revalidation of the full one's.
 fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: Access) {
     // Which credential the page carries — and whether it may act — is decided
     // by the one the request arrived with, not by the run: the read-only link
@@ -2073,7 +2126,9 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: 
         Access::Full => (shared.token.as_str(), shared.actions),
         Access::ReadOnly => (shared.readonly.as_str(), false),
     };
-    let body = APP_HTML.replace("__CCTOP_CONFIG__", &app_config(credential, actions));
+    let page = shared.pages[access as usize].get_or_init(|| {
+        http::Packed::new(APP_HTML.replace("__CCTOP_CONFIG__", &app_config(credential, actions)))
+    });
 
     // Hand the credential back as a cookie so a reload — which has no `?t=`
     // left, the page having stripped it — still gets in. Only a request that
@@ -2092,34 +2147,14 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: 
             );
         }
     }
-    // The app page carries the whole UI and is most of a megabyte; a browser
-    // that takes gzip gets a third of that, which is the difference that
-    // matters over a tunnel to a phone. Compressed per request because the
-    // body differs per credential, and fast because it is per request.
-    if request.accepts_gzip() && body.len() > 64 * 1024 {
-        use std::io::Write;
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        if gz.write_all(body.as_bytes()).is_ok()
-            && let Ok(packed) = gz.finish()
-        {
-            headers.push_str("Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n");
-            return http::respond_extra(
-                stream,
-                Some(request),
-                200,
-                "text/html; charset=utf-8",
-                &packed,
-                &headers,
-            );
-        }
-    }
-    http::respond_extra(
+    http::respond_packed(
         stream,
-        Some(request),
-        200,
+        request,
         "text/html; charset=utf-8",
-        body.as_bytes(),
+        page,
+        http::REVALIDATE,
         &headers,
+        None,
     );
 }
 
@@ -2267,12 +2302,16 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
         .get("session")
         .cloned()
         .filter(|s| !s.is_empty());
+    // A page that knows the field-level shape says so; one loaded before this
+    // server was upgraded does not, and keeps the shape it can apply rather
+    // than silently dropping every patch it was sent.
+    let fine = request.query.get("rows").is_some_and(|v| v == "patch");
     let mut last_row: Option<String> = None;
     // The table this stream last wrote, which is what the next delta is taken
     // against. Per stream rather than per snapshot: a stream that fell behind
     // skips snapshots, and its delta has to cover everything it skipped.
     let mut last_table: Option<Arc<Snapshot>> = None;
-    let Ok(mut sse) = EventStream::open(stream) else {
+    let Ok(mut sse) = EventStream::open(stream, request) else {
         return;
     };
     crate::elog::event("sse", "open", serde_json::json!({}));
@@ -2307,9 +2346,11 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
             let frame = match &only {
                 None => match &last_table {
                     None => Some(("sessions", snapshot.json.clone())),
-                    Some(before) => {
-                        table_delta(&before.rows, &snapshot.rows).map(|delta| ("rows", delta))
+                    Some(before) => match fine {
+                        true => table_patch(&before.rows, &snapshot.rows),
+                        false => table_delta(&before.rows, &snapshot.rows),
                     }
+                    .map(|delta| ("rows", delta)),
                 },
                 Some(id) => {
                     let row = snapshot
@@ -2382,6 +2423,9 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
 /// row counts as changed exactly when its JSON did — no second notion of
 /// equality to drift from what the page would have seen.
 ///
+/// This is the shape a page from before [`table_patch`] understands, and what
+/// a stream that did not ask for the finer one is still sent.
+///
 /// ponytail: rows are told apart by session id, as the page already does for
 /// its keys and its routes. Two rows sharing one — the same session reported
 /// by this machine and by a `--host` — are one row to the delta, and the page
@@ -2409,6 +2453,143 @@ fn table_delta(before: &[(String, String)], after: &[(String, String)]) -> Optio
     }
     body.push('}');
     Some(body)
+}
+
+/// [`table_delta`], down to the field: what a page that asked for it is sent.
+///
+/// [`table_delta`] still sent too much. A session row is four kilobytes —
+/// costs per model, subagents, an activity histogram — and what moves between
+/// two refreshes is usually one field of it: a running agent's CPU figure,
+/// which changes on every tick for every live row. And the order of eight
+/// hundred ids was sent whole whenever one session became the newest, which is
+/// most refreshes on a busy machine. Measured on one, both together were most
+/// of 5 MB a minute. So:
+///
+/// - A row that existed before goes as `"patch": [{"id", "to": {field: value},
+///   "drop": [field]}]` — the fields whose JSON changed, and the ones that are
+///   gone — unless that would be no shorter than the row, which then goes whole
+///   in `"set"` as before. New rows always go whole.
+/// - A changed order goes as `"head": [id, …]` and `"gone": [id, …]`: the new
+///   order is `head`, then every row the page had that is in neither list, in
+///   the order the page had them. A refresh moves a few rows to the top and
+///   leaves the rest as they were, which is a head of a few ids. Any other
+///   reshuffle that would make `head` as long as the table goes as `"order"`.
+///
+/// Fields are compared as parsed JSON, and only for rows whose string already
+/// differed, so a quiet refresh parses nothing.
+fn table_patch(before: &[(String, String)], after: &[(String, String)]) -> Option<String> {
+    use serde_json::{Map, Value};
+    let had: HashMap<&str, &str> = before
+        .iter()
+        .map(|(id, row)| (id.as_str(), row.as_str()))
+        .collect();
+    let mut set: Vec<&str> = Vec::new();
+    let mut patch: Vec<Value> = Vec::new();
+    for (id, row) in after {
+        let Some(old) = had.get(id.as_str()) else {
+            set.push(row);
+            continue;
+        };
+        if old == row {
+            continue;
+        }
+        let parsed = (
+            serde_json::from_str::<Map<String, Value>>(old),
+            serde_json::from_str::<Map<String, Value>>(row),
+        );
+        let (Ok(old), Ok(new)) = parsed else {
+            set.push(row);
+            continue;
+        };
+        let to: Map<String, Value> = new
+            .iter()
+            .filter(|(k, v)| old.get(*k) != Some(*v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let drop: Vec<&String> = old.keys().filter(|k| !new.contains_key(*k)).collect();
+        let mut one = serde_json::json!({ "id": id, "to": to });
+        if !drop.is_empty() {
+            one["drop"] = serde_json::json!(drop);
+        }
+        match one.to_string().len() < row.len() {
+            true => patch.push(one),
+            false => set.push(row),
+        }
+    }
+
+    let reordered =
+        before.len() != after.len() || before.iter().zip(after).any(|((a, _), (b, _))| a != b);
+    if set.is_empty() && patch.is_empty() && !reordered {
+        return None;
+    }
+    let mut body = format!("{{\"set\":[{}]", set.join(","));
+    if !patch.is_empty() {
+        body.push_str(",\"patch\":");
+        body.push_str(&Value::from(patch).to_string());
+    }
+    if reordered {
+        let ids: Vec<&str> = after.iter().map(|(id, _)| id.as_str()).collect();
+        let list = |ids: &[&str]| serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
+        match order_edit(before, &ids) {
+            Some((head, gone)) => {
+                body.push_str(&format!(
+                    ",\"head\":{},\"gone\":{}",
+                    list(&head),
+                    list(&gone)
+                ));
+            }
+            None => body.push_str(&format!(",\"order\":{}", list(&ids))),
+        }
+    }
+    body.push('}');
+    Some(body)
+}
+
+/// The order `after` as an edit of `before`'s: the ids to put first, and the
+/// ids that are gone — with every other row keeping its place relative to the
+/// others. `None` when that is no shorter than the whole order, or when an id
+/// appears twice (see [`table_delta`]'s ponytail), where "its place" means
+/// nothing.
+///
+/// `head` is the shortest prefix of `after` whose removal leaves the rest of
+/// `after` in the order `before` had it. Found from the back: the longest tail
+/// of `after` that `before` contains in sequence, matched greedily from the
+/// end, which is what makes the head left over the shortest. A row new to the
+/// table cannot be in that tail — `before` does not have it — so it is always
+/// in `head`, where the page finds it next to its row in `set`.
+fn order_edit<'a>(
+    before: &'a [(String, String)],
+    after: &[&'a str],
+) -> Option<(Vec<&'a str>, Vec<&'a str>)> {
+    use std::collections::HashSet;
+    let now: HashSet<&str> = after.iter().copied().collect();
+    let was: HashSet<&str> = before.iter().map(|(id, _)| id.as_str()).collect();
+    if now.len() != after.len() || was.len() != before.len() {
+        return None;
+    }
+    let gone: Vec<&str> = before
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| !now.contains(id))
+        .collect();
+    let kept: Vec<&str> = before
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| now.contains(id))
+        .collect();
+    let mut j = kept.len();
+    let mut tail = 0;
+    for id in after.iter().rev() {
+        match kept[..j].iter().rposition(|k| k == id) {
+            Some(at) => {
+                j = at;
+                tail += 1;
+            }
+            None => break,
+        }
+    }
+    let head: Vec<&str> = after[..after.len() - tail].to_vec();
+    (head.len() + gone.len() < after.len()).then_some((head, gone))
 }
 
 /// Build and send one session's report.
@@ -2652,6 +2833,7 @@ mod tests {
             topics: Mutex::new(search::Topics::default()),
             notify: None,
             hosts: HashMap::new(),
+            pages: Default::default(),
         }
     }
 
@@ -2921,12 +3103,23 @@ mod tests {
         query: &str,
         keepalive: Duration,
     ) -> impl FnMut() -> (String, String) {
+        open_stream_with(shared, query, "", keepalive).1
+    }
+
+    /// [`open_stream`] with request headers, handing back the response head
+    /// too. A gzip stream is decoded as it arrives, the way a browser does.
+    fn open_stream_with(
+        shared: &Arc<Shared>,
+        query: &str,
+        headers: &str,
+        keepalive: Duration,
+    ) -> (String, impl FnMut() -> (String, String)) {
         use std::io::{BufRead, BufReader};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (mut server, _) = listener.accept().unwrap();
         client
-            .write_all(format!("GET /api/events{query} HTTP/1.1\r\n\r\n").as_bytes())
+            .write_all(format!("GET /api/events{query} HTTP/1.1\r\n{headers}\r\n").as_bytes())
             .unwrap();
         let request = Request::parse(&server).unwrap();
         let shared = Arc::clone(shared);
@@ -2936,14 +3129,20 @@ mod tests {
             .unwrap();
         let mut reader = BufReader::new(client);
         // The response head, which ends at its blank line.
+        let mut head = String::new();
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).expect("the response head");
             if line == "\r\n" {
                 break;
             }
+            head.push_str(&line);
         }
-        move || {
+        let mut reader: Box<dyn BufRead> = match head.contains("Content-Encoding: gzip") {
+            true => Box::new(BufReader::new(flate2::read::GzDecoder::new(reader))),
+            false => Box::new(reader),
+        };
+        let next = move || {
             let (mut event, mut data) = (String::new(), String::new());
             loop {
                 let mut line = String::new();
@@ -2960,7 +3159,8 @@ mod tests {
                     data = d.to_string();
                 }
             }
-        }
+        };
+        (head, next)
     }
 
     /// The table goes out whole once, then as the rows that moved — and a
@@ -3002,5 +3202,307 @@ mod tests {
         };
         assert_eq!(next(), ("ping".into(), "1".into()));
         churn.join().unwrap();
+    }
+
+    #[test]
+    fn a_patch_carries_only_the_fields_that_moved() {
+        let row = |id: &str, cpu: u32, extra: &str| {
+            format!(
+                r#"{{"session_id":"{id}","title":"a long title that is the bulk of the row","cpu":{cpu}{extra}}}"#
+            )
+        };
+        let before = vec![
+            ("a".to_string(), row("a", 1, r#","permission":"edits""#)),
+            ("b".to_string(), row("b", 1, "")),
+        ];
+        assert_eq!(table_patch(&before, &before.clone()), None);
+
+        // One field moved and one went: the row is not resent, only those.
+        let after = vec![
+            ("a".to_string(), row("a", 2, "")),
+            ("b".to_string(), row("b", 1, "")),
+        ];
+        assert_eq!(
+            table_patch(&before, &after).as_deref(),
+            Some(r#"{"set":[],"patch":[{"id":"a","to":{"cpu":2},"drop":["permission"]}]}"#)
+        );
+
+        // A new row goes whole, and the order as the ids to put first.
+        let grown = vec![
+            ("c".to_string(), row("c", 1, "")),
+            ("a".to_string(), before[0].1.clone()),
+            ("b".to_string(), before[1].1.clone()),
+        ];
+        let delta = table_patch(&before, &grown).unwrap();
+        assert!(
+            delta.starts_with(&format!(r#"{{"set":[{}]"#, row("c", 1, ""))),
+            "{delta}"
+        );
+        assert!(delta.ends_with(r#""head":["c"],"gone":[]}"#), "{delta}");
+    }
+
+    /// The order edit is checked by doing what the page does with it — `head`,
+    /// then every row it had that is neither in `head` nor gone — and
+    /// comparing with the order wanted.
+    #[test]
+    fn an_order_edit_rebuilds_the_order_it_describes() {
+        let ids = |s: &str| -> Vec<(String, String)> {
+            s.chars().map(|c| (c.to_string(), String::new())).collect()
+        };
+        let apply = |before: &str, head: &[&str], gone: &[&str]| -> String {
+            let mut out: String = head.concat();
+            out.extend(
+                before
+                    .chars()
+                    .filter(|c| !head.contains(&c.to_string().as_str()))
+                    .filter(|c| !gone.contains(&c.to_string().as_str())),
+            );
+            out
+        };
+        for (before, after) in [
+            ("abcdefgh", "dabcefgh"),  // one row became the newest
+            ("abcdefgh", "xabcdefgh"), // a new row arrived on top
+            ("abcdefgh", "abcdefg"),   // the oldest went away
+            ("abcdefgh", "abdefgh"),   // one in the middle went away
+            ("abcdefgh", "hgabcdef"),  // two moved up together
+            ("abcdefgh", "fabcdegh"),  // one moved up, one went
+        ] {
+            let after_ids: Vec<String> = after.chars().map(String::from).collect();
+            let after_refs: Vec<&str> = after_ids.iter().map(String::as_str).collect();
+            let before_ids = ids(before);
+            let (head, gone) = order_edit(&before_ids, &after_refs)
+                .unwrap_or_else(|| panic!("{before} -> {after} should be an edit"));
+            assert_eq!(apply(before, &head, &gone), after, "{before} -> {after}");
+            assert!(head.len() <= 2, "{before} -> {after}: head {head:?}");
+        }
+        // Turned around entirely, nearly every id has to be named, and the
+        // whole order is no longer than that plus the departures.
+        let after_ids: Vec<String> = "hgf".chars().map(String::from).collect();
+        let after_refs: Vec<&str> = after_ids.iter().map(String::as_str).collect();
+        assert_eq!(order_edit(&ids("abcdefgh"), &after_refs), None);
+        // And a repeated id has no place to keep.
+        assert_eq!(order_edit(&ids("aab"), &["b", "a", "a"]), None);
+    }
+
+    /// A page that did not ask for patches is sent whole rows, which is all a
+    /// page loaded before the patch shape existed knows how to apply.
+    #[test]
+    fn only_a_stream_that_asks_is_sent_patches() {
+        let shared = Arc::new(shared("", ""));
+        let row = |n: u32| {
+            format!(
+                r#"{{"session_id":"a","title":"{}","n":{n}}}"#,
+                "x".repeat(200)
+            )
+        };
+        let first = row(1);
+        put(&shared, 1, &[("a", &first)]);
+        let mut old = open_stream(&shared, "", Duration::from_secs(30));
+        let mut new = open_stream(&shared, "?rows=patch", Duration::from_secs(30));
+        assert_eq!(old().0, "sessions");
+        assert_eq!(new().0, "sessions");
+        let second = row(2);
+        put(&shared, 2, &[("a", &second)]);
+        assert_eq!(old(), ("rows".into(), format!(r#"{{"set":[{second}]}}"#)));
+        assert_eq!(
+            new(),
+            (
+                "rows".into(),
+                r#"{"set":[],"patch":[{"id":"a","to":{"n":2}}]}"#.into()
+            )
+        );
+    }
+
+    /// Gzip to a client that offers it, and each event decodable the moment
+    /// it is written: a stream that only came out of the compressor when the
+    /// next event pushed it would hold every update back by one refresh.
+    #[test]
+    fn the_event_stream_is_gzip_and_flushed_per_event() {
+        let shared = Arc::new(shared("", ""));
+        put(&shared, 1, &[("a", r#"{"a":1}"#)]);
+        let (head, mut next) = open_stream_with(
+            &shared,
+            "",
+            "Accept-Encoding: gzip, deflate, br\r\n",
+            Duration::from_millis(300),
+        );
+        assert!(head.contains("Content-Encoding: gzip"), "{head}");
+        assert_eq!(next(), ("sessions".into(), r#"[{"a":1}]"#.into()));
+        put(&shared, 2, &[("a", r#"{"a":2}"#)]);
+        assert_eq!(next(), ("rows".into(), r#"{"set":[{"a":2}]}"#.into()));
+        // The ping goes through the same encoder.
+        assert_eq!(next(), ("ping".into(), "1".into()));
+
+        let (plain, _) = open_stream_with(&shared, "", "", Duration::from_secs(30));
+        assert!(!plain.contains("Content-Encoding"), "{plain}");
+    }
+
+    /// One request through the router, as the head and the undecoded body.
+    fn exchange(shared: &Shared, target: &str, headers: &str) -> (String, Vec<u8>) {
+        use std::io::Read;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(format!("GET {target} HTTP/1.1\r\n{headers}\r\n").as_bytes())
+            .unwrap();
+        // Answered on a thread of its own: the app page is most of a megabyte,
+        // more than a socket buffers, and its write would wait on this read.
+        let mut raw = Vec::new();
+        std::thread::scope(|scope| {
+            scope.spawn(move || serve_connection(shared, &mut server));
+            client.read_to_end(&mut raw).unwrap();
+        });
+        let split = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("a response head");
+        let head = String::from_utf8(raw[..split].to_vec()).unwrap();
+        (head, raw[split + 4..].to_vec())
+    }
+
+    /// The value of header `name` in a response head.
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            k.eq_ignore_ascii_case(name).then_some(v.trim())
+        })
+    }
+
+    const JS_PATH: &str = "/_astro/index.astro_astro_type_script_index_0_lang.CdYCpIGm.js";
+
+    #[test]
+    fn hashed_files_are_kept_for_a_year_and_pages_are_revalidated() {
+        let guarded = shared("full", "view");
+        let auth = "Authorization: Bearer full\r\n";
+        for (path, cache) in [
+            (JS_PATH, http::IMMUTABLE),
+            ("/_astro/index.D2bSaP4U.css", http::IMMUTABLE),
+            (
+                "/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm",
+                http::IMMUTABLE,
+            ),
+            ("/term/crabs/lime-dark.svg", http::IMMUTABLE),
+            ("/term/", http::REVALIDATE),
+            ("/", http::REVALIDATE),
+            ("/favicon.svg", http::REVALIDATE),
+        ] {
+            let (head, _) = exchange(&guarded, path, auth);
+            assert!(head.starts_with("HTTP/1.1 200 "), "{path}: {head}");
+            assert_eq!(header(&head, "Cache-Control"), Some(cache), "{path}");
+            if cache == http::REVALIDATE {
+                assert!(header(&head, "ETag").is_some(), "{path} has no ETag");
+            }
+        }
+        // Behind the gate like everything else: caching is not a way round it.
+        let (head, _) = exchange(&guarded, JS_PATH, "");
+        assert!(head.starts_with("HTTP/1.1 403 "), "{head}");
+        // And what holds a transcript is still never kept.
+        let (head, _) = exchange(&guarded, "/api/sessions", auth);
+        assert_eq!(header(&head, "Cache-Control"), Some("no-store"));
+    }
+
+    #[test]
+    fn a_page_the_browser_holds_is_answered_304_and_no_body() {
+        let guarded = shared("full", "view");
+        for path in ["/?t=full", "/term/", JS_PATH] {
+            let (head, body) = exchange(&guarded, path, "Authorization: Bearer full\r\n");
+            let etag = header(&head, "ETag").expect("an ETag").to_string();
+            assert!(!body.is_empty());
+            let (head, body) = exchange(
+                &guarded,
+                path,
+                &format!("Authorization: Bearer full\r\nIf-None-Match: {etag}\r\n"),
+            );
+            assert!(head.starts_with("HTTP/1.1 304 "), "{path}: {head}");
+            assert!(body.is_empty(), "{path}: a 304 carries no body");
+            assert_eq!(header(&head, "ETag"), Some(etag.as_str()));
+            // A stale tag is answered in full.
+            let (head, _) = exchange(
+                &guarded,
+                path,
+                "Authorization: Bearer full\r\nIf-None-Match: W/\"stale\"\r\n",
+            );
+            assert!(head.starts_with("HTTP/1.1 200 "), "{path}: {head}");
+        }
+        // The page carries the credential, so each credential's page has its
+        // own tag: the read-only link's never validates the full one's.
+        let tag = |token: &str| {
+            let (head, _) = exchange(&guarded, &format!("/?t={token}"), "");
+            header(&head, "ETag").unwrap().to_string()
+        };
+        assert_ne!(tag("full"), tag("view"));
+        // A 304 on a link's first visit still hands its cookie back.
+        let full = tag("full");
+        let (head, _) = exchange(&guarded, "/?t=full", &format!("If-None-Match: {full}\r\n"));
+        assert!(head.starts_with("HTTP/1.1 304 "), "{head}");
+        assert!(header(&head, "Set-Cookie").is_some(), "{head}");
+    }
+
+    #[test]
+    fn bodies_are_compressed_for_a_client_that_offers_it() {
+        use std::io::Read;
+        let guarded = shared("full", "view");
+        let auth = "Authorization: Bearer full\r\n";
+        let js = term::file(JS_PATH).unwrap();
+        let raw = exchange(&guarded, JS_PATH, auth);
+        assert_eq!(header(&raw.0, "Content-Encoding"), None);
+        assert_eq!(header(&raw.0, "Vary"), Some("Accept-Encoding"));
+
+        let (head, body) = exchange(
+            &guarded,
+            JS_PATH,
+            &format!("{auth}Accept-Encoding: gzip\r\n"),
+        );
+        assert_eq!(header(&head, "Content-Encoding"), Some("gzip"));
+        assert_eq!(
+            header(&head, "Content-Length"),
+            Some(body.len().to_string().as_str())
+        );
+        let mut plain = Vec::new();
+        flate2::read::GzDecoder::new(&body[..])
+            .read_to_end(&mut plain)
+            .unwrap();
+        assert_eq!(plain, raw.1);
+        assert!(
+            body.len() < raw.1.len() / 3,
+            "{} of {}",
+            body.len(),
+            raw.1.len()
+        );
+
+        let (head, body) = exchange(
+            &guarded,
+            JS_PATH,
+            &format!("{auth}Accept-Encoding: gzip, deflate, br\r\n"),
+        );
+        assert_eq!(header(&head, "Content-Encoding"), Some("br"));
+        let mut plain = Vec::new();
+        brotli::Decompressor::new(&body[..], 4096)
+            .read_to_end(&mut plain)
+            .unwrap();
+        assert_eq!(plain, raw.1);
+        assert_eq!(js.content_type, "application/javascript; charset=utf-8");
+
+        // A route's JSON, built per request, is compressed too.
+        let table: Vec<(String, String)> = (0..40)
+            .map(|i| {
+                (
+                    format!("s{i}"),
+                    format!(r#"{{"session_id":"s{i}","title":"a session"}}"#),
+                )
+            })
+            .collect();
+        let pairs: Vec<(&str, &str)> = table
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        put(&guarded, 1, &pairs);
+        let (head, _) = exchange(
+            &guarded,
+            "/api/sessions",
+            &format!("{auth}Accept-Encoding: gzip\r\n"),
+        );
+        assert_eq!(header(&head, "Content-Encoding"), Some("gzip"), "{head}");
     }
 }

@@ -55,7 +55,9 @@ export function useSessions(only?: string): { sessions: Session[] | null; live: 
       clearTimeout(retry);
       source?.close();
       heard = Date.now();
-      const mine = new EventSource(withToken("/api/events", only ? { session: only } : undefined));
+      // `rows: "patch"` asks for rows as the fields that changed, which a
+      // page from before that shape existed would not know to apply.
+      const mine = new EventSource(withToken("/api/events", only ? { session: only } : { rows: "patch" }));
       source = mine;
       const fresh = () => {
         if (source !== mine) return false;

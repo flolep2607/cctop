@@ -84,6 +84,13 @@ cloudflare-quick-tunnel = "0.3.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
+# The web UI's bodies are sent brotli to a browser that takes it: the app page,
+# rmux's terminal bundle and its WebAssembly come out 7-20% smaller than gzip at
+# the same speed, and each is compressed once per run rather than per request
+# (`serve::http::Packed`). Pure Rust, so the static musl builds take it as it
+# is; without default features it is the encoder, the decoder it is built on,
+# and the two allocator shims they share.
+brotli = { version = "9.0.0", default-features = false, features = ["std"] }
 notify = { version = "8.2.0", default-features = false }
 # The conversation view reads an assistant's replies as the markdown they are
 # written in (`ui::markdown`). Only the parser: its defaults are an HTML writer

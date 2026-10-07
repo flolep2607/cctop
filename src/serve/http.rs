@@ -2,7 +2,7 @@
 //!
 //! The surface cctop needs is three verbs' worth of nothing: `GET`, `HEAD`,
 //! `POST`, a path, a query string, and a body in each direction. No routing
-//! DSL, no middleware, no keep-alive negotiation, no compression. That is a few
+//! DSL, no middleware, no keep-alive negotiation. That is a few
 //! hundred lines here against a web framework and its transitive tree in
 //! `Cargo.toml` — the same bargain [`crate::mcp`] took with JSON-RPC, for the
 //! same reason: a monitoring tool people `cargo install` should not pull in a
@@ -29,6 +29,19 @@
 //! what stops a page in another tab from driving an agent on the strength of a
 //! token it cannot read — see [`Request::wants_json`].
 //!
+//! What it does take seriously as well is how much a page costs to load, because
+//! the road to it is often a tunnel to a phone. Three rules, applied here rather
+//! than per route:
+//!
+//! - **Every text body is compressed** for a client that offers it — brotli
+//!   first, then gzip — and a body that is the same on every request is
+//!   compressed once per run, not per request ([`Packed`]).
+//! - **A file that never changes says so.** Names with a content hash in them
+//!   are cached for a year; everything else that is fixed for a run carries an
+//!   ETag, and a browser that already holds it is answered `304` with no body.
+//! - **Anything else stays `no-store`.** Transcripts, prompts and the token
+//!   are what most routes return, and a disk cache is not where they belong.
+//!
 //! ponytail: HTTP/1.0-style connection-per-request. Keep-alive would save a
 //! handshake on a page that makes four requests and then holds one SSE stream
 //! open for an hour, which is not a saving worth the state machine.
@@ -36,6 +49,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// The most request line and headers that will be read before giving up.
@@ -110,10 +124,14 @@ pub struct Request {
     /// browser following a link — a script, curl, a status board — and it keeps
     /// the token out of the URL such a client logs and displays.
     bearer: String,
-    /// Whether the client said it takes a gzip body. Only the app page uses
-    /// it: at most a few kilobytes everywhere else, and the one response worth
-    /// compressing is the near-megabyte page with the whole UI inlined in it.
+    /// Whether the client said it takes a gzip body.
     accepts_gzip: bool,
+    /// Whether the client said it takes a brotli body. Browsers offer it over
+    /// https; a plain-http page on the LAN usually gets gzip.
+    accepts_br: bool,
+    /// The `If-None-Match` header as it arrived, empty when there was none —
+    /// the ETags a browser already holds a copy for.
+    if_none_match: String,
     /// The query string as it arrived, undecoded, for the one route that
     /// forwards a request rather than answering it: the terminal relay.
     raw_query: String,
@@ -192,6 +210,8 @@ impl Request {
         let mut cookie_header = String::new();
         let mut bearer = String::new();
         let mut accepts_gzip = false;
+        let mut accepts_br = false;
+        let mut if_none_match = String::new();
         let mut headers: Vec<(String, String)> = Vec::new();
         loop {
             let mut header = String::new();
@@ -228,13 +248,24 @@ impl Request {
                         // — which has no query to present — still gets in.
                         cookie_header = value.to_string();
                     } else if name.eq_ignore_ascii_case("accept-encoding") {
-                        accepts_gzip = value.split(',').any(|coding| {
-                            let mut parts = coding.split(';');
-                            let name = parts.next().unwrap_or_default().trim();
-                            // `gzip;q=0` is a refusal, not an offer.
-                            let refused = parts.any(|p| p.trim().replace(' ', "") == "q=0");
-                            name.eq_ignore_ascii_case("gzip") && !refused
-                        });
+                        let offers = |wanted: &str| {
+                            value.split(',').any(|coding| {
+                                let mut parts = coding.split(';');
+                                let name = parts.next().unwrap_or_default().trim();
+                                // `gzip;q=0` is a refusal, not an offer.
+                                let refused = parts.any(|p| {
+                                    let q = p.trim().replace(' ', "");
+                                    q.strip_prefix("q=")
+                                        .and_then(|q| q.parse::<f32>().ok())
+                                        .is_some_and(|q| q <= 0.0)
+                                });
+                                name.eq_ignore_ascii_case(wanted) && !refused
+                            })
+                        };
+                        accepts_gzip = offers("gzip");
+                        accepts_br = offers("br");
+                    } else if name.eq_ignore_ascii_case("if-none-match") {
+                        if_none_match = value.to_string();
                     } else if name.eq_ignore_ascii_case("authorization") {
                         // Safe to honour on an action as well as a read: a page
                         // on another origin can only send this header after a
@@ -283,6 +314,8 @@ impl Request {
             cookie_header,
             bearer,
             accepts_gzip,
+            accepts_br,
+            if_none_match,
             raw_query: raw_query.to_string(),
             headers,
         })
@@ -333,6 +366,27 @@ impl Request {
     /// Whether a gzip body may be sent back.
     pub fn accepts_gzip(&self) -> bool {
         self.accepts_gzip
+    }
+
+    /// The best encoding this client takes, if it takes any.
+    fn encoding(&self) -> Option<Encoding> {
+        match (self.accepts_br, self.accepts_gzip) {
+            (true, _) => Some(Encoding::Br),
+            (false, true) => Some(Encoding::Gzip),
+            (false, false) => None,
+        }
+    }
+
+    /// Whether the browser already holds the representation tagged `etag`.
+    ///
+    /// Compared weakly, as RFC 9110 says `If-None-Match` is: a `W/` on either
+    /// side is ignored. Every tag here is weak anyway — see [`Packed`].
+    fn holds(&self, etag: &str) -> bool {
+        let bare = |t: &str| t.trim().trim_start_matches("W/").to_string();
+        let etag = bare(etag);
+        self.if_none_match
+            .split(',')
+            .any(|t| t.trim() == "*" || bare(t) == etag)
     }
 
     pub fn bearer(&self) -> &str {
@@ -461,6 +515,156 @@ pub const TERM_POLICY: &str = "default-src 'none'; base-uri 'none'; object-src '
      connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; \
      media-src 'none'; frame-src 'none'";
 
+/// The `Cache-Control` of a response that must not be kept anywhere.
+///
+/// The default, because most routes return a transcript, a prompt or a page
+/// with the token in it, and a browser's disk cache is not where those belong.
+pub const NO_STORE: &str = "no-store";
+
+/// For a file whose name changes whenever its bytes do: keep it a year and
+/// never ask again. `private` because every route here is behind the token,
+/// and a shared cache — the tunnel's CDN — that kept a copy would hand it to
+/// requests the gate never saw.
+pub const IMMUTABLE: &str = "private, max-age=31536000, immutable";
+
+/// For a body that is fixed for a run but whose URL is not: the browser keeps
+/// it and asks each time whether it is still current, which an ETag answers
+/// with a `304` and no body. `private` for the same reason as [`IMMUTABLE`].
+pub const REVALIDATE: &str = "private, no-cache";
+
+/// A content coding a response can be sent in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Br,
+    Gzip,
+}
+
+impl Encoding {
+    fn header(self) -> &'static str {
+        match self {
+            Encoding::Br => "br",
+            Encoding::Gzip => "gzip",
+        }
+    }
+
+    /// `body` in this coding, or `None` when it would not be smaller — an
+    /// empty picture gains nothing from a gzip header.
+    ///
+    /// `thorough` is for a body compressed once and sent many times, where a
+    /// tenth of a second buys the last few percent; a body compressed per
+    /// request takes the fast setting, which on brotli is still smaller than
+    /// gzip's best.
+    fn pack(self, body: &[u8], thorough: bool) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(body.len() / 3);
+        match self {
+            Encoding::Br => {
+                let params = brotli::enc::BrotliEncoderParams {
+                    quality: if thorough { 9 } else { 5 },
+                    lgwin: 22,
+                    ..Default::default()
+                };
+                brotli::BrotliCompress(&mut &body[..], &mut out, &params).ok()?;
+            }
+            Encoding::Gzip => {
+                let level = match thorough {
+                    true => flate2::Compression::best(),
+                    false => flate2::Compression::default(),
+                };
+                let mut gz = flate2::write::GzEncoder::new(out, level);
+                gz.write_all(body).ok()?;
+                out = gz.finish().ok()?;
+            }
+        }
+        (out.len() < body.len()).then_some(out)
+    }
+}
+
+/// Whether a body of this type is worth compressing: text of every kind, and
+/// WebAssembly, which shrinks to a quarter. Not images other than SVG, which
+/// are compressed already.
+fn compressible(content_type: &str) -> bool {
+    let kind = content_type.split(';').next().unwrap_or_default().trim();
+    kind.starts_with("text/")
+        || matches!(
+            kind,
+            "application/json"
+                | "application/javascript"
+                | "application/wasm"
+                | "application/manifest+json"
+                | "image/svg+xml"
+        )
+}
+
+/// Bodies smaller than this go out as they are: under a packet, compression
+/// saves nothing a reader would notice and costs a header either way.
+const COMPRESS_FROM: usize = 1024;
+
+/// A body that is the same on every request — a page, a script, a picture —
+/// compressed once, the first time each encoding is asked for, and named by an
+/// ETag so a browser that holds it already is answered `304` and no body.
+///
+/// Compressed lazily rather than up front because most runs never serve most
+/// of these: the terminal bundle is only fetched once someone opens a
+/// terminal, and a run nobody opens in a browser should not spend a second of
+/// CPU at start-up on pages it will never send.
+///
+/// The ETag is weak (`W/`) because it names the content, not one encoding of
+/// it: the gzip and the brotli copy are the same page, and a browser that
+/// cached one may revalidate it against the other.
+pub struct Packed {
+    body: Vec<u8>,
+    etag: String,
+    br: OnceLock<Option<Vec<u8>>>,
+    gzip: OnceLock<Option<Vec<u8>>>,
+}
+
+impl Packed {
+    pub fn new(body: impl Into<Vec<u8>>) -> Packed {
+        let body = body.into();
+        Packed {
+            etag: etag_of(&body),
+            body,
+            br: OnceLock::new(),
+            gzip: OnceLock::new(),
+        }
+    }
+
+    /// The body in `encoding`, compressing it if this is the first ask.
+    fn encoded(&self, encoding: Encoding) -> Option<&[u8]> {
+        let slot = match encoding {
+            Encoding::Br => &self.br,
+            Encoding::Gzip => &self.gzip,
+        };
+        slot.get_or_init(|| encoding.pack(&self.body, true))
+            .as_deref()
+    }
+}
+
+/// A weak ETag naming `body`. Not a security property — a tag only ever
+/// decides whether to resend bytes the browser could ask for anyway — so a
+/// fast 64-bit hash with the length beside it is plenty.
+fn etag_of(body: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut h);
+    format!("W/\"{:x}-{:016x}\"", body.len(), h.finish())
+}
+
+/// Everything a response says beyond its status and body. One struct rather
+/// than another positional argument per header, because each route that grew
+/// one used to grow a `respond_*` function to carry it.
+struct Head<'a> {
+    content_type: &'a str,
+    cache: &'a str,
+    etag: Option<&'a str>,
+    encoding: Option<Encoding>,
+    /// Whether the body depends on `Accept-Encoding`, which a cache has to be
+    /// told or it hands a gzip body to a client that never offered gzip.
+    vary: bool,
+    extra: &'a str,
+    policy: Option<&'a str>,
+}
+
 /// Write a complete response and let the connection close.
 ///
 /// `HEAD` is answered with the headers a `GET` would have carried, length
@@ -478,6 +682,10 @@ pub fn respond(
 
 /// `respond`, plus headers the one route that needs them asks for — the
 /// `Set-Cookie` a page sets on first open is the only one there is.
+///
+/// A text body worth compressing is compressed here, per request, for a
+/// client that offers an encoding — every JSON route included, which on a
+/// shared machine is a table of hundreds of rows.
 pub fn respond_extra(
     stream: &mut TcpStream,
     request: Option<&Request>,
@@ -486,40 +694,166 @@ pub fn respond_extra(
     body: &[u8],
     extra: &str,
 ) {
-    respond_with(stream, request, status, content_type, body, extra, None);
+    respond_fresh(stream, request, status, content_type, body, extra, NO_STORE);
 }
 
-/// `respond` under a content policy of the caller's instead of
-/// [`common_headers`]' — for the one set of files that is not cctop's own.
-pub fn respond_policy(
-    stream: &mut TcpStream,
-    request: Option<&Request>,
-    content_type: &str,
-    body: &[u8],
-    policy: &str,
-) {
-    respond_with(stream, request, 200, content_type, body, "", Some(policy));
-}
-
-fn respond_with(
+/// A body built for this request, compressed if it is worth it, under the
+/// given `Cache-Control`.
+fn respond_fresh(
     stream: &mut TcpStream,
     request: Option<&Request>,
     status: u16,
     content_type: &str,
     body: &[u8],
     extra: &str,
+    cache: &str,
+) {
+    let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
+    let packed = worth
+        .then(|| request.and_then(Request::encoding))
+        .flatten()
+        .and_then(|e| Some((e, e.pack(body, false)?)));
+    let head = Head {
+        content_type,
+        cache,
+        etag: None,
+        encoding: packed.as_ref().map(|(e, _)| *e),
+        vary: worth,
+        extra,
+        policy: None,
+    };
+    let sent = packed.as_ref().map_or(body, |(_, b)| b.as_slice());
+    write_response(stream, request, status, &head, sent, body.len());
+}
+
+/// A body built per request that is often the same as last time — a list
+/// polled every few seconds. Tagged with a hash of its bytes and kept by the
+/// browser under [`REVALIDATE`], so an unchanged answer goes back as a `304`
+/// with no body and the page's `fetch` sees the copy it already had.
+///
+/// Only for routes whose answer may sit in a browser's cache: nothing from a
+/// transcript.
+pub fn respond_revalidated(
+    stream: &mut TcpStream,
+    request: &Request,
+    content_type: &str,
+    body: &[u8],
+) {
+    let etag = etag_of(body);
+    if request.holds(&etag) {
+        return not_modified(stream, request, &etag, REVALIDATE, "");
+    }
+    let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
+    let packed = worth
+        .then(|| request.encoding())
+        .flatten()
+        .and_then(|e| Some((e, e.pack(body, false)?)));
+    let head = Head {
+        content_type,
+        cache: REVALIDATE,
+        etag: Some(&etag),
+        encoding: packed.as_ref().map(|(e, _)| *e),
+        vary: worth,
+        extra: "",
+        policy: None,
+    };
+    let sent = packed.as_ref().map_or(body, |(_, b)| b.as_slice());
+    write_response(stream, Some(request), 200, &head, sent, body.len());
+}
+
+/// Send a [`Packed`] body: `304` to a browser that holds it, otherwise the
+/// best encoding it takes, under `cache`. `policy` replaces the content policy
+/// for the one set of files that is not cctop's own; `extra` carries the
+/// `Set-Cookie` the app page sets, which a `304` sends too, since a reload
+/// that revalidates is still the visit the cookie was minted for.
+pub fn respond_packed(
+    stream: &mut TcpStream,
+    request: &Request,
+    content_type: &str,
+    packed: &Packed,
+    cache: &str,
+    extra: &str,
     policy: Option<&str>,
+) {
+    if request.holds(&packed.etag) {
+        return not_modified(stream, request, &packed.etag, cache, extra);
+    }
+    let worth = compressible(content_type) && packed.body.len() >= COMPRESS_FROM;
+    let chosen = worth
+        .then(|| request.encoding())
+        .flatten()
+        .and_then(|e| Some((e, packed.encoded(e)?)));
+    let head = Head {
+        content_type,
+        cache,
+        etag: Some(&packed.etag),
+        encoding: chosen.map(|(e, _)| e),
+        vary: worth,
+        extra,
+        policy,
+    };
+    let sent = chosen.map_or(packed.body.as_slice(), |(_, b)| b);
+    write_response(stream, Some(request), 200, &head, sent, packed.body.len());
+}
+
+/// A `304`: the browser's copy is current. It repeats the validators and the
+/// cache policy, as RFC 9110 asks, so the stored copy's freshness is renewed.
+fn not_modified(stream: &mut TcpStream, request: &Request, etag: &str, cache: &str, extra: &str) {
+    let mut head = format!(
+        "HTTP/1.1 304 Not Modified\r\n\
+         Connection: close\r\n\
+         Cache-Control: {cache}\r\n\
+         ETag: {etag}\r\n\
+         Vary: Accept-Encoding\r\n"
+    );
+    head.push_str(extra);
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.flush();
+    crate::elog::event(
+        "http",
+        "response",
+        serde_json::json!({
+            "method": request.method,
+            "path": request.path,
+            "status": 304,
+            "bytes": 0,
+            "ms": request.received.elapsed().as_millis() as u64,
+        }),
+    );
+}
+
+/// Put a response on the wire. `raw` is the body's size before encoding, for
+/// the log, which wants to show what compression saved.
+fn write_response(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    head_of: &Head,
+    body: &[u8],
+    raw: usize,
 ) {
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\n\
-         Content-Type: {content_type}\r\n\
+         Content-Type: {}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
-         Cache-Control: no-store\r\n",
+         Cache-Control: {}\r\n",
         reason(status),
+        head_of.content_type,
         body.len(),
+        head_of.cache,
     );
-    match policy {
+    if let Some(etag) = head_of.etag {
+        head.push_str(&format!("ETag: {etag}\r\n"));
+    }
+    if let Some(encoding) = head_of.encoding {
+        head.push_str(&format!("Content-Encoding: {}\r\n", encoding.header()));
+    }
+    if head_of.vary {
+        head.push_str("Vary: Accept-Encoding\r\n");
+    }
+    match head_of.policy {
         None => common_headers(&mut head),
         Some(policy) => {
             head.push_str("X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n");
@@ -528,7 +862,7 @@ fn respond_with(
             head.push_str("\r\n");
         }
     }
-    head.push_str(extra);
+    head.push_str(head_of.extra);
     head.push_str("\r\n");
 
     let head_only = request.is_some_and(|r| r.method == "HEAD");
@@ -551,6 +885,7 @@ fn respond_with(
                 "path": r.path,
                 "status": status,
                 "bytes": body.len(),
+                "raw": raw,
                 "ms": r.received.elapsed().as_millis() as u64,
             }),
             None => serde_json::json!({ "status": status, "bytes": body.len() }),
@@ -571,23 +906,71 @@ pub fn respond_error(stream: &mut TcpStream, request: Option<&Request>, status: 
 
 /// An open `text/event-stream`, held for as long as the client keeps reading.
 pub struct EventStream<'a> {
-    stream: &'a mut TcpStream,
+    sink: Sink<'a>,
+}
+
+/// Where an event stream's bytes go: straight to the socket, or through one
+/// gzip stream that lives as long as the connection.
+///
+/// One stream rather than an encoded body per event, because the deflate
+/// window is what pays: the second row of a session carries the same keys as
+/// the first, and every event after the first is mostly keys and ids the
+/// window has already seen. Each event ends in a sync flush, so the browser
+/// decodes it the moment it lands rather than when the next one pushes it out.
+enum Sink<'a> {
+    Plain(&'a mut TcpStream),
+    Gzip(flate2::write::GzEncoder<&'a mut TcpStream>),
+}
+
+impl Sink<'_> {
+    /// Write `bytes` as one event and push it to the client.
+    fn event(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Sink::Plain(stream) => {
+                stream.write_all(bytes)?;
+                stream.flush()
+            }
+            // `flush` on the encoder is a sync flush followed by the socket's:
+            // the deflate block is closed on a byte boundary, so everything
+            // written so far is decodable on its own.
+            Sink::Gzip(gz) => {
+                gz.write_all(bytes)?;
+                gz.flush()
+            }
+        }
+    }
 }
 
 impl<'a> EventStream<'a> {
     /// Send the SSE preamble, or fail if the client has already gone.
-    pub fn open(stream: &'a mut TcpStream) -> std::io::Result<EventStream<'a>> {
+    ///
+    /// Gzip when the request offered it. Not brotli: a stream has to be
+    /// flushed per event, and gzip's sync flush is the one every browser has
+    /// decoded incrementally for as long as `EventSource` has existed.
+    pub fn open(stream: &'a mut TcpStream, request: &Request) -> std::io::Result<EventStream<'a>> {
+        let gzip = request.accepts_gzip();
         let mut head = String::from(
             "HTTP/1.1 200 OK\r\n\
              Content-Type: text/event-stream; charset=utf-8\r\n\
              Cache-Control: no-store\r\n\
-             Connection: close\r\n",
+             Connection: close\r\n\
+             Vary: Accept-Encoding\r\n",
         );
+        if gzip {
+            head.push_str("Content-Encoding: gzip\r\n");
+        }
         common_headers(&mut head);
         head.push_str("\r\n");
         stream.write_all(head.as_bytes())?;
         stream.flush()?;
-        Ok(EventStream { stream })
+        let sink = match gzip {
+            true => Sink::Gzip(flate2::write::GzEncoder::new(
+                stream,
+                flate2::Compression::default(),
+            )),
+            false => Sink::Plain(stream),
+        };
+        Ok(EventStream { sink })
     }
 
     /// Send one named event carrying `data`.
@@ -609,10 +992,7 @@ impl<'a> EventStream<'a> {
         // Both halves logged: a client that went away mid-stream is the
         // failure this stream exists to survive, and the send that failed is
         // the only record of when it happened.
-        let sent = self
-            .stream
-            .write_all(frame.as_bytes())
-            .and_then(|()| self.stream.flush());
+        let sent = self.sink.event(frame.as_bytes());
         crate::elog::event(
             "sse",
             "send",
@@ -634,8 +1014,7 @@ impl<'a> EventStream<'a> {
     /// answered. The data is not read; it is there because an event with an
     /// empty data buffer is never dispatched.
     pub fn ping(&mut self) -> std::io::Result<()> {
-        self.stream.write_all(b"event: ping\ndata: 1\n\n")?;
-        self.stream.flush()
+        self.sink.event(b"event: ping\ndata: 1\n\n")
     }
 }
 
@@ -741,5 +1120,69 @@ mod tests {
         assert_eq!(parse("authorization: bearer  abc123 "), "abc123");
         assert_eq!(parse("Authorization: Basic YWJjOmRlZg=="), "");
         assert_eq!(parse("X-Other: 1"), "");
+    }
+
+    /// A polled answer that has not changed goes back as a `304` with no
+    /// body; one that has changed, in full with its new tag.
+    #[test]
+    fn an_unchanged_poll_is_answered_304() {
+        let ask = |if_none_match: &str, body: &[u8]| -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            let extra = match if_none_match {
+                "" => String::new(),
+                tag => format!("If-None-Match: {tag}\r\n"),
+            };
+            client
+                .write_all(format!("GET /api/tabs HTTP/1.1\r\n{extra}\r\n").as_bytes())
+                .unwrap();
+            let request = Request::parse(&server).unwrap();
+            respond_revalidated(&mut server, &request, "application/json", body);
+            drop(server);
+            let mut raw = String::new();
+            client.read_to_string(&mut raw).unwrap();
+            raw
+        };
+        let first = ask("", br#"{"tabs":[]}"#);
+        assert!(first.starts_with("HTTP/1.1 200 "), "{first}");
+        assert!(
+            first.contains("Cache-Control: private, no-cache\r\n"),
+            "{first}"
+        );
+        let tag = first
+            .lines()
+            .find_map(|l| l.strip_prefix("ETag: "))
+            .expect("an ETag")
+            .to_string();
+        let again = ask(&tag, br#"{"tabs":[]}"#);
+        assert!(again.starts_with("HTTP/1.1 304 "), "{again}");
+        assert!(again.ends_with("\r\n\r\n"), "a 304 has no body: {again}");
+        // Weak and strong spellings of one tag are the same tag.
+        let strong = tag.trim_start_matches("W/");
+        assert!(ask(strong, br#"{"tabs":[]}"#).starts_with("HTTP/1.1 304 "));
+        let moved = ask(&tag, br#"{"tabs":[{"name":"x"}]}"#);
+        assert!(moved.starts_with("HTTP/1.1 200 "), "{moved}");
+        assert!(moved.ends_with(r#"{"tabs":[{"name":"x"}]}"#), "{moved}");
+    }
+
+    #[test]
+    fn brotli_is_preferred_and_a_zero_quality_is_a_refusal() {
+        let parse = |header: &str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            client
+                .write_all(format!("GET / HTTP/1.1\r\n{header}\r\n\r\n").as_bytes())
+                .unwrap();
+            Request::parse(&server).unwrap().encoding()
+        };
+        assert_eq!(
+            parse("Accept-Encoding: gzip, deflate, br, zstd"),
+            Some(Encoding::Br)
+        );
+        assert_eq!(parse("Accept-Encoding: gzip, br;q=0"), Some(Encoding::Gzip));
+        assert_eq!(parse("Accept-Encoding: gzip;q=0.0, br;q=0.000"), None);
+        assert_eq!(parse("Accept-Encoding: identity"), None);
     }
 }

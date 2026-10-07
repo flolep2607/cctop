@@ -892,6 +892,7 @@ mod tests {
             topics: Mutex::new(search::Topics::default()),
             notify: None,
             hosts: HashMap::new(),
+            pages: Default::default(),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
