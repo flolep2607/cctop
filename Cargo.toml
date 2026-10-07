@@ -7,7 +7,7 @@
 # anything is tagged. 0.26.2 shipped that way once.
 [package]
 name = "cctop"
-version = "0.28.1"
+version = "0.28.2"
 edition = "2024"
 rust-version = "1.88"
 description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
