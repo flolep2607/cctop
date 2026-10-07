@@ -4,25 +4,62 @@ import type { Session } from "./types";
 // from the hook, so what a `rows` event does to the table can be read — and
 // checked — without an EventSource behind it.
 
-/** A `rows` event: the rows that changed, and the order of ids when it moved (`table_delta` in src/serve/mod.rs). */
+/** One row's changed fields, and the ones it no longer has (`table_patch` in src/serve/mod.rs). */
+export interface RowPatch {
+  id: string;
+  to: Partial<Session>;
+  drop?: string[];
+}
+
+/**
+ * A `rows` event: rows sent whole, rows sent as the fields that changed, and
+ * the order when it moved — either whole, or as the ids to put first and the
+ * ids that are gone (`table_patch` in src/serve/mod.rs).
+ */
 export interface RowsDelta {
   set?: Session[];
+  patch?: RowPatch[];
   order?: string[];
+  head?: string[];
+  gone?: string[];
+}
+
+/** `row` with `patch` laid over it. */
+function patched(row: Session, patch: RowPatch): Session {
+  const out = { ...row, ...patch.to } as Record<string, unknown>;
+  for (const key of patch.drop ?? []) delete out[key];
+  return out as unknown as Session;
 }
 
 /**
  * The table after `delta`. Without an order, rows are replaced where they
  * stand; with one, the table is rebuilt in it — which is also how a row that
- * went away is said, by its id no longer being listed.
+ * went away is said, by its id no longer being listed. `head` and `gone` say
+ * the same as an order more briefly: `head` first, then every other row the
+ * table had that is not `gone`, where it was.
  */
 export function applyRows(list: Session[], delta: RowsDelta): Session[] {
   const set = new Map((delta.set ?? []).map((s) => [s.session_id, s]));
-  if (!delta.order) return set.size ? list.map((s) => set.get(s.session_id) ?? s) : list;
+  const patches = new Map((delta.patch ?? []).map((p) => [p.id, p]));
+  const fresh = (s: Session): Session => {
+    const whole = set.get(s.session_id);
+    if (whole) return whole;
+    const p = patches.get(s.session_id);
+    return p ? patched(s, p) : s;
+  };
+  let order = delta.order;
+  if (!order && delta.head) {
+    const first = new Set(delta.head);
+    const gone = new Set(delta.gone ?? []);
+    order = [...delta.head, ...list.map((s) => s.session_id).filter((id) => !first.has(id) && !gone.has(id))];
+  }
+  if (!order) return set.size || patches.size ? list.map(fresh) : list;
   const had = new Map(list.map((s) => [s.session_id, s]));
   const out: Session[] = [];
-  for (const id of delta.order) {
-    const row = set.get(id) ?? had.get(id);
-    if (row) out.push(row);
+  for (const id of order) {
+    const row = had.get(id);
+    const now = row ? fresh(row) : set.get(id);
+    if (now) out.push(now);
   }
   return out;
 }

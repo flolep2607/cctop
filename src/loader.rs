@@ -55,6 +55,13 @@ fn gentle_threads() -> usize {
         .clamp(2, 4)
 }
 
+/// One session's tail reading, as [`Loader`] keeps it between walks.
+type Tail = (
+    session::ActivityState,
+    String,
+    Option<crate::hook::Permission>,
+);
+
 #[derive(Default)]
 pub struct Loader {
     /// Behind an `Arc` so a parse can be handed to a pool thread — see
@@ -69,9 +76,16 @@ pub struct Loader {
     /// Last known-good context reading, so a tail read that misses doesn't
     /// blank the CTX% column for a frame.
     context_cache: HashMap<String, ContextUsage>,
-    /// Activity state and last tool per session, so a walk re-reads only the
-    /// transcripts that can still change.
-    tail_cache: HashMap<String, (session::ActivityState, String)>,
+    /// What a session's tail said — activity state, last tool, permission
+    /// mode — so a walk re-reads only the transcripts that can still change.
+    ///
+    /// The permission mode is kept with the rest because a row rebuilt from
+    /// this cache starts without one: it used to come back blank on every full
+    /// walk after the first, and every stopped Claude session flipped from its
+    /// mode to none at once, which on a machine with hundreds of them was
+    /// hundreds of rows resent to every open page for a change that was not
+    /// one.
+    tail_cache: HashMap<String, Tail>,
     /// The corpus reading the rows in `walked` were built from.
     corpus: fingerprint::Snapshot,
     /// The last full walk's rows, so a walk the corpus says nothing changed for
@@ -397,9 +411,10 @@ impl Loader {
         for (s, read) in sessions.iter_mut().zip(reads) {
             let key = s.key_into(&mut key);
             let Some(read) = read else {
-                if let Some((state, tool)) = self.tail_cache.get(key) {
+                if let Some((state, tool, permission)) = self.tail_cache.get(key) {
                     s.activity_state = *state;
                     s.last_tool = tool.clone();
+                    s.permission = *permission;
                 }
                 s.context = self.context_cache.get(key).copied();
                 continue;
@@ -423,8 +438,10 @@ impl Loader {
             self.context_cache.insert(key.to_string(), ctx);
         }
         s.context = self.context_cache.get(key).copied();
-        self.tail_cache
-            .insert(key.to_string(), (s.activity_state, s.last_tool.clone()));
+        self.tail_cache.insert(
+            key.to_string(),
+            (s.activity_state, s.last_tool.clone(), s.permission),
+        );
     }
 
     /// Activity dot, last tool, and context window for one row.
@@ -434,10 +451,11 @@ impl Loader {
     fn tail_state(&mut self, s: &mut Session) {
         let key = s.key();
         if !s.is_running()
-            && let Some((state, tool)) = self.tail_cache.get(&key)
+            && let Some((state, tool, permission)) = self.tail_cache.get(&key)
         {
             s.activity_state = *state;
             s.last_tool = tool.clone();
+            s.permission = *permission;
             s.context = self.context_cache.get(&key).copied();
             return;
         }
@@ -1110,5 +1128,30 @@ mod tests {
             harness_from_process(&windsurf, "/usr/share/windsurf/windsurf"),
             "Windsurf"
         );
+    }
+
+    /// A stopped session's tail is read once and kept; what comes back from
+    /// the keeping has to include its permission mode, or every walk after
+    /// the first blanks it — and resends the row to every page that had it.
+    #[test]
+    fn a_kept_tail_keeps_the_permission_mode() {
+        let mut loader = Loader::default();
+        let mut s = Session::new(Provider::Claude, "stopped".into());
+        let key = s.key();
+        loader.tail_cache.insert(
+            key,
+            (
+                session::ActivityState::WaitingForInput,
+                "Edit".into(),
+                Some(crate::hook::Permission::Bypass),
+            ),
+        );
+        loader.tail_state(&mut s);
+        assert_eq!(s.permission, Some(crate::hook::Permission::Bypass));
+        assert_eq!(s.last_tool, "Edit");
+
+        let mut walked = vec![Session::new(Provider::Claude, "stopped".into())];
+        loader.attach_tail_state(&mut walked, false);
+        assert_eq!(walked[0].permission, Some(crate::hook::Permission::Bypass));
     }
 }
