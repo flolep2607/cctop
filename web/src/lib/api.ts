@@ -14,6 +14,15 @@ async function problem(response: Response): Promise<string> {
   return "The server answered " + response.status + (response.statusText ? " " + response.statusText : "") + ".";
 }
 
+/** A refusal from the server: the sentence to show, and the status it came with. */
+export class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 /** Every request the app makes: the token added, failures turned into sentences. */
 export async function ask(path: string, init?: RequestInit, extra?: Record<string, string | number | null | undefined>): Promise<Response> {
   let response: Response;
@@ -22,7 +31,7 @@ export async function ask(path: string, init?: RequestInit, extra?: Record<strin
   } catch {
     throw new Error("cctop is unreachable — the connection dropped.");
   }
-  if (!response.ok) throw new Error(await problem(response));
+  if (!response.ok) throw new HttpError(response.status, await problem(response));
   return response;
 }
 
@@ -62,4 +71,14 @@ export const ANSWERABLE = new Set(["claude", "codex"]);
 export async function answerPrompt(sessionId: string, choice: "allow" | "deny"): Promise<string> {
   const done = await act("answer", sessionId, { choice });
   return done.message || (choice === "allow" ? "Allowed" : "Denied");
+}
+
+/**
+ * Whether an answer was refused because the session had already stopped
+ * asking (`actions::answer`'s 409). The server's table is current when it says
+ * that, so a page still showing the prompt is the one behind — the caller drops
+ * it rather than leave buttons up that can only be refused again.
+ */
+export function isNotAsking(e: unknown): boolean {
+  return e instanceof HttpError && e.status === 409 && /not asking/.test(e.message);
 }

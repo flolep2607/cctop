@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Check, MessageCircleQuestion, ShieldAlert, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ANSWERABLE, answerPrompt } from "@/lib/api";
+import { toast } from "sonner";
+import { ANSWERABLE, answerPrompt, isNotAsking } from "@/lib/api";
+import { dropPrompt } from "@/hooks/use-live";
 import { CAN_ACT } from "@/lib/config";
 import { Button } from "@/components/ui/button";
 import type { Session } from "@/lib/types";
@@ -24,6 +26,14 @@ export function PromptBar({ session, className, compact }: { session: Session; c
     try {
       setSaid({ ok: true, text: await answerPrompt(session.session_id, choice) });
     } catch (e) {
+      // Answered already — in its terminal, or by another page. The server is
+      // current and this page is behind, so the prompt comes down now rather
+      // than offering buttons that can only be refused again.
+      if (isNotAsking(e)) {
+        toast.message("Already answered", { description: "That prompt was no longer waiting." });
+        dropPrompt(session.session_id);
+        return;
+      }
       setSaid({ ok: false, text: String((e as Error).message || e) });
     } finally {
       setBusy(false);

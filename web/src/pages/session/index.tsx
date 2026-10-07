@@ -72,7 +72,7 @@ export function SessionPage() {
   }, [urlId]);
 
   const id = r?.session_id ?? urlId;
-  const { sessions } = useSessions(urlId);
+  const { sessions, live: streaming } = useSessions(urlId);
   // The URL may carry any unambiguous prefix of the id.
   const live = useMemo(
     () => sessions?.find((s) => s.session_id === id) ?? sessions?.find((s) => s.session_id.startsWith(urlId)) ?? null,
@@ -137,6 +137,12 @@ export function SessionPage() {
               <StateDot state={state} />
               <span className="truncate">{r.title || shortPath(r.project) || r.session_id}</span>
               <StateBadge state={state} running={running} question={!!live?.asking_question} />
+              {/* The state beside it is the last the stream said; say when that may be old. */}
+              {sessions && !streaming && (
+                <span className="text-muted-foreground shrink-0 text-xs font-normal" title="The live connection dropped; the state shown may be out of date">
+                  reconnecting…
+                </span>
+              )}
             </h1>
             <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
               {r.title && r.project && <span title={r.project}>{shortPath(r.project)}</span>}
