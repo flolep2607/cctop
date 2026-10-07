@@ -329,6 +329,7 @@ impl App {
         self.keymap = keymap;
         self.apply_columns();
         self.apply_theme();
+        self.apply_footer();
     }
 
     /// Repaint if the file now names a different theme.
@@ -359,6 +360,29 @@ impl App {
             Some(list) => super::columns::parse_hidden(list),
             None => Vec::new(),
         };
+    }
+
+    /// Re-read the footer's hiding list and live note out of the settings file.
+    ///
+    /// Applied on every reload rather than once at startup, because the
+    /// footer reads the list on every frame — same reasoning as
+    /// [`App::apply_columns`].
+    pub(super) fn apply_footer(&mut self) {
+        self.hidden_footer = self
+            .settings
+            .footer_hide
+            .as_deref()
+            .map(|list| {
+                list.split(',')
+                    .map(|name| name.trim().to_lowercase())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.footer_extra.apply(
+            self.settings.footer_note.as_deref(),
+            self.settings.footer_command.as_deref(),
+        );
     }
 
     /// Write one entry of the settings file and read it straight back, saying

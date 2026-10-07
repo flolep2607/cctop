@@ -782,6 +782,9 @@ fn event_loop(
         // a channel nothing polls but this, and until it does the corner has a
         // spinner to turn.
         app.needs_redraw |= app.tick_share();
+        // The footer's own line refreshes on its own clock, and its command
+        // answers on a channel nothing polls but this.
+        app.needs_redraw |= app.footer_extra.tick();
         // The insight report's spinner turns on the same terms, and so do
         // the conversation view's and the empty table's during the first scan.
         let scanning = !app.loaded && app.tab == 0;

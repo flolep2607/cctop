@@ -249,6 +249,24 @@ buttons Claude Code and Codex prompts get — for a session nobody has a termina
 open on. What it cannot see is an agent in a plain terminal of its own: no shim,
 no pane, no screen to borrow.
 
+## Writing on the footer
+
+The footer is yours too:
+
+```toml
+[settings]
+footer_hide = "sort, follow"    # drop hints and badges by name; "share" drops the corner
+footer_note = "on-call shift"   # a static line, drawn like any other badge
+footer_command = "date +%H:%M"  # a command; its first line shows, refreshed every 30s
+```
+
+`footer_hide` names the badges (`idle`, `age`, `filter`, `cost`, `marked`,
+`follow`, `bell`, `remote`, `conflict`, `update`, `quit`, `note`) and the key
+hints (`Move`, `Actions`, `Filter`, `Mark`, `Sort`, `Quit`, …, as labelled),
+and `share` for the corner that publishes the table. `footer_command` runs
+through `timeout 5s sh -c`, in the background: a command that hangs or fails
+simply shows nothing until the next run.
+
 ## Letting agents see each other
 
 ```bash
