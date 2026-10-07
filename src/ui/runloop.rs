@@ -171,6 +171,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // means discovery falls back to the periodic walk.
     let watch = crate::watch::Watch::start();
     app.listener = crate::hook::Listener::start();
+    app.yolo = crate::yolo::Auto::new(true);
     // A hook naming a cctop that has since been moved or deleted fires nothing
     // at all, so it is repointed here rather than left to look installed while
     // reporting nothing. Anything narrower than that is left for the panel.
@@ -681,6 +682,11 @@ fn event_loop(
             app.collisions = crate::collide::apply(&mut app.sessions);
             app.hear_ultracode();
         }
+        // Before the bells: a YOLO prompt answered here is one nobody needs
+        // ringing for. Unthrottled when the rows just moved, since that is
+        // when a prompt goes up; on a slow clock otherwise, for a switch that
+        // was flipped by another cctop while nothing here changed.
+        rows_changed |= app.tick_yolo(annotated_rows_changed || rows_changed);
         if annotated_rows_changed {
             // A burst can contain hundreds of rows. Recompute and sort once
             // after draining it rather than once per transcript.
@@ -718,6 +724,7 @@ fn event_loop(
         // permission prompt is worth the bell the frame it appears.
         if app.read_screens() {
             app.apply_reports();
+            app.tick_yolo(true);
             app.check_bells();
             app.notify.ring_pending();
             app.feed_serving();

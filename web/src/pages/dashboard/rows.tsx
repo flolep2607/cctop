@@ -10,14 +10,16 @@ import { ago, money, shortModel, shortPath, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { StateDot, dotOf } from "@/components/status";
-import { stripAnsi } from "@/components/ansi";
+import { StateDot } from "@/components/status";
+import { dotOf } from "@/lib/status";
+import { stripAnsi } from "@/lib/ansi";
+import { YoloBadge } from "@/components/yolo";
 import type { Session } from "@/lib/types";
 
 // The cost a row shows. `incl`, `—` and a figure are three different claims —
 // the plan bundles this, nothing billable was recorded, here is what it cost —
 // and none may be drawn as another.
-export function rowCost(s: Session): string {
+function rowCost(s: Session): string {
   if (s.cost?.included) return "incl";
   if (!s.cost?.available || s.cost.total == null) return "—";
   return money(Number(s.cost.total));
@@ -84,6 +86,7 @@ export const SessionRow = memo(function SessionRow({
             ) : (
               <Badge variant="outline" className="text-destructive border-destructive/40 bg-destructive/5 font-normal">needs permission</Badge>
             ))}
+          {s.yolo && <YoloBadge />}
           {s.state === "error" && <Badge variant="outline" className="text-destructive border-destructive/40 font-normal">{s.running ? "api error" : "ended on an api error"}</Badge>}
           {errRate >= 0.25 && <Badge variant="outline" className="text-destructive border-destructive/40 font-normal">{Math.round(errRate * 100)}% tool errors</Badge>}
           {s.conflict && (

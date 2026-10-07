@@ -357,6 +357,15 @@ pub struct Session {
     /// same as "it asks about everything", which would be a guess about the one
     /// column whose whole job is not to guess.
     pub permission: Option<crate::hook::Permission>,
+    /// Whether cctop allows every permission prompt this session raises, and
+    /// what it has allowed so far — see [`crate::yolo`]. `None` is the
+    /// ordinary case, a session whose prompts wait for a person.
+    ///
+    /// Stamped from the machine's shared YOLO file on every pass rather than
+    /// carried by the walk, for the reason [`Self::asking_for`] is: rows are
+    /// rebuilt from transcripts, which know nothing of it. Behind an `Arc`
+    /// because every refresh clones every row.
+    pub yolo: Option<Arc<crate::yolo::Entry>>,
 
     /// The session this one was converted from, when cctop wrote it as a
     /// handoff into another harness.
@@ -572,6 +581,7 @@ impl Session {
             asking_for: None,
             asking_question: false,
             permission: None,
+            yolo: None,
             converted_from: None,
             recent_writes: Vec::new(),
             conflict: None,

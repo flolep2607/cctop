@@ -143,14 +143,20 @@ export function useTabs(every = 3000): { tabs: Tab[] | null; error: string } {
   return { tabs, error };
 }
 
-/** Re-render on a slow clock, so "4m ago" stays honest between events. */
+/**
+ * Re-render on a slow clock, so "4m ago" stays honest between events.
+ *
+ * Returns the time of the latest tick, which is the "now" a render should
+ * use: reading the clock during render makes the render impure — two renders
+ * of the same state could draw different pages — where this one is state.
+ */
 export function useTick(ms = 15000): number {
-  const [n, setN] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setN((x) => x + 1), ms);
+    const t = setInterval(() => setNow(Date.now()), ms);
     return () => clearInterval(t);
   }, [ms]);
-  return n;
+  return now;
 }
 
 /** State kept in localStorage — per viewer, best effort, never required. */

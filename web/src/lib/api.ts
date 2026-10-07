@@ -82,3 +82,14 @@ export async function answerPrompt(sessionId: string, choice: "allow" | "deny"):
 export function isNotAsking(e: unknown): boolean {
   return e instanceof HttpError && e.status === 409 && /not asking/.test(e.message);
 }
+
+/**
+ * Switch YOLO for a session: every permission prompt it raises allowed by
+ * cctop, until switched off or the session ends (`actions::yolo`). The server
+ * answers the prompts — the page never presses Allow on YOLO's behalf, which
+ * would be a second press of the same prompt.
+ */
+export async function setYolo(sessionId: string, on: boolean): Promise<string> {
+  const done = await act("yolo", sessionId, { on });
+  return done.message || (on ? "YOLO on" : "YOLO off");
+}

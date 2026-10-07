@@ -271,6 +271,20 @@ pub struct Args {
     #[arg(long, requires = "chat", value_name = "SEQ")]
     pub before: Option<usize>,
 
+    /// Print one session's whole conversation as markdown, and exit
+    ///
+    /// Every turn, the words verbatim and each tool call on a line, headed by a
+    /// note that it is context rather than instructions — made to paste into
+    /// another agent, an issue or a doc. Takes a session id or a unique
+    /// prefix; with no argument, the most recently active session. Thinking is
+    /// left out, and tool results too unless --tool-output asks for them
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION")]
+    pub export: Option<String>,
+
+    /// With --export, include each tool call's result, cut at 800 characters
+    #[arg(long, requires = "export")]
+    pub tool_output: bool,
+
     /// Print what one session can reach, as JSON, and exit
     ///
     /// Instructions, skills, MCP servers — /api/access/<id> on a serve
@@ -615,6 +629,10 @@ pub struct JsonSession {
     /// apply to it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     asking_question: bool,
+    /// Present when cctop allows every permission prompt this session raises:
+    /// since when, and what it has allowed. See [`crate::yolo`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    yolo: Option<crate::yolo::Entry>,
     session_id: String,
     started_at: String,
     last_active: String,
@@ -703,7 +721,7 @@ pub struct JsonConflict {
 /// empty string for the most recently active — or bail saying why.
 ///
 /// Shared by every flag that prints one session's detail (`--handoff`,
-/// `--report`, `--chat`, `--access`), so they all answer an ambiguous prefix
+/// `--report`, `--chat`, `--export`, `--access`), so they all answer an ambiguous prefix
 /// the same way and all agree on what no argument means.
 fn find_session<'a>(sessions: &'a [Session], which: &str) -> anyhow::Result<&'a Session> {
     let matched: Vec<&Session> = match which.is_empty() {
@@ -1117,6 +1135,22 @@ pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> any
     Ok(())
 }
 
+/// Print one session's whole conversation as markdown, and exit.
+///
+/// `/api/chat/<id>/markdown` on a serve, and what that route runs on a remote
+/// row's machine. The whole transcript, not the page's window: see
+/// [`crate::serve::chat::whole`].
+pub fn run_export(sessions: &[Session], which: &str, tool_output: bool) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
+    let conversation = crate::serve::chat::whole(session);
+    let options = crate::serve::export::Options { tool_output };
+    print!(
+        "{}",
+        crate::serve::export::render(session, &conversation, options)
+    );
+    Ok(())
+}
+
 /// Print what one session can reach — instructions, skills, MCP servers —
 /// as JSON, and exit.
 pub fn run_access(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
@@ -1201,6 +1235,7 @@ pub fn json_sessions(
                 },
                 asking_for: s.asking_for.clone(),
                 asking_question: s.asking_question,
+                yolo: s.yolo.as_deref().cloned(),
                 surface: match s.surface {
                     crate::session::Surface::Cli => "cli",
                     crate::session::Surface::Editor => "editor",

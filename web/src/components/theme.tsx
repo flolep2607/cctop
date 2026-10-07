@@ -1,24 +1,13 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-
-// Light, dark, or the system's — stored under the same key every cctop page
-// reads, so a choice made here holds on the pages not yet moved to this app.
-// "system" is the key being absent.
-type Theme = "light" | "dark" | "system";
-const KEY = "cctop-theme";
-
-const ThemeContext = createContext<{ theme: Theme; setTheme: (t: Theme) => void; cycle: () => void }>({
-  theme: "system",
-  setTheme: () => {},
-  cycle: () => {},
-});
+import { THEME_KEY, ThemeContext, useTheme, type Theme } from "@/hooks/use-theme";
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
     try {
-      const v = localStorage.getItem(KEY);
+      const v = localStorage.getItem(THEME_KEY);
       return v === "light" || v === "dark" ? v : "system";
     } catch {
       return "system";
@@ -40,8 +29,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const setTheme = (t: Theme) => {
     setThemeState(t);
     try {
-      if (t === "system") localStorage.removeItem(KEY);
-      else localStorage.setItem(KEY, t);
+      if (t === "system") localStorage.removeItem(THEME_KEY);
+      else localStorage.setItem(THEME_KEY, t);
     } catch {
       /* best effort */
     }
@@ -49,8 +38,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const cycle = () => setTheme(theme === "light" ? "dark" : theme === "dark" ? "system" : "light");
   return <ThemeContext.Provider value={{ theme, setTheme, cycle }}>{children}</ThemeContext.Provider>;
 }
-
-export const useTheme = () => useContext(ThemeContext);
 
 export function ThemeToggle() {
   const { theme, cycle } = useTheme();

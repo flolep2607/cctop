@@ -12,8 +12,10 @@ import { Kbd } from "@/components/ui/kbd";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AppShell } from "@/components/app-shell";
-import { StateDot, dotOfTab } from "@/components/status";
-import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
+import { StateDot } from "@/components/status";
+import { dotOfTab } from "@/lib/status";
+import { TerminalFrame } from "@/components/terminal";
+import { popOut, type Terminal } from "@/lib/terminal";
 import { useSessions, useStored, useTabs, useTick } from "@/hooks/use-live";
 import type { Session, Tab } from "@/lib/types";
 import { SessionRow, WantingRow } from "./rows";
@@ -58,7 +60,9 @@ function readSeen(): Record<string, { at?: number }> {
 export function DashboardPage() {
   const { sessions, live } = useSessions();
   const [prefs, setPrefs] = useStored<Prefs>("cctop-dash", DEFAULT_PREFS, (v): v is Prefs => !!v && typeof v === "object");
-  const p = { ...DEFAULT_PREFS, ...prefs };
+  // Held across renders so `p.pins` and the rest keep their identity until the
+  // stored prefs change, which is what the memos below key on.
+  const p = useMemo(() => ({ ...DEFAULT_PREFS, ...prefs }), [prefs]);
   const update = (patch: Partial<Prefs>) => setPrefs({ ...p, ...patch });
   const [filterText, setFilterText] = useState(p.filter);
   const filter = filterText.trim().toLowerCase();

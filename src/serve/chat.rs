@@ -227,11 +227,13 @@ impl Turn {
         }
     }
 
-    fn set_text(&mut self, text: &str) {
+    /// Set the turn's text, cut to `cap` characters — [`MAX_TEXT_CHARS`] for the
+    /// page, unbounded for an export (see [`Limits`]).
+    fn set_text(&mut self, text: &str, cap: usize) {
         let trimmed = text.trim();
-        self.clipped = trimmed.chars().count() > MAX_TEXT_CHARS;
+        self.clipped = trimmed.chars().count() > cap;
         self.text = match self.clipped {
-            true => trimmed.chars().take(MAX_TEXT_CHARS).collect(),
+            true => trimmed.chars().take(cap).collect(),
             false => trimmed.to_string(),
         };
     }
@@ -239,17 +241,17 @@ impl Turn {
     /// Add more text to a turn that already has some.
     ///
     /// A cap that was reached stays reached: a run of entries must not be able
-    /// to grow one turn past [`MAX_TEXT_CHARS`] a block at a time.
-    fn append_text(&mut self, text: &str) {
+    /// to grow one turn past its cap a block at a time.
+    fn append_text(&mut self, text: &str, cap: usize) {
         let trimmed = text.trim();
         if trimmed.is_empty() || self.clipped {
             return;
         }
         if self.text.is_empty() {
-            return self.set_text(trimmed);
+            return self.set_text(trimmed, cap);
         }
         let joined = format!("{}\n\n{trimmed}", self.text);
-        self.set_text(&joined);
+        self.set_text(&joined, cap);
     }
 
     fn is_empty(&self) -> bool {
@@ -288,6 +290,41 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+/// How much of a transcript one read keeps.
+///
+/// Two readers want different answers from the same parse. The page wants a
+/// window it can render without locking the tab, so it gets the tail and every
+/// message cut to size. An export is the whole conversation handed to someone
+/// — another agent, an issue, a doc — and a transcript that silently starts at
+/// turn 312, or stops a pasted plan mid-sentence, is a wrong one. Tool results
+/// stay at [`MAX_RESULT_CHARS`] in both: an export that includes them wants
+/// the head of each, not the megabytes.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    turns: usize,
+    text: usize,
+    tools: usize,
+}
+
+impl Limits {
+    const PAGE: Limits = Limits {
+        turns: MAX_TURNS,
+        text: MAX_TEXT_CHARS,
+        tools: MAX_TOOLS_PER_TURN,
+    };
+    const WHOLE: Limits = Limits {
+        turns: usize::MAX,
+        text: usize::MAX,
+        tools: usize::MAX,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits::PAGE
+    }
+}
+
 /// Read `session`'s conversation, as far as its harness allows.
 ///
 /// `before` pages backwards through the turns: when it is `Some(seq)`, the
@@ -296,11 +333,24 @@ fn is_zero(n: &u32) -> bool {
 /// side. The parse still reads the whole transcript either way, because a tool
 /// result near the end of the file can belong to a call inside the window.
 pub fn build(session: &Session, before: Option<usize>) -> Conversation {
+    read(session, before, Limits::PAGE)
+}
+
+/// Read `session`'s whole conversation: every turn, every message in full.
+///
+/// What [`crate::serve::export`] renders. One session, on request, so holding
+/// all of it is the cost of the answer rather than of a page that polls.
+pub fn whole(session: &Session) -> Conversation {
+    read(session, None, Limits::WHOLE)
+}
+
+fn read(session: &Session, before: Option<usize>, limits: Limits) -> Conversation {
     let Some(path) = session.data_file.as_ref() else {
         return unsupported("this session has no transcript file on this machine");
     };
     let mut sink = Sink {
         before,
+        limits,
         ..Sink::default()
     };
     let read = match session.provider {
@@ -427,6 +477,7 @@ struct Sink {
     /// a request id already seen is part of that reply, however many thinking
     /// blocks and parallel tool calls it was written as.
     run_request: Option<(String, usize)>,
+    limits: Limits,
 }
 
 impl Sink {
@@ -443,7 +494,7 @@ impl Sink {
             let mut turn = turn;
             turn.seq = seq;
             self.turns.push_back(turn);
-            while self.turns.len() > MAX_TURNS {
+            while self.turns.len() > self.limits.turns {
                 self.turns.pop_front();
                 self.first += 1;
             }
@@ -459,8 +510,9 @@ impl Sink {
     /// run rule in [`Sink::run`] stands in.
     fn open_assistant(&mut self, ts: &str, request: Option<&str>) -> usize {
         let roomy = |sink: &mut Sink, seq: usize| {
+            let cap = sink.limits.tools;
             sink.turn_mut(seq)
-                .is_some_and(|turn| turn.tools.len() < MAX_TOOLS_PER_TURN)
+                .is_some_and(|turn| turn.tools.len() < cap)
         };
         if let Some(id) = request {
             if let Some((open, seq)) = self.run_request.clone()
@@ -489,10 +541,11 @@ impl Sink {
     }
 
     fn add_tool(&mut self, seq: usize, id: Option<&str>, tool: ToolUse) {
+        let cap = self.limits.tools;
         let Some(turn) = self.turn_mut(seq) else {
             return;
         };
-        if turn.tools.len() >= MAX_TOOLS_PER_TURN {
+        if turn.tools.len() >= cap {
             return;
         }
         let at = turn.tools.len();
@@ -623,7 +676,7 @@ impl Sink {
             return;
         }
         let mut turn = Turn::new(role, kind, ts);
-        turn.set_text(&text);
+        turn.set_text(&text, self.limits.text);
         self.push(turn);
     }
 
@@ -680,7 +733,7 @@ impl Sink {
         // reply on each one puts every tool call in a box of its own.
         if !thinking.trim().is_empty() {
             let mut turn = Turn::new("assistant", "reasoning", ts);
-            turn.set_text(&thinking);
+            turn.set_text(&thinking, self.limits.text);
             self.push(turn);
         }
 
@@ -693,8 +746,9 @@ impl Sink {
         // holding nothing but a tool name. Everything between two user turns is
         // one thing the agent said, which is how its own interface reads it.
         let seq = self.open_assistant(ts, request);
+        let cap = self.limits.text;
         if let Some(turn) = self.turn_mut(seq) {
-            turn.append_text(&text);
+            turn.append_text(&text, cap);
         }
         for (id, tool) in calls {
             self.add_tool(seq, id.as_deref(), tool);
@@ -725,7 +779,7 @@ impl Sink {
                 let text = codex_summary(payload);
                 if !text.trim().is_empty() {
                     let mut turn = Turn::new("assistant", "reasoning", ts);
-                    turn.set_text(&text);
+                    turn.set_text(&text, self.limits.text);
                     self.push(turn);
                 }
             }
@@ -756,7 +810,7 @@ impl Sink {
             return;
         }
         let mut turn = Turn::new(role, "message", ts);
-        turn.set_text(&text);
+        turn.set_text(&text, self.limits.text);
         let seq = self.push(turn);
         // The calls this reply makes are written as their own entries after it,
         // so the reply stays open for them until a result comes back.
@@ -865,12 +919,13 @@ impl Sink {
             turn.set_text(
                 "the context was compacted here — every turn before it \
                            is no longer in this session's transcript",
+                self.limits.text,
             );
             self.push(turn);
         }
         if !thinking.trim().is_empty() {
             let mut turn = Turn::new("assistant", "reasoning", ts);
-            turn.set_text(&thinking);
+            turn.set_text(&thinking, self.limits.text);
             self.push(turn);
         }
         if text.trim().is_empty() && calls.is_empty() {
@@ -882,7 +937,7 @@ impl Sink {
             _ => "system",
         };
         let mut turn = Turn::new(role, "message", ts);
-        turn.set_text(&text);
+        turn.set_text(&text, self.limits.text);
         let seq = self.push(turn);
         // No call id: the result is on the same part as the call, so nothing
         // later can resolve it and an index entry would only be a leak.
@@ -908,7 +963,7 @@ impl Sink {
                     return;
                 }
                 let mut turn = Turn::new("user", "message", ts);
-                turn.set_text(text);
+                turn.set_text(text, self.limits.text);
                 self.push(turn);
             }
             Some("agent") => self.devin_agent(step, ts, statuses),
@@ -944,7 +999,7 @@ impl Sink {
                     _ => return,
                 }
                 let mut turn = Turn::new("system", "message", ts);
-                turn.set_text(&tidy_devin_event(text));
+                turn.set_text(&tidy_devin_event(text), self.limits.text);
                 self.push(turn);
             }
             _ => {}
@@ -956,7 +1011,7 @@ impl Sink {
             && !thinking.trim().is_empty()
         {
             let mut turn = Turn::new("assistant", "reasoning", ts);
-            turn.set_text(thinking);
+            turn.set_text(thinking, self.limits.text);
             self.push(turn);
         }
 
@@ -977,8 +1032,9 @@ impl Sink {
             other => other.to_string(),
         });
         let seq = self.open_assistant(ts, request.as_deref());
+        let cap = self.limits.text;
         if let Some(turn) = self.turn_mut(seq) {
-            turn.append_text(text);
+            turn.append_text(text, cap);
         }
         for call in calls {
             let name = call
@@ -1072,7 +1128,7 @@ impl Sink {
             "message",
             "",
         );
-        turn.set_text(&tidy);
+        turn.set_text(&tidy, self.limits.text);
         let seq = self.push(turn);
         for call in calls {
             self.add_tool(seq, None, call);
@@ -1093,7 +1149,7 @@ impl Sink {
         match item.get("type").and_then(Value::as_str) {
             Some("user") => {
                 let mut turn = Turn::new("user", "message", &ts);
-                turn.set_text(&gemini_text(item.get("content")));
+                turn.set_text(&gemini_text(item.get("content")), self.limits.text);
                 self.push(turn);
             }
             Some("info") => {
@@ -1104,7 +1160,7 @@ impl Sink {
                     return;
                 }
                 let mut turn = Turn::new("system", "message", &ts);
-                turn.set_text(&tidy_harness_text(text));
+                turn.set_text(&tidy_harness_text(text), self.limits.text);
                 self.push(turn);
             }
             Some("gemini") => self.gemini_reply(item, &ts),
@@ -1135,7 +1191,7 @@ impl Sink {
         }
         if !thinking.trim().is_empty() {
             let mut turn = Turn::new("assistant", "reasoning", ts);
-            turn.set_text(&thinking);
+            turn.set_text(&thinking, self.limits.text);
             self.push(turn);
         }
 
@@ -1149,7 +1205,7 @@ impl Sink {
             return;
         }
         let mut turn = Turn::new("assistant", "message", ts);
-        turn.set_text(&tidy_harness_text(text));
+        turn.set_text(&tidy_harness_text(text), self.limits.text);
         let seq = self.push(turn);
         for call in calls {
             let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
@@ -1231,7 +1287,7 @@ impl Sink {
                 }
                 if !thinking.trim().is_empty() {
                     let mut turn = Turn::new("assistant", "reasoning", &ts);
-                    turn.set_text(&thinking);
+                    turn.set_text(&thinking, self.limits.text);
                     self.push(turn);
                 }
                 if text.trim().is_empty() && calls.is_empty() {
@@ -1242,7 +1298,7 @@ impl Sink {
                     "message",
                     &ts,
                 );
-                turn.set_text(&tidy_harness_text(&text));
+                turn.set_text(&tidy_harness_text(&text), self.limits.text);
                 let seq = self.push(turn);
                 for (id, call) in calls {
                     self.add_tool(seq, id.as_deref(), call);
@@ -2763,6 +2819,41 @@ mod tests {
         let chat = build(&session, None);
         assert!(!chat.supported);
         assert!(chat.note.is_some_and(|n| n.contains("could not read")));
+    }
+
+    /// The page's window and the export read the same file to different
+    /// limits: the page gets the tail with each message cut, the export every
+    /// turn whole — a transcript handed to someone else that began at turn 10
+    /// or stopped a message mid-sentence would be a wrong one.
+    #[test]
+    fn the_whole_read_keeps_what_the_page_window_drops() {
+        let long = "y".repeat(MAX_TEXT_CHARS + 50);
+        let mut lines: Vec<String> = (0..MAX_TURNS + 10)
+            .map(|i| {
+                format!(
+                    r#"{{"type":"user","timestamp":"t","message":{{"content":"message {i}"}}}}"#
+                )
+            })
+            .collect();
+        lines.push(format!(
+            r#"{{"type":"user","timestamp":"t","message":{{"content":"{long}"}}}}"#
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s1.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let mut session = Session::new(Provider::Claude, "s1".into());
+        session.data_file = Some(path);
+
+        let page = build(&session, None);
+        assert_eq!(page.turns.len(), MAX_TURNS);
+        assert!(page.turns.last().unwrap().clipped);
+
+        let all = whole(&session);
+        assert_eq!(all.earlier, 0);
+        assert_eq!(all.turns.len(), MAX_TURNS + 11);
+        assert_eq!(all.turns[0].text, "message 0");
+        assert_eq!(all.turns.last().unwrap().text, long);
+        assert!(!all.turns.last().unwrap().clipped);
     }
 
     /// A harness name is the one place a label is read inside a sentence, and

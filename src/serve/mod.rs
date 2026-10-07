@@ -69,7 +69,7 @@
 //! the tunnel the user already has (ssh, Tailscale) is still better than
 //! anything here, because it authenticates rather than merely encrypting.
 
-mod actions;
+pub(crate) mod actions;
 /// Cross-session aggregation behind `/api/analytics` — the data the
 /// analytics page charts, built from the snapshot plus cached extractions.
 mod analytics;
@@ -80,6 +80,10 @@ pub mod chat;
 /// feature, so a released cctop contains none of this — see the module docs.
 #[cfg(feature = "debug")]
 mod debug;
+/// A whole conversation as markdown, behind `/api/chat/<id>/markdown`.
+/// Crate-visible because `cctop --export` prints the same document, and a
+/// serve answers for a remote row by running that on the row's machine.
+pub(crate) mod export;
 mod http;
 /// `/metrics`, the snapshot in Prometheus's text format.
 mod metrics;
@@ -1084,8 +1088,13 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
         let mut peek = crate::peek::Peek::new();
         let read_screen = crate::settings::Settings::load().read_screen == Some(true);
         loader.set_hook_claims(reports.claims.clone());
+        // The YOLO switch, read on every pass. Only a serve that may act
+        // competes to answer for it — see [`crate::yolo`] for why only one
+        // cctop on the machine ever presses.
+        let mut yolo = crate::yolo::Auto::new(shared.actions);
         let mut rows = loader.load(plan);
         stamp(&mut rows, &reports, &mut peek, read_screen);
+        yolo.tick(&mut rows);
         let mut walked = Instant::now();
         let mut version = 0u64;
         publish(
@@ -1131,6 +1140,9 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
                 loader.refresh_live(plan, &mut rows);
             }
             stamp(&mut rows, &reports, &mut peek, read_screen);
+            // After the stamp, which is what says a prompt is up: an answer
+            // pressed here is a refresh tick behind the prompt at most.
+            yolo.tick(&mut rows);
             publish(
                 &shared,
                 &remotes,
@@ -1536,6 +1548,10 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
+        _ if path.starts_with("/api/chat/") && path.ends_with("/markdown") => {
+            let id = &path["/api/chat/".len()..path.len() - "/markdown".len()];
+            api_chat_markdown(shared, stream, &request, id);
+        }
         _ if path.starts_with("/api/chat/") => {
             api_chat(shared, stream, &request, &path["/api/chat/".len()..]);
         }
@@ -1762,6 +1778,93 @@ fn remote_chat(
     json(stream, request, &conversation.narrowed(since));
 }
 
+/// Serve one session's conversation as a markdown document to paste elsewhere.
+///
+/// `?variant=` picks the document: `conversation` (the default) is every turn
+/// with its calls listed, `tools` adds each call's result, and `brief` is the
+/// handoff brief — the summary [`crate::handoff`] writes for exactly the
+/// paste-into-another-agent case, offered beside the transcript because on a
+/// long session it is the one that fits.
+///
+/// Text rather than JSON, because the body *is* the answer: the page copies or
+/// downloads it as it arrives, and `curl` gets a file it can use.
+fn api_chat_markdown(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
+    let snapshot = current(shared);
+    let Some(session) = find(&snapshot.sessions, id) else {
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
+    };
+    let variant = request.query.get("variant").map(String::as_str);
+    let options = export::Options {
+        tool_output: variant == Some("tools"),
+    };
+    let markdown = match (variant, session.remote.is_some()) {
+        (Some("brief"), false) => {
+            let data = shared.store.session_data_fresh(session);
+            crate::handoff::build(session, Some(&data)).to_markdown()
+        }
+        (Some("brief"), true) => {
+            match remote_text(shared, session, &["--handoff", &session.session_id]) {
+                Ok(text) => text,
+                Err(why) => return http::respond_error(stream, Some(request), 502, &why),
+            }
+        }
+        (_, false) => export::render(session, &chat::whole(session), options),
+        (_, true) => match remote_markdown(shared, session, options) {
+            Ok(text) => text,
+            Err(why) => return http::respond_error(stream, Some(request), 502, &why),
+        },
+    };
+    http::respond(
+        stream,
+        Some(request),
+        200,
+        "text/markdown; charset=utf-8",
+        markdown.as_bytes(),
+    );
+}
+
+/// A remote row's export, rendered by the cctop that holds the transcript.
+///
+/// A peer older than `--export` rejects the flag, and an export that refused
+/// to work against it would be the only session route that did. So it falls
+/// back to the question every peer answers — `--chat`, the page's window — and
+/// renders that here, which the document then says is partial.
+fn remote_markdown(
+    shared: &Shared,
+    session: &Session,
+    options: export::Options,
+) -> Result<String, String> {
+    let id = session.session_id.as_str();
+    let mut args = vec!["--export", id];
+    if options.tool_output {
+        args.push("--tool-output");
+    }
+    let first = match remote_text(shared, session, &args) {
+        Ok(text) => return Ok(text),
+        Err(why) => why,
+    };
+    let body = remote_text(shared, session, &["--chat", id]).map_err(|_| first.clone())?;
+    let conversation = serde_json::from_str::<chat::Conversation>(&body).map_err(|_| first)?;
+    Ok(export::render(session, &conversation, options))
+}
+
+/// Run a cctop command on the machine a remote row came from, and return what
+/// it printed — [`remote_json`] for a caller that wants the text in hand.
+fn remote_text(shared: &Shared, session: &Session, args: &[&str]) -> Result<String, String> {
+    let remote = session
+        .remote
+        .as_ref()
+        .expect("only a remote row reaches remote_text");
+    let Some(host) = shared.hosts.get(&remote.host) else {
+        return Err(format!(
+            "this session is on {}, which this run is not connected to",
+            remote.host
+        ));
+    };
+    host.run(args)
+        .map_err(|why| format!("{} could not answer: {why}", remote.host))
+}
+
 /// Serve what one session can reach.
 fn api_access(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
     let snapshot = current(shared);
@@ -1899,6 +2002,10 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
     let outcome = match verb {
         "send" => actions::send(session, &field("text")),
         "answer" => actions::answer(session, &field("choice")),
+        "yolo" => match body.get("on").and_then(serde_json::Value::as_bool) {
+            Some(on) => actions::yolo(session, on),
+            None => Err((400, "YOLO is `{\"on\": true}` or `{\"on\": false}`".into())),
+        },
         "resume" => actions::resume(session),
         "handoff" => {
             // The brief is built from the extraction, so this one pays for a
@@ -2631,6 +2738,12 @@ mod tests {
     /// A whole request through the router — gate, scope check and route — and
     /// the status line it was answered with.
     fn status_of(shared: &Shared, method: &str, target: &str, headers: &str) -> String {
+        let raw = response_of(shared, method, target, headers);
+        raw.lines().next().unwrap_or_default().to_string()
+    }
+
+    /// A whole request through the router, and the whole raw response.
+    fn response_of(shared: &Shared, method: &str, target: &str, headers: &str) -> String {
         use std::io::Read;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -2642,7 +2755,54 @@ mod tests {
         drop(server);
         let mut raw = String::new();
         client.read_to_string(&mut raw).unwrap();
-        raw.lines().next().unwrap_or_default().to_string()
+        raw
+    }
+
+    /// The export route end to end: behind the same token as its neighbours,
+    /// served as markdown, the whole conversation, and tool results only when
+    /// the variant asks for them.
+    #[test]
+    fn the_markdown_route_serves_the_conversation_behind_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sess-md.jsonl");
+        let lines = [
+            r###"{"type":"user","timestamp":"2026-10-07T10:00:00Z","message":{"content":"## run the tests"}}"###,
+            r#"{"type":"assistant","timestamp":"2026-10-07T10:00:05Z","message":{"content":[{"type":"text","text":"Running them."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-10-07T10:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"test result: ok"}]}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let mut s = Session::new(crate::pricing::Provider::Claude, "sess-md".into());
+        s.data_file = Some(path);
+
+        let guarded = shared("full", "view");
+        *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".to_string(),
+            rows: Vec::new(),
+            sessions: vec![s],
+            host_errors: Vec::new(),
+        });
+        let bearer = "Authorization: Bearer view\r\n";
+
+        let plain = response_of(&guarded, "GET", "/api/chat/sess-md/markdown", bearer);
+        assert!(plain.starts_with("HTTP/1.1 200 "), "{plain}");
+        assert!(plain.contains("text/markdown"), "{plain}");
+        assert!(plain.contains("> ## run the tests"), "{plain}");
+        assert!(plain.contains("- **Bash** `cargo test`"), "{plain}");
+        assert!(!plain.contains("test result: ok"), "{plain}");
+
+        let tools = response_of(
+            &guarded,
+            "GET",
+            "/api/chat/sess-md/markdown?variant=tools",
+            bearer,
+        );
+        assert!(tools.contains("test result: ok"), "{tools}");
+
+        let missing = status_of(&guarded, "GET", "/api/chat/nope/markdown", bearer);
+        assert!(missing.contains(" 404 "), "{missing}");
+        let anonymous = status_of(&guarded, "GET", "/api/chat/sess-md/markdown", "");
+        assert!(anonymous.contains(" 403 "), "{anonymous}");
     }
 
     #[test]

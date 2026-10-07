@@ -8,8 +8,9 @@ import { getJson } from "@/lib/api";
 import { ago, shortModel, shortPath } from "@/lib/format";
 import { withToken } from "@/lib/config";
 import type { Session, Tab } from "@/lib/types";
-import { StateDot, dotOf, dotOfTab } from "./status";
-import { useTheme } from "./theme";
+import { StateDot } from "./status";
+import { dotOf, dotOfTab } from "@/lib/status";
+import { useTheme } from "@/hooks/use-theme";
 import { go, PAGES } from "./nav";
 
 // Ctrl+K / ⌘K on every page: every page, open tab and session, a few letters

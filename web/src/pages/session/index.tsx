@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "wouter";
-import { Check, ChevronDown, Copy, ExternalLink, Forward, LayoutGrid, MoreHorizontal, Play, SquareTerminal, X } from "lucide-react";
+import { Check, ChevronDown, Copy, Download, ExternalLink, FileText, Forward, LayoutGrid, MessagesSquare, MoreHorizontal, Play, SquareTerminal, Wrench, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { act, getJson } from "@/lib/api";
 import { CAN_ACT, withToken } from "@/lib/config";
 import { ago, clock, copyText, shortModel, shortPath } from "@/lib/format";
+import { copyMarkdown, downloadMarkdown } from "@/lib/export";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -14,14 +15,19 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/app-shell";
-import { StateBadge, StateDot, dotOf } from "@/components/status";
-import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
+import { StateBadge, StateDot } from "@/components/status";
+import { dotOf } from "@/lib/status";
+import { TerminalFrame } from "@/components/terminal";
+import { popOut, type Terminal } from "@/lib/terminal";
 import { useSessions, useTick } from "@/hooks/use-live";
+import { YoloLog, YoloSwitch } from "@/components/yolo";
 import type { Report } from "@/lib/types";
 import { AccessView } from "./access-view";
-import { ChangesView, diffFiles } from "./changes-view";
+import { ChangesView } from "./changes-view";
+import { diffFiles } from "./diff-files";
 import { Conversation } from "./conversation";
-import { ReportView, reportMarkdown } from "./report-view";
+import { ReportView } from "./report-view";
+import { reportMarkdown } from "./report-markdown";
 
 /** Where a session can be handed: an agent, under one of its accounts. */
 type HandoffTarget = { agent: string; account?: string | null; label: string };
@@ -140,6 +146,7 @@ export function SessionPage() {
               <StateDot state={state} />
               <span className="truncate">{r.title || shortPath(r.project) || r.session_id}</span>
               <StateBadge state={state} running={running} question={!!live?.asking_question} />
+              {live && <YoloSwitch session={live} className="shrink-0" />}
               {/* The state beside it is the last the stream said; say when that may be old. */}
               {sessions && !streaming && (
                 <span className="text-muted-foreground shrink-0 text-xs font-normal" title="The live connection dropped; the state shown may be out of date">
@@ -167,6 +174,7 @@ export function SessionPage() {
           </div>
           <Actions r={r} id={id} running={running} term={term} onTerminal={toggleTerminal} />
         </div>
+        {live?.yolo && <YoloLog session={live} className="mt-2" />}
         {r.error && (
           <div className="border-destructive/40 bg-destructive/5 text-destructive mt-2 rounded-md border px-3 py-1.5 text-xs">
             This transcript could not be fully read: {r.error}
@@ -347,10 +355,27 @@ function Actions({
             <MoreHorizontal />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
+        <DropdownMenuContent align="end" className="min-w-64">
           <DropdownMenuItem onSelect={copyMd}>
             <Copy /> Copy report as markdown
           </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {/* The conversation itself, for pasting into another agent or an
+              issue. Flat rather than a submenu: a submenu is a hover target,
+              and this menu is opened on phones too. */}
+          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "conversation")}>
+            <MessagesSquare /> Copy conversation as markdown
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "tools")}>
+            <Wrench /> Copy with tool output
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "brief")}>
+            <FileText /> Copy handoff brief
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => downloadMarkdown(r.session_id, "tools")}>
+            <Download /> Download .md with tool output
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => copyText(r.session_id).then(() => toast.success("Copied the session id"))}>
             <Check /> Copy session id
           </DropdownMenuItem>
