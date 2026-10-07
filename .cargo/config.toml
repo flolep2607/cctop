@@ -3,3 +3,13 @@
 # sharing a target dir apart without it.
 [env]
 CCTOP_CHECKOUT = { value = "", relative = true }
+
+# CI builds with `-D warnings`, and so does every gate run here. Exported by
+# hand, the flag came and went between commands — and rustflags are part of
+# every crate's fingerprint, so each time it changed, all ~520 crates in
+# Cargo.lock rebuilt: about two minutes, for nothing in cctop having changed.
+# Set here, every cargo command in the checkout agrees with CI and with each
+# other. An exported `RUSTFLAGS` still replaces this, which is how CI sets the
+# same flag.
+[build]
+rustflags = ["-D", "warnings"]

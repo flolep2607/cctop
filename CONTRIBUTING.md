@@ -17,7 +17,7 @@ Before opening a pull request, run the whole gate. CI sets
 build failure there:
 
 ```bash
-export RUSTFLAGS="-D warnings"
+# -D warnings is set in .cargo/config.toml
 cargo fmt --all --check
 cargo clippy --all-targets
 cargo test
@@ -81,7 +81,7 @@ with `--features debug`, and a change that touches those routes should pass both
 locally:
 
 ```bash
-export RUSTFLAGS="-D warnings"
+# -D warnings is set in .cargo/config.toml
 cargo clippy --all-targets --features debug
 cargo test --all-targets --features debug
 ```
