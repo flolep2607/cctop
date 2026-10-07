@@ -397,8 +397,7 @@ impl App {
             // enough to be worth typing is one you copied from somewhere.
             Mode::LaunchCwd => {
                 if paste_into(&mut self.launch_cwd_input, text, MAX_PATH_INPUT) {
-                    self.launch_cwd_bad = false;
-                    self.launch_cwd_suggest();
+                    self.launch_cwd_edited();
                 }
             }
             Mode::SwitchTab => {
@@ -711,8 +710,7 @@ impl App {
             // this is not one anybody typed on purpose.
             _ => {
                 if self.launch_cwd_input.key(key, MAX_PATH_INPUT).changed() {
-                    self.launch_cwd_bad = false;
-                    self.launch_cwd_suggest();
+                    self.launch_cwd_edited();
                 }
             }
         }

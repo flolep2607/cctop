@@ -107,14 +107,17 @@ an agent that started in `~/work/api/src` lists `~/work/api` — the thing you
 would name. Two checkouts of one repository are two answers, because they are
 two directories to start an agent in.
 
-After those come the repositories cctop found on disk: your `git pull` of this
-morning is offered even though no agent has run in it yet, newest first. The
-scan looks two levels down from your home directory, which covers `~/project` and
-`~/code/project` and stops there — a deeper walk finds nothing new and pays for
-every directory on the machine. It happens on a worker, so the list appears a
-moment after the field opens rather than holding it up.
+Mixed in with those, one for one, come the repositories cctop found on disk:
+your `git pull` of this morning is offered even though no agent has run in it
+yet, newest first, and a long history of projects cannot push every repository
+off the list. The scan looks three levels down from your home directory, which
+covers `~/project`, `~/code/project` and `~/src/github.com/project`, skips
+hidden directories, and never walks into a repository. It happens on a worker,
+so the repositories appear a moment after the field opens rather than holding it
+up — on the first opening too.
 
-Once the text reads as a path — anything with
+The field opens holding the directory the launch was headed for, and still
+shows that list. Once you edit the text and it reads as a path — anything with
 a `/` in it — the list comes off the disk instead: the directories under it,
 hidden ones only once you type the dot. `Tab` fills in as far as the entries
 agree (one match completes outright and adds the `/`, so you can walk down a

@@ -149,32 +149,6 @@ fn shared_prefix(paths: &[PathBuf]) -> String {
     prefix
 }
 
-/// The git repositories under `home`, two levels deep, newest first.
-///
-/// What cctop knows about a project comes from the agents that ran in it, so a
-/// repository nobody has launched an agent in yet is invisible to it — and that
-/// is precisely the repository somebody has just pulled and wants to try. This
-/// is where those come from.
-///
-/// Two levels, because that is where repositories actually sit: `~/project` and
-/// `~/code/project` are both common, and `~/code/project/sub` is not where
-/// anyone keeps the thing they would name. A deeper walk finds nothing new and
-/// pays for every directory on the machine, which is why the cost of the next
-/// level is the whole reason for stopping here rather than a rule of thumb. It
-/// also bounds the walk: a symlink cycle would otherwise be a walk with no end,
-/// and a repository is never descended into, so nothing under one is followed
-/// either way.
-///
-/// Only directories that are not hidden, and only at the two levels: a hidden
-/// home entry is configuration rather than a project, and skipping them also
-/// keeps `.cache` and `.local` — which are large and full of directories that
-/// are not anybody's work — out of the walk entirely.
-///
-/// Newest first, by the `.git` directory's own mtime: a repository pulled this
-/// morning outranks one last touched last spring, which is the same preference
-/// the field already applies to what agents have run in, and the reason the two
-/// parts of the list read as one.
-///
 /// Whether `path` is a directory once a symlink is resolved.
 ///
 /// Separate from a directory read's entry type because the two disagree about a
@@ -184,12 +158,43 @@ fn path_is_dir(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_dir())
 }
 
+/// How many directory levels under the home the scan reads.
+const REPO_DEPTH: usize = 3;
+
+/// The git repositories under `home`, three levels deep, newest first.
+///
+/// What cctop knows about a project comes from the agents that ran in it, so a
+/// repository nobody has launched an agent in yet is invisible to it — and that
+/// is precisely the repository somebody has just pulled and wants to try. This
+/// is where those come from.
+///
+/// Three levels, because that is where repositories actually sit: `~/project`
+/// and `~/code/project` are common, and so is a folder per owner or per
+/// client — `~/src/github.com/project`, `~/work/client/project` — which two
+/// levels stopped one short of, so a whole tree of checkouts was never
+/// offered. Past three is vendored code and build output, not anything
+/// anyone would name, and each level costs every directory at that depth.
+/// The walk stays cheap for the same two reasons it always was: a repository
+/// is never descended into, so a checkout's own tree is never read whatever
+/// its size, and the depth bounds it — a symlink cycle would otherwise be a
+/// walk with no end.
+///
+/// Only directories that are not hidden, at every level: a hidden home entry is
+/// configuration rather than a project, and skipping them also keeps `.cache`
+/// and `.local` — which are large and full of directories that are not
+/// anybody's work — out of the walk entirely.
+///
+/// Newest first, by the `.git` directory's own mtime: a repository pulled this
+/// morning outranks one last touched last spring, which is the same preference
+/// the field already applies to what agents have run in, and the reason the two
+/// parts of the list read as one.
+///
 /// `home` is taken as an argument rather than read from the environment, so the
 /// scan is a function that can be pointed at a directory and tested.
 pub(super) fn repos_under(home: &Path) -> Vec<PathBuf> {
     let mut found: Vec<(u64, PathBuf)> = Vec::new();
     let mut frontier = vec![home.to_path_buf()];
-    for _ in 0..2 {
+    for _ in 0..REPO_DEPTH {
         let mut next = Vec::new();
         for dir in frontier {
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -329,7 +334,7 @@ mod tests {
 
     /// A directory that merely contains a repository is not itself one, and a
     /// plain directory is not offered at all — the difference between `~/code`
-    /// and `~/code/project` is the whole point of going two levels.
+    /// and `~/code/project` is the whole point of going deeper than one.
     #[test]
     fn a_directory_merely_holding_repositories_is_not_itself_one() {
         let home = Home::new();
@@ -354,12 +359,22 @@ mod tests {
         assert!(!repos_under(home.path()).contains(&cache));
     }
 
-    /// Two levels is a decision, not an accident: a repository below that is not
-    /// found, and the scan does not walk into it to find out.
+    /// A folder per owner or per client puts a checkout three levels down,
+    /// and it is found.
     #[test]
-    fn the_scan_stops_at_two_levels() {
+    fn a_repository_three_levels_down_is_found() {
         let home = Home::new();
-        let too_deep = home.repo("code/project/vendor/thing");
+        let deep = home.repo("src/github.com/project");
+
+        assert_eq!(repos_under(home.path()), vec![deep]);
+    }
+
+    /// Three levels is a decision, not an accident: a repository below that is
+    /// not found, and the scan does not walk into it to find out.
+    #[test]
+    fn the_scan_stops_at_three_levels() {
+        let home = Home::new();
+        let too_deep = home.repo("code/project/vendor/thing/x");
 
         assert_eq!(repos_under(home.path()), Vec::<PathBuf>::new());
         assert!(!repos_under(home.path()).contains(&too_deep));

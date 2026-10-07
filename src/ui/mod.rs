@@ -479,6 +479,15 @@ pub struct App {
     /// The suggestion under the cursor, when the cursor has left the text.
     /// `None` means the field is being typed in, and Enter takes what is typed.
     pub launch_cwd_pick: Option<usize>,
+    /// Whether the field still holds what it was opened with, untouched.
+    ///
+    /// The prefill is the directory the launch was already headed for, which
+    /// is a path — and a path is completed against the filesystem, so a field
+    /// opened on `~/cctop` offered the children of `~` whose names start with
+    /// `cctop`, and the projects and repositories the list exists to show
+    /// appeared only once the field had been emptied by hand. Until the first
+    /// edit the field is read as asking nothing, and offers those.
+    pub launch_cwd_pristine: bool,
     /// Line being typed into the selected session's terminal.
     pub send_input: line_edit::LineEdit,
     /// The branch being named for `F`, the checkout it forks from, and the
@@ -1152,6 +1161,7 @@ impl App {
             launch_cwd_repos: Vec::new(),
             launch_cwd_hits: Vec::new(),
             launch_cwd_pick: None,
+            launch_cwd_pristine: false,
             rmux_install: None,
             rmux_deferred: None,
             rmux_declined: false,
