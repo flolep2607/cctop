@@ -579,6 +579,18 @@ pub fn launchable_for(provider: Provider) -> Vec<&'static Profile> {
         .unwrap_or_default()
 }
 
+/// One account the launcher offers for `provider`, by name.
+///
+/// The launchable counterpart of [`profile_named`], which knows directories
+/// only: a handoff names its receiving account the way the launcher lists it,
+/// and a token account is as much a place to send work as a directory is —
+/// more often, since it is the cheap way to hold a second subscription.
+pub fn launchable_named(provider: Provider, name: &str) -> Option<&'static Profile> {
+    launchable_for(provider)
+        .into_iter()
+        .find(|p| p.name == name)
+}
+
 /// Pick up accounts added since the launcher last looked.
 ///
 /// ponytail: an account removed from the config stays launchable until
@@ -614,7 +626,7 @@ fn token_account_names() -> Vec<String> {
 }
 
 /// The same, from the file's text — the half that is worth testing.
-fn account_names_in(text: &str) -> Vec<String> {
+pub(crate) fn account_names_in(text: &str) -> Vec<String> {
     let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
         return Vec::new();
     };

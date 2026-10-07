@@ -1537,6 +1537,34 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         _ if path.starts_with("/api/access/") => {
             api_access(shared, stream, &request, &path["/api/access/".len()..]);
         }
+        // Where this session can be handed: every (agent, account) pair but
+        // the one it is on. Per session rather than folded into /api/agents,
+        // because the pair that is left out is this session's — and empty for
+        // a link that could not act on the answer, as /api/agents says
+        // `actions: false` to the same link.
+        _ if path.starts_with("/api/handoff/") => {
+            let snapshot = current(shared);
+            let id = &path["/api/handoff/".len()..];
+            let Some(session) = find(&snapshot.sessions, id) else {
+                return http::respond_error(stream, Some(&request), 404, NO_SUCH_SESSION);
+            };
+            let targets = match shared.actions && access == Access::Full && session.remote.is_none()
+            {
+                true => crate::handoff::targets(session),
+                false => Vec::new(),
+            };
+            let targets: Vec<serde_json::Value> = targets
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "agent": t.agent,
+                        "account": t.account,
+                        "label": t.label(),
+                    })
+                })
+                .collect();
+            json(stream, &request, &serde_json::json!({ "targets": targets }))
+        }
         // The size rmux has fitted a tab's window to. The page's terminal asks
         // when you come back to it, compares it with its own grid, and if the
         // window is some other client's — the TUI's, typically — nudges its
@@ -1873,7 +1901,12 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
             // the same reason: a brief assembled from the row alone carries the
             // header and none of the work.
             let data = shared.store.session_data_fresh(session);
-            actions::handoff(session, Some(&data), &field("agent"))
+            actions::handoff(
+                session,
+                Some(&data),
+                &field("agent"),
+                Some(&field("account")),
+            )
         }
         _ => return http::respond_error(stream, Some(request), 404, "no such action"),
     };

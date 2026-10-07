@@ -216,7 +216,8 @@ pub struct Args {
     ///
     /// The copy is in the shape that harness's own resume command reads. Takes
     /// a session id or a unique prefix of one, then the harness to convert to
-    /// — currently claude and codex, in either direction. The copy keeps the
+    /// — currently claude and codex, in either direction — optionally with an
+    /// account, as `codex:work`, to write into that account's store. The copy keeps the
     /// session's own id where the receiving store has it free, so cctop can
     /// tell the two apart as one piece of work
     #[arg(
@@ -768,8 +769,23 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
             session.provider.as_str()
         );
     }
+    // `codex:spare` names the account as well as the harness: the copy is
+    // written for whoever resumes it, and a session moved because one login is
+    // out of window has to land where the other login looks.
+    let (agent, account) = match agent.split_once(':') {
+        Some((agent, account)) => (agent, Some(account)),
+        None => (agent, None),
+    };
     let target = crate::pricing::Provider::parse(agent)
         .ok_or_else(|| anyhow::anyhow!("{agent} is not a harness cctop knows"))?;
+    let profile = match account {
+        Some(name) => Some(
+            crate::config::launchable_named(target, name).ok_or_else(|| {
+                anyhow::anyhow!("{agent} has no account named '{name}' on this machine")
+            })?,
+        ),
+        None => None,
+    };
     if !crate::convert::convertible(session.provider, target) {
         anyhow::bail!(
             "cctop cannot convert {} sessions into {}",
@@ -781,9 +797,10 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
         .data_file
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("that session has no transcript on this machine"))?;
-    let home = match target {
-        crate::pricing::Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
-        crate::pricing::Provider::Codex => crate::config::CODEX_HOME.clone(),
+    let home = match (profile, target) {
+        (Some(profile), _) => profile.dir.clone(),
+        (None, crate::pricing::Provider::Claude) => crate::config::CLAUDE_CONFIG_DIR.clone(),
+        (None, crate::pricing::Provider::Codex) => crate::config::CODEX_HOME.clone(),
         _ => anyhow::bail!("that harness has no store cctop writes into"),
     };
     let written = crate::convert::convert(session.provider, transcript, target, &home)

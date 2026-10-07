@@ -13,7 +13,7 @@ expression: screen
 │   LAST▲│ Restart it in its tab      it is not running in a tab here │JECT    │
 │●    now│ Attach to it                                             a │ the ch…┃
 │●     7m│ Type into it                                             s │        │
-╰────────│ Hand off to another agent                                O │────────╯
+╰────────│ Hand off to agent/account                                O │────────╯
 ╭ Info  P│ Read the conversation                                    i │ Context╮
 │Root /us│ Show its subagents                                       e │        │
 │    PID │ Mark for a batch action                              space │        │

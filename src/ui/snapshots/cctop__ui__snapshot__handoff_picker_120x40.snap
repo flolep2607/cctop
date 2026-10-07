@@ -16,19 +16,19 @@ expression: screen
 │○     3h     1h     $0.19      ─     ─ haiku-4-5      ─          ─        local                ─            docs      │
 │○     2d    12h     $7.03      ─     ─ gpt-5-codex    ─          ─        local                ─            infra     │
 │                                                                                                                      │
-│                            ╭ Fix the checkout redirect loop ────────────────────────────╮                            │
-│                            │ Resume in a tab                                          R │                            │
-│                            │ Restart it in its tab      it is not running in a tab here │                            │
-│                            │ Attach to it                                             a │                            │
-│                            │ Type into it                                             s │                            │
-│                            │ Hand off to agent/account                                O │                            │
-│                            │ Read the conversation                                    i │                            │
-│                            │ Show its subagents                                       e │                            │
-╰────────────────────────────│ Mark for a batch action                              space │────────────────────────────╯
-╭ Info  Performance  Processe│ ────────────────────────────────────────────────────────── │────────────────────────────╮
-│Root /usr/bin/claude --model│ Terminate the agent                                 ctrl+k │                            │
-│    PID    CPU%       MEM  C│ Delete the transcript                  it is still running │                            │
-│   4101    9.8%    360.0M  c╰ ↑↓ Enter · Esc ────────────────────────────────────────────╯                            │
+│                                                                                                                      │
+│                                                                                                                      │
+│                            ╭ Hand the context to ───────────────────────────────────────╮                            │
+│                            │   claude                  as default                       │                            │
+│                            │   codex                   as default                       │                            │
+│                            │   codex                   as spare                         │                            │
+│                            │   opencode                                                 │                            │
+│                            │ in /home/me/src/web  (c to change)                         │                            │
+╰────────────────────────────│ ↑/↓  Enter start  Esc cancel                               │────────────────────────────╯
+╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
+│Root /usr/bin/claude --model opus                                                                                     │
+│    PID    CPU%       MEM  COMMAND                                                                                    │
+│   4101    9.8%    360.0M  claude --model opus                                                                        │
 │   4188    2.4%     44.0M  node mcp-server.js                                                                         │
 │   4290    0.3%      8.0M  bash -c npm test                                                                           │
 │                                                                                                                      │

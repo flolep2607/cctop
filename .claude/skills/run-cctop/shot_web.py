@@ -113,6 +113,16 @@ def main() -> int:
                 )
             except Exception as e:
                 problems.append(f"could not inspect the body either: {e}")
+        # A menu or a dialog is only on screen once something opens it, and a
+        # change to one is otherwise impossible to see in a shot:
+        # `CCTOP_CLICK='button:has-text("Hand off")'` clicks it first.
+        click = os.environ.get("CCTOP_CLICK")
+        if click and rendered:
+            try:
+                page.click(click, timeout=5000)
+                time.sleep(0.4)
+            except Exception as e:
+                problems.append(f"could not click {click}: {e}")
         page.screenshot(path=f"{OUT}.png", full_page=True)
         text = page.inner_text("body")
         with open(f"{OUT}.txt", "w") as fh:

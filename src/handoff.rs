@@ -853,6 +853,233 @@ pub fn fork(transcript: &Path, config_dir: &Path) -> std::io::Result<String> {
     Ok(id)
 }
 
+/// Copy a Codex rollout into another account's `$CODEX_HOME` under a new
+/// session id, and return the id.
+///
+/// The Codex half of [`fork`], for the case that motivated choosing an account
+/// at all: one subscription has run out of window, and the work moves to
+/// another login of the *same* harness. A brief would throw away a conversation
+/// the receiving Codex can read perfectly well; it only has to be in the store
+/// that login looks in.
+///
+/// A new id rather than the original's, as [`fork`] mints one, and for the
+/// same reason: cctop keys a row on harness and id, so two rollouts claiming
+/// one id — one in each account — would read as one session reported twice.
+/// The id is rewritten in the `session_meta` record, which is where Codex
+/// resolves a session from, and in the filename, which is its fallback lookup.
+/// Everything else is carried byte for byte.
+///
+/// The copy lands at the same dated path under the receiving `sessions/` that
+/// it had under the sending one — Codex files a rollout under the day it began,
+/// and the day has not changed because the account did.
+pub fn fork_codex(rollout: &Path, codex_home: &Path) -> std::io::Result<String> {
+    use std::io::{BufRead, BufWriter, Write};
+
+    let missing = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, what);
+    let name = rollout
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| missing("that rollout has no file name"))?;
+    let stem = name.strip_suffix(".jsonl").unwrap_or(name);
+    let old = crate::config::trailing_uuid(stem)
+        .ok_or_else(|| missing("that rollout's name carries no session id"))?;
+    // The path below the sending store's `sessions/`, which is the dated
+    // directory; an archived rollout has none, and goes under today's.
+    let parts: Vec<&std::ffi::OsStr> = rollout.iter().collect();
+    let dated: PathBuf = match parts.iter().rposition(|p| *p == "sessions") {
+        Some(at) => parts[at + 1..parts.len() - 1].iter().collect(),
+        None => {
+            let now = chrono::Local::now();
+            PathBuf::from(now.format("%Y/%m/%d").to_string())
+        }
+    };
+    let dir = codex_home.join("sessions").join(dated);
+    std::fs::create_dir_all(&dir)?;
+
+    let prefix = &stem[..stem.len() - old.len()];
+    let (id, path) = (0..3)
+        .map(|_| new_session_id())
+        .filter(|id| !crate::convert::codex_id_taken(codex_home, id))
+        .map(|id| {
+            let path = dir.join(format!("{prefix}{id}.jsonl"));
+            (id, path)
+        })
+        .find(|(_, path)| !path.exists())
+        .ok_or_else(|| missing("could not find an unused session id"))?;
+
+    let source = std::io::BufReader::new(std::fs::File::open(rollout)?);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let mut out = BufWriter::new(file);
+    for line in source.lines() {
+        let line = line?;
+        match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(mut value) if value.get("type").and_then(|t| t.as_str()) == Some("session_meta") => {
+                if let Some(payload) = value.get_mut("payload").and_then(|p| p.as_object_mut()) {
+                    for key in ["id", "session_id"] {
+                        if payload.get(key).and_then(|v| v.as_str()) == Some(old) {
+                            payload.insert(key.into(), serde_json::Value::String(id.clone()));
+                        }
+                    }
+                }
+                writeln!(out, "{value}")?;
+            }
+            // Anything else is passed through as written — see `fork`.
+            _ => writeln!(out, "{line}")?,
+        }
+    }
+    out.flush()?;
+    Ok(id)
+}
+
+/// Where a session can be handed: an agent, and which of its accounts.
+///
+/// A pair because the question a handoff answers is not only "which harness"
+/// but "whose subscription". The motivating case is the second one alone: an
+/// account is out of window for the day, and the same harness under another
+/// login is exactly who should pick the work up. The accounts are cctop's
+/// existing ones — [`crate::config::launchable_for`], the list the launcher's
+/// `p` cycles through — rather than a second notion of what an account is.
+///
+/// `account` is `None` for a harness cctop cannot tell accounts apart for,
+/// which is every one but Claude and Codex: they have no environment variable
+/// that selects a login, so there is one place to send work and nothing to
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Target {
+    /// The command, as [`agents`] lists it — `claude`, `codex`.
+    pub agent: String,
+    /// The account's name, as the launcher and the PROFILE column call it.
+    pub account: Option<String>,
+}
+
+impl Target {
+    /// How a picker names this target: the agent, and the account where there
+    /// is one to name.
+    pub fn label(&self) -> String {
+        match &self.account {
+            Some(account) => format!("{} · {account}", self.agent),
+            None => self.agent.clone(),
+        }
+    }
+
+    /// The account this target launches under, when it names one cctop can
+    /// still find.
+    pub fn profile(&self) -> Option<&'static crate::config::Profile> {
+        let provider = crate::pricing::Provider::parse(&self.agent)?;
+        crate::config::launchable_named(provider, self.account.as_deref()?)
+    }
+
+    /// The target's argv: its agent, under its account.
+    pub fn argv(&self, argv: Vec<String>) -> Vec<String> {
+        match self.profile() {
+            Some(profile) => crate::config::argv_under_profile(argv, profile),
+            None => argv,
+        }
+    }
+}
+
+/// The agents on this machine a session can be handed to.
+///
+/// The same list the terminal launcher offers, minus the shell: handing a brief
+/// to `$SHELL` would start a shell with a paragraph typed into it.
+pub fn agents() -> Vec<String> {
+    crate::alias::AGENTS
+        .split_whitespace()
+        .filter(|agent| crate::shim::is_command(agent))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every place `session` can be handed on this machine.
+///
+/// Both pickers — the launcher's and the page's — ask this, and the server
+/// checks a request against it, so the list that is offered is the list that
+/// is honoured.
+pub fn targets(session: &Session) -> Vec<Target> {
+    let accounts = |agent: &str| -> Vec<String> {
+        crate::pricing::Provider::parse(agent)
+            .map(crate::config::launchable_for)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.name.clone())
+            .collect()
+    };
+    let current = current(session, &accounts(session.provider.as_str()));
+    targets_among(&agents(), accounts, &current)
+}
+
+/// Every (agent, account) pair, less the one the session is already on.
+///
+/// Handing a session to itself is not a handoff — it is the same harness,
+/// spending the same subscription, on a copy of the same conversation — so it
+/// is not offered at all rather than offered and refused. Every other pair is,
+/// including another account of the session's own harness, which is the case
+/// accounts were added to handoffs for.
+///
+/// A harness with no accounts cctop knows of is one target with none named. A
+/// harness with one account is that account, so on a machine with a single
+/// login per harness the list reads exactly as it did before accounts existed:
+/// one line per agent, the session's own harness missing.
+pub fn targets_among(
+    agents: &[String],
+    accounts: impl Fn(&str) -> Vec<String>,
+    current: &Target,
+) -> Vec<Target> {
+    agents
+        .iter()
+        .flat_map(|agent| {
+            let names = accounts(agent);
+            let named: Vec<Option<String>> = match names.is_empty() {
+                true => vec![None],
+                false => names.into_iter().map(Some).collect(),
+            };
+            named.into_iter().map(|account| Target {
+                agent: agent.clone(),
+                account,
+            })
+        })
+        .filter(|target| target != current)
+        .collect()
+}
+
+/// The (agent, account) `session` is running on, given its harness's accounts.
+///
+/// The account is read off the transcript's directory, which is the right
+/// answer for every directory account — and the wrong one for a token account,
+/// whose sessions are in the default directory by design. So a live Claude
+/// session's own process is asked first: the token it was started with names
+/// the account.
+///
+/// A harness with accounts but a session from none of them — a directory that
+/// has since been logged out of — reads as `default`, the account that a
+/// session in the conventional directory is in. One with no accounts at all is
+/// the bare agent, which is how [`targets_among`] lists it.
+fn current(session: &Session, accounts: &[String]) -> Target {
+    let agent = session.provider.as_str().to_string();
+    if accounts.is_empty() {
+        return Target {
+            agent,
+            account: None,
+        };
+    }
+    let token = match session.provider {
+        crate::pricing::Provider::Claude => {
+            session.root_pid().and_then(crate::quota::token_account_of)
+        }
+        _ => None,
+    };
+    let account = token
+        .or_else(|| session.profile.clone())
+        .unwrap_or_else(|| "default".to_string());
+    Target {
+        agent,
+        account: Some(account),
+    }
+}
+
 /// A session id of the shape the harness writes: a version-4 UUID.
 fn new_session_id() -> String {
     let mut bytes = crate::util::random_bytes(16);
@@ -1408,6 +1635,116 @@ mod tests {
         let second = fork(&transcript, home.path()).unwrap();
         assert_ne!(first, second);
         assert_eq!(new_session_id().len(), 36);
+    }
+
+    fn target(agent: &str, account: Option<&str>) -> Target {
+        Target {
+            agent: agent.into(),
+            account: account.map(str::to_string),
+        }
+    }
+
+    /// Two Claude logins and two Codex ones, as the machine that motivated
+    /// accounts on a handoff had.
+    fn two_each(agent: &str) -> Vec<String> {
+        match agent {
+            "claude" => vec!["default".into(), "work".into()],
+            "codex" => vec!["default".into(), "spare".into()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The session's own pair is the one target that is not offered, and the
+    /// same harness under another account is — that is the case accounts were
+    /// added to a handoff for.
+    #[test]
+    fn every_pair_but_the_sessions_own_is_a_target() {
+        let agents = argv(&["claude", "codex", "opencode"]);
+        let offered = targets_among(&agents, two_each, &target("claude", Some("work")));
+        assert_eq!(
+            offered,
+            vec![
+                target("claude", Some("default")),
+                target("codex", Some("default")),
+                target("codex", Some("spare")),
+                target("opencode", None),
+            ]
+        );
+        assert_eq!(offered[0].label(), "claude · default");
+        assert_eq!(offered[3].label(), "opencode");
+    }
+
+    /// One account per harness reads as it did before accounts existed: one
+    /// line per agent, the session's own harness missing.
+    #[test]
+    fn a_harness_with_one_account_is_one_target() {
+        let one = |agent: &str| match agent {
+            "claude" => vec!["default".to_string()],
+            _ => Vec::new(),
+        };
+        let agents = argv(&["claude", "codex"]);
+        let offered = targets_among(&agents, one, &target("claude", Some("default")));
+        assert_eq!(offered, vec![target("codex", None)]);
+        // And a harness with no accounts at all excludes itself the same way.
+        let offered = targets_among(&agents, one, &target("codex", None));
+        assert_eq!(offered, vec![target("claude", Some("default"))]);
+    }
+
+    /// Nothing else installed and nothing else logged in: there is nowhere to
+    /// hand the session, and the list says so by being empty rather than by
+    /// offering the session back to itself.
+    #[test]
+    fn a_session_with_nowhere_else_to_go_has_no_targets() {
+        let one = |_: &str| vec!["default".to_string()];
+        let offered = targets_among(&argv(&["claude"]), one, &target("claude", Some("default")));
+        assert!(offered.is_empty());
+        assert!(targets_among(&[], two_each, &target("claude", None)).is_empty());
+    }
+
+    /// Which account a session is on, read off its row: the transcript's
+    /// directory, or `default` when that is all there is to go on.
+    #[test]
+    fn a_sessions_own_account_is_its_profile() {
+        let mut session = Session::new(Provider::Codex, "x".into());
+        let accounts = vec!["default".to_string(), "spare".to_string()];
+        assert_eq!(
+            current(&session, &accounts),
+            target("codex", Some("default"))
+        );
+        session.profile = Some("spare".into());
+        assert_eq!(current(&session, &accounts), target("codex", Some("spare")));
+        // No accounts to be in: the bare agent, as `targets_among` lists it.
+        assert_eq!(current(&session, &[]), target("codex", None));
+    }
+
+    /// The Codex-to-Codex handoff across accounts: the rollout lands in the
+    /// receiving home's dated directory under a fresh id, named in the
+    /// metadata Codex resolves it by, and the original is left alone.
+    #[test]
+    fn a_codex_rollout_forks_into_another_home() {
+        let from = tempfile::tempdir().unwrap();
+        let old = "019a1b2c-3d4e-7f60-8a9b-0c1d2e3f4a5b";
+        let day = from.path().join("sessions/2026/10/07");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join(format!("rollout-2026-10-07T09-15-00-{old}.jsonl"));
+        let original = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{old}\",\"cwd\":\"/w\"}}}}\n\
+             {{\"type\":\"response_item\",\"payload\":{{\"text\":\"about {old}\"}}}}\n"
+        );
+        std::fs::write(&rollout, &original).unwrap();
+
+        let into = tempfile::tempdir().unwrap();
+        let id = fork_codex(&rollout, into.path()).unwrap();
+        assert_ne!(id, old);
+        let copy = into
+            .path()
+            .join("sessions/2026/10/07")
+            .join(format!("rollout-2026-10-07T09-15-00-{id}.jsonl"));
+        let text = std::fs::read_to_string(&copy).unwrap();
+        assert!(text.contains(&format!("\"id\":\"{id}\"")), "{text}");
+        // What was said is carried as it was said.
+        assert!(text.contains(&format!("about {old}")), "{text}");
+        assert_eq!(std::fs::read_to_string(&rollout).unwrap(), original);
     }
 
     /// What can be handed over whole, and what has to go as a summary.
