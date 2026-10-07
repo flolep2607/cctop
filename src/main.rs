@@ -35,6 +35,8 @@ mod serve;
 mod session;
 mod settings;
 mod shim;
+mod ssh_config;
+mod sshfs;
 mod trace;
 mod ui;
 mod update;
@@ -235,7 +237,7 @@ fn main() -> anyhow::Result<()> {
     {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("sandbox") {
-            std::process::exit(sandbox::run(&argv[2..])?);
+            std::process::exit(sandbox::run_held(&argv[2..])?);
         }
     }
 

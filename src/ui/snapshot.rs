@@ -471,6 +471,56 @@ fn handoff_picker() {
     snap("handoff_picker", &mut app);
 }
 
+/// The new-tab launcher on its Remote row, on a machine without sshfs: the row
+/// and the line under it both say the tab will offer to install it, and `c` is
+/// not offered — the directory is the host's, asked for next.
+#[test]
+fn new_tab_remote() {
+    let mut app = fixture();
+    app.launch_offer = vec![
+        tabs::Choice::Start(vec!["claude".into()]),
+        tabs::Choice::Start(vec!["codex".into()]),
+        tabs::Choice::Remote { sshfs: false },
+    ];
+    app.launch_into = LaunchInto::Tab;
+    app.launch_cursor = 2;
+    app.mode = Mode::Launch;
+    snap("new_tab_remote", &mut app);
+}
+
+/// The Remote entry's two steps: the hosts from `~/.ssh/config`, one line per
+/// `Host` line with its other names beside it, and then the directory on the
+/// host picked.
+#[test]
+fn remote_steps() {
+    use crate::ssh_config::Host;
+    let mut app = fixture();
+    app.launch_offer = vec![tabs::Choice::Remote { sshfs: false }];
+    app.launch_cursor = 0;
+    app.sandbox_hosts = vec![
+        Host {
+            name: "nz-b-procurementdb1".into(),
+            aliases: vec!["procdb".into()],
+        },
+        Host {
+            name: "devbox".into(),
+            aliases: vec![],
+        },
+        Host {
+            name: "gpu-01".into(),
+            aliases: vec!["gpu".into(), "trainer".into()],
+        },
+    ];
+    app.sandbox_cursor = 1;
+    app.mode = Mode::RemoteHost;
+    snap("remote_host", &mut app);
+
+    app.sandbox_host = "devbox".into();
+    app.sandbox_path = "~/src/api".into();
+    app.mode = Mode::RemotePath;
+    snap("remote_path", &mut app);
+}
+
 #[test]
 fn new_worktree() {
     let mut app = fixture();

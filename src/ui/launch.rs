@@ -602,6 +602,15 @@ impl App {
         else {
             return Restart::NoSession(label);
         };
+        // `claude --resume` would bring it back on this machine, with its Bash
+        // calls landing here instead of on the host — the one mistake a
+        // sandbox exists to prevent.
+        if let Some(sandbox) = &session.sandbox {
+            return Restart::Declined(format!(
+                "{label} works on {} through cctop sandbox, which a restart would leave behind",
+                crate::sandbox::host_of(sandbox)
+            ));
+        }
         let Some((argv, profile)) = resume_under_profile(&session) else {
             return Restart::Declined(format!(
                 "{} sessions cannot be resumed from a shell",
@@ -851,6 +860,7 @@ impl App {
         match self.rmux_deferred.take() {
             Some(Deferred::Resume) => self.resume_now(),
             Some(Deferred::Launch) => self.launch_selected(),
+            Some(Deferred::Remote) => self.launch_sandbox(),
             None => {}
         }
     }
@@ -1075,15 +1085,19 @@ impl App {
         }
     }
 
-    /// Whether the launcher's pick is an agent already running somewhere.
+    /// Whether the launcher's pick would ignore a local directory: an agent
+    /// already running somewhere, or the Remote entry.
     ///
     /// Reattaching lands wherever that agent already is, so a directory typed
     /// for it would be accepted and then ignored — which is worse than the key
     /// not being offered.
-    pub(super) fn launch_is_reattach(&self) -> bool {
+    ///
+    /// The Remote entry is answered the same way: its directory is on the host
+    /// and is asked for after the host is, so a local one would be ignored too.
+    pub(super) fn launch_ignores_cwd(&self) -> bool {
         matches!(
             self.launch_offer.get(self.launch_cursor),
-            Some(tabs::Choice::Waiting(_))
+            Some(tabs::Choice::Waiting(_) | tabs::Choice::Remote { .. })
         )
     }
 
@@ -1092,13 +1106,18 @@ impl App {
         let Some(choice) = self.launch_offer.get(self.launch_cursor).cloned() else {
             return;
         };
+        // Not a command yet: a host and a directory are asked for first.
+        if let tabs::Choice::Remote { .. } = choice {
+            self.sandbox_prompt();
+            return;
+        }
         let cwd = self.launch_cwd.clone();
         // Read off the choice rather than the argv below, which by then carries
         // the `env VAR=value` prefix a profile is passed through.
         let starting = match &choice {
             tabs::Choice::Start(argv) => Self::profile_provider(argv),
             tabs::Choice::Handoff(target) => crate::pricing::Provider::parse(&target.agent),
-            tabs::Choice::Waiting(_) => None,
+            tabs::Choice::Waiting(_) | tabs::Choice::Remote { .. } => None,
         };
         // The account a fresh agent starts under: the one `p` picked for a bare
         // launch, the one on the line for a handoff, which names it outright.
@@ -1107,7 +1126,7 @@ impl App {
                 Self::profile_provider(argv).and_then(|p| self.chosen_profile(p))
             }
             tabs::Choice::Handoff(target) => target.profile(),
-            tabs::Choice::Waiting(_) => None,
+            tabs::Choice::Waiting(_) | tabs::Choice::Remote { .. } => None,
         };
         let (argv, own) = match &choice {
             // Reattaching: the agent chose its own command long ago, and the
@@ -1136,6 +1155,8 @@ impl App {
                 let Some(own) = own else { return };
                 (target.argv(vec![target.agent.clone()]), own)
             }
+            // Returned from above.
+            tabs::Choice::Remote { .. } => return,
         };
         // The offer is a snapshot, and an agent can finish in the time the modal
         // is up. Attaching to a session that has gone spawns a client that exits
@@ -1189,6 +1210,7 @@ impl App {
             tabs::Choice::Start(_) => self.launch_profile().map(|p| p.name.clone()),
             tabs::Choice::Handoff(target) => target.account.clone(),
             tabs::Choice::Waiting(agent) => agent.profile.clone(),
+            tabs::Choice::Remote { .. } => None,
         };
         // The tab is named after the agent, not after the brief it was handed:
         // `Pane::launch` names it from the argv it was given, and that argv now
@@ -1252,7 +1274,7 @@ impl App {
                     .unwrap_or_default();
                 format!("Reattached to {label}{at} — it was never gone")
             }
-            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => {
+            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) | tabs::Choice::Remote { .. } => {
                 let where_ = cwd
                     .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
                     .unwrap_or_default();

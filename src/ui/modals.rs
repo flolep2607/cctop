@@ -357,7 +357,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         section("Tabs and splits"),
         item(
             "{new_tab} or Alt+n",
-            "New tab: an agent, a shell, or one still running",
+            "New tab: an agent, a shell, an ssh host, or one still running",
         ),
         item("Alt+v / Alt+s", "Split the tab right / down"),
         item("Alt+← / →", "Previous / next tab"),
@@ -1598,7 +1598,7 @@ pub(super) fn draw_launch(
         // looks exactly like an idle one from a list of names.
         let reported = match choice {
             tabs::Choice::Waiting(agent) => app.waiting_state(agent),
-            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => None,
+            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) | tabs::Choice::Remote { .. } => None,
         };
         // The dot carries whether anyone is already looking, the word carries
         // what the agent said about itself. Two facts that can both be true at
@@ -1608,7 +1608,7 @@ pub(super) fn draw_launch(
             // works, but the two then fight over one window's size.
             tabs::Choice::Waiting(agent) if agent.attached => "◉",
             tabs::Choice::Waiting(_) => "●",
-            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => " ",
+            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) | tabs::Choice::Remote { .. } => " ",
         };
         let dot_color = match (choice, reported) {
             (tabs::Choice::Waiting(_), Some(signal)) => theme::signal_color(signal),
@@ -1616,7 +1616,10 @@ pub(super) fn draw_launch(
             // has happened since cctop started listening. Still a live agent, so
             // it keeps a dot — just one that claims nothing.
             (tabs::Choice::Waiting(_), None) => theme::colors().dim,
-            (tabs::Choice::Start(_) | tabs::Choice::Handoff(_), _) => theme::colors().dimmer,
+            (
+                tabs::Choice::Start(_) | tabs::Choice::Handoff(_) | tabs::Choice::Remote { .. },
+                _,
+            ) => theme::colors().dimmer,
         };
 
         let state = match reported {
@@ -1634,6 +1637,10 @@ pub(super) fn draw_launch(
         // footer says — so the column says whose account it starts under,
         // which is the half of the pair that tells two `claude` lines apart.
         let at = match (choice, choice.cwd().is_some()) {
+            // Said on the row as well as under it: the row is what is read
+            // while the cursor is somewhere else.
+            (tabs::Choice::Remote { sshfs: false }, _) => "needs sshfs".to_string(),
+            (tabs::Choice::Remote { sshfs: true }, _) => "ssh sandbox".to_string(),
             (tabs::Choice::Handoff(target), _) => target
                 .account
                 .as_deref()
@@ -1651,7 +1658,7 @@ pub(super) fn draw_launch(
         let name = match choice {
             tabs::Choice::Waiting(agent) => app.waiting_label(agent),
             tabs::Choice::Handoff(target) => Some(target.agent.clone()),
-            tabs::Choice::Start(_) => None,
+            tabs::Choice::Start(_) | tabs::Choice::Remote { .. } => None,
         }
         .unwrap_or_else(|| choice.label());
 
@@ -1751,6 +1758,14 @@ pub(super) fn draw_launch(
                     " ◉ already open elsewhere — both windows share one size".to_string()
                 }
                 (Some(tabs::Choice::Waiting(_)), _) => " where it already is".to_string(),
+                // The install is offered in the tab, where sudo can ask for a
+                // password; saying so here is what makes that prompt expected.
+                (Some(tabs::Choice::Remote { sshfs: false }), _) => {
+                    " sshfs not installed — will offer to install it".to_string()
+                }
+                (Some(tabs::Choice::Remote { sshfs: true }), _) => {
+                    " Claude here, its Bash and files on a host you pick".to_string()
+                }
                 (_, Some(dir)) => format!(
                     " in {}  (c to change)",
                     crate::util::truncate(
@@ -1812,10 +1827,12 @@ pub(super) fn draw_launch(
             Span::styled("  (p to change)", theme::dim()),
         ]));
     }
+    let picked_remote = matches!(picked, Some(tabs::Choice::Remote { .. }));
     let keys = match (editing, picked_waiting) {
         (true, _) if !hits.is_empty() => " Enter accept  Tab fill in  ↑/↓ pick  Esc cancel",
         (true, _) => " Enter accept  Esc keep the old one",
         (false, true) => " ↑/↓  Enter reattach  Esc cancel",
+        (false, false) if picked_remote => " ↑/↓  Enter pick a host  Esc cancel",
         (false, false) => " ↑/↓  Enter start  Esc cancel",
     };
     lines.push(Line::from(Span::styled(
@@ -2584,6 +2601,123 @@ pub(super) fn draw_rename_tab(
 /// order — narrowed by whatever has been typed. Rows longer than the box
 /// are windowed around the cursor rather than scrolled: the pick is what
 /// moves, not the frame around it.
+/// The launcher's Remote entry: the host step, or the directory step after it.
+///
+/// One function for both because they are one box that changes its question —
+/// the host stays on the title once it is picked, so the directory is never
+/// asked for without saying which machine it is on.
+pub(super) fn draw_remote(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut super::render::Layout,
+) {
+    const WIDTH: u16 = 60;
+    /// Rows of hosts under the field; past it the window slides.
+    const ROWS: usize = 10;
+    const NAME_W: usize = 28;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let title;
+    if app.mode == super::Mode::RemotePath {
+        title = format!("Remote · {}", app.sandbox_host);
+        lines.push(Line::from(Span::styled(
+            format!(" Directory on {}", app.sandbox_host),
+            theme::value(),
+        )));
+        lines.push(Line::from(Span::styled(
+            " Mounted here at the same path; ~ is the host's home.",
+            theme::dim(),
+        )));
+        lines.push(Line::default());
+        lines.push(input_line(&app.sandbox_path));
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            " Enter start   Esc back to hosts",
+            theme::dim(),
+        )));
+    } else {
+        title = "Remote · pick a host".to_string();
+        let matches = app.sandbox_matches();
+        let cursor = app.sandbox_cursor.min(matches.len().saturating_sub(1));
+        let start = cursor
+            .saturating_sub(ROWS / 2)
+            .min(matches.len().saturating_sub(ROWS));
+        let shown = &matches[start..matches.len().min(start + ROWS)];
+        lines.push(input_line(&app.sandbox_filter));
+        lines.push(Line::default());
+        if start > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("    … {start} above"),
+                theme::dim(),
+            )));
+        }
+        for (row, &i) in shown.iter().enumerate() {
+            let host = &app.sandbox_hosts[i];
+            let picked = start + row == cursor;
+            let mut line = Line::from(vec![
+                Span::styled(
+                    if picked { " › " } else { "   " },
+                    Style::default().fg(theme::colors().accent),
+                ),
+                Span::styled(
+                    format!("{:<NAME_W$}", super::render::elide(&host.name, NAME_W - 1)),
+                    theme::value(),
+                ),
+                Span::styled(
+                    match host.aliases.is_empty() {
+                        true => String::new(),
+                        false => super::render::elide(
+                            &format!("also {}", host.aliases.join(", ")),
+                            WIDTH as usize - NAME_W - 6,
+                        ),
+                    },
+                    theme::dim(),
+                ),
+            ]);
+            if picked {
+                line = line.patch_style(theme::selected());
+            }
+            lines.push(line);
+        }
+        if start + shown.len() < matches.len() {
+            lines.push(Line::from(Span::styled(
+                format!("    … {} below", matches.len() - start - shown.len()),
+                theme::dim(),
+            )));
+        }
+        if matches.is_empty() {
+            // What Enter will do with no list to pick from, since it still
+            // does something: ssh takes any host, named in a config or not.
+            let said = match (app.sandbox_pick(), app.sandbox_hosts.is_empty()) {
+                (Some(host), _) => format!("    Enter connects to {host}"),
+                (None, true) => "    No hosts in ~/.ssh/config — type user@host".to_string(),
+                (None, false) => "    Type a host".to_string(),
+            };
+            lines.push(Line::from(Span::styled(said, theme::dim())));
+        }
+        lines.push(Line::default());
+        // Read off the launcher's row rather than the PATH: the row was the
+        // promise, and this frame is drawn many times a second.
+        let missing = matches!(
+            app.launch_choices().get(app.launch_cursor),
+            Some(tabs::Choice::Remote { sshfs: false })
+        );
+        if missing {
+            lines.push(Line::from(Span::styled(
+                " sshfs not installed — the tab will offer to install it",
+                Style::default().fg(theme::colors().cost_mid),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            " Enter next   ↑↓ choose   Esc back",
+            theme::dim(),
+        )));
+    }
+    let (outer, _) = modal(frame, area, &title, lines, WIDTH);
+    layout.modal_rect = Some(outer);
+}
+
 pub(super) fn draw_switch_tab(
     frame: &mut Frame,
     area: Rect,

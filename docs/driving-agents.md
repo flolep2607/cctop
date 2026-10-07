@@ -107,21 +107,35 @@ an agent that started in `~/work/api/src` lists `~/work/api` — the thing you
 would name. Two checkouts of one repository are two answers, because they are
 two directories to start an agent in.
 
-After those come the repositories cctop found on disk: your `git pull` of this
-morning is offered even though no agent has run in it yet, newest first. The
-scan looks two levels down from your home directory, which covers `~/project` and
-`~/code/project` and stops there — a deeper walk finds nothing new and pays for
-every directory on the machine. It happens on a worker, so the list appears a
-moment after the field opens rather than holding it up.
+Mixed in with those, one for one, come the repositories cctop found on disk:
+your `git pull` of this morning is offered even though no agent has run in it
+yet, newest first, and a long history of projects cannot push every repository
+off the list. The scan looks three levels down from your home directory, which
+covers `~/project`, `~/code/project` and `~/src/github.com/project`, skips
+hidden directories, and never walks into a repository. It happens on a worker,
+so the repositories appear a moment after the field opens rather than holding it
+up — on the first opening too.
 
-Once the text reads as a path — anything with
+The field opens holding the directory the launch was headed for, and still
+shows that list. Once you edit the text and it reads as a path — anything with
 a `/` in it — the list comes off the disk instead: the directories under it,
 hidden ones only once you type the dot. `Tab` fills in as far as the entries
 agree (one match completes outright and adds the `/`, so you can walk down a
 tree a keystroke at a time), `↑`/`↓` move into the list and back out into the
 text, and `Enter` on a highlighted entry takes it. Clicking works too: once to
 pick, again to take it. Reattaching to a running agent does not offer this: that
-agent is already somewhere, and a path typed for it would be ignored. `Alt+v` and `Alt+s` split
+agent is already somewhere, and a path typed for it would be ignored.
+
+The last line of the launcher, `remote (ssh)`, starts Claude on this machine
+with its work on another one — [`cctop sandbox`](integrations.md#an-agent-here-working-there)
+in a tab. `Enter` on it lists the hosts in your `~/.ssh/config` (and the files
+it `Include`s), one line per `Host` line with its other names beside it;
+patterns such as `Host *` are skipped. Type to narrow the list by any of a
+host's names, or type a `user@host` that is not in it. `Enter` then asks for
+the directory on that host, `~` (its home) to start with, and `Enter` again
+opens the tab, called `claude ⇄ <host>`. `Esc` steps back one question. If
+`sshfs` is not installed the row says so, and the tab asks to install it before
+connecting. `Alt+v` and `Alt+s` split
 the tab you are in, side by side or stacked, so `claude` and a shell for
 `git diff` are one keystroke apart. Fresh tabs start in the directory where you
 started `cctop`; use `R` to reopen a session in that session's project directory.

@@ -45,6 +45,9 @@ alongside it.
 curl -fsSL https://raw.githubusercontent.com/flolep2607/cctop/main/install.sh | sh
 ```
 
+It offers to install `sshfs` as well, for `cctop sandbox`; append
+`-s -- --with-sshfs` to `sh` to say yes in advance.
+
 <details>
 <summary>Other ways to install</summary>
 

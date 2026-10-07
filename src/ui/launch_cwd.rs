@@ -14,6 +14,16 @@ use super::*;
 /// of transcripts would otherwise stat every project on it on every keystroke.
 const MAX_KNOWN_DIRS: usize = 40;
 
+/// How many of those each source may fill: the projects agents ran in, and the
+/// repositories the scan found.
+///
+/// Half each, so neither crowds the other out. With one shared cap the
+/// sessions came first and took every slot on any machine with a few dozen
+/// projects behind it, and the repositories — the answer to "the one I just
+/// pulled" — were never offered at all. Each half is also a bound on the
+/// `is_dir` checks spent filling it.
+const KNOWN_SHARE: usize = MAX_KNOWN_DIRS / 2;
+
 impl App {
     /// Open the launcher's directory field, prefilled with where it would go.
     ///
@@ -28,28 +38,44 @@ impl App {
             .unwrap_or_default();
         self.launch_cwd_input.set(prefill);
         self.launch_cwd_bad = false;
+        self.launch_cwd_pristine = true;
         self.launch_cwd_known = self.known_dirs();
         self.launch_cwd_suggest();
         // Asked for as the field opens, and answered a moment later by a worker
         // walking the home directory. Sent every time rather than once per
         // session: a repository pulled while cctop is running is the case this
         // exists for, and the walk is tens of milliseconds on a thread of its
-        // own. The list is not rebuilt when the answer lands — see
-        // [`App::got_repos`] — so the suggestions under the cursor stay valid.
+        // own. The list is rebuilt when the answer lands only while nothing in
+        // it is highlighted — see [`App::got_repos`].
         let _ = self.tx.send(worker::Request::Repos);
         self.mode = Mode::LaunchCwd;
         self.needs_redraw = true;
     }
 
-    /// Repositories the worker found, kept for the next time the field opens.
+    /// Repositories the worker found: kept for the next opening, and shown now
+    /// if the field is open with nothing highlighted.
     ///
-    /// Deliberately not re-suggesting from here. The list is a snapshot so that
-    /// Enter takes the directory that is highlighted, and a walk landing a
-    /// moment after the field opened would move the highlight under the cursor
-    /// without the arrow keys having been pressed. The repositories are there
-    /// for the next opening, which is the one after the pull.
+    /// The list is a snapshot so that Enter takes the directory that is
+    /// highlighted, and a walk landing a moment after the field opened must not
+    /// move a highlight under the cursor. But with nothing highlighted there is
+    /// nothing to move, and keeping the answer for "next time" meant the first
+    /// `c` after cctop started — every scan's first answer lands after the
+    /// field has opened — never offered a repository at all.
     pub(super) fn got_repos(&mut self, repos: Vec<std::path::PathBuf>) {
         self.launch_cwd_repos = repos;
+        if self.mode == Mode::LaunchCwd && self.launch_cwd_pick.is_none() {
+            self.launch_cwd_known = self.known_dirs();
+            self.launch_cwd_suggest();
+            self.needs_redraw = true;
+        }
+    }
+
+    /// The field was typed in, pasted into or filled: from here on what it
+    /// holds is what is being asked for.
+    pub(super) fn launch_cwd_edited(&mut self) {
+        self.launch_cwd_pristine = false;
+        self.launch_cwd_bad = false;
+        self.launch_cwd_suggest();
     }
 
     /// Directories agents are known to have run in, last used first.
@@ -90,7 +116,10 @@ impl App {
         });
 
         let mut seen = HashSet::new();
-        self.launch_cwd
+        // Where this launch was already headed, first and whatever else is on
+        // the list: these are what the line the field replaces already meant.
+        let mut out: Vec<std::path::PathBuf> = self
+            .launch_cwd
             .clone()
             .into_iter()
             .chain(self.launch_root.clone())
@@ -99,27 +128,52 @@ impl App {
                     .iter()
                     .filter_map(|c| c.cwd().map(std::path::Path::to_path_buf)),
             )
-            .chain(
-                recent
-                    .iter()
-                    .filter(|s| !s.label_source.is_empty())
-                    // `locate` answers (common git dir, checkout root); the root
-                    // is the directory, and `None` — a relative path, or a
-                    // directory in no repository — leaves it as it was.
-                    .map(|s| match tree::locate_cached(&s.label_source) {
-                        Some((_, root)) => root,
-                        None => std::path::PathBuf::from(&s.label_source),
-                    }),
-            )
-            // Repositories found on disk, after the ones an agent has run in:
-            // a project you worked in today is the likelier answer, and a
-            // repository nobody has tried yet is a fallback rather than a
-            // headline. The `seen` set does the rest — one a session has already
-            // contributed is not offered twice.
-            .chain(self.launch_cwd_repos.iter().cloned())
             .filter(|dir| seen.insert(dir.clone()) && dir.is_dir())
-            .take(MAX_KNOWN_DIRS)
-            .collect()
+            .collect();
+
+        // Each source filtered and then capped, not capped and then filtered:
+        // a share filled with directories since deleted, or with ones already
+        // listed, is a share that offers nothing.
+        let sessions: Vec<std::path::PathBuf> = recent
+            .iter()
+            .filter(|s| !s.label_source.is_empty())
+            // `locate` answers (common git dir, checkout root); the root is
+            // the directory, and `None` — a relative path, or a directory in no
+            // repository — leaves it as it was.
+            .map(|s| match tree::locate_cached(&s.label_source) {
+                Some((_, root)) => root,
+                None => std::path::PathBuf::from(&s.label_source),
+            })
+            .filter(|dir| seen.insert(dir.clone()) && dir.is_dir())
+            .take(KNOWN_SHARE)
+            .collect();
+        // The `seen` set does the deduplication: a repository a session has
+        // already contributed is not offered twice.
+        let repos: Vec<std::path::PathBuf> = self
+            .launch_cwd_repos
+            .iter()
+            .filter(|dir| seen.insert((*dir).clone()) && dir.is_dir())
+            .take(KNOWN_SHARE)
+            .cloned()
+            .collect();
+
+        // Taken in turns, a project an agent ran in ahead of each repository
+        // found on disk: a project worked in today is the likelier answer, so
+        // it leads, but only by one — the field shows a handful of lines, and
+        // a strict "sessions, then repositories" filled every one of them
+        // before the first repository came up.
+        let mut sessions = sessions.into_iter();
+        let mut repos = repos.into_iter();
+        loop {
+            let (s, r) = (sessions.next(), repos.next());
+            if s.is_none() && r.is_none() {
+                break;
+            }
+            out.extend(s);
+            out.extend(r);
+        }
+        out.truncate(MAX_KNOWN_DIRS);
+        out
     }
 
     /// Recompute what the field is offering, after anything that changed what
@@ -128,8 +182,15 @@ impl App {
     /// The pick goes with it: a suggestion highlighted for the old text would
     /// otherwise still be what Enter took, which is a directory the field is no
     /// longer showing.
+    ///
+    /// An untouched field asks nothing — see `launch_cwd_pristine` — so it is
+    /// offered the known list rather than the filesystem under its prefill.
     pub(super) fn launch_cwd_suggest(&mut self) {
-        self.launch_cwd_hits = dirs::suggest(&self.launch_cwd_input, &self.launch_cwd_known);
+        let typed: &str = match self.launch_cwd_pristine {
+            true => "",
+            false => &self.launch_cwd_input,
+        };
+        self.launch_cwd_hits = dirs::suggest(typed, &self.launch_cwd_known);
         self.launch_cwd_pick = None;
     }
 
@@ -164,17 +225,24 @@ impl App {
             .and_then(|i| self.launch_cwd_hits.get(i))
         {
             Some(dir) => format!("{}/", crate::util::tildify(&dir.to_string_lossy())),
-            None => match dirs::complete(&self.launch_cwd_input, &self.launch_cwd_hits) {
-                Some(filled) => filled,
-                None => return,
-            },
+            None => {
+                // An untouched field is offering the known list, which has
+                // nothing to do with the prefill; completing means completing
+                // what is written, so it is read as a path from here.
+                if self.launch_cwd_pristine {
+                    self.launch_cwd_edited();
+                }
+                match dirs::complete(&self.launch_cwd_input, &self.launch_cwd_hits) {
+                    Some(filled) => filled,
+                    None => return,
+                }
+            }
         };
         if filled.chars().count() > input::MAX_PATH_INPUT {
             return;
         }
         self.launch_cwd_input.set(filled);
-        self.launch_cwd_bad = false;
-        self.launch_cwd_suggest();
+        self.launch_cwd_edited();
         self.needs_redraw = true;
     }
 
@@ -397,7 +465,7 @@ mod tests {
             .to_string_lossy()
             .into_owned()
             .into();
-        app.launch_cwd_suggest();
+        app.launch_cwd_edited();
         assert!(app.launch_cwd_hits.is_empty());
         app.on_key(key(KeyCode::Enter));
         assert!(app.launch_cwd_bad);
@@ -578,6 +646,89 @@ mod tests {
             vec![c, b, a],
             "last used first, and the newer of two equally-touched sessions ahead"
         );
+    }
+
+    /// Opened on a directory, the field still offers the projects and the
+    /// repositories: the prefill is where the launch was headed, not a path
+    /// being asked about. The first edit is what turns it into one.
+    #[test]
+    fn a_prefilled_field_offers_the_known_list_until_it_is_edited() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let here = root.path().join("here");
+        let repo = root.path().join("pulled");
+        std::fs::create_dir_all(here.join("inside")).expect("here");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+
+        let mut app = test_app();
+        app.launch_root = None;
+        app.launch_cwd = Some(here.clone());
+        app.launch_cwd_repos = vec![repo.clone()];
+        app.edit_launch_cwd();
+        assert_eq!(
+            app.launch_cwd_input,
+            crate::util::tildify(&here.to_string_lossy())
+        );
+        assert_eq!(app.launch_cwd_hits, vec![here.clone(), repo.clone()]);
+
+        // Typed into, it is a path again, and completes against the disk.
+        app.on_key(key(KeyCode::Char('/')));
+        assert_eq!(app.launch_cwd_hits, vec![here.join("inside")]);
+    }
+
+    /// The scan's first answer lands after the field has opened, so it is shown
+    /// at once — unless something is highlighted, which must not move.
+    #[test]
+    fn repositories_that_land_while_the_field_is_open_are_offered_at_once() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = root.path().join("pulled");
+        let worked = root.path().join("worked");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+        std::fs::create_dir_all(&worked).expect("worked");
+
+        let mut app = test_app();
+        app.sessions = vec![session("a", false, &worked.to_string_lossy())];
+        app.launch_root = None;
+        app.launch_cwd = None;
+        app.edit_launch_cwd();
+        assert_eq!(app.launch_cwd_hits, vec![worked.clone()]);
+
+        app.got_repos(vec![repo.clone()]);
+        assert_eq!(app.launch_cwd_hits, vec![worked.clone(), repo.clone()]);
+
+        // With a pick on screen the list stays as it is, and the answer waits
+        // for the next opening.
+        app.edit_launch_cwd();
+        app.on_key(key(KeyCode::Down));
+        let before = app.launch_cwd_hits.clone();
+        app.got_repos(vec![]);
+        assert_eq!(app.launch_cwd_hits, before);
+        assert_eq!(app.launch_cwd_pick, Some(0));
+    }
+
+    /// A long history of projects does not push every repository off the list.
+    #[test]
+    fn many_session_directories_do_not_crowd_out_the_repositories() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut sessions = Vec::new();
+        for i in 0..(MAX_KNOWN_DIRS + 10) {
+            let dir = root.path().join(format!("project-{i:02}"));
+            std::fs::create_dir(&dir).expect("dir");
+            sessions.push(session(&format!("s{i}"), false, &dir.to_string_lossy()));
+        }
+        let repo = root.path().join("pulled");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+
+        let mut app = test_app();
+        app.sessions = sessions;
+        app.launch_root = None;
+        app.launch_cwd = None;
+        app.launch_cwd_repos = vec![repo.clone()];
+
+        let known = app.known_dirs();
+        assert!(known.len() <= MAX_KNOWN_DIRS, "{}", known.len());
+        // Second, behind the most recent project and not behind all of them,
+        // so it is among the handful the field shows before anything is typed.
+        assert_eq!(known.iter().position(|d| *d == repo), Some(1), "{known:?}");
     }
 
     /// Esc has to leave the launch as it was found, or it becomes a way to lose

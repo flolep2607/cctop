@@ -441,9 +441,27 @@ cctop sandbox devbox:/srv/api
 cctop sandbox devbox:~/src/api --model opus     # anything after the path goes to claude
 ```
 
+The TUI starts the same thing from its new-tab launcher: the `remote (ssh)` row
+lists the hosts in your `~/.ssh/config`, asks for the directory, and opens a tab
+running `cctop sandbox` — see [tabs and splits](driving-agents.md#tabs-and-splits).
+
 Nothing is installed on the host. It needs `bash` and `setsid`, which every
-Linux box has, and this machine needs `sshfs` and `fusermount3`
-(`sudo apt install sshfs fuse3`). Three ordinary pieces do the work:
+Linux box has, and this machine needs `sshfs` and `fusermount3`. When `sshfs`
+is missing and cctop is on a terminal, it asks:
+
+```
+sshfs is required. Install it now? [Y/n]
+```
+
+and on yes prints and runs the install for your package manager — `apt-get
+install -y sshfs`, `dnf` or `yum install -y fuse-sshfs`, `pacman -S sshfs`,
+`zypper install sshfs` or `apk add sshfs` — through `sudo` unless you are root,
+so sudo asks for your password on the same terminal. On no, with a package
+manager it does not know, or with no terminal to ask on, it prints the command
+and exits non-zero. A sandbox opened from the TUI keeps a failure on screen
+until you press Enter. `install.sh` can install sshfs too; see
+[installing](install.md#let-the-script-do-it). Three ordinary pieces do the
+work:
 
 - **One ssh connection.** cctop starts an OpenSSH ControlMaster to the host and
   every later call rides it, so you authenticate once — a passphrase or a host
