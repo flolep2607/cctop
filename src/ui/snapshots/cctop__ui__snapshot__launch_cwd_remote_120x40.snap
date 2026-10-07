@@ -18,15 +18,15 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
-│                             ╭ Remote · devbox ─────────────────────────────────────────╮                             │
-│                             │ Directory on devbox                                      │                             │
-│                             │ Mounted here at the same path; ~ is the host's home.     │                             │
-│                             │                                                          │                             │
-│                             │ > ~/src/api█                                             │                             │
-│                             │                                                          │                             │
-╰─────────────────────────────│ Enter start   Esc back to hosts                          │─────────────────────────────╯
-╭ Info  Performance  Processes╰──────────────────────────────────────────────────────────╯─────────────────────────────╮
-│Root /usr/bin/claude --model opus                                                                                     │
+│                            ╭ New tab ───────────────────────────────────────────────────╮                            │
+│                            │   claude                                                   │                            │
+│                            │ in procdb:~/src/▏                                          │                            │
+│                            │   ~/src/api                                                │                            │
+│                            │   ~/src/cctop  not empty here — the mount would hide it    │                            │
+│                            │   ~/src/web                                                │                            │
+╰────────────────────────────│ as default  (p to change)                                  │────────────────────────────╯
+╭ Info  Performance  Processe│ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │────────────────────────────╮
+│Root /usr/bin/claude --model╰────────────────────────────────────────────────────────────╯                            │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │
 │   4188    2.4%     44.0M  node mcp-server.js                                                                         │

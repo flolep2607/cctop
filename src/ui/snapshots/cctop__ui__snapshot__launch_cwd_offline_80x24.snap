@@ -9,16 +9,16 @@ expression: screen
 │This month        $0.00                               ⡀  Agent CPU   3.2%     │
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Sessions╭ Remote · pick a host ────────────────────────────────────╮─────────╮
-│   LAST▲ │ > █                                                      │OJECT    │
-│●    now │                                                          │x the ch…┃
-│●     7m │   nz-b-procurementdb1         also procdb                │i        │
-╰─────────│ › devbox                                                 │─────────╯
-╭ Info  Pe│   gpu-01                      also gpu, trainer          │  Context╮
-│Root /usr│                                                          │         │
-│    PID  │ sshfs not installed — the tab will offer to install it   │         │
-│   4101  │ Enter next   ↑↓ choose   Esc back                        │         │
-│   4188  ╰──────────────────────────────────────────────────────────╯         │
+╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
+│   LAST▲         $ MODEL          PERM   ! HOST       BRANCH       PROJECT    │
+│●    now╭ New tab ───────────────────────────────────────────────────╮ the ch…┃
+│●     7m│   claude                                                   │        │
+╰────────│ in devbox:~/src▏                                           │────────╯
+╭ Info  P│ devbox: needs a password or key prompt — the tab will ask  │ Context╮
+│Root /us│ as default  (p to change)                                  │        │
+│    PID │ Enter accept  Esc keep the old one                         │        │
+│   4101 ╰────────────────────────────────────────────────────────────╯        │
+│   4188    2.4%     44.0M  node mcp-server.js                                 │
 │   4290    0.3%      8.0M  bash -c npm test                                   │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯

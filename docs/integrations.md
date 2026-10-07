@@ -433,17 +433,65 @@ cctop does not run sudo on another machine for you. The same comparison is in
 ### An agent here, working there
 
 `--host` watches agents that run somewhere else. `cctop sandbox` is the other
-way round: Claude Code runs here, with your login, your hooks and this
+way round: the agent runs here, with your login, your hooks and this
 dashboard, and what it *does* happens on another machine.
 
 ```bash
 cctop sandbox devbox:/srv/api
-cctop sandbox devbox:~/src/api --model opus     # anything after the path goes to claude
+cctop sandbox devbox:~/src/api --model opus     # anything after the path goes to the agent
+cctop sandbox --agent opencode devbox:~/src/api
 ```
 
-The TUI starts the same thing from its new-tab launcher: the `remote (ssh)` row
-lists the hosts in your `~/.ssh/config`, asks for the directory, and opens a tab
-running `cctop sandbox` — see [tabs and splits](driving-agents.md#tabs-and-splits).
+The TUI starts the same thing from its new-tab launcher: press `c` for the
+directory, type `devbox:~/src/api` or pick `devbox:` from the hosts in your
+`~/.ssh/config`, and the agent you pick runs there — see [tabs and
+splits](driving-agents.md#tabs-and-splits).
+
+**Which agents can.** An agent qualifies only if *every* command it runs can be
+sent to the host, so that nothing lands on this machine by mistake:
+
+| Agent | Remote | How |
+|---|---|---|
+| Claude Code | yes | every Bash call goes through `CLAUDE_CODE_SHELL_PREFIX`; a PreToolUse hook keeps the file tools on the mount |
+| opencode | yes | its `shell` setting points at a cctop script (`OPENCODE_CONFIG_CONTENT`), with `permission.external_directory` set to `deny` to keep its file tools on the mount; started `--standalone` |
+| your shell | yes | plain `ssh -t` into the directory; no mount |
+| codex | no | runs `<your login shell> -lc …` with the shell taken from the passwd entry, and has no setting to change it; its own remote mode needs codex installed on the host |
+| devin | no | no shell setting; a hook could rewrite commands, but one that fails lets the command run here |
+| pi | no | not verified |
+
+**Connecting from the launcher.** As soon as a host is in the directory field,
+cctop starts one ControlMaster for it in the background with `BatchMode=yes`
+and no terminal, so it can never stop to ask you something inside the TUI. The
+socket is per host and per user, in cctop's runtime directory (`m-<hash>.sock`,
+short enough for the 108-byte socket limit), and the `cctop sandbox` the launch
+starts finds it there and rides it rather than connecting again. A host that
+needs a password, a passphrase or a host-key answer is shown offline with that
+reason, and the launch tab — which has a terminal — connects interactively
+instead. Each directory listing is one command over the master with a
+5-second timeout (`sh`, no GNU-only flags), remembered for the session; the
+repository scan (`find ~ -maxdepth 4 -name .git`, hidden directories skipped) is
+run once per host. When cctop exits it closes the masters it started, unless a
+sandbox tab is still using one — then that tab closes it when it ends. A master
+nobody is using exits on its own after ten idle minutes, which covers a cctop
+that was killed.
+
+**Which directories can be used.** The host's directory is mounted at the same
+path here, so it has to work on both machines. The launcher marks a suggestion
+that would fail, and `cctop sandbox` refuses it before mounting, with the same
+reason:
+
+- on the host: it must exist, be a directory, and be readable and writable;
+- here, it must not be `/`, nor under `/proc`, `/sys`, `/dev` or `/run`;
+- here, it must not already be a mount point (a stale one left by a sandbox is
+  cleared instead), sit inside a mount a FUSE mount cannot go inside — a WSL
+  Windows drive (`9p`, `drvfs`), a network share, another FUSE mount — or cover
+  a mount below it;
+- here, it must be an empty directory, or missing and creatable by you.
+
+Local mounts are read from `/proc/self/mountinfo`. A remote location that fails
+only the local half is still taken by the field: the agents that mount are
+greyed out with the reason, and your shell, which mounts nothing, can still go
+there.
 
 Nothing is installed on the host. It needs `bash` and `setsid`, which every
 Linux box has, and this machine needs `sshfs` and `fusermount3`. When `sshfs`
@@ -477,11 +525,16 @@ work:
   the host over the connection, in the same directory, and its output, exit
   code and final directory come back — a `cd` sticks, as it would locally.
   Interrupting a command (Esc, or a timeout) closes its ssh channel, and the
-  host stops the command's whole process group when that happens.
+  host stops the command's whole process group when that happens. opencode is
+  given a two-line script as its shell instead, which sends `-c <command>` the
+  same way and opens a terminal on the host for opencode's own terminal.
 
 The file tools can only see the mount, so a PreToolUse hook installed for this
 launch alone (through `--settings`; your settings files are not touched)
 refuses them anywhere else, telling Claude to use Bash for that path instead.
+opencode gets the equivalent from its own `external_directory` permission, set
+to `deny` in the inline config for this launch alone. opencode's LSP servers,
+formatters and MCP servers still run here, on the mounted files.
 Claude Code's own files — `~/.claude` and its temporary directory — stay
 reachable. Claude is also told, in its system prompt, which host it is on and
 what runs where.
@@ -492,7 +545,7 @@ Hooks and the status line are not Bash commands, and they still run here:
 session's for the `!` conflict column — the same path on two machines is two
 files.
 
-When Claude exits — or cctop is sent SIGTERM or SIGHUP — the mount is
+When the agent exits — or cctop is sent SIGTERM or SIGHUP — the mount is
 unmounted and the connection closed. If cctop is killed outright the two
 helpers go with it, and a mount left behind ("Transport endpoint is not
 connected") is cleared the next time a sandbox starts on that path.

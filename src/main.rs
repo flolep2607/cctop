@@ -29,6 +29,7 @@ mod pricing;
 mod proc;
 mod quota;
 mod recall;
+mod remote_fs;
 mod rmux;
 mod sandbox;
 mod serve;
@@ -36,6 +37,7 @@ mod session;
 mod settings;
 mod shim;
 mod ssh_config;
+mod ssh_master;
 mod sshfs;
 mod trace;
 mod ui;
@@ -105,11 +107,12 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(hook::emit(&argv[2..]));
     }
 
-    // The two halves of `cctop sandbox` that Claude Code runs, as often as
-    // `hook` and for the same reason answered before anything is set up:
-    // `--sandbox-exec` is every Bash call (and every hook, which it hands
-    // straight to bash), `--sandbox-guard` every file tool call. Flags rather
-    // than words because Claude Code splits its shell prefix at the last " -".
+    // The parts of `cctop sandbox` that the agent runs, as often as `hook` and
+    // for the same reason answered before anything is set up: `--sandbox-exec`
+    // is every Claude Bash call (and every hook, which it hands straight to
+    // bash), `--sandbox-guard` every Claude file tool call, `--sandbox-shell`
+    // every command of an agent given cctop as its shell. Flags rather than
+    // words because Claude Code splits its shell prefix at the last " -".
     {
         let mut argv = std::env::args_os().skip(1);
         let first = argv.next();
@@ -120,6 +123,7 @@ fn main() -> anyhow::Result<()> {
         match first.as_deref().and_then(std::ffi::OsStr::to_str) {
             Some("--sandbox-exec") => std::process::exit(sandbox::exec(&rest())),
             Some("--sandbox-guard") => std::process::exit(sandbox::guard(&rest())),
+            Some("--sandbox-shell") => std::process::exit(sandbox::shell(&rest())),
             _ => {}
         }
     }

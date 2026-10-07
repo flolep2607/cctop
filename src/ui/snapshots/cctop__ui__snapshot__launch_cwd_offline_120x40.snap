@@ -17,16 +17,16 @@ expression: screen
 │○     2d    12h     $7.03      ─     ─ gpt-5-codex    ─          ─        local                ─            infra     │
 │                                                                                                                      │
 │                                                                                                                      │
-│                             ╭ Remote · pick a host ────────────────────────────────────╮                             │
-│                             │ > █                                                      │                             │
-│                             │                                                          │                             │
-│                             │   nz-b-procurementdb1         also procdb                │                             │
-│                             │ › devbox                                                 │                             │
-│                             │   gpu-01                      also gpu, trainer          │                             │
-│                             │                                                          │                             │
-╰─────────────────────────────│ sshfs not installed — the tab will offer to install it   │─────────────────────────────╯
-╭ Info  Performance  Processes│ Enter next   ↑↓ choose   Esc back                        │─────────────────────────────╮
-│Root /usr/bin/claude --model ╰──────────────────────────────────────────────────────────╯                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                            ╭ New tab ───────────────────────────────────────────────────╮                            │
+│                            │   claude                                                   │                            │
+│                            │ in devbox:~/src▏                                           │                            │
+│                            │ devbox: needs a password or key prompt — the tab will ask  │                            │
+│                            │ as default  (p to change)                                  │                            │
+╰────────────────────────────│ Enter accept  Esc keep the old one                         │────────────────────────────╯
+╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
+│Root /usr/bin/claude --model opus                                                                                     │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │
 │   4188    2.4%     44.0M  node mcp-server.js                                                                         │

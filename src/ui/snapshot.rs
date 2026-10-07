@@ -471,54 +471,108 @@ fn handoff_picker() {
     snap("handoff_picker", &mut app);
 }
 
-/// The new-tab launcher on its Remote row, on a machine without sshfs: the row
-/// and the line under it both say the tab will offer to install it, and `c` is
-/// not offered — the directory is the host's, asked for next.
+/// The new-tab launcher pointed at a directory on an ssh host: the line says
+/// `in host:path`, codex is greyed with why it cannot go there, and the reason
+/// is spelled out under the list while it is the one picked.
 #[test]
 fn new_tab_remote() {
+    use super::location::RemoteTarget;
     let mut app = fixture();
     app.launch_offer = vec![
         tabs::Choice::Start(vec!["claude".into()]),
         tabs::Choice::Start(vec!["codex".into()]),
-        tabs::Choice::Remote { sshfs: false },
+        tabs::Choice::Start(vec!["opencode".into()]),
     ];
     app.launch_into = LaunchInto::Tab;
-    app.launch_cursor = 2;
+    app.launch_remote = Some(RemoteTarget {
+        host: "procdb".into(),
+        path: "~/proj".into(),
+        resolved: Some("/home/me/proj".into()),
+        facts: None,
+        problem: None,
+        unchecked: None,
+    });
+    app.launch_cursor = 1;
     app.mode = Mode::Launch;
     snap("new_tab_remote", &mut app);
 }
 
-/// The Remote entry's two steps: the hosts from `~/.ssh/config`, one line per
-/// `Host` line with its other names beside it, and then the directory on the
-/// host picked.
+/// The directory field before anything is typed: the projects, then the ssh
+/// hosts as `name:`, with their other names beside them.
 #[test]
-fn remote_steps() {
-    use crate::ssh_config::Host;
+fn launch_cwd_hosts() {
+    use super::location::Hit;
     let mut app = fixture();
-    app.launch_offer = vec![tabs::Choice::Remote { sshfs: false }];
+    app.launch_offer = vec![tabs::Choice::Start(vec!["claude".into()])];
     app.launch_cursor = 0;
-    app.sandbox_hosts = vec![
-        Host {
+    app.launch_cwd_input.clear();
+    app.launch_cwd_hits = vec![
+        Hit::Dir("/home/me/src/web".into()),
+        Hit::Dir("/home/me/src/api".into()),
+        Hit::Host {
             name: "nz-b-procurementdb1".into(),
             aliases: vec!["procdb".into()],
         },
-        Host {
+        Hit::Host {
             name: "devbox".into(),
             aliases: vec![],
         },
-        Host {
-            name: "gpu-01".into(),
-            aliases: vec!["gpu".into(), "trainer".into()],
-        },
     ];
-    app.sandbox_cursor = 1;
-    app.mode = Mode::RemoteHost;
-    snap("remote_host", &mut app);
+    app.launch_cwd_pick = Some(2);
+    app.mode = Mode::LaunchCwd;
+    snap("launch_cwd_hosts", &mut app);
+}
 
-    app.sandbox_host = "devbox".into();
-    app.sandbox_path = "~/src/api".into();
-    app.mode = Mode::RemotePath;
-    snap("remote_path", &mut app);
+/// A host in the field: its directories completed like local ones, one marked
+/// with why the sandbox could not mount it — and, for a host that would need a
+/// prompt, the line that says so instead of a list.
+#[test]
+fn launch_cwd_remote() {
+    use super::location::{Conn, Dir, Hit, HostState};
+    let mut app = fixture();
+    app.launch_offer = vec![tabs::Choice::Start(vec!["claude".into()])];
+    app.launch_cursor = 0;
+    let listed = HostState {
+        conn: Conn::Ready {
+            home: "/home/me".into(),
+        },
+        repos: Some(Vec::new()),
+        dirs: [(
+            "~/src".to_string(),
+            Dir::Listed(crate::remote_fs::Listing::default()),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    app.ssh_states.insert("procdb".into(), listed);
+    app.launch_cwd_input.set("procdb:~/src/".to_string());
+    let remote = |path: &str, problem: Option<&str>| Hit::Remote {
+        host: "procdb".into(),
+        path: path.into(),
+        problem: problem.map(str::to_string),
+    };
+    app.launch_cwd_hits = vec![
+        remote("~/src/api", None),
+        remote(
+            "~/src/cctop",
+            Some("not empty here — the mount would hide it"),
+        ),
+        remote("~/src/web", None),
+    ];
+    app.mode = Mode::LaunchCwd;
+    snap("launch_cwd_remote", &mut app);
+
+    app.ssh_states.insert(
+        "devbox".into(),
+        HostState {
+            conn: Conn::Offline("needs a password or key prompt".into()),
+            repos: None,
+            dirs: Default::default(),
+        },
+    );
+    app.launch_cwd_input.set("devbox:~/src".to_string());
+    app.launch_cwd_hits.clear();
+    snap("launch_cwd_offline", &mut app);
 }
 
 #[test]

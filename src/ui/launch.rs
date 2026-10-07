@@ -139,6 +139,11 @@ impl App {
             LaunchInto::Split { .. } => self.launch_cwd.clone(),
             LaunchInto::Tab => self.launch_root.clone(),
         };
+        // A host goes the same way: a split stays beside its tab's work, which
+        // may be on a host; a fresh tab starts on this machine.
+        if into == LaunchInto::Tab {
+            self.launch_remote = None;
+        }
         self.mode = Mode::Launch;
     }
 
@@ -194,6 +199,7 @@ impl App {
         // bare new tab. Here it is only the field's starting value, and `c`
         // still changes it.
         self.launch_cwd = session.work_dir().or_else(|| self.launch_root.clone());
+        self.launch_remote = None;
         self.set_status(format!(
             "Handing off {} — pick who takes it",
             brief.summary()
@@ -249,6 +255,7 @@ impl App {
         self.launch_prompt(LaunchInto::Tab);
         if self.mode == Mode::Launch {
             self.launch_cwd = Some(path);
+            self.launch_remote = None;
             self.set_status(format!("Worktree {branch} ready — pick an agent"));
         }
     }
@@ -860,7 +867,6 @@ impl App {
         match self.rmux_deferred.take() {
             Some(Deferred::Resume) => self.resume_now(),
             Some(Deferred::Launch) => self.launch_selected(),
-            Some(Deferred::Remote) => self.launch_sandbox(),
             None => {}
         }
     }
@@ -1085,19 +1091,15 @@ impl App {
         }
     }
 
-    /// Whether the launcher's pick would ignore a local directory: an agent
-    /// already running somewhere, or the Remote entry.
+    /// Whether the launcher's pick is an agent already running somewhere.
     ///
     /// Reattaching lands wherever that agent already is, so a directory typed
     /// for it would be accepted and then ignored — which is worse than the key
     /// not being offered.
-    ///
-    /// The Remote entry is answered the same way: its directory is on the host
-    /// and is asked for after the host is, so a local one would be ignored too.
-    pub(super) fn launch_ignores_cwd(&self) -> bool {
+    pub(super) fn launch_is_reattach(&self) -> bool {
         matches!(
             self.launch_offer.get(self.launch_cursor),
-            Some(tabs::Choice::Waiting(_) | tabs::Choice::Remote { .. })
+            Some(tabs::Choice::Waiting(_))
         )
     }
 
@@ -1106,9 +1108,12 @@ impl App {
         let Some(choice) = self.launch_offer.get(self.launch_cursor).cloned() else {
             return;
         };
-        // Not a command yet: a host and a directory are asked for first.
-        if let tabs::Choice::Remote { .. } = choice {
-            self.sandbox_prompt();
+        // A remote location takes another road entirely: the agent runs here
+        // under `cctop sandbox`, or the shell over ssh. Reattaching ignores it.
+        if let Some(target) = self.launch_remote.clone()
+            && !matches!(choice, tabs::Choice::Waiting(_))
+        {
+            self.launch_remote_choice(&choice, &target);
             return;
         }
         let cwd = self.launch_cwd.clone();
@@ -1117,7 +1122,7 @@ impl App {
         let starting = match &choice {
             tabs::Choice::Start(argv) => Self::profile_provider(argv),
             tabs::Choice::Handoff(target) => crate::pricing::Provider::parse(&target.agent),
-            tabs::Choice::Waiting(_) | tabs::Choice::Remote { .. } => None,
+            tabs::Choice::Waiting(_) => None,
         };
         // The account a fresh agent starts under: the one `p` picked for a bare
         // launch, the one on the line for a handoff, which names it outright.
@@ -1126,7 +1131,7 @@ impl App {
                 Self::profile_provider(argv).and_then(|p| self.chosen_profile(p))
             }
             tabs::Choice::Handoff(target) => target.profile(),
-            tabs::Choice::Waiting(_) | tabs::Choice::Remote { .. } => None,
+            tabs::Choice::Waiting(_) => None,
         };
         let (argv, own) = match &choice {
             // Reattaching: the agent chose its own command long ago, and the
@@ -1155,8 +1160,6 @@ impl App {
                 let Some(own) = own else { return };
                 (target.argv(vec![target.agent.clone()]), own)
             }
-            // Returned from above.
-            tabs::Choice::Remote { .. } => return,
         };
         // The offer is a snapshot, and an agent can finish in the time the modal
         // is up. Attaching to a session that has gone spawns a client that exits
@@ -1210,7 +1213,6 @@ impl App {
             tabs::Choice::Start(_) => self.launch_profile().map(|p| p.name.clone()),
             tabs::Choice::Handoff(target) => target.account.clone(),
             tabs::Choice::Waiting(agent) => agent.profile.clone(),
-            tabs::Choice::Remote { .. } => None,
         };
         // The tab is named after the agent, not after the brief it was handed:
         // `Pane::launch` names it from the argv it was given, and that argv now
@@ -1274,7 +1276,7 @@ impl App {
                     .unwrap_or_default();
                 format!("Reattached to {label}{at} — it was never gone")
             }
-            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) | tabs::Choice::Remote { .. } => {
+            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => {
                 let where_ = cwd
                     .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
                     .unwrap_or_default();

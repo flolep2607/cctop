@@ -17,16 +17,16 @@ expression: screen
 │○     2d    12h     $7.03      ─     ─ gpt-5-codex    ─          ─        local                ─            infra     │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                                                                                                      │
 │                            ╭ New tab ───────────────────────────────────────────────────╮                            │
 │                            │   claude                                                   │                            │
-│                            │   codex                   local only                       │                            │
-│                            │   opencode                                                 │                            │
-│                            │ in procdb:~/proj  (c to change)                            │                            │
-│                            │ codex can't run commands on a remote host yet              │                            │
-╰────────────────────────────│ ↑/↓  c change folder  Esc cancel                           │────────────────────────────╯
-╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
-│Root /usr/bin/claude --model opus                                                                                     │
+│                            │ in ▏                                                       │                            │
+│                            │   /home/me/src/web                                         │                            │
+│                            │   /home/me/src/api                                         │                            │
+│                            │ › nz-b-procurementdb1:  ssh host · procdb                  │                            │
+│                            │   devbox:  ssh host                                        │                            │
+╰────────────────────────────│ as default  (p to change)                                  │────────────────────────────╯
+╭ Info  Performance  Processe│ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │────────────────────────────╮
+│Root /usr/bin/claude --model╰────────────────────────────────────────────────────────────╯                            │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │
 │   4188    2.4%     44.0M  node mcp-server.js                                                                         │

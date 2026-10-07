@@ -12,13 +12,13 @@ expression: screen
 ╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
 │   LAST▲╭ New tab ───────────────────────────────────────────────────╮JECT    │
 │●    now│   claude                                                   │ the ch…┃
-│●     7m│   codex                   local only                       │        │
-╰────────│   opencode                                                 │────────╯
-╭ Info  P│ in procdb:~/proj  (c to change)                            │ Context╮
-│Root /us│ codex can't run commands on a remote host yet              │        │
-│    PID │ ↑/↓  c change folder  Esc cancel                           │        │
-│   4101 ╰────────────────────────────────────────────────────────────╯        │
-│   4188    2.4%     44.0M  node mcp-server.js                                 │
+│●     7m│ in procdb:~/src/▏                                          │        │
+╰────────│   ~/src/api                                                │────────╯
+╭ Info  P│   ~/src/cctop  not empty here — the mount would hide it    │ Context╮
+│Root /us│   ~/src/web                                                │        │
+│    PID │ as default  (p to change)                                  │        │
+│   4101 │ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │        │
+│   4188 ╰────────────────────────────────────────────────────────────╯        │
 │   4290    0.3%      8.0M  bash -c npm test                                   │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯

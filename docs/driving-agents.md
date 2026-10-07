@@ -126,16 +126,32 @@ text, and `Enter` on a highlighted entry takes it. Clicking works too: once to
 pick, again to take it. Reattaching to a running agent does not offer this: that
 agent is already somewhere, and a path typed for it would be ignored.
 
-The last line of the launcher, `remote (ssh)`, starts Claude on this machine
-with its work on another one — [`cctop sandbox`](integrations.md#an-agent-here-working-there)
-in a tab. `Enter` on it lists the hosts in your `~/.ssh/config` (and the files
-it `Include`s), one line per `Host` line with its other names beside it;
-patterns such as `Host *` are skipped. Type to narrow the list by any of a
-host's names, or type a `user@host` that is not in it. `Enter` then asks for
-the directory on that host, `~` (its home) to start with, and `Enter` again
-opens the tab, called `claude ⇄ <host>`. `Esc` steps back one question. If
-`sshfs` is not installed the row says so, and the tab asks to install it before
-connecting. `Alt+v` and `Alt+s` split
+The field also takes a place on another machine. Type `host:path` the way `scp`
+reads it — `procdb:~/proj`, `me@10.0.0.5:/srv/api`, `[::1]:/srv` — or pick a
+host: the hosts in your `~/.ssh/config` (and the files it `Include`s) are offered
+under the directories as `procdb:`, matched by any of their names, one line per
+`Host` line with its other names beside it; patterns such as `Host *` are
+skipped. The moment a host is in the field, cctop connects to it in the
+background — never asking anything, see [an agent here, working
+there](integrations.md#an-agent-here-working-there) — and then completes paths on
+it exactly as it does here: its directories under what you typed, and, before a
+`/`, the git repositories three levels under its home. While it connects the
+field says `connecting to procdb…`; a host that would need a password or a key
+prompt says so (`procdb: needs a password or key prompt — the tab will ask`), and
+`Enter` still takes the path, unchecked, for the tab to connect to
+interactively. A directory the sandbox could not use is listed with why, dimmed
+— `~/src/cctop  not empty here — the mount would hide it` — so you can still go
+into it. `Enter` asks the host whether the path is there before taking it.
+
+The launcher's line then reads `in procdb:~/proj`, and the agent you pick starts
+there: Claude and opencode through `cctop sandbox` (their commands run on the
+host, their file tools on a mount of it), your shell over `ssh -t` into the
+directory. An agent with no way to run its commands on a host — codex, devin, pi
+— is greyed out with the reason (`codex can't run commands on a remote host
+yet`), and `Enter` on it says so instead of starting it here. The tab is called
+`<agent> ⇄ <host>`. If `sshfs` is not installed the tab asks to install it
+before connecting. A new tab starts on this machine again; a split keeps its
+tab's location. `Alt+v` and `Alt+s` split
 the tab you are in, side by side or stacked, so `claude` and a shell for
 `git diff` are one keystroke apart. Fresh tabs start in the directory where you
 started `cctop`; use `R` to reopen a session in that session's project directory.

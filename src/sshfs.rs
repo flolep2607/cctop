@@ -1,7 +1,7 @@
 //! Getting sshfs onto this machine when `cctop sandbox` finds it missing.
 //!
 //! sshfs is the one thing a sandbox needs here that a fresh Linux install does
-//! not have, and the TUI's Remote entry starts a sandbox in a tab — so a
+//! not have, and the TUI's launcher starts a sandbox in a tab — so a
 //! missing sshfs would otherwise be a tab that prints an apt command and
 //! closes. Asking on the terminal instead turns it into one keypress and a
 //! sudo password, in the tab where the sandbox was about to start.
