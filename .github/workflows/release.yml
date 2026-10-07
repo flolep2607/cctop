@@ -215,7 +215,7 @@ jobs:
   # only made every release that much slower to reach crates.io.
   publish-crate:
     needs: prepare-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
