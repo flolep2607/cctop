@@ -137,7 +137,11 @@ pub const BINDINGS: [(&str, &str, &str); 50] = [
         "Restart every agent tab (not mid-turn)",
     ),
     ("send", "s", "Type a line into its terminal"),
-    ("handoff", "O", "Hand its context to a different agent"),
+    (
+        "handoff",
+        "O",
+        "Hand its context to another agent or account",
+    ),
     ("conversation", "i", "Read its conversation"),
     ("copy", "y", "Copy resume command or transcript path"),
     ("expand", "e", "Show its subagents"),

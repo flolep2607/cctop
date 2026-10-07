@@ -932,7 +932,7 @@ fn free_id_codex(home: &Path, wanted: &str) -> (String, bool) {
     (new_uuid(), false)
 }
 
-fn codex_id_taken(home: &Path, id: &str) -> bool {
+pub(crate) fn codex_id_taken(home: &Path, id: &str) -> bool {
     let sessions = home.join("sessions");
     walk(&sessions, 0, &mut |path| {
         // The stem, not the name: the trailing 36 bytes of `…-<uuid>.jsonl` are

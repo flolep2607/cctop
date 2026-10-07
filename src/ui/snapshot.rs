@@ -447,6 +447,30 @@ fn row_menu() {
     snap("row_menu", &mut app);
 }
 
+/// The handoff picker for a Claude session on its `work` account: every
+/// (agent, account) pair but that one, so `claude · default` is offered and
+/// `claude · work` is not, and the column beside each agent says whose
+/// subscription it would spend.
+#[test]
+fn handoff_picker() {
+    use crate::handoff::Target;
+    let mut app = fixture();
+    let to = |agent: &str, account: Option<&str>| Target {
+        agent: agent.into(),
+        account: account.map(str::to_string),
+    };
+    app.pending_brief = Some("/home/me/.cache/cctop/handoff/web.md".into());
+    app.open_handoff(vec![
+        to("claude", Some("default")),
+        to("codex", Some("default")),
+        to("codex", Some("spare")),
+        to("opencode", None),
+    ]);
+    app.launch_cwd = Some("/home/me/src/web".into());
+    app.launch_cursor = 2;
+    snap("handoff_picker", &mut app);
+}
+
 #[test]
 fn new_worktree() {
     let mut app = fixture();

@@ -1302,6 +1302,13 @@ pub enum Choice {
     Waiting(Box<crate::rmux::Running>),
     /// A command to start fresh.
     Start(Vec<String>),
+    /// Somewhere a handoff can send the session: an agent, under an account.
+    ///
+    /// Its own variant rather than a `Start` whose argv already carries the
+    /// account, because the launcher reads the account back off the choice —
+    /// to name the tab's account, and to put a copied transcript where that
+    /// account looks — and an `env` prefix is not something to parse back.
+    Handoff(crate::handoff::Target),
 }
 
 impl Choice {
@@ -1315,6 +1322,7 @@ impl Choice {
                 .unwrap_or(&agent.name)
                 .to_string(),
             Choice::Start(argv) => label_of(argv),
+            Choice::Handoff(target) => target.label(),
         }
     }
 
@@ -1326,7 +1334,7 @@ impl Choice {
     pub fn cwd(&self) -> Option<&Path> {
         match self {
             Choice::Waiting(agent) => agent.cwd.as_deref(),
-            Choice::Start(_) => None,
+            Choice::Start(_) | Choice::Handoff(_) => None,
         }
     }
 }

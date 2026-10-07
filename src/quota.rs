@@ -777,6 +777,37 @@ pub fn run_as(args: &[String]) -> anyhow::Result<i32> {
     Err(anyhow::anyhow!("could not run {command}: {}", cmd.exec()))
 }
 
+/// Which token account the Claude process `pid` is running under, if any.
+///
+/// A token account keeps its transcripts in the default directory — that is
+/// the point of it — so the path a session was read out of says `default` for
+/// every one of them. The process knows better: `cctop as` handed it the token
+/// in its environment, and `/proc/<pid>/environ` is readable by the user who
+/// owns the process and nobody else. Compared here and dropped; the token is
+/// never returned, logged or put anywhere.
+///
+/// `None` for a process that has ended, one that is not ours, and one that
+/// carries no token or a token cctop does not hold — which is the right answer
+/// for each, since none of them names an account this machine can launch.
+pub fn token_account_of(pid: u32) -> Option<String> {
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let text = std::fs::read_to_string(&*config::CONFIG_FILE).ok()?;
+    token_account_in(&environ, &text)
+}
+
+/// [`token_account_of`], on an environment block and a config file's text.
+fn token_account_in(environ: &[u8], config_text: &str) -> Option<String> {
+    let token = environ
+        .split(|b| *b == 0)
+        .find_map(|var| var.strip_prefix(b"CLAUDE_CODE_OAUTH_TOKEN="))
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
+    config::account_names_in(config_text)
+        .into_iter()
+        .find(|name| pick_token(config_text, name).as_deref() == Some(token))
+}
+
 /// Owner-only permissions: the file holds a token.
 pub(crate) fn restrict(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -1196,6 +1227,22 @@ fn codex_usage(token: &str) -> ProviderStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// A token account's sessions live in the default directory, so only the
+    /// process can say which subscription it is spending — and a handoff that
+    /// could not tell would offer the session its own account back.
+    #[test]
+    fn a_process_names_its_token_account_by_the_token_it_holds() {
+        use super::token_account_in;
+        let config = "[accounts.work]\ntoken = \"sk-ant-oat01-work\"\n\
+                      [accounts.spare]\ntoken = \"sk-ant-oat01-spare\"\n";
+        let env = b"HOME=/home/x\0CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-spare\0TERM=xterm\0";
+        assert_eq!(token_account_in(env, config).as_deref(), Some("spare"));
+        // A token cctop does not hold names no account it could launch.
+        let stranger = b"CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-other\0";
+        assert_eq!(token_account_in(stranger, config), None);
+        assert_eq!(token_account_in(b"HOME=/home/x\0", config), None);
+    }
 
     /// The walkthrough's question takes the popup's keys and the words they
     /// stand for, and an empty answer — a closed stdin reads as one — skips

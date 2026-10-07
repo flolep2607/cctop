@@ -155,6 +155,17 @@ impl App {
         let Some(session) = self.selected_session().cloned() else {
             return;
         };
+        // Where it can go, asked before anything is written: every (agent,
+        // account) pair on this machine but the one the session is on. The
+        // page's menu is the same list, so the two pickers never disagree
+        // about where a session may be sent.
+        let targets = crate::handoff::targets(&session);
+        if targets.is_empty() {
+            self.set_status(
+                "Nowhere to hand this session — no other agent or account on this machine",
+            );
+            return;
+        }
         // The panels already hold the selected session's extraction; a brief
         // built while the row is still loading, or while a subagent row owns the
         // panels, falls back to the header alone rather than to another
@@ -177,24 +188,31 @@ impl App {
         // known until one is picked, so what is held here is the file and the
         // harness it is in — see `fork_pending`.
         self.pending_fork = self.handover_target(&session);
-        self.launch_prompt(LaunchInto::Tab);
-        // `launch_prompt` bails on its own when nothing can be launched, and
-        // leaving a brief pending for a launcher that never opened would attach
-        // it to the next unrelated agent instead.
-        if self.mode != Mode::Launch {
-            self.pending_brief = None;
-            self.pending_fork = None;
-            return;
-        }
-        // The receiving agent belongs in the directory the work is in —
-        // `launch_prompt` opens on `launch_root`, which is where *cctop* was
-        // invoked and right for a bare new tab. Here it is only the field's
-        // starting value, and `c` still changes it.
+        self.open_handoff(targets);
+        // The receiving agent belongs in the directory the work is in, not in
+        // `launch_root`, which is where *cctop* was invoked and right for a
+        // bare new tab. Here it is only the field's starting value, and `c`
+        // still changes it.
         self.launch_cwd = session.work_dir().or_else(|| self.launch_root.clone());
         self.set_status(format!(
             "Handing off {} — pick who takes it",
             brief.summary()
         ));
+    }
+
+    /// Open the launcher on a handoff's targets rather than on everything it
+    /// could start.
+    ///
+    /// The ordinary launcher would offer agents still running — reattaching to
+    /// one hands it nothing — and the shell, which would be typed a paragraph;
+    /// and it picks an account with `p`, which cannot leave out the one the
+    /// session is already on. Each line here is an (agent, account) pair, so the
+    /// account is chosen where the agent is and the session's own is absent.
+    pub(super) fn open_handoff(&mut self, targets: Vec<crate::handoff::Target>) {
+        self.launch_offer = targets.into_iter().map(tabs::Choice::Handoff).collect();
+        self.launch_into = LaunchInto::Tab;
+        self.launch_cursor = 0;
+        self.mode = Mode::Launch;
     }
 
     /// Ask for the branch `F` should fork into a worktree.
@@ -963,7 +981,11 @@ impl App {
     /// A failure to copy or convert is reported and answered with `None`, which
     /// puts the launch back on the brief — the handoff still happens, with less
     /// of the conversation in it.
-    pub(super) fn fork_pending(&mut self, argv: &[String]) -> Option<Vec<String>> {
+    pub(super) fn fork_pending(
+        &mut self,
+        argv: &[String],
+        account: Option<&'static crate::config::Profile>,
+    ) -> Option<Vec<String>> {
         let transcript = self.pending_fork.clone()?;
         // `argv` may carry an `env VAR=value` prefix when a profile was chosen,
         // so the command is read off it by name rather than taken as argv[0].
@@ -972,26 +994,30 @@ impl App {
             // Claude to Claude: a byte-for-byte copy, so it is tried first and
             // keeps everything a conversion drops.
             Provider::Claude if self.pending_provider == Provider::Claude => {
-                let profile = self.chosen_profile(Provider::Claude);
-                let config_dir = profile
-                    .map(|p| p.dir.clone())
-                    .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
+                let config_dir = Self::store_of(target, account);
                 match crate::handoff::fork(&transcript, &config_dir) {
-                    Ok(id) => {
-                        let argv = vec!["claude".to_string(), "--resume".to_string(), id];
-                        Some(match profile {
-                            Some(profile) => crate::config::argv_under_profile(argv, profile),
-                            None => argv,
-                        })
-                    }
+                    Ok(id) => Some(Self::resume_argv(target, &id, account)),
                     Err(error) => {
                         self.set_status(format!("Could not copy the transcript: {error}"));
                         None
                     }
                 }
             }
+            // Codex to Codex: only ever a change of account, since a handoff
+            // never offers the session's own — and the other login reads the
+            // rollout as written once it is in that login's store.
+            Provider::Codex if self.pending_provider == Provider::Codex => {
+                let home = Self::store_of(target, account);
+                match crate::handoff::fork_codex(&transcript, &home) {
+                    Ok(id) => Some(Self::resume_argv(target, &id, account)),
+                    Err(error) => {
+                        self.set_status(format!("Could not copy the rollout: {error}"));
+                        None
+                    }
+                }
+            }
             _ if crate::convert::convertible(self.pending_provider, target) => {
-                let home = self.store_of(target);
+                let home = Self::store_of(target, account);
                 let written =
                     crate::convert::convert(self.pending_provider, &transcript, target, &home);
                 match written {
@@ -1001,7 +1027,7 @@ impl App {
                             target.as_str(),
                             written.session_id
                         ));
-                        Some(self.resume_argv(target, &written.session_id))
+                        Some(Self::resume_argv(target, &written.session_id, account))
                     }
                     None => {
                         self.set_status("Could not convert the transcript".to_string());
@@ -1013,15 +1039,18 @@ impl App {
         }
     }
 
-    /// The store `target` keeps its sessions in, for a chosen account where the
-    /// launcher has one.
+    /// The store `target` keeps its sessions in, under `account` where one was
+    /// picked.
     ///
-    /// A converted session is written for whoever resumes it, so the account
-    /// the launcher is showing is the one to write into — the same reason
+    /// A copied or converted session is written for whoever resumes it, so the
+    /// account picked is the one to write into — the same reason
     /// [`crate::handoff::fork`] takes the receiving profile rather than the
     /// conventional directory.
-    fn store_of(&self, target: Provider) -> std::path::PathBuf {
-        match self.chosen_profile(target) {
+    fn store_of(
+        target: Provider,
+        account: Option<&'static crate::config::Profile>,
+    ) -> std::path::PathBuf {
+        match account {
             Some(profile) => profile.dir.clone(),
             None => match target {
                 Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
@@ -1030,13 +1059,17 @@ impl App {
         }
     }
 
-    /// The argv that resumes `target` on `id`, under a chosen account.
-    fn resume_argv(&self, target: Provider, id: &str) -> Vec<String> {
+    /// The argv that resumes `target` on `id`, under `account`.
+    fn resume_argv(
+        target: Provider,
+        id: &str,
+        account: Option<&'static crate::config::Profile>,
+    ) -> Vec<String> {
         let argv = match target {
             Provider::Codex => vec!["codex".to_string(), "resume".to_string(), id.to_string()],
             _ => vec!["claude".to_string(), "--resume".to_string(), id.to_string()],
         };
-        match self.chosen_profile(target) {
+        match account {
             Some(profile) => crate::config::argv_under_profile(argv, profile),
             None => argv,
         }
@@ -1064,6 +1097,16 @@ impl App {
         // the `env VAR=value` prefix a profile is passed through.
         let starting = match &choice {
             tabs::Choice::Start(argv) => Self::profile_provider(argv),
+            tabs::Choice::Handoff(target) => crate::pricing::Provider::parse(&target.agent),
+            tabs::Choice::Waiting(_) => None,
+        };
+        // The account a fresh agent starts under: the one `p` picked for a bare
+        // launch, the one on the line for a handoff, which names it outright.
+        let account = match &choice {
+            tabs::Choice::Start(argv) => {
+                Self::profile_provider(argv).and_then(|p| self.chosen_profile(p))
+            }
+            tabs::Choice::Handoff(target) => target.profile(),
             tabs::Choice::Waiting(_) => None,
         };
         let (argv, own) = match &choice {
@@ -1086,6 +1129,13 @@ impl App {
                 let Some(own) = own else { return };
                 (self.with_profile(argv.clone()), own)
             }
+            tabs::Choice::Handoff(target) => {
+                let own = self.own_preferring_rmux(Deferred::Launch, || {
+                    crate::rmux::free_name(&target.agent)
+                });
+                let Some(own) = own else { return };
+                (target.argv(vec![target.agent.clone()]), own)
+            }
         };
         // The offer is a snapshot, and an agent can finish in the time the modal
         // is up. Attaching to a session that has gone spawns a client that exits
@@ -1101,12 +1151,12 @@ impl App {
         // A handoff goes to an agent that is starting fresh. Reattaching lands
         // in a conversation already under way, where a "read this and continue"
         // line would interrupt whatever it is doing mid-turn.
-        let fresh = matches!(choice, tabs::Choice::Start(_));
+        let fresh = !matches!(choice, tabs::Choice::Waiting(_));
         // Where the receiving agent can read the transcript itself, the
         // conversation is handed over rather than a summary of it: copied
         // between two Claudes, converted between Claude and Codex. Everything
         // else gets the brief, which is the only form it can read.
-        let forked = fresh.then(|| self.fork_pending(&argv)).flatten();
+        let forked = fresh.then(|| self.fork_pending(&argv, account)).flatten();
         let carrying_conversation = forked.is_some();
         let argv = forked.unwrap_or(argv);
         // Only where the fork did not happen: an agent that cannot read the
@@ -1137,6 +1187,7 @@ impl App {
         // rmux session.
         pane.profile = match &choice {
             tabs::Choice::Start(_) => self.launch_profile().map(|p| p.name.clone()),
+            tabs::Choice::Handoff(target) => target.account.clone(),
             tabs::Choice::Waiting(agent) => agent.profile.clone(),
         };
         // The tab is named after the agent, not after the brief it was handed:
@@ -1146,7 +1197,11 @@ impl App {
         if opening.is_some() {
             pane.label = tabs::label_of(argv);
         } else if carrying_conversation {
-            pane.label = "claude".to_string();
+            // The agent the copy was resumed in, which a conversion makes a
+            // different harness from the one handed over.
+            pane.label = crate::handoff::command_of(argv)
+                .unwrap_or("claude")
+                .to_string();
         }
         let label = pane.label.clone();
         let mut carried = "";
@@ -1197,7 +1252,7 @@ impl App {
                     .unwrap_or_default();
                 format!("Reattached to {label}{at} — it was never gone")
             }
-            tabs::Choice::Start(_) => {
+            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => {
                 let where_ = cwd
                     .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
                     .unwrap_or_default();

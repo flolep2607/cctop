@@ -27,7 +27,7 @@ expression: screen
 ╰─────────────────────│  a                Open its terminal in a tab                             │─────────────────────╯
 ╭ Info  Performance  P│  R                Resume it in a tab of its own                          │─────────────────────╮
 │Root /usr/bin/claude │  s                Type a line into its terminal                          │                     │
-│    PID    CPU%      │  O                Hand its context off to a different agent              │                     │
+│    PID    CPU%      │  O                Hand its context to another agent or account           │                     │
 │   4101    9.8%    36│  i                Read its conversation (works on remote rows)           │                     │
 │   4188    2.4%     4│    / n N  [ ]     In it: search, next / previous hit, turn by turn       │                     │
 │   4290    0.3%      │    ↵ t  m         In it: this turn's tools / all tools, source           │                     │

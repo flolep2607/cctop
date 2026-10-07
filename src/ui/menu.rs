@@ -133,7 +133,7 @@ pub fn items(app: &App) -> Vec<Item> {
         },
         Item {
             action: Action::Handoff,
-            label: "Hand off to another agent",
+            label: "Hand off to agent/account",
             key: "O",
             blocked: far(subagent.then(|| "hand off the session, not a subagent".to_string())),
             rule: false,
