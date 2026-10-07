@@ -42,6 +42,7 @@ mod util;
 mod wait;
 mod watch;
 mod why;
+mod yolo;
 
 use clap::Parser;
 use std::io::IsTerminal;

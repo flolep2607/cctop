@@ -7,12 +7,12 @@ expression: screen
 │Live rate         $0.04                               ⡀  Models               │
 │Today             $8.97                               ⡀  Sessions  4 · 2 live │
 │This month        $0.00                               ⡀  Agent CPU   3.2%     │
-│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
-╰────────╭ Fix the checkout redirect loop ────────────────────────────╮────────╯
-╭ Session│ Resume in a tab                                          R │────────╮
-│   LAST▲│ Restart it in its tab      it is not running in a tab here │JECT    │
-│●    now│ Attach to it                                             a │ the ch…┃
-│●     7m│ Type into it                                             s │        │
+│All time╭ Fix the checkout redirect loop ────────────────────────────╮ MB     │
+╰────────│ Resume in a tab                                          R │────────╯
+╭ Session│ Restart it in its tab      it is not running in a tab here │────────╮
+│   LAST▲│ Attach to it                                             a │JECT    │
+│●    now│ Type into it                                             s │ the ch…┃
+│●     7m│ Allow every prompt (YOLO)                                  │        │
 ╰────────│ Hand off to agent/account                                O │────────╯
 ╭ Info  P│ Read the conversation                                    i │ Context╮
 │Root /us│ Show its subagents                                       e │        │

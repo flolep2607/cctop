@@ -15,12 +15,12 @@ expression: screen
 │●     7m     2h     $2.87    29%   0.4 sonnet-4-5     ─          ─        local                ─            api       │
 │○     3h     1h     $0.19      ─     ─ haiku-4-5      ─          ─        local                ─            docs      │
 │○     2d    12h     $7.03      ─     ─ gpt-5-codex    ─          ─        local                ─            infra     │
-│                                                                                                                      │
 │                            ╭ Fix the checkout redirect loop ────────────────────────────╮                            │
 │                            │ Resume in a tab                                          R │                            │
 │                            │ Restart it in its tab      it is not running in a tab here │                            │
 │                            │ Attach to it                                             a │                            │
 │                            │ Type into it                                             s │                            │
+│                            │ Allow every prompt (YOLO)                                  │                            │
 │                            │ Hand off to agent/account                                O │                            │
 │                            │ Read the conversation                                    i │                            │
 │                            │ Show its subagents                                       e │                            │

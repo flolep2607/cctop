@@ -320,6 +320,38 @@ impl App {
             session.apply_reports(self.reports.report(&session.session_id), screened);
             self.reports.stamp_sandbox(session);
         }
+        // Here because every rebuild of the rows passes through here, and a
+        // row that loses its YOLO mark for one publish is a badge that
+        // flickers off on every page watching it.
+        self.yolo.stamp(&mut self.sessions);
+    }
+
+    /// Switch YOLO for the selected row, through the same check the page's
+    /// switch goes through — see [`crate::serve::actions::yolo`].
+    pub(super) fn toggle_yolo(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let said = match crate::serve::actions::yolo(session, session.yolo.is_none()) {
+            Ok(done) => done.message,
+            Err((_, why)) => why,
+        };
+        self.set_status(said);
+        // Read on the next pass rather than half a second from now.
+        self.yolo_at = None;
+    }
+
+    /// Read the YOLO switch and answer what it covers. `now` skips the slow
+    /// clock. Returns whether a row changed.
+    pub(super) fn tick_yolo(&mut self, now: bool) -> bool {
+        const EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+        if !now && self.yolo_at.is_some_and(|at| at.elapsed() < EVERY) {
+            return false;
+        }
+        self.yolo_at = Some(std::time::Instant::now());
+        let changed = self.yolo.tick(&mut self.sessions);
+        self.needs_redraw |= changed;
+        changed
     }
 
     /// What the screen of the agent running as `pid` last said, from whichever

@@ -234,6 +234,44 @@ pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
     }
 }
 
+/// Switch YOLO on or off for this session: every permission prompt it raises
+/// answered "allow", by [`crate::yolo`], until it is switched off or the
+/// session ends.
+///
+/// On is held to everything [`answer`] is held to, checked now rather than at
+/// the first prompt so the person is told at the switch, not left believing a
+/// session is being waved through when its prompts can never be pressed: a
+/// local row, a harness whose menu cctop knows, and an agent running to press
+/// at. Off is always allowed — it is the way out, and a way out that can be
+/// refused is not one.
+pub fn yolo(session: &Session, on: bool) -> Result<Done, Failed> {
+    if on {
+        local(session)?;
+        if !matches!(
+            session.provider,
+            crate::pricing::Provider::Claude | crate::pricing::Provider::Codex
+        ) {
+            return Err((
+                409,
+                format!(
+                    "cctop does not know how {} answers a prompt, so it cannot answer them all",
+                    session.provider.as_str()
+                ),
+            ));
+        }
+        if session.root_pid().is_none() {
+            return Err((409, "nothing is running this session".into()));
+        }
+    }
+    match crate::yolo::set(&session.session_id, on) {
+        Ok(()) => done(match on {
+            true => "YOLO on — every prompt in this session will be allowed",
+            false => "YOLO off — prompts wait for you again",
+        }),
+        Err(e) => Err((503, format!("could not write the YOLO switch: {e}"))),
+    }
+}
+
 /// Start this session's harness back up on this session's transcript.
 ///
 /// The counterpart of `R` in the terminal, and the only way into a session cctop
@@ -896,6 +934,25 @@ mod tests {
         let (status, message) = answer(&session, "allow").unwrap_err();
         assert_eq!(status, 409);
         assert!(message.contains("build-box"), "{message}");
+    }
+
+    /// YOLO on is refused wherever Allow would be — another machine, a menu
+    /// nobody has driven, nothing to press at — and off never is.
+    #[test]
+    fn yolo_is_held_to_what_answer_is_and_off_always_works() {
+        let _base = crate::config::claim_test_runtime_base("actions-yolo");
+        let mut remote = session();
+        remote.remote = Some(crate::session::Remote {
+            host: "build-box".into(),
+            branch: None,
+            ..Default::default()
+        });
+        assert!(yolo(&remote, true).unwrap_err().1.contains("build-box"));
+        let gemini = Session::new(Provider::Gemini, "g1".into());
+        assert!(yolo(&gemini, true).unwrap_err().1.contains("gemini"));
+        assert_eq!(yolo(&session(), true).unwrap_err().0, 409);
+        assert!(yolo(&remote, false).is_ok());
+        assert!(yolo(&session(), false).is_ok());
     }
 
     #[test]

@@ -6,6 +6,7 @@ import { ANSWERABLE, answerPrompt, isNotAsking } from "@/lib/api";
 import { dropPrompt } from "@/hooks/use-live";
 import { CAN_ACT } from "@/lib/config";
 import { Button } from "@/components/ui/button";
+import { AllowAllButton } from "@/components/yolo";
 import type { Session } from "@/lib/types";
 
 // What a waiting agent is asking, and the two answers cctop can give for it.
@@ -66,6 +67,7 @@ export function PromptBar({ session, className, compact }: { session: Session; c
             <X />
             Deny
           </Button>
+          <AllowAllButton session={session} compact={compact} />
         </>
       ) : (
         <span className="text-muted-foreground shrink-0 text-xs">{question ? "pick an answer in its terminal" : "answer it in its terminal"}</span>

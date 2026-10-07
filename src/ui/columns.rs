@@ -191,7 +191,7 @@ pub const COLUMNS: &[Column] = &[
         // narrows and the numbers start dropping off.
         priority: 72,
         right_align: false,
-        desc: "How much the session asks before it acts, as its own hooks reported it:\nask, edits (writes files unasked), plan (cannot act), BYPASS (asks nothing).\n─ when the session has no cctop hooks installed and so cannot say.",
+        desc: "How much the session asks before it acts, as its own hooks reported it:\nask, edits (writes files unasked), plan (cannot act), BYPASS (asks nothing).\nyolo when cctop is allowing every prompt it raises (the row menu switches it).\n─ when the session has no cctop hooks installed and so cannot say.",
     },
     Column {
         id: ColumnId::Conflict,
@@ -513,9 +513,12 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
         // A session with no hooks cannot report this, and "─" is the honest
         // answer: not "it asks about everything", which would be a guess about
         // the one column whose whole job is not to guess.
-        ColumnId::Permission => match s.permission {
-            Some(p) => Borrowed(p.label()),
-            None => Borrowed("─"),
+        // YOLO outranks whatever mode the harness reports: whatever the agent
+        // would have asked, cctop is answering yes.
+        ColumnId::Permission => match (&s.yolo, s.permission) {
+            (Some(_), _) => Borrowed("yolo"),
+            (None, Some(p)) => Borrowed(p.label()),
+            (None, None) => Borrowed("─"),
         },
         // Blank rather than a dash for the ordinary case. This column is a
         // warning light, and a light that is on in every row is off.
@@ -672,6 +675,9 @@ static BRANCHES: LazyLock<Mutex<HashMap<String, Reading>>> =
 /// setting.
 fn permission_rank(s: &crate::session::Session) -> u8 {
     use crate::hook::Permission;
+    if s.yolo.is_some() {
+        return 5;
+    }
     match s.permission {
         None => 0,
         Some(Permission::Plan) => 1,

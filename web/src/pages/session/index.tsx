@@ -17,6 +17,7 @@ import { AppShell } from "@/components/app-shell";
 import { StateBadge, StateDot, dotOf } from "@/components/status";
 import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
 import { useSessions, useTick } from "@/hooks/use-live";
+import { YoloLog, YoloSwitch } from "@/components/yolo";
 import type { Report } from "@/lib/types";
 import { AccessView } from "./access-view";
 import { ChangesView, diffFiles } from "./changes-view";
@@ -140,6 +141,7 @@ export function SessionPage() {
               <StateDot state={state} />
               <span className="truncate">{r.title || shortPath(r.project) || r.session_id}</span>
               <StateBadge state={state} running={running} question={!!live?.asking_question} />
+              {live && <YoloSwitch session={live} className="shrink-0" />}
               {/* The state beside it is the last the stream said; say when that may be old. */}
               {sessions && !streaming && (
                 <span className="text-muted-foreground shrink-0 text-xs font-normal" title="The live connection dropped; the state shown may be out of date">
@@ -167,6 +169,7 @@ export function SessionPage() {
           </div>
           <Actions r={r} id={id} running={running} term={term} onTerminal={toggleTerminal} />
         </div>
+        {live?.yolo && <YoloLog session={live} className="mt-2" />}
         {r.error && (
           <div className="border-destructive/40 bg-destructive/5 text-destructive mt-2 rounded-md border px-3 py-1.5 text-xs">
             This transcript could not be fully read: {r.error}
