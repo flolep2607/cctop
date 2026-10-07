@@ -22,6 +22,22 @@ fallback is not on your `PATH` either. `sudo` is used only if the install needs
 it, and a `sudo` that cannot run (no tty, no askpass, no sudo at all) falls
 back rather than stopping.
 
+Then, if `sshfs` is missing, it offers to install it — what
+[`cctop sandbox`](integrations.md#an-agent-here-working-there) needs — with
+`[y/N]`, so pressing Enter changes nothing. The question is asked on the
+terminal even under `curl | sh`, and skipped where there is none. To answer it
+in advance:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/flolep2607/cctop/main/install.sh | CCTOP_WITH_SSHFS=1 sh
+curl -fsSL https://raw.githubusercontent.com/flolep2607/cctop/main/install.sh | sh -s -- --with-sshfs
+```
+
+(`CCTOP_WITH_SSHFS=0` or `--without-sshfs` to skip it.) It uses whichever of
+apt-get, dnf, yum, pacman, zypper and apk it finds, through `sudo` unless you
+are root, and prints the command before running it. A failed sshfs install is
+reported and does not undo the cctop one.
+
 Nothing is unpacked until the checksum has been checked, and a mismatch stops
 the install instead of warning about it afterwards. To read it before running
 it, `curl -fsSLO` it and look.

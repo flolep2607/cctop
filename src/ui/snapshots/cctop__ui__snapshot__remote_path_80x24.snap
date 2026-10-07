@@ -1,0 +1,28 @@
+---
+source: src/ui/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
+│   LAST▲ ╭ Remote · devbox ─────────────────────────────────────────╮OJECT    │
+│●    now │ Directory on devbox                                      │x the ch…┃
+│●     7m │ Mounted here at the same path; ~ is the host's home.     │i        │
+╰─────────│                                                          │─────────╯
+╭ Info  Pe│ > ~/src/api█                                             │  Context╮
+│Root /usr│                                                          │         │
+│    PID  │ Enter start   Esc back to hosts                          │         │
+│   4101  ╰──────────────────────────────────────────────────────────╯         │
+│   4188    2.4%     44.0M  node mcp-server.js                                 │
+│   4290    0.3%      8.0M  bash -c npm test                                   │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

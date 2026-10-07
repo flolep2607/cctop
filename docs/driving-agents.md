@@ -124,7 +124,18 @@ agree (one match completes outright and adds the `/`, so you can walk down a
 tree a keystroke at a time), `↑`/`↓` move into the list and back out into the
 text, and `Enter` on a highlighted entry takes it. Clicking works too: once to
 pick, again to take it. Reattaching to a running agent does not offer this: that
-agent is already somewhere, and a path typed for it would be ignored. `Alt+v` and `Alt+s` split
+agent is already somewhere, and a path typed for it would be ignored.
+
+The last line of the launcher, `remote (ssh)`, starts Claude on this machine
+with its work on another one — [`cctop sandbox`](integrations.md#an-agent-here-working-there)
+in a tab. `Enter` on it lists the hosts in your `~/.ssh/config` (and the files
+it `Include`s), one line per `Host` line with its other names beside it;
+patterns such as `Host *` are skipped. Type to narrow the list by any of a
+host's names, or type a `user@host` that is not in it. `Enter` then asks for
+the directory on that host, `~` (its home) to start with, and `Enter` again
+opens the tab, called `claude ⇄ <host>`. `Esc` steps back one question. If
+`sshfs` is not installed the row says so, and the tab asks to install it before
+connecting. `Alt+v` and `Alt+s` split
 the tab you are in, side by side or stacked, so `claude` and a shell for
 `git diff` are one keystroke apart. Fresh tabs start in the directory where you
 started `cctop`; use `R` to reopen a session in that session's project directory.

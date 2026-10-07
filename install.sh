@@ -4,6 +4,12 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/flolep2607/cctop/main/install.sh | sh
 #
+# sshfs, which `cctop sandbox` needs, is offered afterwards and never assumed:
+# asked on a terminal (default no), or installed outright with
+#
+#   curl -fsSL …/install.sh | CCTOP_WITH_SSHFS=1 sh
+#   curl -fsSL …/install.sh | sh -s -- --with-sshfs
+#
 # Written for POSIX sh, not bash, and it cannot be anything else: piped into
 # `sh` the kernel never reads the shebang above, so whatever runs this is whatever
 # `/bin/sh` is. On Debian and Ubuntu that is dash, which has no `pipefail` and
@@ -18,6 +24,19 @@
 # in a directory not on PATH, or run the binary to find out what it does. It
 # fetches, verifies and installs, and stops.
 set -eu
+
+# Empty means "ask if there is a terminal to ask on"; 1 means yes, 0 means no.
+with_sshfs="${CCTOP_WITH_SSHFS:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --with-sshfs) with_sshfs=1 ;;
+    --without-sshfs) with_sshfs=0 ;;
+    *)
+      echo "install.sh: unknown option $arg (known: --with-sshfs, --without-sshfs)" >&2
+      exit 2
+      ;;
+  esac
+done
 
 repo="https://github.com/flolep2607/cctop"
 latest="$repo/releases/latest/download"
@@ -106,6 +125,75 @@ else
 fi
 
 version="$("$dest/cctop" --version 2>/dev/null || echo cctop)"
+
+# The package that provides sshfs here, as the command that installs it, or
+# nothing for a package manager this does not know. The same table as
+# `cctop sandbox` uses when it finds sshfs missing (src/sshfs.rs): dnf before
+# yum because yum is dnf's compatibility name on the systems that have both,
+# and Fedora and RHEL call the package fuse-sshfs.
+sshfs_command() {
+  if command -v apt-get >/dev/null 2>&1; then echo "apt-get install -y sshfs"
+  elif command -v dnf >/dev/null 2>&1; then echo "dnf install -y fuse-sshfs"
+  elif command -v yum >/dev/null 2>&1; then echo "yum install -y fuse-sshfs"
+  elif command -v pacman >/dev/null 2>&1; then echo "pacman -S --noconfirm sshfs"
+  elif command -v zypper >/dev/null 2>&1; then echo "zypper --non-interactive install sshfs"
+  elif command -v apk >/dev/null 2>&1; then echo "apk add sshfs"
+  fi
+}
+
+# A terminal to ask on, which under `curl | sh` is not stdin — stdin is this
+# script. /dev/tty can exist and still not open (no controlling terminal, as in
+# CI or a container started without -t), so it is opened to find out.
+has_tty() {
+  (: </dev/tty) 2>/dev/null
+}
+
+# Optional, and off unless asked for: the plain install above is the whole of
+# what most people want, and a package manager running with sudo is not
+# something to start on a default.
+if ! command -v sshfs >/dev/null 2>&1; then
+  if [ -z "$with_sshfs" ] && has_tty; then
+    printf '\nAlso install sshfs, for `cctop sandbox` (Claude here, its work on an ssh host)? [y/N] ' >/dev/tty
+    answer=""
+    read -r answer </dev/tty || answer=""
+    case "$answer" in
+      y | Y | yes | YES | Yes) with_sshfs=1 ;;
+      *) with_sshfs=0 ;;
+    esac
+  fi
+  if [ "$with_sshfs" = 1 ]; then
+    cmd="$(sshfs_command)"
+    if [ -z "$cmd" ]; then
+      echo "No package manager this script knows; install sshfs with yours" \
+        "(fuse-sshfs on Fedora and RHEL)." >&2
+    else
+      if [ "$(id -u)" != 0 ]; then
+        if command -v sudo >/dev/null 2>&1; then
+          cmd="sudo $cmd"
+        else
+          echo "Installing sshfs needs root, and there is no sudo here. As root, run:" >&2
+          echo "  $cmd" >&2
+          cmd=""
+        fi
+      fi
+      if [ -n "$cmd" ]; then
+        echo "+ $cmd"
+        # Never this script's stdin: under `curl | sh` that is the rest of the
+        # script, and a package manager reading it would swallow it. sudo asks
+        # for its password on the terminal itself.
+        if has_tty; then input=/dev/tty; else input=/dev/null; fi
+        # Word-split on purpose: the command is a few plain words.
+        # shellcheck disable=SC2086
+        if ! $cmd <"$input"; then
+          # cctop is installed either way, so this warns rather than failing
+          # the install it was an extra to.
+          echo "Installing sshfs failed; cctop is installed. Retry with:" >&2
+          echo "  $cmd" >&2
+        fi
+      fi
+    fi
+  fi
+fi
 
 case ":$PATH:" in
   *":$dest:"*) ;;

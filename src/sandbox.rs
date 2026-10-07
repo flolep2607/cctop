@@ -140,9 +140,31 @@ file tools see the host's files. Nothing is installed on the host.
   cctop sandbox devbox:/srv/api
   cctop sandbox devbox:~/src/api --model opus
 
-Needs sshfs and fusermount3 here (sudo apt install sshfs fuse3), and bash and
-setsid on the host. <path> must exist here or be creatable by you: it is the
+Needs sshfs and fusermount3 here, and offers to install sshfs when it is
+missing and the terminal can answer; bash and setsid on the host. <path> must exist here or be creatable by you: it is the
 mount point.";
+
+/// Set by the TUI's Remote entry on the sandbox it starts in a tab.
+///
+/// A failure there — no sshfs and the install declined, a host that will not
+/// answer — would otherwise print its reason and end the tab in the same
+/// instant, which reads as a tab that flashed and vanished. With this set the
+/// reason stays on screen until Enter.
+pub const ENV_HOLD: &str = "CCTOP_SANDBOX_HOLD";
+
+/// [`run`], holding a failure on screen when [`ENV_HOLD`] asks for it.
+pub fn run_held(args: &[String]) -> anyhow::Result<i32> {
+    let result = run(args);
+    match result {
+        Err(e) if std::env::var_os(ENV_HOLD).is_some() => {
+            eprintln!("\n{e:#}\n\nPress Enter to close this tab.");
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            Ok(1)
+        }
+        other => other,
+    }
+}
 
 /// `cctop sandbox …`. Returns the agent's exit code.
 pub fn run(args: &[String]) -> anyhow::Result<i32> {
@@ -157,6 +179,10 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
     let Some(spec) = Spec::parse(first) else {
         anyhow::bail!("expected <host>:<path>, got `{first}`\n\n{USAGE}");
     };
+    // Before anything else: an install that is declined or fails should not
+    // leave an ssh connection behind it, and this is the step most likely to
+    // stop a first run.
+    crate::sshfs::ensure()?;
     let fusermount = require_tools()?;
     // Absolute, because it is put in an environment variable that a shell in
     // some other directory will run.
@@ -232,9 +258,12 @@ fn require_tools() -> anyhow::Result<&'static str> {
         .find(|name| on_path(name));
     match (on_path("sshfs"), fusermount) {
         (true, Some(fusermount)) => Ok(fusermount),
-        _ => anyhow::bail!(
-            "cctop sandbox needs sshfs and fusermount3 on this machine.\n  \
-             Debian/Ubuntu: sudo apt install sshfs fuse3"
+        (false, _) => anyhow::bail!("cctop sandbox needs sshfs on this machine"),
+        // sshfs is here and fuse3 is not: a package that does not depend on
+        // it, or a fusermount3 removed since.
+        (true, None) => anyhow::bail!(
+            "cctop sandbox needs fusermount3 on this machine.\n  \
+             Debian/Ubuntu: sudo apt-get install fuse3"
         ),
     }
 }

@@ -227,6 +227,8 @@ impl App {
             Mode::Launch => self.on_key_launch(key),
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
+            Mode::RemoteHost => self.on_key_sandbox_host(key),
+            Mode::RemotePath => self.on_key_sandbox_path(key),
             Mode::Hooks => self.on_key_hooks(key),
             Mode::Insight => self.on_key_insight(key),
             Mode::Conversation => self.on_key_conversation(key),
@@ -404,6 +406,16 @@ impl App {
                 if paste_into(&mut self.switch_filter, text, SWITCH_FILTER_MAX) {
                     self.switch_cursor = 0;
                 }
+            }
+            // A host name copied from somewhere, or a directory: the two
+            // things in the Remote steps worth not retyping.
+            Mode::RemoteHost => {
+                if paste_into(&mut self.sandbox_filter, text, MAX_PATH_INPUT) {
+                    self.sandbox_cursor = 0;
+                }
+            }
+            Mode::RemotePath => {
+                paste_into(&mut self.sandbox_path, text, MAX_PATH_INPUT);
             }
             // The cost floor is a number, so a paste is filtered the way typing
             // one is rather than flattened: anything that is not a digit or a
@@ -591,7 +603,9 @@ impl App {
             | Mode::NewWorktree
             | Mode::RenameTab
             | Mode::SwitchTab
-            | Mode::LaunchCwd => true,
+            | Mode::LaunchCwd
+            | Mode::RemoteHost
+            | Mode::RemotePath => true,
             Mode::AddAccount => {
                 let flow = &self.add_account;
                 flow.pane.is_none() && flow.outcome.is_none() && !flow.named
@@ -676,7 +690,7 @@ impl App {
             // `c` for the directory it will start in. Not offered while
             // reattaching: that agent is already somewhere, and the footer says
             // so — a path typed there would be quietly ignored.
-            KeyCode::Char('c') if !self.launch_is_reattach() => self.edit_launch_cwd(),
+            KeyCode::Char('c') if !self.launch_ignores_cwd() => self.edit_launch_cwd(),
             KeyCode::Enter => {
                 self.mode = Mode::List;
                 self.launch_selected();

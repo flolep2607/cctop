@@ -468,7 +468,7 @@ reach them was to remember which key pressed which one.
 | `O` | Hand the selected session's context off to a different agent (see below) |
 | `a` | Open that session's terminal in a tab and drive it |
 | `A` | Open the agent this cctop launched itself, rather than one it found on disk |
-| `t` | New tab: run an agent or a shell (see below) |
+| `t` | New tab: run an agent, a shell, or Claude on an ssh host (see below) |
 | `r` or `F5` | Refresh now |
 | `o`, `c` | What the spend was and not got back (`optimize`), and how each model did (`compare`) — see [what it cost you for](optimize-and-compare.md) |
 | `B` | Serve this table to a browser while cctop keeps running — see [In a browser](serve.md) |
@@ -480,7 +480,7 @@ Tabs and splits, from anywhere including inside a running agent:
 
 | Key | Action |
 |---|---|
-| `t` or `Alt+n` | New tab: an agent, a shell, or one still running |
+| `t` or `Alt+n` | New tab: an agent, a shell, an ssh host, or one still running |
 | `Alt+v` / `Alt+s` | Split the current tab right / down |
 | `Alt+←` / `Alt+→` | Previous / next tab |
 | `Alt+1`–`9` | Jump to a tab; `Alt+1` is the dashboard |
