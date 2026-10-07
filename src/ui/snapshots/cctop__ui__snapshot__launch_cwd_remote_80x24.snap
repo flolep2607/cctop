@@ -14,7 +14,7 @@ expression: screen
 │●    now│   sh                                                       │ the ch…┃
 │●     7m│ in procdb:~/src/▏                                          │        │
 ╰────────│   ~/src/api                                                │────────╯
-╭ Info  P│   ~/src/cctop  not empty here — the mount would hide it    │ Context╮
+╭ Info  P│   ~/src/cctop  read-only on the host                       │ Context╮
 │Root /us│   ~/src/web                                                │        │
 │    PID │ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │        │
 │   4101 ╰────────────────────────────────────────────────────────────╯        │

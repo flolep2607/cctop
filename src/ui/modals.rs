@@ -1641,7 +1641,7 @@ pub(super) fn draw_launch(
             _ if blocked.is_some() => {
                 match app.launch_remote.as_ref().and_then(|t| t.problem.as_ref()) {
                     Some(_) if matches!(choice, tabs::Choice::Start(argv) if matches!(super::location::reach_of(argv), super::location::Reach::Sandbox(_))) => {
-                        "can't mount there".to_string()
+                        "can't work there".to_string()
                     }
                     _ => "local only".to_string(),
                 }

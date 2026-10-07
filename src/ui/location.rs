@@ -371,16 +371,10 @@ impl App {
         let Some(state) = self.ssh_states.get(host) else {
             return Vec::new();
         };
-        let Conn::Ready { home } = &state.conn else {
+        if !matches!(state.conn, Conn::Ready { .. }) {
             return Vec::new();
-        };
-        let home = home.clone();
+        }
         let (dir, fragment) = split_remote(path.trim());
-        let mounts = remote_fs::mounts_here();
-        let local = |abs: &str| {
-            let at = std::path::Path::new(abs);
-            remote_fs::verdict(at, &mounts, &remote_fs::here(at), None).err()
-        };
 
         let mut hits: Vec<Hit> = Vec::new();
         // A bare name is matched against the repositories as well as the home's
@@ -396,7 +390,9 @@ impl App {
                     .map(|r| Hit::Remote {
                         host: host.to_string(),
                         path: r.clone(),
-                        problem: local(&remote_fs::absolute(r, &home)),
+                        // Not listed with its permissions: the check on Enter
+                        // asks.
+                        problem: None,
                     }),
             );
         }
@@ -420,7 +416,7 @@ impl App {
                     let problem = match (entry.readable, entry.writable) {
                         (false, _) => Some("not readable on the host".to_string()),
                         (_, false) => Some("read-only on the host".to_string()),
-                        _ => local(&join_remote(&listing.resolved, &entry.name)),
+                        _ => None,
                     };
                     hits.push(Hit::Remote {
                         host: host.to_string(),
@@ -558,9 +554,10 @@ impl App {
     /// The host's answer about the directory being accepted.
     ///
     /// Refused in the field when the host has no such directory — that is a
-    /// typo, and the field is where it can be fixed. Anything else that stops
-    /// a mount is kept as the target's problem: it greys out the agents that
-    /// mount, and leaves the shell, which does not, free to go there.
+    /// typo, and the field is where it can be fixed. A directory the agent
+    /// could not work in — unreadable, read-only — is kept with that as the
+    /// target's problem: it greys out the agents that mount, and leaves the
+    /// shell, which does not, free to go there.
     fn checked_remote(&mut self, host: String, path: String, result: Result<RemoteFacts, String>) {
         let facts = match result {
             Ok(facts) => facts,
@@ -577,16 +574,7 @@ impl App {
             self.refuse_launch_cwd(format!("{what} on {host}"));
             return;
         }
-        let problem = facts.resolved.as_deref().and_then(|root| {
-            let at = std::path::Path::new(root);
-            remote_fs::verdict(
-                at,
-                &remote_fs::mounts_here(),
-                &remote_fs::here(at),
-                Some(&facts),
-            )
-            .err()
-        });
+        let problem = remote_fs::verdict(&facts).err();
         self.take_remote(RemoteTarget {
             host,
             path,
@@ -659,16 +647,17 @@ impl App {
                 Reach::Sandbox(_) => target
                     .problem
                     .as_ref()
-                    .map(|why| format!("can't mount {} here: {why}", target.path)),
+                    .map(|why| format!("can't work in {}: {why}", target.path)),
             },
         }
     }
 
     /// Start the launcher's pick in the remote location.
     ///
-    /// The local half of the usability rules is asked again here, since the
-    /// check in the field may be minutes old and the mount point is on this
-    /// machine; the host's half was asked when the field took the path.
+    /// Nothing about this machine is checked: wherever the host's path cannot
+    /// be mounted at the same path here, the sandbox mounts it under cctop's
+    /// cache instead. The host's half was asked when the field took the path,
+    /// and the sandbox asks it again before mounting.
     pub(super) fn launch_remote_choice(&mut self, choice: &tabs::Choice, target: &RemoteTarget) {
         if let Some(why) = self.launch_blocked(choice) {
             self.set_status(why);
@@ -684,18 +673,6 @@ impl App {
             }
             Reach::Shell(name) => (name, shell_argv(&target.host, &target.path)),
             Reach::Sandbox(agent) => {
-                if let Some(root) = &target.resolved {
-                    let at = std::path::Path::new(root);
-                    if let Err(why) = remote_fs::verdict(
-                        at,
-                        &remote_fs::mounts_here(),
-                        &remote_fs::here(at),
-                        target.facts.as_ref(),
-                    ) {
-                        self.set_status(format!("Can't start {agent} in {root}: {why}"));
-                        return;
-                    }
-                }
                 let exe = match std::env::current_exe() {
                     Ok(exe) => exe,
                     Err(error) => {
@@ -990,18 +967,27 @@ mod tests {
             target.resolved.as_deref(),
             Some(home_path.join("src/web").to_str().expect("utf8"))
         );
-        // The stand-in host is this machine, so the local half of the rules
-        // sees the directory itself: empty, and usable.
         assert_eq!(target.problem, None);
     }
 
-    /// A directory the mount would hide is marked, not hidden: it is still
-    /// the way into the directories under it.
+    /// A directory the agent could not work in is marked, not hidden: it is
+    /// still the way into the directories under it. One that is only awkward
+    /// *here* — full of this machine's own files — is not marked at all: the
+    /// sandbox mounts it somewhere else.
     #[test]
     fn an_unusable_remote_directory_is_marked_with_why() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root writes anywhere, so a read-only directory is not one for it.
+        // SAFETY: getuid cannot fail.
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
         let home = tempfile::tempdir().expect("home");
         let home_path = home.path().canonicalize().expect("canonical");
         std::fs::create_dir_all(home_path.join("full/inside")).expect("dir");
+        std::fs::create_dir_all(home_path.join("frozen")).expect("dir");
+        let frozen = home_path.join("frozen");
+        std::fs::set_permissions(&frozen, std::fs::Permissions::from_mode(0o555)).expect("chmod");
         let sh = LocalSh { home: home_path };
         let (mut app, rx) = app_with_requests();
         app.mode = Mode::LaunchCwd;
@@ -1010,11 +996,18 @@ mod tests {
         serve(&mut app, &rx, &sh, true);
         assert_eq!(
             app.launch_cwd_hits,
-            vec![Hit::Remote {
-                host: "box".into(),
-                path: "~/full".into(),
-                problem: Some("not empty here — the mount would hide it".into()),
-            }]
+            vec![
+                Hit::Remote {
+                    host: "box".into(),
+                    path: "~/frozen".into(),
+                    problem: Some("read-only on the host".into()),
+                },
+                Hit::Remote {
+                    host: "box".into(),
+                    path: "~/full".into(),
+                    problem: None,
+                },
+            ]
         );
         // Taken anyway, it is kept with its problem, which greys the agents
         // that mount and not the shell.
@@ -1022,12 +1015,14 @@ mod tests {
         app.on_key(crate::ui::tests::key(KeyCode::Enter));
         serve(&mut app, &rx, &sh, true);
         let target = app.launch_remote.clone().expect("taken");
-        assert!(target.problem.is_some());
+        assert_eq!(target.problem.as_deref(), Some("read-only on the host"));
         let claude = tabs::Choice::Start(vec!["claude".into()]);
         assert!(
             app.launch_blocked(&claude)
-                .is_some_and(|why| why.contains("can't mount ~/full here"))
+                .is_some_and(|why| why.contains("can't work in ~/frozen"))
         );
+        std::fs::set_permissions(&frozen, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod back");
         // A path the host does not have is refused in the field.
         app.edit_launch_cwd();
         app.launch_cwd_input.set("box:~/nope".to_string());

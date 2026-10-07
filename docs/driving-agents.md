@@ -139,9 +139,13 @@ it exactly as it does here: its directories under what you typed, and, before a
 field says `connecting to procdb…`; a host that would need a password or a key
 prompt says so (`procdb: needs a password or key prompt — the tab will ask`), and
 `Enter` still takes the path, unchecked, for the tab to connect to
-interactively. A directory the sandbox could not use is listed with why, dimmed
-— `~/src/cctop  not empty here — the mount would hide it` — so you can still go
-into it. `Enter` asks the host whether the path is there before taking it.
+interactively. A directory the agent could not work in is listed with why,
+dimmed — `~/src/cctop  read-only on the host` — so you can still go into it.
+`Enter` asks the host whether the path is there before taking it. Any directory
+you can read and write on the host will do, whatever this machine has at that
+path: it is mounted at the same path when it can be, and under
+`~/.cache/cctop/remote/<host>/` when it cannot — see [where the mount
+goes](integrations.md#where-the-mount-goes).
 
 The launcher's line then reads `in procdb:~/proj`, and the agent you pick starts
 there: Claude and opencode through `cctop sandbox` (their commands run on the

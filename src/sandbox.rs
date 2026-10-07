@@ -14,11 +14,10 @@
 //!   instead of authenticating again. It is the user's own OpenSSH reading the
 //!   user's own config, so a host alias, a jump host or an agent-held key work
 //!   exactly as they do at a prompt.
-//! - **The path, mounted at the same path.** sshfs puts the host's `<path>` at
-//!   the identical absolute path here, so Read, Edit, Write, Glob and Grep —
-//!   which run in this process tree and know nothing of ssh — see the host's
-//!   files under the names the host's shell uses for them. One path means
-//!   nothing has to translate between the two.
+//! - **The path, mounted here.** sshfs puts the host's `<path>` on this
+//!   machine, so Read, Edit, Write, Glob and Grep — which run in this process
+//!   tree and know nothing of ssh — see the host's files. Where it goes is
+//!   [`remote_fs::mount_point`](crate::remote_fs::mount_point)'s choice, below.
 //! - **A shell that is not here.** Every command the agent runs is handed to
 //!   cctop instead of to a shell, which sends it to the host over the
 //!   connection, in the same directory, and brings back its output and its
@@ -29,12 +28,35 @@
 //! guard that refuses them anywhere else — without one, a read of
 //! `/etc/hosts` would quietly read *this* machine's.
 //!
-//! ponytail: the mount needs `<path>` to exist here, or to be creatable by this
-//! user. A path under a home that is root's here (`/home/someone-else/…`)
-//! needs a `sudo mkdir` first, and the error says so. A private user and mount
-//! namespace would lift that — mount anywhere, as nobody, visible to the agent
-//! alone — at the cost of the agent no longer sharing this machine's view of
-//! the filesystem, which the dashboard and `cctop hook` both rely on.
+//! ## One path when it can be, two names when it cannot
+//!
+//! The mount goes at the *same* absolute path as on the host when that path
+//! can be made here: an empty directory, or a missing one this user can
+//! create. Then a path means the same file to the file tools and to the
+//! host's shell, and nothing translates anything.
+//!
+//! Often it cannot be. The host's home is `/home/alice.smith`, this
+//! machine's user is `alice`, and `/home` is root's; or the path is here and
+//! full of this machine's own files. Then the mount goes under
+//! `~/.cache/cctop/remote/<host>/<path>` instead — stable, so Claude Code's
+//! per-directory history and `--resume` find it again next launch — and the
+//! directory has two names: `L`, where it is mounted here and where the agent
+//! works, and `R`, the host's own name for it. [`PathMap`] translates at the
+//! two places a name crosses from one machine to the other:
+//!
+//! - **Into a command** (`--sandbox-exec`, `--sandbox-shell`): the directory
+//!   the command starts in, and every `L` in the command's text, become `R`,
+//!   since the model writes the paths it has seen and it has seen `L`. Back
+//!   out of the call, the directory the command ended in becomes `L` again
+//!   before Claude Code reads it.
+//! - **Into a file tool** (`--sandbox-guard`): the host's commands print `R`
+//!   — `pwd`, `git rev-parse --show-toplevel`, a compiler's error — and the
+//!   model then asks Read or Edit for it. The guard hands Claude Code the same
+//!   call with `R` rewritten to `L`.
+//!
+//! Output is never rewritten: it is the host's, byte for byte. No environment
+//! crosses to the host either — a call carries a command line and a
+//! directory, nothing else — so there is none to translate.
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -50,6 +72,11 @@ pub const ENV_SANDBOX: &str = "CCTOP_SANDBOX";
 
 /// The ControlMaster's socket, for `--sandbox-exec` to ride.
 const ENV_SOCKET: &str = "CCTOP_SANDBOX_SOCKET";
+
+/// Where the host's directory is mounted here, set only when that is not the
+/// host's own path for it: the `L` of [`PathMap`], whose `R` is the path half
+/// of [`ENV_SANDBOX`].
+const ENV_MOUNT: &str = "CCTOP_SANDBOX_MOUNT";
 
 /// `statfs`'s answer for any FUSE filesystem, `fuse` and `fuseblk` alike.
 const FUSE_SUPER_MAGIC: i64 = 0x6573_5546;
@@ -167,6 +194,15 @@ pub fn host_of(sandbox: &str) -> &str {
     sandbox.split_once(':').map_or(sandbox, |(host, _)| host)
 }
 
+/// The path half of a `CCTOP_SANDBOX` value: the host's own name for the
+/// directory.
+fn path_of(sandbox: &str) -> Option<&str> {
+    sandbox
+        .strip_prefix(host_of(sandbox))?
+        .strip_prefix(':')
+        .filter(|p| !p.is_empty())
+}
+
 /// `text` as one word to a POSIX shell.
 ///
 /// Bare when it cannot be misread, so the command lines this builds stay
@@ -191,16 +227,16 @@ usage: cctop sandbox [--agent claude|opencode] <host>:<path> [agent args…]
 
 Run an agent here (Claude Code unless --agent says otherwise) with its shell
 commands running on <host>, in <path>, over one ssh connection, and <path>
-mounted here at the same path with sshfs so the file tools see the host's
-files. Nothing is installed on the host.
+mounted here with sshfs so the file tools see the host's files: at the same
+path when that can be made here, else under ~/.cache/cctop/remote/<host>/.
+Nothing is installed on the host.
 
   cctop sandbox devbox:/srv/api
   cctop sandbox devbox:~/src/api --model opus
   cctop sandbox --agent opencode devbox:~/src/api
 
 Needs sshfs and fusermount3 here, and offers to install sshfs when it is
-missing and the terminal can answer; bash and setsid on the host. <path> must exist here or be creatable by you: it is the
-mount point.";
+missing and the terminal can answer; bash and setsid on the host.";
 
 /// Set by the TUI on the sandbox it starts in a tab.
 ///
@@ -283,22 +319,34 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
     let probe = sandbox.probe(&spec.path)?;
     let root = PathBuf::from(&probe.root);
     // The same rules the launcher marks its suggestions with, so a directory
-    // that cannot be mounted on is refused here in the words the field used,
-    // before anything is created or mounted.
-    if let Err(why) = crate::remote_fs::verdict(
-        &root,
-        &crate::remote_fs::mounts_here(),
-        &crate::remote_fs::here(&root),
-        Some(&probe.facts()),
-    ) {
+    // that cannot be used is refused here in the words the field used, before
+    // anything is created or mounted.
+    if let Err(why) = crate::remote_fs::verdict(&probe.facts()) {
         anyhow::bail!("{}:{} can't be used: {why}", spec.host, probe.root);
     }
-    sandbox.created = prepare_mountpoint(&root, sandbox.fusermount)?;
-    eprintln!(
-        "cctop sandbox: mounting {}:{} at the same path here…",
-        spec.host, probe.root
-    );
-    sandbox.mount(&root)?;
+    let point = crate::remote_fs::mount_point(
+        &spec.host,
+        &root,
+        &crate::remote_fs::mounts_here(),
+        &crate::remote_fs::here,
+        &crate::config::CACHE_DIR.join("remote"),
+    )
+    .map_err(|why| anyhow::anyhow!("{}:{} can't be mounted: {why}", spec.host, probe.root))?;
+    sandbox.created = prepare_mountpoint(&point, sandbox.fusermount)?;
+    match point == root {
+        true => eprintln!(
+            "cctop sandbox: mounting {}:{} at the same path here…",
+            spec.host, probe.root
+        ),
+        false => eprintln!(
+            "cctop sandbox: mounting {}:{} at {}…",
+            spec.host,
+            probe.root,
+            point.display()
+        ),
+    }
+    sandbox.mount(&probe.root, &point)?;
+    let map = PathMap::new(&point, &root);
 
     let target = format!("{}:{}", spec.host, probe.root);
     let mut env = vec![
@@ -308,6 +356,9 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
             sandbox.socket.to_string_lossy().into_owned(),
         ),
     ];
+    if map.is_some() {
+        env.push((ENV_MOUNT.to_string(), point.to_string_lossy().into_owned()));
+    }
     let mut argv = vec![agent.clone()];
     match reach(&agent) {
         Reach::ShellPrefix => {
@@ -330,9 +381,9 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
                 // Scoped to this launch: the user's settings files are not
                 // touched, and the guard does not outlive the sandbox it guards.
                 "--settings".to_string(),
-                guard_settings(&exe, &probe.root),
+                guard_settings(&exe, &point, map.as_ref()),
                 "--append-system-prompt".to_string(),
-                system_prompt(&spec.host, &probe),
+                system_prompt(&spec.host, &probe, map.as_ref()),
             ]);
         }
         Reach::ShellSetting => {
@@ -354,7 +405,7 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
     argv.extend(args[1..].iter().cloned());
 
     let stop = Stop::install();
-    let code = crate::shim::run_in(&argv, Some(&root), &env, |pid| stop.watch(pid))?;
+    let code = crate::shim::run_in(&argv, Some(&point), &env, |pid| stop.watch(pid))?;
     // Dropping `sandbox` unmounts and closes the connection.
     drop(sandbox);
     Ok(code)
@@ -625,8 +676,8 @@ impl Sandbox {
         Ok(said)
     }
 
-    /// Mount the host's `root` at `root` here and wait until it is up.
-    fn mount(&mut self, root: &Path) -> anyhow::Result<()> {
+    /// Mount the host's `remote` at `root` here and wait until it is up.
+    fn mount(&mut self, remote: &str, root: &Path) -> anyhow::Result<()> {
         let (log, stderr) = self.log_file("sshfs");
         let ssh_command = format!(
             "ssh -S {} -o ControlMaster=no -o BatchMode=yes",
@@ -645,7 +696,7 @@ impl Sandbox {
                 "idmap=user,reconnect,auto_cache,attr_timeout=1,entry_timeout=1,\
                  negative_timeout=0,dcache_timeout=1",
             ])
-            .arg(format!("{}:{}", self.host, root.display()))
+            .arg(format!("{}:{remote}", self.host))
             .arg(root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -847,8 +898,7 @@ fn prepare_mountpoint(root: &Path, fusermount: &str) -> anyhow::Result<Vec<PathB
             // ran, and they would look like the host's.
             if std::fs::read_dir(root)?.next().is_some() {
                 anyhow::bail!(
-                    "{} exists here and is not empty; the host's directory is mounted at the \
-                     same path, and would hide what is there",
+                    "{} exists here and is not empty, and the mount would hide what is there",
                     root.display()
                 );
             }
@@ -861,11 +911,8 @@ fn prepare_mountpoint(root: &Path, fusermount: &str) -> anyhow::Result<Vec<PathB
                 .map(Path::to_path_buf)
                 .collect();
             if let Err(e) = std::fs::create_dir_all(root) {
-                let quoted = sh_quote(&root.to_string_lossy());
                 anyhow::bail!(
-                    "{} has to exist here to mount the host's directory on, and could not be \
-                     created ({e}). Make it once with:\n  sudo mkdir -p {quoted} && sudo chown \
-                     $USER {quoted}",
+                    "could not create {} to mount the host's directory on ({e})",
                     root.display()
                 );
             }
@@ -910,13 +957,19 @@ fn is_fuse_mount(path: &Path) -> bool {
     rc == 0 && buf.f_type as i64 == FUSE_SUPER_MAGIC
 }
 
-/// The `--settings` that installs the guard for this launch alone.
-fn guard_settings(exe: &Path, root: &str) -> String {
-    let command = format!(
+/// The `--settings` that installs the guard for this launch alone: the mount
+/// it keeps the file tools inside, and the host's name for it when that is
+/// another, for the guard to translate.
+fn guard_settings(exe: &Path, mount: &Path, map: Option<&PathMap>) -> String {
+    let mut command = format!(
         "{} --sandbox-guard {}",
         sh_quote(&exe.to_string_lossy()),
-        sh_quote(root)
+        sh_quote(&mount.to_string_lossy())
     );
+    if let Some(map) = map {
+        command.push_str(" --remote ");
+        command.push_str(&sh_quote(&map.remote));
+    }
     serde_json::json!({
         "hooks": {
             "PreToolUse": [{
@@ -929,19 +982,157 @@ fn guard_settings(exe: &Path, root: &str) -> String {
 }
 
 /// What the model is told about where it is.
-fn system_prompt(host: &str, probe: &Probe) -> String {
+fn system_prompt(host: &str, probe: &Probe, map: Option<&PathMap>) -> String {
+    let mount = match map {
+        None => format!(
+            "see the host's {root} through an sshfs mount at the same path",
+            root = probe.root
+        ),
+        Some(map) => format!(
+            "see the host's {root} through an sshfs mount at {local}, which is your working \
+             directory. The two names are one directory: in a Bash command, {local} is \
+             rewritten to {root} before it is sent, and a file tool given a path under {root} \
+             is pointed at {local} — so either name works, though output from the host will \
+             say {root}",
+            root = map.remote,
+            local = map.local,
+        ),
+    };
     format!(
         "You are working on the remote host `{host}` (hostname `{hostname}`, {uname}) through \
-         cctop sandbox. Your Bash tool runs every command on that host, over ssh, in the same \
-         working directory — programs, services, processes, package managers and environment \
-         are the host's. The file tools (Read, Edit, Write, Glob, Grep, NotebookEdit) run on the \
-         local machine and see the host's {root} through an sshfs mount at the same path; they \
-         are refused anywhere outside it. To read or change any other path on the host, use \
-         Bash.",
+         cctop sandbox. Your Bash tool runs every command on that host, over ssh, in the \
+         matching working directory — programs, services, processes, package managers and \
+         environment are the host's. The file tools (Read, Edit, Write, Glob, Grep, \
+         NotebookEdit) run on the local machine and {mount}; they are refused anywhere outside \
+         it. To read or change any other path on the host, use Bash.",
         hostname = probe.hostname,
         uname = probe.uname,
-        root = probe.root,
     )
+}
+
+// ---------------------------------------------------------------------------
+// The directory's two names
+// ---------------------------------------------------------------------------
+
+/// The mounted directory's name here (`local`, L) and on the host (`remote`,
+/// R), when they differ. When they do not there is no map, and nothing is
+/// translated anywhere.
+///
+/// Paths are mapped by components, so `/x/ab` is never taken for something
+/// under `/x/a`. A command's *text* is mapped by [`swap`], which only takes `L`
+/// where it stands as a whole path or a path's leading part. That is safe to
+/// do blind — without parsing the shell — because of what `L` is: a long path
+/// under `~/.cache/cctop/remote/<host>/`, which no command contains except
+/// where it means this directory. Inside quotes, in an argument, after `=` or
+/// in a `PATH`-style list, an `L` is still a reference to the mount, and `R`
+/// is what the host calls it.
+///
+/// ponytail: the host's name is inserted as it is. An `R` with a space or a
+/// quote in it, where the model wrote `L` bare or quoted the other way,
+/// changes how the host's shell splits the command; and an `L` the model
+/// spelled differently (`~/.cache/…`, a backslash-escaped space) is not seen.
+/// Every home directory and project path anyone has pointed this at has
+/// neither, and both would need shell parsing to do properly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathMap {
+    pub local: String,
+    pub remote: String,
+}
+
+impl PathMap {
+    /// The map from `local` to `remote`, or `None` when they are one path.
+    pub fn new(local: &Path, remote: &Path) -> Option<PathMap> {
+        (local != remote).then(|| PathMap {
+            local: local.to_string_lossy().into_owned(),
+            remote: remote.to_string_lossy().into_owned(),
+        })
+    }
+
+    /// The map a sandbox set up for the agent, read back in a helper it ran.
+    fn from_env() -> Option<PathMap> {
+        let local = std::env::var(ENV_MOUNT)
+            .ok()
+            .filter(|l| l.starts_with('/'))?;
+        let target = std::env::var(ENV_SANDBOX).ok()?;
+        let remote = path_of(&target).filter(|r| r.starts_with('/'))?;
+        PathMap::new(Path::new(&local), Path::new(remote))
+    }
+
+    /// A path here as the host names it; anything outside the mount as it is.
+    pub fn to_remote(&self, path: &Path) -> PathBuf {
+        rebase(path, Path::new(&self.local), Path::new(&self.remote))
+    }
+
+    /// A path on the host as it is named here; anything outside as it is.
+    pub fn to_local(&self, path: &Path) -> PathBuf {
+        rebase(path, Path::new(&self.remote), Path::new(&self.local))
+    }
+
+    /// A command line with every `L` in it made `R`.
+    pub fn command_to_remote<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        swap(text, &self.local, &self.remote)
+    }
+}
+
+/// `path` moved from under `from` to under `to`, if it is under `from`.
+fn rebase(path: &Path, from: &Path, to: &Path) -> PathBuf {
+    match path.strip_prefix(from) {
+        Ok(rest) if rest.as_os_str().is_empty() => to.to_path_buf(),
+        Ok(rest) => to.join(rest),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// Bytes that continue a file name: `from` followed by one of these is the
+/// start of some other name (`/x/ab` after `/x/a`), and one of these — or a
+/// `/` — before it makes it the tail of a longer path.
+fn names_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"._-+~@%".contains(&b) || b >= 0x80
+}
+
+/// Every `from` in `text` that is a path or a path's leading part, made `to`.
+///
+/// "A path's leading part" by the bytes around it: nothing that continues a
+/// name, and no `/`, before it; the end, a `/`, or something that is not part
+/// of a name after it. So `'L'`, `"L/src"`, `--dir=L`, `PATH=L/bin:$PATH` and
+/// `cd L && make` are all taken; `L.bak`, `Lx/` and `/other/L` are not.
+pub fn swap<'a>(text: &'a str, from: &str, to: &str) -> std::borrow::Cow<'a, str> {
+    if from.is_empty() || from == "/" || !text.contains(from) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(found) = text[at..].find(from) {
+        let start = at + found;
+        let end = start + from.len();
+        let before_ok = start == 0 || {
+            let b = bytes[start - 1];
+            b != b'/' && !names_byte(b)
+        };
+        let after_ok = bytes.get(end).is_none_or(|&b| b == b'/' || !names_byte(b));
+        if before_ok && after_ok {
+            out.push_str(&text[copied..start]);
+            // The host's root itself: `L/src` is `/src`, not `//src`.
+            match (to, bytes.get(end)) {
+                ("/", Some(b'/')) => {}
+                _ => out.push_str(to),
+            }
+            copied = end;
+            at = end;
+        } else {
+            // One byte on, not past it: `from` starts with `/`, so this is a
+            // character boundary, and an occurrence overlapping this one is
+            // still found.
+            at = start + 1;
+        }
+    }
+    if copied == 0 {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    out.push_str(&text[copied..]);
+    std::borrow::Cow::Owned(out)
 }
 
 /// Ending the agent when cctop itself is told to stop.
@@ -1065,7 +1256,14 @@ pub fn exec(args: &[String]) -> i32 {
     let socket = std::env::var_os(ENV_SOCKET).filter(|s| !s.is_empty());
     match (classify(command), target, socket) {
         (Call::Remote { head, cwd_file }, Some(target), Some(socket)) => {
-            match remote(head, Some(&cwd_file), &target, Path::new(&socket)) {
+            let map = PathMap::from_env();
+            match remote(
+                head,
+                Some(&cwd_file),
+                &target,
+                Path::new(&socket),
+                map.as_ref(),
+            ) {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!(
@@ -1152,16 +1350,28 @@ pub fn shell(args: &[String]) -> i32 {
         return 126;
     };
     let host = host_of(&target);
+    // ponytail: opencode's file tools get no translation. It has no hook that
+    // can rewrite a tool's input, so a host path it read in a command's output
+    // and handed to Read stays the host's name — and its `external_directory`
+    // rule refuses it as outside the directory it started in, which is at
+    // least a refusal and not a read of this machine's file.
+    let map = PathMap::from_env();
     match shell_call(args) {
-        ShellCall::Command(command) => match remote(command, None, &target, Path::new(&socket)) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("cctop sandbox: could not run this on {host}: {e}");
-                255
+        ShellCall::Command(command) => {
+            match remote(command, None, &target, Path::new(&socket), map.as_ref()) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("cctop sandbox: could not run this on {host}: {e}");
+                    255
+                }
             }
-        },
+        }
         ShellCall::Interactive => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            let cwd = match &map {
+                Some(map) => map.to_remote(&cwd),
+                None => cwd,
+            };
             let line = format!(
                 "cd -- {} 2>/dev/null; exec \"${{SHELL:-sh}}\" -l",
                 sh_quote(&cwd.to_string_lossy())
@@ -1190,19 +1400,30 @@ pub fn shell(args: &[String]) -> i32 {
 }
 
 /// Run one Bash call on the host and report back as bash would have.
-fn remote(head: &str, cwd_file: Option<&str>, target: &str, socket: &Path) -> std::io::Result<i32> {
+///
+/// With a `map`, the call is translated on its way out — its directory and
+/// its text, `L` to `R` — and the directory it ended in on its way back, `R`
+/// to `L`, since that is where Claude Code's next call starts here. Its output
+/// is not: that is the host speaking.
+fn remote(
+    head: &str,
+    cwd_file: Option<&str>,
+    target: &str,
+    socket: &Path,
+    map: Option<&PathMap>,
+) -> std::io::Result<i32> {
     let host = host_of(target);
-    let cwd = std::env::current_dir()?;
+    let (head, cwd) = outbound(head, &std::env::current_dir()?, map);
     let nonce = nonce();
     let mut cmd = Command::new("ssh");
     cmd.args(mux_args(socket))
         .arg(host)
         .arg("--")
-        .arg(remote_line(head, &nonce, &cwd.to_string_lossy()));
+        .arg(remote_line(&head, &nonce, &cwd.to_string_lossy()));
     let mut stderr = std::io::stderr();
     let (code, cwd_now) = run_remote(cmd, &nonce, &mut stderr)?;
     if let (Some(dir), Some(file)) = (cwd_now, cwd_file) {
-        let _ = std::fs::write(file, format!("{dir}\n"));
+        let _ = std::fs::write(file, format!("{}\n", inbound(dir, map)));
     }
     if code == 255 {
         let _ = writeln!(
@@ -1212,6 +1433,26 @@ fn remote(head: &str, cwd_file: Option<&str>, target: &str, socket: &Path) -> st
         );
     }
     Ok(code)
+}
+
+/// A call's command and directory as the host is to be given them.
+fn outbound<'a>(
+    head: &'a str,
+    cwd: &Path,
+    map: Option<&PathMap>,
+) -> (std::borrow::Cow<'a, str>, PathBuf) {
+    match map {
+        Some(map) => (map.command_to_remote(head), map.to_remote(cwd)),
+        None => (std::borrow::Cow::Borrowed(head), cwd.to_path_buf()),
+    }
+}
+
+/// The directory a call ended in on the host, as Claude Code is to be told it.
+fn inbound(dir: String, map: Option<&PathMap>) -> String {
+    match map {
+        Some(map) => map.to_local(Path::new(&dir)).to_string_lossy().into_owned(),
+        None => dir,
+    }
 }
 
 /// A tag no command's output will contain by accident.
@@ -1404,12 +1645,17 @@ fn partial_suffix(buf: &[u8], tag: &[u8]) -> usize {
 // `cctop --sandbox-guard`: keeping the file tools inside the mount
 // ---------------------------------------------------------------------------
 
-/// `cctop --sandbox-guard <root>…`, the PreToolUse hook a sandbox installs.
+/// `cctop --sandbox-guard <mount>… [--remote <host path>]`, the PreToolUse
+/// hook a sandbox installs.
 ///
 /// Not `cctop hook`, which must never answer with a decision; this one exists
 /// to answer with one. Like it, though, it always exits 0: a crash here would
 /// be read as a block with whatever it printed as the reason.
-pub fn guard(roots: &[String]) -> i32 {
+///
+/// With `--remote`, the mount is not at the host's path, and a file tool given
+/// the host's name for a file is handed back its name here instead — see
+/// [`answer`].
+pub fn guard(args: &[String]) -> i32 {
     std::panic::set_hook(Box::new(|_| std::process::exit(0)));
     let mut input = Vec::new();
     if std::io::stdin()
@@ -1426,19 +1672,119 @@ pub fn guard(roots: &[String]) -> i32 {
         .ok()
         .map(|t| host_of(&t).to_string())
         .unwrap_or_else(|| "the host".to_string());
+    let (roots, remote) = match args.iter().position(|a| a == "--remote") {
+        Some(at) => (&args[..at], args.get(at + 1)),
+        None => (args, None),
+    };
+    let map = match (roots.first(), remote) {
+        (Some(local), Some(remote)) => PathMap::new(Path::new(local), Path::new(remote)),
+        _ => None,
+    };
     let roots: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
-    let allowed = own_state_dirs();
-    if let Some(reason) = refusal(&event, &roots, &allowed, &host) {
-        let answer = serde_json::json!({
+    if let Some(answer) = answer(&event, &roots, &own_state_dirs(), &host, map.as_ref()) {
+        println!("{answer}");
+    }
+    0
+}
+
+/// What the guard says about one tool call: a refusal, the call rewritten
+/// onto the mount, or nothing — which lets it through untouched.
+///
+/// A rewrite is `updatedInput` with no `permissionDecision`. Claude Code
+/// (2.1.x) replaces the call's input with it and then runs its own permission
+/// check on the new input, as if the model had asked for that path — so an
+/// Edit still asks when it would have asked. An `allow` beside it would have
+/// skipped that check, which is not this hook's to skip. The input is sent
+/// whole, since it replaces rather than merges.
+fn answer(
+    event: &serde_json::Value,
+    roots: &[PathBuf],
+    own: &[PathBuf],
+    host: &str,
+    map: Option<&PathMap>,
+) -> Option<serde_json::Value> {
+    let updated = map.and_then(|map| rewrite(event, map, own));
+    let reason = match &updated {
+        Some(input) => {
+            let mut event = event.clone();
+            event["tool_input"] = input.clone();
+            refusal(&event, roots, own, host)
+        }
+        None => refusal(event, roots, own, host),
+    };
+    match (reason, updated) {
+        (Some(reason), _) => Some(serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
             },
-        });
-        println!("{answer}");
+        })),
+        (None, Some(input)) => Some(serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": input,
+            },
+        })),
+        (None, None) => None,
     }
-    0
+}
+
+/// The tool call's input with the host's name for the directory made this
+/// machine's, or `None` when no path in it is the host's.
+///
+/// Only the fields that are paths, only when absolute — a relative one is
+/// already relative to the working directory, which is the mount — and never
+/// one already on the mount or one of Claude Code's own files, both of which
+/// could otherwise look like the host's when the host's directory is `/` or
+/// shares a name with this machine's home.
+fn rewrite(event: &serde_json::Value, map: &PathMap, own: &[PathBuf]) -> Option<serde_json::Value> {
+    let tool = event.get("tool_name")?.as_str()?;
+    let input = event.get("tool_input")?.as_object()?;
+    let keys: &[&str] = match tool {
+        "Read" | "Edit" | "Write" | "MultiEdit" => &["file_path"],
+        "NotebookEdit" => &["notebook_path"],
+        // A Glob pattern may be a path with wildcards in it; Grep's `glob` is
+        // a file-name filter, never a directory.
+        "Glob" => &["path", "pattern"],
+        "Grep" => &["path"],
+        _ => return None,
+    };
+    let local = Path::new(&map.local);
+    let remote = Path::new(&map.remote);
+    let mut out = input.clone();
+    let mut changed = false;
+    for key in keys {
+        let Some(path) = input.get(*key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !path.starts_with('/') {
+            continue;
+        }
+        let seen = normalise(Path::new(path));
+        if seen.starts_with(local)
+            || own.iter().any(|dir| is_claude_state(&seen, dir))
+            || !seen.starts_with(remote)
+        {
+            continue;
+        }
+        // By text, not through `normalise`: a Glob pattern keeps its
+        // wildcards and a path its `..`, which the refusal then judges.
+        let moved = match map.remote.as_str() {
+            "/" => format!("{}{path}", map.local),
+            prefix => match path.strip_prefix(prefix) {
+                Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                    format!("{}{rest}", map.local)
+                }
+                // `/R/./x`, `/R//x`: the same place, spelled so the text
+                // does not start with R. The normalised path says where.
+                _ => map.to_local(&seen).to_string_lossy().into_owned(),
+            },
+        };
+        out.insert(key.to_string(), serde_json::Value::String(moved));
+        changed = true;
+    }
+    changed.then_some(serde_json::Value::Object(out))
 }
 
 /// Where Claude Code keeps its own files on this machine, which it must go on
@@ -1859,16 +2205,18 @@ mod tests {
         assert!(err.to_string().contains("not empty"), "{err}");
     }
 
+    /// Only a race gets here — the mount point was chosen because it could be
+    /// made — so the error says what failed and asks nothing of the person.
     #[test]
-    fn a_mountpoint_that_cannot_be_made_says_how() {
+    fn a_mountpoint_that_cannot_be_made_says_why() {
         let err = prepare_mountpoint(Path::new("/proc/cctop-sandbox-test/x"), "fusermount3")
             .expect_err("cannot be made");
         let text = err.to_string();
         assert!(
-            text.contains("sudo mkdir -p /proc/cctop-sandbox-test/x"),
+            text.contains("could not create /proc/cctop-sandbox-test/x"),
             "{text}"
         );
-        assert!(text.contains("sudo chown $USER"), "{text}");
+        assert!(!text.contains("sudo"), "{text}");
     }
 
     #[test]
@@ -1894,13 +2242,277 @@ mod tests {
 
     #[test]
     fn the_guard_is_installed_for_the_file_tools_alone() {
-        let settings = guard_settings(Path::new("/usr/bin/cctop"), "/srv/my app");
+        let exe = Path::new("/usr/bin/cctop");
+        let settings = guard_settings(exe, Path::new("/srv/my app"), None);
         let v: serde_json::Value = serde_json::from_str(&settings).expect("json");
         let entry = &v["hooks"]["PreToolUse"][0];
         assert_eq!(entry["matcher"], FILE_TOOLS);
         assert_eq!(
             entry["hooks"][0]["command"],
             "/usr/bin/cctop --sandbox-guard '/srv/my app'"
+        );
+        // Mounted elsewhere: the guard is told the host's name too.
+        let map = PathMap::new(Path::new(L), Path::new(R));
+        let settings = guard_settings(exe, Path::new(L), map.as_ref());
+        let v: serde_json::Value = serde_json::from_str(&settings).expect("json");
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            format!("/usr/bin/cctop --sandbox-guard {L} --remote {R}")
+        );
+    }
+
+    /// The everyday pair: a host's home with no such home here.
+    const L: &str = "/home/flo/.cache/cctop/remote/procdb/home/florian.leprat";
+    const R: &str = "/home/florian.leprat";
+
+    fn map() -> PathMap {
+        PathMap::new(Path::new(L), Path::new(R)).expect("two names")
+    }
+
+    #[test]
+    fn one_path_needs_no_map() {
+        assert_eq!(PathMap::new(Path::new(R), Path::new(R)), None);
+        assert!(PathMap::new(Path::new(L), Path::new(R)).is_some());
+    }
+
+    #[test]
+    fn a_command_is_given_the_hosts_name() {
+        let m = map();
+        let out = |text: &str| m.command_to_remote(text).into_owned();
+        assert_eq!(
+            out(&format!("cat {L}/src/x.rs")),
+            format!("cat {R}/src/x.rs")
+        );
+        assert_eq!(out(&format!("cd {L}")), format!("cd {R}"));
+        // Inside quotes of either kind, after `=`, in a list.
+        assert_eq!(
+            out(&format!("eval 'ls \"{L}/a b\"' && x='{L}'")),
+            format!("eval 'ls \"{R}/a b\"' && x='{R}'")
+        );
+        assert_eq!(
+            out(&format!("PATH={L}/bin:{L}/node/bin:$PATH make --dir={L}")),
+            format!("PATH={R}/bin:{R}/node/bin:$PATH make --dir={R}")
+        );
+        // Every occurrence, side by side.
+        assert_eq!(
+            out(&format!("diff {L}/a {L}/b")),
+            format!("diff {R}/a {R}/b")
+        );
+        // Untouched: no L at all, and things that only start like it.
+        assert_eq!(out("git status"), "git status");
+        assert!(matches!(
+            m.command_to_remote("git status"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        for other in [
+            format!("{L}x/y"),
+            format!("{L}.bak"),
+            format!("{L}-old"),
+            format!("/mnt{L}"),
+            format!("x{L}"),
+        ] {
+            assert_eq!(out(&other), other, "{other}");
+        }
+    }
+
+    /// The boundary is the point: `/x/a` is not a prefix of `/x/ab`.
+    #[test]
+    fn a_path_boundary_is_a_whole_name() {
+        assert_eq!(swap("/x/ab /x/a /x/a/b", "/x/a", "/R"), "/x/ab /R /R/b");
+        assert_eq!(swap("cd /x/a;ls", "/x/a", "/R"), "cd /R;ls");
+        assert_eq!(swap("(/x/a)", "/x/a", "/R"), "(/R)");
+        // Overlapping spellings: the second one is still found.
+        assert_eq!(swap("/a/a/a /a/a", "/a/a", "/R"), "/R/a /R");
+        // The host's root: `L/src` is `/src`.
+        assert_eq!(swap("ls /m/src /m", "/m", "/"), "ls /src /");
+        // Nothing to swap from.
+        assert_eq!(swap("ls /", "/", "/R"), "ls /");
+    }
+
+    #[test]
+    fn a_path_goes_across_by_components() {
+        let m = map();
+        assert_eq!(m.to_remote(Path::new(L)), Path::new(R));
+        assert_eq!(
+            m.to_remote(&Path::new(L).join("src")),
+            Path::new(R).join("src")
+        );
+        assert_eq!(
+            m.to_local(&Path::new(R).join("a/b")),
+            Path::new(L).join("a/b")
+        );
+        // Outside the directory: as it is, whichever way.
+        assert_eq!(m.to_remote(Path::new("/tmp/x")), Path::new("/tmp/x"));
+        assert_eq!(
+            m.to_local(Path::new("/home/florian.leprat2")),
+            Path::new("/home/florian.leprat2")
+        );
+        assert_eq!(m.to_local(Path::new("/etc")), Path::new("/etc"));
+    }
+
+    /// What a call carries out and brings back: `L` out, `R` back in.
+    #[test]
+    fn a_call_is_translated_out_and_its_directory_back() {
+        let m = map();
+        let command = format!("eval 'cat {L}/README'");
+        let (head, cwd) = outbound(&command, &Path::new(L).join("src"), Some(&m));
+        assert_eq!(head, format!("eval 'cat {R}/README'"));
+        assert_eq!(cwd, Path::new(R).join("src"));
+        assert_eq!(
+            inbound(format!("{R}/src/sub"), Some(&m)),
+            format!("{L}/src/sub")
+        );
+        assert_eq!(inbound("/var/log".into(), Some(&m)), "/var/log");
+        // No map: as it was.
+        let (head, cwd) = outbound("eval ls", Path::new(R), None);
+        assert_eq!((head.as_ref(), cwd.as_path()), ("eval ls", Path::new(R)));
+        assert_eq!(inbound(R.into(), None), R);
+    }
+
+    #[test]
+    fn the_sandbox_value_splits_into_host_and_path() {
+        assert_eq!(path_of("procdb:/home/f"), Some("/home/f"));
+        assert_eq!(path_of("[::1]:/srv"), Some("/srv"));
+        assert_eq!(path_of("procdb:/a:b"), Some("/a:b"));
+        assert_eq!(path_of("procdb"), None);
+        assert_eq!(path_of("procdb:"), None);
+    }
+
+    fn guard_says(tool: &str, input: serde_json::Value) -> Option<serde_json::Value> {
+        let event = serde_json::json!({"tool_name": tool, "tool_input": input, "cwd": L});
+        let own = [PathBuf::from("/home/flo/.claude"), PathBuf::from("/tmp")];
+        answer(&event, &[PathBuf::from(L)], &own, "procdb", Some(&map()))
+    }
+
+    /// A file tool given the host's name for a file is handed the same call
+    /// with this machine's — every other field kept, no decision taken.
+    #[test]
+    fn the_guard_points_a_host_path_at_the_mount() {
+        use serde_json::json;
+        let rewritten = |tool: &str, input: serde_json::Value, want: serde_json::Value| {
+            assert_eq!(
+                guard_says(tool, input),
+                Some(json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "updatedInput": want,
+                    },
+                })),
+                "{tool}"
+            );
+        };
+        rewritten(
+            "Read",
+            json!({"file_path": format!("{R}/src/x.rs"), "offset": 10, "limit": 5}),
+            json!({"file_path": format!("{L}/src/x.rs"), "offset": 10, "limit": 5}),
+        );
+        rewritten(
+            "Edit",
+            json!({"file_path": format!("{R}/a"), "old_string": "x", "new_string": "y"}),
+            json!({"file_path": format!("{L}/a"), "old_string": "x", "new_string": "y"}),
+        );
+        rewritten(
+            "Write",
+            json!({"file_path": format!("{R}/new.txt"), "content": "hi"}),
+            json!({"file_path": format!("{L}/new.txt"), "content": "hi"}),
+        );
+        rewritten(
+            "MultiEdit",
+            json!({"file_path": format!("{R}/a"), "edits": [{"old_string": "x", "new_string": "y"}]}),
+            json!({"file_path": format!("{L}/a"), "edits": [{"old_string": "x", "new_string": "y"}]}),
+        );
+        rewritten(
+            "NotebookEdit",
+            json!({"notebook_path": format!("{R}/n.ipynb"), "new_source": "1"}),
+            json!({"notebook_path": format!("{L}/n.ipynb"), "new_source": "1"}),
+        );
+        rewritten(
+            "Glob",
+            json!({"pattern": format!("{R}/src/**/*.rs")}),
+            json!({"pattern": format!("{L}/src/**/*.rs")}),
+        );
+        rewritten(
+            "Glob",
+            json!({"pattern": "*.rs", "path": R}),
+            json!({"pattern": "*.rs", "path": L}),
+        );
+        rewritten(
+            "Grep",
+            json!({"pattern": "fn main", "path": format!("{R}/src"), "glob": "*.rs"}),
+            json!({"pattern": "fn main", "path": format!("{L}/src"), "glob": "*.rs"}),
+        );
+        // Spelled oddly, it is still the host's directory.
+        rewritten(
+            "Read",
+            json!({"file_path": "/home/./florian.leprat/x"}),
+            json!({"file_path": format!("{L}/x")}),
+        );
+    }
+
+    /// The rest is as it was: let through untouched, or refused.
+    #[test]
+    fn the_guard_still_refuses_what_is_not_on_the_mount() {
+        use serde_json::json;
+        // Already this machine's name for it, relative, or Claude Code's own.
+        assert_eq!(
+            guard_says("Read", json!({"file_path": format!("{L}/x")})),
+            None
+        );
+        assert_eq!(guard_says("Read", json!({"file_path": "src/x"})), None);
+        assert_eq!(guard_says("Glob", json!({"pattern": "**/*.rs"})), None);
+        assert_eq!(
+            guard_says(
+                "Write",
+                json!({"file_path": "/home/flo/.claude/plans/p.md"})
+            ),
+            None
+        );
+        assert_eq!(
+            guard_says("Bash", json!({"command": format!("cat {R}/x")})),
+            None
+        );
+        // Neither name: refused, as before.
+        let denied = |input| {
+            guard_says("Read", input)
+                .and_then(|a| {
+                    a["hookSpecificOutput"]["permissionDecision"]
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(denied(json!({"file_path": "/etc/hosts"})), "deny");
+        assert_eq!(
+            denied(json!({"file_path": "/home/florian.leprat2/x"})),
+            "deny"
+        );
+        // Out of the host's directory by `..`: rewritten, and then refused.
+        assert_eq!(
+            denied(json!({"file_path": format!("{R}/../other/x")})),
+            "deny"
+        );
+    }
+
+    /// A host whose whole filesystem is mounted: every absolute path is the
+    /// host's — except the mount itself and Claude Code's own files.
+    #[test]
+    fn the_hosts_root_is_translated_without_swallowing_this_machine() {
+        use serde_json::json;
+        let local = "/home/flo/.cache/cctop/remote/procdb";
+        let map = PathMap::new(Path::new(local), Path::new("/")).expect("map");
+        let own = [PathBuf::from("/home/flo/.claude"), PathBuf::from("/tmp")];
+        let say = |path: &str| {
+            let event =
+                json!({"tool_name": "Read", "tool_input": {"file_path": path}, "cwd": local});
+            answer(&event, &[PathBuf::from(local)], &own, "procdb", Some(&map))
+                .map(|a| a["hookSpecificOutput"]["updatedInput"]["file_path"].clone())
+        };
+        assert_eq!(say("/etc/hosts"), Some(json!(format!("{local}/etc/hosts"))));
+        assert_eq!(say(&format!("{local}/etc/hosts")), None);
+        assert_eq!(say("/home/flo/.claude/x"), None);
+        assert_eq!(
+            map.command_to_remote(&format!("cat {local}/etc/hosts")),
+            "cat /etc/hosts"
         );
     }
 

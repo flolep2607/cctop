@@ -526,7 +526,7 @@ fn launch_cwd_hosts() {
 }
 
 /// A host in the field: its directories completed like local ones, one marked
-/// with why the sandbox could not mount it — and, for a host that would need a
+/// with why the agent could not work in it — and, for a host that would need a
 /// prompt, the line that says so instead of a list.
 #[test]
 fn launch_cwd_remote() {
@@ -557,10 +557,7 @@ fn launch_cwd_remote() {
     };
     app.launch_cwd_hits = vec![
         remote("~/src/api", None),
-        remote(
-            "~/src/cctop",
-            Some("not empty here — the mount would hide it"),
-        ),
+        remote("~/src/cctop", Some("read-only on the host")),
         remote("~/src/web", None),
     ];
     app.mode = Mode::LaunchCwd;
