@@ -211,6 +211,10 @@ insta = "1.48.0"
 #
 # A [patch] applies to builds of this repository — CI, the release binaries —
 # and not to `cargo install cctop` from crates.io, which resolves the published
-# 0.3.1; that path keeps today's behaviour until upstream is fixed.
+# 0.3.1. That matters: every terminal share leaves the machine through this
+# client now (`rmux::share_link_with`), so a crates.io build hands out share
+# links whose socket is refused at the tunnel — the page loads, the terminal
+# never connects. Loopback shares and the release binaries are unaffected.
+# Drop the patch, and that caveat, once upstream publishes the fix.
 [patch.crates-io]
 cloudflare-quick-tunnel = { path = "vendor/cloudflare-quick-tunnel" }

@@ -633,23 +633,6 @@ fn local(session: &Session) -> Result<(), Failed> {
     }
 }
 
-/// Mint a link to this session's own terminal, for the page to frame.
-///
-/// Only reaches an agent cctop handed to the multiplexer — the same limit `a`
-/// and `W` have in the terminal, and for the same reason: an agent on cctop's
-/// own pty is on no terminal a second viewer can be pointed at.
-///
-/// One share per session, reused — see [`crate::rmux::share_link`]. A link
-/// minted afresh on every ask left a row in `rmux web-share list` per page
-/// reload and, because each tunnelled one dials a rate-limited public relay,
-/// eventually came back untunnelled. Reusing it also matches what is true:
-/// there is one terminal here, however many people are looking at the page.
-///
-/// rmux raises the tunnel — see [`crate::rmux::web_share`] for why cctop's own
-/// one cannot carry a share — and a machine with no way out falls back to a
-/// loopback link rather than to nothing. Which of the two it got is in the
-/// answer, because a link that only opens on the server's own desk is not a
-/// failure the reader can see.
 /// The frontend a page asked its terminal to open in: its own origin's copy of
 /// rmux's app at `/term/`. Only a bare `http(s)://host[:port]` is taken — a
 /// path, a query or another scheme is a request this page never sends — and
@@ -665,6 +648,23 @@ pub fn frontend_for(origin: &str) -> Option<String> {
     host_ok.then(|| format!("{origin}/term/"))
 }
 
+/// Mint a link to this session's own terminal, for the page to frame.
+///
+/// Only reaches an agent cctop handed to the multiplexer — the same limit `a`
+/// and `W` have in the terminal, and for the same reason: an agent on cctop's
+/// own pty is on no terminal a second viewer can be pointed at.
+///
+/// One share per session, reused — see [`crate::rmux::share_link`]. A link
+/// minted afresh on every ask left a row in `rmux web-share list` per page
+/// reload. Reusing it also matches what is true: there is one terminal here,
+/// however many people are looking at the page.
+///
+/// The socket takes the road the page came by, through cctop's relay — see
+/// [`crate::rmux::share_link_with`] — and a machine with no way out falls back
+/// to a loopback link rather than to nothing. Which of the two it got is in
+/// the answer, because a link that only opens on the server's own desk is not
+/// a failure the reader can see.
+///
 /// `fresh` mints a new share instead of handing out the one held — what the
 /// page asks for when the link it was given would not connect.
 pub fn terminal(
