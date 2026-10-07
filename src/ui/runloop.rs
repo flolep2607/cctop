@@ -249,6 +249,9 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
     // the detached thread mid-save, forcing every launch to parse all sessions
     // from scratch again.
     let _ = worker.join();
+    // The ssh masters the directory field started, unless a launch tab is
+    // still working over one — that one lets go of it when it ends.
+    crate::ssh_master::release_all();
     app.save_prefs();
     result
 }
@@ -577,6 +580,7 @@ fn event_loop(
                     app.burn = crate::burn::Log::load();
                     app.needs_redraw = true;
                 }
+                Ok(Response::Location(answer)) => app.got_location(answer),
                 Ok(Response::Repos(repos)) => {
                     // Kept, not offered: see `App::got_repos`. Rebuilding the
                     // list here would move the highlight under a cursor that is

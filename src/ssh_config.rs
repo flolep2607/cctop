@@ -1,4 +1,4 @@
-//! The hosts named in `~/.ssh/config`, for the launcher's Remote entry.
+//! The hosts named in `~/.ssh/config`, for the launcher's directory field.
 //!
 //! Only the names, never the settings under them: whatever a block says about
 //! users, ports, keys or jump hosts is OpenSSH's to apply, and `cctop sandbox`
@@ -38,8 +38,8 @@ const MAX_DEPTH: usize = 16;
 
 /// The hosts in the user's ssh config, in the order the files name them.
 ///
-/// Empty when there is no config, which is not an error: the Remote entry
-/// still takes a typed `user@host`.
+/// Empty when there is no config, which is not an error: the field still
+/// takes a typed `user@host:path`.
 pub fn hosts() -> Vec<Host> {
     let Some(ssh_dir) = dirs::home_dir().map(|h| h.join(".ssh")) else {
         return Vec::new();

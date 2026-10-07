@@ -26,6 +26,7 @@ mod input;
 mod launch;
 mod launch_cwd;
 mod line_edit;
+mod location;
 mod markdown;
 pub mod menu;
 mod modals;
@@ -38,7 +39,6 @@ mod qr;
 mod rave;
 mod reader;
 mod remote;
-mod remote_launch;
 pub mod render;
 mod runloop;
 mod scrollbar;
@@ -117,11 +117,6 @@ pub enum Mode {
     /// launcher with its `in` line in an editable state, so the list of agents
     /// stays visible while the path is being changed.
     LaunchCwd,
-    /// The launcher's Remote entry, first step: which ssh host. A list from
-    /// `~/.ssh/config` narrowed by typing, or a `user@host` typed outright.
-    RemoteHost,
-    /// The Remote entry's second step: which directory on that host.
-    RemotePath,
     /// The agent-integration panel: what is installed where, and whether the
     /// agents are actually reporting in.
     Hooks,
@@ -204,10 +199,6 @@ pub enum Deferred {
     Resume,
     /// [`App::launch_selected`], stopped at the same place.
     Launch,
-    /// [`App::launch_sandbox`], whose host and path wait in `sandbox_host` and
-    /// `sandbox_path` — the launcher's pick alone would only reopen the host
-    /// picker and ask again.
-    Remote,
 }
 
 /// Where the agent picked in `Mode::Launch` ends up.
@@ -460,6 +451,9 @@ pub struct App {
     /// Set when the typed directory does not name one, so the field can say so
     /// where it is being typed rather than in a toast across the screen.
     pub launch_cwd_bad: bool,
+    /// Why, when it is something other than "no such directory" — a host's
+    /// answer about a remote one.
+    pub launch_cwd_why: Option<String>,
     /// Directories agents are already known to have run in, newest first, as of
     /// the moment the field opened.
     ///
@@ -482,10 +476,10 @@ pub struct App {
     /// arrival would reshuffle the list under the cursor, which is the one thing
     /// the snapshot above exists to prevent.
     pub launch_cwd_repos: Vec<std::path::PathBuf>,
-    /// What the field is currently offering for what has been typed. Every one
-    /// of them is a directory that exists, which is what lets a picked
-    /// suggestion skip the check the typed path gets.
-    pub launch_cwd_hits: Vec<std::path::PathBuf>,
+    /// What the field is currently offering for what has been typed: local
+    /// directories that exist — which is what lets a picked one skip the check
+    /// the typed path gets — ssh hosts, and directories on a host.
+    pub launch_cwd_hits: Vec<location::Hit>,
     /// The suggestion under the cursor, when the cursor has left the text.
     /// `None` means the field is being typed in, and Enter takes what is typed.
     pub launch_cwd_pick: Option<usize>,
@@ -498,21 +492,19 @@ pub struct App {
     /// appeared only once the field had been emptied by hand. Until the first
     /// edit the field is read as asking nothing, and offers those.
     pub launch_cwd_pristine: bool,
-    /// The hosts the Remote entry offers, read from `~/.ssh/config` when it
+    /// The hosts the directory field offers, read from `~/.ssh/config` when it
     /// opens — a snapshot, like the launcher's list, so an edit to the config
     /// mid-pick does not move the cursor.
-    pub sandbox_hosts: Vec<crate::ssh_config::Host>,
-    /// What has been typed over the host list: a filter on it, and the host
-    /// itself when nothing in the list matches.
-    pub sandbox_filter: line_edit::LineEdit,
-    /// Which of the narrowed hosts is highlighted.
-    pub sandbox_cursor: usize,
-    /// The host picked in the first step, which the second step and a launch
-    /// deferred by the rmux offer both read.
-    pub sandbox_host: String,
-    /// The directory on that host, as typed: `~` is the host's home, expanded
-    /// there.
-    pub sandbox_path: line_edit::LineEdit,
+    pub ssh_hosts: Vec<crate::ssh_config::Host>,
+    /// What is known about each host put in the field this run: its
+    /// connection, its repositories, the directories listed on it.
+    pub ssh_states: HashMap<String, location::HostState>,
+    /// A remote directory being checked on its host before the field takes
+    /// it, as (host, path).
+    pub launch_cwd_checking: Option<(String, String)>,
+    /// Where the launcher's pick starts when it is not this machine. Set, it
+    /// wins over `launch_cwd`.
+    pub launch_remote: Option<location::RemoteTarget>,
     /// Line being typed into the selected session's terminal.
     pub send_input: line_edit::LineEdit,
     /// The branch being named for `F`, the checkout it forks from, and the
@@ -1182,16 +1174,16 @@ impl App {
             launch_cwd: None,
             launch_cwd_input: Default::default(),
             launch_cwd_bad: false,
+            launch_cwd_why: None,
             launch_cwd_known: Vec::new(),
             launch_cwd_repos: Vec::new(),
             launch_cwd_hits: Vec::new(),
             launch_cwd_pick: None,
             launch_cwd_pristine: false,
-            sandbox_hosts: Vec::new(),
-            sandbox_filter: Default::default(),
-            sandbox_cursor: 0,
-            sandbox_host: String::new(),
-            sandbox_path: Default::default(),
+            ssh_hosts: Vec::new(),
+            ssh_states: HashMap::new(),
+            launch_cwd_checking: None,
+            launch_remote: None,
             rmux_install: None,
             rmux_deferred: None,
             rmux_declined: false,

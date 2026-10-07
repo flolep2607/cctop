@@ -62,6 +62,9 @@ pub(super) enum Request {
     Repos,
     /// Run `cctop --update` on a remote machine, which the user has confirmed.
     UpdateRemote(crate::fleet::Host),
+    /// Something the launcher's directory field wants to know about an ssh
+    /// host: a connection, a listing, the repositories, a directory's state.
+    Location(super::location::Ask),
     Shutdown,
 }
 
@@ -125,6 +128,8 @@ pub(super) enum Response {
     },
     /// A finished report, already laid out as text.
     Insight(String),
+    /// The answer to a [`Request::Location`].
+    Location(super::location::Answer),
     /// A conversation read. `key` and `before` echo the request so an answer
     /// for a view that has since moved on is recognised and dropped; the
     /// remote path's document deserialises into the same `Conversation` the
@@ -614,6 +619,18 @@ pub(super) fn spawn_worker(
                                 probe: host.probe(),
                             });
                         }
+                    });
+                }
+                // A thread each: a connect can take its whole deadline and a
+                // listing its timeout, and a host that is not answering must
+                // hold up neither the next keystroke's work nor another host.
+                Request::Location(ask) => {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let connect = |host: &str| crate::ssh_master::connect(host).map(|_| ());
+                        let answer =
+                            super::location::answer(ask, &crate::ssh_master::Ssh, &connect);
+                        let _ = tx.send(Response::Location(answer));
                     });
                 }
                 Request::Shutdown => break,

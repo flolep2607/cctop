@@ -10,14 +10,14 @@ expression: screen
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
-│   LAST▲╭ New tab ───────────────────────────────────────────────────╮JECT    │
-│●    now│   claude                                                   │ the ch…┃
-│●     7m│   codex                   local only                       │        │
-╰────────│   opencode                                                 │────────╯
-╭ Info  P│ in procdb:~/proj  (c to change)                            │ Context╮
-│Root /us│ codex can't run commands on a remote host yet              │        │
-│    PID │ ↑/↓  c change folder  Esc cancel                           │        │
-│   4101 ╰────────────────────────────────────────────────────────────╯        │
+│   LAST▲         $ MODEL          PERM   ! HOST       BRANCH       PROJECT    │
+│●    now╭ New tab ───────────────────────────────────────────────────╮ the ch…┃
+│●     7m│   sh                                                       │        │
+╰────────│ in devbox:~/src▏                                           │────────╯
+╭ Info  P│ devbox: needs a password or key prompt — the tab will ask  │ Context╮
+│Root /us│ Enter accept  Esc keep the old one                         │        │
+│    PID ╰────────────────────────────────────────────────────────────╯        │
+│   4101    9.8%    360.0M  claude --model opus                                │
 │   4188    2.4%     44.0M  node mcp-server.js                                 │
 │   4290    0.3%      8.0M  bash -c npm test                                   │
 │                                                                              │

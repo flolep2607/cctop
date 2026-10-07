@@ -1309,14 +1309,6 @@ pub enum Choice {
     /// to name the tab's account, and to put a copied transcript where that
     /// account looks — and an `env` prefix is not something to parse back.
     Handoff(crate::handoff::Target),
-    /// Claude here with its work on an ssh host: `cctop sandbox`, once a host
-    /// and a directory have been asked for.
-    ///
-    /// One row rather than one per host: a config can name dozens, and they
-    /// would push the agents off the launcher. `sshfs` is whether it is
-    /// installed as the launcher opens, so the row can say a launch will stop
-    /// to install it before the launch does.
-    Remote { sshfs: bool },
 }
 
 impl Choice {
@@ -1331,7 +1323,6 @@ impl Choice {
                 .to_string(),
             Choice::Start(argv) => label_of(argv),
             Choice::Handoff(target) => target.label(),
-            Choice::Remote { .. } => "remote (ssh)".to_string(),
         }
     }
 
@@ -1343,7 +1334,7 @@ impl Choice {
     pub fn cwd(&self) -> Option<&Path> {
         match self {
             Choice::Waiting(agent) => agent.cwd.as_deref(),
-            Choice::Start(_) | Choice::Handoff(_) | Choice::Remote { .. } => None,
+            Choice::Start(_) | Choice::Handoff(_) => None,
         }
     }
 }
@@ -1369,17 +1360,7 @@ pub fn choices(open: &[String]) -> Vec<Choice> {
         .filter(|agent| !open.contains(&agent.name))
         .map(|agent| Choice::Waiting(Box::new(agent)))
         .chain(harnesses().into_iter().map(Choice::Start))
-        .chain(remote_choice(
-            crate::shim::is_command("ssh") && crate::shim::is_command("claude"),
-            crate::sshfs::installed(),
-        ))
         .collect()
-}
-
-/// The Remote row, where it could work: `cctop sandbox` is ssh on this side
-/// and Claude Code on this side, and without either it can only fail.
-fn remote_choice(possible: bool, sshfs: bool) -> Option<Choice> {
-    possible.then_some(Choice::Remote { sshfs })
 }
 
 /// How a command picked from the launcher is named on screen: the command as
@@ -1700,8 +1681,8 @@ fn starts_an_agent(argv: &[String]) -> bool {
     let Some(command) = words.next() else {
         return false;
     };
-    // `cctop sandbox` is Claude Code with its work elsewhere, and its screen
-    // and its turns are Claude's — what the launcher's Remote entry starts.
+    // `cctop sandbox` is an agent with its work elsewhere, and its screen and
+    // its turns are that agent's — what a remote launch starts.
     if command.starts_with("cctop") && words.next() == Some("sandbox") {
         return true;
     }
@@ -2069,19 +2050,11 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             .iter()
             .position(|c| matches!(c, Choice::Start(_)))
             .unwrap_or(0);
-        // The Remote row, where it is offered, is part of that block: last.
         assert!(
             plain[first_start..]
                 .iter()
-                .all(|c| matches!(c, Choice::Start(_) | Choice::Remote { .. })),
+                .all(|c| matches!(c, Choice::Start(_))),
             "a running agent appeared below the new-launch commands"
-        );
-        assert!(
-            plain
-                .iter()
-                .position(|c| matches!(c, Choice::Remote { .. }))
-                .is_none_or(|at| at == plain.len() - 1),
-            "the Remote row is not last"
         );
 
         // An agent already on screen is not offered again.
@@ -2248,28 +2221,13 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         assert!(starts_an_agent(&argv(
             "env CLAUDE_CONFIG_DIR=/tmp/x claude"
         )));
-        // The launcher's Remote entry: Claude, with its work on a host.
+        // A remote launch: an agent, with its work on a host.
         assert!(starts_an_agent(&argv(
-            "env CCTOP_SANDBOX_HOLD=1 /usr/local/bin/cctop sandbox devbox:~"
+            "env CCTOP_SANDBOX_HOLD=1 /usr/local/bin/cctop sandbox --agent opencode devbox:~"
         )));
         assert!(!starts_an_agent(&argv("/usr/local/bin/cctop doctor")));
         assert!(!starts_an_agent(&argv("/bin/zsh")));
         assert!(!starts_an_agent(&argv("")));
-    }
-
-    /// The Remote row is offered only where `cctop sandbox` could run, and it
-    /// carries whether sshfs is here so the row can say so before Enter.
-    #[test]
-    fn the_remote_row_needs_ssh_and_claude_and_reports_sshfs() {
-        assert_eq!(remote_choice(false, true), None);
-        assert_eq!(
-            remote_choice(true, false),
-            Some(Choice::Remote { sshfs: false })
-        );
-        assert_eq!(
-            Choice::Remote { sshfs: true }.label(),
-            "remote (ssh)".to_string()
-        );
     }
 
     /// The bell outranks every inference. A harness rings when it is blocked on

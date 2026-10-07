@@ -1,4 +1,5 @@
-//! `cctop sandbox <host>:<path> [claude args…]`: Claude Code here, its work there.
+//! `cctop sandbox [--agent <agent>] <host>:<path> [agent args…]`: an agent
+//! here, its work there.
 //!
 //! The agent runs on this machine — its terminal, its login, its hooks, the
 //! dashboard watching it — while what it *does* lands on another one. Nothing
@@ -18,15 +19,15 @@
 //!   which run in this process tree and know nothing of ssh — see the host's
 //!   files under the names the host's shell uses for them. One path means
 //!   nothing has to translate between the two.
-//! - **A shell that is not here.** Claude Code runs every Bash call through
-//!   `$CLAUDE_CODE_SHELL_PREFIX`, which is set to `cctop --sandbox-exec`.
-//!   That helper ([`exec`]) sends the call to the host over the connection,
-//!   in the same directory, and brings back its output, its exit code and the
-//!   directory it ended in.
+//! - **A shell that is not here.** Every command the agent runs is handed to
+//!   cctop instead of to a shell, which sends it to the host over the
+//!   connection, in the same directory, and brings back its output and its
+//!   exit code. How the agent is made to do that is the agent's own business,
+//!   and [`reach`] is the table of which ones have a way.
 //!
-//! The file tools can only see what is mounted, so a separate PreToolUse hook
-//! ([`guard`]) refuses them anywhere else and tells the model to use Bash —
-//! without it, a Read of `/etc/hosts` would quietly read *this* machine's.
+//! The file tools can only see what is mounted, so each agent also gets a
+//! guard that refuses them anywhere else — without one, a read of
+//! `/etc/hosts` would quietly read *this* machine's.
 //!
 //! ponytail: the mount needs `<path>` to exist here, or to be creatable by this
 //! user. A path under a home that is root's here (`/home/someone-else/…`)
@@ -53,12 +54,67 @@ const ENV_SOCKET: &str = "CCTOP_SANDBOX_SOCKET";
 /// `statfs`'s answer for any FUSE filesystem, `fuse` and `fuseblk` alike.
 const FUSE_SUPER_MAGIC: i64 = 0x6573_5546;
 
-/// The longest a Unix socket path may be, less a margin.
+use crate::ssh_master::{SOCKET_PATH_MAX, mux_args};
+
+/// How an agent's commands are made to run on the host, or that they cannot.
 ///
-/// `sun_path` is 108 bytes on Linux, and ssh appends a random suffix to the
-/// ControlPath while it binds — a path that fits on paper fails at bind time,
-/// which is how the first prototype found out.
-const SOCKET_PATH_MAX: usize = 90;
+/// The bar for being on this table is that *nothing* the agent runs can land
+/// on this machine by accident. A launch that quietly ran an agent's commands
+/// here while the person believed they were running on a server is the one
+/// failure worse than refusing, so an agent with no sound way in is refused
+/// for a remote location rather than started half-remote.
+///
+/// Each answer was read off the agent itself — its source, its shipped docs,
+/// or strings in its binary — not assumed:
+///
+/// - **claude**: every Bash call goes through `$CLAUDE_CODE_SHELL_PREFIX`,
+///   split at its last ` -`, so the prefix `cctop --sandbox-exec` receives the
+///   whole command line as one argument. The file tools are kept to the mount
+///   by a PreToolUse hook ([`guard`]) installed with `--settings`.
+/// - **opencode**: runs its shell tool as `<shell> -c <command>`, where the
+///   shell is the config's `shell` key (then `$SHELL`). The key takes one
+///   executable and no arguments, so it points at a two-line script that
+///   execs `cctop --sandbox-shell`, which also answers the interactive
+///   terminal opencode opens with the same shell. The config arrives in
+///   `OPENCODE_CONFIG_CONTENT`, the highest-precedence layer, with
+///   `permission.external_directory = "deny"` — opencode's own rule for any
+///   tool touching a path outside the directory it was started in — as the
+///   guard. `--standalone`, because the shared background server would
+///   resolve the shell once for every session and ignore this one's.
+/// - **codex**: builds `[<shell>, -lc, <command>]` with the shell taken from
+///   the passwd entry, not from `$SHELL` or any setting, so there is nothing
+///   to point at cctop. Its own remote mode (an `exec-server` over ssh) needs
+///   a codex binary on the host, which this feature promises not to need.
+/// - **devin**: no shell setting at all; a PreToolUse hook can rewrite a
+///   command, but a hook that fails with anything but exit 2 lets the
+///   original run here, and its long-lived terminal sessions bypass it.
+/// - **pi**: documents `shellPath` and a remote-execution extension point, but
+///   is not installed anywhere this was checked, so it is not claimed.
+/// - **gemini** (not in the launcher): runs a bare `bash` off `PATH`, so only
+///   a fake `bash` would redirect it — and that would catch its hooks too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Claude Code's shell prefix, and the guard hook.
+    ShellPrefix,
+    /// opencode's `shell` setting, and its `external_directory` rule.
+    ShellSetting,
+    /// No sound way: launched only on this machine.
+    Local,
+}
+
+/// Look `agent` (a command name, `claude`) up in the table above.
+pub fn reach(agent: &str) -> Reach {
+    match agent {
+        "claude" => Reach::ShellPrefix,
+        "opencode" => Reach::ShellSetting,
+        _ => Reach::Local,
+    }
+}
+
+/// What a launcher says about an agent with no way to the host.
+pub fn local_only(agent: &str) -> String {
+    format!("{agent} can't run commands on a remote host yet")
+}
 
 /// How long the mount is given to appear once sshfs has been started.
 const MOUNT_WAIT: Duration = Duration::from_secs(20);
@@ -131,20 +187,22 @@ pub fn sh_quote(text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const USAGE: &str = "\
-usage: cctop sandbox <host>:<path> [claude args…]
+usage: cctop sandbox [--agent claude|opencode] <host>:<path> [agent args…]
 
-Run Claude Code here with its Bash commands running on <host>, in <path>, over
-one ssh connection, and <path> mounted here at the same path with sshfs so the
-file tools see the host's files. Nothing is installed on the host.
+Run an agent here (Claude Code unless --agent says otherwise) with its shell
+commands running on <host>, in <path>, over one ssh connection, and <path>
+mounted here at the same path with sshfs so the file tools see the host's
+files. Nothing is installed on the host.
 
   cctop sandbox devbox:/srv/api
   cctop sandbox devbox:~/src/api --model opus
+  cctop sandbox --agent opencode devbox:~/src/api
 
 Needs sshfs and fusermount3 here, and offers to install sshfs when it is
 missing and the terminal can answer; bash and setsid on the host. <path> must exist here or be creatable by you: it is the
 mount point.";
 
-/// Set by the TUI's Remote entry on the sandbox it starts in a tab.
+/// Set by the TUI on the sandbox it starts in a tab.
 ///
 /// A failure there — no sshfs and the install declined, a host that will not
 /// answer — would otherwise print its reason and end the tab in the same
@@ -176,9 +234,16 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
         println!("{USAGE}");
         return Ok(0);
     }
+    let (agent, args) = split_agent(args)?;
+    let Some(first) = args.first() else {
+        anyhow::bail!("expected <host>:<path>\n\n{USAGE}");
+    };
     let Some(spec) = Spec::parse(first) else {
         anyhow::bail!("expected <host>:<path>, got `{first}`\n\n{USAGE}");
     };
+    if reach(&agent) == Reach::Local {
+        anyhow::bail!("{}", local_only(&agent));
+    }
     // Before anything else: an install that is declined or fails should not
     // leave an ssh connection behind it, and this is the step most likely to
     // stop a first run.
@@ -193,15 +258,41 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
         socket: socket_path(&spec)?,
         fusermount,
         master: None,
+        borrowed: false,
         sshfs: None,
         root: None,
         created: Vec::new(),
+        shim: None,
         log: crate::config::runtime_base().join("cctop"),
     };
-    eprintln!("cctop sandbox: connecting to {}…", spec.host);
-    sandbox.connect()?;
+    // The launcher's connection, when it made one for this host: already
+    // authenticated, so this launch asks nothing.
+    match crate::ssh_master::socket_for(&spec.host)
+        .filter(|shared| crate::ssh_master::is_up(shared, &spec.host))
+    {
+        Some(shared) => {
+            crate::ssh_master::take_lease(&shared, std::process::id());
+            sandbox.socket = shared;
+            sandbox.borrowed = true;
+        }
+        None => {
+            eprintln!("cctop sandbox: connecting to {}…", spec.host);
+            sandbox.connect()?;
+        }
+    }
     let probe = sandbox.probe(&spec.path)?;
     let root = PathBuf::from(&probe.root);
+    // The same rules the launcher marks its suggestions with, so a directory
+    // that cannot be mounted on is refused here in the words the field used,
+    // before anything is created or mounted.
+    if let Err(why) = crate::remote_fs::verdict(
+        &root,
+        &crate::remote_fs::mounts_here(),
+        &crate::remote_fs::here(&root),
+        Some(&probe.facts()),
+    ) {
+        anyhow::bail!("{}:{} can't be used: {why}", spec.host, probe.root);
+    }
     sandbox.created = prepare_mountpoint(&root, sandbox.fusermount)?;
     eprintln!(
         "cctop sandbox: mounting {}:{} at the same path here…",
@@ -210,34 +301,56 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
     sandbox.mount(&root)?;
 
     let target = format!("{}:{}", spec.host, probe.root);
-    let env = vec![
-        // Claude Code wants a bash-family shell for its own command strings;
-        // the host's shell is reached through the prefix, not through this.
-        ("SHELL".to_string(), "/bin/bash".to_string()),
-        ("CLAUDE_CODE_SHELL".to_string(), "/bin/bash".to_string()),
-        // Claude Code splits the prefix at its last " -", quoting the part
-        // before as one executable and passing the rest as words. A prefix with
-        // no " -" in it is taken whole as a program name — which is why the
-        // helper is a flag rather than a subcommand.
-        (
-            "CLAUDE_CODE_SHELL_PREFIX".to_string(),
-            format!("{} --sandbox-exec", exe.display()),
-        ),
+    let mut env = vec![
         (ENV_SANDBOX.to_string(), target.clone()),
         (
             ENV_SOCKET.to_string(),
             sandbox.socket.to_string_lossy().into_owned(),
         ),
     ];
-    let mut argv = vec![
-        "claude".to_string(),
-        // Scoped to this launch: the user's settings files are not touched,
-        // and the guard does not outlive the sandbox it guards.
-        "--settings".to_string(),
-        guard_settings(&exe, &probe.root),
-        "--append-system-prompt".to_string(),
-        system_prompt(&spec.host, &probe),
-    ];
+    let mut argv = vec![agent.clone()];
+    match reach(&agent) {
+        Reach::ShellPrefix => {
+            env.extend([
+                // Claude Code wants a bash-family shell for its own command
+                // strings; the host's shell is reached through the prefix, not
+                // through this.
+                ("SHELL".to_string(), "/bin/bash".to_string()),
+                ("CLAUDE_CODE_SHELL".to_string(), "/bin/bash".to_string()),
+                // Claude Code splits the prefix at its last " -", quoting the
+                // part before as one executable and passing the rest as words.
+                // A prefix with no " -" in it is taken whole as a program name
+                // — which is why the helper is a flag rather than a subcommand.
+                (
+                    "CLAUDE_CODE_SHELL_PREFIX".to_string(),
+                    format!("{} --sandbox-exec", exe.display()),
+                ),
+            ]);
+            argv.extend([
+                // Scoped to this launch: the user's settings files are not
+                // touched, and the guard does not outlive the sandbox it guards.
+                "--settings".to_string(),
+                guard_settings(&exe, &probe.root),
+                "--append-system-prompt".to_string(),
+                system_prompt(&spec.host, &probe),
+            ]);
+        }
+        Reach::ShellSetting => {
+            let shim = write_shell_shim(&exe)?;
+            let content = opencode_config(
+                std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
+                &shim,
+            );
+            sandbox.shim = shim.parent().map(Path::to_path_buf);
+            env.extend([
+                ("SHELL".to_string(), shim.to_string_lossy().into_owned()),
+                ("OPENCODE_CONFIG_CONTENT".to_string(), content),
+            ]);
+            argv.push("--standalone".to_string());
+        }
+        // Refused above.
+        Reach::Local => unreachable!("checked before connecting"),
+    }
     argv.extend(args[1..].iter().cloned());
 
     let stop = Stop::install();
@@ -268,6 +381,71 @@ fn require_tools() -> anyhow::Result<&'static str> {
     }
 }
 
+/// `--agent <name>` (or `--agent=<name>`) off the front of the arguments,
+/// defaulting to claude, which is what `cctop sandbox` meant before it took
+/// any other.
+fn split_agent(args: &[String]) -> anyhow::Result<(String, &[String])> {
+    match args.first().map(String::as_str) {
+        Some("--agent") => match args.get(1) {
+            Some(agent) => Ok((agent.clone(), &args[2..])),
+            None => anyhow::bail!("--agent needs a name\n\n{USAGE}"),
+        },
+        Some(flag) if flag.starts_with("--agent=") => {
+            Ok((flag["--agent=".len()..].to_string(), &args[1..]))
+        }
+        _ => Ok(("claude".to_string(), args)),
+    }
+}
+
+/// The executable an agent is given as its shell: a script that hands every
+/// invocation to `cctop --sandbox-shell`.
+///
+/// A script because the agents that take a shell setting take one path and no
+/// arguments, and cctop's helper is a flag. Named `bash` because the commands
+/// a model writes are bash, and an agent that looks at its shell's name to
+/// decide how to quote should decide for bash. In a directory of its own,
+/// private, removed with the sandbox.
+fn write_shell_shim(exe: &Path) -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::config::runtime_base()
+        .join("cctop")
+        .join(format!("sbx-shell-{}", std::process::id()));
+    if !crate::ssh_master::private_dir(&dir) {
+        anyhow::bail!("could not create {}", dir.display());
+    }
+    let path = dir.join("bash");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nexec {} --sandbox-shell \"$@\"\n",
+            sh_quote(&exe.to_string_lossy())
+        ),
+    )?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(path)
+}
+
+/// opencode's inline config for a sandbox: the shell, and the guard, laid over
+/// whatever inline config was already set.
+///
+/// `external_directory` set to `deny` outright rather than per pattern: the
+/// directory opencode starts in — the mount — is the one place its file tools
+/// may go, and anywhere else is this machine. An inline config already in the
+/// environment keeps its other keys; one that is not a JSON object is
+/// replaced, since a sandbox without its guard is not one to start.
+fn opencode_config(existing: Option<&str>, shell: &Path) -> String {
+    let mut config = existing
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    config["shell"] = serde_json::Value::String(shell.to_string_lossy().into_owned());
+    if !config["permission"].is_object() {
+        config["permission"] = serde_json::json!({});
+    }
+    config["permission"]["external_directory"] = serde_json::Value::String("deny".into());
+    config.to_string()
+}
+
 /// Where the ControlMaster listens: short, private, and one per sandbox.
 ///
 /// The pid is in the name so two sandboxes on one host do not share a master
@@ -278,13 +456,9 @@ fn socket_path(spec: &Spec) -> anyhow::Result<PathBuf> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (&spec.host, &spec.path, std::process::id()).hash(&mut hasher);
     let name = format!("sbx-{:08x}.sock", hasher.finish() as u32);
-    let runtime = crate::config::runtime_base().join("cctop");
-    let home_ssh = dirs::home_dir().map(|h| h.join(".ssh"));
-    for dir in std::iter::once(runtime).chain(home_ssh) {
+    for dir in crate::ssh_master::socket_dirs() {
         let path = dir.join(&name);
-        if path.as_os_str().len() <= SOCKET_PATH_MAX && std::fs::create_dir_all(&dir).is_ok() {
-            let _ =
-                std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        if path.as_os_str().len() <= SOCKET_PATH_MAX && crate::ssh_master::private_dir(&dir) {
             return Ok(path);
         }
     }
@@ -301,11 +475,17 @@ struct Sandbox {
     socket: PathBuf,
     fusermount: &'static str,
     master: Option<Child>,
+    /// The master is the launcher's, leased rather than owned: let go of at
+    /// the end instead of being told to exit, since the launcher may still be
+    /// completing paths over it.
+    borrowed: bool,
     sshfs: Option<Child>,
     /// Where the mount is, once it is.
     root: Option<PathBuf>,
     /// Directories made to mount on, deepest first, removed again if empty.
     created: Vec<PathBuf>,
+    /// The directory holding an agent's shell script, removed at the end.
+    shim: Option<PathBuf>,
     /// The directory the two daemons' stderr goes to.
     log: PathBuf,
 }
@@ -318,6 +498,22 @@ struct Probe {
     /// The directory, absolute and with symlinks resolved — the name the
     /// host's `pwd -P` will report, so the one the mount must use.
     root: String,
+    readable: bool,
+    writable: bool,
+}
+
+impl Probe {
+    /// What the probe found, in the shape the usability rules read.
+    fn facts(&self) -> crate::remote_fs::RemoteFacts {
+        let there = !self.root.is_empty();
+        crate::remote_fs::RemoteFacts {
+            exists: there,
+            is_dir: there,
+            readable: self.readable,
+            writable: self.writable,
+            resolved: there.then(|| self.root.clone()),
+        }
+    }
 }
 
 impl Sandbox {
@@ -514,6 +710,13 @@ impl Drop for Sandbox {
             // Only ever empty by now; a directory that is not is left alone.
             let _ = std::fs::remove_dir(dir);
         }
+        if let Some(dir) = self.shim.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if self.borrowed {
+            crate::ssh_master::release(&self.host, &self.socket, std::process::id());
+            return;
+        }
         if let Some(master) = self.master.take() {
             let _ = Command::new("ssh")
                 .arg("-S")
@@ -570,23 +773,6 @@ fn tail_of(log: &Path) -> String {
     }
 }
 
-/// The ssh options every call over the master uses.
-///
-/// `ControlMaster=no` so a call never tries to become a master of its own,
-/// and `BatchMode` so one made after the master has gone fails rather than
-/// asking for a password on a terminal that belongs to the agent.
-fn mux_args(socket: &Path) -> Vec<std::ffi::OsString> {
-    vec![
-        "-S".into(),
-        socket.as_os_str().to_owned(),
-        "-o".into(),
-        "ControlMaster=no".into(),
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-T".into(),
-    ]
-}
-
 /// The probe, as one command line for the host's login shell.
 ///
 /// `sh` rather than the login shell's own syntax, whatever that is. A path
@@ -598,7 +784,11 @@ echo "hostname=$(hostname 2>/dev/null || uname -n)"
 echo "uname=$(uname -sr)"
 echo "bash=$(command -v bash)"
 echo "setsid=$(command -v setsid)"
-if cd -- "$p" 2>/dev/null; then echo "root=$(pwd -P)"; fi"#;
+if cd -- "$p" 2>/dev/null; then
+  echo "root=$(pwd -P)"
+  [ -r . ] && echo readable=1
+  [ -w . ] && echo writable=1
+fi"#;
     format!(
         "exec sh -c {} cctop-sandbox {}",
         sh_quote(SCRIPT),
@@ -613,6 +803,8 @@ fn parse_probe(out: &str) -> Probe {
             Some(("hostname", v)) => probe.hostname = v.trim().to_string(),
             Some(("uname", v)) => probe.uname = v.trim().to_string(),
             Some(("root", v)) if v.starts_with('/') => probe.root = v.to_string(),
+            Some(("readable", "1")) => probe.readable = true,
+            Some(("writable", "1")) => probe.writable = true,
             _ => {}
         }
     }
@@ -693,37 +885,11 @@ fn mount_type_at(path: &Path) -> Option<String> {
 /// [`mount_type_at`] over a given mountinfo table. The last match wins, since
 /// a later mount on the same point is the one on top.
 fn mount_type_in(mountinfo: &str, path: &Path) -> Option<String> {
-    let want = path.to_string_lossy();
-    mountinfo
-        .lines()
+    crate::remote_fs::parse_mountinfo(mountinfo)
+        .into_iter()
         .rev()
-        .filter_map(|line| {
-            let (left, right) = line.split_once(" - ")?;
-            let point = left.split(' ').nth(4)?;
-            let fstype = right.split(' ').next()?;
-            (unescape_mountinfo(point) == want).then(|| fstype.to_string())
-        })
-        .next()
-}
-
-/// mountinfo spells a space, tab, newline and backslash as octal escapes.
-fn unescape_mountinfo(field: &str) -> String {
-    let bytes = field.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\'
-            && i + 4 <= bytes.len()
-            && let Ok(code) = u8::from_str_radix(&field[i + 1..i + 4], 8)
-        {
-            out.push(code);
-            i += 4;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+        .find(|m| m.point == path)
+        .map(|m| m.fstype)
 }
 
 /// Whether a live FUSE filesystem is mounted at exactly `path`.
@@ -899,7 +1065,7 @@ pub fn exec(args: &[String]) -> i32 {
     let socket = std::env::var_os(ENV_SOCKET).filter(|s| !s.is_empty());
     match (classify(command), target, socket) {
         (Call::Remote { head, cwd_file }, Some(target), Some(socket)) => {
-            match remote(head, &cwd_file, &target, Path::new(&socket)) {
+            match remote(head, Some(&cwd_file), &target, Path::new(&socket)) {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!(
@@ -930,8 +1096,101 @@ pub fn exec(args: &[String]) -> i32 {
     }
 }
 
+/// What an agent asked of the shell it was given.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShellCall<'a> {
+    /// `-c <command>`, with or without `-l`: one command, run on the host.
+    Command(&'a str),
+    /// No command and no script: a terminal for a person, opened on the host.
+    Interactive,
+    /// A script file, or flags this does not know. Refused: there is no file
+    /// here to hand the host, and guessing would run something here.
+    Unknown,
+}
+
+/// Read a shell's argv the way bash would, as far as an agent uses it.
+pub fn shell_call(args: &[String]) -> ShellCall<'_> {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--login" | "--norc" | "--noprofile" | "-l" | "-i" => {}
+            "--" => break,
+            flag if flag.starts_with('-') && !flag.starts_with("--") => {
+                if flag.contains('c') {
+                    return match args.get(i + 1) {
+                        Some(command) => ShellCall::Command(command),
+                        None => ShellCall::Unknown,
+                    };
+                }
+                if !flag[1..].chars().all(|c| "lis".contains(c)) {
+                    return ShellCall::Unknown;
+                }
+            }
+            _ => return ShellCall::Unknown,
+        }
+        i += 1;
+    }
+    match i + 1 >= args.len() {
+        true => ShellCall::Interactive,
+        false => ShellCall::Unknown,
+    }
+}
+
+/// `cctop --sandbox-shell <shell args>`: what an agent with a shell setting
+/// runs instead of bash.
+///
+/// Unlike [`exec`], there is nothing here to tell apart: everything an agent
+/// runs through its configured shell is the agent's work, so all of it goes
+/// to the host. The one exception is the variables having gone missing, which
+/// means this is not inside a sandbox at all — and then it refuses rather than
+/// runs bash, because running here is exactly what the setting promised not to.
+pub fn shell(args: &[String]) -> i32 {
+    let target = std::env::var(ENV_SANDBOX).ok().filter(|t| !t.is_empty());
+    let socket = std::env::var_os(ENV_SOCKET).filter(|s| !s.is_empty());
+    let (Some(target), Some(socket)) = (target, socket) else {
+        eprintln!("cctop sandbox: this shell only runs inside `cctop sandbox`");
+        return 126;
+    };
+    let host = host_of(&target);
+    match shell_call(args) {
+        ShellCall::Command(command) => match remote(command, None, &target, Path::new(&socket)) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("cctop sandbox: could not run this on {host}: {e}");
+                255
+            }
+        },
+        ShellCall::Interactive => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            let line = format!(
+                "cd -- {} 2>/dev/null; exec \"${{SHELL:-sh}}\" -l",
+                sh_quote(&cwd.to_string_lossy())
+            );
+            let mut cmd = Command::new("ssh");
+            // `-t` over `mux_args`' `-T`: the last one ssh reads wins, and this
+            // one is a terminal.
+            cmd.args(mux_args(Path::new(&socket)))
+                .arg("-t")
+                .arg(host)
+                .arg("--")
+                .arg(line);
+            let e = cmd.exec();
+            eprintln!("cctop sandbox: could not run ssh: {e}");
+            255
+        }
+        ShellCall::Unknown => {
+            eprintln!(
+                "cctop sandbox: `{}` is not a shell call cctop can send to {host}, so it was not \
+                 run — running it here would act on this machine instead.",
+                args.join(" ")
+            );
+            126
+        }
+    }
+}
+
 /// Run one Bash call on the host and report back as bash would have.
-fn remote(head: &str, cwd_file: &str, target: &str, socket: &Path) -> std::io::Result<i32> {
+fn remote(head: &str, cwd_file: Option<&str>, target: &str, socket: &Path) -> std::io::Result<i32> {
     let host = host_of(target);
     let cwd = std::env::current_dir()?;
     let nonce = nonce();
@@ -942,8 +1201,8 @@ fn remote(head: &str, cwd_file: &str, target: &str, socket: &Path) -> std::io::R
         .arg(remote_line(head, &nonce, &cwd.to_string_lossy()));
     let mut stderr = std::io::stderr();
     let (code, cwd_now) = run_remote(cmd, &nonce, &mut stderr)?;
-    if let Some(dir) = cwd_now {
-        let _ = std::fs::write(cwd_file, format!("{dir}\n"));
+    if let (Some(dir), Some(file)) = (cwd_now, cwd_file) {
+        let _ = std::fs::write(file, format!("{dir}\n"));
     }
     if code == 255 {
         let _ = writeln!(
@@ -1345,6 +1604,105 @@ mod tests {
         assert_eq!(columns::branch_of(&s), None);
     }
 
+    /// Which agents may be sent to a host, and what the others are told.
+    #[test]
+    fn the_remote_capability_table() {
+        assert_eq!(reach("claude"), Reach::ShellPrefix);
+        assert_eq!(reach("opencode"), Reach::ShellSetting);
+        for local in ["codex", "devin", "pi", "gemini", "htop"] {
+            assert_eq!(reach(local), Reach::Local, "{local}");
+        }
+        assert_eq!(
+            local_only("codex"),
+            "codex can't run commands on a remote host yet"
+        );
+        // Every agent the launcher offers has an answer, and claude — what
+        // `cctop sandbox` always meant — is one that goes.
+        assert!(
+            crate::alias::AGENTS
+                .split_whitespace()
+                .any(|a| reach(a) != Reach::Local)
+        );
+    }
+
+    #[test]
+    fn the_agent_is_named_before_the_spec_and_defaults_to_claude() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        let a = args("box:/srv --model opus");
+        let (agent, rest) = split_agent(&a).expect("ok");
+        assert_eq!((agent.as_str(), rest), ("claude", &a[..]));
+        let a = args("--agent opencode box:~");
+        let (agent, rest) = split_agent(&a).expect("ok");
+        assert_eq!((agent.as_str(), rest), ("opencode", &a[2..]));
+        let a = args("--agent=opencode box:~");
+        assert_eq!(split_agent(&a).expect("ok").0, "opencode");
+        assert!(split_agent(&args("--agent")).is_err());
+    }
+
+    /// The shell an agent is given reads its argv as bash would, as far as
+    /// agents use it — and refuses what it cannot send rather than running it.
+    #[test]
+    fn a_shell_call_is_read_like_bash_reads_one() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            shell_call(&args(&["-c", "ls -la"])),
+            ShellCall::Command("ls -la")
+        );
+        assert_eq!(
+            shell_call(&args(&["-lc", "make"])),
+            ShellCall::Command("make")
+        );
+        assert_eq!(
+            shell_call(&args(&["-l", "-c", "make", "argv0"])),
+            ShellCall::Command("make")
+        );
+        assert_eq!(shell_call(&args(&[])), ShellCall::Interactive);
+        assert_eq!(shell_call(&args(&["-l"])), ShellCall::Interactive);
+        assert_eq!(
+            shell_call(&args(&["--login", "-i"])),
+            ShellCall::Interactive
+        );
+        assert_eq!(shell_call(&args(&["script.sh"])), ShellCall::Unknown);
+        assert_eq!(shell_call(&args(&["-c"])), ShellCall::Unknown);
+        assert_eq!(shell_call(&args(&["-x", "y"])), ShellCall::Unknown);
+    }
+
+    /// The shell and the guard are laid over an inline config the person
+    /// already had, which keeps its other keys.
+    #[test]
+    fn opencodes_config_carries_the_shell_and_the_guard() {
+        let shell = Path::new("/run/user/1/cctop/sbx-shell-1/bash");
+        let fresh: serde_json::Value =
+            serde_json::from_str(&opencode_config(None, shell)).expect("json");
+        assert_eq!(fresh["shell"], "/run/user/1/cctop/sbx-shell-1/bash");
+        assert_eq!(fresh["permission"]["external_directory"], "deny");
+        let theirs = r#"{"model":"x","permission":{"bash":"ask","external_directory":"allow"}}"#;
+        let merged: serde_json::Value =
+            serde_json::from_str(&opencode_config(Some(theirs), shell)).expect("json");
+        assert_eq!(merged["model"], "x");
+        assert_eq!(merged["permission"]["bash"], "ask");
+        assert_eq!(merged["permission"]["external_directory"], "deny");
+        // Not an object: replaced, never dropped.
+        let junk: serde_json::Value =
+            serde_json::from_str(&opencode_config(Some("[1]"), shell)).expect("json");
+        assert_eq!(junk["permission"]["external_directory"], "deny");
+    }
+
+    /// The shim is a real executable that hands its argv to cctop untouched.
+    #[test]
+    fn the_shell_shim_passes_its_arguments_through() {
+        let shim = write_shell_shim(Path::new("/bin/echo")).expect("shim");
+        let out = Command::new(&shim)
+            .args(["-c", "it's one arg"])
+            .output()
+            .expect("run");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "--sandbox-shell -c it's one arg\n"
+        );
+        let _ = std::fs::remove_dir_all(shim.parent().expect("dir"));
+    }
+
     #[test]
     fn a_bash_call_is_told_from_a_hook_by_its_closing_pwd() {
         match classify(BASH_CALL) {
@@ -1516,8 +1874,11 @@ mod tests {
     #[test]
     fn the_probe_reads_what_the_host_said() {
         let p = parse_probe(
-            "hostname=db1\nuname=Linux 6.8.0\nbash=/usr/bin/bash\nsetsid=/usr/bin/setsid\nroot=/home/f/x\n",
+            "hostname=db1\nuname=Linux 6.8.0\nbash=/usr/bin/bash\nsetsid=/usr/bin/setsid\nroot=/home/f/x\nreadable=1\n",
         );
+        assert!(p.readable && !p.writable);
+        let facts = p.facts();
+        assert!(facts.exists && facts.is_dir && facts.readable && !facts.writable);
         assert_eq!(p.hostname, "db1");
         assert_eq!(p.uname, "Linux 6.8.0");
         assert_eq!(p.root, "/home/f/x");

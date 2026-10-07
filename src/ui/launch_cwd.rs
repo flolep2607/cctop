@@ -1,11 +1,22 @@
 //! The launcher's `in` field: typing a directory and being offered one.
 //!
-//! [`dirs`](super::dirs) computes the suggestions; this owns the field they are
+//! [`dirs`](super::dirs) computes the local suggestions and
+//! [`location`](super::location) the remote ones; this owns the field they are
 //! offered into — the editing state, the cursor, and the check that a typed path
 //! is a directory that exists before a launch is allowed to take it. The split
 //! is so that the matching logic can be tested without an `App` at all.
 
+use super::location::{Hit, Typed};
 use super::*;
+
+/// The hosts in `~/.ssh/config`. Not read under test, where the person
+/// running the tests has a config of their own that no test should depend on.
+fn ssh_hosts() -> Vec<crate::ssh_config::Host> {
+    match cfg!(test) {
+        true => Vec::new(),
+        false => crate::ssh_config::hosts(),
+    }
+}
 
 /// Directories the launcher's `in` field will remember, at most.
 ///
@@ -30,16 +41,37 @@ impl App {
     /// Prefilled with `~` spelling rather than the absolute path: that is how
     /// the line already reads, and a field that changed what it showed the
     /// moment it became editable would look like it had lost the setting.
+    ///
+    /// A remote location is prefilled as `host:path` and read as one at once:
+    /// what is under it on the host is what the field is for then, and asking
+    /// for it reconnects a host that went offline earlier.
     pub(super) fn edit_launch_cwd(&mut self) {
-        let prefill = self
-            .launch_cwd
-            .as_ref()
-            .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
-            .unwrap_or_default();
+        let remote = self.launch_remote.as_ref().map(|t| t.spelled());
+        let prefill = remote.clone().unwrap_or_else(|| {
+            self.launch_cwd
+                .as_ref()
+                .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
+                .unwrap_or_default()
+        });
         self.launch_cwd_input.set(prefill);
         self.launch_cwd_bad = false;
-        self.launch_cwd_pristine = true;
+        self.launch_cwd_why = None;
+        self.launch_cwd_checking = None;
+        self.launch_cwd_pristine = remote.is_none();
         self.launch_cwd_known = self.known_dirs();
+        self.ssh_hosts = ssh_hosts();
+        // An offline host is asked again each time the field opens: a key
+        // added to the agent, a VPN brought up, is what the person went away
+        // to fix.
+        let offline: Vec<String> = self
+            .ssh_states
+            .iter()
+            .filter(|(_, s)| matches!(s.conn, location::Conn::Offline(_)))
+            .map(|(h, _)| h.clone())
+            .collect();
+        for host in offline {
+            self.preconnect(&host, true);
+        }
         self.launch_cwd_suggest();
         // Asked for as the field opens, and answered a moment later by a worker
         // walking the home directory. Sent every time rather than once per
@@ -75,7 +107,20 @@ impl App {
     pub(super) fn launch_cwd_edited(&mut self) {
         self.launch_cwd_pristine = false;
         self.launch_cwd_bad = false;
+        self.launch_cwd_why = None;
+        self.launch_cwd_checking = None;
         self.launch_cwd_suggest();
+    }
+
+    /// The local directories among the suggestions.
+    pub fn launch_cwd_dirs(&self) -> Vec<std::path::PathBuf> {
+        self.launch_cwd_hits
+            .iter()
+            .filter_map(|h| match h {
+                Hit::Dir(dir) => Some(dir.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Directories agents are known to have run in, last used first.
@@ -185,12 +230,28 @@ impl App {
     ///
     /// An untouched field asks nothing — see `launch_cwd_pristine` — so it is
     /// offered the known list rather than the filesystem under its prefill.
+    ///
+    /// `host:path` is completed on the host. Anything else is local, and a
+    /// bare word — or nothing — is matched against the ssh hosts as well, so a
+    /// host can be found by the name it is remembered by.
     pub(super) fn launch_cwd_suggest(&mut self) {
-        let typed: &str = match self.launch_cwd_pristine {
-            true => "",
-            false => &self.launch_cwd_input,
+        let text: String = match self.launch_cwd_pristine {
+            true => String::new(),
+            false => self.launch_cwd_input.to_string(),
         };
-        self.launch_cwd_hits = dirs::suggest(typed, &self.launch_cwd_known);
+        self.launch_cwd_hits = match location::parse(&text) {
+            Typed::Remote { host, path } => self.remote_hits(host, path),
+            Typed::Local(typed) => {
+                let local: Vec<Hit> = dirs::suggest(typed, &self.launch_cwd_known)
+                    .into_iter()
+                    .map(Hit::Dir)
+                    .collect();
+                match typed.contains('/') || typed.starts_with(['~', '.']) {
+                    true => local,
+                    false => self.with_hosts(local, typed),
+                }
+            }
+        };
         self.launch_cwd_pick = None;
     }
 
@@ -224,7 +285,7 @@ impl App {
             .launch_cwd_pick
             .and_then(|i| self.launch_cwd_hits.get(i))
         {
-            Some(dir) => format!("{}/", crate::util::tildify(&dir.to_string_lossy())),
+            Some(hit) => location::fill_of(hit),
             None => {
                 // An untouched field is offering the known list, which has
                 // nothing to do with the prefill; completing means completing
@@ -232,7 +293,15 @@ impl App {
                 if self.launch_cwd_pristine {
                     self.launch_cwd_edited();
                 }
-                match dirs::complete(&self.launch_cwd_input, &self.launch_cwd_hits) {
+                let dirs = self.launch_cwd_dirs();
+                let only_dirs = dirs.len() == self.launch_cwd_hits.len();
+                let filled = match only_dirs {
+                    true => dirs::complete(&self.launch_cwd_input, &dirs),
+                    false => {
+                        location::complete_mixed(&self.launch_cwd_input, &self.launch_cwd_hits)
+                    }
+                };
+                match filled {
                     Some(filled) => filled,
                     None => return,
                 }
@@ -252,12 +321,21 @@ impl App {
     /// it is taken without the check the typed path gets — and it is taken by
     /// filling the field with it first, so that a suggestion which has since
     /// been deleted is refused in the field like anything else.
+    ///
+    /// A host is not a place to start yet, so taking one puts `host:` in the
+    /// field and leaves it open, connecting, on the host's directories.
     pub(super) fn take_launch_cwd(&mut self) {
-        if let Some(dir) = self
+        if let Some(hit) = self
             .launch_cwd_pick
             .and_then(|i| self.launch_cwd_hits.get(i))
+            .cloned()
         {
-            self.launch_cwd_input = crate::util::tildify(&dir.to_string_lossy()).into();
+            self.launch_cwd_input.set(hit.text());
+            if let Hit::Host { .. } = hit {
+                self.launch_cwd_edited();
+                self.needs_redraw = true;
+                return;
+            }
         }
         self.accept_launch_cwd();
     }
@@ -268,6 +346,11 @@ impl App {
     /// somewhere inside the shim with a message about spawning, by which point
     /// the launcher is gone and there is nothing left to correct.
     pub(super) fn accept_launch_cwd(&mut self) {
+        if let Typed::Remote { host, path } = location::parse(&self.launch_cwd_input) {
+            let (host, path) = (host.to_string(), path.to_string());
+            self.accept_remote(&host, &path);
+            return;
+        }
         let typed = self.launch_cwd_input.trim();
         // Empty means "wherever cctop was started", which is what the launcher
         // offers by default and what the footer calls "this directory".
@@ -287,6 +370,7 @@ impl App {
         // now holds something perfectly good.
         self.launch_cwd_bad = false;
         self.launch_cwd = taken;
+        self.launch_remote = None;
         self.mode = Mode::Launch;
     }
 }
@@ -427,8 +511,8 @@ mod tests {
 
         // Nothing typed, and the project is already on screen. The one that has
         // since been deleted is not, because taking it could only fail.
-        assert_eq!(app.launch_cwd_hits, vec![project.clone()]);
-        assert!(!app.launch_cwd_hits.contains(&gone));
+        assert_eq!(app.launch_cwd_dirs(), vec![project.clone()]);
+        assert!(!app.launch_cwd_dirs().contains(&gone));
 
         // The arrows move into the list and back out of it. Out, because the
         // field is still what is being typed in.
@@ -445,7 +529,7 @@ mod tests {
             app.launch_cwd_input,
             format!("{}/", project.to_string_lossy())
         );
-        assert_eq!(app.launch_cwd_hits, vec![deep.clone()]);
+        assert_eq!(app.launch_cwd_dirs(), vec![deep.clone()]);
         assert_eq!(app.launch_cwd_pick, None, "a fresh list picks nothing");
 
         // Enter on a suggestion takes it without the refusal a mistyped path
@@ -668,11 +752,11 @@ mod tests {
             app.launch_cwd_input,
             crate::util::tildify(&here.to_string_lossy())
         );
-        assert_eq!(app.launch_cwd_hits, vec![here.clone(), repo.clone()]);
+        assert_eq!(app.launch_cwd_dirs(), vec![here.clone(), repo.clone()]);
 
         // Typed into, it is a path again, and completes against the disk.
         app.on_key(key(KeyCode::Char('/')));
-        assert_eq!(app.launch_cwd_hits, vec![here.join("inside")]);
+        assert_eq!(app.launch_cwd_dirs(), vec![here.join("inside")]);
     }
 
     /// The scan's first answer lands after the field has opened, so it is shown
@@ -690,10 +774,10 @@ mod tests {
         app.launch_root = None;
         app.launch_cwd = None;
         app.edit_launch_cwd();
-        assert_eq!(app.launch_cwd_hits, vec![worked.clone()]);
+        assert_eq!(app.launch_cwd_dirs(), vec![worked.clone()]);
 
         app.got_repos(vec![repo.clone()]);
-        assert_eq!(app.launch_cwd_hits, vec![worked.clone(), repo.clone()]);
+        assert_eq!(app.launch_cwd_dirs(), vec![worked.clone(), repo.clone()]);
 
         // With a pick on screen the list stays as it is, and the answer waits
         // for the next opening.
