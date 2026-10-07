@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "wouter";
-import { Check, ChevronDown, Copy, ExternalLink, Forward, LayoutGrid, MoreHorizontal, Play, SquareTerminal, X } from "lucide-react";
+import { Check, ChevronDown, Copy, Download, ExternalLink, FileText, Forward, LayoutGrid, MessagesSquare, MoreHorizontal, Play, SquareTerminal, Wrench, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { act, getJson } from "@/lib/api";
 import { CAN_ACT, withToken } from "@/lib/config";
 import { ago, clock, copyText, shortModel, shortPath } from "@/lib/format";
+import { copyMarkdown, downloadMarkdown } from "@/lib/export";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -351,10 +352,27 @@ function Actions({
             <MoreHorizontal />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
+        <DropdownMenuContent align="end" className="min-w-64">
           <DropdownMenuItem onSelect={copyMd}>
             <Copy /> Copy report as markdown
           </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {/* The conversation itself, for pasting into another agent or an
+              issue. Flat rather than a submenu: a submenu is a hover target,
+              and this menu is opened on phones too. */}
+          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "conversation")}>
+            <MessagesSquare /> Copy conversation as markdown
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "tools")}>
+            <Wrench /> Copy with tool output
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "brief")}>
+            <FileText /> Copy handoff brief
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => downloadMarkdown(r.session_id, "tools")}>
+            <Download /> Download .md with tool output
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => copyText(r.session_id).then(() => toast.success("Copied the session id"))}>
             <Check /> Copy session id
           </DropdownMenuItem>

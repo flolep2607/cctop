@@ -584,7 +584,15 @@ cctop --handoff            # the most recently active session, as markdown
 cctop --handoff 2abd15fe   # a session id, or any unique prefix of one
 cctop --convert 2abd15fe codex   # the conversation, in Codex's own store
 cctop --converted          # the copies on this machine, and where they came from
+cctop --export 2abd15fe    # the whole conversation as markdown, to paste anywhere
+cctop --export 2abd15fe --tool-output   # with each tool result, cut at 800 characters
 ```
+
+Where the brief is a summary, `--export` is the transcript: every turn, the
+words verbatim and quoted so a heading or a code fence inside a message cannot
+break the document around it, each tool call on one line, thinking left out.
+The session page's ⋯ menu copies or downloads the same document, and the brief
+beside it.
 
 `--convert` writes the transcript and stops there; it does not start an agent.
 Use the UI's `O` for the launch, which resumes the copy as it goes.
