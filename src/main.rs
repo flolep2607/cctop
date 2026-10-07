@@ -394,6 +394,7 @@ fn main() -> anyhow::Result<()> {
         || args.statusline
         || args.report.is_some()
         || args.chat.is_some()
+        || args.export.is_some()
         || args.access.is_some()
     {
         // Non-interactive modes need pricing before they can print anything, so
@@ -410,6 +411,8 @@ fn main() -> anyhow::Result<()> {
             cli::run_report(&sessions, which, args.plan, &loader)?;
         } else if let Some(which) = &args.chat {
             cli::run_chat(&sessions, which, args.before)?;
+        } else if let Some(which) = &args.export {
+            cli::run_export(&sessions, which, args.tool_output)?;
         } else if let Some(which) = &args.access {
             cli::run_access(&sessions, which, &loader)?;
         } else {
