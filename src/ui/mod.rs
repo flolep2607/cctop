@@ -29,6 +29,7 @@ mod line_edit;
 mod markdown;
 pub mod menu;
 mod modals;
+pub mod note;
 pub mod panels;
 mod panes;
 mod preview;
@@ -531,6 +532,12 @@ pub struct App {
     /// Columns the user has hidden outright (`$CCTOP_COLUMNS_HIDE`). These win
     /// over the automatic width-based dropping in [`columns::visible_columns`].
     pub hidden_columns: Vec<ColumnId>,
+
+    /// Footer items the user has hidden with `footer_hide` — badge names,
+    /// hint names, and `share` for the corner.
+    pub hidden_footer: Vec<String>,
+    /// The user's footer line — a static note, or a command's first line.
+    pub footer_extra: note::Extra,
 
     /// Scroll offset of the help overlay, which is taller than most terminals.
     pub help_scroll: u16,
@@ -1035,6 +1042,8 @@ impl App {
             quit_arm: false,
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
+            hidden_footer: Vec::new(),
+            footer_extra: note::Extra::default(),
             help_scroll: 0,
             help_max_scroll: 0,
             help_filter: Default::default(),

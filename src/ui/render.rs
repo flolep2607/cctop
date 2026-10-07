@@ -38,6 +38,10 @@ pub struct Layout {
     /// drawn. Recorded because cctop holds the terminal's mouse capture: the
     /// click that would follow the link has to be answered here or nowhere.
     pub(super) share_corner: Option<(u16, u16, u16)>,
+    /// The `⧉ local` half of the share corner, while the corner is armed and
+    /// nothing is being served. A click on it serves on this machine only;
+    /// the rest of the corner is the internet.
+    pub(super) share_local: Option<(u16, u16, u16)>,
     /// The rectangle a modal covers while one is up. A click inside it belongs
     /// to the modal, and a click outside it must not reach the dashboard the
     /// modal is sitting on top of.
@@ -149,6 +153,12 @@ impl Layout {
     /// Whether the cursor is on the footer's share link.
     pub fn share_corner_at(&self, col: u16, row: u16) -> bool {
         matches!(self.share_corner, Some((y, a, b)) if row == y && col >= a && col < b)
+    }
+
+    /// Whether the cursor is on the armed corner's `⧉ local` half — the side
+    /// that keeps the table on this machine rather than publishing it.
+    pub fn share_local_at(&self, col: u16, row: u16) -> bool {
+        matches!(self.share_local, Some((y, a, b)) if row == y && col >= a && col < b)
     }
 
     /// Whether the cursor is inside the modal that is up, if one is.
@@ -2342,28 +2352,38 @@ fn list_hints(app: &App) -> Vec<Hint> {
 /// is a thing you could learn from the help and a badge is a fact about this
 /// screen that is on show nowhere else.
 fn footer_badges(app: &App) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
+    // Each badge names itself so `footer_hide` can leave it off.
+    let mut badges: Vec<(&'static str, Span<'static>)> = Vec::new();
     // First, and in the colour the costly things use: it is a question waiting
     // for an answer, and the answer is a second click on the hint beside it.
     if app.quit_arm {
-        spans.push(Span::styled(
-            " click q again to quit ",
-            Style::default().fg(theme::colors().cost_high),
+        badges.push((
+            "quit",
+            Span::styled(
+                " click q again to quit ",
+                Style::default().fg(theme::colors().cost_high),
+            ),
         ));
     }
     if app.idle_only {
-        spans.push(Span::styled(
-            format!(
-                " Idle≥{} ",
-                super::idle::threshold_label(app.settings.idle_after_ms())
+        badges.push((
+            "idle",
+            Span::styled(
+                format!(
+                    " Idle≥{} ",
+                    super::idle::threshold_label(app.settings.idle_after_ms())
+                ),
+                Style::default().fg(theme::colors().panel_title),
             ),
-            Style::default().fg(theme::colors().panel_title),
         ));
     }
     if let Some(age) = app.age_filter {
-        spans.push(Span::styled(
-            format!(" Age<{} ", age.short()),
-            Style::default().fg(theme::colors().panel_title),
+        badges.push((
+            "age",
+            Span::styled(
+                format!(" Age<{} ", age.short()),
+                Style::default().fg(theme::colors().panel_title),
+            ),
         ));
     }
     if !app.search.is_empty() {
@@ -2375,30 +2395,44 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
             (true, true) => " +transcripts…".to_string(),
             (true, false) => format!(" +transcripts({})", app.scan_hits.len()),
         };
-        spans.push(Span::styled(
-            format!(" Filter: {}{scope} ", app.search),
-            Style::default().fg(theme::colors().filter_badge),
+        badges.push((
+            "filter",
+            Span::styled(
+                format!(" Filter: {}{scope} ", app.search),
+                Style::default().fg(theme::colors().filter_badge),
+            ),
         ));
     }
     if app.cost_floor > 0.0 {
-        spans.push(Span::styled(
-            format!(" ≥${:.2} ", app.cost_floor),
-            Style::default().fg(theme::colors().cost_high),
+        badges.push((
+            "cost",
+            Span::styled(
+                format!(" ≥${:.2} ", app.cost_floor),
+                Style::default().fg(theme::colors().cost_high),
+            ),
         ));
     }
     if !app.marked.is_empty() {
-        spans.push(Span::styled(
-            format!(" [{} marked] ", app.marked.len()),
-            Style::default()
-                .fg(theme::colors().accent)
-                .add_modifier(Modifier::BOLD),
+        badges.push((
+            "marked",
+            Span::styled(
+                format!(" [{} marked] ", app.marked.len()),
+                Style::default()
+                    .fg(theme::colors().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ));
     }
     if app.follow {
-        spans.push(Span::styled(
-            " FOLLOW ",
-            Style::default().fg(theme::colors().cost_mid),
+        badges.push((
+            "follow",
+            Span::styled(" FOLLOW ", Style::default().fg(theme::colors().cost_mid)),
         ));
+    }
+    // The user's own line, next to what cctop is doing to the table.
+    if let Some(note) = app.footer_extra.text() {
+        let note: String = note.chars().take(48).collect();
+        badges.push(("note", Span::styled(format!(" {note} "), theme::dim())));
     }
     // Who rang, kept there until you are looking at them. A bell you heard from
     // the next room has to still be answerable when you come back.
@@ -2406,40 +2440,68 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
         .notify
         .footer(app.selected_session().map(|s| s.key()).as_deref())
     {
-        spans.push(Span::styled(
-            format!(" {bell} "),
-            Style::default()
-                .fg(theme::colors().accent)
-                .add_modifier(Modifier::BOLD),
+        badges.push((
+            "bell",
+            Span::styled(
+                format!(" {bell} "),
+                Style::default()
+                    .fg(theme::colors().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ));
+    }
+    // Machines answering, beside the ones that are not: without the count of
+    // the living, a warning is the only reading and the totals still look
+    // complete or empty with no way to tell which.
+    if let Some(up) = app.remotes_up_footer() {
+        badges.push((
+            "remote",
+            Span::styled(
+                format!(" {up} "),
+                Style::default().fg(theme::colors().cost_low),
+            ),
         ));
     }
     // A machine that has dropped out has to say so. Its rows are still on
     // screen, holding their last reading, and the totals still look complete.
     if let Some(down) = app.remote_footer() {
-        spans.push(Span::styled(
-            format!(" ⚠ {down} "),
-            Style::default().fg(theme::colors().cost_mid),
+        badges.push((
+            "remote",
+            Span::styled(
+                format!(" ⚠ {down} "),
+                Style::default().fg(theme::colors().cost_mid),
+            ),
         ));
     }
     // Two agents writing one file is the only thing here that is a fault rather
     // than a state, so it sits with the bell rather than among the badges.
     if let Some(clash) = app.conflict_footer() {
-        spans.push(Span::styled(
-            format!(" {clash} "),
-            Style::default()
-                .fg(theme::colors().cost_high)
-                .add_modifier(Modifier::BOLD),
+        badges.push((
+            "conflict",
+            Span::styled(
+                format!(" {clash} "),
+                Style::default()
+                    .fg(theme::colors().cost_high)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ));
     }
     if let Some(version) = &app.update_available {
-        spans.push(Span::styled(
-            format!(" v{version} available — cctop --update "),
-            Style::default()
-                .fg(theme::colors().cost_mid)
-                .add_modifier(Modifier::BOLD),
+        badges.push((
+            "update",
+            Span::styled(
+                format!(" v{version} available — cctop --update "),
+                Style::default()
+                    .fg(theme::colors().cost_mid)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ));
     }
-    spans
+    badges
+        .into_iter()
+        .filter(|(name, _)| !app.hidden_footer.iter().any(|h| h == name))
+        .map(|(_, span)| span)
+        .collect()
 }
 
 /// What the footer's right-hand corner is showing.
@@ -2490,7 +2552,9 @@ fn share_corner(app: &App) -> Corner {
     }
     match app.serving.as_ref().and_then(|s| s.public.as_deref()) {
         Some(url) => Corner::Link(link_label(url), url.to_string()),
-        None if app.share_arm => Corner::Button("⧉ publish to the internet?"),
+        // Armed, nothing served yet: the corner becomes two doors — this
+        // machine, or the internet. Two halves, one for each answer.
+        None if app.share_arm => Corner::Button("⧉ local  ⧉ worldwide"),
         // Serving already, just not off this machine: the click adds the tunnel
         // to the server that is up rather than starting one.
         None if app.serving.is_some() => Corner::Button("⧉ + tunnel"),
@@ -2552,6 +2616,11 @@ const LINK_MIN_HINTS: usize = 26;
 /// The link takes its columns before the hints and badges do, and is drawn after
 /// them, so nothing lands on top of a cell holding an escape sequence.
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    // `footer_hide = "share"` leaves the whole corner off.
+    if app.hidden_footer.iter().any(|h| h == "share") {
+        draw_footer_keys(frame, area, app, layout);
+        return;
+    }
     let corner = share_corner(app);
     let width = corner.label().chars().count();
     // Shown only with a footer's worth of keys still beside it. A column of gap
@@ -2590,11 +2659,32 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
         // Amber while armed: the next click is the one that publishes, and the
         // colour cctop uses for "this wants reading" is the honest one for it.
         Corner::Button(label) => {
-            let style = match app.share_arm {
-                true => Style::default().fg(theme::colors().cost_mid),
-                false => theme::dim(),
-            };
-            frame.buffer_mut().set_string(x, area.y, label, style);
+            // Armed with nothing served: two chips, one per door. The
+            // internet's gets the colour that means "this wants reading";
+            // the local one is what stays on the machine, so it stays dim.
+            let choosing = app.share_arm && app.serving.is_none() && app.share_opening.is_none();
+            if choosing {
+                const LOCAL: &str = "⧉ local";
+                frame
+                    .buffer_mut()
+                    .set_string(x, area.y, LOCAL, theme::dim());
+                let rest: String = label.chars().skip(LOCAL.chars().count()).collect();
+                frame.buffer_mut().set_string(
+                    x + LOCAL.chars().count() as u16,
+                    area.y,
+                    rest,
+                    Style::default()
+                        .fg(theme::colors().cost_mid)
+                        .add_modifier(Modifier::BOLD),
+                );
+                layout.share_local = Some((area.y, x, x + LOCAL.chars().count() as u16));
+            } else {
+                let style = match app.share_arm {
+                    true => Style::default().fg(theme::colors().cost_mid),
+                    false => theme::dim(),
+                };
+                frame.buffer_mut().set_string(x, area.y, label, style);
+            }
         }
         Corner::Working(label) => {
             frame.buffer_mut().set_string(
@@ -2645,6 +2735,16 @@ fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layou
     } else {
         (list_hints(app), footer_badges(app))
     };
+    // `footer_hide` names get left off the hints too, spelled as the label
+    // shows them — "sort" hides `S Sort`.
+    let hints: Vec<Hint> = hints
+        .into_iter()
+        .filter(|h| {
+            !app.hidden_footer
+                .iter()
+                .any(|hide| hide == &h.name.to_lowercase())
+        })
+        .collect();
 
     let badge_w: usize = badges.iter().map(|s| s.content.chars().count()).sum();
     // The badges never squeeze the hints below the first few: a footer that is
@@ -3128,10 +3228,125 @@ mod tests {
 
         app.share_arm = true;
         let armed = share_corner(&app);
-        assert_eq!(armed.label(), "⧉ publish to the internet?");
+        assert_eq!(armed.label(), "⧉ local  ⧉ worldwide");
         // Nothing to open yet, so the corner is a button and not a link: a
         // click on it starts a tunnel rather than a browser.
         assert!(matches!(armed, Corner::Button(_)));
+    }
+
+    /// Armed, the corner is two doors and each has to say which machine the
+    /// table would land on: local stays here, worldwide is the tunnel.
+    #[test]
+    fn the_armed_corner_offers_local_and_worldwide() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.share_arm = true;
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let footer: String = (0..cols).map(|x| buffer[(x, rows - 1)].symbol()).collect();
+        assert!(
+            footer.contains("⧉ local") && footer.contains("⧉ worldwide"),
+            "the two doors are not on the corner: {footer:?}"
+        );
+        let (row, a, b) = layout.share_local.expect("no local hit region");
+        assert!(layout.share_corner_at(a, row));
+        assert!(layout.share_local_at(a, row));
+        assert!(layout.share_local_at(b - 1, row));
+        assert!(!layout.share_local_at(b, row));
+        // The worldwide half is on the corner but not the local side.
+        let (_, ca, cb) = layout.share_corner.expect("no corner");
+        assert!(layout.share_corner_at(cb - 1, row));
+        assert!(!layout.share_local_at(cb - 1, row));
+        assert!(ca <= a);
+    }
+
+    /// `footer_hide` takes a badge or a hint name, and `share` takes the
+    /// corner: a footer is the user's, and it has to be shorten-able.
+    #[test]
+    fn footer_hide_leaves_the_named_items_off() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.follow = true;
+        app.hidden_footer = vec!["follow".into(), "sort".into()];
+        let badges = footer_badges(&app);
+        assert!(!badges.iter().any(|s| s.content.contains("FOLLOW")));
+
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let footer: String = (0..cols).map(|x| buffer[(x, rows - 1)].symbol()).collect();
+        assert!(
+            !footer.contains("Sort"),
+            "the hidden hint is on the footer: {footer:?}"
+        );
+    }
+
+    /// And `footer_hide = "share"` leaves the corner off altogether.
+    #[test]
+    fn the_share_corner_can_be_hidden() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.hidden_footer = vec!["share".into()];
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let footer: String = (0..cols).map(|x| buffer[(x, rows - 1)].symbol()).collect();
+        assert!(
+            !footer.contains("⧉"),
+            "the corner is on the footer: {footer:?}"
+        );
+        assert!(layout.share_corner.is_none());
+    }
+
+    /// The footer's own line is drawn as a badge, whichever of the two ways
+    /// the user supplied it.
+    #[test]
+    fn the_footer_note_shows_as_a_badge() {
+        use crate::cache::UiPrefs;
+        use crate::pricing::Plan;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        assert!(
+            footer_badges(&app)
+                .iter()
+                .all(|s| !s.content.contains("on call"))
+        );
+        app.footer_extra.apply(Some("on call"), None);
+        assert!(
+            footer_badges(&app)
+                .iter()
+                .any(|s| s.content.contains("on call"))
+        );
     }
 
     /// While the edge is being dialled the corner spins, because the second
@@ -3158,7 +3373,7 @@ mod tests {
         );
 
         // And a click at it while it spins is impatience, not a second tunnel.
-        app.on_share_corner(true);
+        app.on_share_corner(true, false);
         assert!(app.share_opening.is_some());
         assert!(app.serving.is_none());
     }
@@ -3415,6 +3630,7 @@ mod tests {
             workspace_spans: vec![(0, 12, 0)],
             workspace_new: Some((12, 23)),
             share_corner: Some((24, 50, 78)),
+            share_local: None,
             header_row: 6,
             rows_start: 7,
             rows_end: 12,
