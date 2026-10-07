@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { StateDot } from "@/components/status";
 import { dotOf } from "@/lib/status";
 import { stripAnsi } from "@/lib/ansi";
+import { YoloBadge } from "@/components/yolo";
 import type { Session } from "@/lib/types";
 
 // The cost a row shows. `incl`, `—` and a figure are three different claims —
@@ -85,6 +86,7 @@ export const SessionRow = memo(function SessionRow({
             ) : (
               <Badge variant="outline" className="text-destructive border-destructive/40 bg-destructive/5 font-normal">needs permission</Badge>
             ))}
+          {s.yolo && <YoloBadge />}
           {s.state === "error" && <Badge variant="outline" className="text-destructive border-destructive/40 font-normal">{s.running ? "api error" : "ended on an api error"}</Badge>}
           {errRate >= 0.25 && <Badge variant="outline" className="text-destructive border-destructive/40 font-normal">{Math.round(errRate * 100)}% tool errors</Badge>}
           {s.conflict && (

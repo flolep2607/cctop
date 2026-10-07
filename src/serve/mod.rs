@@ -69,7 +69,7 @@
 //! the tunnel the user already has (ssh, Tailscale) is still better than
 //! anything here, because it authenticates rather than merely encrypting.
 
-mod actions;
+pub(crate) mod actions;
 /// Cross-session aggregation behind `/api/analytics` — the data the
 /// analytics page charts, built from the snapshot plus cached extractions.
 mod analytics;
@@ -1088,8 +1088,13 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
         let mut peek = crate::peek::Peek::new();
         let read_screen = crate::settings::Settings::load().read_screen == Some(true);
         loader.set_hook_claims(reports.claims.clone());
+        // The YOLO switch, read on every pass. Only a serve that may act
+        // competes to answer for it — see [`crate::yolo`] for why only one
+        // cctop on the machine ever presses.
+        let mut yolo = crate::yolo::Auto::new(shared.actions);
         let mut rows = loader.load(plan);
         stamp(&mut rows, &reports, &mut peek, read_screen);
+        yolo.tick(&mut rows);
         let mut walked = Instant::now();
         let mut version = 0u64;
         publish(
@@ -1135,6 +1140,9 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
                 loader.refresh_live(plan, &mut rows);
             }
             stamp(&mut rows, &reports, &mut peek, read_screen);
+            // After the stamp, which is what says a prompt is up: an answer
+            // pressed here is a refresh tick behind the prompt at most.
+            yolo.tick(&mut rows);
             publish(
                 &shared,
                 &remotes,
@@ -1994,6 +2002,10 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
     let outcome = match verb {
         "send" => actions::send(session, &field("text")),
         "answer" => actions::answer(session, &field("choice")),
+        "yolo" => match body.get("on").and_then(serde_json::Value::as_bool) {
+            Some(on) => actions::yolo(session, on),
+            None => Err((400, "YOLO is `{\"on\": true}` or `{\"on\": false}`".into())),
+        },
         "resume" => actions::resume(session),
         "handoff" => {
             // The brief is built from the extraction, so this one pays for a

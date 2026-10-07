@@ -691,6 +691,7 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
         // scale; the modes that do ask stay quiet, because they are the norm
         // and colouring the norm is how a warning stops being read.
         ColumnId::Permission => match s.permission {
+            _ if s.yolo.is_some() => theme::colors().cost_high,
             Some(p) if p.is_unrestricted() => theme::colors().cost_high,
             Some(_) => theme::colors().dim,
             None => theme::colors().dimmer,

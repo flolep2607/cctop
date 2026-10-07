@@ -730,6 +730,13 @@ pub struct App {
     /// absent entry is the ordinary case and means "fall back to the transcript"
     /// rather than "nothing is happening". See [`crate::hook::Reports`].
     pub reports: crate::hook::Reports,
+    /// The machine's YOLO switch: stamped on the rows wherever reports are,
+    /// and — in the one cctop that owns the job — answered. See
+    /// [`crate::yolo`].
+    pub(super) yolo: crate::yolo::Auto,
+    /// When [`App::tick_yolo`] last read the switch, so an idle loop does not
+    /// stat it on every pass.
+    pub(super) yolo_at: Option<Instant>,
     /// What each tab's agent says on its own screen, by agent pid, while
     /// `read_screen` is on — see [`App::read_screens`]. Pane reads only: a
     /// detached tab's answer is in `peeked`, and the two are looked up together
@@ -1124,6 +1131,10 @@ impl App {
             // question — and that is exactly the row that sends nothing until
             // it is answered. See [`Reports::new`](crate::hook::Reports::new).
             reports: crate::hook::Reports::default(),
+            // Never answering until the run loop says so: an `App` built for a
+            // test or a snapshot must not press keys at anything.
+            yolo: crate::yolo::Auto::new(false),
+            yolo_at: None,
             screen_read: HashMap::new(),
             peeked: HashMap::new(),
             peeked_at: None,

@@ -1534,6 +1534,7 @@ impl App {
             Action::Restart => self.restart_selected(),
             Action::Attach => self.attach_selected(),
             Action::Send => self.send_prompt(),
+            Action::Yolo => self.toggle_yolo(),
             Action::Handoff => self.handoff_selected(),
             Action::Read => self.open_conversation(),
             Action::Expand => self.toggle_expanded(),

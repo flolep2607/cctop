@@ -629,6 +629,10 @@ pub struct JsonSession {
     /// apply to it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     asking_question: bool,
+    /// Present when cctop allows every permission prompt this session raises:
+    /// since when, and what it has allowed. See [`crate::yolo`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    yolo: Option<crate::yolo::Entry>,
     session_id: String,
     started_at: String,
     last_active: String,
@@ -1231,6 +1235,7 @@ pub fn json_sessions(
                 },
                 asking_for: s.asking_for.clone(),
                 asking_question: s.asking_question,
+                yolo: s.yolo.as_deref().cloned(),
                 surface: match s.surface {
                     crate::session::Surface::Cli => "cli",
                     crate::session::Surface::Editor => "editor",

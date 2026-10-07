@@ -30,6 +30,7 @@ pub enum Action {
     Restart,
     Attach,
     Send,
+    Yolo,
     Handoff,
     Read,
     Expand,
@@ -129,6 +130,36 @@ pub fn items(app: &App) -> Vec<Item> {
                 _ if !has_pid => Some("no local process to type into".into()),
                 _ => None,
             }),
+            rule: false,
+        },
+        // No table key: it is rare, and a single letter that waves every
+        // prompt through is one keystroke too close to an accident.
+        Item {
+            action: Action::Yolo,
+            label: match session.yolo.is_some() {
+                true => "Stop allowing every prompt",
+                false => "Allow every prompt (YOLO)",
+            },
+            key: "",
+            // Off is never refused: it is the way out.
+            blocked: match session.yolo.is_some() {
+                true => None,
+                false => far(match () {
+                    _ if subagent => Some("YOLO is for the session, not a subagent".into()),
+                    _ if !has_pid => Some("no local process to answer for".into()),
+                    _ if !matches!(
+                        session.provider,
+                        crate::pricing::Provider::Claude | crate::pricing::Provider::Codex
+                    ) =>
+                    {
+                        Some(format!(
+                            "cctop does not know how {} answers a prompt",
+                            session.provider.as_str()
+                        ))
+                    }
+                    _ => None,
+                }),
+            },
             rule: false,
         },
         Item {

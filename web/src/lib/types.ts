@@ -20,6 +20,8 @@ export interface Session {
   asking_for?: string | null;
   /** The held prompt is a question with choices, not a permission prompt. */
   asking_question?: boolean;
+  /** cctop is allowing every permission prompt this session raises (`src/yolo.rs`): since when, and what it has allowed. */
+  yolo?: { since: string; allowed: { at: string; ask: string }[] } | null;
   cost?: { available: boolean; included: boolean; total: string | number | null; today?: number; this_hour?: number; last_hour?: number };
   tokens?: { input: number; output: number; total: number };
   context?: { used: number; max: number; compacted?: boolean } | null;
