@@ -452,7 +452,7 @@ sent to the host, so that nothing lands on this machine by mistake:
 
 | Agent | Remote | How |
 |---|---|---|
-| Claude Code | yes | every Bash call goes through `CLAUDE_CODE_SHELL_PREFIX`; a PreToolUse hook keeps the file tools on the mount |
+| Claude Code | yes | every Bash call goes through `CLAUDE_CODE_SHELL_PREFIX`; a PreToolUse hook keeps the file tools on the mount, and points a host path at it |
 | opencode | yes | its `shell` setting points at a cctop script (`OPENCODE_CONFIG_CONTENT`), with `permission.external_directory` set to `deny` to keep its file tools on the mount; started `--standalone` |
 | your shell | yes | plain `ssh -t` into the directory; no mount |
 | codex | no | runs `<your login shell> -lc …` with the shell taken from the passwd entry, and has no setting to change it; its own remote mode needs codex installed on the host |
@@ -475,23 +475,13 @@ sandbox tab is still using one — then that tab closes it when it ends. A maste
 nobody is using exits on its own after ten idle minutes, which covers a cctop
 that was killed.
 
-**Which directories can be used.** The host's directory is mounted at the same
-path here, so it has to work on both machines. The launcher marks a suggestion
-that would fail, and `cctop sandbox` refuses it before mounting, with the same
-reason:
-
-- on the host: it must exist, be a directory, and be readable and writable;
-- here, it must not be `/`, nor under `/proc`, `/sys`, `/dev` or `/run`;
-- here, it must not already be a mount point (a stale one left by a sandbox is
-  cleared instead), sit inside a mount a FUSE mount cannot go inside — a WSL
-  Windows drive (`9p`, `drvfs`), a network share, another FUSE mount — or cover
-  a mount below it;
-- here, it must be an empty directory, or missing and creatable by you.
-
-Local mounts are read from `/proc/self/mountinfo`. A remote location that fails
-only the local half is still taken by the field: the agents that mount are
-greyed out with the reason, and your shell, which mounts nothing, can still go
-there.
+**Which directories can be used.** Any directory on the host that exists and
+that you can read and write. The launcher marks a suggestion that is not — `not
+readable on the host`, `read-only on the host` — and `cctop sandbox` refuses it
+before mounting, with the same reason; the agents that mount are greyed out for
+it, and your shell, which mounts nothing, can still go there. Nothing about
+*this* machine refuses a directory: where it is mounted here is cctop's
+problem, not yours (see below).
 
 Nothing is installed on the host. It needs `bash` and `setsid`, which every
 Linux box has, and this machine needs `sshfs` and `fusermount3`. When `sshfs`
@@ -516,10 +506,10 @@ work:
   key question is asked on your terminal before Claude starts. It is your own
   `ssh` reading your own `~/.ssh/config`, so host aliases, jump hosts and agent
   keys work as they do at a prompt.
-- **The directory, mounted at the same path.** sshfs mounts the host's
-  `/srv/api` at `/srv/api` here. Read, Edit, Write, Glob and Grep run on this
-  machine and see the host's files under the names the host's shell uses for
-  them, so nothing has to translate a path.
+- **The directory, mounted here.** sshfs mounts the host's `/srv/api` on this
+  machine, where Read, Edit, Write, Glob and Grep — which run here — see the
+  host's files. At the same path when it can be, under cctop's cache when it
+  cannot; see [where the mount goes](#where-the-mount-goes).
 - **A shell that is not here.** Claude Code runs every Bash command through
   `CLAUDE_CODE_SHELL_PREFIX`, which cctop sets to itself. Each command goes to
   the host over the connection, in the same directory, and its output, exit
@@ -546,27 +536,67 @@ session's for the `!` conflict column — the same path on two machines is two
 files.
 
 When the agent exits — or cctop is sent SIGTERM or SIGHUP — the mount is
-unmounted and the connection closed. If cctop is killed outright the two
-helpers go with it, and a mount left behind ("Transport endpoint is not
-connected") is cleared the next time a sandbox starts on that path.
+unmounted, the directories made for it are removed again, and the connection
+closed. If cctop is killed outright the two helpers go with it, and a mount left
+behind ("Transport endpoint is not connected") is cleared the next time a
+sandbox starts on that path.
 
-**The path has to exist here, or be creatable by you,** because it is the
-mount point. A path under a home directory that is someone else's on this
-machine needs creating once:
+#### Where the mount goes
 
-```bash
-sudo mkdir -p /home/you-on-the-host/project && sudo chown $USER /home/you-on-the-host/project
+**At the same path, when it can be.** If the host's `/srv/api` is an empty
+directory here, or missing and yours to create, it is mounted at `/srv/api`. A
+path then names the same file to the file tools and to the host's shell, and
+nothing is translated.
+
+**Under cctop's cache, when it cannot.** The usual case is a home directory:
+the host's is `/home/you-on-the-host`, and this machine has no such home and a
+`/home` only root can write to. It is also what happens when the path is here
+already and has files in it (the mount would hide them), is a mount point, or
+sits inside a WSL Windows drive or a network share. The host's directory is then
+mounted at
+
+```
+~/.cache/cctop/remote/<host>/<path on the host>
 ```
 
-cctop prints that command rather than running it. It also refuses a path that
-exists here and is not empty, since the mount would hide what is there.
+which needs no sudo and no setup. The place depends only on the host and the
+path, so it is the same every time: Claude Code keeps its history per working
+directory, and `claude --resume` finds yesterday's session there. A second
+sandbox in the same directory while the first is running goes to
+`<host>~2/…`. The tab says where it mounted.
+
+The directory then has two names — this machine's (`L`, under the cache) and the
+host's (`R`) — and cctop translates between them where a name crosses from one
+machine to the other:
+
+- **A command on its way to the host.** The directory it starts in, and every
+  `L` in its text, become `R`: the model writes the paths it has seen, and it
+  works in `L`. `L` is replaced only where it stands as a whole path or a path's
+  start — `"L/src"`, `--dir=L`, `PATH=L/bin:…` — never inside a longer name. That
+  is safe to do without parsing the shell because of what `L` is: a long path
+  under `~/.cache/cctop/remote/`, which no command contains except to mean this
+  directory.
+- **The directory a command ended in,** on its way back, becomes `L` again, so
+  a `cd` sticks as it would locally.
+- **A file tool given the host's name.** The host's commands print `R` —
+  `pwd`, `git rev-parse --show-toplevel`, a compiler's errors — and the model
+  then hands that to Read or Edit. The guard hook rewrites the path to `L`
+  (through `updatedInput`, so Claude Code still asks permission exactly as it
+  would have for that file) instead of refusing it.
+
+Output is never rewritten: what a command prints is the host's, byte for byte.
+No environment variable is sent to the host, so there is none to translate.
+opencode gets the command half; it has no hook that can rewrite a tool's input,
+so an `R` path in its file tools is refused as outside its directory rather
+than translated. And `R` is put in as it is: one with spaces or quotes in it,
+where the model left `L` unquoted, changes how the host's shell splits the
+command.
 
 Limits worth knowing: Claude Code starts each command in its current directory
 *here* before cctop moves it to the host, so a `cd` outside the mount carries
-over to the next command only if that directory exists on this machine too; a
-command that leaves something
-running in the background is stopped with the rest of its process group when
-it returns; and two sandboxes cannot share one mount point at once.
+over to the next command only if that directory exists on this machine too; and
+a command that leaves something running in the background is stopped with the
+rest of its process group when it returns.
 
 ## Every user on the machine
 

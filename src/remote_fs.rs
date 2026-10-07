@@ -11,10 +11,11 @@
 //! The usability rules live here too, in [`verdict`], because both ends need
 //! them: the field marks a suggestion it could not launch in, and `cctop
 //! sandbox` refuses the same directory for the same reason before it mounts
-//! anything.
+//! anything. They are the host's rules alone. Where the mount goes on this
+//! machine is [`mount_point`]'s choice, and it always has one.
 
 use crate::ssh_master::Runner;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long one directory listing may take. Short, because someone is typing
@@ -201,31 +202,6 @@ pub fn home(runner: &dyn Runner, host: &str) -> Result<String, String> {
     }
 }
 
-/// `path` as typed, made absolute against the host's `home` without asking the
-/// host: what the field can work out for a suggestion before anything is
-/// resolved there. Symlinks are not resolved, which [`check`] does.
-pub fn absolute(path: &str, home: &str) -> String {
-    let joined = match path {
-        "" | "~" => home.to_string(),
-        _ => match path.strip_prefix("~/") {
-            Some(rest) => format!("{}/{rest}", home.trim_end_matches('/')),
-            None if path.starts_with('/') => path.to_string(),
-            None => format!("{}/{path}", home.trim_end_matches('/')),
-        },
-    };
-    let mut out = PathBuf::from("/");
-    for part in Path::new(&joined).components() {
-        match part {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::Normal(name) => out.push(name),
-            _ => {}
-        }
-    }
-    out.to_string_lossy().into_owned()
-}
-
 // ---------------------------------------------------------------------------
 // Whether a directory can be the sandbox's
 // ---------------------------------------------------------------------------
@@ -363,66 +339,65 @@ fn writable(dir: &Path) -> bool {
     unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
 }
 
-/// Why `root` cannot be a sandbox's working directory, or `Ok` if it can.
+/// Why the host's `root` cannot be a sandbox's working directory, or `Ok` if
+/// it can.
 ///
-/// `root` is the host's directory as the host resolves it, which is also where
-/// the mount goes here — one path on both machines is the design. So it has to
-/// work on both:
+/// Only the host is judged: the directory has to be there, a directory, and
+/// readable and writable — an agent that cannot write is not much of an agent,
+/// and refusing up front beats every edit failing. Nothing on this machine can
+/// refuse it any more, since a path that cannot be mounted on here is mounted
+/// somewhere else instead (see [`mount_point`]).
 ///
-/// - on the host: there, a directory, readable and writable (an agent that
-///   cannot write is not much of an agent, and refusing up front beats every
-///   edit failing);
-/// - here: not `/` and not under `/proc`, `/sys`, `/dev` or `/run`; not
-///   already a mount point (a stale one of the sandbox's own is fine — it is
-///   cleared); not inside a filesystem a FUSE mount cannot go inside (a WSL
-///   Windows drive, a network share, another FUSE mount); not covering a
-///   mount below it; and either an empty directory, or missing and creatable
-///   by this user.
+/// The reasons are short, because the field shows them beside a suggestion;
+/// the sandbox puts its own context around them.
+pub fn verdict(remote: &RemoteFacts) -> Result<(), String> {
+    if !remote.exists {
+        return Err("does not exist on the host".into());
+    }
+    if !remote.is_dir {
+        return Err("not a directory on the host".into());
+    }
+    if !remote.readable {
+        return Err("not readable on the host".into());
+    }
+    if !remote.writable {
+        return Err("read-only on the host".into());
+    }
+    Ok(())
+}
+
+/// Why a mount cannot go at `at` on this machine, or `None` if it can.
 ///
-/// `remote` is `None` when the host could not be asked, and only the local
-/// half is judged. The reasons are short, because the field shows them beside
-/// a suggestion; the sandbox puts its own context around them.
-pub fn verdict(
-    root: &Path,
-    mounts: &[Mount],
-    here: &Here,
-    remote: Option<&RemoteFacts>,
-) -> Result<(), String> {
-    if let Some(r) = remote {
-        if !r.exists {
-            return Err("does not exist on the host".into());
-        }
-        if !r.is_dir {
-            return Err("not a directory on the host".into());
-        }
-        if !r.readable {
-            return Err("not readable on the host".into());
-        }
-        if !r.writable {
-            return Err("read-only on the host".into());
-        }
+/// - not `/` and not under `/proc`, `/sys`, `/dev` or `/run`;
+/// - not already a mount point (a stale one of the sandbox's own is fine — it
+///   is cleared);
+/// - not inside a filesystem a FUSE mount cannot go inside (a WSL Windows
+///   drive, a network share, another FUSE mount — which includes another
+///   sandbox's mount, where making the directory would make it on that host);
+/// - not covering a mount below it;
+/// - an empty directory, or missing and creatable by this user.
+pub fn mount_problem(at: &Path, mounts: &[Mount], here: &Here) -> Option<String> {
+    if at == Path::new("/") {
+        return Some("the root directory".into());
     }
-    if root == Path::new("/") {
-        return Err("the root directory — mounted locally".into());
+    if let Some(sys) = SYSTEM.iter().find(|s| at.starts_with(s)) {
+        return Some(format!("{sys} is system plumbing here"));
     }
-    if let Some(sys) = SYSTEM.iter().find(|s| root.starts_with(s)) {
-        return Err(format!("{sys} is system plumbing here"));
-    }
-    // The innermost mount holding `root`; the table lists a mount after the
-    // one it sits on, so the last match is the one on top.
+    // The innermost mount holding `at`; the table lists a mount after the one
+    // it sits on, so the last match is the one on top.
     let holder = mounts
         .iter()
         .rev()
-        .filter(|m| root.starts_with(&m.point))
+        .filter(|m| at.starts_with(&m.point))
         .max_by_key(|m| m.point.components().count());
     if let Some(m) = holder {
-        if m.point == root {
+        if m.point == at {
             if !(m.fstype.starts_with("fuse") && *here == Here::StaleFuse) {
-                return Err(format!("mounted locally ({})", m.fstype));
+                return Some(format!("mounted here already ({})", m.fstype));
             }
         } else if foreign(&m.fstype) {
-            return Err(format!(
-                "inside {} here, mounted locally ({})",
+            return Some(format!(
+                "inside {}, mounted here ({})",
                 m.point.display(),
                 m.fstype
             ));
@@ -430,20 +405,130 @@ pub fn verdict(
     }
     if let Some(m) = mounts
         .iter()
-        .find(|m| m.point != root && m.point.starts_with(root))
+        .find(|m| m.point != at && m.point.starts_with(at))
     {
-        return Err(format!(
-            "would cover {}, mounted locally ({})",
+        return Some(format!(
+            "would cover {}, mounted here ({})",
             m.point.display(),
             m.fstype
         ));
     }
     match here {
-        Here::NotDir => Err("a file here, not a directory".into()),
-        Here::Dir { empty: false } => Err("not empty here — the mount would hide it".into()),
-        Here::Missing { creatable: false } => Err("can't be created here without sudo".into()),
-        Here::Dir { empty: true } | Here::Missing { creatable: true } | Here::StaleFuse => Ok(()),
+        Here::NotDir => Some("a file here, not a directory".into()),
+        Here::Dir { empty: false } => Some("not empty here".into()),
+        Here::Missing { creatable: false } => Some("can't be created here".into()),
+        Here::Dir { empty: true } | Here::Missing { creatable: true } | Here::StaleFuse => None,
     }
+}
+
+/// How many cctop-owned places one host's directory may be mounted at once —
+/// the first is the stable one, the rest are for a second and third sandbox
+/// in the same directory at the same time.
+const SLOTS: u32 = 9;
+
+/// The longest mount point taken as it is. A path is at most 4096 bytes, and
+/// the files under the mount need room of their own beneath it.
+const POINT_MAX: usize = 2048;
+
+/// Where the host's `root` is mounted on this machine.
+///
+/// **At `root` itself when that can be done**, because then a path means the
+/// same file on both machines and nothing has to translate between them: an
+/// empty directory, or a missing one this user can create, that no other mount
+/// is in the way of.
+///
+/// **Otherwise under `base`** — `~/.cache/cctop/remote` — at
+/// `<base>/<host>/<root>`. This is the usual case for a home directory: the
+/// host's `/home/someone` is rarely there to be created on this machine
+/// without sudo, and `/home/me` is not empty. The path is a function of the
+/// host and the directory alone, so it is the same every launch: Claude Code
+/// files its history per working directory, and a `--resume` of yesterday's
+/// session has to land in the directory that session was in.
+///
+/// It is also long and unmistakably cctop's, which is what makes the
+/// translation of a command's text safe (see `sandbox::PathMap`): nothing a
+/// model writes contains it by accident.
+///
+/// A second sandbox in the same directory while the first is running finds
+/// the stable place taken, and gets `<host>~2`, then `~3`. A stale mount at
+/// any of them is fine — the sandbox clears it. `here` is how each candidate is
+/// looked at, so tests can say what is there without making it.
+pub fn mount_point(
+    host: &str,
+    root: &Path,
+    mounts: &[Mount],
+    here: &dyn Fn(&Path) -> Here,
+    base: &Path,
+) -> Result<PathBuf, String> {
+    if mount_problem(root, mounts, &here(root)).is_none() {
+        return Ok(root.to_path_buf());
+    }
+    let mut why = String::new();
+    for slot in 1..=SLOTS {
+        let at = cache_point(base, host, root, slot);
+        match mount_problem(&at, mounts, &here(&at)) {
+            None => return Ok(at),
+            Some(problem) => why = format!("{}: {problem}", at.display()),
+        }
+    }
+    Err(format!("nowhere to mount it here — {why}"))
+}
+
+/// `<base>/<host>/<root>`, or `<base>/<host>~<slot>/<root>` past the first.
+///
+/// The host is spelled as typed, so `procdb` and `procdb.example.com` are two
+/// places, as they are two names; bytes a directory name should not carry are
+/// replaced. A name or a path too long for the filesystem is shortened to a
+/// hash of itself — still stable — with the directory's last name kept, so
+/// the path still says what it is.
+pub fn cache_point(base: &Path, host: &str, root: &Path, slot: u32) -> PathBuf {
+    let mut name: String = host
+        .chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || "._-@:+,=".contains(c) {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect();
+    if matches!(name.as_str(), "" | "." | "..") {
+        name = format!("_{name}");
+    }
+    if name.len() > 200 {
+        name = format!("{}-{:012x}", &name[..180], fnv(host.as_bytes()));
+    }
+    if slot > 1 {
+        name = format!("{name}~{slot}");
+    }
+    let dir = base.join(name);
+    let rel = root.strip_prefix("/").unwrap_or(root);
+    let full = dir.join(rel);
+    match full.as_os_str().len() <= POINT_MAX {
+        true => full,
+        false => {
+            let last = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            dir.join(format!(
+                "long-{:012x}",
+                fnv(root.as_os_str().as_encoded_bytes())
+            ))
+            .join(last)
+        }
+    }
+}
+
+/// FNV-1a, not `DefaultHasher`: the mount point has to be the same from one
+/// cctop build to the next, or an update would move every remote session's
+/// history.
+fn fnv(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash & 0xffff_ffff_ffff
 }
 
 /// For tests here and elsewhere: a [`Runner`] that runs the command line with
@@ -551,15 +636,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_typed_path_is_made_absolute_against_the_hosts_home() {
-        assert_eq!(absolute("~", "/home/f"), "/home/f");
-        assert_eq!(absolute("", "/home/f"), "/home/f");
-        assert_eq!(absolute("~/src/", "/home/f"), "/home/f/src");
-        assert_eq!(absolute("src", "/home/f/"), "/home/f/src");
-        assert_eq!(absolute("/srv/../opt", "/home/f"), "/opt");
-    }
-
     const WSL: &str = "\
 22 1 8:32 / / rw,relatime - ext4 /dev/sdc rw
 23 22 0:20 / /proc rw - proc proc rw
@@ -579,32 +655,27 @@ mod tests {
         }
     }
 
-    fn judge(path: &str, here: Here) -> Result<(), String> {
-        verdict(
-            Path::new(path),
-            &parse_mountinfo(WSL),
-            &here,
-            Some(&ok_remote()),
-        )
+    fn problem(path: &str, here: Here) -> Option<String> {
+        mount_problem(Path::new(path), &parse_mountinfo(WSL), &here)
     }
 
     const FREE: Here = Here::Missing { creatable: true };
 
     #[test]
     fn a_path_that_is_mounted_here_cannot_be_mounted_on() {
-        assert_eq!(judge("/home/f/work", FREE), Ok(()));
-        assert_eq!(judge("/tmp/x", FREE), Ok(()), "tmpfs is this machine's own");
-        let reason = |p: &str, h: Here| judge(p, h).expect_err(p);
-        assert_eq!(reason("/mnt/c", FREE), "mounted locally (9p)");
+        assert_eq!(problem("/home/f/work", FREE), None);
+        assert_eq!(problem("/tmp/x", FREE), None, "tmpfs is this machine's own");
+        let reason = |p: &str, h: Here| problem(p, h).expect(p);
+        assert_eq!(reason("/mnt/c", FREE), "mounted here already (9p)");
         assert!(reason("/mnt/c/Users/f", FREE).contains("inside /mnt/c"));
         assert!(reason("/srv/data/x", FREE).contains("nfs4"));
         assert!(reason("/home/f/remote/sub", FREE).contains("fuse.sshfs"));
         assert_eq!(
             reason("/home/f/remote", Here::Dir { empty: true }),
-            "mounted locally (fuse.sshfs)"
+            "mounted here already (fuse.sshfs)"
         );
         // Unless it is a dead sandbox's mount, which the sandbox clears.
-        assert_eq!(judge("/home/f/remote", Here::StaleFuse), Ok(()));
+        assert_eq!(problem("/home/f/remote", Here::StaleFuse), None);
         assert!(reason("/mnt", FREE).contains("would cover /mnt/c"));
         assert!(reason("/", FREE).contains("root"));
         assert!(reason("/proc/1", FREE).contains("/proc"));
@@ -614,18 +685,19 @@ mod tests {
 
     #[test]
     fn a_path_has_to_be_somewhere_the_mount_can_go() {
-        let reason = |h: Here| judge("/home/f/work", h).expect_err("refused");
-        assert_eq!(judge("/home/f/work", Here::Dir { empty: true }), Ok(()));
+        let reason = |h: Here| problem("/home/f/work", h).expect("refused");
+        assert_eq!(problem("/home/f/work", Here::Dir { empty: true }), None);
         assert!(reason(Here::Dir { empty: false }).contains("not empty"));
         assert!(reason(Here::NotDir).contains("file"));
-        assert!(reason(Here::Missing { creatable: false }).contains("sudo"));
+        assert!(reason(Here::Missing { creatable: false }).contains("created"));
     }
 
+    /// Only the host can make a directory unusable now: nothing about this
+    /// machine is asked, so nothing about it can refuse.
     #[test]
     fn a_path_has_to_be_usable_on_the_host() {
-        let with = |r: RemoteFacts| {
-            verdict(Path::new("/home/f/w"), &[], &FREE, Some(&r)).expect_err("refused")
-        };
+        let with = |r: RemoteFacts| verdict(&r).expect_err("refused");
+        assert_eq!(verdict(&ok_remote()), Ok(()));
         assert!(with(RemoteFacts::default()).contains("does not exist"));
         assert!(
             with(RemoteFacts {
@@ -648,8 +720,123 @@ mod tests {
             })
             .contains("read-only")
         );
-        // Not asked: only this side is judged.
-        assert_eq!(verdict(Path::new("/home/f/w"), &[], &FREE, None), Ok(()));
+    }
+
+    const BASE: &str = "/home/f/.cache/cctop/remote";
+
+    /// What [`mount_point`] picks, given what each candidate is said to be.
+    fn pick(root: &str, table: &str, here: &dyn Fn(&Path) -> Here) -> Result<PathBuf, String> {
+        mount_point(
+            "procdb",
+            Path::new(root),
+            &parse_mountinfo(table),
+            here,
+            Path::new(BASE),
+        )
+    }
+
+    #[test]
+    fn the_same_path_is_used_when_it_can_be() {
+        // Missing and creatable, or an empty directory: mounted where it is.
+        assert_eq!(
+            pick("/srv/api", WSL, &|_| FREE),
+            Ok(PathBuf::from("/srv/api"))
+        );
+        assert_eq!(
+            pick("/home/f/empty", WSL, &|_| Here::Dir { empty: true }),
+            Ok(PathBuf::from("/home/f/empty"))
+        );
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_mounted_on_goes_under_the_cache() {
+        let cached = PathBuf::from(format!("{BASE}/procdb/home/florian.leprat"));
+        // The everyday case: the host's home is someone else's here, under a
+        // `/home` this user cannot write.
+        let root_owned = |p: &Path| match p.starts_with(BASE) {
+            true => FREE,
+            false => Here::Missing { creatable: false },
+        };
+        assert_eq!(
+            pick("/home/florian.leprat", WSL, &root_owned),
+            Ok(cached.clone())
+        );
+        // A directory here with files in it, which the mount would hide.
+        let full = |p: &Path| match p.starts_with(BASE) {
+            true => FREE,
+            false => Here::Dir { empty: false },
+        };
+        assert_eq!(pick("/home/florian.leprat", WSL, &full), Ok(cached));
+        // Inside a Windows drive, already a mount, the root itself: all fine,
+        // just not at the same path.
+        for (root, rel) in [
+            ("/mnt/c/Users/f", "mnt/c/Users/f"),
+            ("/home/f/remote", "home/f/remote"),
+            ("/", ""),
+        ] {
+            let want = Path::new(BASE).join("procdb").join(rel);
+            assert_eq!(pick(root, WSL, &|_| FREE), Ok(want), "{root}");
+        }
+    }
+
+    /// A second sandbox in the same directory finds the stable place taken by
+    /// the first, and goes next door; a dead one's mount is reused.
+    #[test]
+    fn a_taken_cache_point_moves_to_the_next_slot() {
+        let first = format!("{BASE}/procdb/home/x");
+        let table = format!("{WSL}\n60 22 0:60 / {first} rw,nosuid - fuse.sshfs procdb:/home/x rw");
+        let busy = |p: &Path| match p.starts_with(BASE) {
+            true if p == Path::new(&first) => Here::Dir { empty: true },
+            true => FREE,
+            false => Here::Missing { creatable: false },
+        };
+        assert_eq!(
+            pick("/home/x", &table, &busy),
+            Ok(PathBuf::from(format!("{BASE}/procdb~2/home/x")))
+        );
+        let stale = |p: &Path| match p.starts_with(BASE) {
+            true if p == Path::new(&first) => Here::StaleFuse,
+            true => FREE,
+            false => Here::Missing { creatable: false },
+        };
+        assert_eq!(pick("/home/x", &table, &stale), Ok(PathBuf::from(&first)));
+        // A directory under a running sandbox's mount would be made on that
+        // host: never a candidate.
+        let outer =
+            format!("{WSL}\n61 22 0:61 / {BASE}/procdb/home rw - fuse.sshfs procdb:/home rw");
+        assert_eq!(
+            pick("/home/x", &outer, &busy),
+            Ok(PathBuf::from(format!("{BASE}/procdb~2/home/x")))
+        );
+    }
+
+    #[test]
+    fn a_cache_point_is_a_safe_and_bounded_name() {
+        let base = Path::new(BASE);
+        let at = |host: &str, root: &str| cache_point(base, host, Path::new(root), 1);
+        assert_eq!(
+            at("me@10.0.0.5", "/srv"),
+            Path::new(BASE).join("me@10.0.0.5/srv")
+        );
+        assert_eq!(at("[::1]", "/srv"), Path::new(BASE).join("_::1_/srv"));
+        assert_eq!(at("..", "/srv"), Path::new(BASE).join("_../srv"));
+        assert_eq!(at("a/b", "/srv"), Path::new(BASE).join("a_b/srv"));
+        // The same answer every time: the history depends on it.
+        assert_eq!(at("procdb", "/home/x"), at("procdb", "/home/x"));
+        let long_host = "h".repeat(300);
+        let name = at(&long_host, "/srv");
+        let host_part = name
+            .strip_prefix(base)
+            .expect("under base")
+            .components()
+            .next()
+            .expect("host");
+        assert!(host_part.as_os_str().len() <= 255, "{name:?}");
+        let deep = format!("/{}/end", "d/".repeat(1200));
+        let short = at("procdb", &deep);
+        assert!(short.as_os_str().len() <= POINT_MAX, "{short:?}");
+        assert!(short.ends_with("end"));
+        assert_eq!(short, at("procdb", &deep));
     }
 
     #[test]
