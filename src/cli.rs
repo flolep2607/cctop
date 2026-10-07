@@ -22,7 +22,10 @@ Commands:
                           them. F12 detaches and leaves it running.
   cctop as <acct> <agent> Start an agent under a named account (see
                           --add-account).
-  cctop serve             Serve the table, and a per-session report, to a
+  cctop sandbox <host>:<path> [args…]
+                          Run Claude Code here with its Bash commands on
+                          <host> over ssh, and <path> mounted here with sshfs.
+  cctop serve            Serve the table, and a per-session report, to a
                           browser. Loopback and read-only by default; `serve
                           --help` for the flags. Handy on a phone.
   cctop wait <session>    Block until a session stops working — by id prefix,
@@ -62,6 +65,7 @@ Each command takes --help for the details.";
                       cctop <agent> [args…]\n       \
                       cctop attach [pid]\n       \
                       cctop as <account> <agent> [args…]\n       \
+                      cctop sandbox <host>:<path> [claude args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop optimize | compare | yield | burn | log\n       \
                       cctop recall <query> [--read SESSION PASSAGE]\n       \
@@ -216,7 +220,8 @@ pub struct Args {
     ///
     /// The copy is in the shape that harness's own resume command reads. Takes
     /// a session id or a unique prefix of one, then the harness to convert to
-    /// — currently claude and codex, in either direction. The copy keeps the
+    /// — currently claude and codex, in either direction — optionally with an
+    /// account, as `codex:work`, to write into that account's store. The copy keeps the
     /// session's own id where the receiving store has it free, so cctop can
     /// tell the two apart as one piece of work
     #[arg(
@@ -623,6 +628,10 @@ pub struct JsonSession {
     /// out of. Absent for every other harness, none of which has the concept.
     #[serde(skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
+    /// Where the session is working when `cctop sandbox` launched it: the
+    /// agent runs here, its commands and `path` are on `host`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox: Option<JsonSandbox>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<JsonAccount>,
     model: Option<String>,
@@ -662,6 +671,12 @@ pub struct JsonSession {
     conflict: Option<JsonConflict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct JsonSandbox {
+    host: String,
+    path: String,
 }
 
 #[derive(Serialize)]
@@ -768,8 +783,23 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
             session.provider.as_str()
         );
     }
+    // `codex:spare` names the account as well as the harness: the copy is
+    // written for whoever resumes it, and a session moved because one login is
+    // out of window has to land where the other login looks.
+    let (agent, account) = match agent.split_once(':') {
+        Some((agent, account)) => (agent, Some(account)),
+        None => (agent, None),
+    };
     let target = crate::pricing::Provider::parse(agent)
         .ok_or_else(|| anyhow::anyhow!("{agent} is not a harness cctop knows"))?;
+    let profile = match account {
+        Some(name) => Some(
+            crate::config::launchable_named(target, name).ok_or_else(|| {
+                anyhow::anyhow!("{agent} has no account named '{name}' on this machine")
+            })?,
+        ),
+        None => None,
+    };
     if !crate::convert::convertible(session.provider, target) {
         anyhow::bail!(
             "cctop cannot convert {} sessions into {}",
@@ -781,9 +811,10 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
         .data_file
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("that session has no transcript on this machine"))?;
-    let home = match target {
-        crate::pricing::Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
-        crate::pricing::Provider::Codex => crate::config::CODEX_HOME.clone(),
+    let home = match (profile, target) {
+        (Some(profile), _) => profile.dir.clone(),
+        (None, crate::pricing::Provider::Claude) => crate::config::CLAUDE_CONFIG_DIR.clone(),
+        (None, crate::pricing::Provider::Codex) => crate::config::CODEX_HOME.clone(),
         _ => anyhow::bail!("that harness has no store cctop writes into"),
     };
     let written = crate::convert::convert(session.provider, transcript, target, &home)
@@ -1183,6 +1214,13 @@ pub fn json_sessions(
                 title: s.title.clone(),
                 user: s.owner.clone(),
                 profile: s.profile.clone(),
+                sandbox: s.sandbox.as_deref().map(|sandbox| JsonSandbox {
+                    host: crate::sandbox::host_of(sandbox).to_string(),
+                    path: sandbox
+                        .get(crate::sandbox::host_of(sandbox).len() + 1..)
+                        .unwrap_or_default()
+                        .to_string(),
+                }),
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
                 harness: (!s.harness.is_empty()).then(|| s.harness.clone()),

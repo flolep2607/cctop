@@ -1892,7 +1892,7 @@ impl App {
     /// pointer should be able to do. The second is the one that registers with
     /// Cloudflare's edge, which is a second of network cctop spends in front of
     /// the person who asked for it.
-    pub(super) fn on_share_corner(&mut self, armed: bool) {
+    pub(super) fn on_share_corner(&mut self, armed: bool, local: bool) {
         // Already dialling. The corner is spinning and says so; a click at it
         // is impatience, not a second instruction.
         if self.share_opening.is_some() {
@@ -1907,10 +1907,15 @@ impl App {
         }
         if !armed {
             self.share_arm = true;
-            self.set_status("Click again to put this table on the internet");
+            self.set_status(
+                "Click ⧉ local to keep the table on this machine, ⧉ worldwide to publish it",
+            );
             return;
         }
-        self.start_serving(true);
+        // Armed: the click was on one of the two halves. Serving one already
+        // has no local half left on the corner — the only answer then is the
+        // tunnel that makes it reachable.
+        self.start_serving(!local);
     }
 
     /// A click on a key written on screen — a footer hint, or the `[y]` in a
@@ -2088,6 +2093,7 @@ impl App {
             // takes it back, which is what stops a forgotten first click from
             // turning an unrelated one into a tunnel.
             let armed = std::mem::replace(&mut self.share_arm, false);
+            let on_local = layout.share_local_at(ev.column, ev.row);
             // Same rule as the corner's: arming is about the click being made
             // now, so any click that is not the second one on `q Quit` takes it
             // back. A first click that quits on the next unrelated one would be
@@ -2098,7 +2104,7 @@ impl App {
                 return;
             }
             if on_corner {
-                self.on_share_corner(armed);
+                self.on_share_corner(armed, on_local);
                 return;
             }
         }

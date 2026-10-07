@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 14] = [
+pub const SETTINGS: [(&str, &str, &str); 17] = [
     (
         "theme",
         "\"auto\"",
@@ -82,6 +82,22 @@ pub const SETTINGS: [(&str, &str, &str); 14] = [
         "false",
         "Read each agent's screen in a tab for its state, over hooks",
     ),
+    // The footer.
+    (
+        "footer_hide",
+        "\"\"",
+        "Footer items to hide, e.g. \"sort,follow\" or \"share\"",
+    ),
+    (
+        "footer_note",
+        "\"\"",
+        "A note always shown on the footer, e.g. \"on-call shift\"",
+    ),
+    (
+        "footer_command",
+        "\"\"",
+        "A command whose first line is shown on the footer, refreshed every 30s",
+    ),
 ];
 
 /// `idle_after`'s default, in hours: long enough that nobody's lunch break
@@ -121,7 +137,11 @@ pub const BINDINGS: [(&str, &str, &str); 50] = [
         "Restart every agent tab (not mid-turn)",
     ),
     ("send", "s", "Type a line into its terminal"),
-    ("handoff", "O", "Hand its context to a different agent"),
+    (
+        "handoff",
+        "O",
+        "Hand its context to another agent or account",
+    ),
     ("conversation", "i", "Read its conversation"),
     ("copy", "y", "Copy resume command or transcript path"),
     ("expand", "e", "Show its subagents"),
@@ -192,6 +212,12 @@ pub struct Settings {
     /// contract, and a release that rewords them goes unread until cctop
     /// catches up.
     pub read_screen: Option<bool>,
+    /// Names of footer items to leave off — badges, hints and the share corner.
+    pub footer_hide: Option<String>,
+    /// A static line for the footer.
+    pub footer_note: Option<String>,
+    /// A command whose first line is the footer's live note.
+    pub footer_command: Option<String>,
     /// `(action, key)` as written, in file order.
     pub keys: Vec<(String, String)>,
     /// Everything that was written and could not be used, said in a sentence.
@@ -248,6 +274,18 @@ impl Settings {
                     "idle_after" => amount(item)
                         .filter(|h| *h > 0.0)
                         .map(|v| out.idle_after = Some(v))
+                        .is_none(),
+                    "footer_hide" => item
+                        .as_str()
+                        .map(|v| out.footer_hide = Some(v.into()))
+                        .is_none(),
+                    "footer_note" => item
+                        .as_str()
+                        .map(|v| out.footer_note = Some(v.into()))
+                        .is_none(),
+                    "footer_command" => item
+                        .as_str()
+                        .map(|v| out.footer_command = Some(v.into()))
                         .is_none(),
                     "alert_errors" => amount(item)
                         .filter(|p| *p <= 100.0)
@@ -311,6 +349,9 @@ impl Settings {
             "alert_error_calls" => self.alert_error_calls.map(|v| v.to_string()),
             "alert_stall" => self.alert_stall.map(|v| v.to_string()),
             "idle_after" => self.idle_after.map(|v| v.to_string()),
+            "footer_hide" => self.footer_hide.as_ref().map(|v| format!("{v:?}")),
+            "footer_note" => self.footer_note.as_ref().map(|v| format!("{v:?}")),
+            "footer_command" => self.footer_command.as_ref().map(|v| format!("{v:?}")),
             _ => None,
         };
         match set {

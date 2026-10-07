@@ -265,7 +265,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("{attach}", "Open its terminal in a tab"),
         item("{resume}", "Resume it in a tab of its own"),
         item("{send}", "Type a line into its terminal"),
-        item("{handoff}", "Hand its context off to a different agent"),
+        item("{handoff}", "Hand its context to another agent or account"),
         item(
             "{conversation}",
             "Read its conversation (works on remote rows)",
@@ -1598,7 +1598,7 @@ pub(super) fn draw_launch(
         // looks exactly like an idle one from a list of names.
         let reported = match choice {
             tabs::Choice::Waiting(agent) => app.waiting_state(agent),
-            tabs::Choice::Start(_) => None,
+            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => None,
         };
         // The dot carries whether anyone is already looking, the word carries
         // what the agent said about itself. Two facts that can both be true at
@@ -1608,7 +1608,7 @@ pub(super) fn draw_launch(
             // works, but the two then fight over one window's size.
             tabs::Choice::Waiting(agent) if agent.attached => "◉",
             tabs::Choice::Waiting(_) => "●",
-            tabs::Choice::Start(_) => " ",
+            tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => " ",
         };
         let dot_color = match (choice, reported) {
             (tabs::Choice::Waiting(_), Some(signal)) => theme::signal_color(signal),
@@ -1616,7 +1616,7 @@ pub(super) fn draw_launch(
             // has happened since cctop started listening. Still a live agent, so
             // it keeps a dot — just one that claims nothing.
             (tabs::Choice::Waiting(_), None) => theme::colors().dim,
-            (tabs::Choice::Start(_), _) => theme::colors().dimmer,
+            (tabs::Choice::Start(_) | tabs::Choice::Handoff(_), _) => theme::colors().dimmer,
         };
 
         let state = match reported {
@@ -1630,9 +1630,17 @@ pub(super) fn draw_launch(
 
         // Drawn from the same iterator the abbreviation was built from, so the
         // paths stay lined up with the choices that have one.
-        let at = match choice.cwd().is_some() {
-            true => short.next().unwrap_or_default(),
-            false => String::new(),
+        // A handoff line has no directory of its own — it starts where the
+        // footer says — so the column says whose account it starts under,
+        // which is the half of the pair that tells two `claude` lines apart.
+        let at = match (choice, choice.cwd().is_some()) {
+            (tabs::Choice::Handoff(target), _) => target
+                .account
+                .as_deref()
+                .map(|account| format!("as {account}"))
+                .unwrap_or_default(),
+            (_, true) => short.next().unwrap_or_default(),
+            (_, false) => String::new(),
         };
 
         // The session's own title where cctop knows it. A resumed session's rmux
@@ -1642,6 +1650,7 @@ pub(super) fn draw_launch(
         // same and do different things.
         let name = match choice {
             tabs::Choice::Waiting(agent) => app.waiting_label(agent),
+            tabs::Choice::Handoff(target) => Some(target.agent.clone()),
             tabs::Choice::Start(_) => None,
         }
         .unwrap_or_else(|| choice.label());

@@ -3,7 +3,8 @@ import { Link } from "wouter";
 import { Check, ImageUp, SendHorizontal, Star, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { act, ANSWERABLE, ask } from "@/lib/api";
+import { act, ANSWERABLE, ask, isNotAsking } from "@/lib/api";
+import { dropPrompt } from "@/hooks/use-live";
 import { CAN_ACT } from "@/lib/config";
 import { ago, money, shortModel, shortPath, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -90,6 +91,11 @@ export const SessionRow = memo(function SessionRow({
               {s.conflict.level === "file" ? "same file as another agent" : "same repo as another agent"}
             </Badge>
           )}
+          {s.sandbox && (
+            <span className="font-mono" title={`Bash runs on ${s.sandbox.host}; ${s.sandbox.path} is mounted here`}>
+              {s.sandbox.host}⇄
+            </span>
+          )}
           {s.user && <span>{s.user}</span>}
           {s.profile && s.profile !== "default" && <span>{s.profile}</span>}
           {s.context?.max ? <ContextBar used={s.context.used} max={s.context.max} /> : null}
@@ -118,6 +124,12 @@ export function WantingRow({ s, picked, onPick, onDismiss }: { s: Session; picke
       toast.success(done.message || label || "Sent");
       return true;
     } catch (e) {
+      // The same stale prompt the session page can hold: drop it here too.
+      if (verb === "answer" && isNotAsking(e)) {
+        toast.message("Already answered", { description: "That prompt was no longer waiting." });
+        dropPrompt(s.session_id);
+        return false;
+      }
       toast.error(String((e as Error).message || e));
       return false;
     } finally {

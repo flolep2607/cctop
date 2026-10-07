@@ -533,7 +533,12 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
                 Owned(format!("↑{}", r.host))
             }
             Some(r) => Borrowed(r.host.as_str()),
-            None => Borrowed("local"),
+            // Running here, working there: the arrows say both at once, and
+            // trail because the host is the part worth keeping when cut.
+            None => match &s.sandbox {
+                Some(sandbox) => Owned(format!("{}⇄", crate::sandbox::host_of(sandbox))),
+                None => Borrowed("local"),
+            },
         },
         // Named for your own rows too. The column is only drawn once a second
         // user is in view (see `users_in_view`), and there a blank reads as
@@ -688,9 +693,12 @@ fn conflict_rank(s: &crate::session::Session) -> u8 {
 
 /// Sort key for the host column, putting this machine before every other.
 fn host_key(s: &crate::session::Session) -> (bool, &str) {
-    match &s.remote {
-        Some(r) => (true, r.host.as_str()),
-        None => (false, ""),
+    match (&s.remote, &s.sandbox) {
+        (Some(r), _) => (true, r.host.as_str()),
+        // Beside that host's own rows: what it is working on is the same
+        // machine's, wherever the agent happens to run.
+        (None, Some(sandbox)) => (true, crate::sandbox::host_of(sandbox)),
+        (None, None) => (false, ""),
     }
 }
 
@@ -700,6 +708,11 @@ pub fn branch_of(s: &crate::session::Session) -> Option<String> {
     // locally, which is worse than reporting nothing.
     match &s.remote {
         Some(r) => r.branch.clone(),
+        // A sandboxed row's directory is the host's, mounted here for as long
+        // as the agent runs. Once it has stopped, the mount is gone and the
+        // same path is whatever this machine has there — an empty directory
+        // at best, a checkout of something else at worst — so no answer.
+        None if s.sandbox.is_some() && !s.is_running() => None,
         None => branch(&s.label_source),
     }
 }
@@ -775,8 +788,10 @@ fn reading<'c>(cache: &'c HashMap<String, Reading>, dir: &str) -> (Option<&'c st
 /// compare two names that were sitting in the cache already.
 fn cmp_branch(a: &Session, b: &Session) -> Ordering {
     // A remote row's name arrived with the row, from the machine that read it;
-    // this machine's cache has nothing to say about it.
-    if a.remote.is_some() || b.remote.is_some() {
+    // this machine's cache has nothing to say about it. A sandboxed row's
+    // answer depends on whether its mount is still there, which only
+    // `branch_of` asks.
+    if a.remote.is_some() || b.remote.is_some() || a.sandbox.is_some() || b.sandbox.is_some() {
         return branch_of(a).cmp(&branch_of(b));
     }
     let (ad, bd) = (a.label_source.as_str(), b.label_source.as_str());

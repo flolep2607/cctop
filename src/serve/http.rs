@@ -621,14 +621,20 @@ impl<'a> EventStream<'a> {
         sent
     }
 
-    /// Send a comment, which SSE ignores and every hop in between does not.
+    /// Send a `ping` event: a few bytes that say the stream is still alive.
     ///
-    /// The point is the bytes, not the content: a proxy or a phone radio that
-    /// drops an idle connection needs traffic to count the stream as alive, and
-    /// a browser that has genuinely gone away only surfaces as a write error
-    /// once something is written to it.
-    pub fn keepalive(&mut self) -> std::io::Result<()> {
-        self.stream.write_all(b": keepalive\n\n")?;
+    /// Three readers want it. A proxy or a phone radio that drops an idle
+    /// connection needs traffic to count the stream as alive; a browser that
+    /// has gone away only surfaces as a write error once something is written
+    /// at it; and the page needs to tell a quiet stream from a dead one. That
+    /// last is why this is an event and not the comment it used to be: a
+    /// comment never reaches `EventSource`, so a stream stalled behind a tunnel
+    /// or a half-open connection looked, from the page, exactly like a table
+    /// with nothing new in it — and its prompts stayed up long after they were
+    /// answered. The data is not read; it is there because an event with an
+    /// empty data buffer is never dispatched.
+    pub fn ping(&mut self) -> std::io::Result<()> {
+        self.stream.write_all(b"event: ping\ndata: 1\n\n")?;
         self.stream.flush()
     }
 }

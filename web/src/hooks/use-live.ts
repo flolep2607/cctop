@@ -1,17 +1,45 @@
 import { useEffect, useState } from "react";
 import { withToken } from "@/lib/config";
 import { getJson } from "@/lib/api";
+import { applyRows, settleAsking, type RowsDelta } from "@/lib/stream";
 import type { Session, Tab } from "@/lib/types";
 
 /**
- * The session table, live, over the same `sessions` event stream every cctop
- * page reads. With `only`, the server sends that session's row alone — the
- * whole table re-sent on every refresh would be paid for by a page that
- * reads one row.
+ * How long the stream may say nothing at all before it is taken for dead.
  *
- * A named event: `onmessage` only ever sees unnamed ones. And a stream that
- * was never a stream (a tunnel's error page) closes for good rather than
- * reconnecting, so a closed source is reopened on a timer.
+ * The server pings every 15 seconds when it has nothing else to write
+ * (`SSE_KEEPALIVE` in src/serve/mod.rs), so this is two of those and some
+ * slack. EventSource never notices a stream that stalled without closing — a
+ * half-open connection, a tunnel holding the bytes — so without this the page
+ * sat on an old table indefinitely and called itself live.
+ */
+const STALE_AFTER = 35_000;
+
+/** The event a page raises when the server has said `id` is not asking. */
+const NOT_ASKING = "cctop:not-asking";
+
+/**
+ * Take `id`'s prompt down on every table this page holds, and resync them.
+ *
+ * For a 409 "not asking" from an answer: the server's table is current when it
+ * says that, so the page is the one behind. The row is settled at once and the
+ * stream reopened, which brings the server's whole table rather than waiting
+ * for whatever event would have corrected it.
+ */
+export function dropPrompt(id: string) {
+  window.dispatchEvent(new CustomEvent(NOT_ASKING, { detail: id }));
+}
+
+/**
+ * The session table, live, over the same event stream every cctop page reads.
+ * With `only`, the server sends that session's row alone, each time it moves.
+ * Without, it sends the table once as `sessions` and then only the rows that
+ * changed, as `rows` — see `applyRows`.
+ *
+ * Named events: `onmessage` only ever sees unnamed ones. A stream that was
+ * never a stream (a tunnel's error page) closes for good rather than
+ * reconnecting, so a closed source is reopened on a timer; and one that goes
+ * quiet for longer than the server's pings allow is closed and reopened too.
  */
 export function useSessions(only?: string): { sessions: Session[] | null; live: boolean } {
   const [sessions, setSessions] = useState<Session[] | null>(null);
@@ -20,9 +48,22 @@ export function useSessions(only?: string): { sessions: Session[] | null; live: 
     let source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let gone = false;
+    let heard = Date.now();
+    // Each source's listeners are its own: a stale one being closed must not
+    // have a late event of its own land on the table its replacement keeps.
     const connect = () => {
-      source = new EventSource(withToken("/api/events", only ? { session: only } : undefined));
-      source.addEventListener("sessions", (event) => {
+      clearTimeout(retry);
+      source?.close();
+      heard = Date.now();
+      const mine = new EventSource(withToken("/api/events", only ? { session: only } : undefined));
+      source = mine;
+      const fresh = () => {
+        if (source !== mine) return false;
+        heard = Date.now();
+        return true;
+      };
+      mine.addEventListener("sessions", (event) => {
+        if (!fresh()) return;
         try {
           const list = JSON.parse((event as MessageEvent).data);
           setSessions(Array.isArray(list) ? list : []);
@@ -31,16 +72,45 @@ export function useSessions(only?: string): { sessions: Session[] | null; live: 
           /* a bad event is skipped, not fatal */
         }
       });
-      source.addEventListener("open", () => setLive(true));
-      source.addEventListener("error", () => {
+      mine.addEventListener("rows", (event) => {
+        if (!fresh()) return;
+        try {
+          const delta = JSON.parse((event as MessageEvent).data) as RowsDelta;
+          setSessions((list) => (list ? applyRows(list, delta) : list));
+          setLive(true);
+        } catch {
+          /* a bad event is skipped, not fatal */
+        }
+      });
+      mine.addEventListener("ping", () => {
+        if (fresh()) setLive(true);
+      });
+      mine.addEventListener("open", () => {
+        if (fresh()) setLive(true);
+      });
+      mine.addEventListener("error", () => {
+        if (source !== mine) return;
         setLive(false);
-        if (source?.readyState === EventSource.CLOSED && !gone) retry = setTimeout(connect, 5000);
+        if (mine.readyState === EventSource.CLOSED && !gone) retry = setTimeout(connect, 5000);
       });
     };
+    const watchdog = setInterval(() => {
+      if (gone || Date.now() - heard < STALE_AFTER) return;
+      setLive(false);
+      connect();
+    }, 5000);
+    const onNotAsking = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      setSessions((list) => (list ? settleAsking(list, id) : list));
+      connect();
+    };
+    window.addEventListener(NOT_ASKING, onNotAsking);
     connect();
     return () => {
       gone = true;
       clearTimeout(retry);
+      clearInterval(watchdog);
+      window.removeEventListener(NOT_ASKING, onNotAsking);
       source?.close();
     };
   }, [only]);

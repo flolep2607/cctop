@@ -93,6 +93,23 @@ impl App {
         ))
     }
 
+    /// The footer's note that machines are answering — the down-note's other
+    /// half. One host answers by name; several are counted. `None` when no
+    /// remote answered yet, which is not news.
+    pub fn remotes_up_footer(&self) -> Option<String> {
+        let up: Vec<&str> = self
+            .remotes
+            .keys()
+            .filter(|host| !self.remote_errors.contains_key(*host))
+            .map(String::as_str)
+            .collect();
+        match up.len() {
+            0 => None,
+            1 => Some(format!("{} up", up[0])),
+            n => Some(format!("{n} remotes up")),
+        }
+    }
+
     /// The footer's note that a machine is not answering.
     pub fn remote_footer(&self) -> Option<String> {
         let mut hosts: Vec<&str> = self.remote_errors.keys().map(String::as_str).collect();
@@ -366,6 +383,35 @@ mod tests {
         let footer = app.remote_footer().expect("a warning");
         assert!(footer.contains("box"), "{footer}");
         assert!(footer.contains("Permission denied"), "{footer}");
+        // And because it is down, it is not also counted as up.
+        assert!(app.remotes_up_footer().is_none());
+    }
+
+    /// The up-count is the good news that the down-warning is missing.
+    #[test]
+    fn the_footer_counts_the_hosts_that_answer() {
+        let mut app = test_app();
+        assert!(app.remotes_up_footer().is_none());
+
+        let mut away = session("away", true, "/srv/work");
+        away.remote = Some(crate::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        app.remotes.insert("box".into(), vec![away]);
+        assert_eq!(app.remotes_up_footer().as_deref(), Some("box up"));
+
+        let mut far = session("far", true, "/srv/other");
+        far.remote = Some(crate::session::Remote {
+            host: "bench".into(),
+            ..Default::default()
+        });
+        app.remotes.insert("bench".into(), vec![far]);
+        assert_eq!(app.remotes_up_footer().as_deref(), Some("2 remotes up"));
+
+        // One drops out: the other is still counted, by name no longer.
+        app.remote_errors.insert("box".into(), "timeout".into());
+        assert_eq!(app.remotes_up_footer().as_deref(), Some("bench up"));
     }
 
     /// A server left behind the laptop: said once, marked on its rows, and

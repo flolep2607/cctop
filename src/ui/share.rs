@@ -486,8 +486,8 @@ mod tests {
         app.share_qr = Some(ShareQr {
             label: "fix the flaky test".to_string(),
             link: format!(
-                "https://abcdef0123456789.lhr.life/s/{}#t={}&k={}",
-                "0123456789abcdef",
+                "https://share.rmux.io/#e=wss://{}.trycloudflare.com/share&t={}&k={}",
+                "tribute-resistance-resolved-moscow",
                 "fedcba9876543210".repeat(2),
                 "00112233445566778899aabbccddeeff"
             ),

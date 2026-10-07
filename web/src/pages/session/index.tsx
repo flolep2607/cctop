@@ -23,6 +23,9 @@ import { ChangesView, diffFiles } from "./changes-view";
 import { Conversation } from "./conversation";
 import { ReportView, reportMarkdown } from "./report-view";
 
+/** Where a session can be handed: an agent, under one of its accounts. */
+type HandoffTarget = { agent: string; account?: string | null; label: string };
+
 const VIEWS = ["chat", "changes", "access", "report"] as const;
 type View = (typeof VIEWS)[number];
 const viewFromHash = (): View => {
@@ -72,7 +75,7 @@ export function SessionPage() {
   }, [urlId]);
 
   const id = r?.session_id ?? urlId;
-  const { sessions } = useSessions(urlId);
+  const { sessions, live: streaming } = useSessions(urlId);
   // The URL may carry any unambiguous prefix of the id.
   const live = useMemo(
     () => sessions?.find((s) => s.session_id === id) ?? sessions?.find((s) => s.session_id.startsWith(urlId)) ?? null,
@@ -137,6 +140,12 @@ export function SessionPage() {
               <StateDot state={state} />
               <span className="truncate">{r.title || shortPath(r.project) || r.session_id}</span>
               <StateBadge state={state} running={running} question={!!live?.asking_question} />
+              {/* The state beside it is the last the stream said; say when that may be old. */}
+              {sessions && !streaming && (
+                <span className="text-muted-foreground shrink-0 text-xs font-normal" title="The live connection dropped; the state shown may be out of date">
+                  reconnecting…
+                </span>
+              )}
             </h1>
             <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
               {r.title && r.project && <span title={r.project}>{shortPath(r.project)}</span>}
@@ -256,11 +265,17 @@ function Actions({
 }: {
   r: Report; id: string; running: boolean; term: unknown; onTerminal: () => void;
 }) {
-  const [agents, setAgents] = useState<string[]>([]);
+  // Every (agent, account) this session can go to — the server leaves out the
+  // pair it is already on, so the menu never offers a session back to itself.
+  const [targets, setTargets] = useState<HandoffTarget[]>([]);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (CAN_ACT) getJson<{ agents?: string[] }>("/api/agents").then((b) => setAgents(b.agents ?? []), () => {});
-  }, []);
+    if (!CAN_ACT) return;
+    getJson<{ targets?: HandoffTarget[] }>("/api/handoff/" + encodeURIComponent(id)).then(
+      (b) => setTargets(b.targets ?? []),
+      () => {},
+    );
+  }, [id]);
   const run = async (verb: string, body: object, label: string) => {
     setBusy(true);
     try {
@@ -299,7 +314,7 @@ function Actions({
           {running ? "Reattach" : "Resume"}
         </Button>
       )}
-      {CAN_ACT && agents.length > 0 && (
+      {CAN_ACT && targets.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm" disabled={busy}>
@@ -308,11 +323,19 @@ function Actions({
               <ChevronDown />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">Brief another agent on this session</DropdownMenuLabel>
-            {agents.map((a) => (
-              <DropdownMenuItem key={a} onSelect={() => run("handoff", { agent: a }, "Handoff")}>
-                {a}
+          <DropdownMenuContent align="end" className="min-w-60">
+            <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">Hand this session to another agent or account</DropdownMenuLabel>
+            {targets.map((t) => (
+              <DropdownMenuItem
+                key={t.label}
+                onSelect={() => run("handoff", { agent: t.agent, account: t.account ?? "" }, "Handoff")}
+              >
+                <span>{t.agent}</span>
+                {/* Named whenever there is one, as the terminal's picker does: it is
+                    the half of the pair that says whose subscription is spent. */}
+                {t.account && (
+                  <span className="text-muted-foreground ml-auto pl-4 text-xs whitespace-nowrap">as {t.account}</span>
+                )}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
