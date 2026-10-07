@@ -87,7 +87,7 @@ export function AccessView({ id }: { id: string }) {
             <DataTable
               head={[["Server"], ["Scope"], ["Command"]]}
               rows={a.mcp.map((s: { name: string; scope: string; command?: string }) => [
-                <span className="font-mono text-xs">{s.name}</span>, s.scope, <span className="text-muted-foreground font-mono text-xs break-all">{s.command || "—"}</span>,
+                <span key="name" className="font-mono text-xs">{s.name}</span>, s.scope, <span key="command" className="text-muted-foreground font-mono text-xs break-all">{s.command || "—"}</span>,
               ])}
             />
           </Panel>
@@ -127,11 +127,11 @@ export function AccessView({ id }: { id: string }) {
               rows={a.hooks.map((h: { harness: string; scope: string; state: string; detail?: string; path: string }) => [
                 h.harness,
                 h.scope,
-                <span>
+                <span key="state">
                   <Badge variant={h.state === "broken" ? "destructive" : "outline"}>{h.state}</Badge>
                   {h.detail && <span className="text-muted-foreground text-xs"> {h.detail}</span>}
                 </span>,
-                <span className="text-muted-foreground font-mono text-xs break-all">{h.path}</span>,
+                <span key="path" className="text-muted-foreground font-mono text-xs break-all">{h.path}</span>,
               ])}
             />
           </Panel>

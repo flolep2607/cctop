@@ -1,4 +1,5 @@
 import { memo, type CSSProperties, type ReactNode } from "react";
+import { CONTROL, ESCAPE, hasAnsi, settle } from "@/lib/ansi";
 
 // Terminal output, coloured the way the terminal coloured it.
 //
@@ -75,37 +76,6 @@ function css(s: Style): CSSProperties | undefined {
   if (s.underline) out.textDecoration = "underline";
   return Object.keys(out).length ? out : undefined;
 }
-
-// SGR, any other CSI, OSC (ended by BEL or ST), and lone two-byte escapes.
-// eslint-disable-next-line no-control-regex
-const ESCAPE = /\x1b\[([0-9;:?]*)([@-~])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]/g;
-
-// The other control characters a terminal swallows: Shift In/Out (`tput sgr0`
-// ends a reset with \x0f), bell, backspace and the rest of C0 — tab, newline
-// and ESC itself excepted. A browser draws each as a tofu box.
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g;
-
-// A progress bar redraws its line with \r, and a terminal shows the last
-// drawing; so does this. A trailing \r (a CRLF line end) is just dropped.
-function settle(text: string): string {
-  if (!text.includes("\r")) return text;
-  return text
-    .split("\n")
-    .map((line) => {
-      if (!line.includes("\r")) return line;
-      const drawn = line.split("\r").filter((seg) => seg !== "");
-      return drawn.length ? drawn[drawn.length - 1] : "";
-    })
-    .join("\n");
-}
-
-/** Whether text needs any of this — the common case is none. */
-// eslint-disable-next-line no-control-regex
-export const hasAnsi = (text: string) => /[\x00-\x08\x0b-\x1f\x7f]/.test(text);
-
-/** The text with every escape sequence and control character removed. */
-export const stripAnsi = (text: string) => (hasAnsi(text) ? settle(text).replace(ESCAPE, "").replace(CONTROL, "") : text);
 
 export const Ansi = memo(function Ansi({ text }: { text: string }) {
   if (!hasAnsi(text)) return <>{text}</>;

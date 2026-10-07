@@ -14,14 +14,18 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/app-shell";
-import { StateBadge, StateDot, dotOf } from "@/components/status";
-import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
+import { StateBadge, StateDot } from "@/components/status";
+import { dotOf } from "@/lib/status";
+import { TerminalFrame } from "@/components/terminal";
+import { popOut, type Terminal } from "@/lib/terminal";
 import { useSessions, useTick } from "@/hooks/use-live";
 import type { Report } from "@/lib/types";
 import { AccessView } from "./access-view";
-import { ChangesView, diffFiles } from "./changes-view";
+import { ChangesView } from "./changes-view";
+import { diffFiles } from "./diff-files";
 import { Conversation } from "./conversation";
-import { ReportView, reportMarkdown } from "./report-view";
+import { ReportView } from "./report-view";
+import { reportMarkdown } from "./report-markdown";
 
 /** Where a session can be handed: an agent, under one of its accounts. */
 type HandoffTarget = { agent: string; account?: string | null; label: string };

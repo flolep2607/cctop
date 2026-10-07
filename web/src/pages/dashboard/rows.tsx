@@ -10,14 +10,15 @@ import { ago, money, shortModel, shortPath, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { StateDot, dotOf } from "@/components/status";
-import { stripAnsi } from "@/components/ansi";
+import { StateDot } from "@/components/status";
+import { dotOf } from "@/lib/status";
+import { stripAnsi } from "@/lib/ansi";
 import type { Session } from "@/lib/types";
 
 // The cost a row shows. `incl`, `—` and a figure are three different claims —
 // the plan bundles this, nothing billable was recorded, here is what it cost —
 // and none may be drawn as another.
-export function rowCost(s: Session): string {
+function rowCost(s: Session): string {
   if (s.cost?.included) return "incl";
   if (!s.cost?.available || s.cost.total == null) return "—";
   return money(Number(s.cost.total));

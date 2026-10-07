@@ -5,7 +5,8 @@ import { clock } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Markdown } from "@/components/markdown";
 import { Patch } from "@/components/patch";
-import { Ansi, stripAnsi } from "@/components/ansi";
+import { Ansi } from "@/components/ansi";
+import { stripAnsi } from "@/lib/ansi";
 import type { Tool, Turn } from "@/lib/types";
 
 const WHO: Record<string, string> = { user: "you", assistant: "agent", system: "harness" };
