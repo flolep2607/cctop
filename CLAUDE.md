@@ -25,13 +25,15 @@ rather than racing: whoever is further along should finish first.
 ## Verify the way CI does
 
 CI sets `RUSTFLAGS: -D warnings`, so a warning is a build failure. Clippy output
-that looks advisory locally is fatal there. The Rust version is pinned in
+that looks advisory locally is fatal there. `.cargo/config.toml` sets the same
+flag for every cargo command in the checkout, so there is nothing to export —
+and exporting or unsetting `RUSTFLAGS` by hand rebuilds every dependency. The Rust version is pinned in
 `rust-toolchain.toml`, which rustup and CI both read, so local clippy is CI's
 clippy — moving to a newer Rust is a pull request that changes that one line.
 Run the whole gate before pushing:
 
 ```bash
-export RUSTFLAGS="-D warnings"
+# -D warnings is set in .cargo/config.toml
 cargo fmt --all --check
 cargo clippy --all-targets
 cargo test

@@ -13,7 +13,7 @@
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-export RUSTFLAGS="-D warnings"
+# `-D warnings` comes from .cargo/config.toml, as for every cargo command here.
 
 if [[ "${1:-}" == "--all" ]]; then
     exec cargo test --all-targets
@@ -73,19 +73,25 @@ echo "running $((${#filters[@]})) scoped test filter(s):"
 printf '  %s\n' "${filters[@]}"
 echo
 
-rc=0
-for f in "${filters[@]}"; do
-    # A filter with no `::` matches any test whose name contains it, which is
-    # what we want for a bare module name like `collide`.
-    echo "── ${f} ──"
-    out=$(cargo test --all-targets "$f" 2>&1)
-    status=$?
-    printf '%s\n' "$out" | grep -E '^test result|^error|FAILED|panicked at' || true
-    if [[ $status -ne 0 ]]; then
-        # Don't truncate the failure: that is the whole point of running it.
-        printf '%s\n' "$out" | grep -E -A15 '^failures:' | head -40
-        rc=1
-    fi
+# One cargo invocation for every filter: libtest takes several and runs a test
+# matching any of them, so the crate is built and the harness started once.
+#
+# And only the unit-test harness, unless the change reaches the binary's own
+# integration tests. `--all-targets` also compiles cctop a second time as a
+# plain binary for `tests/`, which those tests spawn: a whole extra build of
+# the crate, competing for the same cores, to run two files that only
+# `cctop hook` and the argument parsing can break.
+targets=(--bin cctop)
+for f in "${files[@]}"; do
+    case "$f" in
+        tests/*|src/hook.rs|src/hook/*) targets=(--all-targets) ;;
+    esac
 done
-
-exit $rc
+out=$(cargo test "${targets[@]}" -- "${filters[@]}" 2>&1)
+status=$?
+printf '%s\n' "$out" | grep -E '^test result|^error|FAILED|panicked at' || true
+if [[ $status -ne 0 ]]; then
+    # Don't truncate the failure: that is the whole point of running it.
+    printf '%s\n' "$out" | grep -E -A15 '^failures:' | head -40
+fi
+exit $status
