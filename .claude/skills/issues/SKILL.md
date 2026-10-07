@@ -1,0 +1,55 @@
+---
+name: issues
+description: Runs cctop's issue loop — files new GitHub issues from one-line requests with the issue-writer agent, and hands agent-ready issues, answered questions and PR review comments to issue-solver agents. Use for "file an issue for…", "work the issues", or under /loop to keep the queue moving.
+---
+
+GitHub issues are the queue and the conversation. The user files or comments
+from anywhere — the phone included — and this loop turns that into work. Agent
+text ends with the marker `<!-- cctop-agent -->`; everything else on an issue is
+the user's, because every agent posts under the user's own account.
+
+## Labels
+
+| label | meaning | who moves it on |
+|---|---|---|
+| `agent-ready` | written and waiting for a solver | this loop |
+| `agent-working` | a solver has it | the solver |
+| `agent-question` | the solver asked on the issue and stopped | the user's reply |
+| `agent-pr` | a PR is open, CI watched | the user: merge, or review comments |
+
+## With arguments: file issues
+
+`/issues <request>` — spawn one `issue-writer` agent per request (in parallel
+for several) and report the URLs. If a writer returns a question, ask the user
+it rather than filing.
+
+## Without arguments: one pass over the queue
+
+```bash
+gh issue list --state open --label agent-ready    --json number,title
+gh issue list --state open --label agent-question --json number,title
+gh issue list --state open --label agent-pr       --json number,title
+```
+
+1. **agent-ready** — spawn a background `issue-solver` with the number, up to
+   three at once in total; more wait for the next pass.
+2. **agent-question** — look at the last comment (`gh issue view <N> --json
+   comments --jq '.comments[-1].body'`). Without the marker, the user has
+   answered: relabel `agent-ready` and spawn a solver; it resumes from the
+   branch and the conversation. With it, the question is still open — skip.
+3. **agent-pr** — find the PR (`gh pr list --search "Fixes #<N>" --state all`).
+   Merged: nothing to do; GitHub closed the issue. Open with review comments or
+   issue comments newer than the solver's last marked one, or failing CI: spawn
+   a solver to address them. Otherwise skip.
+
+Never spawn a second solver for an issue whose solver from this session is
+still running. Report the pass in a few lines: what started, what is waiting on
+the user, which PRs are ready to merge.
+
+Merging and releasing stay with the user.
+
+## Under /loop
+
+`/loop /issues` paces itself; between passes the solvers run in the background
+and their completion re-invokes the loop. When nothing is running and nothing
+is queued, wake in 20–30 minutes to look for new issues and replies.
