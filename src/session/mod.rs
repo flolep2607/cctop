@@ -391,6 +391,17 @@ pub struct Session {
     /// same-named path if it ran for a remote row.
     pub remote: Option<Remote>,
 
+    /// `host:path` when the agent runs here but works on another machine,
+    /// under `cctop sandbox`: its Bash calls go there over ssh and `path` is
+    /// that machine's, mounted here.
+    ///
+    /// The opposite case from [`Session::remote`]: the process, the transcript
+    /// and the pty are all this machine's, so every local action still
+    /// applies — it is the *working directory* that belongs to somewhere else.
+    /// Set from the session's own hook, which inherits `CCTOP_SANDBOX` from
+    /// the launch; see [`crate::hook::Reports::sandboxes`].
+    pub sandbox: Option<String>,
+
     /// Which Claude profile's directory this session was read out of.
     ///
     /// `$CLAUDE_CONFIG_DIR` lets one user hold several logins side by side, each
@@ -565,6 +576,7 @@ impl Session {
             recent_writes: Vec::new(),
             conflict: None,
             remote: None,
+            sandbox: None,
             profile: None,
             owner: None,
             tokens_per_min: 0.0,

@@ -318,6 +318,7 @@ impl App {
                 .root_pid()
                 .and_then(|pid| peeked.get(&pid).or_else(|| screens.get(&pid)));
             session.apply_reports(self.reports.report(&session.session_id), screened);
+            self.reports.stamp_sandbox(session);
         }
     }
 
@@ -650,6 +651,7 @@ mod tests {
                 provisional: false,
             },
             finished_agent: None,
+            sandbox: None,
             agent: agent.map(str::to_string),
         }
     }
@@ -750,6 +752,7 @@ mod tests {
                 provisional: false,
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         }]);
 
@@ -800,6 +803,7 @@ mod tests {
                 provisional: false,
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         }]);
         assert!(
@@ -838,6 +842,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         };
         let mut app = test_app();
@@ -940,6 +945,7 @@ mod tests {
                 provisional: false,
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         }]);
         app.apply_reports();
@@ -1000,6 +1006,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         };
         let mut app = test_app();
@@ -1053,6 +1060,7 @@ mod tests {
             // This test is about the session's own state; subagent events are
             // covered where subagents are.
             finished_agent: None,
+            sandbox: None,
             agent: None,
         };
         let mut app = test_app();
@@ -1111,6 +1119,7 @@ mod tests {
                 at: std::time::Instant::now() - std::time::Duration::from_secs(60 * 60),
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         };
         let mut app = test_app();
@@ -1154,6 +1163,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         }]);
 
@@ -1212,6 +1222,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         }]);
         assert_eq!(
@@ -1237,6 +1248,7 @@ mod tests {
                 at: std::time::Instant::now(),
             },
             finished_agent: None,
+            sandbox: None,
             agent: None,
         }]);
         app.mark_answered(8);
@@ -1260,6 +1272,7 @@ mod tests {
             session_id: "a".to_string(),
             pids: Vec::new(),
             finished_agent: None,
+            sandbox: None,
             agent: None,
             reported: Reported {
                 signal,
@@ -1302,6 +1315,7 @@ mod tests {
             session_id: "a".to_string(),
             pids: Vec::new(),
             finished_agent: None,
+            sandbox: None,
             agent: None,
             reported: Reported {
                 signal,

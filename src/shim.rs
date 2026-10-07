@@ -32,11 +32,27 @@ const RESIZE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 /// Returns the child's exit code so `cctop run claude` is a transparent stand-in
 /// for `claude` in a shell alias.
 pub fn run(argv: &[String]) -> anyhow::Result<i32> {
+    run_in(argv, None, &[], |_| {})
+}
+
+/// [`run`], started in `cwd` with `env` added to what the agent inherits.
+///
+/// `spawned` is handed the agent's pid as soon as it has one, for a caller
+/// that has to be able to end the agent from elsewhere — `cctop sandbox` hangs
+/// it up when cctop itself is told to stop, so its teardown still runs.
+pub fn run_in(
+    argv: &[String],
+    cwd: Option<&std::path::Path>,
+    env: &[(String, String)],
+    spawned: impl FnOnce(u32),
+) -> anyhow::Result<i32> {
     if argv.is_empty() {
         anyhow::bail!("usage: cctop run <command> [args…]  (e.g. cctop run claude)");
     }
-    let (mut child, master) = spawn_on_pty(argv, None)?;
+    let size = crossterm::terminal::size().unwrap_or((80, 24));
+    let (mut child, master) = spawn_on_pty_at_env(argv, cwd, size, env)?;
     let pid = child.id();
+    spawned(pid);
     crate::elog::event(
         "shim",
         "spawn",
@@ -554,6 +570,10 @@ fn pty_size(master: &File) -> (u16, u16) {
 }
 
 /// Spawn `argv` with a new pty as its controlling terminal, returning the master.
+///
+/// Only the tests still want it: `run` goes through [`run_in`], which has an
+/// environment to pass and so calls [`spawn_on_pty_at_env`] itself.
+#[cfg(test)]
 fn spawn_on_pty(
     argv: &[String],
     cwd: Option<&std::path::Path>,
@@ -562,6 +582,7 @@ fn spawn_on_pty(
 }
 
 /// [`spawn_on_pty`] at `(cols, rows)` rather than the size of this terminal.
+#[cfg(test)]
 fn spawn_on_pty_at(
     argv: &[String],
     cwd: Option<&std::path::Path>,

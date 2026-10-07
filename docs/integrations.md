@@ -412,6 +412,73 @@ ssh -t devbox sudo cctop --update
 cctop does not run sudo on another machine for you. The same comparison is in
 `cctop doctor --host devbox`, which warns when either side is behind.
 
+### An agent here, working there
+
+`--host` watches agents that run somewhere else. `cctop sandbox` is the other
+way round: Claude Code runs here, with your login, your hooks and this
+dashboard, and what it *does* happens on another machine.
+
+```bash
+cctop sandbox devbox:/srv/api
+cctop sandbox devbox:~/src/api --model opus     # anything after the path goes to claude
+```
+
+Nothing is installed on the host. It needs `bash` and `setsid`, which every
+Linux box has, and this machine needs `sshfs` and `fusermount3`
+(`sudo apt install sshfs fuse3`). Three ordinary pieces do the work:
+
+- **One ssh connection.** cctop starts an OpenSSH ControlMaster to the host and
+  every later call rides it, so you authenticate once — a passphrase or a host
+  key question is asked on your terminal before Claude starts. It is your own
+  `ssh` reading your own `~/.ssh/config`, so host aliases, jump hosts and agent
+  keys work as they do at a prompt.
+- **The directory, mounted at the same path.** sshfs mounts the host's
+  `/srv/api` at `/srv/api` here. Read, Edit, Write, Glob and Grep run on this
+  machine and see the host's files under the names the host's shell uses for
+  them, so nothing has to translate a path.
+- **A shell that is not here.** Claude Code runs every Bash command through
+  `CLAUDE_CODE_SHELL_PREFIX`, which cctop sets to itself. Each command goes to
+  the host over the connection, in the same directory, and its output, exit
+  code and final directory come back — a `cd` sticks, as it would locally.
+  Interrupting a command (Esc, or a timeout) closes its ssh channel, and the
+  host stops the command's whole process group when that happens.
+
+The file tools can only see the mount, so a PreToolUse hook installed for this
+launch alone (through `--settings`; your settings files are not touched)
+refuses them anywhere else, telling Claude to use Bash for that path instead.
+Claude Code's own files — `~/.claude` and its temporary directory — stay
+reachable. Claude is also told, in its system prompt, which host it is on and
+what runs where.
+
+Hooks and the status line are not Bash commands, and they still run here:
+`cctop hook` keeps reporting to the dashboard. The row shows its host as
+`devbox⇄`, on the web page too, and its paths are never compared with a local
+session's for the `!` conflict column — the same path on two machines is two
+files.
+
+When Claude exits — or cctop is sent SIGTERM or SIGHUP — the mount is
+unmounted and the connection closed. If cctop is killed outright the two
+helpers go with it, and a mount left behind ("Transport endpoint is not
+connected") is cleared the next time a sandbox starts on that path.
+
+**The path has to exist here, or be creatable by you,** because it is the
+mount point. A path under a home directory that is someone else's on this
+machine needs creating once:
+
+```bash
+sudo mkdir -p /home/you-on-the-host/project && sudo chown $USER /home/you-on-the-host/project
+```
+
+cctop prints that command rather than running it. It also refuses a path that
+exists here and is not empty, since the mount would hide what is there.
+
+Limits worth knowing: Claude Code starts each command in its current directory
+*here* before cctop moves it to the host, so a `cd` outside the mount carries
+over to the next command only if that directory exists on this machine too; a
+command that leaves something
+running in the background is stopped with the rest of its process group when
+it returns; and two sandboxes cannot share one mount point at once.
+
 ## Every user on the machine
 
 Run cctop as root and it reads every user's sessions, not root's own — which on

@@ -22,7 +22,10 @@ Commands:
                           them. F12 detaches and leaves it running.
   cctop as <acct> <agent> Start an agent under a named account (see
                           --add-account).
-  cctop serve             Serve the table, and a per-session report, to a
+  cctop sandbox <host>:<path> [args…]
+                          Run Claude Code here with its Bash commands on
+                          <host> over ssh, and <path> mounted here with sshfs.
+  cctop serve            Serve the table, and a per-session report, to a
                           browser. Loopback and read-only by default; `serve
                           --help` for the flags. Handy on a phone.
   cctop wait <session>    Block until a session stops working — by id prefix,
@@ -62,6 +65,7 @@ Each command takes --help for the details.";
                       cctop <agent> [args…]\n       \
                       cctop attach [pid]\n       \
                       cctop as <account> <agent> [args…]\n       \
+                      cctop sandbox <host>:<path> [claude args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop optimize | compare | yield | burn | log\n       \
                       cctop recall <query> [--read SESSION PASSAGE]\n       \
@@ -623,6 +627,10 @@ pub struct JsonSession {
     /// out of. Absent for every other harness, none of which has the concept.
     #[serde(skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
+    /// Where the session is working when `cctop sandbox` launched it: the
+    /// agent runs here, its commands and `path` are on `host`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox: Option<JsonSandbox>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<JsonAccount>,
     model: Option<String>,
@@ -662,6 +670,12 @@ pub struct JsonSession {
     conflict: Option<JsonConflict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct JsonSandbox {
+    host: String,
+    path: String,
 }
 
 #[derive(Serialize)]
@@ -1183,6 +1197,13 @@ pub fn json_sessions(
                 title: s.title.clone(),
                 user: s.owner.clone(),
                 profile: s.profile.clone(),
+                sandbox: s.sandbox.as_deref().map(|sandbox| JsonSandbox {
+                    host: crate::sandbox::host_of(sandbox).to_string(),
+                    path: sandbox
+                        .get(crate::sandbox::host_of(sandbox).len() + 1..)
+                        .unwrap_or_default()
+                        .to_string(),
+                }),
                 account,
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
                 harness: (!s.harness.is_empty()).then(|| s.harness.clone()),

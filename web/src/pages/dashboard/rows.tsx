@@ -90,6 +90,11 @@ export const SessionRow = memo(function SessionRow({
               {s.conflict.level === "file" ? "same file as another agent" : "same repo as another agent"}
             </Badge>
           )}
+          {s.sandbox && (
+            <span className="font-mono" title={`Bash runs on ${s.sandbox.host}; ${s.sandbox.path} is mounted here`}>
+              {s.sandbox.host}⇄
+            </span>
+          )}
           {s.user && <span>{s.user}</span>}
           {s.profile && s.profile !== "default" && <span>{s.profile}</span>}
           {s.context?.max ? <ContextBar used={s.context.used} max={s.context.max} /> : null}
