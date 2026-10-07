@@ -145,12 +145,16 @@ const MAX_CONNECTIONS: usize = 32;
 /// inotify budget the machine had already spent.
 const FULL_WALK: Duration = Duration::from_secs(30);
 
-/// How long an SSE stream waits for a new snapshot before sending a comment.
+/// The longest an SSE stream goes without writing anything before it sends a
+/// `ping` event.
 ///
 /// Idle connections have to produce traffic or the hops in between drop them,
 /// and a browser that has gone away only surfaces as a write error once
-/// something is written at it.
-const SSE_KEEPALIVE: Duration = Duration::from_secs(20);
+/// something is written at it. The page holds the other end of this bargain:
+/// a stream it has heard nothing on for a little over twice this is one it
+/// closes and reopens (`STALE_AFTER` in `web/src/hooks/use-live.ts`), so the
+/// two numbers move together.
+const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// What a request naming no session, or an ambiguous prefix of one, is told.
 ///
@@ -2135,6 +2139,17 @@ fn app_config(credential: &str, actions: bool) -> String {
 
 /// Hold an SSE stream open, sending each new snapshot as it lands.
 fn events(shared: &Shared, stream: &mut TcpStream, request: &Request) {
+    events_every(shared, stream, request, SSE_KEEPALIVE);
+}
+
+/// [`events`], with the ping interval as an argument so a test can wait for
+/// one without waiting fifteen seconds.
+///
+/// Two shapes of stream. A session page asks for its own row and is sent it,
+/// whole, only when it moved. The table is sent whole once, as `sessions`, and
+/// after that as `rows`: only the rows that changed since this stream last
+/// wrote, and the order of ids when that moved — see [`table_delta`].
+fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keepalive: Duration) {
     // A session page asks for its own row only. It used to be sent the whole
     // table on every refresh — every session on the machine and on every
     // `--host`, re-parsed in the browser several times a minute — to read one
@@ -2145,24 +2160,34 @@ fn events(shared: &Shared, stream: &mut TcpStream, request: &Request) {
         .cloned()
         .filter(|s| !s.is_empty());
     let mut last_row: Option<String> = None;
+    // The table this stream last wrote, which is what the next delta is taken
+    // against. Per stream rather than per snapshot: a stream that fell behind
+    // skips snapshots, and its delta has to cover everything it skipped.
+    let mut last_table: Option<Arc<Snapshot>> = None;
     let Ok(mut sse) = EventStream::open(stream) else {
         return;
     };
     crate::elog::event("sse", "open", serde_json::json!({}));
 
     let mut sent = 0u64;
+    let mut wrote = Instant::now();
     // Which write lost the client is the difference between "browser closed"
     // and "network went" — the reason is kept rather than collapsed.
     let by = loop {
         // The wait is what makes an idle stream free: no polling, and one
-        // wakeup per refresh rather than one per connection per tick.
+        // wakeup per refresh rather than one per connection per tick. It is
+        // bounded by the ping that is next due, not by a fixed window: a
+        // refresh lands every couple of seconds, and a stream whose own rows
+        // never move would otherwise wake on every one, write nothing, and
+        // never come round to pinging at all.
         let snapshot = {
             let Ok(latest) = shared.latest.lock() else {
                 break "lock";
             };
+            let due = keepalive.saturating_sub(wrote.elapsed());
             let (latest, _) = match shared
                 .updated
-                .wait_timeout_while(latest, SSE_KEEPALIVE, |s| s.version <= sent)
+                .wait_timeout_while(latest, due, |s| s.version <= sent)
             {
                 Ok(pair) => pair,
                 Err(_) => break "wait",
@@ -2170,53 +2195,112 @@ fn events(shared: &Shared, stream: &mut TcpStream, request: &Request) {
             Arc::clone(&latest)
         };
 
-        // Nothing new within the keepalive window, so send the bytes that keep
-        // the connection counted as alive — and that surface a client which
-        // quietly went away, since a write is the only thing that can.
-        if snapshot.version <= sent {
-            if sse.keepalive().is_err() {
-                break "keepalive";
+        if snapshot.version > sent {
+            let frame = match &only {
+                None => match &last_table {
+                    None => Some(("sessions", snapshot.json.clone())),
+                    Some(before) => {
+                        table_delta(&before.rows, &snapshot.rows).map(|delta| ("rows", delta))
+                    }
+                },
+                Some(id) => {
+                    let row = snapshot
+                        .rows
+                        .iter()
+                        .find(|(sid, _)| sid == id)
+                        .or_else(|| {
+                            snapshot
+                                .rows
+                                .iter()
+                                .find(|(sid, _)| sid.starts_with(id.as_str()))
+                        })
+                        .map(|(_, r)| r.clone());
+                    // Only when it moved: a refresh that changed some other
+                    // row is nothing to this page.
+                    match row {
+                        Some(row) if last_row.as_ref() != Some(&row) => {
+                            last_row = Some(row.clone());
+                            Some(("sessions", format!("[{row}]")))
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            if let Some((event, body)) = frame {
+                if sse.send(event, &body).is_err() {
+                    break "send";
+                }
+                wrote = Instant::now();
             }
-            continue;
+            if only.is_none() {
+                last_table = Some(Arc::clone(&snapshot));
+            }
+            sent = snapshot.version;
         }
 
-        let body = match &only {
-            None => Some(snapshot.json.clone()),
-            Some(id) => {
-                let row = snapshot
-                    .rows
-                    .iter()
-                    .find(|(sid, _)| sid == id)
-                    .or_else(|| {
-                        snapshot
-                            .rows
-                            .iter()
-                            .find(|(sid, _)| sid.starts_with(id.as_str()))
-                    })
-                    .map(|(_, r)| r.clone());
-                // Only when it moved: a refresh that changed some other row is
-                // nothing to this page.
-                match row {
-                    Some(row) if last_row.as_ref() != Some(&row) => {
-                        last_row = Some(row.clone());
-                        Some(format!("[{row}]"))
-                    }
-                    _ => None,
-                }
+        // Nothing written for a whole interval — no new snapshot, or none that
+        // moved anything this stream shows — so say the stream is alive, which
+        // is also what surfaces a client that quietly went away.
+        if wrote.elapsed() >= keepalive {
+            if sse.ping().is_err() {
+                break "ping";
             }
-        };
-        if let Some(body) = body
-            && sse.send("sessions", &body).is_err()
-        {
-            break "send";
+            wrote = Instant::now();
         }
-        sent = snapshot.version;
     };
     crate::elog::event(
         "sse",
         "close",
         serde_json::json!({ "by": by, "sent": sent }),
     );
+}
+
+/// What a stream that last sent the table `before` needs to be told to be
+/// showing `after`, as the body of a `rows` event — `None` when nothing moved.
+///
+/// The body is `{"set": [row, …]}`, the rows that are new or changed, plus
+/// `"order": [id, …]` when the sequence of ids is not what it was — which is
+/// also how a row that went away is said, by its id no longer being in it.
+///
+/// This exists because the whole table on every refresh is more than some
+/// links carry. On a shared box with eight hundred sessions it is 3.6 MB every
+/// two seconds; through an ssh forward or a trycloudflare tunnel that queued
+/// behind itself, and the page fell tens of seconds behind the server — still
+/// offering Allow on a prompt that had been answered, which the server then
+/// refused, because *it* was current. A refresh moves a handful of rows, so
+/// the stream now carries a handful of rows.
+///
+/// Rows are compared as the strings already rendered for the snapshot, so a
+/// row counts as changed exactly when its JSON did — no second notion of
+/// equality to drift from what the page would have seen.
+///
+/// ponytail: rows are told apart by session id, as the page already does for
+/// its keys and its routes. Two rows sharing one — the same session reported
+/// by this machine and by a `--host` — are one row to the delta, and the page
+/// shows whichever it was sent last.
+fn table_delta(before: &[(String, String)], after: &[(String, String)]) -> Option<String> {
+    let had: HashMap<&str, &str> = before
+        .iter()
+        .map(|(id, row)| (id.as_str(), row.as_str()))
+        .collect();
+    let set: Vec<&str> = after
+        .iter()
+        .filter(|(id, row)| had.get(id.as_str()) != Some(&row.as_str()))
+        .map(|(_, row)| row.as_str())
+        .collect();
+    let reordered =
+        before.len() != after.len() || before.iter().zip(after).any(|((a, _), (b, _))| a != b);
+    if set.is_empty() && !reordered {
+        return None;
+    }
+    let mut body = format!("{{\"set\":[{}]", set.join(","));
+    if reordered {
+        let ids: Vec<&str> = after.iter().map(|(id, _)| id.as_str()).collect();
+        body.push_str(",\"order\":");
+        body.push_str(&serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into()));
+    }
+    body.push('}');
+    Some(body)
 }
 
 /// Build and send one session's report.
@@ -2600,5 +2684,162 @@ mod tests {
             let status = status_of(&guarded, "GET", target, "");
             assert!(status.contains(" 403 "), "{target}: {status}");
         }
+    }
+
+    fn rows(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(id, row)| (id.to_string(), row.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_delta_carries_only_the_rows_that_moved() {
+        let before = rows(&[("a", r#"{"id":"a","n":1}"#), ("b", r#"{"id":"b","n":1}"#)]);
+
+        // The same table again is nothing to send.
+        assert_eq!(table_delta(&before, &before.clone()), None);
+
+        // One row changed in place: that row, and no order, since none moved.
+        let changed = rows(&[("a", r#"{"id":"a","n":2}"#), ("b", r#"{"id":"b","n":1}"#)]);
+        assert_eq!(
+            table_delta(&before, &changed).as_deref(),
+            Some(r#"{"set":[{"id":"a","n":2}]}"#)
+        );
+
+        // A row that appeared is sent, and the order says where it goes.
+        let grown = rows(&[
+            ("c", r#"{"id":"c"}"#),
+            ("a", r#"{"id":"a","n":1}"#),
+            ("b", r#"{"id":"b","n":1}"#),
+        ]);
+        assert_eq!(
+            table_delta(&before, &grown).as_deref(),
+            Some(r#"{"set":[{"id":"c"}],"order":["c","a","b"]}"#)
+        );
+
+        // A row that went away is said by the order alone.
+        let shrunk = rows(&[("b", r#"{"id":"b","n":1}"#)]);
+        assert_eq!(
+            table_delta(&before, &shrunk).as_deref(),
+            Some(r#"{"set":[],"order":["b"]}"#)
+        );
+
+        // And rows that only swapped places are an order and nothing else.
+        let swapped = rows(&[("b", r#"{"id":"b","n":1}"#), ("a", r#"{"id":"a","n":1}"#)]);
+        assert_eq!(
+            table_delta(&before, &swapped).as_deref(),
+            Some(r#"{"set":[],"order":["b","a"]}"#)
+        );
+    }
+
+    /// Put a table in front of every stream, the way `publish` does.
+    fn put(shared: &Shared, version: u64, table: &[(&str, &str)]) {
+        let rows = rows(table);
+        let json = format!(
+            "[{}]",
+            rows.iter()
+                .map(|(_, r)| r.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        *shared.latest.lock().unwrap() = Arc::new(Snapshot {
+            version,
+            json,
+            rows,
+            sessions: Vec::new(),
+            host_errors: Vec::new(),
+        });
+        shared.updated.notify_all();
+    }
+
+    /// Open `/api/events<query>` against `shared` on a thread of its own, and
+    /// hand back a reader of its frames as `(event, data)`.
+    fn open_stream(
+        shared: &Arc<Shared>,
+        query: &str,
+        keepalive: Duration,
+    ) -> impl FnMut() -> (String, String) {
+        use std::io::{BufRead, BufReader};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(format!("GET /api/events{query} HTTP/1.1\r\n\r\n").as_bytes())
+            .unwrap();
+        let request = Request::parse(&server).unwrap();
+        let shared = Arc::clone(shared);
+        std::thread::spawn(move || events_every(&shared, &mut server, &request, keepalive));
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(client);
+        // The response head, which ends at its blank line.
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("the response head");
+            if line == "\r\n" {
+                break;
+            }
+        }
+        move || {
+            let (mut event, mut data) = (String::new(), String::new());
+            loop {
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .expect("a frame before the timeout");
+                let line = line.trim_end_matches('\n');
+                if line.is_empty() {
+                    return (event, data);
+                }
+                if let Some(e) = line.strip_prefix("event: ") {
+                    event = e.to_string();
+                } else if let Some(d) = line.strip_prefix("data: ") {
+                    data = d.to_string();
+                }
+            }
+        }
+    }
+
+    /// The table goes out whole once, then as the rows that moved — and a
+    /// refresh that moved nothing writes nothing.
+    #[test]
+    fn the_table_stream_sends_the_table_once_and_then_what_changed() {
+        let shared = Arc::new(shared("", ""));
+        put(&shared, 1, &[("a", r#"{"a":1}"#), ("b", r#"{"b":1}"#)]);
+        let mut next = open_stream(&shared, "", Duration::from_secs(30));
+
+        assert_eq!(next(), ("sessions".into(), r#"[{"a":1},{"b":1}]"#.into()));
+        // Unchanged, then changed: the first is never written, so the next
+        // frame is the second's one row.
+        put(&shared, 2, &[("a", r#"{"a":1}"#), ("b", r#"{"b":1}"#)]);
+        put(&shared, 3, &[("a", r#"{"a":1}"#), ("b", r#"{"b":2}"#)]);
+        assert_eq!(next(), ("rows".into(), r#"{"set":[{"b":2}]}"#.into()));
+    }
+
+    /// The bug a comment keepalive hid: refreshes land every two seconds, and
+    /// a stream whose own row never moved woke on each one, wrote nothing,
+    /// and so never reached its keepalive at all — which the page could not
+    /// tell from a dead connection. A ping is due by the clock of the last
+    /// write, however many snapshots arrive in between.
+    #[test]
+    fn a_quiet_stream_pings_even_while_refreshes_keep_landing() {
+        let shared = Arc::new(shared("", ""));
+        put(&shared, 1, &[("abc", r#"{"s":"asking"}"#)]);
+        let mut next = open_stream(&shared, "?session=abc", Duration::from_millis(300));
+        assert_eq!(next(), ("sessions".into(), r#"[{"s":"asking"}]"#.into()));
+
+        let churn = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                for version in 2..60 {
+                    put(&shared, version, &[("abc", r#"{"s":"asking"}"#)]);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            })
+        };
+        assert_eq!(next(), ("ping".into(), "1".into()));
+        churn.join().unwrap();
     }
 }

@@ -3,7 +3,8 @@ import { Link } from "wouter";
 import { Check, ImageUp, SendHorizontal, Star, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { act, ANSWERABLE, ask } from "@/lib/api";
+import { act, ANSWERABLE, ask, isNotAsking } from "@/lib/api";
+import { dropPrompt } from "@/hooks/use-live";
 import { CAN_ACT } from "@/lib/config";
 import { ago, money, shortModel, shortPath, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -118,6 +119,12 @@ export function WantingRow({ s, picked, onPick, onDismiss }: { s: Session; picke
       toast.success(done.message || label || "Sent");
       return true;
     } catch (e) {
+      // The same stale prompt the session page can hold: drop it here too.
+      if (verb === "answer" && isNotAsking(e)) {
+        toast.message("Already answered", { description: "That prompt was no longer waiting." });
+        dropPrompt(s.session_id);
+        return false;
+      }
       toast.error(String((e as Error).message || e));
       return false;
     } finally {
