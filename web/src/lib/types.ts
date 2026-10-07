@@ -13,6 +13,8 @@ export interface Session {
   model?: string | null;
   branch?: string | null;
   profile?: string | null;
+  /** Launched by `cctop sandbox`: running here, working on `host`'s `path`. */
+  sandbox?: { host: string; path: string } | null;
   last_active?: string;
   started_at?: string;
   asking_for?: string | null;

@@ -1170,6 +1170,7 @@ fn stamp(
             _ => None,
         };
         session.apply_reports(reports.report(&session.session_id), screened.as_ref());
+        reports.stamp_sandbox(session);
     }
 }
 

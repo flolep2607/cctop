@@ -668,6 +668,10 @@ fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
         // spawn, which the reader treats as "no claim" rather than as an empty
         // one.
         "pids": pids,
+        // Where the session's work actually is, when `cctop sandbox` launched
+        // it: inherited from the launch, and nothing the payload could say.
+        // An environment read, so it costs the deadline nothing.
+        "sandbox": std::env::var(crate::sandbox::ENV_SANDBOX).unwrap_or_default(),
     });
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -899,6 +903,9 @@ pub struct Event {
     /// only the process table can answer — see
     /// [`Collector::collect`](crate::proc::Collector::collect).
     pub pids: Vec<u32>,
+    /// `host:path` when the session was launched by `cctop sandbox` — see
+    /// [`Session::sandbox`](crate::session::Session::sandbox).
+    pub sandbox: Option<String>,
     /// What the agent last said about itself, and where it is working.
     pub reported: Reported,
     /// The subagent this event is about, when it is about one.
@@ -1027,6 +1034,13 @@ pub(crate) struct Reports {
     /// and then repeated. Readers republish only the changes — see
     /// [`save_claims`].
     pub claims: HashMap<String, Vec<u32>>,
+    /// Which sessions are working on another machine through `cctop
+    /// sandbox`, as `host:path`, keyed by session id.
+    ///
+    /// Apart from `hooked` for the reason `claims` is: it is where the session
+    /// is, said on every event and never changing, and an event that did not
+    /// carry it — one from a cctop too old to send it — must not wipe it.
+    pub sandboxes: HashMap<String, String>,
 }
 
 impl Reports {
@@ -1058,9 +1072,14 @@ impl Reports {
             Signal::Ended => {
                 self.hooked.remove(&event.session_id);
                 self.asking_agents.remove(&event.session_id);
+                self.sandboxes.remove(&event.session_id);
                 moved = self.claims.remove(&event.session_id).is_some();
             }
             _ => {
+                if let Some(sandbox) = &event.sandbox {
+                    self.sandboxes
+                        .insert(event.session_id.clone(), sandbox.clone());
+                }
                 if !event.pids.is_empty() && self.claims.get(&event.session_id) != Some(&event.pids)
                 {
                     self.claims
@@ -1102,6 +1121,7 @@ impl Reports {
         // waiting session is never swept, which is the case this exists for.
         let before = self.claims.len();
         self.claims.retain(|id, _| self.hooked.contains_key(id));
+        self.sandboxes.retain(|id, _| self.hooked.contains_key(id));
         (lifecycle, moved || self.claims.len() != before)
     }
 
@@ -1121,6 +1141,17 @@ impl Reports {
             }
         }
         matured
+    }
+
+    /// Stamp `session` with the machine it works on, when its hooks said.
+    ///
+    /// Beside [`Session::apply_reports`](crate::session::Session::apply_reports)
+    /// at both of its callers, and for the same reason: rows are rebuilt from
+    /// transcripts, which know nothing of how the agent was launched.
+    pub(crate) fn stamp_sandbox(&self, session: &mut crate::session::Session) {
+        if let Some(sandbox) = self.sandboxes.get(&session.session_id) {
+            session.sandbox = Some(sandbox.clone());
+        }
     }
 
     /// The report `session_id`'s hooks last made, however old, if they made one.
@@ -1576,6 +1607,11 @@ fn parse(line: &str) -> Option<Event> {
                     .collect()
             })
             .unwrap_or_default(),
+        sandbox: value
+            .get("sandbox")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         // Claude Code names it `agent_id`, and cctop stores that subagent's
         // transcript as `agent-<agent_id>.jsonl`, so the two line up directly.
         finished_agent: matches!(
@@ -3559,6 +3595,32 @@ mod tests {
         let line = envelope("Notification", raw, &[]).expect("envelope");
         let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
         assert_eq!(event.reported.signal, Signal::Idle);
+    }
+
+    /// A `cctop sandbox` session says where it works on every event; the row
+    /// keeps it through an event that did not say (an older hook binary), and
+    /// loses it when the session ends.
+    #[test]
+    fn a_sandboxed_session_is_stamped_with_its_host() {
+        let line = |event: &str, sandbox: &str| {
+            parse(&format!(
+                r#"{{"event":"{event}","session_id":"s-1","cwd":"/srv","sandbox":"{sandbox}"}}"#
+            ))
+            .expect("parse")
+        };
+        let mut reports = Reports::default();
+        reports.observe(&line("PreToolUse", "box:/srv"));
+        reports.observe(&line("PostToolUse", ""));
+        let mut row = crate::session::Session::new(crate::pricing::Provider::Claude, "s-1".into());
+        reports.stamp_sandbox(&mut row);
+        assert_eq!(row.sandbox.as_deref(), Some("box:/srv"));
+
+        reports.observe(&line("SessionEnd", ""));
+        assert!(reports.sandboxes.is_empty());
+        let mut other =
+            crate::session::Session::new(crate::pricing::Provider::Claude, "s-2".into());
+        reports.stamp_sandbox(&mut other);
+        assert_eq!(other.sandbox, None);
     }
 
     /// The permission mode rides in on every Claude Code event, and it is the

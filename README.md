@@ -160,6 +160,7 @@ cctop --json          # dump full session data as JSON
 cctop --statusline    # one line for a status bar: "3 working · 1 waiting · $4.12/h"
 cctop --plan max      # treat Claude usage as bundled
 cctop --host devbox   # also show another machine's sessions, read over ssh
+cctop sandbox devbox:/srv/api   # Claude here, its commands and files on devbox
 cctop doctor          # check this installation and say what is wrong with it
 cctop serve           # the same table in a browser, on a port or a phone
 cctop claude          # start an agent on a pty cctop can watch and type into

@@ -30,6 +30,7 @@ mod proc;
 mod quota;
 mod recall;
 mod rmux;
+mod sandbox;
 mod serve;
 mod session;
 mod settings;
@@ -99,6 +100,25 @@ fn main() -> anyhow::Result<()> {
         std::panic::set_hook(Box::new(|_| std::process::exit(0)));
         let argv: Vec<String> = std::env::args().collect();
         std::process::exit(hook::emit(&argv[2..]));
+    }
+
+    // The two halves of `cctop sandbox` that Claude Code runs, as often as
+    // `hook` and for the same reason answered before anything is set up:
+    // `--sandbox-exec` is every Bash call (and every hook, which it hands
+    // straight to bash), `--sandbox-guard` every file tool call. Flags rather
+    // than words because Claude Code splits its shell prefix at the last " -".
+    {
+        let mut argv = std::env::args_os().skip(1);
+        let first = argv.next();
+        let rest = || {
+            argv.map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        match first.as_deref().and_then(std::ffi::OsStr::to_str) {
+            Some("--sandbox-exec") => std::process::exit(sandbox::exec(&rest())),
+            Some("--sandbox-guard") => std::process::exit(sandbox::guard(&rest())),
+            _ => {}
+        }
     }
 
     // Piped into `head`, `jq` or `less` that stops reading early, every
@@ -206,6 +226,15 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("as") {
             std::process::exit(quota::run_as(&argv[2..])?);
+        }
+    }
+
+    // `cctop sandbox <host>:<path> [claude args…]` alongside `as`, and for the
+    // same reason: a bare word, with the agent's own arguments after it.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("sandbox") {
+            std::process::exit(sandbox::run(&argv[2..])?);
         }
     }
 

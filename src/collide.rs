@@ -120,6 +120,10 @@ pub fn detect(sessions: &[Session]) -> Map {
             continue;
         }
         for (j, other) in live.iter().enumerate().skip(i + 1) {
+            // One path on two machines is two files.
+            if machine(s) != machine(other) {
+                continue;
+            }
             let common: Vec<&str> = other
                 .recent_writes
                 .iter()
@@ -151,9 +155,12 @@ pub fn detect(sessions: &[Session]) -> Map {
     // Same ground without a shared file — the lesser warning. A session
     // already at [`Overlap::File`] keeps only the peers its warning is about
     // rather than gaining the whole neighbourhood.
-    let mut by_repo: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    let mut by_repo: HashMap<(Option<&str>, PathBuf), Vec<usize>> = HashMap::new();
     for (i, s) in live.iter().enumerate() {
-        by_repo.entry(ground(&s.label_source)).or_default().push(i);
+        by_repo
+            .entry((machine(s), ground(&s.label_source)))
+            .or_default()
+            .push(i);
     }
     for group in by_repo.into_values().filter(|g| g.len() > 1) {
         // The whole group's keys before the pairs: each name is needed
@@ -204,6 +211,17 @@ fn keys_repeat_in(live: &[&Session]) -> bool {
     let mut seen: HashSet<(&crate::pricing::Provider, &str)> = HashSet::new();
     live.iter()
         .any(|s| !seen.insert((&s.provider, s.session_id.as_str())))
+}
+
+/// The machine whose files a live session's paths name: `None` for this one,
+/// the host for a session working elsewhere under `cctop sandbox`.
+///
+/// Its paths are spelled exactly like local ones — that is the point of
+/// mounting the host's directory at the same path — so without this a
+/// sandboxed session and a local one would be told they share a checkout
+/// that is in fact on two different machines.
+fn machine(s: &Session) -> Option<&str> {
+    s.sandbox.as_deref().map(crate::sandbox::host_of)
 }
 
 /// Remember `live[i]`'s key, unless something already needed it.
@@ -458,6 +476,26 @@ mod tests {
             .map(|w| normalise(w, "/anywhere"))
             .collect::<Vec<_>>();
         s
+    }
+
+    /// A session working on another machine through `cctop sandbox` spells
+    /// its paths exactly like a local one, and is still on another disk. Two
+    /// sandboxed on the same host are on the same disk, and race as usual.
+    #[test]
+    fn a_sandboxed_session_collides_only_on_its_own_host() {
+        let fx = Fixture::new("sandbox");
+        let repo = fx.checkout("repo");
+        let file = format!("{repo}/src/ui.rs");
+        let local = live("local", &repo, &[&file]);
+        let mut far = live("far", &repo, &[&file]);
+        far.sandbox = Some(format!("box:{repo}"));
+        assert!(detect(&[local.clone(), far.clone()]).is_empty());
+
+        let mut also_far = live("also-far", &repo, &[&file]);
+        also_far.sandbox = far.sandbox.clone();
+        let map = detect(&[local, far, also_far]);
+        assert_eq!(map.len(), 2, "{map:?}");
+        assert!(map.values().all(|c| c.level == Overlap::File));
     }
 
     /// The whole point: two agents in one checkout, both having written the
