@@ -117,7 +117,7 @@ export function AnalyticsPage() {
   const [error, setError] = useState("");
   const [updated, setUpdated] = useState(0);
   const [sel, setSel] = useStored<Sel>("cctop-analytics", { provider: "", project: "", model: "", who: "", range: "30d" });
-  useTick(10000);
+  const now = useTick(10000);
 
   useEffect(() => {
     let live = true;
@@ -144,7 +144,7 @@ export function AnalyticsPage() {
 
   const range = (Object.hasOwn(RANGES, sel.range) ? sel.range : "30d") as Range;
   const ms = RANGES[range];
-  const cut = isFinite(ms) ? new Date(Date.now() - ms) : null;
+  const cut = isFinite(ms) ? new Date(now - ms) : null;
   const MIN_DAY = cut ? dayKey(cut) : "";
   const MIN_HOUR = cut ? hourKey(cut) : "";
 
@@ -182,7 +182,7 @@ export function AnalyticsPage() {
     return (isFinite(last) && last >= cut.getTime()) || (isFinite(start) && start >= cut.getTime());
   });
 
-  const today = dayKey(new Date());
+  const today = dayKey(new Date(now));
   const domain = (present: Iterable<string>) => {
     let first: string | null = MIN_DAY || null;
     for (const d of present) if (!first || d < first) first = d;
@@ -264,7 +264,7 @@ export function AnalyticsPage() {
                 <>
                   <SpendChart list={list} byDay={byDay} />
                   <TokensChart list={list} byDay={byDay} />
-                  <ActiveChart list={list} minDay={MIN_DAY} domain={domain} />
+                  <ActiveChart list={list} today={today} minDay={MIN_DAY} domain={domain} />
                   <Heat list={list} minHour={MIN_HOUR} />
                   <Files list={list} />
                   <Breakdowns list={list} />
@@ -331,8 +331,7 @@ function TokensChart({ list, byDay }: { list: A[]; byDay: ByDay }) {
 }
 
 // A session counts on every day its [started, last_active] span covers.
-function ActiveChart({ list, minDay, domain }: { list: A[]; minDay: string; domain: (d: Iterable<string>) => string[] }) {
-  const today = dayKey(new Date());
+function ActiveChart({ list, today, minDay, domain }: { list: A[]; today: string; minDay: string; domain: (d: Iterable<string>) => string[] }) {
   const covered = new Map<string, number>();
   const present: string[] = [];
   for (const s of list) {

@@ -36,7 +36,7 @@ jobs:
 
   prepare-release:
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned on purpose: see verify.yml
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
@@ -79,7 +79,7 @@ jobs:
 
   create-release:
     needs: prepare-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -180,7 +180,7 @@ jobs:
   build:
     needs: [prepare-release, create-release]
     name: ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

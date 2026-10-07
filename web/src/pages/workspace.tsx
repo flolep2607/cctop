@@ -11,8 +11,10 @@ import { Kbd } from "@/components/ui/kbd";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { AppShell } from "@/components/app-shell";
 import { PromptBar } from "@/components/prompt-bar";
-import { StateDot, dotOfTab } from "@/components/status";
-import { popOut, TerminalFrame, type Terminal } from "@/components/terminal";
+import { StateDot } from "@/components/status";
+import { dotOfTab } from "@/lib/status";
+import { TerminalFrame } from "@/components/terminal";
+import { popOut, type Terminal } from "@/lib/terminal";
 import { useSessions, useStored, useTabs } from "@/hooks/use-live";
 import type { Session, Tab } from "@/lib/types";
 

@@ -1,7 +1,8 @@
 import { Badge } from "@/components/ui/badge";
 import { DataTable, Panel, Section, Stat } from "@/components/section";
 import { clock, money, secs, tokens } from "@/lib/format";
-import { Ansi, stripAnsi } from "@/components/ansi";
+import { Ansi } from "@/components/ansi";
+import { stripAnsi } from "@/lib/ansi";
 import type { Report } from "@/lib/types";
 
 const when = (ts?: string) => (ts || "").replace("T", " ").replace(/\..*$/, "");
@@ -215,7 +216,7 @@ function Heaviest({ r }: { r: Report }) {
       <Panel>
         <DataTable
           head={[["Tool"], ["Call"], ["Grew by", "num"]]}
-          rows={calls.map((c) => [<span className="font-mono text-xs">{c.tool}</span>, callCell(c, (c.shared ?? 0) > 1 ? `with ${(c.shared ?? 0) - 1} more` : null), tokens(c.window_growth)])}
+          rows={calls.map((c) => [<span key="tool" className="font-mono text-xs">{c.tool}</span>, callCell(c, (c.shared ?? 0) > 1 ? `with ${(c.shared ?? 0) - 1} more` : null), tokens(c.window_growth)])}
         />
       </Panel>
     </Section>
@@ -228,7 +229,7 @@ function Slowest({ r }: { r: Report }) {
   return (
     <Section title="Slowest calls" note="Wall time from the call being issued to its result arriving.">
       <Panel>
-        <DataTable head={[["Tool"], ["Call"], ["Took", "num"]]} rows={calls.map((c) => [<span className="font-mono text-xs">{c.tool}</span>, callCell(c), secs(c.duration_ms)])} />
+        <DataTable head={[["Tool"], ["Call"], ["Took", "num"]]} rows={calls.map((c) => [<span key="tool" className="font-mono text-xs">{c.tool}</span>, callCell(c), secs(c.duration_ms)])} />
       </Panel>
     </Section>
   );
@@ -242,7 +243,7 @@ function Tools({ r }: { r: Report }) {
       <Panel>
         <DataTable
           head={[["Tool"], ["Calls", "num"], ["Failed", "num"]]}
-          rows={tools.map((t) => [<span className="font-mono text-xs">{t.name}</span>, t.calls.toLocaleString(), t.failed ? String(t.failed) : "—"])}
+          rows={tools.map((t) => [<span key="tool" className="font-mono text-xs">{t.name}</span>, t.calls.toLocaleString(), t.failed ? String(t.failed) : "—"])}
         />
       </Panel>
     </Section>
@@ -266,11 +267,11 @@ function CallLog({ r }: { r: Report }) {
           <DataTable
             head={[["Tool"], ["Call"], ["Took", "num"], ["Grew", "num"], ["When"]]}
             rows={calls.map((c) => [
-              <span className={c.failed ? "text-destructive font-mono text-xs" : "font-mono text-xs"}>{c.tool}</span>,
+              <span key="tool" className={c.failed ? "text-destructive font-mono text-xs" : "font-mono text-xs"}>{c.tool}</span>,
               callCell(c),
               c.duration_ms == null ? "—" : secs(c.duration_ms),
               c.window_growth == null ? "—" : "+" + tokens(c.window_growth),
-              <span className="text-muted-foreground font-mono text-xs whitespace-nowrap">{when(c.ts)}</span>,
+              <span key="when" className="text-muted-foreground font-mono text-xs whitespace-nowrap">{when(c.ts)}</span>,
             ])}
           />
         </div>
@@ -287,7 +288,7 @@ function Subagents({ r }: { r: Report }) {
         <DataTable
           head={[["Type"], ["Description"], ["Tools", "num"], ["Cost", "num"]]}
           rows={r.subagents.map((a: { type: string; description: string; tool_count: number; cost: number }) => [
-            <span className="font-mono text-xs">{a.type}</span>, a.description, a.tool_count, r.cost.included ? "incl" : money(a.cost),
+            <span key="type" className="font-mono text-xs">{a.type}</span>, a.description, a.tool_count, r.cost.included ? "incl" : money(a.cost),
           ])}
         />
       </Panel>
@@ -310,36 +311,4 @@ export function ReportView({ r }: { r: Report }) {
       <Subagents r={r} />
     </>
   );
-}
-
-/** The report as something to paste: the figures a summary would type. */
-export function reportMarkdown(r: Report): string {
-  const out: string[] = ["# " + (r.title || r.project || r.session_id)];
-  const meta = [r.project, r.branch, r.model || r.provider].filter(Boolean).join(" · ");
-  if (meta) out.push(meta);
-  out.push("");
-  out.push("- Cost: " + (r.cost.included ? "included in the plan" : r.cost.available ? money(r.cost.total) : "not recorded"));
-  out.push(`- Tokens: ${tokens(r.tokens.total || r.tokens.input + r.tokens.output)} (${tokens(r.tokens.input)} in · ${tokens(r.tokens.output)} out)`);
-  if (r.context?.max)
-    out.push(
-      `- Context: ${Math.round(r.context.percent_to_compact)}% of the window (${tokens(r.context.used)} of ${tokens(r.context.max)})` +
-        (r.context.compactions ? `, ${r.context.compactions} compactions` : ""),
-    );
-  if (r.duration) out.push("- Duration: " + r.duration + (r.running ? ", still running" : ""));
-  if (r.activity?.error_rate != null)
-    out.push(`- Tool errors: ${Math.round(r.activity.error_rate * 100)}% (${r.activity.tool_errors || 0} of ${r.activity.tool_count || 0})`);
-  const loops = (r.activity.failures ?? []).filter((f: { count: number }) => f.count > 1);
-  if (loops.length) {
-    out.push("", "## Repeated failures");
-    for (const f of loops.slice(0, 6)) {
-      let d = String(f.detail || "").split("\n")[0];
-      if (d.length > 120) d = d.slice(0, 117) + "…";
-      out.push(`- ×${f.count} \`${f.tool}\`` + (d ? ` — \`${d}\`` : ""));
-    }
-  }
-  if (r.files?.length) {
-    out.push("", "## Files it wrote");
-    for (const f of r.files) out.push("- " + f);
-  }
-  return out.join("\n");
 }

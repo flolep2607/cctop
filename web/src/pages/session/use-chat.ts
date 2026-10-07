@@ -27,19 +27,22 @@ export function useChat(id: string, running: boolean) {
     setTurns(next);
   }, []);
 
-  const refresh = useCallback(async () => {
+  // Written as a promise chain rather than an async body so that every state
+  // update visibly sits in a callback that runs once the read lands: the
+  // effects below call this on mount, and React's lint takes a setState in an
+  // async function's own body for one made synchronously in the effect.
+  const refresh = useCallback(() => {
     const newest = held.current.length ? held.current[held.current.length - 1].seq : null;
     const narrow = stamp.current !== null && newest !== null;
-    try {
-      const chat = await getJson<Chat>("/api/chat/" + encodeURIComponent(id), narrow ? { since: stamp.current, after: newest } : undefined);
-      if (chat.stamp) stamp.current = chat.stamp;
-      setError("");
-      if (chat.unchanged) return;
-      if (!narrow) setMeta({ supported: chat.supported, note: chat.note, earlier: chat.earlier });
-      merge(chat.turns ?? []);
-    } catch (e) {
-      setError(String((e as Error).message || e));
-    }
+    return getJson<Chat>("/api/chat/" + encodeURIComponent(id), narrow ? { since: stamp.current, after: newest } : undefined)
+      .then((chat) => {
+        if (chat.stamp) stamp.current = chat.stamp;
+        setError("");
+        if (chat.unchanged) return;
+        if (!narrow) setMeta({ supported: chat.supported, note: chat.note, earlier: chat.earlier });
+        merge(chat.turns ?? []);
+      })
+      .catch((e) => setError(String((e as Error).message || e)));
   }, [id, merge]);
 
   // Turns the transcript holds before everything fetched: the seq of the
