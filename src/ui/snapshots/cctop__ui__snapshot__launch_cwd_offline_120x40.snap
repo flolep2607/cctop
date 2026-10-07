@@ -20,12 +20,12 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 │                            ╭ New tab ───────────────────────────────────────────────────╮                            │
-│                            │   claude                                                   │                            │
+│                            │   sh                                                       │                            │
 │                            │ in devbox:~/src▏                                           │                            │
 │                            │ devbox: needs a password or key prompt — the tab will ask  │                            │
-│                            │ as default  (p to change)                                  │                            │
-╰────────────────────────────│ Enter accept  Esc keep the old one                         │────────────────────────────╯
-╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
+│                            │ Enter accept  Esc keep the old one                         │                            │
+╰────────────────────────────╰────────────────────────────────────────────────────────────╯────────────────────────────╯
+╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context  Preview  ─────────────────────────────╮
 │Root /usr/bin/claude --model opus                                                                                     │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │

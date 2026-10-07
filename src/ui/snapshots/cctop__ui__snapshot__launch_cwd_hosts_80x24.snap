@@ -9,14 +9,14 @@ expression: screen
 │This month        $0.00                               ⡀  Agent CPU   3.2%     │
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Session╭ New tab ───────────────────────────────────────────────────╮────────╮
-│   LAST▲│   claude                                                   │JECT    │
-│●    now│ in ▏                                                       │ the ch…┃
-│●     7m│   /home/me/src/web                                         │        │
-╰────────│   /home/me/src/api                                         │────────╯
-╭ Info  P│ › nz-b-procurementdb1:  ssh host · procdb                  │ Context╮
-│Root /us│   devbox:  ssh host                                        │        │
-│    PID │ as default  (p to change)                                  │        │
+╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
+│   LAST▲╭ New tab ───────────────────────────────────────────────────╮JECT    │
+│●    now│   sh                                                       │ the ch…┃
+│●     7m│ in ▏                                                       │        │
+╰────────│   /home/me/src/web                                         │────────╯
+╭ Info  P│   /home/me/src/api                                         │ Context╮
+│Root /us│ › nz-b-procurementdb1:  ssh host · procdb                  │        │
+│    PID │   devbox:  ssh host                                        │        │
 │   4101 │ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │        │
 │   4188 ╰────────────────────────────────────────────────────────────╯        │
 │   4290    0.3%      8.0M  bash -c npm test                                   │

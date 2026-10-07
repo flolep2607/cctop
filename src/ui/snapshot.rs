@@ -503,7 +503,9 @@ fn new_tab_remote() {
 fn launch_cwd_hosts() {
     use super::location::Hit;
     let mut app = fixture();
-    app.launch_offer = vec![tabs::Choice::Start(vec!["claude".into()])];
+    // A plain shell, which has no accounts: a `claude` row would add an
+    // `as <account>` line only on a machine that has some.
+    app.launch_offer = vec![tabs::Choice::Start(vec!["/bin/sh".into()])];
     app.launch_cursor = 0;
     app.launch_cwd_input.clear();
     app.launch_cwd_hits = vec![
@@ -530,7 +532,9 @@ fn launch_cwd_hosts() {
 fn launch_cwd_remote() {
     use super::location::{Conn, Dir, Hit, HostState};
     let mut app = fixture();
-    app.launch_offer = vec![tabs::Choice::Start(vec!["claude".into()])];
+    // A plain shell, which has no accounts: a `claude` row would add an
+    // `as <account>` line only on a machine that has some.
+    app.launch_offer = vec![tabs::Choice::Start(vec!["/bin/sh".into()])];
     app.launch_cursor = 0;
     let listed = HostState {
         conn: Conn::Ready {

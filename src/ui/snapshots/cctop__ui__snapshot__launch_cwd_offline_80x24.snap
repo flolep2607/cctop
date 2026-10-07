@@ -12,12 +12,12 @@ expression: screen
 ╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
 │   LAST▲         $ MODEL          PERM   ! HOST       BRANCH       PROJECT    │
 │●    now╭ New tab ───────────────────────────────────────────────────╮ the ch…┃
-│●     7m│   claude                                                   │        │
+│●     7m│   sh                                                       │        │
 ╰────────│ in devbox:~/src▏                                           │────────╯
 ╭ Info  P│ devbox: needs a password or key prompt — the tab will ask  │ Context╮
-│Root /us│ as default  (p to change)                                  │        │
-│    PID │ Enter accept  Esc keep the old one                         │        │
-│   4101 ╰────────────────────────────────────────────────────────────╯        │
+│Root /us│ Enter accept  Esc keep the old one                         │        │
+│    PID ╰────────────────────────────────────────────────────────────╯        │
+│   4101    9.8%    360.0M  claude --model opus                                │
 │   4188    2.4%     44.0M  node mcp-server.js                                 │
 │   4290    0.3%      8.0M  bash -c npm test                                   │
 │                                                                              │

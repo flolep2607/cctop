@@ -19,14 +19,14 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 │                            ╭ New tab ───────────────────────────────────────────────────╮                            │
-│                            │   claude                                                   │                            │
+│                            │   sh                                                       │                            │
 │                            │ in procdb:~/src/▏                                          │                            │
 │                            │   ~/src/api                                                │                            │
 │                            │   ~/src/cctop  not empty here — the mount would hide it    │                            │
 │                            │   ~/src/web                                                │                            │
-╰────────────────────────────│ as default  (p to change)                                  │────────────────────────────╯
-╭ Info  Performance  Processe│ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │────────────────────────────╮
-│Root /usr/bin/claude --model╰────────────────────────────────────────────────────────────╯                            │
+╰────────────────────────────│ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │────────────────────────────╯
+╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
+│Root /usr/bin/claude --model opus                                                                                     │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │
 │   4188    2.4%     44.0M  node mcp-server.js                                                                         │
