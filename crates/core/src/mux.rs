@@ -968,6 +968,8 @@ mod tests {
             .expect("session made");
         assert!(daemon.socket().exists());
         assert!(has_session("cctop-t"));
+        // What `cctop doctor` reports: the daemon's own count, not a listing.
+        assert_eq!(status().map(|s| s.sessions), Some(1));
         let listing = list_all_panes("#{session_name}\t#{pane_pid}").expect("listing");
         assert!(
             listing.lines().any(|l| l.starts_with("cctop-t\t")),
