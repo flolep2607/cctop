@@ -39,6 +39,10 @@ jobs:
     runs-on: ubuntu-24.04  # pinned on purpose: see verify.yml
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      # "false" when a push to main carries a version that is already released.
+      # Every job after this one is gated on it, so such a run ends green with
+      # the rest skipped rather than red.
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -65,8 +69,21 @@ jobs:
           # A version change on main owns its tag. Refuse to republish or move
           # an existing tag, and otherwise tag this exact checked-out commit.
           if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "branch" ]; then
-            if git rev-parse --verify --quiet "refs/tags/$tag"; then
-              echo "::error::release tag $tag already exists; bump Cargo.toml before releasing"
+            if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+              # Any Cargo.toml edit on main lands here, not only a bump: #188
+              # changed the package's `exclude` list and the run went red as if
+              # a release had broken. When the existing tag is already in this
+              # commit's history, main simply has not moved past that release,
+              # so this push is not one: end quietly and let every later job
+              # skip. A tag that is *not* in the history was cut from somewhere
+              # else, and claiming its version here would publish two different
+              # commits under one number, so that stays an error.
+              if git merge-base --is-ancestor "refs/tags/$tag" HEAD; then
+                echo "::notice::not a release: $tag already exists and is part of this commit's history"
+                echo "release=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::error::release tag $tag already exists on a commit outside main's history; bump Cargo.toml before releasing"
               exit 1
             fi
             git config user.name "github-actions[bot]"
@@ -76,9 +93,11 @@ jobs:
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
 
   create-release:
     needs: prepare-release
+    if: needs.prepare-release.outputs.release == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -179,6 +198,7 @@ jobs:
 
   build:
     needs: [prepare-release, create-release]
+    if: needs.prepare-release.outputs.release == 'true'
     name: ${{ matrix.target }}
     runs-on: ubuntu-24.04
     strategy:
@@ -215,6 +235,7 @@ jobs:
   # only made every release that much slower to reach crates.io.
   publish-crate:
     needs: prepare-release
+    if: needs.prepare-release.outputs.release == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
