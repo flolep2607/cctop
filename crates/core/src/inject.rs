@@ -155,8 +155,8 @@ fn rmux_send(pid: u32, input: Input) -> Option<Result<(), String>> {
     let pane = pane_for(pid)?;
     Some(match input {
         Input::Line(text) => send(&pane, text),
-        Input::Key(Key::Char(c)) => rmux(&["send-keys", "-t", &pane, "-l", "--", &c.to_string()]),
-        Input::Key(Key::Escape) => rmux(&["send-keys", "-t", &pane, "Escape"]),
+        Input::Key(Key::Char(c)) => keys(&pane, &c.to_string(), true),
+        Input::Key(Key::Escape) => keys(&pane, "Escape", false),
     })
 }
 
@@ -275,8 +275,24 @@ fn send(pane: &str, text: &str) -> Result<(), String> {
     // `-l --` sends the text literally, so a message containing "Enter" or "C-c"
     // is typed rather than interpreted, and a leading dash isn't read as a flag.
     // The newline that submits it has to be a separate, non-literal key.
-    rmux(&["send-keys", "-t", pane, "-l", "--", text])?;
-    rmux(&["send-keys", "-t", pane, "Enter"])
+    keys(pane, text, true)?;
+    keys(pane, "Enter", false)
+}
+
+/// `send-keys` to one pane: `key` typed as text when `literal`, else read as
+/// the name of a key.
+///
+/// To cctop's own daemon through its protocol, where [`list_panes`] named the
+/// pane `session:window.pane`; to the user's with the `rmux` command line.
+fn keys(pane: &str, key: &str, literal: bool) -> Result<(), String> {
+    if crate::mux::builtin() {
+        let target = crate::mux::pane_target(pane).ok_or_else(|| format!("no pane {pane}"))?;
+        return crate::mux::send_keys(&target, key, literal);
+    }
+    match literal {
+        true => rmux(&["send-keys", "-t", pane, "-l", "--", key]),
+        false => rmux(&["send-keys", "-t", pane, key]),
+    }
 }
 
 /// Every pane on the server as `(pane_pid, pane_id)`.
@@ -284,15 +300,27 @@ fn send(pane: &str, text: &str) -> Result<(), String> {
 /// `None` when rmux isn't installed or no server is running — both mean "this
 /// session isn't in a pane", which is the caller's only question.
 pub(crate) fn list_panes() -> Option<Vec<(u32, String)>> {
-    let out = Command::new(crate::rmux::BIN)
-        .args(["list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+    // Only cctop's own daemon under `CCTOP_MUX=builtin`: an agent in one of the
+    // user's own rmux panes is theirs, and reached through `cctop run`'s shim
+    // or TIOCSTI instead (#197). Panes are named as the typed protocol names
+    // them there, `session:window.pane`.
+    let listing = match crate::mux::builtin() {
+        true => {
+            crate::mux::list_all_panes("#{pane_pid} #{session_name}:#{window_index}.#{pane_index}")?
+        }
+        false => {
+            let out = Command::new(crate::rmux::BIN)
+                .args(["list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    };
     Some(
-        String::from_utf8_lossy(&out.stdout)
+        listing
             .lines()
             .filter_map(|line| {
                 let (pid, id) = line.split_once(' ')?;
@@ -419,39 +447,27 @@ mod tests {
 
     /// The whole feature is the round trip: find the pane holding a process we
     /// only know by PID, then have what we send arrive as that process's input.
-    /// Nothing smaller than a real rmux server tests either half.
+    /// Nothing smaller than a real rmux server tests either half: this one is
+    /// cctop's own daemon on a socket of the test's, never the user's.
     #[test]
     fn types_into_the_pane_holding_a_pid() {
-        if Command::new(crate::rmux::BIN).arg("-V").output().is_err() {
-            eprintln!("skipping: rmux not installed");
-            return;
-        }
-        // Every test that drives the real server takes its turn — see
-        // [`rmux::test_lock`](crate::rmux::test_lock).
-        let _turn = crate::rmux::test_lock();
+        let _daemon = crate::mux::TestDaemon::new("types_into_the_pane_holding_a_pid");
         let out = std::env::temp_dir().join(format!("cctop-mux-test-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
         // `tee` takes the path as an argument, so the reader is findable by
         // cmdline; the trailing `:` stops the shell from exec'ing it, keeping a
         // shell between the pane and the reader so the ancestor walk has to
-        // climb at least one level. Both names carry the pid: the daemon is
-        // machine-wide, so two `cargo test` runs share it and a fixed name or
-        // file would have them stomping each other's session.
-        let session = format!("cctop-mux-test-{}", std::process::id());
-        // A run killed before its teardown leaves the session behind and
-        // `new-session` then fails as a duplicate — for every run after it,
-        // until someone thinks to look in rmux.
-        let _ = Command::new(crate::rmux::BIN)
-            .args(["kill-session", "-t", &format!("={session}")])
-            .status();
+        // climb at least one level. The file carries the pid, so two `cargo
+        // test` runs cannot read each other's.
+        let session = "cctop-mux-test";
         let script = format!("tee {} >/dev/null; :", out.display());
-        assert!(
-            Command::new(crate::rmux::BIN)
-                .args(["new-session", "-d", "-s", &session, "sh", "-c", &script])
-                .status()
-                .unwrap()
-                .success()
-        );
+        crate::mux::new_session(
+            session,
+            None,
+            Vec::new(),
+            &["sh".into(), "-c".into(), script],
+        )
+        .expect("a session on the test's daemon");
 
         // A scan of every process is the expensive kind of look.
         let reader = wait_asking(|| {
@@ -485,9 +501,7 @@ mod tests {
                 std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
             })
         });
-        let _ = Command::new(crate::rmux::BIN)
-            .args(["kill-session", "-t", &session])
-            .status();
+        let _ = crate::mux::kill_session(session);
         let _ = std::fs::remove_file(&out);
 
         assert!(pane.is_some(), "no pane found for the reader process");

@@ -43,3 +43,6 @@ cctop-core = { workspace = true, features = ["test-support"] }
 # The tests decode what the build compressed, byte for byte, and a brotli body
 # off the wire. The decoder alone: the encoder is a build dependency only.
 brotli-decompressor.workspace = true
+# Only for the constant the pinned share page has to agree with: see
+# `term::tests::the_pinned_share_page_speaks_the_linked_servers_protocol`.
+rmux-server.workspace = true

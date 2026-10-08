@@ -191,4 +191,45 @@ mod tests {
             }
         }
     }
+
+    /// The pinned page and the daemon linked into this binary ship together,
+    /// so they have to speak the same share protocol: the page sends its
+    /// version in the hello, and the daemon refuses any other. A fork release
+    /// that moves the server's version fails here until the page is re-pulled
+    /// with `pull.sh`, rather than in a browser that cannot open a terminal.
+    ///
+    /// The page is minified, so the version is found the way it is used: the
+    /// identifier after `protocol_version:` in the hello, and that
+    /// identifier's `const` declaration.
+    #[test]
+    fn the_pinned_share_page_speaks_the_linked_servers_protocol() {
+        let script = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/assets/rmux-share/_astro/index.astro_astro_type_script_index_0_lang.CdYCpIGm.js"
+        ))
+        .expect("the pinned share script");
+        let name: String = script
+            .split("protocol_version:")
+            .nth(1)
+            .expect("the hello names its protocol version")
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        let declared = format!("const {name}=");
+        let value: String = script
+            .split(&declared)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no `{declared}` in the pinned script"))
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let page: u16 = value.parse().expect("a numeric protocol version");
+        assert_eq!(
+            page,
+            rmux_server::WEB_SHARE_PROTOCOL_VERSION,
+            "the pinned share page speaks protocol {page}, the linked daemon {}: re-pull it \
+             with src/assets/rmux-share/pull.sh",
+            rmux_server::WEB_SHARE_PROTOCOL_VERSION
+        );
+    }
 }

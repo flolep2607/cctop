@@ -44,6 +44,7 @@ pub mod inject;
 pub mod insight;
 pub mod json;
 pub mod loader;
+pub mod mux;
 pub mod notify;
 pub mod opencode;
 pub mod paste;
