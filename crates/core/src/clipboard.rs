@@ -102,6 +102,19 @@ const HOW: &str = "install wl-clipboard or xclip (WSL uses powershell.exe)";
 /// pressed to paste *whatever* is there and cannot stall on a clipboard that
 /// is usually text.
 pub fn image_to_file(ask_terminal: bool) -> Result<PathBuf, NoImage> {
+    // The clipboard read is the developer's, as the write is in
+    // [`copy_to_clipboard`]: a test that pressed F9 would hand an agent
+    // whatever screenshot was last copied on the machine running `cargo test`,
+    // and pass or fail on it. The one test that means to read it calls
+    // [`image_from_system`] itself.
+    if crate::under_test() {
+        return Err(NoImage::NoTool);
+    }
+    image_from_system(ask_terminal)
+}
+
+/// [`image_to_file`] without the test guard.
+fn image_from_system(ask_terminal: bool) -> Result<PathBuf, NoImage> {
     let dir = paste_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return Err(NoImage::NoTool);
@@ -258,6 +271,13 @@ pub fn write_image(image: &PastedImage) -> std::io::Result<PathBuf> {
 /// one becomes `-2`, `-3`, and so on.
 fn reserve(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    reserve_stamped(dir, ext, &stamp)
+}
+
+/// [`reserve`] with the second given rather than read, so a test of what
+/// happens inside one second is not at the mercy of the clock ticking over
+/// between two calls.
+fn reserve_stamped(dir: &Path, ext: &str, stamp: &str) -> std::io::Result<PathBuf> {
     for n in 1..=99u32 {
         let name = match n {
             1 => format!("paste-{stamp}.{ext}"),
@@ -834,7 +854,7 @@ mod tests {
     #[test]
     #[ignore = "reads the machine's real clipboard"]
     fn the_clipboard_image_becomes_a_png_on_disk() {
-        match image_to_file(false) {
+        match image_from_system(false) {
             Ok(path) => {
                 assert!(is_png(&path), "{} is not a PNG", path.display());
                 eprintln!(
@@ -847,18 +867,31 @@ mod tests {
         }
     }
 
+    /// A test never reads the clipboard of whoever runs it, the same rule the
+    /// cache and [`copy_to_clipboard`] follow.
+    #[test]
+    fn a_test_never_reads_the_real_clipboard() {
+        assert!(matches!(image_to_file(true), Err(NoImage::NoTool)));
+    }
+
     /// Two images pasted in the same second are two files.
     ///
     /// The name resolves to a second, and more than one thing can paste inside
     /// one — two cctops on the same machine, the page and a terminal, or a
     /// finger on F9 twice. The second write used to land on the first, handing
     /// an agent a path to somebody else's picture.
+    ///
+    /// The second is fixed rather than read: with the clock read per call, a
+    /// tick between the first and second reservation gave the second a fresh
+    /// stamp and no `-2`, and the test failed under load for code that was
+    /// right.
     #[test]
     fn a_second_paste_in_the_same_second_gets_its_own_name() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let first = reserve(dir.path(), "png").expect("first");
-        let second = reserve(dir.path(), "png").expect("second");
-        let third = reserve(dir.path(), "png").expect("third");
+        let stamp = "20260901-142233";
+        let first = reserve_stamped(dir.path(), "png", stamp).expect("first");
+        let second = reserve_stamped(dir.path(), "png", stamp).expect("second");
+        let third = reserve_stamped(dir.path(), "png", stamp).expect("third");
         assert_ne!(first, second);
         assert_ne!(second, third);
         // Claimed, not merely named: the file is there, which is what stops
