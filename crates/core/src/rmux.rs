@@ -382,39 +382,46 @@ fn web_share(name: &str, public: Option<&str>) -> Result<Share, String> {
 /// carries — a daemon that restarted listens somewhere else, and the tunnel to
 /// the old port is replaced rather than handed out.
 ///
-/// Not the tunnel `cctop serve --tunnel` holds, though both are quick tunnels
-/// from the same client. That one lands on cctop's own server, where every
-/// route — the socket relay included — wants the page's token, and a link
-/// opened cold on `share.rmux.io` has never seen that token. Putting it in the
-/// share link would hand whoever gets the link the whole dashboard. So a share
-/// with no page of cctop's around it gets a tunnel straight to rmux's
-/// listener, whose own token, PIN and encryption are the whole of its door.
+/// Not the tunnel `cctop serve --tunnel` holds, though both come from the same
+/// client. That one lands on cctop's own server, where every route — the
+/// socket relay included — wants the page's token, and a link opened cold on
+/// `share.rmux.io` has never seen that token. Putting it in the share link
+/// would hand whoever gets the link the whole dashboard. So a share with no
+/// page of cctop's around it gets a road straight to rmux's listener, whose
+/// own token, PIN and encryption are the whole of its door: the account
+/// tunnel's `-share` hostname when this process holds that tunnel
+/// ([`crate::tunnel::share_origin`]), and this quick tunnel otherwise.
 ///
 /// One for the process, however many sessions are shared: the listener is one
 /// per daemon and tells shares apart by the token in the fragment. Held until
 /// cctop exits, which is when the shares it handed out stop answering.
 static PUBLIC: std::sync::Mutex<Option<(u16, crate::tunnel::Tunnel)>> = std::sync::Mutex::new(None);
 
-/// The origin of a quick tunnel to the daemon's share listener, starting one
+/// The public origin of the daemon's share listener: the account tunnel's
+/// share hostname when this process holds one, else a quick tunnel, started
 /// if none is up. An error where the edge cannot be reached, which leaves the
 /// caller a loopback share.
 ///
-/// Blocking for as long as the registration takes — a few seconds — and with
-/// the lock held, so two pages asking at once register one tunnel, not two.
+/// Blocking for as long as a quick registration takes — a few seconds — and
+/// with the lock held, so two pages asking at once register one tunnel, not
+/// two.
 fn public_origin() -> Result<String, String> {
     let port = on_daemon(|rmux| async move { rmux.web_config().await })?.port;
+    // Before the quick tunnel, even one already up: links it carried keep
+    // working until cctop exits, and new ones take the stable hostname.
+    if let Some(origin) = crate::tunnel::share_origin(port) {
+        return Ok(origin);
+    }
     let mut held = PUBLIC.lock().map_err(|_| "the share tunnel is poisoned")?;
     if let Some((at, tunnel)) = held.as_ref()
         && *at == port
     {
         return Ok(tunnel.url.clone());
     }
-    // The first line only: the rest is advice about `--tunnel`, a flag this
-    // caller never had.
-    // A quick tunnel even when an account is connected: the account's
-    // hostname is the page's, and this listener is not the page.
-    // ponytail: shares on the account tunnel's second hostname (#180) are not
-    // done here; setup already makes that hostname's DNS record.
+    // A quick one even when an account is connected: the account's hostname
+    // is the page's, and this listener is not the page. The first line of the
+    // error only: the rest is advice about `--tunnel`, a flag this caller
+    // never had.
     let tunnel = crate::tunnel::start(port, crate::tunnel::Want::Quick).map_err(|e| {
         format!("{e}")
             .lines()
@@ -471,9 +478,11 @@ pub fn share_link_with(
     frontend: Option<&str>,
     fresh: bool,
 ) -> Result<(Share, bool), String> {
-    /// A share, whether its endpoint is reachable off this machine, and when
-    /// it was minted.
-    type Reachable = (Share, bool, std::time::Instant);
+    /// A share, whether its endpoint is reachable off this machine, when it
+    /// was minted, and the account tunnel's generation then — a share on the
+    /// `-share` hostname dies with the serve that held the tunnel, and one
+    /// minted on a quick tunnel before it came up is better re-minted on it.
+    type Reachable = (Share, bool, std::time::Instant, u64);
     /// Session, flavour, and the frontend it opens in: a link minted for
     /// one origin's copy of the app does not open on another's.
     type Key = (String, bool, Option<String>);
@@ -481,17 +490,19 @@ pub fn share_link_with(
     let key = (name.to_string(), embedded, frontend.map(str::to_string));
     if !fresh
         && let Ok(cache) = CACHE.lock()
-        && let Some((share, tunnelled, at)) = cache.as_ref().and_then(|c| c.get(&key))
+        && let Some((share, tunnelled, at, generation)) = cache.as_ref().and_then(|c| c.get(&key))
         && at.elapsed() < SHARE_REUSE
+        && *generation == crate::tunnel::share_generation()
     {
         return Ok((share.clone(), *tunnelled));
     }
+    let generation = crate::tunnel::share_generation();
     let mint = |public: Option<&str>| match embedded {
         true => web_share_embedded(name, frontend, public),
         false => web_share(name, public),
     };
-    // Every share goes out through a Cloudflare quick tunnel of cctop's, or
-    // stays on loopback. rmux encrypts terminal traffic end to end between
+    // Every share goes out through a Cloudflare tunnel of cctop's — the
+    // account's `-share` hostname or a quick one — or stays on loopback. rmux encrypts terminal traffic end to end between
     // the browser and the daemon — ChaCha20-Poly1305 under keys from an
     // X25519 + ML-KEM handshake, the link's token mixed in — so whoever carries
     // the socket carries ciphertext, and the choice of carrier is about
@@ -542,9 +553,15 @@ pub fn share_link_with(
         None => tunnelled(mint)?,
     };
     if let Ok(mut cache) = CACHE.lock() {
-        cache
-            .get_or_insert_with(HashMap::new)
-            .insert(key, (made.0.clone(), made.1, std::time::Instant::now()));
+        cache.get_or_insert_with(HashMap::new).insert(
+            key,
+            (
+                made.0.clone(),
+                made.1,
+                std::time::Instant::now(),
+                generation,
+            ),
+        );
     }
     Ok(made)
 }

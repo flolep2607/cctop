@@ -92,6 +92,10 @@ pub struct Tunnel {
     _handle: cctop_tunnel::Tunnel,
     /// Held for as long as this process is the tunnel's connector.
     _lock: Option<File>,
+    /// This tunnel's entry in [`SHARES`], when it is the account's and has a
+    /// share hostname: gone with the tunnel, so a share is never handed a
+    /// hostname nothing carries any more.
+    _shares: Option<Lent>,
     /// Not a handle to park — this *is* the tunnel. The tasks it drives accept
     /// the edge's streams and proxy them; if it stops turning, the public URL
     /// stops answering.
@@ -138,10 +142,15 @@ pub fn start(port: u16, want: Want) -> anyhow::Result<Tunnel> {
     if let Some(account) = account {
         match open_account(&runtime, port, &account) {
             Ok((handle, lock)) => {
+                let shares = account
+                    .share_hostname
+                    .as_deref()
+                    .map(|host| SHARES.lend(handle.routes().clone(), host));
                 return Ok(Tunnel {
                     url: handle.url().to_string(),
                     kind: Kind::Account,
                     fallback: None,
+                    _shares: shares,
                     _handle: handle,
                     _lock: Some(lock),
                     _runtime: runtime,
@@ -164,6 +173,7 @@ pub fn start(port: u16, want: Want) -> anyhow::Result<Tunnel> {
         url: handle.url().to_string(),
         kind: Kind::Quick,
         fallback,
+        _shares: None,
         _handle: handle,
         _lock: None,
         _runtime: runtime,
@@ -233,6 +243,106 @@ fn claim_in(dir: &Path, tunnel_id: &str) -> Option<File> {
     match unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } {
         0 => Some(file),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal shares on the account's second hostname
+// ---------------------------------------------------------------------------
+
+/// The account tunnel this process holds, lent to terminal shares.
+///
+/// `cctop tunnel setup` makes two hostnames: the page's, and a `-share` one
+/// for rmux's share listener. A share cannot ride the page's hostname — every
+/// route there wants the page's token, and a cold share link must not carry it
+/// — but it can ride the same tunnel on the other hostname, since the tunnel
+/// routes by `Host`. So whoever brings the account tunnel up (`cctop serve`,
+/// or the dashboard's serve) lends its routing table here, and
+/// [`crate::rmux`] asks for a route instead of registering a second, quick
+/// tunnel.
+static SHARES: Shares = Shares::new();
+
+/// The share route for rmux's listener on `port`: `https://<share hostname>`,
+/// with that hostname sent to `port` from the next request on. `None` when
+/// this process holds no account tunnel with a share hostname — no account,
+/// no serve running, the account fell back to a quick tunnel, or it came from
+/// `CCTOP_TUNNEL_TOKEN` with nothing to name the share hostname — and then
+/// the caller opens its own quick tunnel, as before.
+///
+/// A daemon restarted on a new port asks again and the entry is replaced; old
+/// links to the old port are refused by rmux's own token, which is correct.
+pub fn share_origin(port: u16) -> Option<String> {
+    SHARES.route(port)
+}
+
+/// Changes whenever the lent tunnel comes or goes, so a share minted on it
+/// can tell it outlived the tunnel it was minted on.
+pub fn share_generation() -> u64 {
+    SHARES.generation()
+}
+
+struct Shares {
+    lent: std::sync::Mutex<Option<(u64, Routes, String)>>,
+    generation: std::sync::atomic::AtomicU64,
+}
+
+/// The receipt for a lent routing table; dropping it takes the loan back.
+struct Lent {
+    shares: &'static Shares,
+    generation: u64,
+}
+
+impl Shares {
+    const fn new() -> Shares {
+        Shares {
+            lent: std::sync::Mutex::new(None),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn lend(&'static self, routes: Routes, host: &str) -> Lent {
+        let generation = self.bump();
+        *self.locked() = Some((generation, routes, host.to_string()));
+        Lent {
+            shares: self,
+            generation,
+        }
+    }
+
+    fn route(&self, port: u16) -> Option<String> {
+        let lent = self.locked();
+        let (_, routes, host) = lent.as_ref()?;
+        routes.insert(host, port);
+        Some(format!("https://{host}"))
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn bump(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    fn locked(&self) -> std::sync::MutexGuard<'_, Option<(u64, Routes, String)>> {
+        // A poisoned slot is one a panic left holding a routing table, which
+        // is still a routing table.
+        self.lent.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        let mut lent = self.shares.locked();
+        // Only its own loan: one process holds one account tunnel (the lock
+        // sees to that), but a test lends twice.
+        if lent.as_ref().is_some_and(|(g, ..)| *g == self.generation) {
+            *lent = None;
+            drop(lent);
+            self.shares.bump();
+        }
     }
 }
 
@@ -507,6 +617,36 @@ mod tests {
         assert!(claim_in(dir.path(), "another-tunnel").is_some());
         drop(first);
         assert!(claim_in(dir.path(), "6ff42ae2-765d-4adf-8112-31c55c1551ef").is_some());
+    }
+
+    #[test]
+    fn a_share_rides_the_held_account_tunnel_and_nothing_else() {
+        static LOCAL: Shares = Shares::new();
+        // Nothing held: the caller opens its own quick tunnel.
+        assert_eq!(LOCAL.route(4000), None);
+
+        let routes = Routes::new(7777);
+        routes.insert("cctop.example.test", 7777);
+        let before = LOCAL.generation();
+        let lent = LOCAL.lend(routes.clone(), "cctop-share.example.test");
+        assert_ne!(LOCAL.generation(), before);
+        assert_eq!(
+            LOCAL.route(4000).as_deref(),
+            Some("https://cctop-share.example.test")
+        );
+        assert_eq!(routes.port_for("cctop-share.example.test"), Some(4000));
+        // The page's hostname is left where it was: a share link on it would
+        // need the page's token.
+        assert_eq!(routes.port_for("cctop.example.test"), Some(7777));
+
+        // A daemon back on a new port moves the route rather than adding one.
+        LOCAL.route(4100);
+        assert_eq!(routes.port_for("cctop-share.example.test"), Some(4100));
+
+        let held = LOCAL.generation();
+        drop(lent);
+        assert_eq!(LOCAL.route(4000), None, "the tunnel is gone");
+        assert_ne!(LOCAL.generation(), held, "shares minted on it are stale");
     }
 
     #[test]

@@ -271,6 +271,12 @@ would still be a dead bookmark. `--rotate-token` replaces them. The dashboard's
 own serve still mints new ones each time, since stopping it is meant to revoke
 every link.
 
+While that serve runs, terminal shares (`W` in the dashboard) ride the same
+tunnel on the `-share` hostname instead of opening a quick tunnel of their own —
+see [Sharing an agent to a browser](driving-agents.md#sharing-an-agent-to-a-browser). A share link never uses the page's
+hostname, which would want the page's token. `CCTOP_TUNNEL_TOKEN` alone names
+no share hostname, so shares keep their quick tunnel there.
+
 `--tunnel=quick` asks for a quick tunnel even with an account connected. And if
 your tunnel cannot come up — its token revoked, the edge unreachable, or another
 cctop on this machine already serving it (two would become replicas, and
