@@ -1398,7 +1398,11 @@ mod tests {
             &*super::UI_PREFS_FILE,
             &*super::BURN_LOG_FILE,
         ] {
-            assert!(!path.starts_with(&real), "{} is the real cache", path.display());
+            assert!(
+                !path.starts_with(&real),
+                "{} is the real cache",
+                path.display()
+            );
             assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
         }
     }
