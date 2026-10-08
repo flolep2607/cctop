@@ -40,10 +40,6 @@ const COST_MAX: usize = 12;
 /// Longest value the settings page takes for one setting.
 const SETTING_MAX: usize = 200;
 
-/// How close two identical pastes must be to count as one. See
-/// [`App::on_paste`].
-const DOUBLE_PASTE: Duration = Duration::from_millis(150);
-
 /// Longest query the settings page's filter accepts.
 ///
 /// Short, like the switcher's: it is matched as a substring against a name and
@@ -122,6 +118,10 @@ impl App {
             return;
         }
         self.needs_redraw = true;
+        // Someone typed, so the next paste is meant even if it repeats the
+        // last. Mouse events do not get here, which is the point: the click
+        // that comes with a right-click paste must not undo the debounce.
+        self.paste.interrupt();
 
         // Before anything else sees the key, in every mode and on every tab:
         // the arrows move things, and a code heard only on the dashboard is
@@ -299,22 +299,25 @@ impl App {
     /// shortcut for anything: pasting into the dashboard is somebody aiming at a
     /// box, and answering it with an action would be a command nobody typed.
     ///
-    /// The same text twice within [`DOUBLE_PASTE`] is one paste. A terminal that
-    /// answers a paste chord with a bracketed paste *and* a key, or a
-    /// multiplexer that forwards it on both of two paths, delivers it twice
-    /// while the person pressed once; nobody pastes the same thing twice in a
-    /// tenth of a second on purpose, so the second is dropped.
+    /// The same text again within `paste_debounce_ms` of the last one having
+    /// been handed on is one paste, and the second is dropped: some layer
+    /// between the terminal and here can deliver a paste twice under load, and
+    /// nobody pastes the same thing twice in a quarter of a second on purpose.
+    /// A key pressed in between resets that; see [`cctop_core::paste::Debounce`].
     pub(super) fn on_paste(&mut self, text: &str) {
         self.needs_redraw = true;
-        let now = Instant::now();
-        if let Some((last, at)) = &self.last_paste
-            && last == text
-            && now.duration_since(*at) < DOUBLE_PASTE
-        {
+        self.paste.window = self.settings.paste_debounce();
+        if !self.paste.admit(text.as_bytes(), Instant::now()) {
             return;
         }
-        self.last_paste = Some((text.to_string(), now));
+        self.deliver_paste(text);
+        // Timed from here rather than from arrival, so a paste that was slow to
+        // get through does not use up the window its echo is caught in.
+        self.paste.delivered(Instant::now());
+    }
 
+    /// A paste that is not an echo of the last one.
+    fn deliver_paste(&mut self, text: &str) {
         // An image that arrived as text — one of the ways one reaches a cctop
         // running over ssh, where the clipboard is on the machine the ssh was
         // typed on and no helper on this side can see it. What is pasted is a
@@ -2319,9 +2322,18 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::sync::mpsc::channel;
 
+    /// A test app whose paste window is a minute, so two pastes a test makes
+    /// back to back fall inside it however loaded the machine is.
+    fn slow_paste_app() -> App {
+        let mut app = test_app();
+        app.settings =
+            cctop_core::settings::Settings::parse("[settings]\npaste_debounce_ms = 60000\n");
+        app
+    }
+
     #[test]
     fn the_same_paste_twice_at_once_is_one_paste() {
-        let mut app = test_app();
+        let mut app = slow_paste_app();
         app.mode = Mode::Help;
         app.on_paste("abc");
         app.on_paste("abc");
@@ -2329,6 +2341,51 @@ mod tests {
         // A different text is a different paste, however soon.
         app.on_paste("d");
         assert_eq!(app.help_filter.to_string(), "abcd");
+        // And with the debounce turned off, the same text twice is twice.
+        app.settings = cctop_core::settings::Settings::parse("[settings]\npaste_debounce_ms = 0\n");
+        app.on_paste("d");
+        assert_eq!(app.help_filter.to_string(), "abcdd");
+    }
+
+    /// A key between two identical pastes means someone was there, so the
+    /// second was meant.
+    #[test]
+    fn a_key_between_two_identical_pastes_keeps_both() {
+        let mut app = slow_paste_app();
+        app.mode = Mode::Help;
+        app.on_paste("abc");
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.on_paste("abc");
+        assert_eq!(app.help_filter.to_string(), "abcabc");
+    }
+
+    /// The echo never reaches the agent: `send_paste` is not called for it.
+    #[test]
+    fn a_pane_is_sent_a_doubled_paste_once() {
+        #[derive(Clone)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink(std::sync::Arc::default());
+        let mut pane = crate::tabs::Pane::for_test("claude");
+        pane.view = cctop_core::attach::Attach::for_test_into(Box::new(sink.clone()));
+        let mut app = slow_paste_app();
+        app.tabs = vec![crate::tabs::Tab::new(pane)];
+        app.tab = 1;
+        let paste = "Draft PR: open a draft PR as soon as the first commit is pushed";
+        app.on_paste(paste);
+        app.on_paste(paste);
+        let sent = sink.0.lock().unwrap().clone();
+        let once =
+            cctop_core::attach::frame::encode(cctop_core::attach::frame::KEYS, paste.as_bytes());
+        assert_eq!(sent, once);
     }
     /// A paste on the dashboard is typing into whichever one-line box is open,
     /// and the line breaks in it must not go in: none of these inputs can show a

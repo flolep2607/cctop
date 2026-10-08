@@ -606,6 +606,22 @@ reads `unbound` rather than naming a key that now does something different.
 A line the file has but cctop could not use — listed as a problem at the top of
 the `,` panel — moved nothing, and the help says so by not moving either.
 
+### A paste that arrives twice
+
+Some layer between a terminal and an agent can deliver one paste twice when the
+machine is loaded, so a sentence reaches the agent doubled. cctop drops a paste
+that is byte for byte the last one and starts within `paste_debounce_ms` (250 by
+default) of the last having been handed on. That holds in a tab, under
+`cctop run` and under `cctop attach`. A key pressed in between means you meant
+the second, so it is kept; a click is not a key, so the one that comes with a
+right-click paste does not count. `paste_debounce_ms = 0` turns it off.
+
+Each dropped paste is a `duplicate-dropped` line under `CCTOP_LOG`, with its
+size and the gap. An identical paste kept because it came after the window
+is logged as `duplicate-kept`: many of those say the window is too short for
+your machine. Only a bracketed paste is caught. A copy that arrives as plain
+keystrokes goes through.
+
 ### Pasting an image
 
 A terminal cannot carry one. A bracketed paste is text, so a screenshot copied

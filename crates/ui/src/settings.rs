@@ -691,6 +691,12 @@ impl App {
                 Ok(n) if n >= 1 => self.write_setting("settings", name, Some(n.into())),
                 _ => self.set_status("alert_error_calls is a whole number, 1 or more"),
             },
+            "paste_debounce_ms" => match text.parse::<u64>() {
+                Ok(n) if i64::try_from(n).is_ok() => {
+                    self.write_setting("settings", name, Some((n as i64).into()))
+                }
+                _ => self.set_status("paste_debounce_ms is a whole number, 0 to turn it off"),
+            },
             "idle_after" => match text.parse::<f64>() {
                 Ok(h) if h.is_finite() && h > 0.0 => {
                     let value = match h.fract() == 0.0 && h < i64::MAX as f64 {

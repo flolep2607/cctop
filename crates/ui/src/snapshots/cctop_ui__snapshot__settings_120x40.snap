@@ -1,5 +1,5 @@
 ---
-source: src/ui/snapshot.rs
+source: crates/ui/src/snapshot.rs
 expression: screen
 ---
  1:Dashboard │ + Tab (t) ───────────────────────────────────────────────────────────────────────────────────── Settings
@@ -27,6 +27,7 @@ expression: screen
 │  warn_agents       false            Tell an agent when a live peer just wrote its file                               │
 │  idle_after        6                Hours quiet before a live session counts as idle (I)                             │
 │  read_screen       false            Read each agent's screen in a tab for its state, over hooks                      │
+│  paste_debounce_ms 250              Drop a paste repeated within this many ms; 0 = off                               │
 │  footer_hide       ""               Footer items to hide, e.g. "sort,follow" or "share"                              │
 │  footer_note       ""               A note always shown on the footer, e.g. "on-call shift"                          │
 │  footer_command    ""               A command whose first line is shown on the footer, refreshed every 30s           │
@@ -39,6 +40,5 @@ expression: screen
 │  bottom_panel      Processes      * Which panel opens under the table                                                │
 │  tool_show_diff    off              Show each edit's diff under its row                                              │
 │  tool_live_only    off              Tool Activity shows this run only                                                │
-│  subagent_sort     last ↓           What the Subagents panel sorts by                                                │
-╰ 77   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 78   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

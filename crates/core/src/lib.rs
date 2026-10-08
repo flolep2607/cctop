@@ -45,6 +45,7 @@ pub mod json;
 pub mod loader;
 pub mod notify;
 pub mod opencode;
+pub mod paste;
 pub mod peek;
 pub mod pricing;
 pub mod proc;
