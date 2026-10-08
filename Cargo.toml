@@ -54,6 +54,9 @@ homepage = "https://github.com/flolep2607/cctop"
 # `cargo install cctop@x` from ever pairing it with another version's core.
 [workspace]
 members = ["crates/core", "crates/serve", "crates/ui"]
+# Everything, so that a bare `cargo test` or `cargo clippy` at the root checks
+# what CI checks rather than only the binary.
+default-members = [".", "crates/core", "crates/serve", "crates/ui"]
 resolver = "3"
 
 [workspace.dependencies]

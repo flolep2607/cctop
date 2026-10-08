@@ -7,21 +7,21 @@ what shape they are in, which columns cctop can fill from them, and — the part
 worth writing down — where the format says something other than what it appears
 to say.
 
-These are cctop's own notes, written from the parsers in `src/session/`. They
+These are cctop's own notes, written from the parsers in `crates/core/src/session/`. They
 are not a description of the harness: they are a description of what our code
 believes about it, which is a narrower and more useful thing. Every claim here
 should be traceable to a function you can open.
 
 | | Parser | Where its data lives |
 |---|---|---|
-| [Claude Code](claude.md) | `src/session/claude.rs` | `~/.claude/projects/<slug>/<uuid>.jsonl` |
-| [Codex](codex.md) | `src/session/codex.rs` | `~/.codex/sessions/**/rollout-*.jsonl` |
-| [Cursor](cursor.md) | `src/session/cursor.rs` | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` |
-| [Devin](devin.md) | `src/session/devin.rs` | `~/.local/share/devin/cli/{sessions.db,transcripts/}` |
-| [Gemini CLI](gemini-cli.md) | `src/session/gemini.rs` | `~/.gemini/tmp/<project>/chats/session-*.json{,l}` |
-| [OpenCode](opencode.md) | `src/session/opencode.rs` | `~/.local/share/opencode/opencode*.db` |
-| [Pi](pi.md) | `src/session/pi.rs` | `~/.pi/agent/sessions/**/*.jsonl` |
-| [Windsurf](windsurf.md) | `src/session/windsurf.rs` | `<Windsurf User>/workspaceStorage/*/state.vscdb` |
+| [Claude Code](claude.md) | `crates/core/src/session/claude.rs` | `~/.claude/projects/<slug>/<uuid>.jsonl` |
+| [Codex](codex.md) | `crates/core/src/session/codex.rs` | `~/.codex/sessions/**/rollout-*.jsonl` |
+| [Cursor](cursor.md) | `crates/core/src/session/cursor.rs` | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` |
+| [Devin](devin.md) | `crates/core/src/session/devin.rs` | `~/.local/share/devin/cli/{sessions.db,transcripts/}` |
+| [Gemini CLI](gemini-cli.md) | `crates/core/src/session/gemini.rs` | `~/.gemini/tmp/<project>/chats/session-*.json{,l}` |
+| [OpenCode](opencode.md) | `crates/core/src/session/opencode.rs` | `~/.local/share/opencode/opencode*.db` |
+| [Pi](pi.md) | `crates/core/src/session/pi.rs` | `~/.pi/agent/sessions/**/*.jsonl` |
+| [Windsurf](windsurf.md) | `crates/core/src/session/windsurf.rs` | `<Windsurf User>/workspaceStorage/*/state.vscdb` |
 
 And [adding a harness](adding-a-harness.md), which is the list of places a
 ninth one has to be registered before it works — derived from what the eight

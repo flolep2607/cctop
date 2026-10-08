@@ -21,12 +21,12 @@ build failure there:
 cargo fmt --all --check
 cargo clippy --all-targets
 cargo test
-cargo publish --dry-run --allow-dirty   # what `verify / package` runs
+cargo publish --dry-run --workspace --allow-dirty   # what `verify / package` runs
 ```
 
 ### While iterating, run the tests that could have broken
 
-`cargo test --all-targets` is 1295 tests and takes 58 seconds of wall time for
+`cargo test --all-targets` is about 1500 tests and takes 58 seconds of wall time for
 about 11 seconds of CPU — it spends most of its life waiting on `thread::sleep`,
 real ptys and real subprocesses. Two of those tests assert wall-clock margins
 (`hook::tests::advice_is_kept_only_if_it_beat_the_deadline`,
@@ -37,19 +37,47 @@ reasons that have nothing to do with your change.
 `tools/targeted-test.sh` maps what you changed to the tests worth running:
 
 ```bash
-./tools/targeted-test.sh                    # diff against main, run what it names
-./tools/targeted-test.sh src/ui/filter.rs   # or name the files yourself
-./tools/targeted-test.sh --all              # force the full suite
+./tools/targeted-test.sh                           # diff against main, run what it names
+./tools/targeted-test.sh crates/ui/src/filter.rs   # or name the files yourself
+./tools/targeted-test.sh --all                     # force the full suite
 ```
 
-A test's module path is its file's module path, so `src/ui/filter.rs` runs
-`ui::filter::`. Changing `src/main.rs`, `build.rs` or anything non-Rust runs
-everything, because those reach the whole crate. Use it while you work and the
-full suite once, at the end, on its own.
+A test's module path is its file's module path inside its own crate, so
+`crates/ui/src/filter.rs` runs `filter::` in `-p cctop-ui`, and `src/cli.rs`
+runs `cli::` in the binary, `-p cctop`. A crate root (`lib.rs`, `main.rs`) runs
+that crate's whole suite; `crates/core/build.rs` or anything non-Rust runs
+everything. Only the changed file's own crate is tested, not the crates built
+on it — that is what the full run at the end is for. Use it while you work and
+the full suite once, at the end, on its own.
+
+## Layout
+
+cctop is one binary built from four crates, so that an edit recompiles only
+what sits above it:
+
+| Crate | Where | What |
+| --- | --- | --- |
+| `cctop` | `src/` | `main`, the command line, and the commands nothing else calls (`doctor`, `why`, `wait`, `mcp`, `recall`) |
+| `cctop-ui` | `crates/ui/` | the terminal dashboard |
+| `cctop-serve` | `crates/serve/` | the web server, and the conversation model it shares with the dashboard |
+| `cctop-core` | `crates/core/` | sessions and their parsers, the cache, pricing, config, processes, hooks, rmux, the shim |
+
+Each depends only on the ones below it in the table, and the root `Cargo.toml`
+says why each boundary is where it is. Nothing in core reaches up: something
+both the dashboard and the server need belongs in core.
+
+Core's guards that keep a test off the real machine — no bell on stdout, no
+copy to your clipboard, no write over your saved preferences, a runtime
+directory of the test's own — ask `cctop_core::under_test()`, and the fixtures
+other crates' tests use are `cfg(any(test, feature = "test-support"))`.
+`cfg(test)` is only true for core's own tests, so the other crates turn the
+feature on from their dev-dependencies. A release build never has it; a binary
+built by `cargo test` does, and its `main` switches the guards off before
+anything else runs, so it behaves as cctop.
 
 ## The `debug` feature
 
-`src/serve/debug.rs` is behind `#[cfg(feature = "debug")]`, which is off by
+`crates/serve/src/debug.rs` is behind `#[cfg(feature = "debug")]`, which is off by
 default and never enabled for a release — so an ordinary build contains neither
 the routes nor the strings that name them. That is the condition for having them:
 a debug surface reachable in a shipped binary is a debug surface somebody else
@@ -75,7 +103,7 @@ cargo run --features debug -- serve --no-token
 
 Because the feature is off by default, `cargo clippy --all-targets` and
 `cargo test --all-targets` never compile that module — a change to
-`src/serve/mod.rs` that breaks the debug routes is green, and nothing finds out
+`crates/serve/src/lib.rs` that breaks the debug routes is green, and nothing finds out
 until someone runs it by hand. So `verify` runs both commands a second time
 with `--features debug`, and a change that touches those routes should pass both
 locally:
@@ -107,7 +135,7 @@ which `-D warnings` rejects.
 Code reads its exit code as a *decision*: non-zero blocks the tool call and
 feeds stderr back to the model. So it exits 0 always, writes nothing to stdout,
 and returns inside a deadline — by construction, not by care. See the module
-docs in `src/hook.rs`.
+docs in `crates/core/src/hook.rs`.
 
 A hook that fell through to clap would exit non-zero on every fire, so the
 `hook` dispatch in `main.rs` is never gated behind anything.
@@ -156,9 +184,12 @@ A few things that are less obvious from the code:
 
 ## Releasing
 
-Change the package `version` in `Cargo.toml` and push that commit to `main`.
-GitHub Actions derives the matching `v<version>` tag, creates the GitHub
-release, builds the Linux archives, and publishes the crate. **The version
+Change the `version` under `[workspace.package]` in the root `Cargo.toml`, and
+the three `=` pins on `cctop-core`, `cctop-serve` and `cctop-ui` beside it, and
+push that commit, with `Cargo.lock`, to `main`. GitHub Actions derives the
+matching `v<version>` tag, creates the GitHub release, builds the Linux
+archives, and publishes all four crates — the internal three first, since
+`cargo install cctop` builds against them from crates.io. **The version
 bump is the release** — there is no separate confirmation step, and
 `cargo publish` to crates.io cannot be undone. Do not create a release tag by
 hand for a normal version bump.

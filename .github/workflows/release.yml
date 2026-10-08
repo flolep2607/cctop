@@ -2,7 +2,7 @@ name: Release
 
 # Changing the package version on main cuts a release. The workflow derives a
 # `v<version>` tag from Cargo.toml, then builds the tagged commit, attaches the
-# archives and checksums, and publishes the crate. Existing tags can still be
+# archives and checksums, and publishes the crates. Existing tags can still be
 # released manually, but they must agree with Cargo.toml.
 on:
   push:
@@ -229,8 +229,15 @@ jobs:
             echo "::error::CARGO_REGISTRY_TOKEN is not configured"
             exit 1
           fi
-          # `verify / package` already built this exact package with
-          # `cargo publish --dry-run` before the tag existed. Cargo normally
-          # builds it again before uploading; skip that redundant verification
-          # on this fresh runner.
-          cargo publish --locked --no-verify
+          # `verify / package` already built these exact packages with
+          # `cargo publish --dry-run --workspace` before the tag existed. Cargo
+          # normally builds each again before uploading; skip that redundant
+          # verification on this fresh runner.
+          #
+          # `--workspace` publishes cctop-core, cctop-serve, cctop-ui and then
+          # cctop, each after the ones it depends on, waiting for every one to
+          # show in the index before the next goes up. They share one version,
+          # so a release is all four or it is not finished: a run that fails
+          # part-way is re-run with the published ones left out (`-p` the
+          # rest), since crates.io refuses a version it already has.
+          cargo publish --workspace --locked --no-verify

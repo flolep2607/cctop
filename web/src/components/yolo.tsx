@@ -13,7 +13,7 @@ import {
 import type { Session } from "@/lib/types";
 
 // YOLO: cctop allowing every permission prompt a session raises, until it is
-// switched off or the session ends (src/yolo.rs). The server presses the key;
+// switched off or the session ends (crates/core/src/yolo.rs). The server presses the key;
 // this page only flips the switch and shows what was waved through.
 
 const TITLE = "cctop is allowing every permission prompt this session raises";
@@ -154,7 +154,7 @@ export function AllowAllButton({ session, compact }: { session: Session; compact
 
 /**
  * What YOLO has allowed, newest first, and a toast for each as it lands.
- * The server keeps the last twenty (`KEEP` in src/yolo.rs); the event log has
+ * The server keeps the last twenty (`KEEP` in crates/core/src/yolo.rs); the event log has
  * the rest.
  */
 export function YoloLog({ session, className }: { session: Session; className?: string }) {

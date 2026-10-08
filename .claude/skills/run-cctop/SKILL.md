@@ -207,7 +207,7 @@ process at all.
 
 For anything drawn by the TUI — a modal, a panel, a column — a `TestBackend`
 render test is faster, deterministic, and says what is actually in the buffer.
-There are several in `src/ui/mod.rs`; the pattern is:
+There are several in `crates/ui/src/lib.rs`; the pattern is:
 
 ```rust
 let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("backend");
@@ -241,7 +241,7 @@ cargo publish --dry-run --allow-dirty
 
 ## The multiplexer
 
-cctop drives **rmux**, not tmux (since 0.8 — `src/rmux.rs`). tmux still appears
+cctop drives **rmux**, not tmux (since 0.8 — `crates/core/src/rmux.rs`). tmux still appears
 here because the *driver* uses it as a terminal to run cctop in; the two are
 unrelated, and cctop cannot see the driver's tmux server at all.
 
@@ -256,7 +256,7 @@ unrelated, and cctop cannot see the driver's tmux server at all.
   new-session -d -s x -- sleep 60` on a private socket is a cheap way to ask.
 - **An rmux pane exports five env vars** — `RMUX`, `RMUX_PANE`, `TMUX`,
   `TMUX_PANE`, `TMUX_PROGRAM` — and `new-session -A` refuses to nest under any
-  of them. `src/shim.rs` strips all five.
+  of them. `crates/core/src/shim.rs` strips all five.
 - `docs/rmux/` mirrors rmux's own documentation; `docs/rmux/pull.sh` refreshes
   it. Read it before guessing at a flag.
 
@@ -289,7 +289,7 @@ unrelated, and cctop cannot see the driver's tmux server at all.
   `set-option` on a real session answering "can't find session". `up --spawn`
   unsets all four variables for exactly this reason. Anything that tests tab
   adoption, tab order, or the rmux options cctop writes has to go through
-  `--spawn` — or be tested against the real daemon in `src/rmux.rs`, as
+  `--spawn` — or be tested against the real daemon in `crates/core/src/rmux.rs`, as
   `an_order_written_onto_a_session_survives_in_it` is.
 - **Agents cctop starts go to a private rmux daemon** (`RMUX_TMPDIR` under
   `$CCTOP_SHOTS/../rmux`), which `down` kills. Before this, a resumed fixture

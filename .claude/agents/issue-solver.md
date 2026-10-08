@@ -63,7 +63,7 @@ Never run `cargo publish`, not even `--dry-run`. A failure in the full suite on
 a busy machine is not evidence until re-run alone (CLAUDE.md). If `web/`
 changed, `npm run build` and `npm run lint` (Node via
 `export NVM_DIR=$HOME/.nvm; . $NVM_DIR/nvm.sh; cd web; nvm use`) and commit the
-rebuilt `src/serve/assets/app/index.html`.
+rebuilt `crates/serve/src/assets/app/index.html`.
 
 ## 5. Commit, PR, CI
 

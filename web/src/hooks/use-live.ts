@@ -8,7 +8,7 @@ import type { Session, Tab } from "@/lib/types";
  * How long the stream may say nothing at all before it is taken for dead.
  *
  * The server pings every 15 seconds when it has nothing else to write
- * (`SSE_KEEPALIVE` in src/serve/mod.rs), so this is two of those and some
+ * (`SSE_KEEPALIVE` in crates/serve/src/lib.rs), so this is two of those and some
  * slack. EventSource never notices a stream that stalled without closing — a
  * half-open connection, a tunnel holding the bytes — so without this the page
  * sat on an old table indefinitely and called itself live.

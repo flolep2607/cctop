@@ -4,7 +4,7 @@ import type { Session } from "./types";
 // from the hook, so what a `rows` event does to the table can be read — and
 // checked — without an EventSource behind it.
 
-/** One row's changed fields, and the ones it no longer has (`table_patch` in src/serve/mod.rs). */
+/** One row's changed fields, and the ones it no longer has (`table_patch` in crates/serve/src/lib.rs). */
 export interface RowPatch {
   id: string;
   to: Partial<Session>;
@@ -14,7 +14,7 @@ export interface RowPatch {
 /**
  * A `rows` event: rows sent whole, rows sent as the fields that changed, and
  * the order when it moved — either whole, or as the ids to put first and the
- * ids that are gone (`table_patch` in src/serve/mod.rs).
+ * ids that are gone (`table_patch` in crates/serve/src/lib.rs).
  */
 export interface RowsDelta {
   set?: Session[];

@@ -128,7 +128,7 @@ version="$("$dest/cctop" --version 2>/dev/null || echo cctop)"
 
 # The package that provides sshfs here, as the command that installs it, or
 # nothing for a package manager this does not know. The same table as
-# `cctop sandbox` uses when it finds sshfs missing (src/sshfs.rs): dnf before
+# `cctop sandbox` uses when it finds sshfs missing (crates/core/src/sshfs.rs): dnf before
 # yum because yum is dnf's compatibility name on the systems that have both,
 # and Fedora and RHEL call the package fuse-sshfs.
 sshfs_command() {

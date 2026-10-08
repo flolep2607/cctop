@@ -1,6 +1,6 @@
 # Codex
 
-[← all harnesses](README.md) · parser: [`src/session/codex.rs`](../../src/session/codex.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/codex.rs`](../../crates/core/src/session/codex.rs)
 
 Codex writes a *rollout*: an append-only log of the events the agent went
 through, rather than a conversation. Most of the parser's weight is not in

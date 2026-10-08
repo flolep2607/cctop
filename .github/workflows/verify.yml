@@ -57,12 +57,14 @@ jobs:
           cache-key-prefix: kache-test
           pr-comment: false
           runtime-dir: ${{ runner.temp }}/kache
-      - run: cargo test --all-targets
+      # The whole workspace: the binary at the root and cctop-core, -serve and
+      # -ui under crates/, each with its own tests.
+      - run: cargo test --workspace --all-targets
       # The `debug` feature is off by default and never enabled for a release,
-      # so nothing above compiles `src/serve/debug.rs`. Without this, a change to
-      # `src/serve/mod.rs` that breaks the debug routes is green and nobody
+      # so nothing above compiles `crates/serve/src/debug.rs`. Without this, a change to
+      # `crates/serve/src/lib.rs` that breaks the debug routes is green and nobody
       # finds out until someone runs it by hand.
-      - run: cargo test --all-targets --features debug
+      - run: cargo test --workspace --all-targets --features debug
 
   lint:
     runs-on: ubuntu-24.04
@@ -79,13 +81,16 @@ jobs:
           pr-comment: false
           runtime-dir: ${{ runner.temp }}/kache
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets
+      - run: cargo clippy --workspace --all-targets
       # As in `test`: the debug routes are behind a feature nothing else builds,
       # so the ordinary clippy run never looks at them.
-      - run: cargo clippy --all-targets --features debug
+      - run: cargo clippy --workspace --all-targets --features debug
 
-  # Fails the build if the README or Cargo.toml would stop `cargo publish`
-  # working — cheaper to catch here than at release time.
+  # Fails the build if the README or a Cargo.toml would stop `cargo publish`
+  # working — cheaper to catch here than at release time. Every crate of the
+  # workspace, because the binary can only be installed from crates.io if the
+  # crates it is built from are there too; `--workspace` packages them in
+  # dependency order against a local copy of the ones not yet published.
   package:
     runs-on: ubuntu-24.04
     steps:
@@ -98,9 +103,9 @@ jobs:
           cache-key-prefix: kache-package
           pr-comment: false
           runtime-dir: ${{ runner.temp }}/kache
-      - run: cargo publish --dry-run
+      - run: cargo publish --dry-run --workspace
 
-  # The web UI's built page is committed (src/serve/assets/app/index.html) so
+  # The web UI's built page is committed (crates/serve/src/assets/app/index.html) so
   # that `cargo install` needs no Node. This rebuilds it from web/ and fails if
   # the result differs: a change to web/ without `npm run build`, or a build
   # edited by hand, is caught here rather than shipped.
@@ -122,4 +127,4 @@ jobs:
       - run: npm run build
         working-directory: web
       - name: The committed build matches web/
-        run: git diff --exit-code --stat -- src/serve/assets/app/
+        run: git diff --exit-code --stat -- crates/serve/src/assets/app/

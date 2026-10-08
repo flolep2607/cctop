@@ -37,11 +37,11 @@ Run the whole gate before pushing:
 cargo fmt --all --check
 cargo clippy --all-targets
 cargo test
-cargo publish --dry-run --allow-dirty   # what `verify / package` runs
+cargo publish --dry-run --workspace --allow-dirty   # what `verify / package` runs
 ```
 
-Whole screens are pinned as snapshots (`src/ui/snapshot.rs`, with the `.snap`
-files beside it in `src/ui/snapshots/`). A change to what the TUI draws fails
+Whole screens are pinned as snapshots (`crates/ui/src/snapshot.rs`, with the `.snap`
+files beside it in `crates/ui/src/snapshots/`). A change to what the TUI draws fails
 them on purpose. Look at the diff, and if the new frame is the one you meant,
 accept it with `cargo insta review` (needs `cargo install cargo-insta`) or with
 `INSTA_UPDATE=always cargo test`, and commit the `.snap` files that changed. CI
@@ -49,7 +49,7 @@ only compares against the committed files and never writes new ones.
 
 ## Run only the tests your change can break
 
-`cargo test --all-targets` is 1295 tests: 58 seconds of wall time for about 11
+`cargo test --all-targets` is about 1500 tests: 58 seconds of wall time for about 11
 seconds of CPU. Nearly all of that is waiting — `thread::sleep`, real ptys,
 real subprocesses — which means it is both slow and *load-sensitive*: two of
 those tests assert wall-clock margins, so several lanes running the suite at
@@ -57,8 +57,29 @@ once turn them red for reasons unrelated to anyone's change. On a busy machine a
 full-suite failure is not evidence until you have re-run it alone.
 
 While working, run `tools/targeted-test.sh`, which maps changed files to the
-tests that cover them (`src/ui/filter.rs` → `ui::filter::`), and saves the full
-suite for one final run on its own. `CONTRIBUTING.md` has the details.
+tests that cover them (`crates/ui/src/filter.rs` → `-p cctop-ui filter::`), and
+saves the full suite for one final run on its own. `CONTRIBUTING.md` has the
+details.
+
+## cctop is four crates
+
+The binary is at the root; `cctop-core`, `cctop-serve` and `cctop-ui` are under
+`crates/`, each depending only on the ones below it. The root `Cargo.toml` draws
+the graph and says why each boundary is where it is. The point is the rebuild:
+an edit to the UI recompiles the UI and the binary, not the parsers.
+
+- From a crate above core, a module of core is `cctop_core::x`. If the item you
+  want is `pub(crate)`, widen it to `pub` rather than copying it.
+- Nothing in core may reach up. Something both faces need goes down into core.
+- A guard in core that keeps tests off the real machine — the bell, the
+  clipboard, saved preferences, the runtime directory — asks
+  `crate::under_test()`, not `cfg!(test)`, which is false while the UI's or the
+  server's tests run. A fixture those tests use is
+  `cfg(any(test, feature = "test-support"))`; their dev-dependencies turn the
+  feature on. See `under_test` for why the binary still behaves as cctop.
+- The version lives once, in the root `Cargo.toml`, with the `=` pins on the
+  three internal crates beside it. A bump changes those lines and `Cargo.lock`;
+  cargo refuses to resolve if a pin is left behind.
 
 ## cctop is Linux-only
 
@@ -79,7 +100,7 @@ feeds stderr back to the model. So it exits 0 always, writes nothing to stdout
 that could read as a decision, and returns inside a deadline — by construction,
 not by care. The one thing it may print is the opt-in `warn_agents` context,
 which carries no decision; see "The one answer that is not silence" in the
-module docs of `src/hook.rs`.
+module docs of `crates/core/src/hook.rs`.
 
 A hook that fell through to clap would exit non-zero on every fire, so the
 `hook` dispatch in `main.rs` is never gated behind anything.
@@ -132,21 +153,21 @@ shadcn/ui** in `web/`, with a route per page — the table (`/`), a session
 ```bash
 cd web && npm ci          # Node from web/.nvmrc
 npm run dev               # hot reload, proxied to `cctop serve --no-token --port 7778`
-npm run build             # writes src/serve/assets/app/index.html — commit it
+npm run build             # writes crates/serve/src/assets/app/index.html — commit it
 npm run lint
 ```
 
 How it ships, and why:
 
 - **One file, everything inlined.** `vite-plugin-singlefile` builds the whole
-  app — scripts, styles, fonts — into `src/serve/assets/app/index.html`, which
+  app — scripts, styles, fonts — into `crates/serve/src/assets/app/index.html`, which
   `include_str!` puts in the binary. The content policy loads nothing from any
   URL, and an installed cctop is one binary. The server gzips it per request.
 - **The build is committed**, so `cargo install` needs no Node. CI's
   `verify / web` job rebuilds it and fails if it differs — change `web/` and
   run `npm run build` in the same commit.
 - **The server's values arrive as JSON** in `<script id="cctop-config">`
-  (`app_config` in `src/serve/mod.rs`): token, whether actions are allowed,
+  (`app_config` in `crates/serve/src/lib.rs`): token, whether actions are allowed,
   home, version. `web/src/lib/config.ts` reads it; every request goes through
   `web/src/lib/api.ts`, which adds the token.
 - **Size is paid on every load**, so heavy dependencies need a reason: `wouter`

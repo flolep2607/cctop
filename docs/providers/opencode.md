@@ -1,6 +1,6 @@
 # OpenCode
 
-[← all harnesses](README.md) · parser: [`src/session/opencode.rs`](../../src/session/opencode.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/opencode.rs`](../../crates/core/src/session/opencode.rs)
 
 The first of the two harnesses that keep everything in one database rather than
 one file per session. That single fact is behind most of what is unusual here:
