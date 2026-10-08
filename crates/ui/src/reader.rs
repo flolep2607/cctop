@@ -75,6 +75,9 @@ struct Block {
     /// index here is one in the row — what search matches against and
     /// highlights by.
     plain: Vec<Vec<char>>,
+    /// The subagents this turn started, by the row their call's line is on —
+    /// what `a` opens.
+    agents: Vec<(usize, cctop_core::chat::AgentCall)>,
 }
 
 /// `/`, and what it found.
@@ -206,6 +209,24 @@ impl ChatView {
             .and_then(|b| laid.blocks[b].seq)
     }
 
+    /// The subagent `a` opens: the first whose call's line is on screen, from
+    /// the top — scrolling a line moves it onto the next of several.
+    fn agent_to_open(&self) -> Option<&cctop_core::chat::AgentCall> {
+        let laid = self.laid.as_ref()?;
+        let top = self.top();
+        let bottom = top + self.visible;
+        (laid.block_at(top)..laid.blocks.len())
+            .take_while(|&b| laid.starts[b] < bottom)
+            .flat_map(|b| {
+                laid.blocks[b]
+                    .agents
+                    .iter()
+                    .map(move |(row, call)| (laid.starts[b] + row, call))
+            })
+            .find(|(row, _)| (top..bottom).contains(row))
+            .map(|(_, call)| call)
+    }
+
     /// The query's hits in the current layout, and the view moved to the first
     /// one at or below `from`.
     fn search_from(&mut self, from: usize) {
@@ -267,7 +288,11 @@ impl App {
             // A search on screen goes first, as it does in the table: one Esc
             // to stop looking, another to leave.
             KeyCode::Esc if !view.search.query.is_empty() => view.clear_search(),
+            // Out of an agent's turns, back to the conversation that started
+            // it, where it was left.
+            KeyCode::Esc if view.parent.is_some() => self.close_agent(),
             KeyCode::Esc => self.close_conversation(),
+            KeyCode::Char('a') => self.open_agent(),
             KeyCode::Char('d') if ctrl => view.scroll_down(page / 2),
             KeyCode::Char('u') if ctrl => view.scroll_up(page / 2),
             KeyCode::Down | KeyCode::Char('j') => view.scroll_down(1),
@@ -372,6 +397,43 @@ impl App {
         self.mode = Mode::List;
         self.chat = None;
     }
+
+    /// `a`: the subagent on screen, its own turns in place of these, with
+    /// these kept to come back to.
+    fn open_agent(&mut self) {
+        let Some(view) = self.chat.take() else {
+            return;
+        };
+        let Some(agent) = view.agent_to_open().cloned() else {
+            self.chat = Some(view);
+            self.set_status("No agent call on screen — scroll one into view");
+            return;
+        };
+        let mut child = ChatView::new(view.session.clone(), view.host.clone());
+        child.agent = Some(agent);
+        child.parent = Some(Box::new(view));
+        self.chat = Some(child);
+        self.fetch_chat(None);
+    }
+
+    fn close_agent(&mut self) {
+        let Some(parent) = self.chat.as_mut().and_then(|v| v.parent.take()) else {
+            return;
+        };
+        let mut parent = *parent;
+        // A page it asked for while the agent was open was answered into the
+        // agent's view and dropped there, so it is asked for again.
+        let refetch = parent.fetching;
+        parent.fetching = false;
+        let before = parent
+            .conversation
+            .as_ref()
+            .and_then(|c| c.turns.first().map(|t| t.seq));
+        self.chat = Some(parent);
+        if refetch {
+            self.fetch_chat(before);
+        }
+    }
 }
 
 /// A key while the query is being typed.
@@ -453,6 +515,12 @@ fn lay_out(view: &mut ChatView, width: usize) {
         .unwrap_or_default();
 
     let who = view.session.surface.label(view.session.provider);
+    // Inside a subagent's own turns, what plays the person's part is the main
+    // agent's brief.
+    let asked = match view.agent {
+        Some(_) => "main agent",
+        None => "you",
+    };
     // A hand-back names its agent by id; the call that started it says which
     // agent that is and what it was doing.
     let agents: HashMap<&str, String> = conv
@@ -485,6 +553,7 @@ fn lay_out(view: &mut ChatView, width: usize) {
                 turn_block(
                     &view.session,
                     who,
+                    asked,
                     turn,
                     sender.map(String::as_str),
                     width,
@@ -579,6 +648,7 @@ fn finish(
         lines,
         links,
         plain,
+        agents: Vec::new(),
     }
 }
 
@@ -593,9 +663,11 @@ fn finish(
 /// stay one. Each tool call is one line under the text unless `open`, and a
 /// tool's result keeps the colours its program printed it in (see
 /// [`super::ansi`]).
+#[allow(clippy::too_many_arguments)]
 fn turn_block(
     session: &Session,
     agent: &str,
+    asked: &str,
     turn: &Turn,
     sender: Option<&str>,
     width: usize,
@@ -625,7 +697,7 @@ fn turn_block(
         .add_modifier(Modifier::BOLD);
     let reasoning = turn.kind.as_ref() == "reasoning";
     let (who, style) = match turn.role.as_ref() {
-        "user" => ("you".to_string(), accent),
+        "user" => (asked.to_string(), accent),
         "assistant" if reasoning => (
             format!("{agent} · thinking"),
             Style::default().fg(super::panels::provider_color(session)),
@@ -699,11 +771,17 @@ fn turn_block(
             theme::dim(),
         ));
     }
+    let mut agents = Vec::new();
     for tool in &turn.tools {
+        if let Some(call) = &tool.agent {
+            agents.push((out.len(), call.clone()));
+        }
         tool_lines(tool, width, open, &mut out);
     }
     out.push(Line::default());
-    finish(Some(turn.seq), open, has_tools, ts, out, links)
+    let mut block = finish(Some(turn.seq), open, has_tools, ts, out, links);
+    block.agents = agents;
+    block
 }
 
 /// A tool call: one line when closed, with what opening it would show counted
@@ -804,6 +882,9 @@ fn agent_lines(
     if agent.status == "running" {
         tail.push("running".into());
     }
+    if agent.last_message {
+        tail.push("no hand-back".into());
+    }
     let tail: Vec<String> = tail.into_iter().filter(|t| !t.is_empty()).collect();
     let tail = match tail.is_empty() {
         true => String::new(),
@@ -819,6 +900,13 @@ fn agent_lines(
         Span::styled(tail, theme::dim()),
     ]));
     if let (true, Some(report)) = (open, report) {
+        // Its last words are not its conclusion, and say so before they start.
+        if agent.last_message {
+            out.push(Line::styled(
+                format!("      {}:", cctop_core::chat::LAST_MESSAGE_LABEL),
+                theme::dim().add_modifier(Modifier::ITALIC),
+            ));
+        }
         out.extend(super::ansi::wrapped(report, theme::dim(), width, "      "));
     }
 }
@@ -911,16 +999,20 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     frame.render_widget(Clear, area);
 
+    let what = match &view.agent {
+        Some(agent) => format!(
+            "{} · agent of {}",
+            agent.title(),
+            view.session.display_label()
+        ),
+        None => format!("{} — conversation", view.session.display_label()),
+    };
     let title = match &view.session.remote {
         // The host is worth the title room: a remote conversation is otherwise
         // indistinguishable from a local one, and knowing which machine it was
         // read off is the whole difference.
-        Some(remote) => format!(
-            " {} — conversation · on {} ",
-            view.session.display_label(),
-            remote.host
-        ),
-        None => format!(" {} — conversation ", view.session.display_label()),
+        Some(remote) => format!(" {what} · on {} ", remote.host),
+        None => format!(" {what} "),
     };
     let inner = area.inner(Margin::new(1, 1));
     view.visible = inner.height as usize;
@@ -1053,6 +1145,9 @@ fn footer(view: &ChatView) -> Line<'static> {
         false => "↵ tools · t all".into(),
     });
     parts.push("[ ] turn".into());
+    if view.agent_to_open().is_some() {
+        parts.push("a agent".into());
+    }
     parts.push(match view.raw {
         true => "m rendered".into(),
         false => "m source".into(),
@@ -1064,7 +1159,10 @@ fn footer(view: &ChatView) -> Line<'static> {
         }
         _ => {}
     }
-    parts.push("q close".into());
+    parts.push(match view.parent {
+        Some(_) => "esc back · q close".into(),
+        None => "q close".into(),
+    });
     Line::styled(format!(" {} ", parts.join(" · ")), dim)
 }
 
@@ -1101,7 +1199,7 @@ mod tests {
             note: None,
             ..Default::default()
         };
-        app.got_chat(key, None, Ok(Box::new(conv)));
+        app.got_chat(key, None, None, Ok(Box::new(conv)));
         app
     }
 
@@ -1132,6 +1230,7 @@ mod tests {
         let key = app.chat.as_ref().expect("view").session.key();
         app.got_chat(
             key,
+            None,
             None,
             Ok(Box::new(Conversation {
                 supported: true,
@@ -1184,6 +1283,7 @@ mod tests {
         let key = app.chat.as_ref().expect("view").session.key();
         app.got_chat(
             key,
+            None,
             None,
             Ok(Box::new(Conversation {
                 supported: true,
@@ -1337,6 +1437,100 @@ mod tests {
             text.contains("● from an agent · Explore — map the parser"),
             "{text}"
         );
+    }
+
+    /// A reply that started a background agent which never handed back, under
+    /// enough filler to scroll.
+    fn agent_app() -> App {
+        let mut reply = turn(1, "assistant", "launching");
+        reply.tools.push(ToolUse {
+            name: "Agent".into(),
+            detail: "dummy brief".into(),
+            result: Some("Async agent launched successfully".into()),
+            agent: Some(cctop_core::chat::AgentCall {
+                id: "agent-a0000000000000001".into(),
+                agent_type: "Explore".into(),
+                description: "map the parser".into(),
+                status: "running".into(),
+                turns: 4,
+                tool_count: 3,
+                background: true,
+                report: Some("dummy last words".into()),
+                last_message: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let filler = (0..30).map(|i| format!("line {i}\n\n")).collect::<String>();
+        open_with(vec![
+            turn(0, "assistant", &filler),
+            reply,
+            turn(2, "assistant", &filler),
+        ])
+    }
+
+    /// The call's line says how much the agent did and that it never handed
+    /// back; opened, its last words are labelled as what they are.
+    #[test]
+    fn an_agent_with_no_handback_says_so_on_its_line() {
+        let mut app = agent_app();
+        draw_chat(&mut app, 100, 30);
+        press(&mut app, KeyCode::Char('t'));
+        let text = screen(&mut app, 100, 200);
+        assert!(
+            text.contains("Explore — map the parser  · 4 turns · 3 tools · running · no hand-back"),
+            "{text}"
+        );
+        assert!(
+            text.contains("No hand-back — last message from the agent:"),
+            "{text}"
+        );
+        assert!(text.contains("dummy last words"), "{text}");
+    }
+
+    /// `a` reads the agent on screen in place of the conversation, titled with
+    /// the agent and its session; an answer meant for the conversation beneath
+    /// does not land in it; `Esc` comes back to the same row.
+    #[test]
+    fn a_opens_the_agents_turns_and_esc_comes_back() {
+        let mut app = agent_app();
+        draw_chat(&mut app, 100, 20);
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char(']'));
+        press(&mut app, KeyCode::Char('k'));
+        let before = screen(&mut app, 100, 20);
+        assert!(before.contains("⚙ Agent"), "{before}");
+        assert!(before.contains("a agent"), "{before}");
+        let back = view(&app).back;
+
+        press(&mut app, KeyCode::Char('a'));
+        let id = view(&app).agent.as_ref().map(|a| a.id.clone());
+        assert_eq!(id.as_deref(), Some("agent-a0000000000000001"));
+        let key = view(&app).session.key();
+        let conv = |text: &str| {
+            Ok(Box::new(Conversation {
+                supported: true,
+                turns: vec![turn(0, "user", "dummy brief"), turn(1, "assistant", text)],
+                ..Default::default()
+            }))
+        };
+        app.got_chat(key.clone(), None, None, conv("meant for the session"));
+        app.got_chat(key, id, None, conv("the agent's own reply"));
+        let text = screen(&mut app, 100, 20);
+        assert!(
+            text.contains("Explore — map the parser · agent of"),
+            "{text}"
+        );
+        assert!(text.contains("the agent's own reply"), "{text}");
+        assert!(!text.contains("meant for the session"), "{text}");
+        assert!(text.contains("● main agent"), "{text}");
+        assert!(text.contains("esc back"), "{text}");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(view(&app).agent.is_none());
+        assert_eq!(view(&app).back, back);
+        assert_eq!(screen(&mut app, 100, 20), before);
+        assert_eq!(app.mode, Mode::Conversation);
     }
 
     /// Enter opens the tools of the turn being read and no other, and the row

@@ -373,6 +373,30 @@ pub struct AgentCall {
 pub const LAST_MESSAGE_LABEL: &str = "No hand-back — last message from the agent";
 
 impl AgentCall {
+    /// What the session's subagent list knows of an agent, before the
+    /// conversation says how it was launched and what it reported.
+    pub fn from_subagent(sa: &crate::session::Subagent) -> AgentCall {
+        AgentCall {
+            id: sa.agent_id.clone(),
+            agent_type: sa.agent_type.clone(),
+            description: sa.description.clone(),
+            status: match sa.status {
+                crate::session::SubagentStatus::Running => "running",
+                crate::session::SubagentStatus::Done => "done",
+            }
+            .to_string(),
+            started_at: sa.started_at.clone(),
+            last_active: sa.last_active.clone(),
+            duration_ms: sa.duration_ms,
+            tool_count: sa.tool_count,
+            turns: sa.turns,
+            cost: sa.cost,
+            tokens: sa.tokens,
+            ghost: sa.ghost,
+            ..AgentCall::default()
+        }
+    }
+
     /// `Explore — map the parser`: which agent, doing what. What names the
     /// agent anywhere it is mentioned — its call, its hand-back.
     pub fn title(&self) -> String {
@@ -616,29 +640,17 @@ fn join_agents(conversation: &mut Conversation, subagents: &[crate::session::Sub
             true => sa.last_text.clone(),
             false => report,
         };
-        let status = match (tool.failed, sa.status) {
-            (true, _) => "failed",
-            (false, crate::session::SubagentStatus::Running) => "running",
-            (false, crate::session::SubagentStatus::Done) => "done",
-        };
-        tool.agent = Some(AgentCall {
-            id: sa.agent_id.clone(),
-            agent_type: sa.agent_type.clone(),
-            description: sa.description.clone(),
-            status: status.to_string(),
-            started_at: sa.started_at.clone(),
-            last_active: sa.last_active.clone(),
-            duration_ms: sa.duration_ms,
-            tool_count: sa.tool_count,
-            turns: sa.turns,
-            cost: sa.cost,
-            tokens: sa.tokens,
-            ghost: sa.ghost,
+        let mut call = AgentCall {
             background,
             handback: handback.map(|(seq, _)| *seq),
             report,
             last_message,
-        });
+            ..AgentCall::from_subagent(sa)
+        };
+        if tool.failed {
+            call.status = "failed".into();
+        }
+        tool.agent = Some(call);
     }
 }
 

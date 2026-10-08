@@ -275,6 +275,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "In it: search, next / previous hit, turn by turn",
         ),
         item("  ↵ t  m", "In it: this turn's tools / all tools, source"),
+        item("  a", "In it: a subagent's own turns (Esc comes back)"),
         item("{copy}", "Copy resume command or transcript path"),
         item(
             "{expand} / {expand_all}",

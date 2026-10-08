@@ -681,9 +681,10 @@ fn event_loop(
                 }
                 Ok(Response::Chat {
                     key,
+                    agent,
                     before,
                     result,
-                }) => app.got_chat(key, before, result),
+                }) => app.got_chat(key, agent, before, result),
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
