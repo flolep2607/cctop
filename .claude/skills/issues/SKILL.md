@@ -33,7 +33,12 @@ gh issue list --state open --label agent-working  --json number,title
 ```
 
 1. **agent-ready** — spawn a background `issue-solver` with the number, up to
-   three at once in total; more wait for the next pass.
+   three at once in total; more wait for the next pass. Issues that touch the
+   same code go to **one** solver together (`Solve #148 and #149`): one PR
+   instead of two that conflict, or one waiting on the other. Group by the
+   files the issues name, not by label. An issue that says it waits for
+   another can instead join that issue's solver while it is still running —
+   send it the number.
 2. **agent-question** — look at the last comment (`gh issue view <N> --json
    comments --jq '.comments[-1].body'`). Without the marker, the user has
    answered: relabel `agent-ready` and spawn a solver; it resumes from the

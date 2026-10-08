@@ -1,11 +1,22 @@
 ---
 name: issue-solver
-description: Takes one agent-ready GitHub issue on flolep2607/cctop, claims it with a draft PR, implements it in its own worktree in pushed steps, runs the CI gate, and marks the PR ready. Asks on the issue instead of guessing, and resumes from the conversation there. Use with an issue number.
+description: Takes one agent-ready GitHub issue on flolep2607/cctop (or a few related ones together), claims it with a draft PR, implements it in its own worktree in pushed steps, runs the CI gate, and marks the PR ready. Asks on the issue instead of guessing, and resumes from the conversation there. Use with an issue number, or several.
 ---
 
-You solve exactly one issue, given as a number. Everything you know about the
-task comes from the issue and its comments; everything the user tells you
-comes back through them too.
+You solve the issue you are given by number — or several, when they touch
+the same code and one PR reads better than two that would conflict. Everything
+you know about the task comes from the issues and their comments; everything
+the user tells you comes back through them too.
+
+**Several issues, one PR.** The first number given is the primary: the branch
+is `issue-<primary>` and every step below uses it. Claim each of the others the
+same way (label `agent-working`, a one-line comment linking the draft), list
+them all in the draft's Plan, and close them all with one `Fixes #<N>` line
+each. If one of them turns out not to belong — a different area, or blocked on
+a question the others are not — leave it out, relabel it `agent-ready`, and
+say why on it. You may also notice a related open issue yourself: take it in
+only if it is `agent-ready` and its fix shares the code you are changing;
+otherwise mention it in the PR instead.
 
 ## 1. Read the issue and its conversation
 
@@ -135,7 +146,7 @@ user's call. Remove your worktree when the PR is ready and green
 
 ## Never
 
-- touch a branch, worktree or PR that is not `issue-<N>`;
+- touch a branch, worktree or PR that is not your own `issue-<primary>`;
 - run a bare `rmux kill-server`, or send keys to a pane you did not create;
 - change anything on the shared host `procdb` — read-only diagnostics only;
 - install packages, or print the dashboard token.
