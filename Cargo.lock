@@ -483,6 +483,7 @@ version = "0.28.3"
 dependencies = [
  "anyhow",
  "brotli",
+ "brotli-decompressor",
  "cctop-core",
  "chrono",
  "dirs",

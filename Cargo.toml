@@ -101,13 +101,17 @@ cloudflare-quick-tunnel = "0.3.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
-# The web UI's bodies are sent brotli to a browser that takes it: the app page,
-# rmux's terminal bundle and its WebAssembly come out 7-20% smaller than gzip at
-# the same speed, and each is compressed once per run rather than per request
-# (`serve::http::Packed`). Pure Rust, so the static musl builds take it as it
-# is; without default features it is the encoder, the decoder it is built on,
-# and the two allocator shims they share.
-brotli = { version = "9.0.0", default-features = false, features = ["std"] }
+# The web UI's fixed bodies are sent brotli to a browser that takes it: the app
+# page, rmux's terminal bundle and its WebAssembly come out 7-20% smaller than
+# gzip. They are compressed when cctop is built (`crates/serve/build.rs`), so
+# this is a build dependency only and the encoder is not in the binary — it was
+# about a megabyte of it. Pure Rust; without default features it is the
+# encoder, the decoder it is built on, and the two allocator shims they share.
+# `ffi-api` for its one non-generic entry point, which is what lets the
+# `profile.*.package.brotli` below make the build fast; see the build script.
+brotli = { version = "9.0.0", default-features = false, features = ["std", "ffi-api"] }
+# The decoder on its own, for the tests that check what the build compressed.
+brotli-decompressor = "6.0.1"
 notify = { version = "8.2.0", default-features = false }
 # The conversation view reads an assistant's replies as the markdown they are
 # written in (`ui::markdown`). Only the parser: its defaults are an HTML writer
@@ -302,6 +306,17 @@ debug = false
 [profile.debugging]
 inherits = "dev"
 debug = true
+
+# The brotli encoder runs in `crates/serve/build.rs`, and build dependencies
+# are compiled unoptimised: there it took 25 s to compress the web UI, on every
+# clean build. Optimising this one crate brings that to about 2 s, without
+# optimising every other build script and proc macro, which a `build-override`
+# would. It is only a build dependency, so nothing in the binary changes.
+[profile.dev.package.brotli]
+opt-level = 3
+
+[profile.release.package.brotli]
+opt-level = 3
 
 # The quick-tunnel client, patched to carry WebSockets. Cloudflare's edge
 # strips `Upgrade`/`Connection` and marks the stream a WebSocket instead;

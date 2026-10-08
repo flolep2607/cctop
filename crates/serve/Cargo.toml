@@ -23,7 +23,6 @@ debug = ["cctop-core/debug"]
 [dependencies]
 cctop-core.workspace = true
 anyhow.workspace = true
-brotli.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 flate2.workspace = true
@@ -33,5 +32,14 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
+# The web UI is compressed when this crate is built (`build.rs`), so the
+# brotli encoder runs on the build machine and is not linked into cctop.
+[build-dependencies]
+brotli.workspace = true
+flate2.workspace = true
+
 [dev-dependencies]
 cctop-core = { workspace = true, features = ["test-support"] }
+# The tests decode what the build compressed, byte for byte, and a brotli body
+# off the wire. The decoder alone: the encoder is a build dependency only.
+brotli-decompressor.workspace = true

@@ -8,10 +8,20 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>cctop</title>
     <!-- What the server knows and the page cannot: the token, whether this run
-         may act, the operator's home, the version. cctop substitutes the
-         placeholder with JSON when it serves the page; under `npm run dev` it
-         stays as is and config.ts falls back to defaults. -->
-    <script id="cctop-config" type="application/json">__CCTOP_CONFIG__</script>
+         may act, the operator's home, the version. Not in the page, which is
+         the same for every run so cctop can compress it when it is built, but
+         asked for here, first thing: the request is in flight while the
+         browser parses the app's script, and config.ts waits on it. With the
+         `?t=` the page was opened with, ahead of the cookie, so a read-only
+         link is told the read-only token even where the full one's cookie is
+         held. -->
+    <script>
+      try {
+        var t = new URLSearchParams(location.search).get("t");
+        window.cctopConfig = fetch("/api/config" + (t ? "?t=" + encodeURIComponent(t) : ""), { cache: "no-store" })
+          .then(function (r) { return r.ok ? r.json() : {}; });
+      } catch (e) {}
+    </script>
     <!-- Before the first paint, so a reader who chose dark never sees a light
          frame. The same key the rest of cctop's pages use. -->
     <script>
