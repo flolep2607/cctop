@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Which crates a release has to bump, and which it has to publish.
 #
-# cctop is four crates — cctop-core, cctop-serve and cctop-ui under crates/,
-# and the binary at the root — and each has its own version. The root's is
+# cctop is five crates — cctop-tunnel, cctop-core, cctop-serve and cctop-ui
+# under crates/, and the binary at the root — and each has its own version. The root's is
 # the release version and the tag, and every release bumps it. An internal
 # crate is bumped only when it changed since the last release tag, where
 # "changed" is any of:
@@ -69,7 +69,8 @@ manifests() {
 }
 
 # Internal crates in publishing order: each after the ones it depends on.
-# Derived rather than listed, so a fifth crate needs no edit here.
+# Derived rather than listed, so a new crate needs no edit here: cctop-tunnel,
+# the fifth, comes out first because core depends on it.
 publish_order() {
     jq -r '
         . as $m

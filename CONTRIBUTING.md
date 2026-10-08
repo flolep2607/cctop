@@ -86,7 +86,7 @@ the full suite once, at the end, on its own.
 
 ## Layout
 
-cctop is one binary built from four crates, so that an edit recompiles only
+cctop is one binary built from five crates, so that an edit recompiles only
 what sits above it:
 
 | Crate | Where | What |
@@ -95,9 +95,12 @@ what sits above it:
 | `cctop-ui` | `crates/ui/` | the terminal dashboard |
 | `cctop-serve` | `crates/serve/` | the web server |
 | `cctop-core` | `crates/core/` | sessions and their parsers, the cache, pricing, config, processes, hooks, rmux, the shim, and what both faces read and do to a session (the conversation, report, export, handoff, actions) |
+| `cctop-tunnel` | `crates/tunnel/` | local ports on public URLs, behind a provider-agnostic `Provider` trait; Cloudflare's quick and named tunnels are the two implementations, speaking the edge's protocol natively |
 
 The dashboard and the server each depend on core and not on each other, and
-the binary depends on all three; the root `Cargo.toml` says why each boundary
+the binary depends on all three; core depends on the tunnel crate, which
+depends on nothing of cctop's and is the one crate whose licence is not plain
+MIT (it began as `cloudflare-quick-tunnel`, MIT OR Apache-2.0); the root `Cargo.toml` says why each boundary
 is where it is. Nothing in core reaches up: something both faces need belongs
 in core. The dashboard starts a server to share its table through a function
 the binary hands it (`serve_for_dashboard` in `src/main.rs`).

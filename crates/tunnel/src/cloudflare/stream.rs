@@ -26,21 +26,21 @@ use futures::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::debug;
 
-use crate::error::TunnelError;
+use crate::Error;
 use crate::quic_metadata_protocol_capnp;
 
 /// 6-byte tag the edge writes first to disambiguate stream kinds.
-/// We only ever see `DATA_STREAM_SIGNATURE` on per-request streams.
-/// `RPC_STREAM_SIGNATURE` is reserved for the cloudflared-server
-/// RPC (session manager / config), which the edge does NOT open
-/// against quick tunnels.
+/// `DATA_STREAM_SIGNATURE` opens a per-request stream.
+/// `RPC_STREAM_SIGNATURE` opens a call on cloudflared's own interface —
+/// the configuration push of a dashboard-managed tunnel. The edge opens
+/// none of those against a quick tunnel.
 pub const DATA_STREAM_SIGNATURE: [u8; 6] = [0x0A, 0x36, 0xCD, 0x12, 0xA1, 0x3E];
 pub const RPC_STREAM_SIGNATURE: [u8; 6] = [0x52, 0xBB, 0x82, 0x5C, 0xDB, 0x65];
 
 /// Two ASCII bytes (`"01"`). cloudflared treats `readVersion` as a
 /// NO-OP for now — kept here verbatim so a future bump shows up
 /// loudly.
-pub const PROTOCOL_V1: [u8; 2] = [b'0', b'1'];
+pub const PROTOCOL_V1: [u8; 2] = *b"01";
 
 /// What kind of payload the edge is asking us to serve on this
 /// stream. Mirror of `quic_metadata_protocol.ConnectionType`.
@@ -83,44 +83,44 @@ pub const HTTP_STATUS_KEY: &str = "HttpStatus";
 
 // ── Read side ────────────────────────────────────────────────────────────────
 
-/// Read the preamble (signature + version), assert it's the data
-/// stream, and decode the capnp `ConnectRequest` that follows.
-pub async fn read_connect_request<R>(reader: &mut R) -> Result<ConnectRequest, TunnelError>
+/// Read the protocol version, which follows the signature on either kind
+/// of stream. Its value is not checked, as cloudflared does not check it.
+pub async fn read_version<R>(reader: &mut R) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
 {
-    let mut sig = [0u8; 6];
-    reader
-        .read_exact(&mut sig)
-        .await
-        .map_err(|e| TunnelError::Internal(format!("read signature: {e}")))?;
-    if sig != DATA_STREAM_SIGNATURE {
-        return Err(TunnelError::Internal(format!(
-            "unexpected stream signature: {sig:02x?}"
-        )));
-    }
     let mut ver = [0u8; 2];
     reader
         .read_exact(&mut ver)
         .await
-        .map_err(|e| TunnelError::Internal(format!("read version: {e}")))?;
+        .map_err(|e| Error::Internal(format!("read version: {e}")))?;
     debug!(version = %String::from_utf8_lossy(&ver), "stream preamble");
+    Ok(())
+}
+
+/// Decode a data stream's `ConnectRequest`. The signature has been read by
+/// whoever told the stream kinds apart; the version is read here.
+pub async fn read_connect_request<R>(reader: &mut R) -> Result<ConnectRequest, Error>
+where
+    R: futures::io::AsyncRead + Unpin,
+{
+    read_version(reader).await?;
 
     let msg = serialize::read_message(reader, ReaderOptions::new())
         .await
-        .map_err(|e| TunnelError::Internal(format!("read capnp message: {e}")))?;
+        .map_err(|e| Error::Internal(format!("read capnp message: {e}")))?;
     let root: quic_metadata_protocol_capnp::connect_request::Reader = msg
         .get_root()
-        .map_err(|e| TunnelError::Internal(format!("capnp root: {e}")))?;
+        .map_err(|e| Error::Internal(format!("capnp root: {e}")))?;
 
     let dest = root
         .get_dest()
-        .map_err(|e| TunnelError::Internal(format!("dest: {e}")))?
+        .map_err(|e| Error::Internal(format!("dest: {e}")))?
         .to_string()
-        .map_err(|e| TunnelError::Internal(format!("dest utf-8: {e}")))?;
+        .map_err(|e| Error::Internal(format!("dest utf-8: {e}")))?;
     let conn_type = match root
         .get_type()
-        .map_err(|e| TunnelError::Internal(format!("type: {e}")))?
+        .map_err(|e| Error::Internal(format!("type: {e}")))?
     {
         quic_metadata_protocol_capnp::ConnectionType::Http => ConnectionType::Http,
         quic_metadata_protocol_capnp::ConnectionType::Websocket => ConnectionType::Websocket,
@@ -165,18 +165,18 @@ pub async fn write_connect_response<W>(
     writer: &mut W,
     error: &str,
     metadata: &[MetaPair<'_>],
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     W: futures::io::AsyncWrite + Unpin,
 {
     writer
         .write_all(&DATA_STREAM_SIGNATURE)
         .await
-        .map_err(|e| TunnelError::Internal(format!("write signature: {e}")))?;
+        .map_err(|e| Error::Internal(format!("write signature: {e}")))?;
     writer
         .write_all(&PROTOCOL_V1)
         .await
-        .map_err(|e| TunnelError::Internal(format!("write version: {e}")))?;
+        .map_err(|e| Error::Internal(format!("write version: {e}")))?;
 
     let mut message = ::capnp::message::Builder::new_default();
     {
@@ -191,11 +191,11 @@ where
     }
     serialize::write_message(&mut *writer, &message)
         .await
-        .map_err(|e| TunnelError::Internal(format!("write capnp: {e}")))?;
+        .map_err(|e| Error::Internal(format!("write capnp: {e}")))?;
     writer
         .flush()
         .await
-        .map_err(|e| TunnelError::Internal(format!("flush: {e}")))?;
+        .map_err(|e| Error::Internal(format!("flush: {e}")))?;
     Ok(())
 }
 
@@ -235,14 +235,5 @@ mod tests {
         assert_eq!(&buf[0..6], &DATA_STREAM_SIGNATURE);
         assert_eq!(&buf[6..8], &PROTOCOL_V1);
         assert!(buf.len() > 8 + 8, "capnp body present");
-    }
-
-    #[tokio::test]
-    async fn rejects_wrong_signature() {
-        let mut buf = vec![0u8; 16];
-        // intentional garbage signature
-        let mut r = Cursor::new(buf.as_mut_slice());
-        let err = read_connect_request(&mut r).await.unwrap_err();
-        assert!(matches!(err, TunnelError::Internal(s) if s.contains("signature")));
     }
 }

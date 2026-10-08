@@ -23,8 +23,9 @@ use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::edge::EdgeAddr;
-use crate::error::TunnelError;
+use super::EdgeSource;
+use super::edge::EdgeAddr;
+use crate::Error;
 
 /// ALPN advertised in the TLS ClientHello to the edge.
 pub const ALPN: &[u8] = b"argotunnel";
@@ -35,7 +36,7 @@ pub const EDGE_SNI: &str = "quic.cftunnel.com";
 /// Three CF-internal CAs that sign `*.cftunnel.com`. Sourced from
 /// `cloudflared/tlsconfig/cloudflare_ca.go` (Apache-2.0). Without
 /// them the edge cert chain fails to verify with `UnknownIssuer`.
-pub const CF_EDGE_ROOTS_PEM: &[u8] = include_bytes!("../cf-edge-roots.pem");
+pub const CF_EDGE_ROOTS_PEM: &[u8] = include_bytes!("../../cf-edge-roots.pem");
 
 /// Hard cap for the handshake. The edge itself uses 5s
 /// (`cloudflared/quic/constants.go: HandshakeIdleTimeout`); 10s
@@ -44,22 +45,22 @@ pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Dial a single edge. Caller owns the `Endpoint` so its UDP
 /// socket stays alive across multiple dials.
-pub async fn dial(endpoint: &Endpoint, edge: &EdgeAddr) -> Result<quinn::Connection, TunnelError> {
+pub async fn dial(endpoint: &Endpoint, edge: &EdgeAddr) -> Result<quinn::Connection, Error> {
     let addr: SocketAddr = edge.socket();
     debug!(%addr, "QUIC connect");
     let connecting = endpoint
         .connect(addr, EDGE_SNI)
-        .map_err(|e| TunnelError::QuicDial {
+        .map_err(|e| Error::QuicDial {
             attempts: 1,
             last: format!("connect builder: {e}"),
         })?;
     match timeout(DEFAULT_HANDSHAKE_TIMEOUT, connecting).await {
         Ok(Ok(conn)) => Ok(conn),
-        Ok(Err(e)) => Err(TunnelError::QuicDial {
+        Ok(Err(e)) => Err(Error::QuicDial {
             attempts: 1,
             last: format!("handshake: {e}"),
         }),
-        Err(_) => Err(TunnelError::QuicDial {
+        Err(_) => Err(Error::QuicDial {
             attempts: 1,
             last: "handshake timed out".into(),
         }),
@@ -67,12 +68,9 @@ pub async fn dial(endpoint: &Endpoint, edge: &EdgeAddr) -> Result<quinn::Connect
 }
 
 /// Try a list of edges in order; stop on first successful handshake.
-pub async fn dial_any(
-    endpoint: &Endpoint,
-    edges: &[EdgeAddr],
-) -> Result<quinn::Connection, TunnelError> {
+pub async fn dial_any(endpoint: &Endpoint, edges: &[EdgeAddr]) -> Result<quinn::Connection, Error> {
     if edges.is_empty() {
-        return Err(TunnelError::QuicDial {
+        return Err(Error::QuicDial {
             attempts: 0,
             last: "no edges provided".into(),
         });
@@ -90,7 +88,7 @@ pub async fn dial_any(
             }
         }
     }
-    Err(TunnelError::QuicDial {
+    Err(Error::QuicDial {
         attempts: edges.len(),
         last: last_err,
     })
@@ -100,12 +98,16 @@ pub async fn dial_any(
 /// Binds an ephemeral UDP socket on `0.0.0.0:0`; one Endpoint can
 /// dial many edges concurrently, so callers typically build it
 /// once at supervisor start.
-pub fn build_endpoint() -> Result<Endpoint, TunnelError> {
+pub(crate) fn build_endpoint(edge: &EdgeSource) -> Result<Endpoint, Error> {
     install_crypto_provider();
-    let config = build_client_config()?;
+    let config = match edge {
+        EdgeSource::Discover => build_client_config(None)?,
+        #[cfg(test)]
+        EdgeSource::Fixed(seam) => build_client_config(Some(seam.root()))?,
+    };
     let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let mut endpoint = Endpoint::client(local)
-        .map_err(|e| TunnelError::Internal(format!("Endpoint::client bind: {e}")))?;
+        .map_err(|e| Error::Internal(format!("Endpoint::client bind: {e}")))?;
     endpoint.set_default_client_config(config);
     Ok(endpoint)
 }
@@ -120,8 +122,17 @@ fn install_crypto_provider() {
     });
 }
 
-fn build_client_config() -> Result<ClientConfig, TunnelError> {
+/// The client configuration, trusting the system's roots and Cloudflare's
+/// edge CAs — or, given `only`, that one certificate and nothing else, which
+/// is how a test's fake edge is reached without being trusted anywhere else.
+fn build_client_config(only: Option<CertificateDer<'static>>) -> Result<ClientConfig, Error> {
     let mut roots = RootCertStore::empty();
+    if let Some(cert) = only {
+        roots
+            .add(cert)
+            .map_err(|e| Error::Internal(format!("test root: {e}")))?;
+        return finish_client_config(roots);
+    }
 
     match rustls_native_certs::load_native_certs() {
         Ok(certs) => {
@@ -137,8 +148,7 @@ fn build_client_config() -> Result<ClientConfig, TunnelError> {
     let mut cf_added = 0usize;
     let mut reader = std::io::BufReader::new(CF_EDGE_ROOTS_PEM);
     for cert in rustls_pemfile::certs(&mut reader) {
-        let cert =
-            cert.map_err(|e| TunnelError::Internal(format!("CF root PEM malformed: {e}")))?;
+        let cert = cert.map_err(|e| Error::Internal(format!("CF root PEM malformed: {e}")))?;
         if roots.add(cert).is_ok() {
             cf_added += 1;
         }
@@ -149,14 +159,17 @@ fn build_client_config() -> Result<ClientConfig, TunnelError> {
         total = roots.len(),
         "trust anchors built"
     );
+    finish_client_config(roots)
+}
 
+fn finish_client_config(roots: RootCertStore) -> Result<ClientConfig, Error> {
     let mut tls = RustlsClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
     tls.alpn_protocols = vec![ALPN.to_vec()];
 
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-        .map_err(|e| TunnelError::Internal(format!("rustls→quinn: {e}")))?;
+        .map_err(|e| Error::Internal(format!("rustls→quinn: {e}")))?;
     let mut cfg = ClientConfig::new(Arc::new(crypto));
 
     let mut transport = TransportConfig::default();
@@ -170,61 +183,23 @@ fn build_client_config() -> Result<ClientConfig, TunnelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edge::{EdgeIpVersion, IpVersionFilter};
-    use std::net::{IpAddr, Ipv4Addr};
 
     #[tokio::test]
     async fn endpoint_builds() {
         // quinn::Endpoint::client wires its UDP socket through the
         // tokio runtime, so this must run on the multi-thread
         // runner just like dial paths do.
-        let endpoint = build_endpoint().expect("endpoint should build");
+        let endpoint = build_endpoint(&EdgeSource::Discover).expect("endpoint should build");
         drop(endpoint);
     }
 
     #[tokio::test]
     async fn dial_any_empty_short_circuits() {
-        let endpoint = build_endpoint().unwrap();
+        let endpoint = build_endpoint(&EdgeSource::Discover).unwrap();
         let err = dial_any(&endpoint, &[]).await.unwrap_err();
         match err {
-            TunnelError::QuicDial { attempts, .. } => assert_eq!(attempts, 0),
+            Error::QuicDial { attempts, .. } => assert_eq!(attempts, 0),
             other => panic!("unexpected: {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn dial_unreachable_addr_times_out_fast() {
-        let endpoint = build_endpoint().unwrap();
-        let bogus = EdgeAddr {
-            ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            port: 7844,
-            version: EdgeIpVersion::V4,
-        };
-        let _ = IpVersionFilter::Auto;
-        let result = tokio::time::timeout(
-            Duration::from_secs(12),
-            dial_any(&endpoint, std::slice::from_ref(&bogus)),
-        )
-        .await
-        .expect("outer timeout shouldn't fire");
-        assert!(result.is_err(), "TEST-NET should never connect");
-    }
-
-    /// Gated live smoke (same as the spike binary) — `CFQT_LIVE_TESTS=1`.
-    #[tokio::test]
-    #[ignore]
-    async fn live_handshake_against_edge() {
-        if std::env::var_os("CFQT_LIVE_TESTS").is_none() {
-            eprintln!("skip: set CFQT_LIVE_TESTS=1 to run");
-            return;
-        }
-        let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
-        let edges = crate::edge::discover(IpVersionFilter::Auto)
-            .await
-            .expect("discover");
-        let endpoint = build_endpoint().expect("endpoint");
-        let conn = dial_any(&endpoint, &edges[..3]).await.expect("handshake");
-        drop(conn);
-        endpoint.wait_idle().await;
     }
 }

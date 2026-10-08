@@ -495,8 +495,8 @@ pub fn share_link_with(
     //
     // It used to be localhost.run, raised by rmux per share, because a
     // WebSocket through cctop's quick tunnel came back 404. That was the
-    // tunnel client dropping the upgrade (see `vendor/cloudflare-quick-tunnel`
-    // and the `[patch]` in Cargo.toml), not Cloudflare, and with it fixed the
+    // tunnel client dropping the upgrade (see `build_request_head` in
+    // `cctop-tunnel`'s proxy), not Cloudflare, and with it fixed the
     // second way out of the machine was only a second thing to drop: its ssh
     // sessions were behind most of the refused frames and slow enough to time
     // the mint out.

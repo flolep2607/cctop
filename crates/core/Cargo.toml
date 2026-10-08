@@ -30,9 +30,9 @@ debug = []
 test-support = []
 
 [dependencies]
+cctop-tunnel.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
-cloudflare-quick-tunnel.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
 flate2.workspace = true

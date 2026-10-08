@@ -1,4 +1,5 @@
-//! Bounded idle-TCP-connection pool against `127.0.0.1:<port>`.
+//! Bounded idle-TCP-connection pools against `127.0.0.1:<port>`, one
+//! per local port a tunnel routes to.
 //!
 //! Reduces socket() + connect() overhead per inbound stream by
 //! reusing keep-alive connections to the local origin. Each pooled
@@ -11,6 +12,7 @@
 //! call [`Pool::release`] **only** after fully reading a response
 //! whose framing it understood (Content-Length-bounded).
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
@@ -22,7 +24,7 @@ use tracing::trace;
 /// buffer and matches the typical client-side default.
 pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30);
 
-/// Soft cap on idle sockets per pool. Beyond this we drop the
+/// Soft cap on idle sockets per port. Beyond this we drop the
 /// freshly-released socket on the floor; the next acquire will
 /// open a new one if needed.
 pub const DEFAULT_MAX_IDLE: usize = 16;
@@ -33,56 +35,62 @@ struct Idle {
 }
 
 pub struct Pool {
-    port: u16,
     idle_ttl: Duration,
     max_idle: usize,
-    idle: Mutex<Vec<Idle>>,
+    idle: Mutex<HashMap<u16, Vec<Idle>>>,
 }
 
 impl Pool {
-    pub fn new(port: u16) -> Self {
+    pub fn new() -> Self {
         Self {
-            port,
             idle_ttl: DEFAULT_IDLE_TTL,
             max_idle: DEFAULT_MAX_IDLE,
-            idle: Mutex::new(Vec::new()),
+            idle: Mutex::new(HashMap::new()),
         }
     }
 
     /// Acquire a socket: pop a fresh idle entry if available,
     /// otherwise open a new TCP connection.
-    pub async fn acquire(&self) -> std::io::Result<TcpStream> {
+    pub async fn acquire(&self, port: u16) -> std::io::Result<TcpStream> {
         // Drain stale entries up-front so callers never see a
         // stream older than `idle_ttl`. Locking inside the loop
         // gives the reaper write-access without blocking other
         // acquires for the connect path.
         {
-            let mut g = self.idle.lock().await;
+            let mut all = self.idle.lock().await;
+            let g = all.entry(port).or_default();
             while let Some(entry) = g.last() {
                 if entry.released_at.elapsed() <= self.idle_ttl {
                     let entry = g.pop().expect("checked not-empty");
-                    trace!(port = self.port, pool_size = g.len(), "pool hit");
+                    trace!(port, pool_size = g.len(), "pool hit");
                     return Ok(entry.stream);
                 }
                 g.pop();
             }
         }
-        trace!(port = self.port, "pool miss; opening fresh TCP");
-        TcpStream::connect(("127.0.0.1", self.port)).await
+        trace!(port, "pool miss; opening fresh TCP");
+        TcpStream::connect(("127.0.0.1", port)).await
     }
 
     /// Return a socket to the pool. Drop on overflow.
-    pub async fn release(&self, stream: TcpStream) {
-        let mut g = self.idle.lock().await;
+    pub async fn release(&self, port: u16, stream: TcpStream) {
+        let mut all = self.idle.lock().await;
+        let g = all.entry(port).or_default();
         if g.len() >= self.max_idle {
-            trace!(port = self.port, "pool full; dropping released stream");
+            trace!(port, "pool full; dropping released stream");
             return;
         }
         g.push(Idle {
             stream,
             released_at: Instant::now(),
         });
-        trace!(port = self.port, pool_size = g.len(), "pool released");
+        trace!(port, pool_size = g.len(), "pool released");
+    }
+}
+
+impl Default for Pool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -106,12 +114,12 @@ mod tests {
             }
         });
 
-        let pool = Pool::new(port);
-        let s1 = pool.acquire().await.unwrap();
+        let pool = Pool::new();
+        let s1 = pool.acquire(port).await.unwrap();
         let s1_local = s1.local_addr().unwrap();
-        pool.release(s1).await;
+        pool.release(port, s1).await;
 
-        let s2 = pool.acquire().await.unwrap();
+        let s2 = pool.acquire(port).await.unwrap();
         assert_eq!(s2.local_addr().unwrap(), s1_local, "should reuse socket");
     }
 
@@ -124,15 +132,15 @@ mod tests {
                 let _ = listener.accept().await;
             }
         });
-        let mut pool = Pool::new(port);
+        let mut pool = Pool::new();
         pool.idle_ttl = Duration::from_millis(50);
 
-        let s1 = pool.acquire().await.unwrap();
+        let s1 = pool.acquire(port).await.unwrap();
         let s1_local = s1.local_addr().unwrap();
-        pool.release(s1).await;
+        pool.release(port, s1).await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let s2 = pool.acquire().await.unwrap();
+        let s2 = pool.acquire(port).await.unwrap();
         assert_ne!(
             s2.local_addr().unwrap(),
             s1_local,

@@ -7,11 +7,10 @@
 //! wrong shape for anything permanent — the URL changes every run, which is also
 //! why it is not a substitute for the token.
 //!
-//! The client is [`cloudflare_quick_tunnel`], which speaks that protocol itself —
-//! QUIC to the edge and capnp-RPC over it — rather than shelling out to
-//! `cloudflared` and reading a URL off its stderr. So `--tunnel` needs nothing
-//! installed and cctop stays one binary, which is the whole reason it ships as
-//! one.
+//! The client is [`cctop_tunnel`], which speaks that protocol itself — QUIC to
+//! the edge and capnp-RPC over it — rather than shelling out to `cloudflared`
+//! and reading a URL off its stderr. So `--tunnel` needs nothing installed and
+//! cctop stays one binary, which is the whole reason it ships as one.
 //!
 //! Not inside `serve`, though `cctop serve --tunnel` is its first user: a terminal
 //! share from rmux opens one too ([`crate::rmux`]), with no server of cctop's
@@ -33,16 +32,16 @@
 //! machine from a phone, not a private channel, and the announcement
 //! `cctop serve` prints says so where someone will actually read it.
 
-use cloudflare_quick_tunnel::{QuickTunnelHandle, QuickTunnelManager};
+use cctop_tunnel::{Provider, Routes};
 
 /// A live tunnel, reachable at [`url`](Tunnel::url) until it is dropped.
 pub struct Tunnel {
     /// The `https://…trycloudflare.com` origin the edge assigned this run.
     pub url: String,
-    /// Declared before the runtime so it drops first: the handle signals the
+    /// Declared before the runtime so it drops first: dropping it signals the
     /// edge reactors to wind down, which needs the runtime they are still
     /// running on.
-    _handle: QuickTunnelHandle,
+    _handle: cctop_tunnel::Tunnel,
     /// Not a handle to park — this *is* the tunnel. The tasks it drives accept
     /// the edge's streams and proxy them; if it stops turning, the public URL
     /// stops answering.
@@ -73,10 +72,10 @@ pub fn start(port: u16) -> anyhow::Result<Tunnel> {
     // second QUIC connection for masking a single-POP reconnect, and the page
     // reports a gap of its own anyway.
     let handle = runtime
-        .block_on(QuickTunnelManager::new(port).start())
+        .block_on(cctop_tunnel::cloudflare::Quick::new().open(Routes::new(port)))
         .map_err(|e| anyhow::anyhow!("{e}\nDrop --tunnel to serve on this machine only."))?;
     Ok(Tunnel {
-        url: handle.url.clone(),
+        url: handle.url().to_string(),
         _handle: handle,
         _runtime: runtime,
     })

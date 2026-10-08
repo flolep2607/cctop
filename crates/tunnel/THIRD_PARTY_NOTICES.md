@@ -1,4 +1,8 @@
-# Third-party notices — `cloudflare-quick-tunnel`
+# Third-party notices — `cctop-tunnel`
+
+This crate began as `cloudflare-quick-tunnel` 0.3.1 by lordmacu
+(<https://github.com/lordmacu/cloudflare-quick-tunnel-rs>), MIT OR Apache-2.0.
+What that crate vendored from `cloudflared` is listed below, unchanged.
 
 This crate vendors a small amount of material from upstream
 `cloudflared` (the Cloudflare-authored tunnel client) to talk to
