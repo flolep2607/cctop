@@ -8,6 +8,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { CommandPalette } from "./command-palette";
+import { DashboardAddress } from "./address";
 import { ThemeToggle } from "./theme";
 import { go, PAGES } from "./nav";
 
@@ -56,6 +57,8 @@ export function AppShell({ children, right }: { children: ReactNode; right?: Rea
         </nav>
         <div className="flex-1" />
         {right}
+        {/* The full link only: the read-only page has no address to choose. */}
+        {CAN_ACT && <DashboardAddress />}
         {/* Said once, in the header, rather than discovered per button: the
             read-only link is the second one `cctop serve` prints and the
             easier one to click by mistake. */}
