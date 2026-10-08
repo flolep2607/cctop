@@ -9,35 +9,49 @@
 #
 #   1. a file under its directory changed;
 #   2. its packaged manifest changed without one — a `[workspace.dependencies]`
-#      entry it uses was bumped, or a `[workspace.package]` field it inherits.
-#      Compared as `cargo metadata` sees the package at the tag and at HEAD, so
-#      that what counts is what cargo would publish, not how the TOML is laid
-#      out;
-#   3. an internal crate it depends on was bumped. The `=` pins make this one
-#      unavoidable: a published cctop-ui@0.28.3 requires cctop-core =0.28.3, so
-#      a cctop that wants core 0.28.4 beside that ui resolves two cores and
-#      `cargo install cctop` fails on mismatched types. Rule 2 already sees the
-#      pin move, but it is written down on its own so nobody has to work it
-#      out again.
+#      entry it uses was bumped, its requirement on an internal crate moved, or
+#      a `[workspace.package]` field it inherits changed. Compared as `cargo
+#      metadata` sees the package at the tag and at HEAD, so that what counts
+#      is what cargo would publish, not how the TOML is laid out;
+#   3. an internal crate it depends on takes a breaking bump. The internal
+#      requirements are carets on the compatible part of the version ("0.28"),
+#      so a non-breaking bump of core leaves a published cctop-ui@0.28.3
+#      building beside it, and nothing else moves. A breaking one (0.28.x ->
+#      0.29.0) has to move the requirement, and a moved requirement is rule 2;
+#      this rule is the same thing said before the bump, so that `needs-bump`
+#      can answer it.
+#
+# Whether a crate's public API broke is cargo-semver-checks' answer, comparing
+# the crate at HEAD with the same crate at the tag. Only crates that changed
+# under rules 1-2 are asked, and only on a release, because each one builds the
+# crate's rustdoc twice. The version is pinned in rust-toolchain.toml, beside
+# the toolchain whose rustdoc it reads. CCTOP_BREAKING, set (even empty), stands
+# in for it: the space-separated crates whose API broke. The tests use it, and
+# so can a human without the tool who knows the answer.
 #
 # Commands:
 #
 #   check        The guard `verify` runs. On a release commit (the root version
 #                differs from the last tag's) it fails, one `::error::` line per
-#                crate, when a changed crate kept its version or an unchanged
-#                one was bumped, and prints what the release will publish. On
+#                crate, when a changed crate kept its version, an unchanged one
+#                was bumped, a crate whose API broke took less than a breaking
+#                bump, or an internal requirement is not the caret on its
+#                dependency's current version; and prints what the release
+#                will publish. On
 #                any other commit it says so and passes: a feature branch
 #                changes crates without bumping them, and that is fine.
-#   needs-bump   The internal crates rules 1-3 say must be bumped, closing rule
-#                3 over rules 1 and 2 rather than over the versions, so it
-#                answers before anything is bumped. `tools/bump.sh` reads it.
+#   needs-bump   The internal crates rules 1-3 say must be bumped, as
+#                "name<TAB>reason<TAB>patch|breaking", closing rule 3 over the
+#                API breaks rather than over the versions, so it answers before
+#                anything is bumped. `tools/bump.sh` reads it.
 #   base         The tag the other commands compare against.
 #   unpublished  The workspace crates whose current version is not on
 #                crates.io yet, in the order they must be published. What
 #                `publish-crate` publishes.
 #
 # It never runs `cargo publish` in any form. It needs git, cargo, jq and curl,
-# and a checkout with its tags and history (`fetch-depth: 0` in CI).
+# a checkout with its tags and history (`fetch-depth: 0` in CI), and for
+# `check` on a release and `needs-bump`, cargo-semver-checks or CCTOP_BREAKING.
 #
 # CCTOP_RELEASE_BASE overrides the tag to compare against (tests use it).
 
@@ -129,43 +143,126 @@ own_change() {
         echo "$dir/"
         return
     fi
-    # The pins on other internal crates leave out their version requirement:
-    # that moving is rule 3, and is reported as such by the caller.
+    # A moved requirement on an internal crate is a real manifest change —
+    # the published crate asks for something else — but it has one cause
+    # worth naming, so it is told apart from the rest.
     local shape='.[$n] | del(.version) | .pins |= map(del(.req))'
     if [ "$(jq -c --arg n "$name" "$shape" <<<"$head_meta")" != \
         "$(jq -c --arg n "$name" "$shape" <<<"$base_meta")" ]; then
         echo "its packaged manifest"
+        return
     fi
+    local moved
+    moved=$(jq -r --arg n "$name" --argjson base "$base_meta" '
+        .[$n].pins[] as $p
+        | ($base[$n].pins[] | select(.name == $p.name and (.kind // "") == ($p.kind // "")) | .req) as $was
+        | select($was != $p.req) | "\($p.name) moved from \($was) to \($p.req)"' <<<"$head_meta" |
+        sort -u | paste -sd, - | sed 's/,/, /g')
+    if [ -n "$moved" ]; then echo "its requirement on $moved"; fi
 }
 
-# Every internal crate rules 1-3 say must be bumped, as "name<TAB>reason".
-# Rule 3 is closed over rules 1 and 2, so the answer does not depend on
-# whether the bumps have been made yet; `check` adds rule 3 over the actual
-# versions on top, for a dependency bumped without cause.
+# The caret a dependent should hold on a crate at this version: what cargo
+# calls compatible, so that it moves exactly when the version breaks.
+compat() {
+    local major minor
+    IFS=. read -r major minor _ <<<"$1"
+    if [ "$major" = 0 ]; then echo "0.$minor"; else echo "$major"; fi
+}
+
+# Whether going from $1 to $2 is a breaking bump in cargo's sense.
+is_breaking() { [ "$(compat "$1")" != "$(compat "$2")" ]; }
+
+# The pinned cargo-semver-checks, from rust-toolchain.toml.
+semver_checks_pin() { sed -n 's/^# cargo-semver-checks \([0-9][0-9.]*\)$/\1/p' rust-toolchain.toml; }
+
+# Which of the crates named in $3.. broke their public API since $1, one per
+# line. A crate new since the tag has no API to break and is not asked.
+breaking() {
+    local base=$1 base_meta=$2 name
+    shift 2
+    if [ -n "${CCTOP_BREAKING+set}" ]; then
+        for name in $CCTOP_BREAKING; do
+            grep -qx -- "$name" <<<"$internal" || die "CCTOP_BREAKING names $name, which is not an internal crate"
+        done
+        for name in "$@"; do
+            if grep -qx -- "$name" <<<"$(tr ' ' '\n' <<<"$CCTOP_BREAKING")"; then echo "$name"; fi
+        done
+        return 0
+    fi
+    [ $# -gt 0 ] || return 0
+    local pin have
+    pin=$(semver_checks_pin)
+    [ -n "$pin" ] || die "rust-toolchain.toml names no cargo-semver-checks version"
+    have=$(cargo semver-checks --version 2>/dev/null | awk '{print $2}') ||
+        die "cargo-semver-checks is not installed: cargo install cargo-semver-checks@$pin --locked, or set CCTOP_BREAKING to the crates whose API broke"
+    [ "$have" = "$pin" ] ||
+        die "cargo-semver-checks is $have, and rust-toolchain.toml pins $pin: it has to read this toolchain's rustdoc"
+    local out rc
+    for name in "$@"; do
+        jq -e --arg n "$name" 'has($n)' <<<"$base_meta" >/dev/null || continue
+        echo "cargo-semver-checks: $name against $base" >&2
+        # `--release-type minor` asks only "is anything breaking?": under it
+        # just the lints that need a breaking bump fail, whichever way the
+        # tool reads minor on a 0.x crate, and the versions themselves are
+        # left out of the question, so it answers the same before the bump as
+        # after.
+        rc=0
+        out=$(cargo semver-checks check-release --package "$name" --baseline-rev "$base" \
+            --release-type minor 2>&1) || rc=$?
+        if [ "$rc" = 0 ]; then
+            continue
+        elif grep -q 'semver requires new' <<<"$out"; then
+            sed 's/^/    /' <<<"$out" >&2
+            echo "$name"
+        else
+            # A build failure is not an API verdict: calling it breaking would
+            # send a needless 0.x minor to crates.io, which cannot be undone.
+            sed 's/^/    /' <<<"$out" >&2
+            die "cargo-semver-checks failed on $name (exit $rc) without a verdict"
+        fi
+    done
+}
+
+# Every internal crate rules 1-3 say must be bumped, as
+# "name<TAB>reason<TAB>patch|breaking". Rule 3 is closed over the API breaks,
+# not over the versions, so the answer does not depend on whether the bumps
+# have been made yet. A requirement that moved because the bump was made
+# already is rule 2 by then, and gives the same answer.
 needs_bump() {
     local base=$1 base_meta=$2 name reason dep
-    declare -A why=()
+    declare -A why=() level=()
+    local changed=()
     for name in $internal; do
         if ! jq -e --arg n "$name" 'has($n)' <<<"$base_meta" >/dev/null; then
             why[$name]="it is new since $base"
             continue
         fi
         reason=$(own_change "$name" "$base" "$base_meta")
-        if [ -n "$reason" ]; then why[$name]=$reason; fi
+        if [ -n "$reason" ]; then
+            why[$name]=$reason
+            changed+=("$name")
+        fi
     done
-    # In publishing order, so a dependency's reason is settled before its
-    # dependents look at it.
+    local broke
+    broke=$(breaking "$base" "$base_meta" "${changed[@]}") || return 1
+    for name in $broke; do
+        level[$name]=breaking
+        why[$name]="${why[$name]}; its public API broke"
+    done
+    # In publishing order, so a dependency's verdict is settled before its
+    # dependents look at it. Only a breaking bump reaches a dependent: it is
+    # the one that moves the requirement.
     for name in $internal; do
         [ -n "${why[$name]:-}" ] && continue
         for dep in $(jq -r --arg n "$name" '.[$n].internal[]' <<<"$head_meta"); do
-            if [ -n "${why[$dep]:-}" ]; then
-                why[$name]="it depends on $dep, which is bumped"
+            if [ "${level[$dep]:-}" = breaking ]; then
+                why[$name]="its requirement on $dep has to move: $dep takes a breaking bump"
                 break
             fi
         done
     done
     for name in $internal; do
-        [ -n "${why[$name]:-}" ] && printf '%s\t%s\n' "$name" "${why[$name]}"
+        [ -n "${why[$name]:-}" ] && printf '%s\t%s\t%s\n' "$name" "${why[$name]}" "${level[$name]:-patch}"
     done
     return 0
 }
@@ -178,6 +275,13 @@ order=$(publish_order "$head_meta")
 internal=$(grep -vx "$root_name" <<<"$order" || true)
 
 version_of() { jq -r --arg n "$1" '.[$n].version // empty' <<<"$2"; }
+
+# The next breaking version after $1: 0.28.6 -> 0.29.0, 1.2.3 -> 2.0.0.
+next_breaking() {
+    local major minor
+    IFS=. read -r major minor _ <<<"$1"
+    if [ "$major" = 0 ]; then echo "0.$((minor + 1)).0"; else echo "$((major + 1)).0.0"; fi
+}
 
 # The sparse index's path for a crate name, as crates.io lays it out.
 index_path() {
@@ -246,10 +350,13 @@ case $cmd in
             exit 0
         fi
 
-        declare -A why=()
-        while IFS=$'\t' read -r name reason; do
-            [ -n "$name" ] && why[$name]=$reason
-        done < <(needs_bump "$base" "$base_meta")
+        declare -A why=() level=()
+        plan=$(needs_bump "$base" "$base_meta") || exit 1
+        while IFS=$'\t' read -r name reason lvl; do
+            [ -n "$name" ] || continue
+            why[$name]=$reason
+            level[$name]=$lvl
+        done <<<"$plan"
 
         failed=0
         publish=()
@@ -257,23 +364,20 @@ case $cmd in
             now=$(version_of "$name" "$head_meta")
             was=$(version_of "$name" "$base_meta")
             reason=${why[$name]:-}
-            # Rule 3 over the versions as they are: a dependency bumped without
-            # cause still moves this crate's pin.
-            if [ -z "$reason" ]; then
-                for dep in $(jq -r --arg n "$name" '.[$n].internal[]' <<<"$head_meta"); do
-                    if [ "$(version_of "$dep" "$head_meta")" != "$(version_of "$dep" "$base_meta")" ]; then
-                        reason="it depends on $dep, which is bumped"
-                        break
-                    fi
-                done
-            fi
             dir=$(jq -r --arg n "$name" '.[$n].dir' <<<"$head_dirs")
             if [ -n "$reason" ]; then
                 if [ "$now" = "$was" ]; then
-                    echo "::error::$name changed since $base ($reason) but is still $now; bump it and its = pin"
+                    if [ "${level[$name]}" = breaking ]; then
+                        echo "::error::$name changed since $base ($reason) but is still $now; give it a breaking bump and move its requirement to \"$(compat "$(next_breaking "$now")")\""
+                    else
+                        echo "::error::$name changed since $base ($reason) but is still $now; bump it"
+                    fi
                     failed=1
                 elif [ -n "$was" ] && [ "$(printf '%s\n%s\n' "$was" "$now" | sort -V | tail -n1)" != "$now" ]; then
                     echo "::error::$name went from $was to $now; a release only moves a version up"
+                    failed=1
+                elif [ "${level[$name]}" = breaking ] && [ -n "$was" ] && ! is_breaking "$was" "$now"; then
+                    echo "::error::$name broke its public API since $base (cargo-semver-checks) but went only from $was to $now; make it $(next_breaking "$was") and move its requirement to \"$(compat "$(next_breaking "$was")")\""
                     failed=1
                 else
                     publish+=("$name")
@@ -283,6 +387,18 @@ case $cmd in
                 failed=1
             fi
         done
+        # Every requirement is the caret on its dependency's version as it is,
+        # so that the workspace resolves one copy of each crate and a
+        # requirement moves exactly when a breaking bump does. cargo would
+        # refuse a caret the version has left anyway; this says which line.
+        while IFS=$'\t' read -r name dep req; do
+            [ -n "$name" ] || continue
+            want="^$(compat "$(version_of "$dep" "$head_meta")")"
+            if [ "$req" != "$want" ]; then
+                echo "::error::$name requires $dep $req, and $dep is $(version_of "$dep" "$head_meta"); make its requirement under [workspace.dependencies] \"${want#^}\""
+                failed=1
+            fi
+        done < <(jq -r '.[] | .name as $n | .pins[] | [$n, .name, .req] | @tsv' <<<"$head_meta" | sort -u)
         [ "$failed" = 0 ] || exit 1
         publish+=("$root_name")
         echo "::notice::release $root_now (since $base) publishes: ${publish[*]}"
