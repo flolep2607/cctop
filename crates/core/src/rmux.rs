@@ -413,8 +413,8 @@ fn public_origin() -> Result<String, String> {
     // caller never had.
     // A quick tunnel even when an account is connected: the account's
     // hostname is the page's, and this listener is not the page.
-    // ponytail: shares on the account tunnel's second hostname are issue #174's
-    // last part, not done here.
+    // ponytail: shares on the account tunnel's second hostname (#180) are not
+    // done here; setup already makes that hostname's DNS record.
     let tunnel = crate::tunnel::start(port, crate::tunnel::Want::Quick).map_err(|e| {
         format!("{e}")
             .lines()
