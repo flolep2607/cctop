@@ -48,6 +48,30 @@ export interface Tool {
   added?: number;
   removed?: number;
   diff?: string[];
+  /** The harness's id for the call. */
+  id?: string;
+  /** For a call that started a subagent, the subagent it started. */
+  agent?: AgentCall;
+}
+
+/** The subagent an `Agent` call started — `AgentCall` in `chat.rs`. */
+export interface AgentCall {
+  /** What `/api/chat/<id>?agent=` takes. */
+  id: string;
+  type: string;
+  description: string;
+  status: "running" | "done" | "failed" | string;
+  started_at?: string;
+  last_active?: string;
+  duration_ms?: number;
+  tool_count?: number;
+  /** Its transcript was purged. */
+  ghost?: boolean;
+  /** Launched in the background: the call's result is only a launch receipt. */
+  background?: boolean;
+  /** The seq of its hand-back turn. */
+  handback?: number;
+  report?: string;
 }
 
 export interface Turn {
