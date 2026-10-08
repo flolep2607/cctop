@@ -36,10 +36,11 @@ hostname. It needs a domain whose DNS is on Cloudflare.
 
 setup    With --browser, log in to Cloudflare in the browser and pick the
          domain there: nothing to make or paste. Over ssh, the address to
-         open is printed. Without it, paste an API token (cctop prints a link that makes one with the three
-         permissions it needs) and pick a domain: cctop creates the tunnel and
-         its DNS records. A tunnel token from the dashboard works too. Piped,
-         one token is read from stdin.
+         open is printed. Without it, paste an API token (cctop prints a
+         link that makes one with the three permissions it needs) and pick
+         a domain. Either way cctop creates the tunnel and its DNS records.
+         A tunnel token from the dashboard works too. Piped, one token is
+         read from stdin.
 status   What is connected.
 remove   Delete what setup created on Cloudflare — the DNS records and the
          tunnel, by the ids it stored, nothing else — and forget it.
