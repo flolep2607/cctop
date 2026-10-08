@@ -962,20 +962,24 @@ pub(crate) fn remove_with(account: &Account, api: impl Fn(&str) -> Api) -> Lefto
     Leftovers(left)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A stand-in for Cloudflare's API on loopback, for this crate's tests and
+/// for a build made for tests elsewhere — the server's rename routes are
+/// tested against it. Every token sent to it is made up; it answers 401 to
+/// any that does not start `made-up`.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake {
+    use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
     /// One call the fake API saw: method, path, body.
-    type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
+    pub type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
 
     /// A stand-in for api.cloudflare.com on loopback. `answer` maps a call to
     /// a status and the JSON body; every call is recorded. Every token the
     /// tests send it is made up.
-    fn fake_api(
+    pub fn api(
         answer: impl Fn(&str, &str, &str) -> (u16, Value) + Send + Sync + 'static,
     ) -> (String, Seen) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1034,27 +1038,18 @@ mod tests {
         (base, seen)
     }
 
-    fn ok(result: Value) -> (u16, Value) {
+    pub fn ok(result: Value) -> (u16, Value) {
         (
             200,
             json!({"success": true, "errors": [], "result": result}),
         )
     }
 
-    fn zone() -> Zone {
-        Zone {
-            id: "zone1".into(),
-            name: "example.test".into(),
-            account_id: "acct1".into(),
-            active: true,
-        }
-    }
-
-    const TUNNEL_ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
+    pub const TUNNEL_ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
 
     /// A Cloudflare that has nothing in the zone and accepts every creation,
     /// except `fail_on`, a path prefix answered 500.
-    fn cloudflare(fail_on: Option<&'static str>) -> impl Fn(&str, &str, &str) -> (u16, Value) {
+    pub fn accepting(fail_on: Option<&'static str>) -> impl Fn(&str, &str, &str) -> (u16, Value) {
         move |method: &str, path: &str, _body: &str| {
             if let Some(prefix) = fail_on
                 && path.starts_with(prefix)
@@ -1090,6 +1085,33 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(1);
         N.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl Api {
+    /// A client for the [`fake`] API at `base`. Only in a build made for
+    /// tests, like `CCTOP_CLOUDFLARE_API`: a token sent to a base of someone's
+    /// choosing is a token given away.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake(base: &str, token: &str) -> Api {
+        Api::at(base, token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use super::fake::{Seen, TUNNEL_ID, accepting as cloudflare, api as fake_api, ok};
+
+    fn zone() -> Zone {
+        Zone {
+            id: "zone1".into(),
+            name: "example.test".into(),
+            account_id: "acct1".into(),
+            active: true,
+        }
     }
 
     fn calls(seen: &Seen) -> Vec<String> {

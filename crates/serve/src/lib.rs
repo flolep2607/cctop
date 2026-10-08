@@ -69,6 +69,8 @@
 //! the tunnel the user already has (ssh, Tailscale) is still better than
 //! anything here, because it authenticates rather than merely encrypting.
 
+/// `/api/address`: choosing the dashboard's address, and an agent's.
+mod address;
 /// Cross-session aggregation behind `/api/analytics` — the data the
 /// analytics page charts, built from the snapshot plus cached extractions.
 mod analytics;
@@ -286,6 +288,10 @@ struct Shared {
     /// [`share_host`]. A function rather than the call itself so a test can
     /// name a share host without lending a tunnel.
     is_share_host: fn(&str) -> bool,
+    /// The connected account and its renames, for `/api/address` — see
+    /// [`address`]. A trait object so a test can rename against a fake
+    /// Cloudflare without touching `config.toml`.
+    addresses: Arc<dyn address::Addresses>,
 }
 
 /// One publish of the whole table.
@@ -628,6 +634,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             .collect(),
         ssh: ssh::Reach::ssh(),
         is_share_host: tunnel::is_share_host,
+        addresses: Arc::new(address::Connected),
     });
 
     let remotes = Arc::new(Mutex::new(Remotes::default()));
@@ -1849,6 +1856,16 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         _ if path.starts_with("/api/act/") => {
             api_act(shared, stream, &request, &path["/api/act/".len()..], access);
+        }
+        "/api/address" => address::route(shared, stream, &request, "", access),
+        _ if path.starts_with("/api/address/") => {
+            address::route(
+                shared,
+                stream,
+                &request,
+                &path["/api/address/".len()..],
+                access,
+            );
         }
         _ => http::respond_error(stream, Some(&request), 404, "no such page"),
     }
@@ -3105,6 +3122,7 @@ mod tests {
             hosts: HashMap::new(),
             ssh: ssh::Reach::nowhere(),
             is_share_host: |_| false,
+            addresses: Arc::new(address::Nowhere),
         }
     }
 
@@ -3556,6 +3574,158 @@ mod tests {
             "Host: cctop-share.example.test\r\nAuthorization: Bearer full\r\n",
         );
         assert!(bearer.contains(" 404 "), "{bearer}");
+    }
+
+    /// A server with one session and an account on a fake Cloudflare.
+    fn addressed() -> (Shared, cctop_core::cloudflare::fake::Seen) {
+        let (fake, seen) = address::tests::fake();
+        let shared = Shared {
+            addresses: Arc::new(fake),
+            ..shared("full", "view")
+        };
+        let mut s = Session::new(
+            cctop_core::pricing::Provider::Claude,
+            "8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11".into(),
+        );
+        s.abbrev_label = "web".into();
+        *shared.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".to_string(),
+            rows: Vec::new(),
+            sessions: vec![s],
+            host_errors: Vec::new(),
+        });
+        (shared, seen)
+    }
+
+    fn body_of(raw: &str) -> &str {
+        raw.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+    }
+
+    /// The page renames an agent's address and the dashboard's with the full
+    /// token, against a fake Cloudflare, and is told what it needs: the new
+    /// hostname, and for the dashboard the origin to go to.
+    #[test]
+    fn the_full_token_chooses_addresses() {
+        let (guarded, seen) = addressed();
+        let read = response_of(&guarded, "GET", "/api/address", &bearer_line("full"));
+        assert!(read.starts_with("HTTP/1.1 200 "), "{read}");
+        assert!(
+            body_of(&read).contains(r#""host":"cctop.example.test""#),
+            "{read}"
+        );
+        assert!(body_of(&read).contains(r#""renamable":true"#), "{read}");
+        let agent = response_of(
+            &guarded,
+            "GET",
+            "/api/address/8f14e45f",
+            &bearer_line("full"),
+        );
+        assert!(
+            body_of(&agent).contains(r#""host":"cctop-share.example.test""#),
+            "{agent}"
+        );
+
+        let named = post_json(
+            &guarded,
+            "/api/address/8f14e45f",
+            "full",
+            r#"{"name":"myagent"}"#,
+        );
+        assert!(named.starts_with("HTTP/1.1 200 "), "{named}");
+        assert!(
+            body_of(&named).contains(r#""host":"myagent.example.test""#),
+            "{named}"
+        );
+        let agent = response_of(
+            &guarded,
+            "GET",
+            "/api/address/8f14e45f",
+            &bearer_line("full"),
+        );
+        assert!(
+            body_of(&agent).contains(r#""host":"myagent.example.test""#),
+            "{agent}"
+        );
+        assert!(
+            seen.lock().unwrap().iter().any(|(m, p, b)| m == "POST"
+                && p == "/zones/zone1/dns_records"
+                && b.contains("myagent")),
+            "no record was made"
+        );
+
+        let moved = post_json(&guarded, "/api/address", "full", r#"{"name":"home"}"#);
+        assert!(moved.starts_with("HTTP/1.1 200 "), "{moved}");
+        assert!(
+            body_of(&moved).contains(r#""origin":"https://home.example.test""#),
+            "{moved}"
+        );
+        assert!(!moved.contains("made-up"), "a token in the answer: {moved}");
+    }
+
+    /// Each refusal is its own sentence, as the dialog shows it, and nothing
+    /// is written for one.
+    #[test]
+    fn a_refused_address_is_said_in_a_sentence() {
+        let (guarded, seen) = addressed();
+        let refused = post_json(
+            &guarded,
+            "/api/address/8f14e45f",
+            "full",
+            r#"{"name":"myagent_"}"#,
+        );
+        assert!(refused.starts_with("HTTP/1.1 400 "), "{refused}");
+        assert_eq!(
+            body_of(&refused),
+            "myagent_ is not a usable name: letters, digits and - only"
+        );
+        let taken = post_json(
+            &guarded,
+            "/api/address/8f14e45f",
+            "full",
+            r#"{"name":"taken"}"#,
+        );
+        assert_eq!(
+            body_of(&taken),
+            "taken.example.test is already used by another agent's shares"
+        );
+        let dashboard = post_json(
+            &guarded,
+            "/api/address",
+            "full",
+            r#"{"name":"cctop-share"}"#,
+        );
+        assert!(dashboard.starts_with("HTTP/1.1 400 "), "{dashboard}");
+        assert!(
+            !seen.lock().unwrap().iter().any(|(m, ..)| m != "GET"),
+            "a refusal wrote something"
+        );
+    }
+
+    /// The read-only link and a `--no-actions` serve cannot choose an address,
+    /// nor read the controls' state, and a GET cannot write.
+    #[test]
+    fn only_the_full_token_on_an_acting_serve_chooses_addresses() {
+        let (guarded, seen) = addressed();
+        for target in ["/api/address", "/api/address/8f14e45f"] {
+            let view = post_json(&guarded, target, "view", r#"{"name":"myagent"}"#);
+            assert!(view.starts_with("HTTP/1.1 403 "), "{target}: {view}");
+            let read = status_of(&guarded, "GET", target, &bearer_line("view"));
+            assert!(read.contains(" 403 "), "{target}: {read}");
+        }
+        let (fake, _) = address::tests::fake();
+        let no_actions = Shared {
+            actions: false,
+            addresses: Arc::new(fake),
+            ..shared("full", "view")
+        };
+        for target in ["/api/address", "/api/address/8f14e45f"] {
+            let refused = post_json(&no_actions, target, "full", r#"{"name":"myagent"}"#);
+            assert!(refused.starts_with("HTTP/1.1 403 "), "{target}: {refused}");
+            let read = status_of(&no_actions, "GET", target, &bearer_line("full"));
+            assert!(read.contains(" 403 "), "{target}: {read}");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "Cloudflare was asked");
     }
 
     #[test]
