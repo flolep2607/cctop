@@ -164,27 +164,62 @@ fn fetch_latest() -> Result<Release> {
 /// this is cheap to call on every start. Failures are silent: a monitor that
 /// cannot reach GitHub should still run.
 pub fn cached_latest_version() -> Option<String> {
-    let path = config::CACHE_DIR.join("update-check.json");
-    if let Ok(text) = std::fs::read_to_string(&path)
+    latest_checked(
+        &config::CACHE_DIR.join("update-check.json"),
+        asset_target(),
+        fetch_latest,
+    )
+}
+
+/// [`cached_latest_version`] with the cache file, the platform and the network
+/// handed in, so a test can stand in for all three.
+///
+/// A release with nothing built for `target` is not an answer yet, and is
+/// neither returned nor cached. The workflow publishes a release only once its
+/// archives are attached, but v0.31.0 went out seven minutes before them, and
+/// every cctop that looked in that window was told of a version it could not
+/// fetch — then failed to, on screen, at startup. Caching that would have held
+/// the half-made answer for the hour; leaving it uncached asks again next start.
+fn latest_checked(
+    path: &Path,
+    target: Option<&str>,
+    fetch: impl FnOnce() -> Result<Release>,
+) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(path)
         && let Ok(cache) = serde_json::from_str::<CheckCache>(&text)
         && unix_secs().saturating_sub(cache.checked_at) < CHECK_MAX_AGE_SECS
     {
         return Some(cache.latest);
     }
 
-    let latest = fetch_latest()
-        .ok()?
-        .tag_name
-        .trim_start_matches('v')
-        .to_string();
-    let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
+    let release = fetch().ok()?;
+    if let Some(target) = target
+        && archive(&release, target).is_none()
+    {
+        return None;
+    }
+    let latest = release.version().to_string();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     if let Ok(text) = serde_json::to_string(&CheckCache {
         checked_at: unix_secs(),
         latest: latest.clone(),
     }) {
-        let _ = std::fs::write(&path, text);
+        let _ = std::fs::write(path, text);
     }
     Some(latest)
+}
+
+/// The release's archive for `target`, which is absent while the workflow is
+/// still building it.
+fn archive<'a>(release: &'a Release, target: &str) -> Option<&'a Asset> {
+    release
+        .assets
+        .iter()
+        // The checksum sidecars share the archive's prefix, so match on the
+        // archive extensions rather than on the target alone.
+        .find(|a| a.name.contains(target) && a.name.ends_with(".tar.gz"))
 }
 
 /// The newer version available, or `None` when already current.
@@ -472,8 +507,28 @@ pub fn run(force: bool) -> Result<()> {
         println!("Already on the newest version ({current}).");
         return Ok(());
     }
+    if archive(&release, target).is_none() {
+        println!("{}", not_ready(latest, target, current));
+        return Ok(());
+    }
 
-    install(&release, target, current, staging_dir).map(|_| ())
+    let exe = std::env::current_exe().ok();
+    install(&release, target, current, staging_dir)?;
+    if let Some(exe) = exe {
+        record_install(latest, &exe);
+    }
+    Ok(())
+}
+
+/// What to say about a release whose archive for this platform is not up yet.
+///
+/// Not an error: the release is real and its binaries are minutes away, so the
+/// honest answer is "soon", and the version already installed is fine until then.
+fn not_ready(latest: &str, target: &str, current: &str) -> String {
+    format!(
+        "cctop {latest} is published, but its {target} binary is still being built; \
+         staying on {current} — try again in a few minutes."
+    )
 }
 
 /// Fetch the archive for `target` and put it in place of the running binary.
@@ -489,12 +544,7 @@ fn install(
     place: impl FnOnce() -> Result<Placement>,
 ) -> Result<bool> {
     let latest = release.version();
-    let asset = release
-        .assets
-        .iter()
-        // The checksum sidecars share the archive's prefix, so match on the
-        // archive extensions rather than on the target alone.
-        .find(|a| a.name.contains(target) && a.name.ends_with(".tar.gz"))
+    let asset = archive(release, target)
         .ok_or_else(|| anyhow!("release {latest} has no archive for {target}"))?;
 
     // Claim the staging directory before downloading: whether the new binary can
@@ -618,6 +668,26 @@ pub fn auto_at_startup(enabled: bool, prefs: &mut crate::cache::UiPrefs) {
         return;
     };
     let current = current_version();
+    let marker = config::CACHE_DIR.join(INSTALLED_FILE);
+    // The guard against doing this forever. Installing `latest` here once
+    // already, and still being `current`, means the file at this path is not
+    // what runs — so a second install would land exactly where the first did and
+    // change nothing, at the cost of a download (and perhaps a sudo prompt) on
+    // every launch. Said every time rather than once: it is a broken state, and
+    // a line on each start is what gets it reported.
+    if already_installed(read_installed(&marker), &latest, &exe) {
+        note(&format!(
+            "not installing {latest} again at {}: it was installed there, yet {current} is what started",
+            exe.display()
+        ));
+        eprintln!(
+            "cctop {latest} was already installed at {}, but {current} is what started; not \
+             installing it again. `cctop --update` retries, and `cctop --version` shows which \
+             one runs.",
+            exe.display()
+        );
+        return;
+    }
     let declined = prefs.declined_update.as_deref() == Some(latest.as_str());
     let recourse = recourse(
         is_root(),
@@ -645,17 +715,35 @@ pub fn auto_at_startup(enabled: bool, prefs: &mut crate::cache::UiPrefs) {
         }
     };
     let updated = fetch_latest().and_then(|release| {
-        match is_newer(release.version(), current) {
+        let version = release.version().to_string();
+        if !is_newer(&version, current) {
             // The cache was stale in the direction that matters: it named a
             // release that has since been replaced by the very version running.
-            false => Ok(false),
-            true => install(&release, target, current, move || Ok(placement)),
+            return Ok(Fetched::Current);
         }
+        if archive(&release, target).is_none() {
+            return Ok(Fetched::NotReady(version));
+        }
+        install(&release, target, current, move || Ok(placement))
+            .map(|notes| Fetched::Installed(version, notes))
     });
-    let Ok(showed_notes) = updated else {
-        println!("Could not update just now; starting {current} instead.");
-        return;
+    let (installed, showed_notes) = match updated {
+        Ok(Fetched::Installed(version, notes)) => (version, notes),
+        Ok(Fetched::Current) => return,
+        // Announced a line ago, so it is answered rather than left hanging —
+        // but as the wait it is, not as a failure.
+        Ok(Fetched::NotReady(version)) => {
+            println!("{}", not_ready(&version, target, current));
+            return;
+        }
+        Err(error) => {
+            note(&format!("could not update to {latest}: {error:#}"));
+            println!("Could not update just now; starting {current} instead.");
+            return;
+        }
     };
+    record_install(&installed, &exe);
+    warn_if_shadowed(&exe);
     // The UI is about to take the alternate screen, which puts everything above
     // on the other side of a curtain until cctop exits. Notes nobody gets to
     // read are not notes, and this is the one moment they are what the user is
@@ -666,6 +754,124 @@ pub fn auto_at_startup(enabled: bool, prefs: &mut crate::cache::UiPrefs) {
         let _ = std::io::stdin().read_line(&mut String::new());
     }
     relaunch();
+}
+
+/// What the startup path's fetch came to.
+enum Fetched {
+    /// The release is the version already running: nothing to do.
+    Current,
+    /// Published, but not yet built for this platform.
+    NotReady(String),
+    /// Installed this version, and whether its notes were shown.
+    Installed(String, bool),
+}
+
+/// Where the last install this machine made is recorded, in `CACHE_DIR`.
+const INSTALLED_FILE: &str = "update-installed.json";
+
+/// The last version installed, and over which binary.
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct Installed {
+    version: String,
+    exe: PathBuf,
+}
+
+fn read_installed(path: &Path) -> Option<Installed> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Remember that `version` now sits at `exe`, for [`already_installed`].
+fn record_install(version: &str, exe: &Path) {
+    note(&format!("installed {version} at {}", exe.display()));
+    let path = config::CACHE_DIR.join(INSTALLED_FILE);
+    let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
+    let installed = Installed {
+        version: version.to_string(),
+        exe: exe.to_path_buf(),
+    };
+    if let Ok(text) = serde_json::to_string(&installed) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// Whether `latest` was already put at `exe`, by this or an earlier run.
+///
+/// Only asked by a run that is older than `latest`, so a yes means that install
+/// did not become what starts from that path. Keyed on the path as well as the
+/// version: a second cctop elsewhere is a different file, still behind, and
+/// updating it is the right thing to do.
+fn already_installed(last: Option<Installed>, latest: &str, exe: &Path) -> bool {
+    last.is_some_and(|last| last.version == latest && last.exe == exe)
+}
+
+/// Append one line to `CACHE_DIR/update.log`.
+///
+/// The update loop reported in #205 left nothing behind to say which step
+/// repeated; this is that trail. Started over past 64 KiB rather than rotated:
+/// it is for the last few updates, and a line is written only when one is
+/// attempted.
+fn note(line: &str) {
+    use std::io::Write;
+    let path = config::CACHE_DIR.join("update.log");
+    let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
+    let full = std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(!full)
+        .write(true)
+        .truncate(full)
+        .open(&path);
+    if let Ok(mut file) = file {
+        let _ = writeln!(
+            file,
+            "{} {} (pid {}): {line}",
+            unix_secs(),
+            current_version(),
+            std::process::id()
+        );
+    }
+}
+
+/// The first `name` on `path`, the way a shell would find it.
+fn first_on_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
+/// The `cctop` a shell would run, when it is not the file just updated.
+fn shadowing(exe: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let found = first_on_path("cctop", path)?;
+    let same = match (found.canonicalize(), exe.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => found == exe,
+    };
+    (!same).then_some(found)
+}
+
+/// Say so when typing `cctop` would not run what was just updated.
+///
+/// Two installs — `~/.cargo/bin` and `/usr/local/bin`, say — update one at a
+/// time, and the one left behind announces the same release again on its next
+/// start. That reads as an update that will not stick, and one line here is what
+/// turns it into the two installs it actually is.
+fn warn_if_shadowed(exe: &Path) {
+    if let Some(other) = shadowing(exe, &std::env::var_os("PATH").unwrap_or_default()) {
+        note(&format!(
+            "{} shadows {} on PATH",
+            other.display(),
+            exe.display()
+        ));
+        println!(
+            "Note: `cctop` on your PATH is {}, which this update did not touch — {} is the one \
+             that was updated.",
+            other.display(),
+            exe.display()
+        );
+    }
 }
 
 /// Offer to let cargo install the newer release, and do it if that is wanted.
@@ -791,12 +997,34 @@ fn relaunch() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let mut command = relaunch_command(exe, std::env::args_os().skip(1).collect());
+    let exe = on_disk(exe);
+    let mut command = relaunch_command(exe.clone(), std::env::args_os().skip(1).collect());
     use std::os::unix::process::CommandExt;
     // Replaces this process outright, so there is no wrapper left holding a
     // terminal that two programs then both believe they own.
     let error = command.exec();
+    note(&format!("could not exec {}: {error}", exe.display()));
     println!("Could not start the new version ({error}); continuing.");
+}
+
+/// The path a binary was started from, now that it has been replaced.
+///
+/// `current_exe` reads `/proc/self/exe`, and once the update has renamed the new
+/// file over the old one the kernel answers with the old inode's name plus
+/// ` (deleted)` — a path with no file at it. Every startup update exec'd that,
+/// failed, and carried on as the old version in memory, which then announced
+/// the very release it had just installed: the update that seemed to happen
+/// again and again in #205. The file at the path without the suffix is the new
+/// binary, which is the one to start.
+fn on_disk(exe: PathBuf) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    if exe.exists() {
+        return exe;
+    }
+    match exe.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+        Some(path) => PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+        None => exe,
+    }
 }
 
 /// Where the new binary is put in place from.
@@ -1321,6 +1549,144 @@ mod tests {
             .get_envs()
             .any(|(k, v)| k == JUST_UPDATED && v == Some(std::ffi::OsStr::new("1")));
         assert!(marked, "the new process could update itself again");
+    }
+
+    /// A GitHub release, as the API sends it, with archives for `targets`.
+    fn published(tag: &str, targets: &[&str]) -> Result<Release> {
+        let assets: Vec<_> = targets
+            .iter()
+            .flat_map(|t| {
+                [
+                    format!("cctop-{t}.tar.gz"),
+                    format!("cctop-{t}.tar.gz.sha256"),
+                ]
+            })
+            .map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "browser_download_url": format!("http://127.0.0.1:9/{name}"),
+                })
+            })
+            .collect();
+        let json = serde_json::json!({ "tag_name": tag, "assets": assets, "body": null });
+        Ok(serde_json::from_value(json)?)
+    }
+
+    /// v0.31.0 was visible as the latest release for seven minutes before its
+    /// binaries were attached. A check in that window must not name it: it
+    /// would be announced, fetched, found empty and reported as a failure at
+    /// every start — and cached, for the hour.
+    #[test]
+    fn a_release_without_this_platforms_archive_is_not_news_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("update-check.json");
+        let target = "x86_64-unknown-linux-musl";
+
+        let bare = latest_checked(&cache, Some(target), || published("v0.32.0", &[]));
+        assert_eq!(bare, None, "a release with no binaries was offered");
+        assert!(!cache.exists(), "the half-made release was cached");
+
+        // Built for the other architecture only: still nothing for this one.
+        let other = || published("v0.32.0", &["aarch64-unknown-linux-musl"]);
+        assert_eq!(latest_checked(&cache, Some(target), other), None);
+
+        let ready = latest_checked(&cache, Some(target), || {
+            published("v0.32.0", &[target, "aarch64-unknown-linux-musl"])
+        });
+        assert_eq!(ready.as_deref(), Some("0.32.0"));
+        // And cached: the next start answers without asking GitHub at all.
+        let cached = latest_checked(&cache, Some(target), || panic!("fetched again"));
+        assert_eq!(cached.as_deref(), Some("0.32.0"));
+    }
+
+    /// The archive is told apart from its checksum sidecar, which shares its
+    /// name up to the extension.
+    #[test]
+    fn the_archive_is_the_tarball_and_not_its_checksum() {
+        let target = "x86_64-unknown-linux-musl";
+        let release = published("v0.32.0", &[target]).unwrap();
+        let found = archive(&release, target).map(|a| a.name.as_str());
+        assert_eq!(found, Some("cctop-x86_64-unknown-linux-musl.tar.gz"));
+        assert!(!not_ready("0.32.0", target, "0.31.0").contains("Could not"));
+    }
+
+    /// The relaunch that never happened: once the update has renamed the new
+    /// binary over the old, `/proc/self/exe` names the old inode with
+    /// ` (deleted)` on the end, and exec'ing that fails. Reproduced on a real
+    /// process whose file is swapped under it, the way `self_replace` does.
+    #[test]
+    fn the_relaunch_starts_the_file_now_at_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("cctop");
+        std::fs::copy("/bin/sleep", &exe).unwrap();
+        let mut child = std::process::Command::new(&exe).arg("5").spawn().unwrap();
+
+        let staged = dir.path().join("cctop.new");
+        std::fs::copy("/bin/sleep", &staged).unwrap();
+        std::fs::rename(&staged, &exe).unwrap();
+        let seen = std::fs::read_link(format!("/proc/{}/exe", child.id())).unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            !seen.exists(),
+            "the kernel named a file that exists: {}",
+            seen.display()
+        );
+        assert_eq!(on_disk(seen), exe);
+        // A path that is fine is left alone.
+        assert_eq!(on_disk(exe.clone()), exe);
+    }
+
+    /// The hard stop: the same version is never installed over the same file
+    /// twice in a row, whatever made the first one not take.
+    #[test]
+    fn a_version_installed_at_a_path_is_not_installed_there_again() {
+        let exe = Path::new("/usr/local/bin/cctop");
+        let last = |version: &str, at: &str| {
+            Some(Installed {
+                version: version.into(),
+                exe: at.into(),
+            })
+        };
+        assert!(already_installed(
+            last("0.32.0", "/usr/local/bin/cctop"),
+            "0.32.0",
+            exe
+        ));
+        // A newer release is a new install.
+        assert!(!already_installed(
+            last("0.31.0", "/usr/local/bin/cctop"),
+            "0.32.0",
+            exe
+        ));
+        // Another copy of cctop is behind on its own account.
+        assert!(!already_installed(
+            last("0.32.0", "/home/me/.local/bin/cctop"),
+            "0.32.0",
+            exe
+        ));
+        assert!(!already_installed(None, "0.32.0", exe));
+    }
+
+    /// Two installs on PATH: the update went to one, the shell runs the other.
+    #[test]
+    fn an_install_shadowed_on_path_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let (first, second) = (root.path().join("a"), root.path().join("b"));
+        for dir in [&first, &second] {
+            std::fs::create_dir(dir).unwrap();
+            let bin = dir.join("cctop");
+            std::fs::write(&bin, b"").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        assert_eq!(
+            shadowing(&second.join("cctop"), &path),
+            Some(first.join("cctop"))
+        );
+        assert_eq!(shadowing(&first.join("cctop"), &path), None);
     }
 
     /// Nothing to report when nothing moved, which is what `--update --force`
