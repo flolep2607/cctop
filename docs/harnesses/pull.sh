@@ -38,7 +38,9 @@ EOF
 # Reads "url<TAB>relative/path" on stdin.
 fetch_list() { # <dir>
   local dir="$1"
-  xargs -P 8 -n 2 bash -c '
+  # A line without its path would pair the next URL with this one's; keep
+  # only well-formed lines so one odd entry cannot shift all the rest.
+  grep -P '^\S+\t\S+$' | xargs -P 8 -n 2 bash -c '
     out="'"$dir"'/$1"
     mkdir -p "$(dirname "$out")"
     curl -sSLf --retry 2 -o "$out" "$0" || echo "  ! $0" >&2
@@ -77,8 +79,12 @@ reset_dir() { rm -rf "$root/$1"; mkdir -p "$root/$1"; echo "$root/$1"; }
 
 pull_claude() {
   local dir; dir="$(reset_dir claude)"
+  # English pages only. Since 2026-10 the index also links translated indexes
+  # (`/docs/_llms/es.md`, ...), which have no `en/` path to mirror under; one
+  # such line without its tab knocked every following url/path pair in
+  # `fetch_list` out of step, so most pages were written under their own URL.
   curl -sSLf https://code.claude.com/docs/llms.txt \
-    | grep -oE 'https://code\.claude\.com/docs/[^)]+\.md' | sort -u \
+    | grep -oE 'https://code\.claude\.com/docs/en/[^)]+\.md' | sort -u \
     | sed -E 's|(https://code\.claude\.com/docs/en/(.*))|\1\t\2|' \
     | fetch_list "$dir"
   stamp "$dir" "<https://code.claude.com/docs> (the \`.md\` twin of each page listed in its \`llms.txt\`)" \

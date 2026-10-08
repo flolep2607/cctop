@@ -34,6 +34,25 @@ real ptys and real subprocesses. Two of those tests assert wall-clock margins
 so running the full suite concurrently with other builds makes it fail for
 reasons that have nothing to do with your change.
 
+The first run after a build can also be several times slower than the next
+(#141): 40 s rather than 10, with a handful of tests taking seconds that take
+a fraction of one on a rerun. What is known of the cause:
+
+- `recall::tests::recall_finds_the_passage_and_skips_the_caller` used to load
+  the fetched 30 MB embedding model from `~/.cache/cctop` — cold off the disk on
+  a first run, and only on a machine that had fetched one. Under test,
+  `config::CACHE_DIR` is now a temporary directory of the process's own, so no
+  test reads or writes the real cache.
+- `advise::tests::the_ledger_stays_small` takes an `flock` per write and polls
+  for it every millisecond. A child forked by another test in the same binary
+  holds an inherited flock until it execs, so under a parallel run with many
+  forks that wait can add up.
+- The `chat::tests::an_opencode_*` tests build sqlite fixtures; the first one
+  pays for sqlite's first touch.
+
+So a slow first run on its own is not a regression: compare it against a second
+run of the same command before blaming any one test.
+
 `tools/targeted-test.sh` maps what you changed to the tests worth running:
 
 ```bash

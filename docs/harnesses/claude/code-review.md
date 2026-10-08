@@ -7,7 +7,7 @@
 > Set up automated PR reviews that catch logic errors, security vulnerabilities, and regressions using multi-agent analysis of your full codebase
 
 <Note>
-  Code Review is in research preview, available for [Team and Enterprise](https://claude.ai/admin-settings/claude-code) subscriptions. It is not available for organizations with [Zero Data Retention](/docs/en/zero-data-retention) enabled. On other plans, you can still [review a diff locally](#review-a-diff-locally) with the `/code-review` command.
+  Code Review is in research preview, available for [Team and Enterprise](https://claude.ai/admin-settings/claude-code) subscriptions. It is not available for organizations with [Zero Data Retention](/docs/en/zero-data-retention) enabled or with the [HIPAA configuration](/docs/en/hipaa-setup) applied, and is not covered under Anthropic's BAA. On other plans, you can still [review a diff locally](#review-a-diff-locally) with the `/code-review` command.
 </Note>
 
 Code Review analyzes your GitHub pull requests and posts findings as inline comments on the lines of code where it found issues. A fleet of specialized agents examine the code changes in the context of your full codebase, looking for logic errors, security vulnerabilities, broken edge cases, and subtle regressions.
@@ -38,13 +38,13 @@ Reviews scale in cost with PR size and complexity, completing in 20 minutes on a
 
 Each finding is tagged with a severity level:
 
-| Marker | Severity     | Meaning                                                             |
-| :----- | :----------- | :------------------------------------------------------------------ |
-| 🔴     | Important    | A bug that should be fixed before merging                           |
-| 🟡     | Nit          | A minor issue, worth fixing but not blocking                        |
-| 🟣     | Pre-existing | A bug that exists in the codebase but was not introduced by this PR |
+| Marker | Severity | Meaning |
+| :- | :- | :- |
+| 🔴 | Important | A bug that should be fixed before merging |
+| 🟡 | Nit | A minor issue, worth fixing but not blocking |
+| 🟣 | Pre-existing | A bug that exists in the codebase but was not introduced by this PR |
 
-Findings include a collapsible extended reasoning section you can expand to understand why Claude flagged the issue and how it verified the problem.
+Findings include a collapsed **Why this was flagged** section that you can expand to read why Claude flagged the issue and how it verified the problem.
 
 ### Rate and reply to findings
 
@@ -52,14 +52,16 @@ Each review comment from Claude arrives with 👍 and 👎 already attached so b
 
 Replying to an inline comment does not prompt Claude to respond or update the PR. To act on a finding, fix the code and push. If the PR is subscribed to push-triggered reviews, the next run resolves the thread when the issue is fixed. To request a fresh review without pushing, comment `@claude review` as a [top-level PR comment](#manually-trigger-reviews).
 
+To dismiss a finding without a code change, resolve its thread; replying doesn't dismiss it.
+
 ### Check run output
 
 Beyond the inline review comments, each review populates the **Claude Code Review** check run that appears alongside your CI checks. Expand its **Details** link to see a summary of every finding in one place, sorted by severity:
 
-| Severity     | File:Line                 | Issue                                                          |
-| ------------ | ------------------------- | -------------------------------------------------------------- |
+| Severity | File:Line | Issue |
+| - | - | - |
 | 🔴 Important | `src/auth/session.ts:142` | Token refresh races with logout, leaving stale sessions active |
-| 🟡 Nit       | `src/auth/session.ts:88`  | `parseExpiry` silently returns 0 on malformed input            |
+| 🟡 Nit | `src/auth/session.ts:88` | `parseExpiry` silently returns 0 on malformed input |
 
 Each finding also appears as an annotation in the **Files changed** tab, marked directly on the relevant diff lines. Important findings render with a red marker, nits with a yellow warning, and pre-existing bugs with a gray notice. Annotations and the severity table are written to the check run independently of inline review comments, so they remain available even if GitHub rejects an inline comment on a line that moved.
 
@@ -104,7 +106,9 @@ An Owner enables Code Review once for the organization and selects which reposit
 
     * **Once after PR creation**: review runs once when a PR is opened or marked ready for review
     * **After every push**: review runs on every push to the PR branch, catching new issues as the PR evolves and auto-resolving threads when you fix flagged issues
-    * **Manual**: reviews start only when someone [comments `@claude review` on a PR](#manually-trigger-reviews); `@claude review always` starts a review and subscribes the PR to reviews on subsequent pushes
+    * **Manual**: opening or pushing to a PR doesn't start a review; comment [`@claude review`](#manually-trigger-reviews) to request one, or `@claude review always` to also subscribe the PR to reviews on subsequent pushes
+
+    Whichever option you choose, Claude reviews a [pull request from a fork](#review-pull-requests-from-forks) only when someone comments `@claude review` on it.
 
     Reviewing on every push runs the most reviews and costs the most. Manual mode is useful for high-traffic repos where you want to opt specific PRs into review, or to only start reviewing your PRs once they're ready.
   </Step>
@@ -118,11 +122,11 @@ To verify setup, open a test PR. If you chose an automatic trigger, a check run 
 
 Comment commands start a review on demand. They work regardless of the repository's configured trigger, so you can use them to opt specific PRs into review in Manual mode or to get an immediate re-review in other modes.
 
-| Command                 | What it does                                                                  |
-| :---------------------- | :---------------------------------------------------------------------------- |
-| `@claude review`        | Starts a single review without subscribing the PR to future pushes            |
+| Command | What it does |
+| :- | :- |
+| `@claude review` | Starts a single review without subscribing the PR to future pushes |
 | `@claude review always` | Starts a review and subscribes the PR to push-triggered reviews going forward |
-| `@claude review once`   | Same as `@claude review`: starts a single review without subscribing          |
+| `@claude review once` | Same as `@claude review`: starts a single review without subscribing |
 
 Use `@claude review always` when you want every subsequent push to the PR to start a fresh review, such as on a high-priority PR in a repository set to Manual mode. Because the bare command doesn't subscribe the PR, you can request a one-off second opinion without changing whether later pushes trigger reviews.
 
@@ -134,12 +138,23 @@ For any of these commands to trigger a review:
 
 * Post it as a top-level PR comment, not an inline comment on a diff line
 * Put the command at the start of the comment, with `once` or `always` on the same line as the rest of the command
-* You must have owner, member, or collaborator access to the repository
+* You must have write, maintain, or admin permission on the repository
 * The PR must be open
+
+If the repository belongs to an organization and your membership in that organization is private, which is GitHub's default, GitHub doesn't identify you to Claude as a member. Claude may still react to your comment with 👀, but it doesn't start a review unless you were added to the repository directly as a collaborator, even when a team or the organization's base permissions give you write access. To fix this, [make your organization membership public](https://docs.github.com/en/account-and-profile/setting-up-and-managing-your-personal-account-on-github/managing-your-membership-in-organizations/publicizing-or-hiding-organization-membership) or ask a repository admin to add you to the repository as a collaborator.
 
 Unlike automatic triggers, manual triggers run on draft PRs, since an explicit request signals you want the review now regardless of draft status.
 
 If a review is already running on that PR, the request is queued until the in-progress review completes. You can monitor progress via the check run on the PR.
+
+### Review pull requests from forks
+
+Claude doesn't review a pull request from a fork automatically, regardless of the repository's **Review Behavior** setting. To start one, comment `@claude review` on the pull request. The [requirements for comment commands](#manually-trigger-reviews) still apply, and the write access you need is to the base repository, not the fork.
+
+To get another review of a fork pull request, post a new `@claude review` comment. `@claude review always` works too, but doesn't subscribe the pull request to reviews on later pushes. Nothing other than a comment command starts a review on a fork pull request:
+
+* Clicking **Re-run** on the check run doesn't start a review
+* Pushing new commits doesn't start a review, even in a repository set to **After every push**
 
 ## Customize reviews
 
@@ -160,7 +175,7 @@ For review-specific guidance that you don't want applied to general Claude Code 
 
 `REVIEW.md` is a file at your repository root that tailors Code Review to your repo. The agents in the review pipeline that find and verify findings receive its contents as your repository's review instructions, alongside Code Review's default review guidance, and the agents that rank and report findings consult it before settling severity and writing the review.
 
-The agents read the file's text as-is, so `REVIEW.md` is plain instructions: [`@` import syntax](/docs/en/memory#import-additional-files) is not expanded, and referenced files are not read along with it. Put the rules you want enforced directly in the file.
+Put the rules you want enforced directly in `REVIEW.md`.
 
 #### What you can tune
 
@@ -223,12 +238,12 @@ Length has a cost: a long `REVIEW.md` dilutes the rules that matter most. Keep i
 
 Go to [claude.ai/analytics/code-review](https://claude.ai/analytics/code-review) to see Code Review activity across your organization. The dashboard shows:
 
-| Section              | What it shows                                                                            |
-| :------------------- | :--------------------------------------------------------------------------------------- |
-| PRs reviewed         | Daily count of pull requests reviewed over the selected time range                       |
-| Cost weekly          | Weekly spend on Code Review                                                              |
-| Feedback             | Count of review comments that were auto-resolved because a developer addressed the issue |
-| Repository breakdown | Per-repo counts of PRs reviewed and comments resolved                                    |
+| Section | What it shows |
+| :- | :- |
+| PRs reviewed | Daily count of pull requests reviewed over the selected time range |
+| Cost weekly | Weekly spend on Code Review |
+| Feedback | Count of review comments that were auto-resolved because a developer addressed the issue |
+| Repository breakdown | Per-repo counts of PRs reviewed and comments resolved |
 
 Dashboard cost figures are estimates for monitoring activity. For invoice-accurate spend, refer to your Anthropic bill.
 
@@ -240,9 +255,9 @@ The review trigger you choose affects total cost:
 
 * **Once after PR creation**: runs once per PR
 * **After every push**: runs on each push, multiplying cost by the number of pushes
-* **Manual**: no reviews until someone comments `@claude review` on a PR
+* **Manual**: no reviews on open or push, so cost accrues only from reviews someone requests
 
-In Once after PR creation or Manual mode, commenting `@claude review always` [opts the PR into push-triggered reviews](#manually-trigger-reviews), so additional cost accrues per push after that comment. In After every push mode, pushes already trigger reviews, so the subscription doesn't change per-push cost. Commenting `@claude review` runs a single review without subscribing to future pushes.
+In Once after PR creation or Manual mode, commenting `@claude review always` [opts the PR into push-triggered reviews](#manually-trigger-reviews), so additional cost accrues per push after that comment. In After every push mode, pushes already trigger reviews, so the subscription doesn't change per-push cost. Commenting `@claude review` runs a single review without subscribing to future pushes. Claude reviews a [pull request from a fork](#review-pull-requests-from-forks) only when someone comments `@claude review`, so a fork pull request never accrues per-push cost in any mode.
 
 Costs appear on your Anthropic bill regardless of whether your organization uses Amazon Bedrock or Google Cloud's Agent Platform for other Claude Code features. To set a monthly spend cap for Code Review, go to [claude.ai/admin-settings/usage](https://claude.ai/admin-settings/usage) and configure the limit for the Claude Code Review service.
 
@@ -250,19 +265,20 @@ Monitor spend via the weekly cost chart in [analytics](#view-usage) or the per-r
 
 ## Troubleshooting
 
-Review runs are best-effort. A failed run never blocks your PR, but it also doesn't retry on its own. This section covers how to recover from a failed run and where to look when the check run reports issues you can't find.
+Review runs are best-effort, and a failed run never blocks your PR. Code Review retries some interrupted reviews on its own. This section covers how to run a review again yourself and where to look when the check run reports issues you can't find.
 
 ### Retrigger a failed or timed-out review
 
-When the review infrastructure hits an internal error or exceeds its time limit, the check run completes with a title of **Code review encountered an error** or **Code review timed out**. The conclusion is still neutral, so nothing blocks your merge, but no findings are posted.
+When a review fails or exceeds its time limit, the check run completes with a title such as **Code review failed** or **Code review timed out**. The conclusion is still neutral, so nothing blocks your merge. Unless the check run's summary says a new review of the commit has been queued automatically, run the review again yourself.
 
-To run the review again, comment `@claude review` on the PR. This starts a fresh review without subscribing the PR to future pushes. If the PR is already subscribed to push-triggered reviews, pushing a new commit also starts a new review.
+To run the review again, comment `@claude review` on the PR. This starts a fresh review without subscribing the PR to future pushes. If the PR isn't [from a fork](#review-pull-requests-from-forks), you can instead click **Re-run** on the **Claude Code Review** check in GitHub's Checks tab. A re-run also starts a fresh review without subscribing the PR.
 
-The **Re-run** button in GitHub's Checks tab does not retrigger Code Review. Use the comment command or a new push instead.
+### Review didn't run and the PR shows a budget message
 
-### Review didn't run and the PR shows a spend-cap message
+When your organization's monthly spend cap for Code Review is reached or its usage-credits balance is used up, Code Review skips the review and posts a single comment on the PR. The comment and the check-run card both name the cause and link the admin page where an admin fixes it:
 
-When your organization's monthly spend cap is reached, Code Review posts a single comment on the PR explaining that the review was skipped. Reviews resume automatically at the start of the next billing period, or immediately when an admin raises the cap at [claude.ai/admin-settings/usage](https://claude.ai/admin-settings/usage).
+* **Spend cap reached**: reviews resume at the start of the next billing period, or immediately after an admin raises the cap at [claude.ai/admin-settings/usage](https://claude.ai/admin-settings/usage)
+* **Usage credits used up**: reviews resume once an admin adds more [usage credits](https://support.claude.com/en/articles/12429409-extra-usage-for-paid-claude-plans) at [claude.ai/admin-settings/usage](https://claude.ai/admin-settings/usage)
 
 ### Find issues that aren't showing as inline comments
 
@@ -274,7 +290,7 @@ If the check run title says issues were found but you don't see inline review co
 
 ## Review a diff locally
 
-The [`/code-review` command](/docs/en/commands) reviews a diff in your terminal without installing the GitHub App. It reports correctness bugs and reuse, simplification, and efficiency cleanups.
+The [`/code-review` command](/docs/en/commands) reviews a diff in your terminal without installing the GitHub App. It reports correctness bugs. Depending on your model and effort level, the review also covers reuse, simplification, and efficiency cleanups.
 
 `/review` is an alias of `/code-review`; before v2.1.223, it was a separate command that ran a single-pass, read-only review of a GitHub pull request.
 
@@ -291,8 +307,13 @@ The [`/code-review` command](/docs/en/commands) reviews a diff in your terminal 
     You can also add flags:
 
     * `--fix`: applies the findings to your working tree after the review
-    * `--comment`: posts the findings as inline PR comments
+    * `--comment`: posts the findings on a GitHub pull request as inline comments, or on a GitLab merge request as a single note
     * `--post`: on an `ultra` cloud review of a `github.com` pull request, preselects posting the finished findings to the PR in the launch dialog; see [Post findings to the pull request](/docs/en/ultrareview#post-findings-to-the-pull-request). Requires Claude Code v2.1.227 or later
+    * `--max-findings <n>`, `--max-findings all`, or `--max-findings default`: reports up to `n` findings, or every finding with `all`, in place of the review's usual limit. Later reviews reuse the value you typed until you pass `--max-findings default`. Requires Claude Code v2.1.288 or later
+
+    When you pass `--comment` for a GitLab merge request, Claude Code posts the findings through GitLab's `glab` CLI. Requires Claude Code v2.1.257 or later. When `glab` isn't installed, Claude prints the findings in the terminal instead.
+
+    Pass the merge request as its URL or a `!123` reference. Claude Code treats a bare number or branch name as a merge request only when the checkout's origin is on `gitlab.com`. On a self-managed GitLab instance, pass the URL or `!123` form.
   </Step>
 
   <Step title="Keep working">
@@ -304,12 +325,12 @@ The [`/code-review` command](/docs/en/commands) reviews a diff in your terminal 
   </Step>
 </Steps>
 
-Claude reports the findings as text in the reply in both of these runs, even when a host application requests the findings list described below:
+Claude reports the findings as text in the reply in both of these runs, even when a host application requests a findings list:
 
 * In a terminal session, where `/code-review` runs the review as a [forked subagent](/docs/en/skills#run-skills-in-a-subagent)
 * In a `-p` run with text or JSON output
 
-In a host application that requests the findings list, such as the [desktop app](/docs/en/desktop), Claude reports the review's findings through the [`ReportFindings` tool](/docs/en/tools-reference) instead. Claude Code renders the report as a findings list, and each entry shows the file location, a one-sentence summary, and a category tag such as `correctness` when the finding carries one. A host request applies at every effort level and requires Claude Code v2.1.218 or later.
+In a host application that requests the findings list, such as the [desktop app](/docs/en/desktop#review-your-code), Claude reports the review's findings through the [`ReportFindings` tool](/docs/en/tools-reference) instead. Claude Code renders the report as a findings list, and each entry shows the file location, a one-sentence summary, and a category tag such as `correctness` when the finding carries one. A host request applies at every effort level and requires Claude Code v2.1.218 or later.
 
 When Claude fixes reported findings later in the session, it reports them again, and Claude Code marks each finding in the updated findings list as fixed, skipped, or no change needed.
 
@@ -319,7 +340,7 @@ The review follows your `CLAUDE.md` like any Claude Code session, but it doesn't
 
 ### Tune effort and arguments
 
-Pass an [effort level](/docs/en/model-config#adjust-effort-level) to trade coverage for confidence. At `low` and `medium`, the review reports only the findings it's most confident in, so you see fewer false positives; `high` through `max` broaden coverage and may include findings the review is less sure about.
+Pass an [effort level](/docs/en/model-config#adjust-effort-level) to trade coverage for confidence. At `low`, the review reports the findings it's most confident in, so you see fewer false positives. From `medium` through `max`, the review broadens coverage.
 
 When you don't type a level, the review reuses the last level from `low` through `max` you typed, even in an earlier session, and Claude Code shows a notice such as `Reusing high effort, the level you typed last time`. Type a level, like `/code-review high`, to change what later runs reuse; a level you pass in a non-interactive `-p` run doesn't update it. `ultra` neither updates nor uses the remembered level. If you've never typed a level, the review uses the session's current effort. Before v2.1.223, a `/code-review` without a level always used the session's current effort.
 
@@ -333,18 +354,12 @@ After the effort level and flags, Claude Code reads the rest of the line in one 
 The review runs in the background by default; before v2.1.218, it ran inside your conversation. It runs in the foreground instead in cases like these:
 
 * You run `/code-review` again while an earlier review is still in progress
-* You run it in non-interactive mode, with the `-p` flag or the Agent SDK; Claude Code waits for the review and includes the findings in the response, except for `ultra`, which [launches the cloud review without waiting](#escalate-to-ultrareview)
+* You run it in non-interactive mode, with the `-p` flag or the Agent SDK; Claude Code waits for the review and includes the findings in the response, except for `ultra`, which [doesn't wait for the cloud review](/docs/en/ultrareview#run-ultrareview-non-interactively)
 * You set [`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`](/docs/en/env-vars) to `1`, which also turns off every other background task feature
 
 ### Let Claude start the review
 
 Claude can start `/code-review` on its own. Ask it to review your changes in plain language and it can run the skill without you typing the command, and a [scheduled task](/docs/en/scheduled-tasks) with `/code-review` as its prompt runs the review.
-
-Exceptions include the following sessions, where `/code-review` runs only when you type it yourself and a scheduled `/code-review` reaches Claude as plain text instead of running the review:
-
-* **Cloud providers**: sessions on Amazon Bedrock, Claude Platform on AWS, Google Cloud's Agent Platform, or Microsoft Foundry, unless a host platform that embeds Claude Code sets [`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`](/docs/en/env-vars)
-* **Claude apps gateway**: sessions that connect through the [Claude apps gateway](/docs/en/claude-apps-gateway)
-* **Privacy environment variables**: sessions that opt out of telemetry or feature-flag fetching with [`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, or `DISABLE_GROWTHBOOK`](/docs/en/env-vars#variables)
 
 A scheduled task never launches the [cloud review](#escalate-to-ultrareview), so schedule `/code-review` without the `ultra` argument.
 
@@ -358,23 +373,23 @@ To stop both Claude and scheduled tasks from starting the review while keeping `
 }
 ```
 
-From v2.1.215 through v2.1.222, Claude never started `/code-review` on its own in any configuration.
+Before v2.1.246, Claude started `/code-review` on its own only where a feature flag fetched from Anthropic turned it on. In [sessions that don't fetch feature flags](/docs/en/env-vars#features-that-need-feature-flag-fetching), `/code-review` ran only when you typed it, and a scheduled `/code-review` reached Claude as plain text.
 
 ### Escalate to ultrareview
 
-`/code-review ultra --fix` runs the deeper [ultrareview](/docs/en/ultrareview) in the cloud, then applies its findings to your working tree when they arrive back in your session. Ultrareview uses its own scope: your current branch against the repository's default branch, plus any uncommitted and staged changes in the working tree. Pass a branch name, such as `/code-review ultra develop`, to compare against a different base.
+`/code-review ultra --fix` runs the deeper [ultrareview](/docs/en/ultrareview) in the cloud, then applies its findings to your working tree when they arrive back in your session.
+
+Ultrareview uses its own scope: your current branch against the repository's default branch, plus uncommitted and staged changes in the working tree. For uncommitted changes to files named like credentials or keys, such as `.env` and `*.tfvars` files, Claude Code follows the rules for [uploading a local repository to a cloud session](/docs/en/claude-code-on-the-web#send-local-repositories-without-github). Pass a branch name, such as `/code-review ultra develop`, to compare against a different base.
 
 When the target is a `github.com` pull request, you can have Claude [post the finished findings to the PR](/docs/en/ultrareview#post-findings-to-the-pull-request) as a comment from your GitHub account. Requires Claude Code v2.1.227 or later.
 
 <Note>
-  Ultrareview requires authentication with a claude.ai account and is not available on Amazon Bedrock, Google Cloud's Agent Platform, or Microsoft Foundry, or to organizations with Zero Data Retention enabled. When ultrareview is not available, `/code-review ultra` runs a local review in your session instead.
+  Ultrareview requires authentication with a claude.ai account and is not available on Amazon Bedrock, Google Cloud's Agent Platform, or Microsoft Foundry, or to organizations with Zero Data Retention enabled or with the [HIPAA configuration](/docs/en/hipaa-setup) applied. When ultrareview is not available, `/code-review ultra` runs a local review in your session instead.
 </Note>
 
-To start a cloud review from a script or CI, run `claude -p '/code-review ultra'`. Claude Code launches the review and prints a link for tracking it. Requires Claude Code v2.1.218 or later.
+To run a cloud review from a script or CI job, use the [`claude ultrareview` subcommand](/docs/en/ultrareview#run-ultrareview-non-interactively), which waits for the findings and prints them to stdout.
 
-When the review would bill [usage credits](https://support.claude.com/en/articles/12429409-extra-usage-for-paid-claude-plans), Claude Code stops before launching, because the billing confirmation needs an interactive session. Run the [`claude ultrareview` subcommand](/docs/en/ultrareview#run-ultrareview-non-interactively) instead; by running it, you consent to the charge.
-
-The command was named `/simplify` before v2.1.147, when it applied fixes by default. From v2.1.154, `/simplify` runs a separate cleanup-only review that applies fixes without hunting for bugs. If you scripted `/simplify` for bug-finding, switch to `/code-review --fix`, which is unchanged.
+The command was named `/simplify` before v2.1.147, when it applied fixes by default. `/simplify` runs a separate cleanup-only review that applies fixes without hunting for bugs. If you scripted `/simplify` for bug-finding, switch to `/code-review --fix`.
 
 ## Related resources
 
