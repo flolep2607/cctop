@@ -615,6 +615,9 @@ fn event_loop(
                 }
                 Ok(Response::ProviderStatus(page, status)) => {
                     app.outage.status.set(page, *status);
+                    // Handed to a served page now rather than at the next
+                    // refresh, so the browser and the footer change together.
+                    app.feed_serving();
                     app.needs_redraw = true;
                 }
                 Ok(Response::Location(answer)) => app.got_location(answer),

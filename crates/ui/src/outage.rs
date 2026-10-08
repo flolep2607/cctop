@@ -14,22 +14,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-
-/// Gap between checks of a page that answered.
-///
-/// The vendor posts an update every few minutes at best, so polling faster
-/// would only buy requests; opening the panel rechecks at once for anyone who
-/// cannot wait.
-const INTERVAL: Duration = Duration::from_secs(120);
-
-/// Gap after a page could not be reached. Longer, because the likeliest reason
-/// is that this machine is offline, when every request is wasted.
-const RETRY: Duration = Duration::from_secs(300);
-
-/// How often the poller wakes to see whether a page is due or a recheck was
-/// asked for.
-const TICK: Duration = Duration::from_secs(2);
 
 /// What the pages last said, and the panel's own state.
 #[derive(Default)]
@@ -44,41 +28,20 @@ pub struct Outage {
     pub max_scroll: u16,
 }
 
-/// Poll each page on a thread of its own, sending one answer per page.
+/// Start the shared poller, its answers arriving as worker responses.
 ///
-/// Per page, so a slow or unreachable one does not hold back the one that
-/// answered. Never on the drawing thread: [`ps::fetch`] can block for its whole
-/// timeout, which is exactly what it does when the network is down.
+/// The loop and its pacing are core's, so a standalone `cctop serve` asks the
+/// vendor on exactly the same schedule; see [`ps::poll`].
 pub(super) fn spawn_poller(
     tx: std::sync::mpsc::Sender<super::worker::Response>,
     recheck: Arc<AtomicBool>,
 ) {
-    std::thread::spawn(move || {
-        let mut due = [Instant::now(); Page::ALL.len()];
-        loop {
-            let forced = recheck.swap(false, Ordering::Relaxed);
-            for (i, page) in Page::ALL.into_iter().enumerate() {
-                if !forced && Instant::now() < due[i] {
-                    continue;
-                }
-                let status = ps::fetch(page);
-                due[i] = Instant::now()
-                    + match status {
-                        PageStatus::Unavailable(_) => RETRY,
-                        _ => INTERVAL,
-                    };
-                if tx
-                    .send(super::worker::Response::ProviderStatus(
-                        page,
-                        Box::new(status),
-                    ))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            std::thread::sleep(TICK);
-        }
+    ps::spawn_poller(recheck, move |page, status| {
+        tx.send(super::worker::Response::ProviderStatus(
+            page,
+            Box::new(status),
+        ))
+        .is_ok()
     });
 }
 
@@ -119,37 +82,11 @@ impl App {
     }
 }
 
-/// The footer line, when there is anything to say.
-///
-/// Three cases. The vendor reports an incident — name it, and say how many of
-/// yours fail against it when any do, because then it is the answer. Sessions
-/// fail while the page that covers them says all is well — say it is probably
-/// this machine, which is worth knowing early. Silent otherwise, including when
-/// no page could be reached: a footer that permanently reads "operational", or
-/// "unknown" on every offline afternoon, is a footer nobody reads.
+/// The footer line, when there is anything to say: core's summary, which the
+/// web dashboard shows too, plus the key that opens the panel. See
+/// [`ps::summary_line`] for when it is silent.
 pub(super) fn footer_line(alerts: &[Alert]) -> Option<(String, Level)> {
-    let a = alerts.first()?;
-    let what = match a.level {
-        Level::Maintenance => "maintenance",
-        _ => "incident",
-    };
-    let yours = match a.erroring {
-        0 => String::new(),
-        n => format!(" — {n} of yours failing"),
-    };
-    let text = match a.probably_local() {
-        true => format!(
-            "⚠ {} failing, {} reports all clear: probably this machine · !",
-            a.erroring,
-            a.page.label()
-        ),
-        false => format!(
-            "⚠ {} {what}: {}{yours} · !",
-            a.page.label(),
-            cctop_core::util::truncate(&a.headline, 40)
-        ),
-    };
-    Some((text, a.level))
+    ps::summary_line(alerts).map(|(text, level)| (format!("{text} · !"), level))
 }
 
 /// The footer's style for a line at `level`: red for an outage, amber for
@@ -200,45 +137,20 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // The answer to "is it me?" comes first, before any of the vendor's detail,
     // because on a bad day it is the only line that gets read.
-    let total: usize = erroring.iter().map(|(_, n)| n).sum();
-    let are = |n: usize| if n == 1 { "is" } else { "are" };
-    match alerts.first() {
-        Some(a) if a.confirmed() => lines.push(Line::from(Span::styled(
-            format!(
-                " {} of your sessions {} failing, and {} reports an incident",
-                a.erroring,
-                are(a.erroring),
-                a.page.label()
-            ),
-            footer_style(a.level),
-        ))),
-        Some(a) if a.probably_local() => {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    " {} of your sessions {} failing, but {} reports all clear",
-                    a.erroring,
-                    are(a.erroring),
-                    a.page.label()
-                ),
-                footer_style(Level::Maintenance),
-            )));
-            lines.push(Line::from(Span::styled(
-                "   so suspect this machine: network, proxy, credentials, a model name",
-                theme::dim(),
-            )));
-        }
-        _ if total == 0 => lines.push(Line::from(Span::styled(
-            " None of your running sessions is reporting API errors",
+    let verdict = ps::verdict(&alerts, &erroring);
+    lines.push(Line::from(Span::styled(
+        format!(" {}", verdict.text),
+        match verdict.tone {
+            ps::Tone::Outage => footer_style(Level::Major),
+            ps::Tone::Warning => footer_style(Level::Maintenance),
+            ps::Tone::Quiet => theme::dim(),
+        },
+    )));
+    if let Some(detail) = verdict.detail {
+        lines.push(Line::from(Span::styled(
+            format!("   {detail}"),
             theme::dim(),
-        ))),
-        // Failing, but no page that covers them has answered.
-        _ => lines.push(Line::from(Span::styled(
-            format!(
-                " {total} of your sessions {} failing; their status page has not answered",
-                are(total)
-            ),
-            theme::dim(),
-        ))),
+        )));
     }
 
     for page in Page::ALL {

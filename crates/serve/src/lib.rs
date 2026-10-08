@@ -252,10 +252,18 @@ struct Shared {
     /// The `/api/quota` document, already serialised.
     ///
     /// Rendered by whoever produced the numbers — the standalone serve's own
-    /// poller, or the dashboard feeding [`Serving::publish_with_quota`] — so
+    /// poller, or the dashboard feeding [`Serving::publish_table`] — so
     /// the route itself is a memory read and never touches the rate-limited
     /// usage endpoints on a browser's schedule.
     quota: Mutex<String>,
+    /// What the vendors' status pages last said.
+    ///
+    /// Written like the quota, by whoever polled — the standalone serve's own
+    /// poller, or the dashboard through [`Serving::publish_table`] — and read
+    /// by `/api/provider-status`, which sets it against the rows of the moment
+    /// rather than the rows of the last poll. Kept unrendered for that reason:
+    /// the alerts depend on which sessions are failing *now*.
+    provider_status: Mutex<cctop_core::provider_status::Status>,
     /// The topical tier behind `/api/search`, built lazily on the first query
     /// that wants it.
     topics: Mutex<search::Topics>,
@@ -440,17 +448,23 @@ impl Serving {
         self.public.as_deref().unwrap_or(&self.local)
     }
 
-    /// Show the page these rows and this usage reading, replacing whatever it
-    /// was showing.
+    /// Show the page these rows, this usage reading and these status pages,
+    /// replacing whatever it was showing.
     ///
-    /// For a dashboard-hosted server, which has both already. Cheap enough to
-    /// call on every refresh: it costs one JSON encode of what the table is
-    /// already holding, and it is what wakes the event stream. The quota comes
-    /// along because the dashboard polls the usage endpoints for its own
-    /// panes — the page shares that reading rather than standing up a second
-    /// poller against the same rate-limited endpoints, and the two can never
+    /// For a dashboard-hosted server, which has all three already. Cheap enough
+    /// to call on every refresh: it costs one JSON encode of what the table is
+    /// already holding, and it is what wakes the event stream. The quota and
+    /// the status pages come along because the dashboard polls both for its
+    /// own panes — the page shares those readings rather than standing up a
+    /// second poller against the same endpoints, and the two can never
     /// disagree.
-    pub fn publish_with_quota(&self, sessions: &[Session], quota: &cctop_core::quota::Quota) {
+    pub fn publish_table(
+        &self,
+        sessions: &[Session],
+        quota: &cctop_core::quota::Quota,
+        provider_status: &cctop_core::provider_status::Status,
+    ) {
+        lock_provider_status(&self.shared).clone_from(provider_status);
         let Ok(mut version) = self.version.lock() else {
             return;
         };
@@ -559,6 +573,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         updated: Condvar::new(),
         store: cctop_core::cache::Store::new(),
         quota: Mutex::new(quota::EMPTY.to_string()),
+        provider_status: Mutex::default(),
         topics: Mutex::new(search::Topics::default()),
         notify: options
             .notify
@@ -595,9 +610,12 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             options.delay,
         );
         // The dashboard's own poller feeds the page through
-        // `publish_with_quota`; a standalone serve has to ask the endpoints
+        // `publish_table`; a standalone serve has to ask the endpoints
         // itself, on the slow cadence they demand.
         spawn_quota_poller(Arc::clone(&shared));
+        // Likewise the status pages: the dashboard hands over its own answers,
+        // and only a serve with no dashboard behind it asks the vendor.
+        spawn_provider_status_poller(Arc::clone(&shared));
     }
 
     let query = match token.is_empty() {
@@ -1059,6 +1077,59 @@ fn spawn_quota_poller(shared: Arc<Shared>) {
     });
 }
 
+/// Run core's status-page poller into [`Shared::provider_status`].
+///
+/// The same loop and pacing as the dashboard's footer, so a serve never asks
+/// more often than the TUI does — and with no recheck flag anybody can set:
+/// the browser re-reads memory on its own timer and cannot make cctop poll.
+fn spawn_provider_status_poller(shared: Arc<Shared>) {
+    cctop_core::provider_status::spawn_poller(Arc::default(), move |page, status| {
+        // A debug build can stand a fixture in for the vendor; the poller must
+        // not overwrite it two minutes later.
+        #[cfg(feature = "debug")]
+        if debug::provider_status_pinned() {
+            return true;
+        }
+        lock_provider_status(&shared).set(page, status);
+        true
+    });
+}
+
+/// The status pages' slot, recovered rather than refused if a writer panicked:
+/// it holds plain data, and the worst a half-finished write leaves is one
+/// page's answer a poll out of date.
+fn lock_provider_status(
+    shared: &Shared,
+) -> std::sync::MutexGuard<'_, cctop_core::provider_status::Status> {
+    shared
+        .provider_status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `/api/provider-status`: the pages' last answers, set against the rows being
+/// published now.
+///
+/// Served from memory: a request never waits on a status page, and offline it
+/// answers as fast as any other route — every page pending or unreachable, and
+/// nothing to say.
+fn provider_status_route(shared: &Shared, stream: &mut TcpStream, request: &Request) {
+    let status = lock_provider_status(shared).clone();
+    let snapshot = current(shared);
+    let body = serde_json::to_string(&cctop_core::provider_status::document(
+        &status,
+        &snapshot.sessions,
+    ))
+    .unwrap_or_default();
+    http::respond(
+        stream,
+        Some(request),
+        200,
+        "application/json; charset=utf-8",
+        body.as_bytes(),
+    );
+}
+
 /// Walk, refresh, and publish, forever.
 ///
 /// The cadence mirrors the UI's: a light refresh every `delay` that re-reads
@@ -1499,6 +1570,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 body.as_bytes(),
             );
         }
+        "/api/provider-status" => provider_status_route(shared, stream, &request),
         "/api/search" => api_search(shared, stream, &request),
         "/api/events" => events(shared, stream, &request),
         "/insight/optimize" => api_insight(shared, stream, &request, "optimize"),
@@ -2885,6 +2957,7 @@ mod tests {
             updated: Condvar::new(),
             store: cctop_core::cache::Store::new(),
             quota: Mutex::new(quota::EMPTY.to_string()),
+            provider_status: Mutex::default(),
             topics: Mutex::new(search::Topics::default()),
             notify: None,
             hosts: HashMap::new(),
@@ -3659,5 +3732,100 @@ mod tests {
             );
             assert_eq!(header(&head, "Content-Encoding"), Some("gzip"), "{head}");
         }
+    }
+    /// The `/api/provider-status` document for this status and these rows,
+    /// asked with the read-only token — the route is a GET like any other.
+    fn provider_status_of(
+        status: cctop_core::provider_status::Status,
+        sessions: Vec<Session>,
+    ) -> serde_json::Value {
+        let guarded = shared("full", "view");
+        *guarded.provider_status.lock().unwrap() = status;
+        *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".to_string(),
+            rows: Vec::new(),
+            sessions,
+            host_errors: Vec::new(),
+        });
+        let raw = response_of(
+            &guarded,
+            "GET",
+            "/api/provider-status",
+            "Authorization: Bearer view\r\n",
+        );
+        assert!(raw.starts_with("HTTP/1.1 200 "), "{raw}");
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default();
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))
+    }
+
+    /// A running Opus session whose last request failed, as it would arrive
+    /// from this machine or from a `--host`.
+    fn failing_opus() -> Session {
+        let mut s = Session::new(cctop_core::pricing::Provider::Claude, "sess-err".into());
+        s.model = "claude-opus-5".into();
+        s.inferred_running = true;
+        s.activity_state = cctop_core::session::ActivityState::ApiError;
+        s
+    }
+
+    fn fixture_status(anthropic: &str, openai: &str) -> cctop_core::provider_status::Status {
+        use cctop_core::provider_status::parse;
+        cctop_core::provider_status::Status {
+            anthropic: parse(anthropic),
+            openai: parse(openai),
+        }
+    }
+
+    #[test]
+    fn provider_status_confirms_an_incident_your_sessions_are_failing_against() {
+        use cctop_core::provider_status::fixtures::{MAJOR, OPERATIONAL};
+        let doc = provider_status_of(fixture_status(MAJOR, OPERATIONAL), vec![failing_opus()]);
+        let alert = &doc["alerts"][0];
+        assert_eq!(alert["page"], "anthropic");
+        assert_eq!(alert["confirmed"], true);
+        assert_eq!(alert["erroring"], 1);
+        assert_eq!(alert["headline"], "Elevated errors on Claude Opus");
+        assert_eq!(
+            doc["line"]["text"],
+            "⚠ Anthropic incident: Elevated errors on Claude Opus — 1 of yours failing"
+        );
+        assert_eq!(doc["line"]["tone"], "outage");
+        let page = &doc["pages"][0];
+        assert_eq!(page["site"], "https://status.claude.com");
+        assert_eq!(page["state"], "ok");
+        assert_eq!(page["incidents"][0]["stage"], "identified");
+    }
+
+    #[test]
+    fn provider_status_says_probably_local_against_a_clean_page() {
+        use cctop_core::provider_status::fixtures::OPERATIONAL;
+        let doc = provider_status_of(
+            fixture_status(OPERATIONAL, OPERATIONAL),
+            vec![failing_opus()],
+        );
+        assert_eq!(doc["alerts"][0]["probably_local"], true);
+        assert_eq!(doc["alerts"][0]["confirmed"], false);
+        assert_eq!(doc["line"]["tone"], "warning");
+    }
+
+    #[test]
+    fn provider_status_before_any_answer_is_pending_and_silent() {
+        let doc = provider_status_of(Default::default(), vec![failing_opus()]);
+        assert_eq!(doc["pages"][0]["state"], "pending");
+        assert_eq!(doc["pages"][1]["state"], "pending");
+        assert_eq!(doc["alerts"], serde_json::json!([]));
+        assert_eq!(doc["line"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn provider_status_honours_the_token() {
+        let guarded = shared("full", "view");
+        let bearer = |token: &str| format!("Authorization: Bearer {token}\r\n");
+        let route = "/api/provider-status";
+        assert!(status_of(&guarded, "GET", route, &bearer("full")).contains(" 200 "));
+        assert!(status_of(&guarded, "GET", route, &bearer("view")).contains(" 200 "));
+        assert!(status_of(&guarded, "GET", route, &bearer("wrong")).contains(" 403 "));
+        assert!(status_of(&guarded, "GET", route, "").contains(" 403 "));
     }
 }
