@@ -78,6 +78,15 @@ pub enum ProviderStatus {
     NotSignedIn,
     /// Sign-in expired; the user must re-authenticate.
     Expired,
+    /// The usage endpoint will not give this credential its limits.
+    ///
+    /// A 403 rather than a 401: the credential authenticated and was refused
+    /// the read. A `claude setup-token` token is documented as able to make
+    /// model requests and nothing else, so for a token account this is the
+    /// normal state and not a fault — it is what an account that works but
+    /// cannot be measured looks like, and it must not read as "expired",
+    /// which says the account cannot be used at all.
+    NoLimits,
     /// Throttled. `retry_at` is a Unix timestamp when known.
     RateLimited {
         retry_at: Option<i64>,
@@ -159,6 +168,12 @@ impl Quota {
     }
 }
 
+/// How long a credential the usage endpoint refused waits to be asked again.
+///
+/// Six hours rather than never: an endpoint that starts serving tokens one day
+/// should show up the same day, without anyone re-adding the account.
+const NO_LIMITS_RECHECK_SECS: u64 = 6 * 60 * 60;
+
 /// How the outcome of a fetch should pace the next one.
 impl ProviderStatus {
     /// Seconds to wait before polling this provider again.
@@ -174,6 +189,11 @@ impl ProviderStatus {
             // Nothing will change until the user acts, so stop hammering.
             ProviderStatus::Expired | ProviderStatus::NotSignedIn => 900,
             ProviderStatus::ApiBilling => 3600,
+            // A refusal is a property of the credential, which does not change
+            // until the account is re-added — and that is a new token, a new
+            // cache key, and so asked at once anyway. Every retry before then
+            // spends a request from the token's own budget to learn nothing.
+            ProviderStatus::NoLimits => NO_LIMITS_RECHECK_SECS,
             _ => default,
         }
     }
@@ -548,7 +568,16 @@ fn add_token(name: &str, again: &str) -> anyhow::Result<()> {
     } else {
         store_token(name, &token)?;
         eprintln!("  Checking it against the usage endpoint…");
-        eprintln!("  {}", describe(&cached(&token, || claude_usage(&token))));
+        // The panel folds a 401 into "no limits for a token"; here, with the
+        // token just pasted, the difference is still worth a line, since a
+        // clipped paste is the likeliest cause of one.
+        let mut raw = None;
+        let folded = cached(&token, || {
+            let status = claude_usage(&token);
+            raw = Some(status.clone());
+            for_source(config::AccountSource::Token, status)
+        });
+        eprintln!("  {}", describe_token(raw.as_ref().unwrap_or(&folded)));
     }
     Ok(())
 }
@@ -577,7 +606,27 @@ fn describe(status: &ProviderStatus) -> String {
             "· Stored; the usage endpoint is rate-limiting, so it is unchecked for now.".into()
         }
         ProviderStatus::ApiBilling => "· That is an API key: billed per use, with no limits to show.".into(),
+        ProviderStatus::NoLimits => {
+            "· Its limits cannot be read with this credential, so the panel will not show them.".into()
+        }
         other => format!("· Stored, but could not check it: {other:?}"),
+    }
+}
+
+/// The same line for a pasted `claude setup-token` token, which the usage
+/// endpoint may refuse while the token works fine for sessions.
+fn describe_token(status: &ProviderStatus) -> String {
+    match status {
+        ProviderStatus::NoLimits => {
+            "· Stored. Limits cannot be read with a token, so the panel will say \"no limits for a token\".".into()
+        }
+        ProviderStatus::Expired => {
+            "· Stored, but the usage endpoint did not accept it (401). That may only mean a token \
+             cannot read limits; if sessions with it fail too, check the whole token was pasted \
+             and run this again."
+                .into()
+        }
+        other => describe(other),
     }
 }
 
@@ -894,23 +943,14 @@ fn get_json(req: ureq::RequestBuilder<ureq::typestate::WithoutBody>) -> Fetched 
         Ok(r) => r,
         Err(e) => return Fetched::Failed(ProviderStatus::Unavailable(short_error(&e))),
     };
-    let status = resp.status().as_u16();
-    if status == 429 {
-        // `retry-after` is seconds-from-now; store it as an absolute instant so
-        // the UI can count down without knowing when the request happened.
-        let retry_at = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<i64>().ok())
-            .map(|secs| chrono::Utc::now().timestamp() + secs);
-        return Fetched::Failed(ProviderStatus::RateLimited { retry_at });
-    }
-    if status == 401 || status == 403 {
-        return Fetched::Failed(ProviderStatus::Expired);
-    }
-    if !(200..300).contains(&status) {
-        return Fetched::Failed(ProviderStatus::Unavailable(format!("HTTP {status}")));
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let code = resp.status().as_u16();
+    if let Some(failed) = refusal(code, retry_after.as_deref(), chrono::Utc::now().timestamp()) {
+        return Fetched::Failed(failed);
     }
     match resp.body_mut().read_to_string() {
         Ok(text) => match serde_json::from_str(&text) {
@@ -918,6 +958,30 @@ fn get_json(req: ureq::RequestBuilder<ureq::typestate::WithoutBody>) -> Fetched 
             Err(_) => Fetched::Failed(ProviderStatus::Unavailable("bad response".into())),
         },
         Err(e) => Fetched::Failed(ProviderStatus::Unavailable(short_error(&e))),
+    }
+}
+
+/// What a non-success answer from a usage endpoint means, or `None` for a
+/// success. Pure, so the mapping is tested without a network.
+///
+/// 401 and 403 used to be one answer, "expired". They are not the same thing:
+/// 401 is a credential that did not authenticate, 403 one that did and was
+/// refused this read — which is every `claude setup-token` token, since those
+/// are scoped to model requests. Folding them sent people to re-add accounts
+/// that were working.
+fn refusal(code: u16, retry_after: Option<&str>, now: i64) -> Option<ProviderStatus> {
+    match code {
+        200..=299 => None,
+        // `retry-after` is seconds-from-now; store it as an absolute instant so
+        // the UI can count down without knowing when the request happened.
+        429 => Some(ProviderStatus::RateLimited {
+            retry_at: retry_after
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .map(|secs| now + secs),
+        }),
+        401 => Some(ProviderStatus::Expired),
+        403 => Some(ProviderStatus::NoLimits),
+        _ => Some(ProviderStatus::Unavailable(format!("HTTP {code}"))),
     }
 }
 
@@ -996,11 +1060,18 @@ fn cached_in(
     let mut hasher = std::hash::DefaultHasher::new();
     token.hash(&mut hasher);
     let key = format!("{:016x}", hasher.finish());
+    // Entry by entry, so one this build cannot read — a status a newer cctop
+    // added — costs that account a request and not every account its entry.
     let read = || -> std::collections::HashMap<String, Cached> {
         std::fs::read(path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|bytes| {
+                serde_json::from_slice::<std::collections::HashMap<String, Value>>(&bytes).ok()
+            })
             .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, serde_json::from_value(v).ok()?)))
+            .collect()
     };
     if let Some(hit) = read().remove(&key)
         && now < hit.due
@@ -1111,7 +1182,26 @@ pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
         Credential::None => return ProviderStatus::NotSignedIn,
         Credential::OAuth(t) => t,
     };
-    cached(&token, || claude_usage(&token))
+    let status = cached(&token, || for_source(profile.source, claude_usage(&token)));
+    // Folded again on the way out for an answer cached before the fold
+    // existed: an older cctop stored a token's refusal as `Expired`.
+    for_source(profile.source, status)
+}
+
+/// What a usage answer means for an account added as `source`.
+///
+/// For a token account a refusal of either kind is "no limits for a token",
+/// not "expired". Such a token can only make model requests, and the usage
+/// endpoint is not one; whether a 401 there means the token is dead or only
+/// that it may not read limits cannot be told without spending a model
+/// request, and an "expired" that is wrong tells someone their working
+/// account is unusable. A dead token announces itself in the session that
+/// uses it.
+fn for_source(source: config::AccountSource, status: ProviderStatus) -> ProviderStatus {
+    match (source, status) {
+        (config::AccountSource::Token, ProviderStatus::Expired) => ProviderStatus::NoLimits,
+        (_, status) => status,
+    }
 }
 
 /// What Claude's usage endpoint says about `token`, asked now.
@@ -1371,6 +1461,144 @@ mod tests {
             ProviderStatus::Ok(ProviderQuota::default()).retry_delay_secs(300),
             300
         );
+    }
+
+    /// 401 and 403 are different answers: one is a credential that did not
+    /// authenticate, the other one that may not read limits — every
+    /// `claude setup-token` token.
+    #[test]
+    fn a_refusal_is_not_an_expiry() {
+        let now = 1_000;
+        assert!(refusal(200, None, now).is_none());
+        assert!(matches!(
+            refusal(401, None, now),
+            Some(ProviderStatus::Expired)
+        ));
+        assert!(matches!(
+            refusal(403, None, now),
+            Some(ProviderStatus::NoLimits)
+        ));
+        assert!(matches!(
+            refusal(429, Some(" 60 "), now),
+            Some(ProviderStatus::RateLimited {
+                retry_at: Some(1_060)
+            })
+        ));
+        assert!(matches!(
+            refusal(429, None, now),
+            Some(ProviderStatus::RateLimited { retry_at: None })
+        ));
+        assert!(matches!(
+            refusal(503, None, now),
+            Some(ProviderStatus::Unavailable(ref why)) if why == "HTTP 503"
+        ));
+    }
+
+    /// A token account is never "expired": the usage endpoint cannot tell a
+    /// dead token from one that may not read limits. A login keeps the
+    /// distinction, since `claude login` does fix its 401.
+    #[test]
+    fn a_token_account_reads_a_refusal_as_no_limits() {
+        use config::AccountSource::{Directory, Token};
+        for status in [ProviderStatus::Expired, ProviderStatus::NoLimits] {
+            assert!(matches!(
+                for_source(Token, status),
+                ProviderStatus::NoLimits
+            ));
+        }
+        assert!(matches!(
+            for_source(Directory, ProviderStatus::Expired),
+            ProviderStatus::Expired
+        ));
+        assert!(matches!(
+            for_source(Token, ProviderStatus::RateLimited { retry_at: None }),
+            ProviderStatus::RateLimited { .. }
+        ));
+        // And it is asked rarely, since asking again learns nothing and
+        // spends the token's own request budget.
+        assert!(
+            ProviderStatus::NoLimits.retry_delay_secs(300)
+                >= ProviderStatus::Expired.retry_delay_secs(300)
+        );
+    }
+
+    /// The walkthrough's line for a token says it was stored and never that it
+    /// is expired when it merely cannot read limits.
+    #[test]
+    fn a_stored_token_without_limits_is_not_called_expired() {
+        let line = describe_token(&ProviderStatus::NoLimits);
+        assert!(line.contains("Stored") && line.contains("no limits for a token"));
+        assert!(!line.to_lowercase().contains("expired"), "{line}");
+        let line = describe(&ProviderStatus::NoLimits);
+        assert!(!line.to_lowercase().contains("expired"), "{line}");
+        // A 401 on a paste is still worth naming, as a possible clipped paste,
+        // but not as a verdict.
+        let line = describe_token(&ProviderStatus::Expired);
+        assert!(line.contains("Stored") && line.contains("401"), "{line}");
+    }
+
+    /// A cached `Expired` is an answer like any other: when it falls due, a
+    /// throttled or a good answer replaces it, rather than it sticking.
+    #[test]
+    fn a_cached_expiry_gives_way_to_the_next_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let t0 = chrono::Utc::now().timestamp();
+        cached_in(&path, "tok-x", t0, || ProviderStatus::Expired);
+        let due = t0 + ProviderStatus::Expired.retry_delay_secs(INTERVAL_SECS) as i64;
+        let throttled = cached_in(&path, "tok-x", due, || ProviderStatus::RateLimited {
+            retry_at: None,
+        });
+        assert!(matches!(throttled, ProviderStatus::RateLimited { .. }));
+        // And still throttled when read back, not the old expiry.
+        let again = cached_in(&path, "tok-x", due + 1, || ProviderStatus::Expired);
+        assert!(
+            matches!(again, ProviderStatus::RateLimited { .. }),
+            "{again:?}"
+        );
+
+        let later = due + 10_000;
+        let ok = cached_in(&path, "tok-x", later, || {
+            ProviderStatus::Ok(ProviderQuota::default())
+        });
+        assert!(matches!(ok, ProviderStatus::Ok(_)));
+    }
+
+    /// A usage cache written by another build still loads: an entry this one
+    /// cannot read costs that account one request, not every account its entry.
+    #[test]
+    fn an_unreadable_cache_entry_costs_only_itself() {
+        use std::hash::{Hash, Hasher};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let t0 = chrono::Utc::now().timestamp();
+        let key = |token: &str| {
+            let mut hasher = std::hash::DefaultHasher::new();
+            token.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        };
+        let file = serde_json::json!({
+            key("tok-old"): {"due": t0 + 900, "status": "Expired"},
+            key("tok-new"): {"due": t0 + 900, "status": "SomethingLater"},
+        });
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let asked = std::cell::Cell::new(0);
+        let fetch = || {
+            asked.set(asked.get() + 1);
+            ProviderStatus::NoLimits
+        };
+        // The old-format entry is served from the file.
+        assert!(matches!(
+            cached_in(&path, "tok-old", t0, fetch),
+            ProviderStatus::Expired
+        ));
+        assert_eq!(asked.get(), 0);
+        // The unknown one is asked for again.
+        assert!(matches!(
+            cached_in(&path, "tok-new", t0, fetch),
+            ProviderStatus::NoLimits
+        ));
+        assert_eq!(asked.get(), 1);
     }
 
     /// The request is made once per account per interval, however many
