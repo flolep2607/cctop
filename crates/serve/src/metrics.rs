@@ -894,6 +894,7 @@ mod tests {
             notify: None,
             hosts: HashMap::new(),
             ssh: crate::ssh::Reach::nowhere(),
+            is_share_host: |_| false,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();

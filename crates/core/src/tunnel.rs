@@ -118,6 +118,12 @@ impl Tunnel {
 /// does not exist yet, and a URL printed before the edge has the registration is
 /// a link that 404s for whoever opens it first.
 ///
+/// `share_front` is the loopback port of the server that answers the
+/// account's share hostnames — rmux's static frontend and the share socket,
+/// nothing of the page's (`cctop_serve`'s `share_host` module). Without one no
+/// share hostname is routed, and `W` takes a quick tunnel as it would with no
+/// account at all.
+///
 /// Silent, also deliberately. This is called with the dashboard on screen as
 /// often as from the command line, and a line written to stderr under a TUI is
 /// painted straight over it — `cctop: opening a trycloudflare tunnel…` sat
@@ -125,7 +131,7 @@ impl Tunnel {
 /// Whoever called says so on the surface they own: the command line prints it,
 /// and the dashboard spins. A fallback is reported the same way, through
 /// [`Tunnel::fallback`].
-pub fn start(port: u16, want: Want) -> anyhow::Result<Tunnel> {
+pub fn start(port: u16, want: Want, share_front: Option<u16>) -> anyhow::Result<Tunnel> {
     // Two workers, because the proxying happens here rather than in somebody
     // else's process: one accepts streams while the other is still writing a
     // response.
@@ -142,10 +148,13 @@ pub fn start(port: u16, want: Want) -> anyhow::Result<Tunnel> {
     if let Some(account) = account {
         match open_account(&runtime, port, &account) {
             Ok((handle, lock)) => {
+                // Lent only with a front to send it to: a share hostname
+                // routed anywhere else would be a road nobody vetted.
                 let shares = account
                     .share_hostname
                     .as_deref()
-                    .map(|host| SHARES.lend(handle.routes().clone(), host));
+                    .zip(share_front)
+                    .map(|(host, front)| SHARES.lend(handle.routes().clone(), host, front));
                 return Ok(Tunnel {
                     url: handle.url().to_string(),
                     kind: Kind::Account,
@@ -253,26 +262,50 @@ fn claim_in(dir: &Path, tunnel_id: &str) -> Option<File> {
 /// The account tunnel this process holds, lent to terminal shares.
 ///
 /// `cctop tunnel setup` makes two hostnames: the page's, and a `-share` one
-/// for rmux's share listener. A share cannot ride the page's hostname — every
-/// route there wants the page's token, and a cold share link must not carry it
-/// — but it can ride the same tunnel on the other hostname, since the tunnel
-/// routes by `Host`. So whoever brings the account tunnel up (`cctop serve`,
-/// or the dashboard's serve) lends its routing table here, and
-/// [`crate::rmux`] asks for a route instead of registering a second, quick
-/// tunnel.
+/// for `W`'s links. A share cannot ride the page's hostname — every route
+/// there wants the page's token, and a cold share link must not carry it — but
+/// it can ride the same tunnel on the other hostname, since the tunnel routes
+/// by `Host`. So whoever brings the account tunnel up (`cctop serve`, or the
+/// dashboard's serve) lends its routing table here, and [`crate::rmux`] asks
+/// for a route instead of registering a second, quick tunnel.
+///
+/// A share hostname goes to the *share front*, not to rmux's listener: a
+/// loopback server of its own (`cctop_serve`'s `share_host` module) that
+/// answers rmux's static frontend and relays the share socket to
+/// [`share_upstream`], and has no other route at all. So a link reads
+/// `https://<share host>/#…` — the app and its socket on the one hostname —
+/// rather than sending the reader to `share.rmux.io` first, and a share
+/// hostname still cannot become a way into the dashboard: the page's server
+/// never sees its requests, and refuses them by `Host` if it ever does
+/// ([`is_share_host`]).
 static SHARES: Shares = Shares::new();
 
 /// The share route for rmux's listener on `port`: `https://<share hostname>`,
-/// with that hostname sent to `port` from the next request on. `None` when
-/// this process holds no account tunnel with a share hostname — no account,
-/// no serve running, the account fell back to a quick tunnel, or it came from
-/// `CCTOP_TUNNEL_TOKEN` with nothing to name the share hostname — and then
-/// the caller opens its own quick tunnel, as before.
+/// with that hostname sent to the share front from the next request on, and
+/// the front relaying to `port`. `None` when this process holds no account
+/// tunnel with a share hostname — no account, no serve running, the account
+/// fell back to a quick tunnel, or it came from `CCTOP_TUNNEL_TOKEN` with
+/// nothing to name the share hostname — and then the caller opens its own
+/// quick tunnel, as before.
 ///
-/// A daemon restarted on a new port asks again and the entry is replaced; old
+/// A daemon restarted on a new port asks again and the upstream moves; old
 /// links to the old port are refused by rmux's own token, which is correct.
 pub fn share_origin(port: u16) -> Option<String> {
-    SHARES.route(port)
+    SHARES.route(port, None)
+}
+
+/// The rmux listener port the share front relays the socket to, while this
+/// process lends a tunnel and a share has been routed on it.
+pub fn share_upstream() -> Option<u16> {
+    SHARES.upstream()
+}
+
+/// Whether `host` is one of the hostnames routed to the share front. The
+/// page's server refuses such a request outright, whatever token it carries:
+/// the tunnel never sends one there, and if a misrouting ever did, a share
+/// hostname must still not open the dashboard.
+pub fn is_share_host(host: &str) -> bool {
+    SHARES.is_share_host(host)
 }
 
 /// Changes whenever the lent tunnel comes or goes, so a share minted on it
@@ -281,9 +314,20 @@ pub fn share_generation() -> u64 {
     SHARES.generation()
 }
 
+/// One loan: the routing table, the default share hostname, and the share
+/// front's loopback port.
+struct Lease {
+    generation: u64,
+    routes: Routes,
+    host: String,
+    front: u16,
+}
+
 struct Shares {
-    lent: std::sync::Mutex<Option<(u64, Routes, String)>>,
+    lent: std::sync::Mutex<Option<Lease>>,
     generation: std::sync::atomic::AtomicU64,
+    /// rmux's listener port, 0 until a share has been routed.
+    upstream: std::sync::atomic::AtomicU16,
 }
 
 /// The receipt for a lent routing table; dropping it takes the loan back.
@@ -297,23 +341,48 @@ impl Shares {
         Shares {
             lent: std::sync::Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            upstream: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
-    fn lend(&'static self, routes: Routes, host: &str) -> Lent {
+    fn lend(&'static self, routes: Routes, host: &str, front: u16) -> Lent {
         let generation = self.bump();
-        *self.locked() = Some((generation, routes, host.to_string()));
+        *self.locked() = Some(Lease {
+            generation,
+            routes,
+            host: host.to_string(),
+            front,
+        });
         Lent {
             shares: self,
             generation,
         }
     }
 
-    fn route(&self, port: u16) -> Option<String> {
+    /// Route `host` — the default share hostname when `None` — to the front,
+    /// with the front relaying to rmux's listener on `port`.
+    fn route(&self, port: u16, host: Option<&str>) -> Option<String> {
         let lent = self.locked();
-        let (_, routes, host) = lent.as_ref()?;
-        routes.insert(host, port);
+        let lease = lent.as_ref()?;
+        let host = host.unwrap_or(&lease.host);
+        lease.routes.insert(host, lease.front);
+        self.upstream
+            .store(port, std::sync::atomic::Ordering::SeqCst);
         Some(format!("https://{host}"))
+    }
+
+    fn upstream(&self) -> Option<u16> {
+        self.locked().as_ref()?;
+        match self.upstream.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => None,
+            port => Some(port),
+        }
+    }
+
+    fn is_share_host(&self, host: &str) -> bool {
+        self.locked()
+            .as_ref()
+            .is_some_and(|lease| lease.routes.port_for(host) == Some(lease.front))
     }
 
     fn generation(&self) -> u64 {
@@ -326,7 +395,7 @@ impl Shares {
             + 1
     }
 
-    fn locked(&self) -> std::sync::MutexGuard<'_, Option<(u64, Routes, String)>> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, Option<Lease>> {
         // A poisoned slot is one a panic left holding a routing table, which
         // is still a routing table.
         self.lent.lock().unwrap_or_else(|e| e.into_inner())
@@ -338,9 +407,15 @@ impl Drop for Lent {
         let mut lent = self.shares.locked();
         // Only its own loan: one process holds one account tunnel (the lock
         // sees to that), but a test lends twice.
-        if lent.as_ref().is_some_and(|(g, ..)| *g == self.generation) {
+        if lent
+            .as_ref()
+            .is_some_and(|lease| lease.generation == self.generation)
+        {
             *lent = None;
             drop(lent);
+            self.shares
+                .upstream
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             self.shares.bump();
         }
     }
@@ -622,30 +697,41 @@ mod tests {
     #[test]
     fn a_share_rides_the_held_account_tunnel_and_nothing_else() {
         static LOCAL: Shares = Shares::new();
+        const FRONT: u16 = 5555;
         // Nothing held: the caller opens its own quick tunnel.
-        assert_eq!(LOCAL.route(4000), None);
+        assert_eq!(LOCAL.route(4000, None), None);
+        assert_eq!(LOCAL.upstream(), None);
 
         let routes = Routes::new(7777);
         routes.insert("cctop.example.test", 7777);
         let before = LOCAL.generation();
-        let lent = LOCAL.lend(routes.clone(), "cctop-share.example.test");
+        let lent = LOCAL.lend(routes.clone(), "cctop-share.example.test", FRONT);
         assert_ne!(LOCAL.generation(), before);
+        assert_eq!(LOCAL.upstream(), None, "nothing shared yet");
         assert_eq!(
-            LOCAL.route(4000).as_deref(),
+            LOCAL.route(4000, None).as_deref(),
             Some("https://cctop-share.example.test")
         );
-        assert_eq!(routes.port_for("cctop-share.example.test"), Some(4000));
-        // The page's hostname is left where it was: a share link on it would
-        // need the page's token.
+        // The share hostname goes to the front, which relays to rmux — never
+        // to the page, and never to rmux's listener bare.
+        assert_eq!(routes.port_for("cctop-share.example.test"), Some(FRONT));
+        assert_eq!(LOCAL.upstream(), Some(4000));
+        assert!(LOCAL.is_share_host("CCTOP-share.example.test:443"));
+        // The page's hostname is left where it was, and is not a share host.
         assert_eq!(routes.port_for("cctop.example.test"), Some(7777));
+        assert!(!LOCAL.is_share_host("cctop.example.test"));
+        assert!(!LOCAL.is_share_host("127.0.0.1:7777"));
 
-        // A daemon back on a new port moves the route rather than adding one.
-        LOCAL.route(4100);
-        assert_eq!(routes.port_for("cctop-share.example.test"), Some(4100));
+        // A daemon back on a new port moves the upstream, not the route.
+        LOCAL.route(4100, None);
+        assert_eq!(routes.port_for("cctop-share.example.test"), Some(FRONT));
+        assert_eq!(LOCAL.upstream(), Some(4100));
 
         let held = LOCAL.generation();
         drop(lent);
-        assert_eq!(LOCAL.route(4000), None, "the tunnel is gone");
+        assert_eq!(LOCAL.route(4000, None), None, "the tunnel is gone");
+        assert_eq!(LOCAL.upstream(), None);
+        assert!(!LOCAL.is_share_host("cctop-share.example.test"));
         assert_ne!(LOCAL.generation(), held, "shares minted on it are stale");
     }
 
