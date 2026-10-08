@@ -473,14 +473,21 @@ pub fn run(force: bool) -> Result<()> {
         return Ok(());
     }
 
-    install(&release, target, current).map(|_| ())
+    install(&release, target, current, staging_dir).map(|_| ())
 }
 
 /// Fetch the archive for `target` and put it in place of the running binary.
 ///
 /// Shared by `--update` and the startup path, which differ only in how they
-/// decided to be here.
-fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
+/// decided to be here — and in when they asked where the binary goes, which is
+/// why `place` is handed in: `--update` asks now, the startup path has already
+/// asked and passes the answer on rather than asking it a second time.
+fn install(
+    release: &Release,
+    target: &str,
+    current: &str,
+    place: impl FnOnce() -> Result<Placement>,
+) -> Result<bool> {
     let latest = release.version();
     let asset = release
         .assets
@@ -493,9 +500,9 @@ fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
     // Claim the staging directory before downloading: whether the new binary can
     // be put in place is a permission question with an answer already available,
     // and finding out afterwards means having spent the download for nothing.
-    // `None` is a directory only root can write, which the user agreed to
-    // elevate for: the download still happens here, as them.
-    let staging = staging_dir()?;
+    // Root's placement is a directory only root can write, which the user agreed
+    // to elevate for: the download still happens here, as them.
+    let placement = place()?;
 
     println!("Downloading {}…", asset.name);
     let mut body = Vec::new();
@@ -508,10 +515,13 @@ fn install(release: &Release, target: &str, current: &str) -> Result<bool> {
         .read_to_end(&mut body)
         .context("could not read the release archive")?;
 
-    let Some(staging) = staging else {
-        install_as_root(&body)?;
-        println!("Updated {current} -> {latest}.");
-        return Ok(show_changes(current, latest));
+    let staging = match placement {
+        Placement::Beside(staging) => staging,
+        Placement::ThroughSudo => {
+            install_as_root(&body)?;
+            println!("Updated {current} -> {latest}.");
+            return Ok(show_changes(current, latest));
+        }
     };
     let new_binary = unpack(&body, staging.path())?;
     self_replace::self_replace(&new_binary).context("could not replace the running executable")?;
@@ -598,22 +608,48 @@ pub fn auto_at_startup(enabled: bool, prefs: &mut crate::cache::UiPrefs) {
     if built_by_cargo() {
         return;
     }
-    // An install cctop cannot write to is not worth a download, and finding out
-    // costs nothing: it is the same question `--update` asks before spending one.
-    if staging_dir().is_err() {
-        return;
-    }
     let Some(target) = asset_target() else {
         return;
     };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
     let current = current_version();
-    println!("cctop {latest} is out; updating from {current} before starting…");
+    let declined = prefs.declined_update.as_deref() == Some(latest.as_str());
+    let recourse = recourse(
+        is_root(),
+        already_elevated(),
+        crate::shim::is_command("sudo"),
+        interactive(),
+    );
+    let placement = match startup_placement(
+        dir,
+        recourse,
+        declined,
+        || println!("cctop {latest} is out; updating from {current} before starting…"),
+        || confirm(dir, &exe),
+    ) {
+        Startup::Update(placement) => placement,
+        Startup::Skip => return,
+        // Remembered against this version, as a "not now" to cargo is: the
+        // question would otherwise come back on every launch until the next
+        // release, and `--update` is still there to ask it on demand.
+        Startup::Declined => {
+            prefs.declined_update = Some(latest.clone());
+            prefs.save();
+            eprintln!("Left on {current}. `cctop --update` asks again whenever you want it.");
+            return;
+        }
+    };
     let updated = fetch_latest().and_then(|release| {
         match is_newer(release.version(), current) {
             // The cache was stale in the direction that matters: it named a
             // release that has since been replaced by the very version running.
             false => Ok(false),
-            true => install(&release, target, current),
+            true => install(&release, target, current, move || Ok(placement)),
         }
     });
     let Ok(showed_notes) = updated else {
@@ -763,6 +799,66 @@ fn relaunch() {
     println!("Could not start the new version ({error}); continuing.");
 }
 
+/// Where the new binary is put in place from.
+enum Placement {
+    /// A scratch directory beside the running binary, which this user can write.
+    Beside(tempfile::TempDir),
+    /// A directory only root can write, which the user agreed to elevate for.
+    ThroughSudo,
+}
+
+/// What the startup path makes of the install directory.
+enum Startup {
+    Update(Placement),
+    /// Nothing worth a download, and nothing asked.
+    Skip,
+    /// Asked whether to install as root, and told no.
+    Declined,
+}
+
+/// Decide, before anything is downloaded, whether a startup update can land —
+/// asking the root question here, once, if that is what it takes.
+///
+/// This is the only place the startup path probes the directory. It used to
+/// probe with [`staging_dir`] as a silent "is it worth a download" check, but
+/// that probe prompts on an unwritable directory, and [`install`] then called
+/// it again and prompted a second time, throwing the first answer away. The
+/// probe here never prompts by itself: a permission refusal becomes the one
+/// question when [`recourse`] says there is someone to ask, and a skip
+/// otherwise, and the answer is carried through to [`install`].
+///
+/// `announce` runs only when an update is going ahead or about to be asked
+/// about, so the line naming the release sits above the question and is never
+/// printed for a skip. `declined` is an earlier "no" to this same release.
+fn startup_placement(
+    dir: &Path,
+    recourse: Recourse,
+    declined: bool,
+    announce: impl FnOnce(),
+    ask: impl FnOnce() -> bool,
+) -> Startup {
+    match raw_stage_in(dir) {
+        Ok(staging) => {
+            announce();
+            Startup::Update(Placement::Beside(staging))
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && recourse == Recourse::Ask
+                && !declined =>
+        {
+            announce();
+            match ask() {
+                true => Startup::Update(Placement::ThroughSudo),
+                false => Startup::Declined,
+            }
+        }
+        // Not writable with no one to ask, already asked, or broken in a way
+        // sudo would not fix: every reason not to act is silent here.
+        Err(_) => Startup::Skip,
+    }
+}
+
 /// How to retry with the privileges the replacement needs.
 const ELEVATE: &str = "re-run it as `sudo cctop --update`";
 
@@ -771,18 +867,18 @@ const ELEVATE: &str = "re-run it as `sudo cctop --update`";
 /// Replacing an executable is a rename and a rename cannot cross a filesystem
 /// boundary, so this has to sit next to the current binary rather than in a temp
 /// dir — which makes it a permission question wherever that binary lives.
-fn staging_dir() -> Result<Option<tempfile::TempDir>> {
+fn staging_dir() -> Result<Placement> {
     let exe = std::env::current_exe().context("could not locate the running executable")?;
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow!("the running executable has no parent directory"))?;
     match raw_stage_in(dir) {
-        Ok(staged) => Ok(Some(staged)),
+        Ok(staged) => Ok(Placement::Beside(staged)),
         // The one failure the user can do something about without going back to
         // the shell, so it is worth handling rather than only reporting.
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => match elevate(dir) {
             Some(failed) => Err(failed),
-            None => Ok(None),
+            None => Ok(Placement::ThroughSudo),
         },
         Err(error) => Err(anyhow::Error::new(error)
             .context(format!("could not stage an update in {}", dir.display()))),
@@ -1428,6 +1524,65 @@ mod tests {
             error.contains(&dir.path().display().to_string()),
             "got: {error}"
         );
+    }
+
+    /// A startup update into a directory only root can write asks once, and the
+    /// answer is the whole decision: a yes goes on to install through sudo with
+    /// nothing left to ask, a no starts the version already here. It used to ask
+    /// once to decide whether to download and again to install, and threw the
+    /// first answer away. `ask` stands in for the terminal, so it is counted
+    /// rather than answered, and nothing here runs sudo.
+    #[test]
+    fn a_startup_update_asks_about_root_at_most_once() {
+        use std::cell::Cell;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Running as root, where the mode bits don't apply.
+        if raw_stage_in(dir.path()).is_ok() {
+            return;
+        }
+        let run = |recourse, declined, answer| {
+            let (asked, announced) = (Cell::new(0), Cell::new(0));
+            let outcome = startup_placement(
+                dir.path(),
+                recourse,
+                declined,
+                || announced.set(announced.get() + 1),
+                || {
+                    asked.set(asked.get() + 1);
+                    answer
+                },
+            );
+            (outcome, asked.get(), announced.get())
+        };
+
+        let (outcome, asked, announced) = run(Recourse::Ask, false, true);
+        assert!(matches!(outcome, Startup::Update(Placement::ThroughSudo)));
+        assert_eq!((asked, announced), (1, 1));
+
+        let (outcome, asked, _) = run(Recourse::Ask, false, false);
+        assert!(matches!(outcome, Startup::Declined));
+        assert_eq!(asked, 1);
+
+        // Said no to this release before: not asked again on the next launch.
+        let (outcome, asked, announced) = run(Recourse::Ask, true, true);
+        assert!(matches!(outcome, Startup::Skip));
+        assert_eq!((asked, announced), (0, 0));
+
+        // No one to ask, or root already: a silent skip, as before.
+        for recourse in [Recourse::Explain, Recourse::Privileged] {
+            let (outcome, asked, announced) = run(recourse, false, true);
+            assert!(matches!(outcome, Startup::Skip));
+            assert_eq!((asked, announced), (0, 0));
+        }
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Writable: staged beside the binary, with no question at all.
+        let (outcome, asked, announced) = run(Recourse::Ask, false, true);
+        assert!(matches!(outcome, Startup::Update(Placement::Beside(_))));
+        assert_eq!((asked, announced), (0, 1));
     }
 
     /// Elevating is something the user asks for, never something that happens
