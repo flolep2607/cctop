@@ -14,6 +14,7 @@
 mod ansi;
 mod batch;
 pub mod columns;
+mod connect;
 mod dirs;
 mod drunk;
 mod effects;
@@ -147,6 +148,9 @@ pub enum Mode {
     /// Adding a Claude account: naming it, then `claude setup-token` in a
     /// terminal inside the popup. See [`AddAccount`].
     AddAccount,
+    /// Connecting a Cloudflare account, or disconnecting it. See
+    /// [`connect`].
+    Connect,
 }
 
 /// The two things an added Claude account can be.
@@ -864,6 +868,12 @@ pub struct App {
     pub start_server: Option<StartServer>,
     /// The add-account popup, while `Mode::AddAccount` is up.
     pub add_account: AddAccount,
+    /// The Cloudflare popup, while `Mode::Connect` is up.
+    pub connect: Option<connect::Connect>,
+    /// The Cloudflare account `t` serves over, as last read — `None` for
+    /// none. Read when it may have changed, not per frame: see
+    /// [`App::refresh_connected`].
+    pub connected: Option<connect::Connected>,
     /// A tunnel being registered on a thread of its own.
     ///
     /// Registering with Cloudflare's edge is a second or more of network, and
@@ -1201,6 +1211,8 @@ impl App {
             serving: None,
             start_server: None,
             add_account: AddAccount::default(),
+            connect: None,
+            connected: None,
             serve_error: None,
             share_opening: None,
             share_arm: false,
@@ -2011,6 +2023,7 @@ mod tests {
                     Item::Setting(i) => cctop_core::settings::SETTINGS[*i].0 == name,
                     Item::View(i) => super::settings::VIEWS[*i].0 == name,
                     Item::Key(i) => cctop_core::settings::BINDINGS[*i].0 == name,
+                    Item::Cloudflare => name == "cloudflare",
                 }
             })
             .unwrap_or_else(|| panic!("no row called {name}"))

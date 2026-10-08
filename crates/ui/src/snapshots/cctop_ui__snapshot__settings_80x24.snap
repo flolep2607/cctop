@@ -24,5 +24,5 @@ expression: screen
 │  alert_errors      0                Alert when X% of 10m of tool calls fail …│
 │  alert_error_calls 10               …counting only once there are this many …│
 │  alert_stall       0                Alert when a working agent writes nothin…│
-╰ 79   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
+╰ 80   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

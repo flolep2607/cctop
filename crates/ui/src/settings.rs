@@ -37,7 +37,13 @@ pub enum Item {
     View(usize),
     /// An entry of `[keys]`, by index into [`cctop_core::settings::BINDINGS`].
     Key(usize),
+    /// The Cloudflare account `t` and `W` use: `[tunnel]`, which is not a
+    /// value to type but a flow to go through, so Enter opens its popup.
+    Cloudflare,
 }
+
+/// What the Cloudflare row says it is for.
+pub const CLOUDFLARE_WHAT: &str = "Your Cloudflare tunnel: links that stay";
 
 /// How a view choice is read and changed.
 ///
@@ -330,6 +336,9 @@ impl App {
         self.apply_columns();
         self.apply_theme();
         self.apply_footer();
+        // `[tunnel]` is in the same file, and `cctop tunnel setup` in another
+        // terminal is a change to it like any other.
+        self.refresh_connected();
     }
 
     /// Repaint if the file now names a different theme.
@@ -415,6 +424,7 @@ impl App {
         (0..cctop_core::settings::SETTINGS.len())
             .map(Item::Setting)
             .chain((0..VIEWS.len()).map(Item::View))
+            .chain(std::iter::once(Item::Cloudflare))
             .chain((0..cctop_core::settings::BINDINGS.len()).map(Item::Key))
             .collect()
     }
@@ -451,6 +461,10 @@ impl App {
                             self.settings.key_for(action)
                         )
                     }
+                    Item::Cloudflare => format!(
+                        "cloudflare tunnel {CLOUDFLARE_WHAT} {}",
+                        self.cloudflare_value()
+                    ),
                 };
                 hay.to_lowercase().contains(&needle)
             })
@@ -518,6 +532,18 @@ impl App {
             Item::Key(_) => self.settings_capture = true,
             Item::View(i) => self.view_activate(i),
             Item::Setting(i) => self.setting_activate(cctop_core::settings::SETTINGS[i].0),
+            Item::Cloudflare => self.open_connect(Mode::List),
+        }
+    }
+
+    /// What the Cloudflare row shows: whether one is connected, and where.
+    pub(super) fn cloudflare_value(&self) -> String {
+        match &self.connected {
+            None => "not connected".to_string(),
+            Some(c) => c
+                .hostname
+                .clone()
+                .unwrap_or_else(|| "connected".to_string()),
         }
     }
 
@@ -603,6 +629,9 @@ impl App {
             }
             Item::Key(i) => self.write_setting("keys", cctop_core::settings::BINDINGS[i].0, None),
             Item::View(i) => self.view_reset(i),
+            // Not on a key that also clears a field: disconnecting deletes
+            // things on Cloudflare, and the popup asks first.
+            Item::Cloudflare => self.set_status("Enter on cloudflare to disconnect it"),
         }
     }
 

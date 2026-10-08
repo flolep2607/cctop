@@ -977,6 +977,7 @@ mod tests {
             all,
             cctop_core::settings::SETTINGS.len()
                 + VIEWS.len()
+                + 1 // the Cloudflare account
                 + cctop_core::settings::BINDINGS.len(),
             "a source is missing rows"
         );

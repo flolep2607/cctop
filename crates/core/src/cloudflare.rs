@@ -34,6 +34,22 @@ const API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Where [`Api::new`] sends its calls: Cloudflare, except in a build made for
+/// tests, where `CCTOP_CLOUDFLARE_API` can name a fake one. A dashboard driven
+/// by hand through a whole setup needs some Cloudflare to talk to, and never a
+/// real one with a real token. Absent from a release build, since a token sent
+/// to a base of someone's choosing is a token given away.
+fn api_base() -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(base) = std::env::var("CCTOP_CLOUDFLARE_API")
+        .ok()
+        .filter(|b| !b.is_empty())
+    {
+        return base;
+    }
+    API_BASE.to_string()
+}
+
 /// The three permissions a setup token needs, as the dashboard names them.
 pub const PERMISSIONS: [&str; 3] = [
     "Account · Cloudflare Tunnel · Edit",
@@ -181,7 +197,7 @@ impl fmt::Debug for Api {
 
 impl Api {
     pub fn new(token: &str) -> Api {
-        Api::at(API_BASE, token)
+        Api::at(&api_base(), token)
     }
 
     /// Against another base URL: a fake API in tests. Private to the crate,

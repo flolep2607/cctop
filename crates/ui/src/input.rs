@@ -224,6 +224,7 @@ impl App {
             Mode::RenameTab => self.on_key_rename(key),
             Mode::SwitchTab => self.on_key_switch(key),
             Mode::AddAccount => self.on_key_add_account(key),
+            Mode::Connect => self.on_key_connect(key),
             Mode::Launch => self.on_key_launch(key),
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
@@ -376,6 +377,7 @@ impl App {
                 }
                 None => {}
             },
+            Mode::Connect => self.paste_connect(text),
             Mode::Search => {
                 if paste_into(&mut self.search, text, usize::MAX) {
                     self.search_edited();
@@ -600,6 +602,7 @@ impl App {
                 let flow = &self.add_account;
                 flow.pane.is_none() && flow.outcome.is_none() && !flow.named
             }
+            Mode::Connect => self.connect.as_ref().is_some_and(|c| c.typing()),
             Mode::List if self.on_settings() => {
                 self.settings_input.is_some() && !self.settings_capture
             }
@@ -798,6 +801,7 @@ impl App {
             KeyCode::Char('l') => self.start_serving(false),
             KeyCode::Char('t') => self.start_serving(true),
             KeyCode::Char('x') => self.stop_serving(),
+            KeyCode::Char('a') => self.open_connect(Mode::Serve),
             // Only a tunnel's link is worth a code: the loopback one is the
             // link a phone cannot open.
             KeyCode::Char('c') => match self.serving.as_ref().is_some_and(|s| s.public.is_some()) {
@@ -1702,6 +1706,9 @@ impl App {
             KeyCode::Char('B') => {
                 self.mode = Mode::Serve;
                 self.serve_qr = false;
+                // The panel offers to connect an account only while none is,
+                // and one may have been connected from a terminal since.
+                self.refresh_connected();
             }
             KeyCode::Char('#') => {
                 self.cost_input = if self.cost_floor > 0.0 {
@@ -2033,7 +2040,9 @@ impl App {
             }
             // A click beside the popup must not cancel a sign-in half done in
             // the browser; only its own Esc does.
-            if self.mode == Mode::AddAccount {
+            // Nor one half way through connecting Cloudflare: a stray click
+            // would throw away a pasted token.
+            if matches!(self.mode, Mode::AddAccount | Mode::Connect) {
                 return;
             }
             // The row menu answers a single click: unlike the launcher, every
