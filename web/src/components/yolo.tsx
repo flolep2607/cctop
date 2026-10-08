@@ -13,8 +13,10 @@ import {
 import type { Session } from "@/lib/types";
 
 // YOLO: cctop allowing every permission prompt a session raises, until it is
-// switched off or the session ends (crates/core/src/yolo.rs). The server presses the key;
-// this page only flips the switch and shows what was waved through.
+// switched off or the agent process exits (crates/core/src/yolo.rs). Claude Code
+// is answered by `cctop yolo-hook` before its dialog goes up; other agents, and
+// a Claude whose hook did not answer, get Allow pressed by the server. This page
+// only flips the switch and shows what was waved through.
 
 const TITLE = "cctop is allowing every permission prompt this session raises";
 
@@ -68,10 +70,13 @@ function Confirm({ open, onOpenChange, onConfirm }: { open: boolean; onOpenChang
             Allow everything this session asks?
           </AlertDialogTitle>
           <AlertDialogDescription>
-            Every tool call in this session will be allowed without asking you: cctop presses Allow on each permission prompt as it goes up — commands,
-            edits, fetches, all of it.
+            Every tool call in this session will be allowed without asking you — commands, edits, fetches, all of it. Claude Code&apos;s prompts are
+            answered before they appear; other agents get Allow pressed for them.
           </AlertDialogDescription>
-          <AlertDialogDescription>It lasts until you turn it off or the session ends. A question with choices still waits for you.</AlertDialogDescription>
+          <AlertDialogDescription>
+            It lasts until you turn it off or this agent process exits, so a resumed session needs it turned on again. A question with choices still
+            waits for you.
+          </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>

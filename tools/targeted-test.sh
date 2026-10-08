@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Run only the tests that could plausibly be affected by what changed.
 #
-# Why this exists: `cargo test --workspace` in cctop spends most of its wall
-# time waiting on sleeps, ptys and subprocesses, and it goes *flaky* when
-# several of them run at once on this 6-core box — two wall-clock tests failed
-# across three consecutive full runs while six lanes were compiling. A red
-# full-suite run under load is a false signal.
+# Why this exists: the full suite is cheap to run now — a few seconds once
+# built — but building every test binary in the workspace is not, and an edit
+# to one crate rarely needs the others' tests until the end. It also keeps the
+# one full run alone: a red full-suite run while other lanes are compiling and
+# forking is not evidence until it has been re-run on its own (CONTRIBUTING.md).
 #
 # Usage:
 #   ./targeted-test.sh                 # diff against the merge-base of main

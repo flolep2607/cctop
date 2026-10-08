@@ -64,4 +64,7 @@ Merging and releasing stay with the user.
 
 `/loop /issues` paces itself; between passes the solvers run in the background
 and their completion re-invokes the loop. When nothing is running and nothing
-is queued, wake in 20–30 minutes to look for new issues and replies.
+is queued, wake in about 20 minutes to look for new issues and replies —
+soon enough for an issue filed from a phone, without polling GitHub for a
+queue that is usually empty. CONTRIBUTING.md, "The issue loop", gives the same
+figure to the person starting it.

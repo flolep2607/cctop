@@ -60,7 +60,7 @@ mod torn;
 mod tree;
 mod worker;
 
-pub use runloop::run;
+pub use runloop::{choose_palette, run};
 use share::{Opening, ShareQr};
 pub use share::{ServeRequest, Served, StartServer};
 use worker::Request;
