@@ -39,6 +39,21 @@ fn profile(p: &ProfileQuota) -> serde_json::Value {
             "an API key — usage is billed, not capped".to_string(),
         ),
         ProviderStatus::NotSignedIn => ("not_signed_in", "not signed in".to_string()),
+        // A token account is never "expired" here, for the reason
+        // `fetch_claude` folds it: the usage endpoint cannot tell a dead
+        // token from one that may not read limits.
+        ProviderStatus::NoLimits | ProviderStatus::Expired
+            if p.source == cctop_core::config::AccountSource::Token =>
+        {
+            (
+                "no_limits",
+                "limits cannot be read with a token".to_string(),
+            )
+        }
+        ProviderStatus::NoLimits => (
+            "no_limits",
+            "the usage endpoint will not show this account's limits".to_string(),
+        ),
         ProviderStatus::Expired => (
             "expired",
             "the sign-in has expired — log in again".to_string(),
@@ -102,6 +117,7 @@ mod tests {
             (ProviderStatus::ApiBilling, "api_billing"),
             (ProviderStatus::NotSignedIn, "not_signed_in"),
             (ProviderStatus::Expired, "expired"),
+            (ProviderStatus::NoLimits, "no_limits"),
             (
                 ProviderStatus::RateLimited { retry_at: None },
                 "rate_limited",
@@ -117,6 +133,30 @@ mod tests {
                 codex: Vec::new(),
             });
             assert_eq!(doc["claude"][0]["status"], want, "status {want}");
+        }
+    }
+
+    /// The page says "sign-in expired" for `expired`, which a token account
+    /// whose limits cannot be read is not.
+    #[test]
+    fn a_token_account_is_never_sent_as_expired() {
+        for status in [ProviderStatus::Expired, ProviderStatus::NoLimits] {
+            let doc = document(&Quota {
+                fetched: true,
+                claude: vec![ProfileQuota {
+                    profile: "work2".into(),
+                    status,
+                    source: cctop_core::config::AccountSource::Token,
+                }],
+                codex: Vec::new(),
+            });
+            assert_eq!(doc["claude"][0]["status"], "no_limits");
+            assert!(
+                !doc["claude"][0]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("expired")
+            );
         }
     }
 

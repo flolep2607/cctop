@@ -770,6 +770,12 @@ the one `~/.claude` with everything else, sharing the history, the settings and
 the project trust rather than splitting them across a second directory. Start
 one with `CLAUDE_CODE_OAUTH_TOKEN` set and that is the subscription it spends.
 
+A `setup-token` token is made for model requests, and the usage endpoint may
+refuse it. When it does, the panel says `no limits for a token` rather than
+calling the account expired, and asks again only every few hours: the account
+works, cctop just cannot measure it. A login into a `~/.claude-<name>` of its
+own is the way to see that account's limits.
+
 `+` in the TUI is the same thing without leaving the dashboard: it asks for the
 name, then offers `claude auth login` into a `~/.claude-<name>` of its own or
 `claude setup-token`, and runs whichever you pick in a tab of its own so you can

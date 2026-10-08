@@ -2024,18 +2024,26 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
             cctop_core::quota::ProviderStatus::ApiBilling => {
                 spans.push(Span::styled("API billing, no limits", theme::dim()));
             }
+            // A token account the usage endpoint refuses is the normal case,
+            // not a fault: a `claude setup-token` token can only make model
+            // requests. It says so calmly, like API billing, and names no
+            // command, because there is nothing to repair. `Expired` lands
+            // here too for a token, though the poller already folds it: a
+            // token cannot be told dead from unmeasurable by this endpoint.
+            cctop_core::quota::ProviderStatus::NoLimits
+            | cctop_core::quota::ProviderStatus::Expired
+                if account.source == cctop_core::config::AccountSource::Token =>
+            {
+                spans.push(Span::styled("no limits for a token", theme::dim()));
+            }
+            cctop_core::quota::ProviderStatus::NoLimits => {
+                spans.push(Span::styled("limits not readable", theme::dim()));
+            }
             cctop_core::quota::ProviderStatus::Expired => {
-                // A token account has no login to renew: its credentials are
-                // the line the user pasted into cctop's own config, and
-                // `claude login` would refresh a directory it does not use.
-                // The shorter wording goes with the longer command, because an
-                // account's whole message lives in one column of a shared line
-                // and a hint clipped mid-flag is not a hint.
-                let (said, cmd) = match (account.source, *harness) {
-                    (cctop_core::config::AccountSource::Token, _) => {
-                        ("expired — ", "cctop --add-account")
-                    }
-                    (_, "Codex") => ("sign-in expired — ", "codex login"),
+                // Each harness renews its own sign-in; naming the other one's
+                // command would refresh a directory this account does not use.
+                let (said, cmd) = match *harness {
+                    "Codex" => ("sign-in expired — ", "codex login"),
                     _ => ("sign-in expired — ", "claude login"),
                 };
                 // Three accounts on 120 columns is 37 a column, one short of
@@ -3811,7 +3819,15 @@ mod tests {
         use cctop_core::config::AccountSource::{Directory, Token};
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
-        app.quota.claude = vec![expired("default", Directory), expired("side", Token)];
+        app.quota.claude = vec![
+            expired("default", Directory),
+            expired("side", Token),
+            cctop_core::quota::ProfileQuota {
+                profile: "work2".into(),
+                status: cctop_core::quota::ProviderStatus::NoLimits,
+                source: Token,
+            },
+        ];
         app.quota.codex = vec![expired("default", Directory), expired("work", Directory)];
 
         let (cols, rows) = (200u16, 50u16);
@@ -3844,18 +3860,25 @@ mod tests {
             "a Codex account was pointed at another harness's login: {mine:?}"
         );
 
-        // And an account that is only a token is pointed at the command that
-        // replaces one: it has no directory for `claude login` to write to, so
-        // the ordinary hint would be a repair that changes nothing.
-        let line = screen
-            .lines()
-            .find(|l| l.contains("Claude (side)"))
-            .expect("the token account was not drawn");
-        let mine = &line[line.find("Claude (side)").expect("found above")..];
-        assert!(
-            mine.contains("cctop --add-account") && !mine.contains("claude login"),
-            "a token account was told to log in: {mine:?}"
-        );
+        // And an account that is only a token is never "expired", whether the
+        // endpoint said 403 or 401 (or an older cctop cached the 401 as
+        // expired): a `setup-token` token cannot read limits, so the refusal
+        // is its normal state, and there is no command that would change it.
+        for profile in ["Claude (side)", "Claude (work2)"] {
+            let line = screen
+                .lines()
+                .find(|l| l.contains(profile))
+                .expect("the token account was not drawn");
+            let mine = &line[line.find(profile).expect("found above")..];
+            let mine = mine.split("  ").next().unwrap_or(mine);
+            assert!(
+                mine.contains("no limits for a token")
+                    && !mine.contains("expired")
+                    && !mine.contains("--add-account")
+                    && !mine.contains("login"),
+                "a token account was told it is broken: {mine:?}"
+            );
+        }
     }
 
     /// The spend bar fills the room the two leading names leave, up to a cap,
