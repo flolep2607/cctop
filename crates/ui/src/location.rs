@@ -18,66 +18,9 @@
 
 use super::*;
 use cctop_core::remote_fs::{self, Listing, RemoteFacts};
+pub use cctop_core::remote_launch::{Typed, parse};
+use cctop_core::remote_launch::{sandbox_argv, shell_argv, split_remote};
 use cctop_core::ssh_master::Runner;
-
-/// What the field's text names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Typed<'a> {
-    /// A path on this machine, a bare word to match against known projects, or
-    /// nothing.
-    Local(&'a str),
-    /// `host:path`, scp-style. An empty path is the host's home.
-    Remote { host: &'a str, path: &'a str },
-}
-
-/// Read the field's text as a location.
-///
-/// `scp`'s rule, near enough: a colon before any slash makes the part before
-/// it a host. Anything that starts like a path — `/`, `~`, `.` — is local
-/// whatever colons follow, since a directory name may have one and a host name
-/// may not start that way. An IPv6 address is written `[addr]:path`.
-pub fn parse(text: &str) -> Typed<'_> {
-    let text = text.trim();
-    if text.is_empty() || text.starts_with(['/', '~', '.']) {
-        return Typed::Local(text);
-    }
-    if text.starts_with('[') {
-        return match text.find("]:") {
-            Some(end) if end > 1 => Typed::Remote {
-                host: &text[..=end],
-                path: &text[end + 2..],
-            },
-            _ => Typed::Local(text),
-        };
-    }
-    match text.split_once(':') {
-        Some((host, path))
-            if !host.is_empty() && !host.contains('/') && !host.contains(char::is_whitespace) =>
-        {
-            Typed::Remote { host, path }
-        }
-        _ => Typed::Local(text),
-    }
-}
-
-/// Split a remote path being typed into the directory to list and the start of
-/// a name in it. A path with no slash is a name in the home, as `scp host:x`
-/// reads it.
-fn split_remote(path: &str) -> (String, String) {
-    match path.rfind('/') {
-        None => ("~".to_string(), path.to_string()),
-        Some(0) => ("/".to_string(), path[1..].to_string()),
-        Some(at) => (path[..at].to_string(), path[at + 1..].to_string()),
-    }
-}
-
-/// `name` inside `dir`, spelled the way the field spells paths.
-fn join_remote(dir: &str, name: &str) -> String {
-    match dir {
-        "/" => format!("/{name}"),
-        dir => format!("{}/{name}", dir.trim_end_matches('/')),
-    }
-}
 
 /// One host's connection, as far as the launcher knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,60 +231,6 @@ pub(super) fn remote_label(agent: &str, host: &str) -> String {
     format!("{agent} ⇄ {host}")
 }
 
-/// The command a sandboxed launch runs, as an argv for the pane.
-///
-/// Through `env`, which is how every launch here already carries a variable,
-/// and which [`tabs::label_of`] knows to look past. The hold variable keeps a
-/// setup failure on screen instead of closing the tab on it.
-pub(super) fn sandbox_argv(
-    exe: &std::path::Path,
-    agent: &str,
-    host: &str,
-    path: &str,
-) -> Vec<String> {
-    let path = match path.trim() {
-        "" => "~",
-        path => path,
-    };
-    vec![
-        "env".to_string(),
-        format!("{}=1", cctop_core::sandbox::ENV_HOLD),
-        exe.to_string_lossy().into_owned(),
-        "sandbox".to_string(),
-        "--agent".to_string(),
-        agent.to_string(),
-        format!("{host}:{path}"),
-    ]
-}
-
-/// The command a remote shell runs: ssh with a terminal, into the directory.
-///
-/// Over the launcher's master when it is up (`ControlMaster=auto` uses a live
-/// socket and otherwise connects, prompting in the tab as ssh at a prompt
-/// would). `~` is expanded there, by the host's `sh`.
-pub(super) fn shell_argv(host: &str, path: &str) -> Vec<String> {
-    use cctop_core::sandbox::sh_quote;
-    let script = r#"p=$1
-case $p in "~"|"") p=$HOME ;; "~/"*) p=$HOME/${p#"~/"} ;; esac
-cd -- "$p" || exit 1
-exec "${SHELL:-sh}" -l"#;
-    let mut argv = vec!["ssh".to_string(), "-t".to_string()];
-    if let Some(socket) = cctop_core::ssh_master::socket_for(host) {
-        argv.extend([
-            "-S".to_string(),
-            socket.to_string_lossy().into_owned(),
-            "-o".to_string(),
-            "ControlMaster=auto".to_string(),
-        ]);
-    }
-    argv.extend([
-        host.to_string(),
-        "--".to_string(),
-        format!("exec sh -c {} cctop {}", sh_quote(script), sh_quote(path)),
-    ]);
-    argv
-}
-
 /// Hosts offered beside the local directories before one is in the field, at
 /// most: enough to show that hosts are on offer, few enough to leave room for
 /// the projects.
@@ -377,67 +266,28 @@ impl App {
         if !matches!(state.conn, Conn::Ready { .. }) {
             return Vec::new();
         }
-        let (dir, fragment) = split_remote(path.trim());
-
-        let mut hits: Vec<Hit> = Vec::new();
-        // A bare name is matched against the repositories as well as the home's
-        // own directories: what is remembered about a project is its name.
-        if !path.contains('/')
-            && let Some(repos) = &state.repos
-        {
-            let wanted = fragment.to_lowercase();
-            hits.extend(
-                repos
-                    .iter()
-                    .filter(|r| r.to_lowercase().contains(&wanted))
-                    .map(|r| Hit::Remote {
-                        host: host.to_string(),
-                        path: r.clone(),
-                        // Not listed with its permissions: the check on Enter
-                        // asks.
-                        problem: None,
-                    }),
-            );
-        }
-        match state.dirs.get(&dir) {
-            Some(Dir::Listed(listing)) => {
-                let wanted = fragment.to_lowercase();
-                for entry in &listing.dirs {
-                    if entry.name.starts_with('.') && !fragment.starts_with('.') {
-                        continue;
-                    }
-                    if !entry.name.to_lowercase().starts_with(&wanted) {
-                        continue;
-                    }
-                    let path = join_remote(&dir, &entry.name);
-                    if hits
-                        .iter()
-                        .any(|h| matches!(h, Hit::Remote { path: p, .. } if *p == path))
-                    {
-                        continue;
-                    }
-                    let problem = match (entry.readable, entry.writable) {
-                        (false, _) => Some("not readable on the host".to_string()),
-                        (_, false) => Some("read-only on the host".to_string()),
-                        _ => None,
-                    };
-                    hits.push(Hit::Remote {
-                        host: host.to_string(),
-                        path,
-                        problem,
-                    });
-                }
-            }
-            Some(_) => {}
-            None => {
-                if let Some(state) = self.ssh_states.get_mut(host) {
-                    state.dirs.insert(dir.clone(), Dir::Pending);
-                }
-                let _ = self.tx.send(worker::Request::Location(Ask::List {
+        let (dir, _) = split_remote(path.trim());
+        let listing = match state.dirs.get(&dir) {
+            Some(Dir::Listed(listing)) => Some(listing),
+            _ => None,
+        };
+        let mut hits: Vec<Hit> =
+            cctop_core::remote_launch::suggest(path, state.repos.as_deref(), listing)
+                .into_iter()
+                .map(|s| Hit::Remote {
                     host: host.to_string(),
-                    dir,
-                }));
+                    path: s.path,
+                    problem: s.problem,
+                })
+                .collect();
+        if !state.dirs.contains_key(&dir) {
+            if let Some(state) = self.ssh_states.get_mut(host) {
+                state.dirs.insert(dir.clone(), Dir::Pending);
             }
+            let _ = self.tx.send(worker::Request::Location(Ask::List {
+                host: host.to_string(),
+                dir,
+            }));
         }
         hits.truncate(dirs::MAX_HITS);
         hits
@@ -775,28 +625,6 @@ mod tests {
     use ratatui::crossterm::event::KeyCode;
     use std::sync::mpsc::{Receiver, channel};
 
-    #[test]
-    fn the_field_reads_host_colon_path_as_a_remote_location() {
-        let remote = |host, path| Typed::Remote { host, path };
-        assert_eq!(parse("procdb:~/proj"), remote("procdb", "~/proj"));
-        assert_eq!(parse("procdb:"), remote("procdb", ""));
-        assert_eq!(parse(" me@10.0.0.5:/srv "), remote("me@10.0.0.5", "/srv"));
-        assert_eq!(parse("[::1]:/srv"), remote("[::1]", "/srv"));
-        // A path that starts like one is local, colons and all.
-        for local in [
-            "", "~", "~/a:b", "/srv/x:y", "./x:y", "a/b:c", "cctop", "[::1]/x",
-        ] {
-            assert_eq!(parse(local), Typed::Local(local.trim()), "{local}");
-        }
-        assert_eq!(split_remote(""), ("~".into(), "".into()));
-        assert_eq!(split_remote("pro"), ("~".into(), "pro".into()));
-        assert_eq!(split_remote("~/src/a"), ("~/src".into(), "a".into()));
-        assert_eq!(split_remote("~/src/"), ("~/src".into(), "".into()));
-        assert_eq!(split_remote("/s"), ("/".into(), "s".into()));
-        assert_eq!(join_remote("/", "srv"), "/srv");
-        assert_eq!(join_remote("~/src/", "api"), "~/src/api");
-    }
-
     /// The agents that have a way to run their commands on the host go through
     /// the sandbox; the shell goes over ssh; the rest are refused by name.
     #[test]
@@ -822,38 +650,9 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_launch_names_the_agent_and_the_host() {
-        let exe = std::path::Path::new("/usr/local/bin/cctop");
-        assert_eq!(
-            sandbox_argv(exe, "opencode", "devbox", "  "),
-            [
-                "env",
-                "CCTOP_SANDBOX_HOLD=1",
-                "/usr/local/bin/cctop",
-                "sandbox",
-                "--agent",
-                "opencode",
-                "devbox:~"
-            ]
-        );
+    fn a_remote_tab_is_named_for_its_agent_first() {
         let label = remote_label("opencode", "procdb");
         assert_eq!(cctop_core::screen::harness_of(&label), "opencode");
-        let shell = shell_argv("devbox", "~/src");
-        assert_eq!(shell[..2], ["ssh", "-t"]);
-        assert!(shell.contains(&"devbox".to_string()));
-        // The path goes to the host's sh as an argument, `~` and all.
-        let home = shell_argv("devbox", "~");
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(
-                home.last()
-                    .expect("line")
-                    .replace("exec \"${SHELL:-sh}\" -l", "pwd"),
-            )
-            .env("HOME", "/")
-            .output()
-            .expect("sh");
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "/\n");
     }
 
     /// An App whose worker requests can be read back.

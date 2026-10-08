@@ -107,43 +107,73 @@ fn parse_listing(out: &str) -> Option<Listing> {
     Some(Listing { resolved, dirs })
 }
 
-/// The git repositories under the host's home, as `~/…` paths.
+/// The git repositories under the host's home, as `~/…` paths, newest first
+/// where the host can say when each was last touched.
 ///
 /// The same shape as the local scan — three levels, hidden directories
-/// skipped, a repository's own subdirectories not offered — so the two halves
-/// of the field read as one list. `timeout` where the host has it, so a scan
-/// cut off here does not go on walking there.
+/// skipped, a repository's own subdirectories not offered, newest first by the
+/// `.git` entry's mtime — so the two halves of the field read as one list.
+/// `timeout` where the host has it, so a scan cut off here does not go on
+/// walking there.
+///
+/// The times come from `find -printf`, which only GNU findutils has, so the
+/// host is asked whether its `find` takes it rather than guessed at from its
+/// OS. One without it (BusyBox, the BSDs) still answers, A to Z, as the scan
+/// did before it read times. The sort runs on the host before the cap, so a
+/// home with more checkouts than [`REPOS_CAP`] keeps its newest, not its
+/// alphabetically first.
 pub fn repos(runner: &dyn Runner, host: &str) -> Result<Vec<String>, String> {
     let script = format!(
         r#"cd || exit 0
 t=; command -v timeout >/dev/null 2>&1 && t="timeout {secs}"
-$t find . -mindepth 1 -maxdepth 4 -name .git -print -prune -o -name '.*' -prune 2>/dev/null | head -n {REPOS_CAP}"#,
+if find . -maxdepth 0 -printf '' >/dev/null 2>&1; then
+  $t find . -mindepth 1 -maxdepth 4 -name .git -printf '%T@ %p\n' -prune -o -name '.*' -prune 2>/dev/null | sort -rn | head -n {REPOS_CAP}
+else
+  $t find . -mindepth 1 -maxdepth 4 -name .git -print -prune -o -name '.*' -prune 2>/dev/null | head -n {REPOS_CAP}
+fi"#,
         secs = REPOS_TIMEOUT.as_secs().saturating_sub(1).max(1),
     );
     let out = runner.run(host, &script_line(&script, ""), REPOS_TIMEOUT)?;
     Ok(parse_repos(&out))
 }
 
+/// The scan's lines, which are `<mtime> ./x/.git` from a GNU `find` and plain
+/// `./x/.git` from any other.
 fn parse_repos(out: &str) -> Vec<String> {
-    let mut found: Vec<String> = out
+    let found: Vec<(Option<f64>, String)> = out
         .lines()
         .filter_map(|line| {
-            let rel = line.strip_prefix("./")?.strip_suffix("/.git")?;
-            (!rel.is_empty()).then(|| format!("~/{rel}"))
+            let (when, path) = match line.starts_with("./") {
+                true => (None, line),
+                false => {
+                    let (when, path) = line.split_once(' ')?;
+                    (Some(when.parse::<f64>().ok()?), path)
+                }
+            };
+            let rel = path.strip_prefix("./")?.strip_suffix("/.git")?;
+            (!rel.is_empty()).then(|| (when, format!("~/{rel}")))
         })
         .collect();
-    found.sort();
-    // A repository inside one already listed is that one's business.
-    let mut kept: Vec<String> = Vec::new();
-    for repo in found {
-        if !kept
-            .iter()
-            .any(|outer| repo.starts_with(&format!("{outer}/")))
-        {
-            kept.push(repo);
-        }
-    }
-    kept
+    // A repository inside another one found is that one's business. Judged
+    // against everything found rather than in a pass over a sorted list, so it
+    // holds in any order: a nested checkout touched after its parent is still
+    // the parent's.
+    let mut kept: Vec<(Option<f64>, String)> = found
+        .iter()
+        .filter(|(_, repo)| {
+            !found
+                .iter()
+                .any(|(_, outer)| repo.starts_with(&format!("{outer}/")))
+        })
+        .cloned()
+        .collect();
+    // Newest first, ties and untimed lines by path, as `repos_under` does. A
+    // host either times every line or none, so the two never really mix.
+    kept.sort_by(|(a_when, a), (b_when, b)| {
+        let (a_when, b_when) = (a_when.unwrap_or(0.0), b_when.unwrap_or(0.0));
+        b_when.total_cmp(&a_when).then_with(|| a.cmp(b))
+    });
+    kept.into_iter().map(|(_, repo)| repo).collect()
 }
 
 /// What the host says about one directory.
@@ -595,8 +625,19 @@ mod tests {
             .expect("chmod back");
     }
 
+    /// Set a path's mtime, so repositories can be told apart by when they
+    /// were last touched rather than by what they are called.
+    fn backdate(path: &Path, secs_ago: u64) {
+        let when = std::time::SystemTime::now() - Duration::from_secs(secs_ago);
+        std::fs::File::open(path)
+            .expect("open")
+            .set_times(std::fs::FileTimes::new().set_modified(when))
+            .expect("set mtime");
+    }
+
+    /// Linux CI has GNU find, so this runs the timed half of the script.
     #[test]
-    fn the_repository_scan_finds_checkouts_and_not_what_is_inside_them() {
+    fn the_repository_scan_finds_checkouts_newest_first_and_not_what_is_inside_them() {
         let (_keep, sh) = fake_home();
         for repo in [
             "api",
@@ -609,8 +650,29 @@ mod tests {
         }
         // Four levels down: past the scan.
         std::fs::create_dir_all(sh.home.join("a/b/c/d/.git")).expect("deep");
+        backdate(&sh.home.join("api/.git"), 3 * 86_400);
+        backdate(&sh.home.join("a/b/c/.git"), 86_400);
+        // Newest of all, and still not offered: it is inside `code/web`.
+        backdate(&sh.home.join("code/web/.git"), 2 * 86_400);
         let found = repos(&sh, "box").expect("ran");
-        assert_eq!(found, ["~/a/b/c", "~/api", "~/code/web"]);
+        assert_eq!(found, ["~/a/b/c", "~/code/web", "~/api"]);
+    }
+
+    #[test]
+    fn a_find_without_times_gives_its_repositories_a_to_z() {
+        let out = "./zeta/.git\n./code/web/.git\n./alpha/.git\n./code/web/sub/.git\n";
+        assert_eq!(parse_repos(out), ["~/alpha", "~/code/web", "~/zeta"]);
+    }
+
+    #[test]
+    fn a_nested_repository_is_dropped_even_when_it_is_the_newest() {
+        let out = "\
+1700000300.5 ./code/web/vendor/.git
+1700000200.0 ./old/.git
+1700000200.0 ./code/web/.git
+1700000100.0 ./zz/.git
+";
+        assert_eq!(parse_repos(out), ["~/code/web", "~/old", "~/zz"]);
     }
 
     #[test]
