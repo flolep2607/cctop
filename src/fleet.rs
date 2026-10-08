@@ -644,10 +644,7 @@ mod tests {
         let rows = parse("box", json).expect("parses");
         let s = &rows[0];
         assert_eq!(s.remote.as_ref().map(|r| r.host.as_str()), Some("box"));
-        assert_eq!(
-            crate::ui::columns::branch_of(s).as_deref(),
-            Some("feat/idle")
-        );
+        assert_eq!(crate::branch::branch_of(s).as_deref(), Some("feat/idle"));
         assert!(s.is_running(), "a live remote row must read as live");
         assert_eq!(s.activity_state, ActivityState::WaitingForInput);
         assert_eq!(s.total_cost, Some(1.25));
@@ -693,7 +690,7 @@ mod tests {
         );
         assert_eq!(rows[0].session_id, "x");
         assert!(!rows[0].is_running());
-        assert!(crate::ui::columns::branch_of(&rows[0]).is_none());
+        assert!(crate::branch::branch_of(&rows[0]).is_none());
     }
 
     /// The answers a real far side gives, as ssh hands them back.

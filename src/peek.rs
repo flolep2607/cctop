@@ -8,7 +8,7 @@
 //! to whoever attaches, and rmux, which keeps the pane's screen for
 //! `capture-pane`.
 //!
-//! What is read feeds the same [`screen_state`](crate::ui::tabs::screen_state)
+//! What is read feeds the same [`screen_state`](crate::screen::screen_state)
 //! recognizer the panes feed, so a permission prompt no hook reported still
 //! puts Allow and Deny on the page.
 //!
@@ -31,7 +31,7 @@ pub(crate) struct Screened {
     /// when the prompt carries nothing readable — never something made up.
     pub ask: Option<String>,
     /// Whether the prompt on screen is a question with choices rather than a
-    /// permission prompt; see [`screen_question`](crate::ui::tabs::screen_question).
+    /// permission prompt; see [`screen_question`](crate::screen::screen_question).
     pub question: bool,
 }
 
@@ -75,7 +75,7 @@ impl Peek {
     pub(crate) fn read(&mut self, harness: &str, pid: u32) -> Option<Screened> {
         // Checked before the borrow: a harness with no footer row to match has
         // no screen worth capturing.
-        if !crate::ui::tabs::screenable(harness) {
+        if !crate::screen::screenable(harness) {
             return None;
         }
         if self.swept_at.elapsed() >= SWEEP_STALE {
@@ -112,22 +112,22 @@ impl Peek {
 pub(crate) fn named(name: &str) -> Option<Screened> {
     let capture = crate::rmux::capture(name)?;
     let rows = replay(&capture);
-    finish(crate::ui::tabs::harness_of(name), &rows)
+    finish(crate::screen::harness_of(name), &rows)
 }
 
 /// The harness name, a recognized screen, and nothing else in the answer.
 fn finish(harness: &str, rows: &[String]) -> Option<Screened> {
-    if !crate::ui::tabs::screenable(harness) {
+    if !crate::screen::screenable(harness) {
         return None;
     }
-    let signal = crate::ui::tabs::screen_state(harness, rows)?;
+    let signal = crate::screen::screen_state(harness, rows)?;
     // A prompt's detail is only worth reading when there is a prompt: the
     // extractor reads the same footer window the recognizer did.
     let asking = signal == crate::hook::Signal::NeedsInput;
     let ask = asking
-        .then(|| crate::ui::tabs::screen_ask(harness, rows))
+        .then(|| crate::screen::screen_ask(harness, rows))
         .flatten();
-    let question = asking && crate::ui::tabs::screen_question(harness, rows);
+    let question = asking && crate::screen::screen_question(harness, rows);
     Some(Screened {
         signal,
         ask,

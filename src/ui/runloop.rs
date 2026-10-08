@@ -8,7 +8,6 @@
 
 use super::worker::{Response, spawn_worker};
 use super::*;
-use crate::cli::Args;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event,
@@ -42,7 +41,15 @@ const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 /// Run the UI. `hosted` is an agent cctop launched for this session, which it
 /// shows attached and outlives by nothing: when the agent exits, so does cctop,
 /// so `cctop claude` gets you back to your shell the way `claude` would.
-pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i32> {
+///
+/// The three flags the UI reads are taken one by one rather than as the
+/// command line they came from: the parser is the binary's, above the UI.
+pub fn run(
+    plan: crate::pricing::Plan,
+    delay: f64,
+    hosts: &[String],
+    hosted: Option<crate::shim::Hosted>,
+) -> anyhow::Result<i32> {
     // Before anything draws, and once: the palette is read by every widget and
     // must not change under them mid-run. Before `ratatui::init` too, because
     // `auto` asks the terminal for its background and reads the answer off
@@ -51,7 +58,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
 
     let (req_tx, req_rx) = channel::<Request>();
     let (res_tx, res_rx) = channel::<Response>();
-    let worker = spawn_worker(args.plan, req_rx, res_tx.clone());
+    let worker = spawn_worker(plan, req_rx, res_tx.clone());
 
     // Pricing and quota are network-bound; keep both off the UI thread.
     {
@@ -62,7 +69,7 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
         });
     }
     spawn_quota_poller(res_tx.clone());
-    let hosts = crate::fleet::Host::collect(&args.hosts);
+    let hosts = crate::fleet::Host::collect(hosts);
     for host in &hosts {
         spawn_host_poller(host.clone(), res_tx.clone());
     }
@@ -79,8 +86,8 @@ pub fn run(args: &Args, hosted: Option<crate::shim::Hosted>) -> anyhow::Result<i
         });
     }
 
-    let mut app = App::new(args.plan, req_tx.clone());
-    app.refresh_secs = args.delay;
+    let mut app = App::new(plan, req_tx.clone());
+    app.refresh_secs = delay;
     // With nothing to put in it, HOST is a column of one repeated word. Hidden
     // through the same mechanism the user has, so `$CCTOP_COLUMNS_HIDE` and this
     // cannot disagree about what is on screen.

@@ -505,9 +505,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
 /// bumped at a release: every build between two of them says the same number,
 /// and "which one is this" is the question the number cannot answer.
 pub(super) fn build_label() -> String {
-    match env!("CCTOP_COMMIT") {
-        "" => format!("cctop {}", env!("CARGO_PKG_VERSION")),
-        commit => format!("cctop {} ({commit})", env!("CARGO_PKG_VERSION")),
+    let version = crate::update::current_version();
+    match crate::update::current_commit() {
+        "" => format!("cctop {version}"),
+        commit => format!("cctop {version} ({commit})"),
     }
 }
 

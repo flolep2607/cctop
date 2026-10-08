@@ -2,7 +2,9 @@ mod access;
 mod advise;
 mod alert;
 mod alias;
+mod answer;
 mod attach;
+mod branch;
 mod burn;
 mod cache;
 mod cast;
@@ -20,6 +22,7 @@ mod handoff;
 mod hook;
 mod inject;
 mod insight;
+mod json;
 mod loader;
 mod mcp;
 mod notify;
@@ -32,6 +35,7 @@ mod recall;
 mod remote_fs;
 mod rmux;
 mod sandbox;
+mod screen;
 mod serve;
 mod session;
 mod settings;
@@ -40,6 +44,7 @@ mod ssh_config;
 mod ssh_master;
 mod sshfs;
 mod trace;
+mod tunnel;
 mod ui;
 mod update;
 mod util;
@@ -475,13 +480,17 @@ fn main() -> anyhow::Result<()> {
     // while the network fetch is still in flight.
     pricing::load_cached_pricing();
 
+    // An agent asking what colour the terminal is gets cctop's palette, which
+    // the UI owns; before any agent is hosted, so the first query is answered.
+    shim::answer_colours_from(|| ui::theme::variant() == ui::theme::Variant::Light);
+
     // Started before the UI so a failure to launch prints as an ordinary error
     // rather than from inside the alternate screen.
     let hosted = agent
         .map(|agent| shim::host(&agent, None, ui::render::pane_size()))
         .transpose()?;
 
-    let code = ui::run(&args, hosted)?;
+    let code = ui::run(args.plan, args.delay, &args.hosts, hosted)?;
     // After the UI is down, so the message is not painted over by the alternate
     // screen being restored.
     finish_trace(&args);

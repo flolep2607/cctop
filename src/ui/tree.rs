@@ -524,7 +524,7 @@ fn repos(
                 .push(format!("{rail}{}", if last { "└─ " } else { "├─ " }));
             let folded = heading(tree, key, label, depth + 1, &members);
             if let Some(g) = tree.groups.last_mut() {
-                g.branch = columns::branch_of(&sessions[members[0]]);
+                g.branch = crate::branch::branch_of(&sessions[members[0]]);
             }
             if !folded {
                 leaves(

@@ -123,7 +123,7 @@ impl vt100::Callbacks for Signals {
         // A helper can block, and the no-helper fallback writes the sequence
         // onward to the real terminal's stdout — neither belongs on the
         // thread that is mid-parse of the pane's output.
-        std::thread::spawn(move || crate::ui::render::copy_to_clipboard(&text));
+        std::thread::spawn(move || crate::clipboard::copy_to_clipboard(&text));
     }
 
     /// Watch for the agent turning on a keyboard protocol.

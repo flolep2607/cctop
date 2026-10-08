@@ -288,7 +288,7 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
             .or_else(|| data.title.clone())
             .or_else(|| session.title.clone()),
         project: (!session.label_source.is_empty()).then(|| util::tildify(&session.label_source)),
-        branch: crate::ui::columns::branch_of(session),
+        branch: crate::branch::branch_of(session),
         profile: session.profile.clone(),
         model: (!session.model.is_empty()).then(|| session.model.clone()),
         models: data.models.clone(),

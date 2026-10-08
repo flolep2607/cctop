@@ -863,6 +863,20 @@ fn strike(haystack: &mut [u8], needle: &[u8]) -> usize {
     found
 }
 
+/// Whether cctop's palette is the light one, asked of whoever owns the palette.
+///
+/// The palette is the terminal UI's, and the shim sits below the UI: it also
+/// runs with no UI at all (`cctop run`). So the UI hands the question down
+/// rather than the shim reaching up for it, and with nobody to ask the answer is
+/// dark — the palette a thread gets when it has not chosen one.
+static LIGHT_PALETTE: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+
+/// Answer an agent's colour query from `light`. The first caller wins; there is
+/// one palette owner per process.
+pub fn answer_colours_from(light: fn() -> bool) {
+    let _ = LIGHT_PALETTE.set(light);
+}
+
 /// The foreground (10) or background (11) colour to report.
 ///
 /// An agent that asks is deciding whether to draw for a light or a dark
@@ -871,7 +885,7 @@ fn strike(haystack: &mut [u8], needle: &[u8]) -> usize {
 /// it. Only the luminance is really being asked about, so the two ends of the
 /// ramp say it unambiguously.
 fn color_reply(which: u16) -> String {
-    let light = crate::ui::theme::variant() == crate::ui::theme::Variant::Light;
+    let light = LIGHT_PALETTE.get().is_some_and(|light| light());
     let bright = "ffff/ffff/ffff";
     let dark = "0000/0000/0000";
     let value = match (which, light) {

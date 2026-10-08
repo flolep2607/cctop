@@ -393,8 +393,7 @@ fn web_share(name: &str, public: Option<&str>) -> Result<Share, String> {
 /// One for the process, however many sessions are shared: the listener is one
 /// per daemon and tells shares apart by the token in the fragment. Held until
 /// cctop exits, which is when the shares it handed out stop answering.
-static PUBLIC: std::sync::Mutex<Option<(u16, crate::serve::tunnel::Tunnel)>> =
-    std::sync::Mutex::new(None);
+static PUBLIC: std::sync::Mutex<Option<(u16, crate::tunnel::Tunnel)>> = std::sync::Mutex::new(None);
 
 /// The origin of a quick tunnel to the daemon's share listener, starting one
 /// if none is up. An error where the edge cannot be reached, which leaves the
@@ -412,7 +411,7 @@ fn public_origin() -> Result<String, String> {
     }
     // The first line only: the rest is advice about `--tunnel`, a flag this
     // caller never had.
-    let tunnel = crate::serve::tunnel::start(port).map_err(|e| {
+    let tunnel = crate::tunnel::start(port).map_err(|e| {
         format!("{e}")
             .lines()
             .next()

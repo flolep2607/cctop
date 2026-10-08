@@ -102,13 +102,12 @@ mod tabs;
 mod term;
 /// The run's credentials, and `--token-file`, which keeps them across runs.
 mod tokens;
-pub mod tunnel;
 
-use crate::cli;
 use crate::fleet;
 use crate::loader::Loader;
 use crate::pricing::Plan;
 use crate::session::Session;
+use crate::tunnel;
 use crate::watch::Watch;
 use http::{EventStream, Request};
 use std::collections::HashMap;
@@ -349,7 +348,7 @@ why the link carries a token and the default is loopback only.
 
 /// Parse `cctop serve`'s own flags and run the server until interrupted.
 ///
-/// Flags are parsed here rather than in [`crate::cli::Args`] for the reason
+/// Flags are parsed here rather than in `cli::Args` for the reason
 /// `doctor` and `attach` are: cctop takes no positionals, so clap answers a
 /// bare `serve` with a usage error before it can reach any of this.
 /// What a run of the server needs to know, however it was asked for.
@@ -1233,8 +1232,8 @@ fn publish(
 
     // The same document `--json` prints and `--host` parses, from the same
     // builder: a browser being shown different figures than the terminal is a
-    // bug nobody would think to look for. See [`cli::json_sessions`].
-    let document = cli::json_sessions(&sessions, plan, store);
+    // bug nobody would think to look for. See [`crate::json::sessions`].
+    let document = crate::json::sessions(&sessions, plan, store);
     // Serialised a row at a time and joined, which is byte for byte what the
     // whole array would serialise to — so the dashboard's document is
     // unchanged, and a session page's stream can send its one row of it.

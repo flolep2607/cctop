@@ -4,7 +4,7 @@
 //! decided this one agent may do whatever it asks to. It is not a harness
 //! setting and not a hook decision — `cctop hook` never returns one, see its
 //! module docs. It is cctop pressing the same key a person clicking Allow
-//! presses, through the same [`crate::serve::actions::answer`], with every
+//! presses, through the same [`crate::answer::answer`], with every
 //! guard that has: only while the row says it is asking, never at a question
 //! with choices, never at a harness whose menu cctop has not driven, never at
 //! a row from another machine.
@@ -166,7 +166,7 @@ fn update(dir: &Path, change: impl FnOnce(&mut State)) -> std::io::Result<()> {
 /// Switch YOLO on or off for `session_id`, for every cctop on the machine.
 ///
 /// The caller decides whether the session may have it — see
-/// [`crate::serve::actions::yolo`]. Switching on a session already on keeps
+/// `serve::actions::yolo`. Switching on a session already on keeps
 /// its history; switching off forgets it.
 pub fn set(session_id: &str, on: bool) -> std::io::Result<()> {
     set_in(&dir(), session_id, on)
@@ -314,7 +314,7 @@ impl Auto {
     /// the ids whose session has ended. Returns whether any row changed.
     pub fn tick(&mut self, sessions: &mut [Session]) -> bool {
         self.tick_with(sessions, &mut |session| {
-            crate::serve::actions::answer(session, "allow")
+            crate::answer::answer(session, "allow")
                 .map(|_| ())
                 .map_err(|(_, why)| why)
         })

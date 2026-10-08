@@ -81,7 +81,7 @@ pub struct AnalyticsSession {
     /// recorded — for the providers that keep a credential on disk, and only
     /// for the reader's own sessions: stamping the local login on another
     /// user's row would be a wrong answer where no answer is the true one.
-    /// Same rule as `cli::json_sessions`; a bare string rather than that
+    /// Same rule as `json::sessions`; a bare string rather than that
     /// route's object because the page uses it directly as a grouping key.
     pub account: Option<String>,
     /// The ssh host the row came from, when it did not come from this machine.
@@ -229,7 +229,7 @@ fn row(
         profile: s.profile.clone(),
         account,
         host: s.remote.as_ref().map(|r| r.host.clone()),
-        branch: crate::ui::columns::branch_of(s),
+        branch: crate::branch::branch_of(s),
         started: s.started_at.clone(),
         last_active: s.last_active.clone(),
         running: s.is_running(),

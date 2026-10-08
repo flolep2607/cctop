@@ -135,7 +135,7 @@ pub fn build(session: &Session, data: Option<&SessionData>) -> Brief {
             .or_else(|| data.and_then(|d| d.title.clone()))
             .unwrap_or_else(|| "(untitled session)".into()),
         cwd: session.label_source.clone(),
-        branch: crate::ui::columns::branch_of(session),
+        branch: crate::branch::branch_of(session),
         model: match session.model.is_empty() {
             true => data.map(|d| d.last_model.clone()).unwrap_or_default(),
             false => session.model.clone(),

@@ -13,11 +13,15 @@
 //! installed and cctop stays one binary, which is the whole reason it ships as
 //! one.
 //!
+//! Not inside `serve`, though `cctop serve --tunnel` is its first user: a terminal
+//! share from rmux opens one too ([`crate::rmux`]), with no server of cctop's
+//! around it.
+//!
 //! The consequence worth knowing: the tunnel's data path is *inside this
 //! process*. Every request from the internet arrives as a QUIC stream, gets
 //! proxied to the loopback listener by a task on the runtime below, and lands on
 //! the same socket a local browser would use. So the connection cap, the token
-//! check and the deadlines in [`super::http`] all still apply — the tunnel adds
+//! check and the deadlines in `serve::http` all still apply — the tunnel adds
 //! a route in, not a second server.
 //!
 //! # What it does not do
@@ -26,8 +30,8 @@
 //! the edge and from the edge to here, and readable in between by the party
 //! carrying it — which is worth saying because the opposite is easy to assume of
 //! anything with a `https://` URL. A quick tunnel is a way to reach your own
-//! machine from a phone, not a private channel, and the announcement in
-//! [`super::announce`] says so where someone will actually read it.
+//! machine from a phone, not a private channel, and the announcement
+//! `cctop serve` prints says so where someone will actually read it.
 
 use cloudflare_quick_tunnel::{QuickTunnelHandle, QuickTunnelManager};
 

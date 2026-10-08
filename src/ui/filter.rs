@@ -262,7 +262,7 @@ impl App {
         }
         // The branch is derived rather than stored, so it is the one field that
         // cannot be borrowed straight off the session.
-        if columns::branch_of(s).is_some_and(|b| contains_ascii_ci(&b, query)) {
+        if crate::branch::branch_of(s).is_some_and(|b| contains_ascii_ci(&b, query)) {
             return true;
         }
         self.search_content && self.scan_query == query && self.scan_hits.contains_key(&s.key())

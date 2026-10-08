@@ -79,7 +79,7 @@ pub fn render(session: &Session, conversation: &Conversation, options: Options) 
         "Directory",
         &crate::util::tildify(&session.label_source),
     );
-    if let Some(branch) = crate::ui::columns::branch_of(session) {
+    if let Some(branch) = crate::branch::branch_of(session) {
         field(&mut out, "Branch", &branch);
     }
     field(&mut out, "Session", &session.session_id);

@@ -834,7 +834,7 @@ mod tests {
             ]
         );
         let label = remote_label("opencode", "procdb");
-        assert_eq!(tabs::harness_of(&label), "opencode");
+        assert_eq!(crate::screen::harness_of(&label), "opencode");
         let shell = shell_argv("devbox", "~/src");
         assert_eq!(shell[..2], ["ssh", "-t"]);
         assert!(shell.contains(&"devbox".to_string()));

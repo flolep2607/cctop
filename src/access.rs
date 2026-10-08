@@ -168,7 +168,7 @@ pub fn build(session: &Session, data: Option<&SessionData>) -> Access {
     let mut access = Access {
         cwd: util::tildify(&session.label_source),
         cwd_exists: has_cwd && cwd.is_dir(),
-        branch: crate::ui::columns::branch_of(session),
+        branch: crate::branch::branch_of(session),
         harness: session.surface.label(session.provider).to_string(),
         model: session.model.clone(),
         permission: session.permission.map(|p| p.label().to_string()),

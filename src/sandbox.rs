@@ -1935,21 +1935,6 @@ mod tests {
         assert_eq!(host_of("[::1]:/srv"), "[::1]");
     }
 
-    /// The row says where the work is, and stops claiming a branch for a
-    /// mount that went away with the agent.
-    #[test]
-    fn a_sandboxed_row_names_its_host_and_no_stale_branch() {
-        use crate::ui::columns::{self, ColumnId};
-        let mut s = crate::session::Session::new(crate::pricing::Provider::Claude, "s".into());
-        s.sandbox = Some("procdb:/home/f/x".into());
-        // The checkout this test runs in has a branch; a stopped sandboxed
-        // row at the same path must not report it.
-        s.label_source = env!("CARGO_MANIFEST_DIR").into();
-        let cell = columns::render_cell(ColumnId::Host, &s, &chrono::Utc::now());
-        assert_eq!(cell, "procdb⇄");
-        assert_eq!(columns::branch_of(&s), None);
-    }
-
     /// Which agents may be sent to a host, and what the others are told.
     #[test]
     fn the_remote_capability_table() {

@@ -372,10 +372,7 @@ mod tests {
 
         // The branch comes from the far side rather than from this filesystem,
         // where the same path may well exist and mean something else.
-        assert_eq!(
-            crate::ui::columns::branch_of(remote).as_deref(),
-            Some("main")
-        );
+        assert_eq!(crate::branch::branch_of(remote).as_deref(), Some("main"));
 
         // A host that stops answering keeps its rows and says so.
         app.remote_errors

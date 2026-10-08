@@ -15,14 +15,6 @@
 
 use crate::session::{ActivityState, Session};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-/// How long a notification POST is given before it is abandoned.
-///
-/// A webhook endpoint is someone's chat bridge or push relay; past a few
-/// seconds it is down, and the refresh loop must not be made to wait on it.
-const POST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where `--notify` points, plus everything a payload's link is built from.
 pub struct Webhook {
@@ -110,7 +102,7 @@ impl Webhook {
             true => link,
             false => format!("{link}?t={}", self.token),
         };
-        post(
+        crate::notify::post(
             self.target.clone(),
             serde_json::json!({
                 "event": event,
@@ -123,45 +115,6 @@ impl Webhook {
             serde_json::json!({ "event": event, "session": session.session_id }),
         );
     }
-}
-
-/// Set once a failed POST has been said. A dead endpoint is then silent: it
-/// was reported, and repeating the same line on every refresh is the spam this
-/// flag exists to prevent.
-static WARNED: AtomicBool = AtomicBool::new(false);
-
-/// POST `body` to `target` on a thread of its own, on a short deadline.
-///
-/// `log` is the extra fields the event log records beside the outcome. Shared
-/// by the serve's own webhook and the dashboard's, which reaches the same send
-/// without a `Webhook` of its own — a TUI has no fixed origin to carry.
-pub(crate) fn post(target: String, body: String, log: serde_json::Value) {
-    std::thread::spawn(move || {
-        // `build()` yields the Config; the Agent is made from it, as in
-        // `quota::agent`.
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(POST_TIMEOUT))
-            .build()
-            .into();
-        let sent = agent
-            .post(&target)
-            .header("Content-Type", "application/json")
-            .send(body.as_str());
-        crate::elog::event(
-            "notify",
-            "post",
-            serde_json::json!({
-                "ok": sent.is_ok(),
-                "status": sent.as_ref().map(|r| r.status().as_u16()).unwrap_or(0),
-                "context": log,
-            }),
-        );
-        if let Err(why) = sent
-            && !WARNED.swap(true, Ordering::Relaxed)
-        {
-            eprintln!("cctop: notify POST to {target} failed: {why}");
-        }
-    });
 }
 
 #[cfg(test)]

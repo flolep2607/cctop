@@ -9,7 +9,7 @@
 //! pty can carry.
 //!
 //! Reading the clipboard is a platform helper's job, as writing it already is
-//! in [`crate::ui::render::copy_to_clipboard`]. The helpers are tried in turn
+//! in [`copy_to_clipboard`]. The helpers are tried in turn
 //! and the first that produces a PNG wins. Where no helper can see the
 //! clipboard at all — over ssh, where it lives on the machine the ssh was
 //! typed on — the terminal itself is asked through the escapes that reach it
@@ -68,7 +68,7 @@ impl NoImage {
             // nothing installed on this one will ever see it. What works there
             // is sending the image as text, which is the one thing the
             // connection already carries.
-            NoImage::NoTool if over_ssh() => {
+            NoImage::NoTool if reached_over_ssh() => {
                 // One line, and short. A continued literal here once had the
                 // source's own indentation folded into it, and the status bar
                 // showed the message with a gap chewed out of the middle.
@@ -85,7 +85,7 @@ impl NoImage {
 /// Any of the three: `SSH_TTY` is absent when the session has no terminal,
 /// `SSH_CLIENT` is dropped by some sshd builds, and a login shell may pass on
 /// only one of them.
-fn over_ssh() -> bool {
+fn reached_over_ssh() -> bool {
     ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"]
         .iter()
         .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
@@ -129,7 +129,7 @@ pub fn image_to_file(ask_terminal: bool) -> Result<PathBuf, NoImage> {
     // all. The ask is a localhost connect, so where no bridge is listening it
     // costs microseconds rather than a wait, and it runs on every path
     // including Ctrl+V.
-    if over_ssh() {
+    if reached_over_ssh() {
         match image_over_bridge(&dest, bridge_port()) {
             Attempt::Wrote => return Ok(dest),
             // A bridge that answered empty was asked about the real clipboard;
@@ -147,7 +147,7 @@ pub fn image_to_file(ask_terminal: bool) -> Result<PathBuf, NoImage> {
     // locally only when no helper ran at all — a helper that reported empty
     // was already asking the same clipboard the terminal would.
     if ask_terminal
-        && (over_ssh() || !ran_something)
+        && (reached_over_ssh() || !ran_something)
         && let Some(image) = image_from_terminal()
     {
         return write_image(&image).map_err(|_| NoImage::NoTool);
@@ -723,6 +723,79 @@ fn is_png(path: &Path) -> bool {
         return false;
     };
     bytes.starts_with(PNG_MAGIC)
+}
+
+/// Copy text via a platform helper, falling back to the OSC 52 escape sequence.
+///
+/// OSC 52 works over SSH and inside multiplexers where no local clipboard tool
+/// exists, so it's the last resort rather than the first choice.
+pub fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // A test that copies — an OSC 52 fed through a pane, a selection — would
+    // otherwise land on the clipboard of whoever ran `cargo test`, which is how
+    // a developer's copy came back as `hello`.
+    if cfg!(test) {
+        return;
+    }
+    // Over ssh the helpers below reach the remote machine's clipboard, and one
+    // of them working would stop the escape that reaches the user's.
+    if over_ssh() {
+        osc52(text);
+        return;
+    }
+
+    const HELPERS: &[(&str, &[&str])] = &[
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("pbcopy", &[]),
+        ("clip.exe", &[]),
+    ];
+
+    for (cmd, args) in HELPERS {
+        let Ok(mut child) = Command::new(cmd)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(stdin) = child.stdin.as_mut()
+            && stdin.write_all(text.as_bytes()).is_ok()
+        {
+            drop(child.stdin.take());
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return;
+            }
+        }
+    }
+
+    osc52(text);
+}
+
+/// Whether cctop is running on the far end of an ssh session.
+///
+/// Then the machine's own clipboard and browser are not the ones in front of
+/// the user: a helper that "succeeds" copies onto a clipboard nobody reads.
+pub fn over_ssh() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
+/// Hand `text` to the terminal emulator's clipboard, which is the user's
+/// wherever cctop runs — it travels down the same connection the screen does.
+fn osc52(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = write!(
+        out,
+        "\x1b]52;c;{}\x07",
+        crate::util::b64_encode(text.as_bytes())
+    );
+    let _ = out.flush();
 }
 
 #[cfg(test)]

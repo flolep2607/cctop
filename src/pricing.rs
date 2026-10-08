@@ -755,19 +755,10 @@ mod provider_lists {
                 "`{where_}` is missing from optimize's --help"
             );
 
-            // `--list` groups, which iterate the same list.
-            assert!(
-                crate::cli::list_order().any(|q| q == p),
-                "`--list` has no group for {where_}"
-            );
-
-            // Doctor's parsers section, which iterates the enum now, and the
-            // sources section above it, which names a directory per provider.
+            // Doctor's parsers section, which iterates the enum now. Its
+            // sources section and `--list`'s groups are the binary's, and are
+            // checked beside it, in `cli`.
             assert!(!p.display_name().is_empty(), "{where_} has no display name");
-            assert!(
-                !crate::doctor::sessions_root(p).as_os_str().is_empty(),
-                "{where_} has no session directory"
-            );
 
             // The two per-provider trace spans, whose spelling used to be
             // written out in `cache` and `loader` separately.

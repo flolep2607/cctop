@@ -207,7 +207,7 @@ pub struct Settings {
     /// [`Settings::idle_after_ms`].
     pub idle_after: Option<f64>,
     /// Whether a tab's agent is read off its own screen — see
-    /// [`crate::ui::tabs::screen_state`]. Off unless the file says otherwise,
+    /// [`crate::screen::screen_state`]. Off unless the file says otherwise,
     /// because the words it looks for belong to each agent's UI, not to any
     /// contract, and a release that rewords them goes unread until cctop
     /// catches up.

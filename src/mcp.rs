@@ -513,7 +513,7 @@ fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
                 // unless cctop is reading every user's homes.
                 "user": s.owner,
                 "directory": s.label_source,
-                "branch": crate::ui::columns::branch_of(s),
+                "branch": crate::branch::branch_of(s),
                 "branch_note": "the branch checked out now, not necessarily the one it worked on",
                 "running": s.is_running(),
                 "started_at": s.started_at,

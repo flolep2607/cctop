@@ -54,6 +54,13 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// The commit this build was made from, or empty when the build could not tell
+/// (see `commit` in `build.rs`). Beside the version because the build script
+/// that knows it runs for this code, not for the help page that shows it.
+pub fn current_commit() -> &'static str {
+    env!("CCTOP_COMMIT")
+}
+
 /// The release archive built for the running platform.
 ///
 /// Releases are cut for a fixed set of targets, so this maps to one of those
