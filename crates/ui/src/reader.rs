@@ -453,6 +453,15 @@ fn lay_out(view: &mut ChatView, width: usize) {
         .unwrap_or_default();
 
     let who = view.session.surface.label(view.session.provider);
+    // A hand-back names its agent by id; the call that started it says which
+    // agent that is and what it was doing.
+    let agents: HashMap<&str, String> = conv
+        .turns
+        .iter()
+        .flat_map(|t| &t.tools)
+        .filter_map(|tool| tool.agent.as_ref())
+        .map(|agent| (agent.id.as_str(), agent.title()))
+        .collect();
     let mut blocks = Vec::with_capacity(conv.turns.len() + 1);
     if let Some(note) = &conv.note {
         blocks.push(kept.remove(&None).unwrap_or_else(|| {
@@ -472,7 +481,16 @@ fn lay_out(view: &mut ChatView, width: usize) {
                 {
                     made += 1;
                 }
-                turn_block(&view.session, who, turn, width, view.raw, open)
+                let sender = turn.agent.as_deref().and_then(|id| agents.get(id));
+                turn_block(
+                    &view.session,
+                    who,
+                    turn,
+                    sender.map(String::as_str),
+                    width,
+                    view.raw,
+                    open,
+                )
             }
         };
         blocks.push(block);
@@ -579,6 +597,7 @@ fn turn_block(
     session: &Session,
     agent: &str,
     turn: &Turn,
+    sender: Option<&str>,
     width: usize,
     raw: bool,
     open: bool,
@@ -620,7 +639,7 @@ fn turn_block(
         // Another agent's report: not the person, and not the harness either,
         // so it says who sent it rather than borrowing either label.
         _ if turn.kind.as_ref() == cctop_core::chat::AGENT_MESSAGE => (
-            match &turn.from {
+            match sender.or(turn.from.as_deref()) {
                 Some(from) => format!("from an agent · {from}"),
                 None => "from an agent".to_string(),
             },
@@ -690,6 +709,9 @@ fn turn_block(
 /// A tool call: one line when closed, with what opening it would show counted
 /// at its end; its argument, result and diff under it when open.
 fn tool_lines(tool: &ToolUse, width: usize, open: bool, out: &mut Vec<Line<'static>>) {
+    if let Some(agent) = &tool.agent {
+        return agent_lines(tool, agent, width, open, out);
+    }
     let (mark, style) = match tool.failed {
         true => ("✗", theme::failed()),
         false => ("⚙", theme::dim()),
@@ -752,6 +774,52 @@ fn tool_lines(tool: &ToolUse, width: usize, open: bool, out: &mut Vec<Line<'stat
             format!("      {}", super::ansi::strip(line)),
             style,
         ));
+    }
+}
+
+/// A call that started a subagent: which agent, doing what, and how far it
+/// got, opening onto its report.
+///
+/// The call's own argument is the brief and its result, for a background
+/// agent, a launch receipt meant for the model; neither says what the agent
+/// did, which is what a reader opening the line wants.
+fn agent_lines(
+    tool: &ToolUse,
+    agent: &cctop_core::chat::AgentCall,
+    width: usize,
+    open: bool,
+    out: &mut Vec<Line<'static>>,
+) {
+    let (mark, style) = match agent.status.as_str() {
+        "failed" => ("✗", theme::failed()),
+        _ => ("⚙", theme::dim()),
+    };
+    let report = agent.report.as_deref().filter(|r| !r.trim().is_empty());
+    let fold = match (report.is_some(), open) {
+        (false, _) => " ",
+        (true, false) => "▸",
+        (true, true) => "▾",
+    };
+    let mut tail = vec![agent.size()];
+    if agent.status == "running" {
+        tail.push("running".into());
+    }
+    let tail: Vec<String> = tail.into_iter().filter(|t| !t.is_empty()).collect();
+    let tail = match tail.is_empty() {
+        true => String::new(),
+        false => format!("  · {}", tail.join(" · ")),
+    };
+    let head = format!("  {fold} {mark} {}", tool.name);
+    let room =
+        width.saturating_sub(cctop_core::util::cells(&head) + cctop_core::util::cells(&tail) + 2);
+    let title = cctop_core::util::truncate(&agent.title(), room);
+    out.push(Line::from(vec![
+        Span::styled(head, style),
+        Span::styled(format!("  {title}"), theme::value()),
+        Span::styled(tail, theme::dim()),
+    ]));
+    if let (true, Some(report)) = (open, report) {
+        out.extend(super::ansi::wrapped(report, theme::dim(), width, "      "));
     }
 }
 
@@ -1231,6 +1299,44 @@ mod tests {
         let text = screen(&mut app, 100, 30);
         assert!(text.contains("● from an agent · general-purpose"), "{text}");
         assert_eq!(text.matches("● you").count(), 1, "{text}");
+    }
+
+    /// An `Agent` call names the agent and what it was doing, not the brief
+    /// or the launch receipt, and its hand-back names the same agent.
+    #[test]
+    fn an_agent_call_and_its_handback_name_the_agent() {
+        let mut reply = turn(0, "assistant", "launching");
+        reply.tools.push(ToolUse {
+            name: "Agent".into(),
+            detail: "dummy long brief".into(),
+            result: Some("Async agent launched successfully".into()),
+            agent: Some(cctop_core::chat::AgentCall {
+                id: "agent-a1".into(),
+                agent_type: "Explore".into(),
+                description: "map the parser".into(),
+                status: "done".into(),
+                tool_count: 3,
+                background: true,
+                report: Some("dummy report".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut handback = turn(1, "system", "dummy report");
+        handback.kind = cctop_core::chat::AGENT_MESSAGE.into();
+        handback.from = Some("Explore".into());
+        handback.agent = Some("agent-a1".into());
+        let mut app = open_with(vec![reply, handback]);
+        let text = screen(&mut app, 100, 30);
+        assert!(
+            text.contains("▸ ⚙ Agent  Explore — map the parser  · 3 tools"),
+            "{text}"
+        );
+        assert!(!text.contains("dummy long brief"), "{text}");
+        assert!(
+            text.contains("● from an agent · Explore — map the parser"),
+            "{text}"
+        );
     }
 
     /// Enter opens the tools of the turn being read and no other, and the row

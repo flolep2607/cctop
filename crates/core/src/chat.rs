@@ -352,6 +352,30 @@ pub struct AgentCall {
     pub report: Option<String>,
 }
 
+impl AgentCall {
+    /// `Explore — map the parser`: which agent, doing what. What names the
+    /// agent anywhere it is mentioned — its call, its hand-back.
+    pub fn title(&self) -> String {
+        match self.description.trim() {
+            "" => self.agent_type.clone(),
+            what => format!("{} — {what}", self.agent_type),
+        }
+    }
+
+    /// `3 tools · 2m10s`, the size of the work, with whatever is known.
+    pub fn size(&self) -> String {
+        let mut parts = Vec::new();
+        if self.tool_count > 0 {
+            let s = if self.tool_count == 1 { "" } else { "s" };
+            parts.push(format!("{} tool{s}", self.tool_count));
+        }
+        if self.duration_ms > 0 {
+            parts.push(util::compact_duration(self.duration_ms));
+        }
+        parts.join(" · ")
+    }
+}
+
 fn is_zero_i64(n: &i64) -> bool {
     *n == 0
 }
