@@ -74,7 +74,12 @@ pub enum Step {
     /// it. Left empty, it is learned from the configuration the edge pushes.
     TunnelHostname { token: String, field: LineEdit },
     /// Connected just now, at this hostname when it is known.
-    Done { hostname: Option<String> },
+    /// `shares` when it has a share hostname too, which only one cctop
+    /// created has.
+    Done {
+        hostname: Option<String>,
+        shares: bool,
+    },
     /// What stopped it, in Cloudflare's or cctop's words.
     Failed { message: String },
     /// Disconnected, and anything left on Cloudflare to delete by hand.
@@ -168,6 +173,19 @@ impl From<&Account> for Connected {
             hostname: account.hostname.clone(),
             from_env: account.from_env,
         }
+    }
+}
+
+/// A refusal in the popup's words: Cloudflare's sentence, except that a
+/// missing permission points at the link one Enter away rather than spelling
+/// out its two hundred characters of query string.
+fn said(error: &cloudflare::Error) -> String {
+    match error {
+        cloudflare::Error::MissingPermission(permission) => format!(
+            "That token lacks the permission \"{permission}\". Enter goes back to the \
+             link, which makes one with all three."
+        ),
+        other => other.to_string(),
     }
 }
 
@@ -340,7 +358,10 @@ impl App {
         };
         match cctop_core::tunnel::save_account(&account) {
             Ok(()) => {
-                flow.step = Step::Done { hostname };
+                flow.step = Step::Done {
+                    hostname,
+                    shares: false,
+                };
                 flow.problem = None;
                 self.connected = Some(Connected::from(&account));
             }
@@ -470,13 +491,12 @@ impl App {
                 flow.problem = Some(why);
             }
             Answer::Zones(_, Err(e)) | Answer::Suggested(_, _, Err(e)) => {
-                flow.step = Step::Failed {
-                    message: e.to_string(),
-                };
+                flow.step = Step::Failed { message: said(&e) };
             }
             Answer::Created(Ok(account)) => {
                 flow.step = Step::Done {
                     hostname: account.hostname.clone(),
+                    shares: account.share_hostname.is_some(),
                 };
                 self.connected = Some(Connected::from(&account));
                 self.set_status("Cloudflare account connected");
@@ -720,7 +740,8 @@ mod tests {
             let Step::Failed { message } = step(&app) else {
                 panic!("{error:?} did not fail");
             };
-            assert_eq!(*message, error.to_string());
+            assert_eq!(*message, said(&error));
+            assert!(!message.contains("permissionGroupKeys"), "{message}");
             // Enter starts over, with a fresh field.
             app.on_key_connect(KeyCode::Enter.into());
             assert!(matches!(step(&app), Step::Start { field, .. } if field.is_empty()));
@@ -777,7 +798,7 @@ mod tests {
             ..Account::default()
         })));
         assert!(
-            matches!(step(&app), Step::Done { hostname: Some(h) } if h == "cctop.example.test")
+            matches!(step(&app), Step::Done { hostname: Some(h), .. } if h == "cctop.example.test")
         );
         assert_eq!(
             app.connected.as_ref().and_then(|c| c.hostname.as_deref()),

@@ -2922,6 +2922,17 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
     let accent = Style::default().fg(theme::colors().accent);
     let text = |s: &str| Line::from(Span::raw(format!(" {s}")));
     let dim = |s: &str| Line::from(Span::styled(format!(" {s}"), theme::dim()));
+    // Decided before the lines, because a sentence from Cloudflare is wrapped
+    // here to it: the box is sized by counting rows, and a paragraph's own
+    // word wrap of a long URL takes more of them than the count expects.
+    let width = 70.min(area.width.saturating_sub(4).max(24));
+    let wrap = |s: &str, indent: usize, style: Style| -> Vec<Line<'static>> {
+        let room = (width as usize).saturating_sub(3 + indent).max(8);
+        wrap_words(s, room)
+            .into_iter()
+            .map(|row| Line::from(Span::styled(format!(" {}{row}", " ".repeat(indent)), style)))
+            .collect()
+    };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     // `(what is drawn, where it goes)`, laid over the text once it is placed.
@@ -3003,7 +3014,7 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                 vec![("[Enter]", enter), ("[Esc]", esc)],
             )
         }
-        Step::Done { hostname } => {
+        Step::Done { hostname, shares } => {
             match hostname {
                 Some(host) => {
                     let url = format!("https://{host}");
@@ -3018,7 +3029,10 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                     good,
                 ))),
             }
-            lines.push(dim("t in the serve panel now uses it, and W shares too."));
+            lines.push(dim(match shares {
+                true => "t in the serve panel now uses it, and W shares too.",
+                false => "t in the serve panel now uses it.",
+            }));
             (
                 " [s] serve on it now  [Enter] done".to_string(),
                 vec![
@@ -3028,7 +3042,7 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
             )
         }
         Step::Failed { message } => {
-            lines.push(Line::from(Span::styled(format!(" {message}"), warn)));
+            lines.extend(wrap(message, 0, warn));
             lines.push(Line::default());
             lines.push(dim("Quick tunnels still work: t in the serve panel."));
             (
@@ -3057,13 +3071,13 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
             if account.from_env {
                 lines.push(dim("From CCTOP_TUNNEL_TOKEN, not from setup."));
             }
-            lines.push(Line::default());
             match confirm {
                 false => (
                     " [d] disconnect  [Esc] close".to_string(),
                     vec![("[d]", KeyEvent::from(KeyCode::Char('d'))), ("[Esc]", esc)],
                 ),
                 true => {
+                    lines.push(Line::default());
                     match account.api_token.is_some() {
                         true => {
                             lines.push(Line::from(Span::styled(
@@ -3110,7 +3124,7 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                         warn,
                     )));
                     for item in left {
-                        lines.push(dim(&format!("- {item}")));
+                        lines.extend(wrap(&format!("- {item}"), 0, theme::dim()));
                     }
                 }
             }
@@ -3119,10 +3133,11 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
         }
     };
     if let Some(problem) = &flow.problem {
-        lines.push(Line::from(Span::styled(
-            format!("   {problem}"),
+        lines.extend(wrap(
+            problem,
+            2,
             Style::default().fg(theme::colors().cost_high),
-        )));
+        ));
     }
     lines.push(Line::default());
     // A call in flight replaces the keys: there is nothing to press but Esc,
@@ -3136,7 +3151,6 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
     };
     lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
 
-    let width = 70.min(area.width.saturating_sub(4).max(24));
     let room = match &qr_at {
         Some((at, Some(qr))) => make_room_for_qr(area, width, &mut lines, *at, qr),
         _ => None,
@@ -3148,7 +3162,11 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
         );
     }
     let row = wrapped_rows(&lines[..lines.len() - 1], width.saturating_sub(2));
-    let (outer, inner) = modal(frame, area, "Connect your Cloudflare account", lines, width);
+    let title = match flow.step {
+        Step::Connected { .. } | Step::Disconnected { .. } => "Your Cloudflare account",
+        _ => "Connect your Cloudflare account",
+    };
+    let (outer, inner) = modal(frame, area, title, lines, width);
     if let (Some((_, Some(qr))), Some(at)) = (&qr_at, room) {
         draw_qr(frame, inner, at, qr);
     }
@@ -3159,6 +3177,40 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
         }
     }
     confirm_chips(layout, outer, inner, row, &hint, &keys);
+}
+
+/// `text` in rows of at most `width` columns, broken between words, and
+/// inside a word only where one is longer than a row — a URL, usually.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let used = row.chars().count();
+            let gap = usize::from(used > 0);
+            if used + gap + word.len() <= width {
+                if gap == 1 {
+                    row.push(' ');
+                }
+                row.extend(word);
+                break;
+            }
+            // Not on this row: on the next, unless it is longer than a whole
+            // row, which is cut at the edge and carried on below.
+            if used > 0 {
+                rows.push(std::mem::take(&mut row));
+                continue;
+            }
+            row.extend(word.drain(..width));
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
 
 /// The paste field, masked: as many dots as characters, up to a line's worth,
@@ -4022,6 +4074,25 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Go to tab · needs you"), "{text}");
         assert!(text.contains("No tab by that name needs you"), "{text}");
+    }
+
+    #[test]
+    fn a_long_sentence_wraps_between_words_and_a_url_is_cut() {
+        let rows = wrap_words(
+            "Add one at https://dash.example.test/a/very/long/path then",
+            16,
+        );
+        assert_eq!(
+            rows,
+            [
+                "Add one at",
+                "https://dash.exa",
+                "mple.test/a/very",
+                "/long/path then"
+            ]
+        );
+        assert!(rows.iter().all(|r| r.chars().count() <= 16));
+        assert_eq!(wrap_words("", 10), [""]);
     }
 
     #[test]

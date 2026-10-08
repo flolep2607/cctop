@@ -514,7 +514,9 @@ fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> 
     // dead bookmark (decision 3 on #174). Elsewhere a stop still revokes every
     // link, which is what a quick tunnel's throwaway hostname is for anyway.
     let tokens = match request.tunnel && cctop_core::tunnel::account().is_some() {
-        true => Some(serve::tokens::load_or_create(&serve::account_token_file(), request.rotate)?.0),
+        true => {
+            Some(serve::tokens::load_or_create(&serve::account_token_file(), request.rotate)?.0)
+        }
         false => None,
     };
     let serving = serve::start(serve::Options {

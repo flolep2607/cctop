@@ -664,6 +664,7 @@ fn connect_popup() {
 
     let mut app = open(Step::Done {
         hostname: Some("cctop.example.com".into()),
+        shares: true,
     });
     snap("connect_done", &mut app);
 }

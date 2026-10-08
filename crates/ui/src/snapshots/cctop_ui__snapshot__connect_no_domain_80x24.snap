@@ -11,9 +11,9 @@ expression: screen
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Ses╭ Connect your Cloudflare account ───────────────────────────────────╮────╮
 │   L│ A stable tunnel needs a domain whose DNS is on Cloudflare, and this│    │
-│●   │account has none. Add one at                                        │ ch…┃
-│●   │https://dash.cloudflare.com/?to=/:account/add-site (a cheap domain  │    │
-╰────│works; DNS on Cloudflare is free), then run this again.             │────╯
+│●   │ account has none. Add one at                                       │ ch…┃
+│●   │ https://dash.cloudflare.com/?to=/:account/add-site (a cheap domain │    │
+╰────│ works; DNS on Cloudflare is free), then run this again.            │────╯
 ╭ Inf│                                                                    │text╮
 │Root│ Quick tunnels still work: t in the serve panel.                    │    │
 │    │                                                                    │    │
