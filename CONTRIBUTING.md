@@ -26,13 +26,20 @@ cargo publish --dry-run --workspace --allow-dirty   # what `verify / package` ru
 
 ### While iterating, run the tests that could have broken
 
-`cargo test --all-targets` is about 1500 tests and takes 58 seconds of wall time for
-about 11 seconds of CPU — it spends most of its life waiting on `thread::sleep`,
-real ptys and real subprocesses. Two of those tests assert wall-clock margins
-(`hook::tests::advice_is_kept_only_if_it_beat_the_deadline`,
-`ui::tabs::tests::a_tab_asks_for_attention_only_when_it_has_something_you_cannot_see`),
-so running the full suite concurrently with other builds makes it fail for
-reasons that have nothing to do with your change.
+`cargo test --workspace --all-targets` is about 1570 tests, and on a warm build
+it takes about 5 seconds of wall time for 6 seconds of CPU (6 cores, already
+loaded to about 4 by other lanes, median of seven runs). It used to be a minute
+of mostly `thread::sleep`; the sleeps are now waits on the condition itself
+(`cctop_core::test_wait`), so what is left is the real ptys and subprocesses,
+and the slowest binaries take about a second each. No test asserts a tight
+wall-clock margin any more: the few that check `elapsed()` —
+`test_wait::tests::a_condition_that_already_holds_costs_no_sleep`,
+`yolo::tests::the_hooks_allow_is_listed_and_never_waits_long` and
+`ssh_master::tests::a_command_that_overruns_is_cut_off`, all in `-p cctop-core`
+— bound something meant to be instant by fifty times what it needs. A
+full-suite failure on a busy machine is still not evidence until you have
+re-run it alone: fork-heavy tests share one process, and a race between them
+is not your change.
 
 The first run after a build can also be several times slower than the next
 (#141): 40 s rather than 10, with a handful of tests taking seconds that take
@@ -314,3 +321,37 @@ agent's draft PR is always current. Enable them once per clone:
 ```bash
 git config core.hooksPath tools/git-hooks
 ```
+
+## The issue loop
+
+GitHub issues are a work queue: an issue filed from anywhere, a phone
+included, is picked up by agents — but only while a Claude Code session is
+running the loop on a machine with a checkout. Nothing on GitHub's side starts
+one. To start it, open Claude Code in the checkout and run:
+
+```text
+/loop /issues
+```
+
+With no interval the loop paces itself (see `.claude/skills/issues/SKILL.md`,
+"Under /loop"): each pass spawns solvers in the background, and their finishing
+wakes the loop again. When nothing is running and nothing is queued it looks
+again in about 20 minutes — soon enough that an issue filed from a phone is
+started within the half hour, without polling GitHub every minute for a queue
+that is usually empty. Press `Esc` to stop it. A self-paced loop is not
+restored by `claude --resume`, and like any recurring task it expires after
+seven days, so run `/loop /issues` again after either.
+
+What it picks up is decided by labels, the table in the skill:
+
+| label | meaning |
+|---|---|
+| `agent-ready` | written and waiting for a solver — the only label that starts new work |
+| `agent-working` | a solver has it, with a draft PR from `issue-<N>` |
+| `agent-question` | the solver asked on the issue and stopped; your reply resumes it |
+| `agent-pr` | the PR is ready for review; review comments send a solver back |
+
+So an issue filed by hand needs the `agent-ready` label to be worked on, and an
+unlabelled one is left alone. `/issues <one-line request>` files one with the
+issue-writer agent, which writes it up and adds the label. Merging and
+releasing stay with you: the loop never merges a PR or bumps a version.

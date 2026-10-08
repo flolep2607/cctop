@@ -606,6 +606,25 @@ fn publish(palette: Palette) {
     PALETTE.with(|p| p.set(leaked));
 }
 
+/// Whether [`init_from_env`] has run on this thread, so the palette is a
+/// choice rather than the default.
+pub fn chosen() -> bool {
+    ENV.with(|slot| slot.borrow().is_some())
+}
+
+/// Tell the agents cctop hosts which palette this thread chose, so one asking
+/// its terminal for a background colour hears light under a light cctop.
+///
+/// Pushed from the draw thread rather than read by the shim, because the
+/// shim answers on a thread of its own, where [`colors`] is always the default
+/// dark — see [`cctop_core::shim::set_light_palette`]. Called where the draw
+/// thread installs a palette, not from [`publish`], which every test that
+/// tries a theme also calls: the value is process-wide, and the palette is
+/// deliberately not.
+pub fn tell_hosted_agents() {
+    cctop_core::shim::set_light_palette(variant() == Variant::Light);
+}
+
 pub fn variant() -> Variant {
     colors().variant
 }
