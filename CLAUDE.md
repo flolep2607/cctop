@@ -78,9 +78,14 @@ not the server and not the parsers.
   server's tests run. A fixture those tests use is
   `cfg(any(test, feature = "test-support"))`; their dev-dependencies turn the
   feature on. See `under_test` for why the binary still behaves as cctop.
-- The version lives once, in the root `Cargo.toml`, with the `=` pins on the
-  three internal crates beside it. A bump changes those lines and `Cargo.lock`;
-  cargo refuses to resolve if a pin is left behind.
+- Each crate has its own version. The root `cctop`'s is the release version
+  (`[workspace.package]` in the root `Cargo.toml`); cctop-core, -serve and -ui
+  carry theirs in `crates/*/Cargo.toml`, with `=` pins on them in the root's
+  `[workspace.dependencies]`. A release bumps the root, and an internal crate
+  only if it changed since the last tag — its files, its packaged manifest, or
+  an internal crate it depends on (so a core change bumps all four). Each bump
+  is its `version` line, its pin and `Cargo.lock`; `tools/bump.sh` does it, and
+  `verify / release-plan` fails a release that got it wrong.
 
 ## cctop is Linux-only
 

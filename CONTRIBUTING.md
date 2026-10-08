@@ -186,15 +186,47 @@ A few things that are less obvious from the code:
 
 ## Releasing
 
-Change the `version` under `[workspace.package]` in the root `Cargo.toml`, and
-the three `=` pins on `cctop-core`, `cctop-serve` and `cctop-ui` beside it, and
-push that commit, with `Cargo.lock`, to `main`. GitHub Actions derives the
-matching `v<version>` tag, creates the GitHub release, builds the Linux
-archives, and publishes all four crates — the internal three first, since
-`cargo install cctop` builds against them from crates.io. **The version
-bump is the release** — there is no separate confirmation step, and
-`cargo publish` to crates.io cannot be undone. Do not create a release tag by
-hand for a normal version bump.
+Bump the root version — `version` under `[workspace.package]` in the root
+`Cargo.toml`, which is the `cctop` binary's and becomes the tag — and push that
+commit, with `Cargo.lock`, to `main`. GitHub Actions derives the matching
+`v<version>` tag, creates the GitHub release, builds the Linux archives, and
+publishes to crates.io. **The version bump is the release** — there is no
+separate confirmation step, and `cargo publish` to crates.io cannot be undone.
+Do not create a release tag by hand for a normal version bump.
+
+The three internal crates, `cctop-core`, `cctop-serve` and `cctop-ui`, each
+have their own `version` in `crates/*/Cargo.toml`, and the root pins each with
+`=` under `[workspace.dependencies]`. A release bumps one only if it changed
+since the last `v*` tag, which is any of:
+
+1. **its files changed** — anything under its directory besides its own
+   `version` line;
+2. **its packaged manifest changed** without that — a `[workspace.dependencies]`
+   entry it uses was bumped, or a `[workspace.package]` field it inherits
+   (`edition`, `rust-version`, `license`…);
+3. **an internal crate it depends on was bumped.** The `=` pins make this
+   follow: a published `cctop-ui@0.28.3` requires `cctop-core =0.28.3`, so a
+   `cctop` that wants core 0.28.4 beside it resolves two cores and `cargo
+   install cctop` fails on mismatched types.
+
+So a change to `crates/ui` alone bumps `cctop-ui` and `cctop`, one to
+`crates/serve` alone bumps `cctop-serve` and `cctop`, one to `crates/core`
+bumps all four, and one to the binary's own `src/` bumps `cctop` alone. Each
+bump is the crate's `version` line, its `=` pin, and `Cargo.lock`.
+
+`tools/bump.sh <version>` makes those edits for you — the root to the version
+given, every crate the rules name up one patch, the lock refreshed — but it is
+optional, and a bump by hand is as good. Either way:
+
+- **`verify / release-plan`** (`tools/release-plan.sh check`) fails a release
+  commit — one whose root version differs from the last tag's — naming each
+  crate that changed but kept its version, and each one bumped with nothing
+  changed. On any other commit it passes with a notice, since a feature branch
+  changes crates without bumping them. Run it locally after committing.
+- **`publish-crate`** asks the crates.io index which crates are missing at
+  their current version and publishes only those, dependency order first; the
+  rest are skipped with a notice. A run that failed part-way can be re-run
+  as it is.
 
 **Name the pull request after what the release contains.** The notes GitHub
 generates are one line per merged PR, and `cctop --update` prints those lines to
