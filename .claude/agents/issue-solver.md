@@ -23,10 +23,13 @@ section says where the last solver stopped. Read it, the PR's review comments
 and the issue comments since, check out the branch (step 2's resume line) and
 carry on from there rather than starting over.
 
-## 2. Claim it in public, with a draft PR
+## 2. Claim it first, with a draft PR
 
-Before writing any code, so the user sees the issue is taken and any later
-session can pick up where this one stops:
+Claim before reading any code beyond the issue, so two solvers never take the
+same one and any later session can pick up where this one stops. The push of
+`issue-<N>` is the lock: GitHub takes a new branch from one pusher only, so
+if the push is rejected, or a PR from `issue-<N>` already exists, someone else
+has the issue — stop and report that, unless you were sent to resume it.
 
 ```bash
 git fetch -q origin
@@ -34,15 +37,29 @@ git worktree add .claude/worktrees/issue-<N> -b issue-<N> origin/main
 # resuming: git worktree add .claude/worktrees/issue-<N> issue-<N>
 cd .claude/worktrees/issue-<N>
 git commit --allow-empty -m "Start on #<N>"       # a PR needs one commit
-git push -u origin issue-<N>
+git push -u origin issue-<N>                      # rejected → already taken
 gh pr create --draft --base main --head issue-<N> \
   --title "<release-note title>" --body-file <file>
 gh issue edit <N> --add-label agent-working --remove-label agent-ready
 gh issue comment <N> --body-file <file>
 ```
 
-The draft's body has a **Plan** — the steps you intend, as a checklist — and a
-**Progress** section saying what is done and what is next, then `Fixes #<N>`.
+The draft's body starts with a **Session** line, then a **Plan** — the steps
+you intend, as a checklist; "to come" is fine at first, filled in once you
+have read the code — and a **Progress** section saying what is done and what
+is next, then `Fixes #<N>`.
+
+The Session line is how anyone gets back to the conversation behind the work:
+
+```
+Session: `$CLAUDE_CODE_SESSION_ID` · resume with `claude --resume $CLAUDE_CODE_SESSION_ID` in /home/flo/cctop
+```
+
+The id and the command, never a link to a shared transcript or a dashboard:
+this repository is public, and a conversation carries paths, commands and
+sometimes tokens. The id is only useful on the machine that ran it, which is
+the point.
+
 The issue comment is one or two lines: taking this, the draft PR's link, the
 plan in a sentence, then `<!-- cctop-agent -->`. Several solvers run at once,
 so never edit the main checkout; the worktree is yours.
