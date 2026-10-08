@@ -1885,9 +1885,8 @@ fn normalise(path: &Path) -> PathBuf {
 /// the "remote" command right here, the way sshd would hand it to a shell.
 #[cfg(test)]
 pub(crate) fn fake_ssh(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join("ssh");
-    std::fs::write(
+    write_executable(
         &path,
         "#!/bin/sh\n\
          while [ $# -gt 0 ]; do\n\
@@ -1898,10 +1897,37 @@ pub(crate) fn fake_ssh(dir: &Path) -> PathBuf {
            esac\n\
          done\n\
          exec sh -c \"$*\"\n",
-    )
-    .expect("write fake ssh");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    );
     path
+}
+
+/// Puts an executable a test is about to run at `path`, written by a child
+/// process rather than by this one.
+///
+/// The test binary runs tests on many threads, and many of them fork. A file
+/// this process opens for writing is open in every child forked while that
+/// descriptor exists — `O_CLOEXEC` closes it at the child's exec, not at its
+/// fork — and while any process holds a write descriptor on the inode, the
+/// kernel refuses to execute it with `ETXTBSY`. Closing our own copy first, or
+/// writing under a temporary name and renaming, does not help: the stray
+/// descriptor is on the same inode. A `sh` of its own opening the file is
+/// race-free, because nothing ever forks from that `sh`'s descriptor table.
+#[cfg(test)]
+pub(crate) fn write_executable(path: &Path, contents: &str) {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn the writer");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(contents.as_bytes())
+        .expect("write the executable");
+    let status = child.wait().expect("wait for the writer");
+    assert!(status.success(), "writing {} failed", path.display());
 }
 
 #[cfg(test)]
@@ -2023,10 +2049,20 @@ mod tests {
     #[test]
     fn the_shell_shim_passes_its_arguments_through() {
         let shim = write_shell_shim(Path::new("/bin/echo")).expect("shim");
-        let out = Command::new(&shim)
-            .args(["-c", "it's one arg"])
-            .output()
-            .expect("run");
+        // The shim is written by this process, so a test forking while it was
+        // open can hold it busy until that child execs (see
+        // `write_executable`). The sandbox execs it long after; here the
+        // retry waits out that child, which is milliseconds at most.
+        let mut tries = 0;
+        let out = loop {
+            match Command::new(&shim).args(["-c", "it's one arg"]).output() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                run => break run.expect("run"),
+            }
+        };
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             "--sandbox-shell -c it's one arg\n"
@@ -2588,7 +2624,10 @@ mod tests {
         let sleeper = tmp
             .path()
             .join(format!("sleep-cctop-sbx-orphan-{}", std::process::id()));
-        std::fs::copy("/bin/sleep", &sleeper).expect("copy sleep");
+        // A link rather than a copy: a copy is written by this process, and a
+        // test forking meanwhile would keep it busy (see `write_executable`).
+        // argv[0] is the link's path either way.
+        std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("link sleep");
         let token = sleeper.to_string_lossy().into_owned();
         let ssh = fake_ssh(tmp.path());
         let mut child = Command::new(ssh)
