@@ -91,12 +91,17 @@ last_tag() {
     if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
         die "shallow checkout: the release guard needs the history and tags (actions/checkout with fetch-depth: 0)"
     fi
-    local version
+    local version tag
     version=$(jq -r --arg r "$root_name" '.[$r].version' <<<"$head_meta")
-    # Excluding the root's own version: a workflow_dispatch re-run of a release
-    # checks out the tag itself, and comparing a release with itself would
-    # call nothing changed.
-    git describe --tags --abbrev=0 --match 'v*' --exclude "v$version" HEAD 2>/dev/null || true
+    tag=$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null) || return 0
+    # A workflow_dispatch re-run of a release checks out the tag itself, and
+    # comparing a release with itself would call nothing changed, so there it
+    # is the tag before. Anywhere else, a newest tag that matches the root is
+    # what says this commit is not a release.
+    if [ "$tag" = "v$version" ] && [ "$(git rev-parse "$tag^{commit}")" = "$(git rev-parse HEAD)" ]; then
+        tag=$(git describe --tags --abbrev=0 --match 'v*' --exclude "$tag" HEAD 2>/dev/null) || return 0
+    fi
+    echo "$tag"
 }
 
 # The metadata of the workspace as it was at a tag, read from a copy of that
@@ -114,7 +119,11 @@ meta_at() {
 own_change() {
     local name=$1 base=$2 base_meta=$3 dir
     dir=$(jq -r --arg n "$name" '.[$n].dir' <<<"$head_dirs")
-    if ! git diff --quiet "$base" HEAD -- "$dir/"; then
+    # The crate's own version line is the one edit that is not a change: it
+    # is the bump these rules ask for.
+    if ! git diff --quiet "$base" HEAD -- "$dir/" ":(exclude)$dir/Cargo.toml" ||
+        [ "$(git show "$base:$dir/Cargo.toml" | sed '0,/^version = /{/^version = /d}')" != \
+            "$(git show "HEAD:$dir/Cargo.toml" | sed '0,/^version = /{/^version = /d}')" ]; then
         echo "$dir/"
         return
     fi
