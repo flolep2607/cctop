@@ -166,15 +166,18 @@ npm run lint
 How it ships, and why:
 
 - **One file, everything inlined.** `vite-plugin-singlefile` builds the whole
-  app — scripts, styles, fonts — into `crates/serve/src/assets/app/index.html`, which
-  `include_str!` puts in the binary. The content policy loads nothing from any
-  URL, and an installed cctop is one binary. The server gzips it per request.
+  app — scripts, styles, fonts — into `crates/serve/src/assets/app/index.html`.
+  `crates/serve/build.rs` compresses it (brotli and gzip) when cctop is built,
+  and the binary carries only those copies. The content policy loads nothing
+  from any URL, and an installed cctop is one binary.
 - **The build is committed**, so `cargo install` needs no Node. CI's
   `verify / web` job rebuilds it and fails if it differs — change `web/` and
   run `npm run build` in the same commit.
-- **The server's values arrive as JSON** in `<script id="cctop-config">`
-  (`app_config` in `crates/serve/src/lib.rs`): token, whether actions are allowed,
-  home, version. `web/src/lib/config.ts` reads it; every request goes through
+- **The server's values are fetched** from `/api/config` (`app_config` in
+  `crates/serve/src/lib.rs`), token-gated and never cached: token, whether
+  actions are allowed, home, version. They stay out of the HTML so the page is
+  the same bytes on every run and can be compressed at build time.
+  `web/src/lib/config.ts` reads them; every request goes through
   `web/src/lib/api.ts`, which adds the token.
 - **Size is paid on every load**, so heavy dependencies need a reason: `wouter`
   rather than react-router, Latin font subsets only.
