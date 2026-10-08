@@ -398,12 +398,18 @@ pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
 /// Nothing is asked of the host here, and nothing waits on it: the sandbox
 /// connects inside the rmux session, where a host that wants a password or a
 /// host-key answer has a terminal to ask on — the session page's — and where
-/// a failure stays on screen. The caller checks the directory first when it
-/// can reach the host without asking.
+/// a failure stays on screen. `problem` is the caller's check of the
+/// directory, asked only once the request is otherwise good — it may connect
+/// to the host — and a reason from it refuses the launch.
 ///
 /// [`sandbox::reach`]: crate::sandbox::reach
 /// [`remote_launch::host_ok`]: crate::remote_launch::host_ok
-pub fn launch_remote(agent: &str, host: &str, path: &str) -> Result<Done, Failed> {
+pub fn launch_remote(
+    agent: &str,
+    host: &str,
+    path: &str,
+    problem: impl FnOnce() -> Option<String>,
+) -> Result<Done, Failed> {
     if !agents().iter().any(|known| known == agent) {
         return Err((
             400,
@@ -415,6 +421,9 @@ pub fn launch_remote(agent: &str, host: &str, path: &str) -> Result<Done, Failed
     }
     if !crate::remote_launch::host_ok(host) {
         return Err((400, format!("{host} is not an ssh host name")));
+    }
+    if let Some(why) = problem() {
+        return Err((400, why));
     }
     let exe = std::env::current_exe()
         .map_err(|e| (503, format!("could not find cctop's own binary: {e}")))?;
@@ -957,6 +966,22 @@ mod tests {
 
     fn session() -> Session {
         Session::new(Provider::Claude, "s1".into())
+    }
+
+    /// The host is asked about the folder only for a launch that is otherwise
+    /// good: a command cctop would not run, an agent with no way to the host,
+    /// or an ssh option in the host's place never reaches it.
+    #[test]
+    fn a_remote_launch_is_refused_before_the_host_is_asked() {
+        let never = || -> Option<String> { panic!("the host was asked") };
+        for (agent, host) in [
+            ("sh -c id", "devbox"),
+            ("codex", "devbox"),
+            ("claude", "-oProxyCommand=id"),
+        ] {
+            let (status, why) = launch_remote(agent, host, "~", never).unwrap_err();
+            assert_eq!(status, 400, "{agent} {host}: {why}");
+        }
     }
 
     /// Nothing is pressed at a session that is not asking: the key that answers

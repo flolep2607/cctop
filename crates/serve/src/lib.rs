@@ -1691,10 +1691,9 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             // field reads it.
             let launched = match cwd.map(cctop_core::remote_launch::parse) {
                 Some(cctop_core::remote_launch::Typed::Remote { host, path }) => {
-                    match ssh::launch_problem(&shared.ssh, host, path) {
-                        Some(why) => Err((400, why)),
-                        None => actions::launch_remote(agent, host, path),
-                    }
+                    actions::launch_remote(agent, host, path, || {
+                        ssh::launch_problem(&shared.ssh, host, path)
+                    })
                 }
                 _ => actions::launch_agent(agent, cwd),
             };
@@ -3443,16 +3442,21 @@ mod tests {
             r#"{"host":"-oProxyCommand=touch /tmp/x","path":"~"}"#,
         );
         assert!(option.starts_with("HTTP/1.1 400 "), "{option}");
-        // A launch into the folder that is not there is refused with the
-        // host's reason, before any rmux session is made.
+        // A launch is judged on its agent before the host is asked anything:
+        // a request naming nothing cctop would run connects nowhere.
+        let (_home, reach, connects) = ssh::local_host(true);
+        let fresh = Shared {
+            ssh: reach,
+            ..shared("full", "view")
+        };
         let launch = post_json(
-            &guarded,
+            &fresh,
             "/api/launch",
             "full",
-            r#"{"agent":"claude","cwd":"devbox:~/gone"}"#,
+            r#"{"agent":"sh -c id","cwd":"devbox:~"}"#,
         );
         assert!(launch.starts_with("HTTP/1.1 400 "), "{launch}");
-        assert!(launch.contains("does not exist on the host"), "{launch}");
+        assert_eq!(*connects.lock().expect("count"), 0);
     }
 
     /// A host that would ask for a password is an answer, not an error: the
