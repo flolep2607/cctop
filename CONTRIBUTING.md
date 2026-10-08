@@ -34,12 +34,20 @@ of mostly `thread::sleep`; the sleeps are now waits on the condition itself
 and the slowest binaries take about a second each. No test asserts a tight
 wall-clock margin any more: the few that check `elapsed()` —
 `test_wait::tests::a_condition_that_already_holds_costs_no_sleep`,
-`yolo::tests::the_hooks_allow_is_listed_and_never_waits_long` and
+`yolo::tests::the_hooks_allow_never_waits_long` and
 `ssh_master::tests::a_command_that_overruns_is_cut_off`, all in `-p cctop-core`
 — bound something meant to be instant by fifty times what it needs. A
 full-suite failure on a busy machine is still not evidence until you have
 re-run it alone: fork-heavy tests share one process, and a race between them
 is not your change.
+
+One such race is worth knowing when you write a test that takes an `flock`:
+the lock belongs to the open file description, and a child forked by any
+other test thread holds a copy of every open descriptor until it execs. A
+lock file this test (or code it called) opened a moment ago can therefore
+still be held when the test tries to take it. Take it on a file nothing has
+opened yet, as `yolo::tests::switched_on_unlocked` does, or wait for it with
+`test_wait`.
 
 The first run after a build can also be several times slower than the next
 (#141): 40 s rather than 10, with a handful of tests taking seconds that take
