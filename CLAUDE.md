@@ -65,10 +65,12 @@ tests that cover them (`crates/ui/src/filter.rs` → `-p cctop-ui filter::`), an
 saves the full suite for one final run on its own. `CONTRIBUTING.md` has the
 details.
 
-## cctop is four crates
+## cctop is five crates
 
-The binary is at the root; `cctop-core`, `cctop-serve` and `cctop-ui` are under
-`crates/`. The UI and the server each depend on core and not on each other. The
+The binary is at the root; `cctop-core`, `cctop-serve`, `cctop-ui` and
+`cctop-tunnel` are under `crates/`. The UI and the server each depend on core
+and not on each other; `cctop-tunnel` sits below core and knows nothing of
+cctop, so its `Provider` interface can take tunnels other than Cloudflare's. The
 root `Cargo.toml` draws the graph and says why each boundary is where it is.
 The point is the rebuild: an edit to the UI recompiles the UI and the binary,
 not the server and not the parsers.
