@@ -63,6 +63,12 @@ the times you are on ssh with no browser to open.
   they wrap; on a terminal that cannot do that (`TERM=dumb` or `linux`) the URL
   is printed after its label. What you typed is shown as you typed it. Code is
   not syntax-highlighted.
+- **A subagent's call is one line too**, naming the agent and how much it did
+  (`3 turns · 12 tools · 2m10s`); opened, it shows the agent's report. A
+  background agent that never handed back shows its last message instead,
+  labelled as that. `a` opens the agent's own turns, and `Esc` comes back to
+  the same place; opening the reader on a subagent's row in the table goes
+  straight to its turns.
 - **Tool calls are one line each** until you open them: the tool, its argument,
   and how many lines opening it would add. `Enter` opens the calls of the turn
   you are reading; `t` opens every one.
@@ -88,7 +94,8 @@ out once for the terminal's width, and scrolling it lays nothing out again.
 | `t` | Open or fold every tool call |
 | `m` | Toggle between rendered markdown and its source |
 | `u` | Load earlier turns, when there are any |
-| `Esc` | Clear the search; with none, close |
+| `a` | Open the subagent whose call is highest on screen: its own turns, titled with the agent and its session |
+| `Esc` | Clear the search; with none, back out of a subagent's turns, or close |
 | `q` | Close |
 
 ## Context breakdown

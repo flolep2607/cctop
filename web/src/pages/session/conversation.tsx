@@ -212,9 +212,10 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
       reported: new Map(turns.filter((t) => t.kind === "agent-message").map((t) => [t.seq, t.ts ?? ""])),
       everything: scope === "everything",
       jump: gotoTurn,
+      included: !!live?.cost?.included,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, callKey, reportKey, scope, gotoTurn],
+    [id, callKey, reportKey, scope, gotoTurn, live?.cost?.included],
   );
 
   const showEarlier = async () => {

@@ -279,6 +279,11 @@ fn agent_call(out: &mut String, tool: &ToolUse, agent: &AgentCall) {
     out.push('\n');
     if let Some(report) = agent.report.as_deref().filter(|r| !r.trim().is_empty()) {
         out.push('\n');
+        // Said outside the quote, so a reader cannot take the agent's last
+        // words for the conclusion it never handed back.
+        if agent.last_message {
+            out.push_str(&format!("  *{}:*\n\n", crate::chat::LAST_MESSAGE_LABEL));
+        }
         for line in quote(report).lines() {
             out.push_str(&format!("  {line}\n"));
         }
@@ -521,6 +526,31 @@ mod tests {
             headings(&doc)
                 .iter()
                 .any(|h| h.starts_with("## From an agent · Explore — map the parser")),
+            "{doc}"
+        );
+    }
+
+    /// A background agent that never handed back is quoted with its last
+    /// message, labelled as that rather than as its report.
+    #[test]
+    fn an_agent_with_no_handback_is_quoted_as_its_last_message() {
+        let mut call = tool("Agent", "dummy brief", Some("Async agent launched"));
+        call.agent = Some(AgentCall {
+            id: "agent-a1".into(),
+            agent_type: "Explore".into(),
+            status: "running".into(),
+            turns: 4,
+            tool_count: 3,
+            background: true,
+            report: Some("dummy last words".into()),
+            last_message: true,
+            ..AgentCall::default()
+        });
+        let doc = md(vec![turn("assistant", "message", "", vec![call])], true);
+        assert!(
+            doc.contains(
+                "(Explore) · 4 turns · 3 tools — still running\n\n  *No hand-back — last message from the agent:*\n\n  > dummy last words"
+            ),
             "{doc}"
         );
     }
