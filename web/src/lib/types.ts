@@ -53,8 +53,12 @@ export interface Tool {
 export interface Turn {
   seq: number;
   role: "user" | "assistant" | "system" | string;
-  kind: "message" | "reasoning" | "compaction" | string;
+  kind: "message" | "reasoning" | "compaction" | "agent-message" | string;
   text?: string;
+  /** An agent-message's sender, by type (`general-purpose`). */
+  from?: string;
+  /** An agent-message's sender id, which names its subagent. */
+  agent?: string;
   ts?: string;
   clipped?: boolean;
   tools?: Tool[];

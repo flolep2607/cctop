@@ -152,6 +152,10 @@ fn heading(turn: &Turn) -> &'static str {
     }
     match (turn.role.as_ref(), turn.kind.as_ref()) {
         (_, "compaction") => "Context compacted",
+        // Another agent's report is neither the person's words nor the
+        // harness's, and filing it under User put pages of model output in
+        // the person's mouth.
+        (_, crate::chat::AGENT_MESSAGE) => "From an agent",
         ("user", _) => "User",
         ("system", _) => "System",
         _ => "Assistant",
@@ -161,6 +165,9 @@ fn heading(turn: &Turn) -> &'static str {
 fn render_section(out: &mut String, section: &[&Turn], options: Options) {
     out.push_str("## ");
     out.push_str(heading(section[0]));
+    if let Some(from) = &section[0].from {
+        out.push_str(&format!(" · {}", one_line(from)));
+    }
     let at = when(&section[0].ts);
     if !at.is_empty() {
         out.push_str(&format!(" · {at}"));
@@ -354,6 +361,8 @@ mod tests {
             text: text.into(),
             clipped: false,
             tools,
+            from: None,
+            agent: None,
         }
     }
 
@@ -409,6 +418,30 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A subagent's report is filed as what it is. Under `## User` it read as
+    /// the person's prompt, and as the session's title when it came first.
+    #[test]
+    fn an_agent_message_has_its_own_heading_and_is_never_the_title() {
+        let mut report = turn("system", crate::chat::AGENT_MESSAGE, "dummy report", vec![]);
+        report.from = Some("general-purpose".into());
+        let mut s = session();
+        s.title = None;
+        let conversation = conversation(vec![
+            report,
+            turn("user", "message", "the real ask", vec![]),
+        ]);
+        let doc = render(&s, &conversation, Options { tool_output: false });
+        let heads = headings(&doc);
+        assert!(
+            heads
+                .iter()
+                .any(|h| h.starts_with("## From an agent · general-purpose")),
+            "{heads:?}"
+        );
+        assert_eq!(heads.iter().filter(|h| h.starts_with("## User")).count(), 1);
+        assert_eq!(title(&s, &conversation), "the real ask");
     }
 
     #[test]

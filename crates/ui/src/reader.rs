@@ -617,6 +617,15 @@ fn turn_block(
                 .fg(super::panels::provider_color(session))
                 .add_modifier(Modifier::BOLD),
         ),
+        // Another agent's report: not the person, and not the harness either,
+        // so it says who sent it rather than borrowing either label.
+        _ if turn.kind.as_ref() == cctop_core::chat::AGENT_MESSAGE => (
+            match &turn.from {
+                Some(from) => format!("from an agent · {from}"),
+                None => "from an agent".to_string(),
+            },
+            theme::dim(),
+        ),
         _ => ("system".to_string(), theme::dim()),
     };
     let mut header = vec![Span::styled(format!("● {who}"), style)];
@@ -1005,6 +1014,8 @@ mod tests {
             text: text.into(),
             clipped: false,
             tools: Vec::new(),
+            from: None,
+            agent: None,
         }
     }
 
@@ -1207,6 +1218,19 @@ mod tests {
         // `m` shows the source instead, markers and all.
         press(&mut app, KeyCode::Char('m'));
         assert!(screen(&mut app, 100, 30).contains("Ran **all** of it"));
+    }
+
+    /// A subagent's report says who sent it. Labelled `you`, it put pages of
+    /// model output in the person's mouth.
+    #[test]
+    fn an_agent_message_is_labelled_by_its_sender_not_as_you() {
+        let mut report = turn(1, "system", "dummy report");
+        report.kind = cctop_core::chat::AGENT_MESSAGE.into();
+        report.from = Some("general-purpose".into());
+        let mut app = open_with(vec![turn(0, "user", "the real ask"), report]);
+        let text = screen(&mut app, 100, 30);
+        assert!(text.contains("● from an agent · general-purpose"), "{text}");
+        assert_eq!(text.matches("● you").count(), 1, "{text}");
     }
 
     /// Enter opens the tools of the turn being read and no other, and the row

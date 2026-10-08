@@ -11,6 +11,14 @@ import type { Tool, Turn } from "@/lib/types";
 
 const WHO: Record<string, string> = { user: "you", assistant: "agent", system: "harness" };
 
+// Whose words a turn is. Another agent's report is filed as `system` so it never
+// reads as the person's, but "harness" would be wrong too: it names its sender.
+function who(turn: Turn): string {
+  if (turn.kind === "reasoning") return "thinking";
+  if (turn.kind === "agent-message") return turn.from ? `from an agent · ${turn.from}` : "from an agent";
+  return WHO[turn.role] || turn.role;
+}
+
 // A tool call: one line saying what it did, opening onto what came back.
 // `openAll` is the conversation-wide fold; each call can still be toggled.
 // Keyed on the fold by its caller, so flipping the fold resets every call.
@@ -89,7 +97,7 @@ export const TurnView = memo(function TurnView({
     >
       <div className="text-muted-foreground mb-1.5 flex items-center gap-2 text-[11px] tracking-wider uppercase">
         <span className={cn(turn.role === "user" && "text-primary font-medium")}>
-          {turn.kind === "reasoning" ? "thinking" : WHO[turn.role] || turn.role}
+          {who(turn)}
         </span>
         {turn.ts && <span className="normal-case tracking-normal opacity-80">{clock(turn.ts, true)}</span>}
         {isNew && <span className="bg-primary size-1.5 rounded-full" title="New since your last visit" />}

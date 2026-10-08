@@ -200,10 +200,19 @@ pub struct Turn {
     /// allocates.
     pub role: Cow<'static, str>,
     /// `message` ordinarily; `reasoning` for a thinking summary, `compaction`
-    /// for the summary a harness writes when it reclaims the window. The page
-    /// styles them differently because they are read differently — a compaction
-    /// is a seam in the conversation, not a thing anybody said.
+    /// for the summary a harness writes when it reclaims the window, and
+    /// [`AGENT_MESSAGE`] for what another agent sent this one. The page styles
+    /// them differently because they are read differently — a compaction is a
+    /// seam in the conversation, not a thing anybody said.
     pub kind: Cow<'static, str>,
+    /// Who sent an [`AGENT_MESSAGE`], when the transcript names them — a
+    /// subagent's type such as `general-purpose`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub from: Option<String>,
+    /// The sending agent's id on an [`AGENT_MESSAGE`] (`origin.from`), which is
+    /// what ties a hand-back to the subagent and the call that launched it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent: Option<String>,
     pub ts: String,
     pub text: String,
     /// Whether `text` was cut to [`MAX_TEXT_CHARS`].
@@ -224,6 +233,8 @@ impl Turn {
             text: String::new(),
             clipped: false,
             tools: Vec::new(),
+            from: None,
+            agent: None,
         }
     }
 
@@ -605,8 +616,33 @@ impl Sink {
         match item.get("type").and_then(Value::as_str) {
             Some("user") => self.claude_user(item, ts),
             Some("assistant") => self.claude_assistant(item, ts),
+            Some("attachment") => self.claude_queued(item, ts),
             _ => {}
         }
+    }
+
+    /// Something that arrived while the agent was busy.
+    ///
+    /// Claude Code writes a message that lands mid-turn as a `queued_command`
+    /// attachment rather than a `user` entry — whoever wrote it. A person
+    /// typing while the agent works is recorded only this way, so ignoring
+    /// attachments lost every word said mid-turn; and a subagent's report or
+    /// a task notification arrives the same way, so the record says nothing
+    /// about who spoke until its `origin` is read.
+    fn claude_queued(&mut self, item: &Value, ts: &str) {
+        let Some(queued) = item
+            .get("attachment")
+            .filter(|a| a.get("type").and_then(Value::as_str) == Some("queued_command"))
+        else {
+            return;
+        };
+        let text = prompt_text(queued.get("prompt"));
+        if text.trim().is_empty() {
+            return;
+        }
+        let mode = queued.get("commandMode").and_then(Value::as_str);
+        let by = author(queued.get("origin"), mode, &text);
+        self.claude_said(by, false, &text, ts);
     }
 
     fn claude_user(&mut self, item: &Value, ts: &str) {
@@ -653,29 +689,36 @@ impl Sink {
         }
         // A tool result and a typed message can share one entry when someone
         // types while a tool is running. The result has already been attached;
-        // what is left is a person talking.
+        // what is left is a person talking — unless the entry is the harness's
+        // own (`isMeta`), as a hook's output is.
         let compaction = item.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
-        let (role, kind) = match compaction {
-            true => ("system", "compaction"),
-            // A `<command-name>` block or a hook's output is the harness
-            // speaking through the user's turn, and reads wrong attributed to
-            // the person.
-            false if is_harness_text(&text) || (had_result && item_is_meta(item)) => {
-                ("system", "message")
-            }
-            false => ("user", "message"),
+        let by = match had_result && item_is_meta(item) {
+            true => Author::Harness,
+            false => author(item.get("origin"), None, &text),
         };
-        // The harness writes for a parser, not for a reader. What it says is
-        // worth keeping; the tags around it are not, and a turn that is only
-        // tags says nothing at all.
-        let text = match role {
-            "system" if kind == "message" => tidy_harness_text(&text),
-            _ => text,
+        self.claude_said(by, compaction, &text, ts);
+    }
+
+    /// A message filed where a prompt goes, as the turn its author makes it.
+    fn claude_said(&mut self, by: Author, compaction: bool, text: &str, ts: &str) {
+        let mut sender = (None, None);
+        let (role, kind, text) = match (compaction, by) {
+            (true, _) => ("system", "compaction", text.to_string()),
+            (false, Author::Person) => ("user", "message", text.to_string()),
+            // The harness writes for a parser, not for a reader. What it says
+            // is worth keeping; the tags around it are not, and a turn that is
+            // only tags says nothing at all.
+            (false, Author::Harness) => ("system", "message", tidy_harness_text(text)),
+            (false, Author::Agent { name, id }) => {
+                sender = (name, id.or_else(|| agent_message_sender(text)));
+                ("system", AGENT_MESSAGE, tidy_agent_message(text))
+            }
         };
         if text.trim().is_empty() {
             return;
         }
         let mut turn = Turn::new(role, kind, ts);
+        (turn.from, turn.agent) = sender;
         turn.set_text(&text, self.limits.text);
         self.push(turn);
     }
@@ -1808,6 +1851,175 @@ fn tidy_devin_event(text: &str) -> String {
     }
 }
 
+/// The [`Turn::kind`] of a message another agent sent this one: a subagent's
+/// hand-back, another session writing in, or a coordinator briefing a worker.
+pub const AGENT_MESSAGE: &str = "agent-message";
+
+/// The line Claude Code opens another session's message with.
+const AGENT_PREAMBLE: &str = "Another Claude session sent a message";
+
+/// Who wrote a message Claude Code filed where a person's prompt goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Author {
+    /// The person at the keyboard.
+    Person,
+    /// Another agent: the name the transcript gives it and its id, if any.
+    Agent {
+        name: Option<String>,
+        id: Option<String>,
+    },
+    /// The harness: a slash command, a hook, a task notification.
+    Harness,
+}
+
+/// Who wrote a prompt-shaped message — the one decision both a `user` entry
+/// and a `queued_command` attachment go through.
+///
+/// `origin.kind` is the record's own answer and is read first. Nothing else on
+/// the record separates the cases: `renderedRole` is `system` on everything
+/// queued, including what the person typed, and neither `isMeta` nor
+/// `commandMode` is written on every kind. Only `human` is the person; a kind
+/// this does not know is someone else, because showing a machine's words as
+/// the person's is the mistake this exists to stop, and the opposite one only
+/// dims a line. Transcripts older than `origin` fall back to the shape of the
+/// text.
+fn author(origin: Option<&Value>, command_mode: Option<&str>, text: &str) -> Author {
+    let kind = origin.and_then(|o| o.get("kind")).and_then(Value::as_str);
+    let field = |key: &str| {
+        origin
+            .and_then(|o| o.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+    };
+    let agent = || Author::Agent {
+        name: field("name"),
+        id: field("from"),
+    };
+    match kind {
+        // A slash command the person typed is still recorded as the harness's
+        // expansion of it.
+        Some("human") if is_harness_text(text) => Author::Harness,
+        Some("human") => Author::Person,
+        Some("peer" | "coordinator") => agent(),
+        Some(_) if is_agent_text(text) => agent(),
+        Some(_) => Author::Harness,
+        None if command_mode == Some("task-notification") => Author::Harness,
+        None if is_agent_text(text) => Author::Agent {
+            name: None,
+            id: agent_message_sender(text),
+        },
+        None if is_harness_text(text) => Author::Harness,
+        None => Author::Person,
+    }
+}
+
+/// Whether a record's `origin` says someone other than the person wrote it.
+///
+/// For the readers that only need to know whether to trust a record as typed —
+/// the effort switch — rather than how to show it. A record with no `origin`
+/// is not ruled out here; it predates the field.
+pub(crate) fn from_someone_else(item: &Value) -> bool {
+    item.get("origin")
+        .and_then(|o| o.get("kind"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "human")
+}
+
+/// Whether text has the shape of another agent's message, for records that do
+/// not say who wrote them.
+fn is_agent_text(text: &str) -> bool {
+    let head = text.trim_start();
+    head.starts_with(AGENT_PREAMBLE) || head.starts_with("<agent-message")
+}
+
+/// The `from` attribute of an `<agent-message>` tag: the sender's id, for a
+/// record whose `origin` does not carry it.
+fn agent_message_sender(text: &str) -> Option<String> {
+    let open = &text[text.find("<agent-message")?..];
+    let tag = &open[..open.find('>')?];
+    let rest = &tag[tag.find("from=\"")? + "from=\"".len()..];
+    let id = &rest[..rest.find('"')?];
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// Another agent's message as the report it carries.
+///
+/// The harness wraps it three times over for the model's benefit: a preamble
+/// line, `<agent-message from="…">` tags, and a trailing paragraph explaining
+/// what the other session is. Inside, a subagent's hand-back opens with a
+/// frame ending `The report follows:` and indents the report beneath it. A
+/// reader wants the report, so all of that comes off and the report is
+/// de-indented; text that does not have a given layer keeps what it has.
+fn tidy_agent_message(text: &str) -> String {
+    let body = match text.find("<agent-message") {
+        Some(open) => {
+            let rest = &text[open..];
+            let rest = rest.find('>').map_or("", |end| &rest[end + 1..]);
+            rest.find("</agent-message>")
+                .map_or(rest, |close| &rest[..close])
+        }
+        None => match text.trim_start().strip_prefix(AGENT_PREAMBLE) {
+            Some(rest) => rest.split_once('\n').map_or("", |(_, after)| after),
+            None => text,
+        },
+    };
+    const FRAME_END: &str = "The report follows:";
+    let body = match body.trim_start().starts_with("[Subagent hand-back]") {
+        true => body
+            .find(FRAME_END)
+            .map_or(body, |at| &body[at + FRAME_END.len()..]),
+        false => body,
+    };
+    dedent(body).trim().to_string()
+}
+
+/// Text with the indentation every non-blank line shares taken off.
+fn dedent(text: &str) -> String {
+    // Whatever shares the first line with the frame is not indented with the
+    // rest, so it is measured separately and only trimmed.
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let indent = rest
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out = first.trim().to_string();
+    for line in rest.lines() {
+        out.push('\n');
+        // Only whitespace is cut: a blank line shorter than the indent is
+        // cut to nothing rather than into its neighbour's text.
+        let cut = line.len() - line.trim_start().len();
+        out.push_str(&line[cut.min(indent)..]);
+    }
+    out
+}
+
+/// A queued message's `prompt`: a string ordinarily, a list of blocks when an
+/// image came with it. Only the words are kept, as for a `user` entry.
+fn prompt_text(prompt: Option<&Value>) -> String {
+    let mut text = String::new();
+    match prompt {
+        Some(Value::String(s)) => text.push_str(s),
+        Some(Value::Array(blocks)) => {
+            for block in blocks {
+                match block {
+                    Value::String(s) => push_text(&mut text, s),
+                    _ => {
+                        if let Some(t) = block.get("text").and_then(Value::as_str) {
+                            push_text(&mut text, t);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    text
+}
+
 fn item_is_meta(item: &Value) -> bool {
     item.get("isMeta").and_then(Value::as_bool) == Some(true)
 }
@@ -2483,6 +2695,145 @@ mod tests {
             chat.turns[0].text,
             "Agent \"bench linkage\" finished\nthe build query is running in the background"
         );
+    }
+
+    /// The shapes Claude Code writes for a message that is not the person's,
+    /// with dummy text. A peer `user` entry: a subagent handing back.
+    const PEER_USER: &str = r#"{"type":"user","timestamp":"t1","isMeta":true,"promptSource":"system","turnOrigin":"peer","origin":{"kind":"peer","from":"a0000000000000001","name":"general-purpose","handback":true,"body":"x"},"message":{"role":"user","content":"Another Claude session sent a message:\n<agent-message from=\"a0000000000000001\">\n[Subagent hand-back] A subagent you launched has finished. The report follows:\n  dummy report\n    with an indented line\n</agent-message>\n\nThat \"other Claude session\" is a dummy trailer."}}"#;
+
+    /// A subagent's report arriving as a `user` entry is not the person, and
+    /// reads as the report: no preamble, no tags, no frame, no trailer.
+    #[test]
+    fn a_peer_message_is_an_agent_message_without_its_envelope() {
+        let chat = sink_claude(&[PEER_USER]);
+        assert_eq!(chat.turns.len(), 1);
+        let turn = &chat.turns[0];
+        assert_eq!(
+            (turn.role.as_ref(), turn.kind.as_ref()),
+            ("system", AGENT_MESSAGE)
+        );
+        assert_eq!(turn.text, "dummy report\n  with an indented line");
+        assert_eq!(turn.from.as_deref(), Some("general-purpose"));
+        assert_eq!(turn.agent.as_deref(), Some("a0000000000000001"));
+    }
+
+    /// A transcript older than `origin` is told by its shape, and the sender's
+    /// id comes off the tag.
+    #[test]
+    fn an_agent_message_without_an_origin_is_told_by_its_shape() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","message":{"content":"Another Claude session sent a message:\n<agent-message from=\"a0000000000000003\">\nplain dummy note\n</agent-message>"}}"#,
+        ]);
+        assert_eq!(chat.turns[0].kind, AGENT_MESSAGE);
+        assert_eq!(chat.turns[0].text, "plain dummy note");
+        assert_eq!(chat.turns[0].agent.as_deref(), Some("a0000000000000003"));
+        assert_eq!(chat.turns[0].from, None);
+    }
+
+    /// What the person types while the agent works is recorded only as a
+    /// queued attachment. It was dropped, so the conversation lost it.
+    #[test]
+    fn a_message_typed_mid_turn_is_the_persons() {
+        let chat = sink_claude(&[
+            r#"{"type":"attachment","timestamp":"t1","renderedRole":"system","attachment":{"type":"queued_command","commandMode":"prompt","humanTurn":true,"origin":{"kind":"human"},"prompt":"dummy typed text"}}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].role, "user");
+        assert_eq!(chat.turns[0].kind, "message");
+        assert_eq!(chat.turns[0].ts, "t1");
+        assert_eq!(chat.turns[0].text, "dummy typed text");
+    }
+
+    /// An image typed with the message makes `prompt` a list of blocks; the
+    /// words are kept as for a `user` entry.
+    #[test]
+    fn a_queued_message_with_blocks_keeps_its_words() {
+        let chat = sink_claude(&[
+            r#"{"type":"attachment","timestamp":"t1","attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":[{"type":"text","text":"look at this"},{"type":"image","source":{"type":"base64","data":"AAAA"}},{"type":"text","text":"and this"}]}}"#,
+        ]);
+        assert_eq!(chat.turns[0].role, "user");
+        assert_eq!(chat.turns[0].text, "look at this\n\nand this");
+    }
+
+    /// A peer or a coordinator writing in mid-turn is another agent, however
+    /// the attachment's other fields read.
+    #[test]
+    fn a_queued_peer_or_coordinator_message_is_an_agent_message() {
+        let chat = sink_claude(&[
+            r#"{"type":"attachment","timestamp":"t1","renderedRole":"system","attachment":{"type":"queued_command","commandMode":"prompt","isMeta":true,"origin":{"kind":"peer","from":"a0000000000000002","name":"Plan","handback":true,"body":"x"},"prompt":"<agent-message from=\"a0000000000000002\">\n[Subagent hand-back] frame. The report follows:\n  dummy plan\n</agent-message>"}}"#,
+            r#"{"type":"attachment","timestamp":"t2","attachment":{"type":"queued_command","isMeta":true,"origin":{"kind":"coordinator"},"prompt":"dummy instruction from the orchestrator"}}"#,
+        ]);
+        let shown: Vec<(&str, &str, Option<&str>)> = chat
+            .turns
+            .iter()
+            .map(|t| (t.kind.as_ref(), t.text.as_str(), t.from.as_deref()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (AGENT_MESSAGE, "dummy plan", Some("Plan")),
+                (
+                    AGENT_MESSAGE,
+                    "dummy instruction from the orchestrator",
+                    None
+                ),
+            ]
+        );
+        assert!(chat.turns.iter().all(|t| t.role == "system"));
+    }
+
+    /// A queued task notification is the harness's, with an `origin` or
+    /// without, and in the plain-text form as well as the tagged one.
+    #[test]
+    fn a_queued_task_notification_is_the_harness() {
+        let chat = sink_claude(&[
+            r#"{"type":"attachment","timestamp":"t1","attachment":{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"task-notification","producer":"session-task"},"prompt":"<task-notification>\n<task-id>x</task-id>\n<summary>dummy finished</summary>\n</task-notification>"}}"#,
+            r#"{"type":"attachment","timestamp":"t2","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>y</task-id>\n<summary>dummy older</summary>\n</task-notification>"}}"#,
+            r#"{"type":"attachment","timestamp":"t3","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"Background agent \"dummy\" was stopped by the user."}}"#,
+            r#"{"type":"user","timestamp":"t4","promptSource":"system","turnOrigin":"task_notification","origin":{"kind":"task-notification"},"message":{"role":"user","content":"Background agent \"dummy\" was stopped by the user."}}"#,
+        ]);
+        let shown: Vec<(&str, &str)> = chat
+            .turns
+            .iter()
+            .map(|t| (t.role.as_ref(), t.text.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("system", "dummy finished"),
+                ("system", "dummy older"),
+                (
+                    "system",
+                    "Background agent \"dummy\" was stopped by the user."
+                ),
+                (
+                    "system",
+                    "Background agent \"dummy\" was stopped by the user."
+                ),
+            ]
+        );
+        assert!(chat.turns.iter().all(|t| t.kind == "message"));
+    }
+
+    /// An `origin` this does not know is not the person: the safe mistake is
+    /// dimming a line, not putting words in someone's mouth.
+    #[test]
+    fn an_unknown_origin_is_never_the_person() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","origin":{"kind":"something-new"},"message":{"content":"dummy machine text"}}"#,
+        ]);
+        assert_eq!(chat.turns[0].role, "system");
+    }
+
+    /// A queued message on a sidechain is a subagent's, like every sidechain
+    /// record, and other attachments are not messages at all.
+    #[test]
+    fn sidechain_and_other_attachments_are_skipped() {
+        let chat = sink_claude(&[
+            r#"{"type":"attachment","timestamp":"t1","isSidechain":true,"attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":"a subagent's queue"}}"#,
+            r#"{"type":"attachment","timestamp":"t2","attachment":{"type":"file","content":"dummy file"}}"#,
+        ]);
+        assert!(chat.turns.is_empty(), "{:?}", chat.turns);
     }
 
     /// A notification carrying none of the fields a reader needs is not a
