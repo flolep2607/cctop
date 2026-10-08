@@ -404,6 +404,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
         Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
+        Mode::ProviderStatus => super::outage::draw(frame, area, app),
         Mode::Insight => modals::draw_insight(frame, area, app),
         Mode::Conversation => super::reader::draw(frame, area, app),
         Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
@@ -2496,6 +2497,15 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
                     .fg(theme::colors().cost_high)
                     .add_modifier(Modifier::BOLD),
             ),
+        ));
+    }
+    // A vendor incident, or sessions failing against a page that reports all
+    // clear. With the faults rather than the states, since either one explains
+    // something red on screen.
+    if let Some((text, level)) = super::outage::footer_line(&app.provider_alerts()) {
+        badges.push((
+            "provider",
+            Span::styled(format!(" {text} "), super::outage::footer_style(level)),
         ));
     }
     if let Some(version) = &app.update_available {

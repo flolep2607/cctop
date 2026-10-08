@@ -84,6 +84,11 @@ pub(super) enum Response {
     /// which is the one place that copies — see there.
     Data(String, Arc<SessionData>),
     Quota(Box<Quota>),
+    /// One vendor's status page answered, or could not be reached.
+    ProviderStatus(
+        cctop_core::provider_status::Page,
+        Box<cctop_core::provider_status::PageStatus>,
+    ),
     /// Repositories on disk, newest first. Sent when the directory field opens,
     /// and only when the field is open to be helped by them.
     Repos(Vec<std::path::PathBuf>),

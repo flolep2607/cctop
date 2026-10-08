@@ -261,7 +261,7 @@ footer_command = "date +%H:%M"  # a command; its first line shows, refreshed eve
 ```
 
 `footer_hide` names the badges (`idle`, `age`, `filter`, `cost`, `marked`,
-`follow`, `bell`, `remote`, `conflict`, `update`, `quit`, `note`) and the key
+`follow`, `bell`, `remote`, `conflict`, `provider`, `update`, `quit`, `note`) and the key
 hints (`Move`, `Actions`, `Filter`, `Mark`, `Sort`, `Quit`, …, as labelled),
 and `share` for the corner that publishes the table. `footer_command` runs
 through `timeout 5s sh -c`, in the background: a command that hangs or fails

@@ -228,6 +228,7 @@ impl App {
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
             Mode::Hooks => self.on_key_hooks(key),
+            Mode::ProviderStatus => self.on_key_provider_status(key),
             Mode::Insight => self.on_key_insight(key),
             Mode::Conversation => self.on_key_conversation(key),
             Mode::Help => self.on_key_help(key),
@@ -1729,6 +1730,10 @@ impl App {
 
             // `h` rather than `H`, which already sorts by harness.
             KeyCode::Char('h') | KeyCode::F(8) => self.open_hooks(),
+            // `!` for "what is wrong": the one free punctuation key with the
+            // right connotation. No function key: F9, the next free one when
+            // this was first written, is the image paste now.
+            KeyCode::Char('!') => self.open_provider_status(),
             KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
             KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
             KeyCode::Char(',') => self.goto_settings(),
