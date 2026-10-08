@@ -1,0 +1,36 @@
+{
+  "page": {"id": "tymt9n04zgry", "name": "Claude", "url": "https://status.claude.com", "updated_at": "2026-10-08T10:02:11.000Z"},
+  "components": [
+    {"id": "0qbwn08sd68x", "name": "Claude API (api.anthropic.com)", "status": "major_outage", "group": false},
+    {"id": "yjjsg5k7xs8m", "name": "Claude Code", "status": "partial_outage", "group": false},
+    {"id": "k8w3r06qmzrp", "name": "claude.ai", "status": "operational", "group": false}
+  ],
+  "incidents": [
+    {
+      "id": "x1y2z3",
+      "name": "Elevated errors on Claude Opus",
+      "status": "identified",
+      "impact": "major",
+      "created_at": "2026-10-08T09:41:00.000Z",
+      "components": [
+        {"id": "0qbwn08sd68x", "name": "Claude API (api.anthropic.com)", "status": "major_outage"},
+        {"id": "yjjsg5k7xs8m", "name": "Claude Code", "status": "partial_outage"}
+      ],
+      "incident_updates": [
+        {"status": "identified", "body": "A bad deploy is being rolled back.", "created_at": "2026-10-08T10:02:11.000Z"},
+        {"status": "investigating", "body": "We are seeing elevated errors.", "created_at": "2026-10-08T09:41:00.000Z"}
+      ]
+    },
+    {
+      "id": "a9b8c7",
+      "name": "Slow responses on claude.ai",
+      "status": "investigating",
+      "impact": "minor",
+      "created_at": "2026-10-08T09:55:00.000Z",
+      "components": [],
+      "incident_updates": []
+    }
+  ],
+  "scheduled_maintenances": [],
+  "status": {"indicator": "major", "description": "Partial System Outage"}
+}
