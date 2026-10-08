@@ -343,6 +343,8 @@ impl App {
     /// happen.
     pub(super) fn apply_theme(&mut self) {
         super::theme::set_theme(self.settings.theme.as_deref());
+        // And to agents opened from here on, which draw inside this palette.
+        super::theme::tell_hosted_agents();
     }
 
     /// Re-read the hidden columns out of the settings file.
