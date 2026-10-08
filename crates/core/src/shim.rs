@@ -17,6 +17,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 
@@ -817,6 +818,10 @@ impl Answers {
     /// Codex asks and carries on regardless, which is why this has stayed a
     /// note rather than a parser.
     fn table() -> Vec<(&'static [u8], String)> {
+        // Read per chunk rather than kept from when the agent started: it is
+        // one relaxed load, and an agent that asks after a theme change hears
+        // the new palette rather than the one in force at its launch.
+        let light = LIGHT_PALETTE.load(Ordering::Relaxed);
         // A VT220 with ANSI colour: what the vt100 parser behind every watcher
         // actually implements, so this is a description rather than a boast.
         let da1 = "\x1b[?62;22c".to_string();
@@ -833,8 +838,8 @@ impl Answers {
             // watcher's parser ignores the mode and cctop's own draw is already
             // one flush — and saves the agent from assuming it must not.
             (b"\x1b[?2026$p".as_slice(), "\x1b[?2026;2$y".to_string()),
-            (b"\x1b]10;?".as_slice(), color_reply(10)),
-            (b"\x1b]11;?".as_slice(), color_reply(11)),
+            (b"\x1b]10;?".as_slice(), color_reply(10, light)),
+            (b"\x1b]11;?".as_slice(), color_reply(11, light)),
         ]
     }
 }
@@ -863,29 +868,39 @@ fn strike(haystack: &mut [u8], needle: &[u8]) -> usize {
     found
 }
 
-/// Whether cctop's palette is the light one, asked of whoever owns the palette.
+/// Whether cctop's palette is the light one, as the UI last said.
 ///
 /// The palette is the terminal UI's, and the shim sits below the UI: it also
-/// runs with no UI at all (`cctop run`). So the UI hands the question down
-/// rather than the shim reaching up for it, and with nobody to ask the answer is
-/// dark — the palette a thread gets when it has not chosen one.
-static LIGHT_PALETTE: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+/// runs with no UI at all (`cctop run`). So the UI pushes its choice down
+/// rather than the shim reaching up for it, and with nobody to say otherwise
+/// the answer is dark.
+///
+/// A process-wide value rather than a question put to the UI, because of who
+/// asks. The palette lives in a thread-local on the draw thread, and the
+/// questions are answered on each agent's own `pump_output` thread, which never
+/// chose a palette and so always saw dark: a light cctop told every agent it
+/// hosted that the terminal was black, and Claude Code's `theme: auto` drew dark
+/// colours onto a white pane.
+static LIGHT_PALETTE: AtomicBool = AtomicBool::new(false);
 
-/// Answer an agent's colour query from `light`. The first caller wins; there is
-/// one palette owner per process.
-pub fn answer_colours_from(light: fn() -> bool) {
-    let _ = LIGHT_PALETTE.set(light);
+/// Tell agents hosted from now on that cctop's palette is light (or not).
+///
+/// Called by the UI wherever its draw thread installs a palette — at startup
+/// and on every theme change — so the answer follows the settings page. An
+/// agent asks once, at startup, so one already running keeps the answer it got.
+pub fn set_light_palette(light: bool) {
+    LIGHT_PALETTE.store(light, Ordering::Relaxed);
 }
 
-/// The foreground (10) or background (11) colour to report.
+/// The foreground (10) or background (11) colour to report, for a light or a
+/// dark palette.
 ///
 /// An agent that asks is deciding whether to draw for a light or a dark
 /// terminal — Claude Code's `theme: auto` is exactly this question — and the
 /// honest answer is cctop's own palette, because a hosted agent is drawn inside
 /// it. Only the luminance is really being asked about, so the two ends of the
 /// ramp say it unambiguously.
-fn color_reply(which: u16) -> String {
-    let light = LIGHT_PALETTE.get().is_some_and(|light| light());
+fn color_reply(which: u16, light: bool) -> String {
     let bright = "ffff/ffff/ffff";
     let dark = "0000/0000/0000";
     let value = match (which, light) {
@@ -1237,6 +1252,54 @@ mod tests {
         assert!(
             !said.contains('R'),
             "answered the cursor position: {said:?}"
+        );
+    }
+
+    /// The colour answers are the two ends of the ramp, and which end is which
+    /// follows the palette: a light one has a white ground and dark ink.
+    #[test]
+    fn the_colour_answers_follow_the_palette() {
+        let white = "\x1b]11;rgb:ffff/ffff/ffff\x1b\\";
+        assert_eq!(color_reply(11, true), white);
+        assert_eq!(color_reply(10, true), "\x1b]10;rgb:0000/0000/0000\x1b\\");
+        assert_eq!(color_reply(11, false), "\x1b]11;rgb:0000/0000/0000\x1b\\");
+        assert_eq!(color_reply(10, false), "\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
+    }
+
+    /// A palette published on one thread is what an agent's questions are
+    /// answered with on another — the exact bug: the UI chose light on its draw
+    /// thread, and the `pump_output` thread answering the agent had never
+    /// chosen anything, so it said dark.
+    ///
+    /// The only test in this crate that writes [`LIGHT_PALETTE`], and the only
+    /// one that reads which end of the ramp it gets, so it races nobody. It
+    /// puts dark back on the way out all the same.
+    #[test]
+    fn a_palette_published_on_one_thread_answers_an_agent_on_another() {
+        let ask = || {
+            std::thread::spawn(|| {
+                let mut said = Vec::new();
+                Answers::default().answer(b"\x1b]11;?\x1b\\\x1b]10;?\x1b\\", &mut said);
+                String::from_utf8(said).unwrap()
+            })
+            .join()
+            .unwrap()
+        };
+        std::thread::spawn(|| set_light_palette(true))
+            .join()
+            .unwrap();
+        let light = ask();
+        std::thread::spawn(|| set_light_palette(false))
+            .join()
+            .unwrap();
+        let dark = ask();
+        assert!(
+            light.contains("]11;rgb:ffff/ffff/ffff") && light.contains("]10;rgb:0000/0000/0000"),
+            "a light palette was answered as {light:?}"
+        );
+        assert!(
+            dark.contains("]11;rgb:0000/0000/0000") && dark.contains("]10;rgb:ffff/ffff/ffff"),
+            "a dark palette was answered as {dark:?}"
         );
     }
 

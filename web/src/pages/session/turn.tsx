@@ -1,14 +1,14 @@
 import { memo, useState, type ReactNode } from "react";
 import { ArrowUpRight, Bot, ChevronRight, Hash, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { clock, secs } from "@/lib/format";
+import { clock, money, secs, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Markdown } from "@/components/markdown";
 import { Patch } from "@/components/patch";
 import { Ansi } from "@/components/ansi";
 import { stripAnsi } from "@/lib/ansi";
 import type { AgentCall, Tool, Turn } from "@/lib/types";
-import { agentTitle, useAgents } from "./agents";
+import { LAST_MESSAGE, agentTitle, useAgents } from "./agents";
 import { useChat } from "./use-chat";
 
 const WHO: Record<string, string> = { user: "you", assistant: "agent", system: "harness" };
@@ -212,12 +212,18 @@ const STATUS_BADGE: Record<string, ReactNode> = {
 // transcript the first time the block opens and followed while it runs.
 function AgentBlock({ tool, agent }: { tool: Tool; agent: AgentCall }) {
   const [open, setOpen] = useState(false);
-  const { reported, everything, jump } = useAgents();
+  const { reported, everything, jump, included } = useAgents();
+  const plural = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
   const summary = [
-    agent.tool_count ? `${agent.tool_count} tool${agent.tool_count === 1 ? "" : "s"}` : "",
+    agent.turns ? plural(agent.turns, "turn") : "",
+    agent.tool_count ? plural(agent.tool_count, "tool") : "",
     agent.duration_ms ? secs(agent.duration_ms) : "",
+    // As the report tab's subagent table reads it: a bundled plan's agent is
+    // "incl", and an unpriced one says nothing rather than "$0".
+    agent.cost ? (included ? "incl" : money(agent.cost)) : "",
     agent.started_at ? "started " + clock(agent.started_at) : "",
   ].filter(Boolean);
+  const spent = agent.tokens ? `${tokens(agent.tokens)} tokens` : undefined;
   const reportedAt = agent.handback !== undefined ? reported.get(agent.handback) : undefined;
   return (
     <div className={cn("bg-muted/40 mt-2 overflow-hidden rounded-md border", agent.status === "failed" && "border-destructive/50")}>
@@ -232,9 +238,16 @@ function AgentBlock({ tool, agent }: { tool: Tool; agent: AgentCall }) {
             <span className="min-w-0 text-[13px] font-medium break-words">{agent.description || tool.detail}</span>
             {STATUS_BADGE[agent.status]}
           </div>
-          {summary.length > 0 && <div className="text-muted-foreground mt-1 text-xs">{summary.join(" · ")}</div>}
+          {summary.length > 0 && (
+            <div className="text-muted-foreground mt-1 text-xs break-words" title={spent}>
+              {summary.join(" · ")}
+            </div>
+          )}
           {!open && agent.report && (
-            <div className="text-muted-foreground mt-1.5 line-clamp-3 text-xs break-words whitespace-pre-line">{agent.report}</div>
+            <div className={cn("text-muted-foreground mt-1.5 text-xs break-words", agent.last_message && "border-muted-foreground/40 border-l-2 border-dashed pl-2 italic")}>
+              {agent.last_message && <div className="mb-0.5 not-italic text-[11px] tracking-wider uppercase">{LAST_MESSAGE}</div>}
+              <div className="line-clamp-3 whitespace-pre-line">{agent.report}</div>
+            </div>
           )}
         </div>
       </button>
@@ -275,8 +288,8 @@ function AgentBody({ tool, agent }: { tool: Tool; agent: AgentCall }) {
       )}
       {agent.report && (
         <div className="border-t px-3 py-2">
-          <div className="text-muted-foreground mb-1 text-[11px] tracking-wider uppercase">Report</div>
-          <div className="[&_.md]:text-[13px]">
+          <div className="text-muted-foreground mb-1 text-[11px] tracking-wider uppercase">{agent.last_message ? LAST_MESSAGE : "Report"}</div>
+          <div className={cn("[&_.md]:text-[13px]", agent.last_message && "border-muted-foreground/40 text-muted-foreground border-l-2 border-dashed pl-2")}>
             <Markdown text={agent.report} />
           </div>
         </div>

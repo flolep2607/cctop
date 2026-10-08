@@ -467,9 +467,12 @@ fn main() -> anyhow::Result<()> {
     // while the network fetch is still in flight.
     pricing::load_cached_pricing();
 
-    // An agent asking what colour the terminal is gets cctop's palette, which
-    // the UI owns; before any agent is hosted, so the first query is answered.
-    shim::answer_colours_from(|| ui::theme::variant() == ui::theme::Variant::Light);
+    // The palette is chosen here rather than inside `ui::run`, because the
+    // agent below starts first and may ask what colour the terminal is before
+    // the UI would have chosen one: it would be told dark under a light theme.
+    // Safe this early because choosing it reads the terminal's reply off stdin,
+    // and nothing has started reading stdin yet — hosting the agent does not.
+    ui::choose_palette();
 
     // Started before the UI so a failure to launch prints as an ordinary error
     // rather than from inside the alternate screen.
@@ -514,7 +517,9 @@ fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> 
         actions: serving.actions,
         // The server moves in with the closure, so dropping what the dashboard
         // holds stops it.
-        publish: Box::new(move |sessions, quota| serving.publish_with_quota(sessions, quota)),
+        publish: Box::new(move |sessions, quota, provider_status| {
+            serving.publish_table(sessions, quota, provider_status)
+        }),
     })
 }
 

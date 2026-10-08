@@ -60,7 +60,7 @@ mod torn;
 mod tree;
 mod worker;
 
-pub use runloop::run;
+pub use runloop::{choose_palette, run};
 use share::{Opening, ShareQr};
 pub use share::{ServeRequest, Served, StartServer};
 use worker::Request;
@@ -1292,10 +1292,12 @@ impl App {
     /// row's transcript is read on the machine that has it, over the same ssh
     /// channel the row arrived by.
     pub(crate) fn open_conversation(&mut self) {
-        if self.on_subagent() {
-            self.set_status("A subagent has no transcript of its own — read the session's");
-            return;
-        }
+        // A subagent row opens that agent's own turns, which are read through
+        // its session: the session is what lists the agent, and listing it is
+        // what makes the id safe to read by.
+        let agent = self
+            .selected_subagent()
+            .map(cctop_core::chat::AgentCall::from_subagent);
         let Some(session) = self.selected_session() else {
             return;
         };
@@ -1327,22 +1329,10 @@ impl App {
             Some(_) => reader::Search::for_match(&self.scan_query),
             None => reader::Search::default(),
         };
-        self.chat = Some(ChatView {
-            session: session.clone(),
-            host,
-            conversation: None,
-            error: None,
-            back: 0,
-            fetching: false,
-            raw: false,
-            tools_open: false,
-            opened: std::collections::HashSet::new(),
-            search,
-            laid: None,
-            visible: 0,
-            dirty: false,
-            hold: false,
-        });
+        let mut view = ChatView::new(session.clone(), host);
+        view.search = search;
+        view.agent = agent;
+        self.chat = Some(view);
         self.mode = Mode::Conversation;
         self.fetch_chat(None);
     }
@@ -1360,6 +1350,7 @@ impl App {
             session: Box::new(view.session.clone()),
             host: view.host.clone(),
             before,
+            agent: view.agent.as_ref().map(|a| a.id.clone()),
         });
     }
 
@@ -1371,13 +1362,17 @@ impl App {
     pub(crate) fn got_chat(
         &mut self,
         key: String,
+        agent: Option<String>,
         before: Option<usize>,
         result: Result<Box<cctop_core::chat::Conversation>, String>,
     ) {
         let Some(view) = &mut self.chat else {
             return;
         };
-        if view.session.key() != key {
+        // An agent's turns and its session's share the session's key, so the
+        // agent is checked too: an answer for the conversation underneath an
+        // agent's view must not land in it.
+        if view.session.key() != key || view.agent.as_ref().map(|a| &a.id) != agent.as_ref() {
             return;
         }
         view.fetching = false;
@@ -1470,6 +1465,36 @@ pub struct ChatView {
     /// The next layout keeps the top row in place even at the end; see
     /// [`ChatView::relayout`].
     pub hold: bool,
+    /// The subagent whose own turns these are, when they are not the
+    /// session's.
+    pub agent: Option<cctop_core::chat::AgentCall>,
+    /// The conversation this agent's view was opened from, kept whole — its
+    /// layout, its scroll, its search — so `Esc` puts the reader back exactly
+    /// where it was.
+    pub parent: Option<Box<ChatView>>,
+}
+
+impl ChatView {
+    pub(crate) fn new(session: Session, host: Option<cctop_core::fleet::Host>) -> Self {
+        ChatView {
+            session,
+            host,
+            conversation: None,
+            error: None,
+            back: 0,
+            fetching: false,
+            raw: false,
+            tools_open: false,
+            opened: std::collections::HashSet::new(),
+            search: reader::Search::default(),
+            laid: None,
+            visible: 0,
+            dirty: false,
+            hold: false,
+            agent: None,
+            parent: None,
+        }
+    }
 }
 
 /// Columns the user has hidden outright, which win over the automatic
@@ -1662,8 +1687,8 @@ mod tests {
 
         // The latest window arrives first, then the page `u` asked for —
         // which belongs in front of it, not after.
-        app.got_chat(key.clone(), None, Ok(page(&[3, 4, 5], 7)));
-        app.got_chat(key.clone(), Some(3), Ok(page(&[0, 1, 2], 0)));
+        app.got_chat(key.clone(), None, None, Ok(page(&[3, 4, 5], 7)));
+        app.got_chat(key.clone(), None, Some(3), Ok(page(&[0, 1, 2], 0)));
         let conv = app
             .chat
             .as_ref()
@@ -1677,7 +1702,7 @@ mod tests {
 
         // An answer addressed to another row's key — a fetch still in flight
         // from a view since closed — must not land in this one.
-        app.got_chat("other".into(), None, Ok(page(&[9], 0)));
+        app.got_chat("other".into(), None, None, Ok(page(&[9], 0)));
         assert_eq!(
             app.chat
                 .as_ref()
@@ -1687,7 +1712,7 @@ mod tests {
         );
 
         // And an error is shown rather than an empty box pretending to load.
-        app.got_chat(key, None, Err("no such session".into()));
+        app.got_chat(key, None, None, Err("no such session".into()));
         assert_eq!(
             app.chat.as_ref().and_then(|v| v.error.as_deref()),
             Some("no such session")

@@ -31,14 +31,14 @@ expression: screen
 │   4101    9.8%    36│  i                Read its conversation (works on remote rows)           │                     │
 │   4188    2.4%     4│    / n N  [ ]     In it: search, next / previous hit, turn by turn       │                     │
 │   4290    0.3%      │    ↵ t  m         In it: this turn's tools / all tools, source           │                     │
+│                     │    a              In it: a subagent's own turns (Esc comes back)         │                     │
 │                     │  y                Copy resume command or transcript path                 │                     │
 │                     │  e / E            Show its subagents / all subagents                     │                     │
 │                     │  d                Delete it (only when it is not running)                │                     │
 │                     │  Ctrl+K           Terminate it                                           │                     │
 │                     │                                                                          │                     │
-│                     │Several at once                                                           │                     │
-╰─────────────────────│  Space            Mark / unmark the selected session                     │─────────────────────╯
-╭ Limits ─────────────│  U                Clear all marks                                        │────────── + account ╮
-│Claude checking…     │  D                Delete all marked sessions                             │                     │
-╰─────────────────────╰ 1–35 of 142   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
+╰─────────────────────│Several at once                                                           │─────────────────────╯
+╭ Limits ─────────────│  Space            Mark / unmark the selected session                     │────────── + account ╮
+│Claude checking…     │  U                Clear all marks                                        │                     │
+╰─────────────────────╰ 1–35 of 143   ↑↓ scroll ─────────────────────────────────────────────────╯─────────────────────╯
 ↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help t New tab Tab Panel S Sort q Quit                ⧉ share

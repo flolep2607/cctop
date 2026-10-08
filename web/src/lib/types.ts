@@ -65,6 +65,12 @@ export interface AgentCall {
   last_active?: string;
   duration_ms?: number;
   tool_count?: number;
+  /** Replies in its own transcript. */
+  turns?: number;
+  /** Its own requests, in dollars at list price; "incl" on a plan that bundles them. */
+  cost?: number;
+  /** Every token billed to it. */
+  tokens?: number;
   /** Its transcript was purged. */
   ghost?: boolean;
   /** Launched in the background: the call's result is only a launch receipt. */
@@ -72,6 +78,8 @@ export interface AgentCall {
   /** The seq of its hand-back turn. */
   handback?: number;
   report?: string;
+  /** `report` is only its last message: a background agent that never handed back. */
+  last_message?: boolean;
 }
 
 export interface Turn {

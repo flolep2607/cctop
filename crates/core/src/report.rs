@@ -197,6 +197,7 @@ pub struct ReportBreakdown {
     pub tool_input: u64,
     pub attachments: u64,
     pub user_text: u64,
+    pub agent_text: u64,
     pub assistant_text: u64,
     /// Signed, and deliberately so — see [`crate::session::ContextBreakdown::unaccounted`].
     pub unaccounted: i64,
@@ -339,6 +340,7 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
                 tool_input: b.tool_input,
                 attachments: b.attachments,
                 user_text: b.user_text,
+                agent_text: b.agent_text,
                 assistant_text: b.assistant_text,
                 unaccounted: b.unaccounted(),
                 after_compaction: b.after_compaction,

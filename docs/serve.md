@@ -325,6 +325,7 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /api/agents` | What this run can hand work to, and whether it will act at all — the page hides the controls it cannot use rather than offering buttons that answer 403 |
 | `GET /api/tabs` | The tabs cctop is running, for the page's tab strip |
 | `GET /api/quota` | Each account's rate-limit status and windows — `{"claude":[…],"codex":[…]}`, each profile with `status`, `detail`, `plan` and `windows` |
+| `GET /api/provider-status` | What the Anthropic and OpenAI status pages last said, set against the sessions failing now: `{pages, alerts, line, verdict}`. Each page has `label`, `site` and `state` — `pending`, `unavailable` with a `reason`, or `ok` with `level`, `description`, `incidents` and `degraded`; each alert has `confirmed` and `probably_local`; `line` is the TUI footer's sentence, or `null` when it would say nothing |
 | `GET /api/search?q=<query>` | Both search tiers over every session: `{"hits":[{key, session_id, snippet, score}]}`. Literal matches carry the matching text; topical-only hits carry `~NN% ` plus the chunk head |
 | `GET /metrics` | The same table as Prometheus text exposition. **Needs no token** — see [Scraping it](#scraping-it-with-prometheus) |
 | `GET /insight/optimize` | The text `cctop optimize` prints, as `text/plain` |
@@ -353,6 +354,13 @@ endpoints itself on a 60-second cadence — slower than the two-second session
 refresh, because they throttle hard — and a dashboard-hosted one serves the
 reading the TUI's own poller already made. Either way a request never triggers a
 fetch.
+
+`/api/provider-status` works the same way. A standalone `serve` asks each status
+page on the TUI's schedule — every two minutes after an answer, five after a
+page could not be reached — and one the TUI started is handed the TUI's answers
+instead, so one process never asks the vendor twice. Nothing a browser sends
+makes cctop ask sooner. The dashboard re-reads it every 30 seconds and shows the
+footer's line above the table, which opens the `!` panel's account in a dialog.
 
 `/api/search` runs the same two tiers the TUI's `s` does: the literal byte scan,
 then the embedding index when the model is installed and the query earns it —

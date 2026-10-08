@@ -16,6 +16,8 @@ export interface Agents {
   everything: boolean;
   /** Walk to a main-conversation turn and mark it. */
   jump: (seq: number) => void;
+  /** The session's plan bundles its cost, so an agent's reads "incl", as on the report tab. */
+  included: boolean;
 }
 
 export const AgentsContext = createContext<Agents>({
@@ -24,6 +26,7 @@ export const AgentsContext = createContext<Agents>({
   reported: new Map(),
   everything: true,
   jump: () => {},
+  included: false,
 });
 
 export const useAgents = () => useContext(AgentsContext);
@@ -38,6 +41,9 @@ export function agentCalls(turns: Turn[]): Agents["calls"] {
 
 /** `Explore — map the parser`. */
 export const agentTitle = (a: AgentCall) => (a.description ? `${a.type} — ${a.description}` : a.type);
+
+/** What a report that is only the agent's last message is labelled — `LAST_MESSAGE_LABEL` in `chat.rs`. */
+export const LAST_MESSAGE = "No hand-back — last message from the agent";
 
 /** Whether a turn is about a subagent rather than said in the main conversation. */
 export const aboutAgent = (t: Turn) => t.kind === "agent-message" || (t.role === "system" && !!t.agent);

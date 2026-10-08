@@ -185,6 +185,7 @@ fn web_data() -> SessionData {
             tool_input: 12_000,
             attachments: 4_000,
             user_text: 6_000,
+            agent_text: 0,
             assistant_text: 19_000,
             after_compaction: false,
             superseded: false,

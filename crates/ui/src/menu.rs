@@ -176,7 +176,8 @@ pub fn items(app: &App) -> Vec<Item> {
             key: "i",
             // Works on a remote row: the read goes over the ssh channel the
             // row arrived by, to the machine that actually has the transcript.
-            blocked: subagent.then(|| "a subagent has no transcript of its own".to_string()),
+            // On a subagent's row it reads that agent's own turns.
+            blocked: None,
             rule: false,
         },
         Item {

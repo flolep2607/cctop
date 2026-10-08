@@ -38,6 +38,24 @@ const FULL_WALK_INTERVAL: Duration = Duration::from_secs(60);
 /// file may sit there for a while before the model first answers.
 const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Choose the palette for this run, on the thread that will draw, and tell the
+/// agents cctop hosts which one it is.
+///
+/// Public because `cctop claude` hosts its agent before [`run`] starts, and
+/// that agent's first question about the terminal's colours can arrive before
+/// `run` would have chosen anything: it would be told dark under a light theme.
+/// So the binary calls this first, and `run` skips it when it has been done.
+///
+/// Before `ratatui::init`, because `auto` asks the terminal for its background
+/// and reads the answer off stdin, which nothing else may be reading yet.
+/// Hosting an agent does not read stdin — the shim's input pump is `cctop
+/// run`'s, not `host`'s — so choosing this before the agent starts is as safe
+/// as choosing it in `run` was.
+pub fn choose_palette() {
+    theme::init_from_env(cctop_core::settings::Settings::load().theme.as_deref());
+    theme::tell_hosted_agents();
+}
+
 /// Run the UI. `hosted` is an agent cctop launched for this session, which it
 /// shows attached and outlives by nothing: when the agent exits, so does cctop,
 /// so `cctop claude` gets you back to your shell the way `claude` would.
@@ -53,10 +71,11 @@ pub fn run(
     start_server: crate::StartServer,
 ) -> anyhow::Result<i32> {
     // Before anything draws, and once: the palette is read by every widget and
-    // must not change under them mid-run. Before `ratatui::init` too, because
-    // `auto` asks the terminal for its background and reads the answer off
-    // stdin, which nothing else may be reading yet.
-    theme::init_from_env(cctop_core::settings::Settings::load().theme.as_deref());
+    // must not change under them mid-run. Usually already done by the caller,
+    // which has to choose it before hosting an agent — see `choose_palette`.
+    if !theme::chosen() {
+        choose_palette();
+    }
 
     let (req_tx, req_rx) = channel::<Request>();
     let (res_tx, res_rx) = channel::<Response>();
@@ -596,6 +615,9 @@ fn event_loop(
                 }
                 Ok(Response::ProviderStatus(page, status)) => {
                     app.outage.status.set(page, *status);
+                    // Handed to a served page now rather than at the next
+                    // refresh, so the browser and the footer change together.
+                    app.feed_serving();
                     app.needs_redraw = true;
                 }
                 Ok(Response::Location(answer)) => app.got_location(answer),
@@ -681,9 +703,10 @@ fn event_loop(
                 }
                 Ok(Response::Chat {
                     key,
+                    agent,
                     before,
                     result,
-                }) => app.got_chat(key, before, result),
+                }) => app.got_chat(key, agent, before, result),
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
