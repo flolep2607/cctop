@@ -206,7 +206,12 @@ toml_edit = "0.25.13"
 # `ratatui-rmux = "<the version carrying #220>"` and the test named
 # `a_pane_snapshot_paints_into_the_buffer_cctop_draws_with`, which is in this
 # repository's history at 3808d80.
-rmux-sdk = "0.10.0"
+#
+# Published as `cctop-rmux-sdk`: cctop's fork of rmux (flolep2607/rmux), whose
+# crates carry fixes upstream has not merged and will host the daemon cctop
+# builds in (#197). The dependency keeps the name `rmux-sdk`, and the crate
+# keeps its library name, so the code still says `rmux_sdk::`.
+rmux-sdk = { package = "cctop-rmux-sdk", version = "0.10.0" }
 safetensors = "0.6"
 # Pure Rust, and deliberately without `onig`: oniguruma is C and `esaxx-rs` is
 # C++, and a C++ toolchain is the one dependency class the musl release does not

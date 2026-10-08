@@ -449,6 +449,7 @@ name = "cctop-core"
 version = "0.30.0"
 dependencies = [
  "anyhow",
+ "cctop-rmux-sdk",
  "cctop-tunnel",
  "chrono",
  "crossterm",
@@ -460,7 +461,6 @@ dependencies = [
  "ratatui",
  "rayon",
  "regex",
- "rmux-sdk",
  "rusqlite",
  "safetensors",
  "self-replace",
@@ -475,6 +475,69 @@ dependencies = [
  "toml_edit",
  "ureq",
  "vt100",
+]
+
+[[package]]
+name = "cctop-rmux-ipc"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2bbcf0bd29ecb4f80e2e81e2c12ca430e4dda0f55a3d0f3d2a95919ca87f7e3"
+dependencies = [
+ "cctop-rmux-os",
+ "libc",
+ "rustix 1.1.4",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cctop-rmux-os"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ca692667b8ccbdf683bf267c5031b56c1bdcb9ecc5d7e838561fdf552a300c9"
+dependencies = [
+ "cctop-rmux-types",
+ "libc",
+ "rustix 1.1.4",
+]
+
+[[package]]
+name = "cctop-rmux-proto"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2de31dd9db758ec30b5843892ee0083ac78209be308a72a9af815c884f62b51"
+dependencies = [
+ "bincode",
+ "cctop-rmux-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "cctop-rmux-sdk"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9baf79139e17b38e95d07c510714755bcc546f879f838b073371ec14477bd887"
+dependencies = [
+ "cctop-rmux-ipc",
+ "cctop-rmux-os",
+ "cctop-rmux-proto",
+ "libc",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tokio",
+]
+
+[[package]]
+name = "cctop-rmux-types"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea31175e61c60cc50b40340420057498402d478cdd77cd8f10828e7dd731fcf0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -3145,74 +3208,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rmux-ipc"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31f63795a405962308478f28ae2551d8e3f73ac8827c6f838f7b8083085ba2a6"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
- "rmux-os",
- "rustix 1.1.4",
- "sha2",
- "tokio",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rmux-os"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d7017db3e6cfb59857df098ece53d22e31bdf8cd10c63dadb50ae1a140e1ce2"
-dependencies = [
- "libc",
- "rmux-types",
- "rustix 1.1.4",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rmux-proto"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf07fafa60cc2b10f6630d400acb85b472dc1d981866c5396d21cc03f6176489"
-dependencies = [
- "bincode",
- "rmux-types",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "rmux-sdk"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0684ac39de5e707a3dfe6e21ef14299e9540097ed27d5de33300ab8eca50df3"
-dependencies = [
- "libc",
- "rmux-ipc",
- "rmux-os",
- "rmux-proto",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "signal-hook",
- "tokio",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rmux-types"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c591db0342827ab26e271262d3ecad75c72b6299e865ee45b2a15d9db85f3db"
-dependencies = [
- "serde",
 ]
 
 [[package]]

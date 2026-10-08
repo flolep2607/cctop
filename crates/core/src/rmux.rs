@@ -52,6 +52,19 @@ pub const BIN: &str = "rmux";
 /// agents is slow to answer, and giving up early costs more than waiting.
 const DAEMON_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The daemon every SDK connection cctop makes is pointed at.
+///
+/// One function, so that where cctop's agents live is decided in one place
+/// and every connection follows it (#197). Today that is still the user's own
+/// rmux daemon, found the way the `rmux` CLI finds it: `RmuxEndpoint::Default`
+/// is the SDK's deferred discovery, which reads `$RMUX`/`$TMUX` and
+/// `RMUX_TMPDIR` exactly as the shell-outs below do, so the SDK and the
+/// command line keep reaching the same server. When cctop runs its own daemon
+/// this returns that daemon's socket, and nothing else here has to change.
+fn endpoint() -> rmux_sdk::RmuxEndpoint {
+    rmux_sdk::RmuxEndpoint::Default
+}
+
 /// Run one piece of SDK work against the local daemon and wait for it.
 ///
 /// The SDK is async and cctop is not. Everything here is one short exchange
@@ -72,6 +85,7 @@ where
         // whichever of these runs first, and a cctop that only ever asks
         // questions should still get answers.
         let rmux = rmux_sdk::Rmux::builder()
+            .endpoint(endpoint())
             .default_timeout(DAEMON_DEADLINE)
             .connect_or_start()
             .await
