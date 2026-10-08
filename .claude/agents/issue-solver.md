@@ -79,8 +79,9 @@ gh pr checks <pr> --watch
 ```
 
 The title is a release note: what changed for a user, no prefix, no version.
-The body says what changed and why, what was checked by hand, any choice you
-made on the user's behalf, and ends with `Fixes #<N>` and
+The body follows `.github/pull_request_template.md`: what changed and why (with
+any choice you made on the user's behalf), what was checked by hand, the gate
+checklist ticked for what you ran, and `Fixes #<N>`, then
 `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
 Fix CI until green. Do not merge and do not bump the version — that is the

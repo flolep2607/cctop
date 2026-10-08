@@ -1,0 +1,72 @@
+name: Bug
+description: Something cctop does wrong, or stopped doing
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most reports come from a machine running an older cctop than the one
+        that fixed it, so the version comes first.
+        Add the `agent-ready` label once this says enough for an agent to fix
+        it without asking; the `/issues` loop picks those up.
+  - type: input
+    id: version
+    attributes:
+      label: cctop version
+      description: "`cctop --version` on the machine where it happened"
+      placeholder: cctop 0.28.2
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      multiple: true
+      options:
+        - The table (TUI)
+        - The + tab / launcher
+        - Web dashboard (cctop serve)
+        - Shared link / tunnel
+        - Remote (cctop sandbox, ssh)
+        - The hook (inside an agent session)
+        - Install / update
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Agent
+      multiple: true
+      options:
+        - Claude Code
+        - Codex
+        - opencode
+        - Other / not agent-specific
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, including any error text exactly as shown
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen again
+      placeholder: |
+        1. Open the + tab
+        2. Press c and type procdb:~/
+        3. ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Leave out dashboard tokens and share links — they grant access.
+      render: text

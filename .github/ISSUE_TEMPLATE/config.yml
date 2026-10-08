@@ -1,0 +1,3 @@
+# Blank issues stay open: the issue-writer agent files with `gh issue create
+# --body-file`, in its own layout, and a template would only get in its way.
+blank_issues_enabled: true
