@@ -258,8 +258,23 @@ fn install(raw: HashMap<String, serde_json::Value>) {
 #[cfg(test)]
 #[must_use = "hold the guard until the test is done reading the table"]
 pub fn install_test_table(rows: &[(&str, serde_json::Value)]) -> TestTable {
+    install_test_table_holding(test_table_lock(), rows)
+}
+
+/// The lock every [`install_test_table`] takes, for a test that has to look at
+/// the table on either side of one: a snapshot taken without it can see
+/// another test's rows, installed in the gap, and call them this test's.
+#[cfg(test)]
+fn test_table_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+fn install_test_table_holding(
+    lock: std::sync::MutexGuard<'static, ()>,
+    rows: &[(&str, serde_json::Value)],
+) -> TestTable {
     // Taken under the lock, and put back on the way out. The table is read by
     // every test that asks a cost, not only by the tests holding this guard, so
     // an empty one installed for a single test is an answer from an empty table
@@ -271,7 +286,10 @@ pub fn install_test_table(rows: &[(&str, serde_json::Value)]) -> TestTable {
         .map(|(k, v)| ((*k).to_string(), v.clone()))
         .collect();
     install(raw);
-    TestTable { lock, previous }
+    TestTable {
+        lock: Some(lock),
+        previous,
+    }
 }
 
 #[cfg(test)]
@@ -298,9 +316,22 @@ fn restore(snapshot: &Snapshot) {
 /// and a failing assertion is the most likely way to reach one.
 #[cfg(test)]
 pub struct TestTable {
-    #[allow(dead_code)]
-    lock: std::sync::MutexGuard<'static, ()>,
+    /// An `Option` only so [`TestTable::put_back`] can hand the lock on; it is
+    /// `Some` for as long as the table is installed.
+    lock: Option<std::sync::MutexGuard<'static, ()>>,
     previous: Snapshot,
+}
+
+#[cfg(test)]
+impl TestTable {
+    /// Put the table back and keep the lock, so the caller can check what was
+    /// put back before any other test installs over it.
+    ///
+    /// The restore is still `Drop`'s, the same one every other test relies on,
+    /// so checking it here checks theirs.
+    fn put_back(mut self) -> std::sync::MutexGuard<'static, ()> {
+        self.lock.take().expect("held until put back")
+    }
 }
 
 #[cfg(test)]
@@ -921,23 +952,31 @@ mod tests {
     /// table installed for one of them is an answer from an empty table for the
     /// rest of the run — and a test that tolerates `None` passes for the wrong
     /// reason, in an order the runner picks.
+    ///
+    /// Both snapshots are taken holding the lock. Taken outside it, another
+    /// test's table could be in place for one of them and not the other — which
+    /// failed this test under load, twice in 400 runs, for a restore that was
+    /// working.
     #[test]
     fn a_test_table_is_put_back_when_its_test_is_done() {
+        let lock = test_table_lock();
         let before = snapshot();
-        {
-            let _guard = install_test_table(&[(
+        let guard = install_test_table_holding(
+            lock,
+            &[(
                 "cctop-restores-this",
                 serde_json::json!({"input_cost_per_token": 1e-6}),
-            )]);
-            assert!(resolve_generic("cctop-restores-this").is_some());
-        }
+            )],
+        );
+        assert!(resolve_generic("cctop-restores-this").is_some());
+        let _lock = guard.put_back();
         let after = snapshot();
         assert_eq!(
             format!("{:?}", after.0),
             format!("{:?}", before.0),
             "the table outlived its test"
         );
-        assert_eq!(pricing_epoch(), before.1, "and so did its epoch");
+        assert_eq!(after.1, before.1, "and so did its epoch");
         assert!(
             resolve_generic("cctop-restores-this").is_none(),
             "the row is still being priced from"
