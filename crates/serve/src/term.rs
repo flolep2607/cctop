@@ -26,28 +26,23 @@
 //! `share.rmux.io` installable as a phone app, which a frame inside cctop has
 //! no use for, and the 404 they get costs nothing.
 
-use super::http::{IMMUTABLE, Packed, REVALIDATE};
+use super::http::{IMMUTABLE, Packed, REVALIDATE, built};
 use std::sync::LazyLock;
-
-const INDEX: &[u8] = include_bytes!("assets/rmux-share/index.html");
-const CSS: &[u8] = include_bytes!("assets/rmux-share/_astro/index.D2bSaP4U.css");
-const JS: &[u8] = include_bytes!(
-    "assets/rmux-share/_astro/index.astro_astro_type_script_index_0_lang.CdYCpIGm.js"
-);
-const WASM: &[u8] =
-    include_bytes!("assets/rmux-share/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm");
 
 /// A picture of nothing, for the logos the app asks for and nobody ships.
 const EMPTY_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
 
-// Each file compressed at most once per run, and only once something asks for
-// it — see [`Packed`]. A workspace of eight tiles is eight frames loading the
-// same three files at once; the first compresses, the rest are handed its copy.
-static INDEX_P: LazyLock<Packed> = LazyLock::new(|| Packed::new(INDEX));
-static CSS_P: LazyLock<Packed> = LazyLock::new(|| Packed::new(CSS));
-static JS_P: LazyLock<Packed> = LazyLock::new(|| Packed::new(JS));
-static WASM_P: LazyLock<Packed> = LazyLock::new(|| Packed::new(WASM));
-static EMPTY_P: LazyLock<Packed> = LazyLock::new(|| Packed::new(EMPTY_SVG));
+// Each file as the build compressed it — see [`Packed`] and `build.rs`, which
+// lists the same paths. Lazy only for the ETag, a hash of the gzip copy.
+static INDEX_P: LazyLock<Packed> = LazyLock::new(|| built!("src/assets/rmux-share/index.html"));
+static CSS_P: LazyLock<Packed> =
+    LazyLock::new(|| built!("src/assets/rmux-share/_astro/index.D2bSaP4U.css"));
+static JS_P: LazyLock<Packed> = LazyLock::new(|| {
+    built!("src/assets/rmux-share/_astro/index.astro_astro_type_script_index_0_lang.CdYCpIGm.js")
+});
+static WASM_P: LazyLock<Packed> =
+    LazyLock::new(|| built!("src/assets/rmux-share/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm"));
+static EMPTY_P: LazyLock<Packed> = LazyLock::new(|| Packed::plain(EMPTY_SVG));
 
 /// One file of the app, and how long a browser may keep it.
 pub struct File {
@@ -119,7 +114,7 @@ mod tests {
     /// must be a file this module serves, or the frame draws nothing.
     #[test]
     fn every_asset_the_page_names_is_served() {
-        let page = std::str::from_utf8(INDEX).expect("utf-8");
+        let page = std::str::from_utf8(INDEX_P.decoded()).expect("utf-8");
         let mut named = 0;
         for piece in page.split('"') {
             if piece.starts_with("/_astro/") {
@@ -131,7 +126,7 @@ mod tests {
             named, 2,
             "the page should name one stylesheet and one script"
         );
-        let js = std::str::from_utf8(JS).expect("utf-8");
+        let js = std::str::from_utf8(JS_P.decoded()).expect("utf-8");
         assert!(
             js.contains("/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm"),
             "the script loads a WebAssembly module this does not serve"
@@ -143,7 +138,7 @@ mod tests {
     /// nothing else under `/term/` is mistaken for one.
     #[test]
     fn every_crab_is_answered_and_nothing_else_is() {
-        let js = std::str::from_utf8(JS).expect("utf-8");
+        let js = std::str::from_utf8(JS_P.decoded()).expect("utf-8");
         assert!(
             js.contains("crabs/${e}-dark.svg"),
             "the app no longer asks for its crabs where this answers them"
@@ -171,7 +166,7 @@ mod tests {
     #[test]
     fn only_the_hashed_files_are_kept_without_asking() {
         assert_eq!(file("/term/").unwrap().cache, REVALIDATE);
-        for piece in std::str::from_utf8(INDEX).unwrap().split('"') {
+        for piece in std::str::from_utf8(INDEX_P.decoded()).unwrap().split('"') {
             if piece.starts_with("/_astro/") {
                 assert_eq!(file(piece).unwrap().cache, IMMUTABLE, "{piece}");
             }

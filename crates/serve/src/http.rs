@@ -33,9 +33,11 @@
 //! the road to it is often a tunnel to a phone. Three rules, applied here rather
 //! than per route:
 //!
-//! - **Every text body is compressed** for a client that offers it — brotli
-//!   first, then gzip — and a body that is the same on every request is
-//!   compressed once per run, not per request ([`Packed`]).
+//! - **Every text body is compressed** for a client that offers it. A body
+//!   that is the same in every run of a build — the app page, rmux's terminal
+//!   bundle — was compressed when cctop was built, to brotli and gzip, and is
+//!   sent in the better of the two the client takes ([`Packed`]). A body built
+//!   per request is gzipped per request; see [`gzip`] for why not brotli.
 //! - **A file that never changes says so.** Names with a content hash in them
 //!   are cached for a year; everything else that is fixed for a run carries an
 //!   ETag, and a browser that already holds it is answered `304` with no body.
@@ -546,37 +548,6 @@ impl Encoding {
             Encoding::Gzip => "gzip",
         }
     }
-
-    /// `body` in this coding, or `None` when it would not be smaller — an
-    /// empty picture gains nothing from a gzip header.
-    ///
-    /// `thorough` is for a body compressed once and sent many times, where a
-    /// tenth of a second buys the last few percent; a body compressed per
-    /// request takes the fast setting, which on brotli is still smaller than
-    /// gzip's best.
-    fn pack(self, body: &[u8], thorough: bool) -> Option<Vec<u8>> {
-        let mut out = Vec::with_capacity(body.len() / 3);
-        match self {
-            Encoding::Br => {
-                let params = brotli::enc::BrotliEncoderParams {
-                    quality: if thorough { 9 } else { 5 },
-                    lgwin: 22,
-                    ..Default::default()
-                };
-                brotli::BrotliCompress(&mut &body[..], &mut out, &params).ok()?;
-            }
-            Encoding::Gzip => {
-                let level = match thorough {
-                    true => flate2::Compression::best(),
-                    false => flate2::Compression::default(),
-                };
-                let mut gz = flate2::write::GzEncoder::new(out, level);
-                gz.write_all(body).ok()?;
-                out = gz.finish().ok()?;
-            }
-        }
-        (out.len() < body.len()).then_some(out)
-    }
 }
 
 /// Whether a body of this type is worth compressing: text of every kind, and
@@ -599,44 +570,126 @@ fn compressible(content_type: &str) -> bool {
 /// saves nothing a reader would notice and costs a header either way.
 const COMPRESS_FROM: usize = 1024;
 
-/// A body that is the same on every request — a page, a script, a picture —
-/// compressed once, the first time each encoding is asked for, and named by an
-/// ETag so a browser that holds it already is answered `304` and no body.
+/// `body` gzipped at the default level, or `None` when that is not smaller.
 ///
-/// Compressed lazily rather than up front because most runs never serve most
-/// of these: the terminal bundle is only fetched once someone opens a
-/// terminal, and a run nobody opens in a browser should not spend a second of
-/// CPU at start-up on pages it will never send.
+/// The one compressor that runs while cctop serves, for bodies built per
+/// request — every JSON route. Gzip rather than brotli: brotli's encoder was
+/// about a megabyte of the binary, and on these bodies it saved little: a
+/// real `/api/sessions` of 93 rows, 255 KB, is 32.5 KB gzipped and 30.5 KB at
+/// the brotli quality this used (5). Two kilobytes a refresh is not worth a
+/// megabyte that every install carries whether or not it ever serves a page.
+/// The fixed bodies, where brotli's gain is paid for once at build time, still
+/// get it: see [`Packed`].
+fn gzip(body: &[u8]) -> Option<Vec<u8>> {
+    let mut gz = flate2::write::GzEncoder::new(
+        Vec::with_capacity(body.len() / 3),
+        flate2::Compression::default(),
+    );
+    gz.write_all(body).ok()?;
+    let out = gz.finish().ok()?;
+    (out.len() < body.len()).then_some(out)
+}
+
+/// A body that is the same on every request — a page, a script, a picture —
+/// named by an ETag, so a browser that holds it already is answered `304` and
+/// no body.
+///
+/// The large ones are compressed when cctop is built (`build.rs`), and the
+/// binary carries the brotli and the gzip copy rather than the file itself.
+/// A client that takes neither — curl without `--compressed`, mostly — is sent
+/// the gzip copy decoded, once per run and on first ask. Decoded rather than
+/// embedded a third time because the raw files are 1.7 MB the binary would
+/// carry for a client that hardly ever comes, and `flate2`, which decodes it,
+/// is in the binary anyway for the event stream.
 ///
 /// The ETag is weak (`W/`) because it names the content, not one encoding of
 /// it: the gzip and the brotli copy are the same page, and a browser that
-/// cached one may revalidate it against the other.
+/// cached one may revalidate it against the other. A built body's tag is a
+/// hash of its gzip copy, which is as much a function of the content as the
+/// content's own hash is, and saves decoding it to find out.
 pub struct Packed {
-    body: Vec<u8>,
     etag: String,
-    br: OnceLock<Option<Vec<u8>>>,
-    gzip: OnceLock<Option<Vec<u8>>>,
+    form: Form,
 }
 
+enum Form {
+    /// Too small or of a type not worth compressing: sent as it is.
+    Plain(&'static [u8]),
+    Built {
+        br: &'static [u8],
+        gzip: &'static [u8],
+        decoded: OnceLock<Vec<u8>>,
+    },
+}
+
+/// The [`Packed`] form of a file `build.rs` compressed, named by its path in
+/// this crate — `built!("src/assets/app/index.html")`. A file the build script
+/// does not list is a compile error here, not a missing page at run time.
+macro_rules! built {
+    ($path:literal) => {
+        $crate::http::Packed::built(
+            include_bytes!(concat!(env!("OUT_DIR"), "/", $path, ".br")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/", $path, ".gz")),
+        )
+    };
+}
+pub(crate) use built;
+
 impl Packed {
-    pub fn new(body: impl Into<Vec<u8>>) -> Packed {
-        let body = body.into();
+    /// A body sent as it is.
+    pub fn plain(body: &'static [u8]) -> Packed {
         Packed {
-            etag: etag_of(&body),
-            body,
-            br: OnceLock::new(),
-            gzip: OnceLock::new(),
+            etag: etag_of(body),
+            form: Form::Plain(body),
         }
     }
 
-    /// The body in `encoding`, compressing it if this is the first ask.
-    fn encoded(&self, encoding: Encoding) -> Option<&[u8]> {
-        let slot = match encoding {
-            Encoding::Br => &self.br,
-            Encoding::Gzip => &self.gzip,
-        };
-        slot.get_or_init(|| encoding.pack(&self.body, true))
-            .as_deref()
+    /// A body the build compressed; see [`built!`].
+    pub fn built(br: &'static [u8], gzip: &'static [u8]) -> Packed {
+        Packed {
+            etag: etag_of(gzip),
+            form: Form::Built {
+                br,
+                gzip,
+                decoded: OnceLock::new(),
+            },
+        }
+    }
+
+    /// The body as it was before any compression.
+    pub fn decoded(&self) -> &[u8] {
+        match &self.form {
+            Form::Plain(body) => body,
+            Form::Built { gzip, decoded, .. } => decoded.get_or_init(|| {
+                let mut out = Vec::new();
+                flate2::read::GzDecoder::new(*gzip)
+                    .read_to_end(&mut out)
+                    .expect("the build wrote valid gzip");
+                out
+            }),
+        }
+    }
+
+    /// The body to send a client that takes `encoding`, and the coding it is
+    /// in; `None` is the body as it is.
+    fn for_client(&self, encoding: Option<Encoding>) -> (Option<Encoding>, &[u8]) {
+        match (&self.form, encoding) {
+            (Form::Built { br, .. }, Some(Encoding::Br)) => (Some(Encoding::Br), br),
+            (Form::Built { gzip, .. }, Some(Encoding::Gzip)) => (Some(Encoding::Gzip), gzip),
+            _ => (None, self.decoded()),
+        }
+    }
+
+    /// The size before compression, for the log, without decoding the body:
+    /// gzip's trailer ends with it, modulo 2³², which nothing here reaches.
+    fn raw_len(&self) -> usize {
+        match &self.form {
+            Form::Plain(body) => body.len(),
+            Form::Built { gzip, .. } => {
+                let tail: [u8; 4] = gzip[gzip.len() - 4..].try_into().unwrap_or_default();
+                u32::from_le_bytes(tail) as usize
+            }
+        }
     }
 }
 
@@ -709,20 +762,19 @@ fn respond_fresh(
     cache: &str,
 ) {
     let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
-    let packed = worth
-        .then(|| request.and_then(Request::encoding))
-        .flatten()
-        .and_then(|e| Some((e, e.pack(body, false)?)));
+    let packed = (worth && request.is_some_and(Request::accepts_gzip))
+        .then(|| gzip(body))
+        .flatten();
     let head = Head {
         content_type,
         cache,
         etag: None,
-        encoding: packed.as_ref().map(|(e, _)| *e),
+        encoding: packed.as_ref().map(|_| Encoding::Gzip),
         vary: worth,
         extra,
         policy: None,
     };
-    let sent = packed.as_ref().map_or(body, |(_, b)| b.as_slice());
+    let sent = packed.as_deref().unwrap_or(body);
     write_response(stream, request, status, &head, sent, body.len());
 }
 
@@ -744,20 +796,19 @@ pub fn respond_revalidated(
         return not_modified(stream, request, &etag, REVALIDATE, "");
     }
     let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
-    let packed = worth
-        .then(|| request.encoding())
-        .flatten()
-        .and_then(|e| Some((e, e.pack(body, false)?)));
+    let packed = (worth && request.accepts_gzip())
+        .then(|| gzip(body))
+        .flatten();
     let head = Head {
         content_type,
         cache: REVALIDATE,
         etag: Some(&etag),
-        encoding: packed.as_ref().map(|(e, _)| *e),
+        encoding: packed.as_ref().map(|_| Encoding::Gzip),
         vary: worth,
         extra: "",
         policy: None,
     };
-    let sent = packed.as_ref().map_or(body, |(_, b)| b.as_slice());
+    let sent = packed.as_deref().unwrap_or(body);
     write_response(stream, Some(request), 200, &head, sent, body.len());
 }
 
@@ -778,22 +829,19 @@ pub fn respond_packed(
     if request.holds(&packed.etag) {
         return not_modified(stream, request, &packed.etag, cache, extra);
     }
-    let worth = compressible(content_type) && packed.body.len() >= COMPRESS_FROM;
-    let chosen = worth
-        .then(|| request.encoding())
-        .flatten()
-        .and_then(|e| Some((e, packed.encoded(e)?)));
+    let (encoding, sent) = packed.for_client(request.encoding());
     let head = Head {
         content_type,
         cache,
         etag: Some(&packed.etag),
-        encoding: chosen.map(|(e, _)| e),
-        vary: worth,
+        encoding,
+        // A built body's bytes depend on what the client offered; a plain
+        // one's never do, and saying otherwise only splits a cache.
+        vary: matches!(packed.form, Form::Built { .. }),
         extra,
         policy,
     };
-    let sent = chosen.map_or(packed.body.as_slice(), |(_, b)| b);
-    write_response(stream, Some(request), 200, &head, sent, packed.body.len());
+    write_response(stream, Some(request), 200, &head, sent, packed.raw_len());
 }
 
 /// A `304`: the browser's copy is current. It repeats the validators and the
@@ -1164,6 +1212,56 @@ mod tests {
         let moved = ask(&tag, br#"{"tabs":[{"name":"x"}]}"#);
         assert!(moved.starts_with("HTTP/1.1 200 "), "{moved}");
         assert!(moved.ends_with(r#"{"tabs":[{"name":"x"}]}"#), "{moved}");
+    }
+
+    /// What the build compressed is the file, byte for byte, in both codings
+    /// — and what a client that takes neither is sent is the file too.
+    #[test]
+    fn every_built_body_decodes_to_its_source() {
+        let built = [
+            (
+                "src/assets/app/index.html",
+                built!("src/assets/app/index.html"),
+            ),
+            (
+                "src/assets/rmux-share/index.html",
+                built!("src/assets/rmux-share/index.html"),
+            ),
+            (
+                "src/assets/rmux-share/_astro/index.D2bSaP4U.css",
+                built!("src/assets/rmux-share/_astro/index.D2bSaP4U.css"),
+            ),
+            (
+                "src/assets/rmux-share/_astro/index.astro_astro_type_script_index_0_lang.CdYCpIGm.js",
+                built!(
+                    "src/assets/rmux-share/_astro/index.astro_astro_type_script_index_0_lang.CdYCpIGm.js"
+                ),
+            ),
+            (
+                "src/assets/rmux-share/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm",
+                built!("src/assets/rmux-share/_astro/rmux_web_crypto_wasm_bg.C8R0tHIf.wasm"),
+            ),
+        ];
+        for (path, packed) in built {
+            let file =
+                std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap();
+            let Form::Built { br, gzip, .. } = &packed.form else {
+                panic!("{path} is not built");
+            };
+            let mut plain = Vec::new();
+            flate2::read::GzDecoder::new(*gzip)
+                .read_to_end(&mut plain)
+                .unwrap();
+            assert!(plain == file, "{path}: the gzip copy is not the file");
+            let mut plain = Vec::new();
+            brotli_decompressor::Decompressor::new(*br, 4096)
+                .read_to_end(&mut plain)
+                .unwrap();
+            assert!(plain == file, "{path}: the brotli copy is not the file");
+            assert!(packed.decoded() == file, "{path}: the identity body");
+            assert_eq!(packed.raw_len(), file.len(), "{path}");
+            assert!(br.len() < gzip.len(), "{path}: brotli is not the smaller");
+        }
     }
 
     #[test]

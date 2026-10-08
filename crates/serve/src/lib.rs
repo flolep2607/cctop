@@ -165,10 +165,11 @@ const NO_SUCH_SESSION: &str = "no session with that id, or the prefix matches mo
 /// is one binary, and a page that loads its own files is a page that breaks the
 /// moment the binary is moved. It is also what lets the response promise a
 /// content policy that forbids loading anything at all. What the server knows
-/// and the page cannot reaches it as JSON in place of `__CCTOP_CONFIG__`; see
-/// [`app_config`]. Every page — the table, a session, the workspace, analytics
-/// — is a route inside it.
-const APP_HTML: &str = include_str!("assets/app/index.html");
+/// and the page cannot it fetches from `/api/config`; see [`app_config`]. Every
+/// page — the table, a session, the workspace, analytics — is a route inside
+/// it. Compressed by `build.rs`, so the binary carries it as brotli and gzip.
+static APP_PAGE: std::sync::LazyLock<http::Packed> =
+    std::sync::LazyLock::new(|| http::built!("src/assets/app/index.html"));
 
 /// A favicon small enough to keep inline: the table's dark tile with the amber
 /// dot it draws on a session that is waiting.
@@ -185,10 +186,10 @@ const FAVICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 6
 /// Its own route rather than a data: URL in a `<link>` because manifest fetches
 /// are governed by `manifest-src`, which `data:` is not a part of here.
 static FAVICON_P: std::sync::LazyLock<http::Packed> =
-    std::sync::LazyLock::new(|| http::Packed::new(FAVICON));
+    std::sync::LazyLock::new(|| http::Packed::plain(FAVICON.as_bytes()));
 
 static MANIFEST_P: std::sync::LazyLock<http::Packed> =
-    std::sync::LazyLock::new(|| http::Packed::new(MANIFEST));
+    std::sync::LazyLock::new(|| http::Packed::plain(MANIFEST.as_bytes()));
 
 const MANIFEST: &str = concat!(
     r#"{"name":"cctop","short_name":"cctop","display":"standalone","#,
@@ -265,10 +266,6 @@ struct Shared {
     /// Present even when `scan` is off: a dashboard-hosted serve still owes
     /// its remote rows an answer.
     hosts: HashMap<String, fleet::Host>,
-    /// The app page as each credential is served it, compressed once — see
-    /// [`app_page`]. Indexed by [`Access`]: the page differs only in which
-    /// token and actions flag it carries, both fixed for the run.
-    pages: [std::sync::OnceLock<http::Packed>; 2],
 }
 
 /// One publish of the whole table.
@@ -574,7 +571,6 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
                     .filter(|url| !url.is_empty())
             })
             .map(|target| notify::Webhook::new(target, origin.clone(), token.clone())),
-        pages: Default::default(),
         hosts: options
             .hosts
             .iter()
@@ -1465,6 +1461,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             "",
             None,
         ),
+        "/api/config" => config_route(shared, stream, &request, access),
         "/api/sessions" => {
             let snapshot = current(shared);
             http::respond(
@@ -2086,49 +2083,37 @@ fn current(shared: &Shared) -> Arc<Snapshot> {
     }
 }
 
-/// Serve the app page, with the token stitched in.
+/// Serve the app page, which is the same for every run of a build.
 ///
-/// The page needs the token to make its own requests, and it cannot read the
-/// one in its URL without either parsing `location` in script — which is fine —
-/// or being handed it. It is handed it, because the same page is fetched with
-/// no token at all under `--no-token` and a single substitution keeps both
-/// cases on one code path.
+/// It used to carry this run's config — the token, whether it may act — stitched
+/// in where `__CCTOP_CONFIG__` stands, which made it a different page per run
+/// and per credential, compressed by this process on its first request. The
+/// config is fetched from [`config_route`] instead, so the page can be
+/// compressed when cctop is built, and the brotli encoder that compressed it
+/// here is no longer in the binary. The page starts that fetch from its
+/// `<head>`, before its script is parsed, so the round trip it adds runs
+/// alongside work the browser had to do anyway.
 ///
-/// What it costs to send is decided by the fact that it changes only with the
-/// credential. There are two of those per run, so the page is built and
-/// compressed once for each — most of a megabyte, a third of that compressed,
-/// and it used to be gzipped again on every request — and sent from then on as
-/// it was packed.
-///
-/// Cached as `private, no-cache` with an ETag, which is the most a page holding
-/// the token can safely be:
+/// Cached as `private, no-cache` with an ETag:
 ///
 /// - **Not `no-store`.** That made every reload download the whole UI again —
 ///   300 KB over a tunnel to a phone — for a page that had not changed. With
 ///   an ETag a reload is a `304` and no body.
 /// - **Not `max-age`.** The page is the one thing that knows which cctop it
 ///   was built by; kept without asking, it would go on running the old UI
-///   against an upgraded server, or a token a restart had already replaced.
-///   `no-cache` asks every time, and the answer is free when nothing moved.
-/// - **`private`.** The body carries a credential, so no shared cache between
-///   here and the browser — the tunnel's CDN, a proxy — may keep it. The
-///   browser's own copy adds little to what it already holds: the token is in
-///   its history, in the access cookie, and in the page it is showing.
+///   against an upgraded server. `no-cache` asks every time, and the answer is
+///   free when nothing moved.
+/// - **`private`.** Every route here is behind the token, and a shared cache —
+///   the tunnel's CDN, a proxy — that kept a copy would hand it to requests the
+///   gate never saw.
 ///
-/// The tag is a hash of the body, so it differs per credential: the read-only
-/// link's page never answers a revalidation of the full one's.
+/// The tag names the build, so it is the same for both credentials, which is
+/// now right: the page carries neither.
 fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: Access) {
-    // Which credential the page carries — and whether it may act — is decided
-    // by the one the request arrived with, not by the run: the read-only link
-    // opens the same page wired to the narrower token, so a page it hands out
-    // can neither act nor leak the token that could.
-    let (credential, actions) = match access {
-        Access::Full => (shared.token.as_str(), shared.actions),
-        Access::ReadOnly => (shared.readonly.as_str(), false),
+    let credential = match access {
+        Access::Full => shared.token.as_str(),
+        Access::ReadOnly => shared.readonly.as_str(),
     };
-    let page = shared.pages[access as usize].get_or_init(|| {
-        http::Packed::new(APP_HTML.replace("__CCTOP_CONFIG__", &app_config(credential, actions)))
-    });
 
     // Hand the credential back as a cookie so a reload — which has no `?t=`
     // left, the page having stripped it — still gets in. Only a request that
@@ -2151,7 +2136,7 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: 
         stream,
         request,
         "text/html; charset=utf-8",
-        page,
+        &APP_PAGE,
         http::REVALIDATE,
         &headers,
         None,
@@ -2260,12 +2245,31 @@ fn relay_terminal(
     let _ = pump.join();
 }
 
-/// What the app page is told about this run, as the JSON that replaces
-/// `__CCTOP_CONFIG__` inside a `<script type="application/json">`.
+/// Answer `/api/config`: what the app page is told about this run.
 ///
-/// `<` is escaped because the JSON sits inside a script element, and a home
-/// directory is free to contain `</script>`: the browser would end the element
-/// there, whatever the JSON parser would have made of it.
+/// Which credential it carries — and whether it may act — is decided by the one
+/// the request arrived with, not by the run: the read-only link opens the same
+/// page, which asks with the read-only token and is told only that one, so a
+/// page it hands out can neither act nor leak the token that could. The page
+/// asks with the `?t=` it was opened with, ahead of the cookie, so a read-only
+/// link opened in a browser holding the full cookie gets the read-only answer.
+///
+/// `no-store` like every other route that carries the token.
+fn config_route(shared: &Shared, stream: &mut TcpStream, request: &Request, access: Access) {
+    let (credential, actions) = match access {
+        Access::Full => (shared.token.as_str(), shared.actions),
+        Access::ReadOnly => (shared.readonly.as_str(), false),
+    };
+    http::respond(
+        stream,
+        Some(request),
+        200,
+        "application/json; charset=utf-8",
+        app_config(credential, actions).as_bytes(),
+    );
+}
+
+/// The config [`config_route`] answers with, as JSON.
 fn app_config(credential: &str, actions: bool) -> String {
     let home = dirs::home_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -2277,7 +2281,6 @@ fn app_config(credential: &str, actions: bool) -> String {
         "version": env!("CARGO_PKG_VERSION"),
     })
     .to_string()
-    .replace('<', "\\u003c")
 }
 
 /// Hold an SSE stream open, sending each new snapshot as it lands.
@@ -2767,26 +2770,57 @@ mod tests {
     }
 
     #[test]
-    fn the_app_page_is_built_and_takes_its_config() {
+    fn the_app_page_is_built_and_fetches_its_config() {
         // The built app is committed (web/ is its source); a checkout where it
         // is missing or stale-shaped would serve a page that cannot start.
-        assert!(APP_HTML.contains(
-            r#"<script id="cctop-config" type="application/json">__CCTOP_CONFIG__</script>"#
-        ));
-        assert!(APP_HTML.contains("<div id=\"root\"></div>"));
+        let page = std::str::from_utf8(APP_PAGE.decoded()).expect("utf-8");
+        assert!(page.contains("<div id=\"root\"></div>"));
+        // The page is the same for every run, so nothing is substituted into
+        // it: the config comes from the route, asked for from the head.
+        assert!(!page.contains("__CCTOP_CONFIG__"));
+        let head = &page[..page.find("</head>").expect("a head")];
+        assert!(
+            head.contains("/api/config"),
+            "the head does not ask for the config"
+        );
         // Everything inlined: a page that loads a file of its own breaks under
         // the content policy, which allows no URL at all.
-        assert!(!APP_HTML.contains(" src=\"/assets/"));
-        assert!(!APP_HTML.contains("<link rel=\"stylesheet\""));
+        assert!(!page.contains(" src=\"/assets/"));
+        assert!(!page.contains("<link rel=\"stylesheet\""));
     }
 
+    /// Each link is told its own credential and nothing more, whichever way it
+    /// arrived — and a read-only link opened where the full cookie is held is
+    /// told the read-only one, since the page asks with the `?t=` it opened
+    /// with.
     #[test]
-    fn the_app_config_cannot_end_its_script_element() {
-        let json = app_config("abc", true);
-        assert!(!json.contains('<'));
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["token"], "abc");
-        assert_eq!(v["actions"], true);
+    fn each_link_is_told_only_its_own_credential() {
+        let guarded = shared("full", "view");
+        let config = |target: &str, headers: &str| {
+            let (head, body) = exchange(&guarded, target, headers);
+            assert!(head.starts_with("HTTP/1.1 200 "), "{target}: {head}");
+            assert_eq!(header(&head, "Cache-Control"), Some("no-store"), "{target}");
+            let body = String::from_utf8(body).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            (v, body)
+        };
+        let (full, _) = config("/api/config?t=full", "");
+        assert_eq!(full["token"], "full");
+        assert_eq!(full["actions"], true);
+        assert_eq!(full["version"], env!("CARGO_PKG_VERSION"));
+        for (target, headers) in [
+            ("/api/config?t=view", ""),
+            ("/api/config", "Authorization: Bearer view\r\n"),
+            ("/api/config", "Cookie: cctop_access_7777=view\r\n"),
+            ("/api/config?t=view", "Cookie: cctop_access_7777=full\r\n"),
+        ] {
+            let (v, body) = config(target, headers);
+            assert_eq!(v["token"], "view", "{target} {headers}");
+            assert_eq!(v["actions"], false, "{target} {headers}");
+            assert!(!body.contains("full"), "{target} {headers}: {body}");
+        }
+        let (head, _) = exchange(&guarded, "/api/config", "");
+        assert!(head.starts_with("HTTP/1.1 403 "), "{head}");
     }
 
     #[test]
@@ -2833,7 +2867,6 @@ mod tests {
             topics: Mutex::new(search::Topics::default()),
             notify: None,
             hosts: HashMap::new(),
-            pages: Default::default(),
         }
     }
 
@@ -3425,13 +3458,13 @@ mod tests {
             );
             assert!(head.starts_with("HTTP/1.1 200 "), "{path}: {head}");
         }
-        // The page carries the credential, so each credential's page has its
-        // own tag: the read-only link's never validates the full one's.
+        // The page carries no credential, so both links are one page with
+        // one tag: it names the build, not the link.
         let tag = |token: &str| {
             let (head, _) = exchange(&guarded, &format!("/?t={token}"), "");
             header(&head, "ETag").unwrap().to_string()
         };
-        assert_ne!(tag("full"), tag("view"));
+        assert_eq!(tag("full"), tag("view"));
         // A 304 on a link's first visit still hands its cookie back.
         let full = tag("full");
         let (head, _) = exchange(&guarded, "/?t=full", &format!("If-None-Match: {full}\r\n"));
@@ -3444,45 +3477,55 @@ mod tests {
         use std::io::Read;
         let guarded = shared("full", "view");
         let auth = "Authorization: Bearer full\r\n";
-        let js = term::file(JS_PATH).unwrap();
-        let raw = exchange(&guarded, JS_PATH, auth);
-        assert_eq!(header(&raw.0, "Content-Encoding"), None);
-        assert_eq!(header(&raw.0, "Vary"), Some("Accept-Encoding"));
-
-        let (head, body) = exchange(
-            &guarded,
-            JS_PATH,
-            &format!("{auth}Accept-Encoding: gzip\r\n"),
-        );
-        assert_eq!(header(&head, "Content-Encoding"), Some("gzip"));
+        for (path, source) in [
+            (
+                JS_PATH,
+                "src/assets/rmux-share/_astro/index.astro_astro_type_script_index_0_lang.CdYCpIGm.js",
+            ),
+            ("/term/", "src/assets/rmux-share/index.html"),
+            ("/", "src/assets/app/index.html"),
+        ] {
+            let file = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(source))
+                .unwrap();
+            // Each client is sent the file itself in the coding it took, with
+            // a length that is the length on the wire.
+            for (offer, coding) in [
+                ("", None),
+                ("Accept-Encoding: gzip\r\n", Some("gzip")),
+                ("Accept-Encoding: gzip, deflate, br\r\n", Some("br")),
+            ] {
+                let (head, body) = exchange(&guarded, path, &format!("{auth}{offer}"));
+                assert!(head.starts_with("HTTP/1.1 200 "), "{path}: {head}");
+                assert_eq!(header(&head, "Content-Encoding"), coding, "{path} {offer}");
+                assert_eq!(header(&head, "Vary"), Some("Accept-Encoding"), "{path}");
+                assert_eq!(
+                    header(&head, "Content-Length"),
+                    Some(body.len().to_string().as_str())
+                );
+                let mut plain = Vec::new();
+                match coding {
+                    None => plain = body.clone(),
+                    Some("gzip") => {
+                        flate2::read::GzDecoder::new(&body[..])
+                            .read_to_end(&mut plain)
+                            .unwrap();
+                    }
+                    _ => {
+                        brotli_decompressor::Decompressor::new(&body[..], 4096)
+                            .read_to_end(&mut plain)
+                            .unwrap();
+                    }
+                }
+                assert!(plain == file, "{path} {offer}: not the file");
+                if coding.is_some() {
+                    assert!(body.len() < file.len(), "{path} {offer}");
+                }
+            }
+        }
         assert_eq!(
-            header(&head, "Content-Length"),
-            Some(body.len().to_string().as_str())
+            term::file(JS_PATH).unwrap().content_type,
+            "application/javascript; charset=utf-8"
         );
-        let mut plain = Vec::new();
-        flate2::read::GzDecoder::new(&body[..])
-            .read_to_end(&mut plain)
-            .unwrap();
-        assert_eq!(plain, raw.1);
-        assert!(
-            body.len() < raw.1.len() / 3,
-            "{} of {}",
-            body.len(),
-            raw.1.len()
-        );
-
-        let (head, body) = exchange(
-            &guarded,
-            JS_PATH,
-            &format!("{auth}Accept-Encoding: gzip, deflate, br\r\n"),
-        );
-        assert_eq!(header(&head, "Content-Encoding"), Some("br"));
-        let mut plain = Vec::new();
-        brotli::Decompressor::new(&body[..], 4096)
-            .read_to_end(&mut plain)
-            .unwrap();
-        assert_eq!(plain, raw.1);
-        assert_eq!(js.content_type, "application/javascript; charset=utf-8");
 
         // A route's JSON, built per request, is compressed too.
         let table: Vec<(String, String)> = (0..40)
@@ -3498,11 +3541,15 @@ mod tests {
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
         put(&guarded, 1, &pairs);
-        let (head, _) = exchange(
-            &guarded,
-            "/api/sessions",
-            &format!("{auth}Accept-Encoding: gzip\r\n"),
-        );
-        assert_eq!(header(&head, "Content-Encoding"), Some("gzip"), "{head}");
+        // Gzip even to a client that would take brotli: the binary carries no
+        // brotli encoder, and the build compressed only the fixed bodies.
+        for offer in ["gzip", "gzip, deflate, br"] {
+            let (head, _) = exchange(
+                &guarded,
+                "/api/sessions",
+                &format!("{auth}Accept-Encoding: {offer}\r\n"),
+            );
+            assert_eq!(header(&head, "Content-Encoding"), Some("gzip"), "{head}");
+        }
     }
 }

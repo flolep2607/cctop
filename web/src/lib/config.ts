@@ -1,4 +1,5 @@
-// What the server substituted into the page (see index.html). Read once.
+// What the server knows and the page cannot: fetched from `/api/config` by the
+// script at the top of index.html, which starts it before this one is parsed.
 export interface Config {
   token: string;
   /** Whether this run serves the routes that act on a session. */
@@ -8,17 +9,40 @@ export interface Config {
   version: string;
 }
 
-function read(): Config {
+declare global {
+  interface Window {
+    cctopConfig?: Promise<Partial<Config>>;
+  }
+}
+
+async function read(): Promise<Config> {
   const fallback: Config = { token: "", actions: false, home: "", version: "dev" };
   try {
-    const raw = document.getElementById("cctop-config")?.textContent ?? "";
-    return { ...fallback, ...JSON.parse(raw) };
+    return { ...fallback, ...(await window.cctopConfig) };
   } catch {
     return fallback;
   }
 }
 
-export const config = read();
+// The script in index.html has already asked for the config with the token,
+// so from here the `?t=` in the address bar is only a credential in history
+// and screenshots — and it goes before the wait for the answer, not after.
+// Captured first: a page that wants something else from the query (`?find=`)
+// reads it from here, not from a URL that has already been rewritten.
+export const OPENING_QUERY = new URLSearchParams(location.search);
+try {
+  const here = new URL(location.href);
+  if (here.searchParams.has("t")) {
+    here.searchParams.delete("t");
+    history.replaceState(history.state, "", here.pathname + here.search + here.hash);
+  }
+} catch {
+  /* a context that forbids it keeps the URL it opened with */
+}
+
+// Awaited here, at the top level, so every module that imports these reads
+// them as the plain values they always were: nothing renders before it lands.
+export const config = await read();
 export const TOKEN = config.token;
 export const QUERY = TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "";
 export const CAN_ACT = config.actions;
@@ -32,19 +56,4 @@ export function withToken(path: string, extra?: Record<string, string | number |
   const hash = path.indexOf("#");
   const [base, frag] = hash >= 0 ? [path.slice(0, hash), path.slice(hash)] : [path, ""];
   return base + (q ? (base.includes("?") ? "&" : "?") + q : "") + frag;
-}
-
-// The token reaches the script inside the page, so once it is running the
-// `?t=` in the address bar is only a credential in history and screenshots.
-// Captured first: a page that wants something else from the query (`?find=`)
-// reads it from here, not from a URL that has already been rewritten.
-export const OPENING_QUERY = new URLSearchParams(location.search);
-try {
-  const here = new URL(location.href);
-  if (here.searchParams.has("t")) {
-    here.searchParams.delete("t");
-    history.replaceState(history.state, "", here.pathname + here.search + here.hash);
-  }
-} catch {
-  /* a context that forbids it keeps the URL it opened with */
 }
