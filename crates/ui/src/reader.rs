@@ -50,6 +50,12 @@ pub struct Laid {
     /// next one's.
     starts: Vec<usize>,
     total: usize,
+    /// How many blocks this view has laid out from scratch, kept ones not
+    /// counted, over every layout so far. What the tests ask to tell a kept
+    /// layout from a new one: the address of a block's lines, which they once
+    /// compared, is one the allocator is free to hand straight back.
+    #[cfg(test)]
+    made: usize,
 }
 
 /// One turn laid out — or the note above them all, which is the block with no
@@ -436,6 +442,8 @@ fn lay_out(view: &mut ChatView, width: usize) {
         _ => None,
     };
 
+    #[cfg(test)]
+    let mut made = view.laid.as_ref().map_or(0, |l| l.made);
     let reusable = view
         .laid
         .take()
@@ -447,16 +455,25 @@ fn lay_out(view: &mut ChatView, width: usize) {
     let who = view.session.surface.label(view.session.provider);
     let mut blocks = Vec::with_capacity(conv.turns.len() + 1);
     if let Some(note) = &conv.note {
-        blocks.push(
-            kept.remove(&None)
-                .unwrap_or_else(|| note_block(note, width)),
-        );
+        blocks.push(kept.remove(&None).unwrap_or_else(|| {
+            #[cfg(test)]
+            {
+                made += 1;
+            }
+            note_block(note, width)
+        }));
     }
     for turn in &conv.turns {
         let open = view.is_open(turn.seq);
         let block = match kept.remove(&Some(turn.seq)) {
             Some(b) if b.open == open => b,
-            _ => turn_block(&view.session, who, turn, width, view.raw, open),
+            _ => {
+                #[cfg(test)]
+                {
+                    made += 1;
+                }
+                turn_block(&view.session, who, turn, width, view.raw, open)
+            }
         };
         blocks.push(block);
     }
@@ -472,6 +489,8 @@ fn lay_out(view: &mut ChatView, width: usize) {
         blocks,
         starts,
         total,
+        #[cfg(test)]
+        made,
     });
     view.dirty = false;
     view.hold = false;
@@ -1390,15 +1409,12 @@ mod tests {
             turn(2, "assistant", &long),
         ]);
         draw_chat(&mut app, 80, 20);
-        let ptr = |app: &App| {
-            view(app).laid.as_ref().expect("laid").blocks[1]
-                .lines
-                .as_ptr()
-        };
-        let before = ptr(&app);
+        let made = |app: &App| view(app).laid.as_ref().expect("laid").made;
+        let before = made(&app);
+        assert_eq!(before, 3, "each turn is laid out once to begin with");
         press(&mut app, KeyCode::Char('j'));
         draw_chat(&mut app, 80, 20);
-        assert_eq!(ptr(&app), before, "a scroll laid everything out again");
+        assert_eq!(made(&app), before, "a scroll laid everything out again");
 
         // Onto the second reply's header, then narrower.
         press(&mut app, KeyCode::Char('['));
@@ -1408,7 +1424,7 @@ mod tests {
             at.contains("Claude") && narrow.contains("Claude"),
             "{narrow}"
         );
-        assert_ne!(ptr(&app), before);
+        assert_eq!(made(&app), before + 3, "a new width kept the old layout");
     }
 
     /// A few thousand turns lay out once and scroll without laying out again —
@@ -1423,13 +1439,16 @@ mod tests {
         draw_chat(&mut app, 100, 40);
         let total = view(&app).laid_total();
         assert!(total > 3000 * 5, "{total}");
-        let started = std::time::Instant::now();
+        let made = |app: &App| view(app).laid.as_ref().expect("laid").made;
+        let once = made(&app);
+        assert_eq!(once, 3000, "every turn laid out, and once");
         for _ in 0..50 {
             press(&mut app, KeyCode::PageUp);
             draw_chat(&mut app, 100, 40);
         }
-        // Generous: an unoptimised test build on a loaded machine. Laying
-        // everything out per frame is seconds here, not this.
-        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        // Counted rather than timed: laying everything out per frame is what
+        // made a long reader unusable, and a count says whether it happens on
+        // any machine, where a stopwatch said so only on an idle one.
+        assert_eq!(made(&app), once, "a scroll laid the conversation out again");
     }
 }

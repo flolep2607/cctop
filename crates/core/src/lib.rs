@@ -62,6 +62,8 @@ pub mod shim;
 pub mod ssh_config;
 pub mod ssh_master;
 pub mod sshfs;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_wait;
 pub mod trace;
 pub mod tunnel;
 pub mod update;

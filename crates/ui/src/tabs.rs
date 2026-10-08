@@ -1487,7 +1487,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
             (79, 24),
             "and holds it until rmux has seen it"
         );
-        std::thread::sleep(FIT_NUDGE + std::time::Duration::from_millis(20));
+        // The nudge's age is what the rule reads, so it is aged rather than
+        // waited out.
+        pane.fit.nudged_at = pane.fit.nudged_at.map(|at| at - FIT_NUDGE);
         assert_eq!(pane.fit_request(80, 24), (80, 24));
         // Then a look a moment later at whether it took.
         assert!(pane.fit.verify_at.is_some());
@@ -2290,29 +2292,20 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
         // Past the threshold, only the one that stopped drawing is idle.
         //
-        // Waiting for the precondition rather than for a span of time: the
-        // assertion is about the quiet pane going idle while the busy one has
-        // not, and those are two observable facts. A fixed wait instead hopes
-        // the loop below painted often enough over four seconds, which under
-        // load it sometimes does not, and then the busy pane reads as idle too
-        // and the assertion fails for a reason that has nothing to do with what
-        // it is testing.
-        let deadline = Instant::now() + QUIET_IS_IDLE * 4;
-        loop {
+        // The threshold is a rule about how long ago a pane last drew, so the
+        // quiet pane's last drawing is moved back past it rather than waited
+        // out — two seconds a run, and under load a busy pane that had not
+        // painted often enough over them read as idle too. What is waited for
+        // is only what has to have happened first: each pane has drawn what
+        // it was going to, so nothing arriving later resets the clock moved
+        // here.
+        cctop_core::test_wait::eventually_true("both panes to draw", || {
             tab.pump();
-            let (busy_pane, quiet_pane) = (&tab.panes[0], &tab.panes[1]);
-            let quiet_gone = quiet_pane.drew_at.elapsed() >= QUIET_IS_IDLE;
-            let busy_live = busy_pane.drew_at.elapsed() < QUIET_IS_IDLE;
-            if quiet_gone && busy_live {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the quiet pane never went quiet ({quiet_gone}) while the busy one \
-                 stayed live ({busy_live})"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+            let drawn =
+                |pane: &Pane, what: &str| pane.view.parser.screen().contents().contains(what);
+            drawn(&tab.panes[0], ".") && drawn(&tab.panes[1], "done")
+        });
+        tab.panes[1].drew_at -= QUIET_IS_IDLE;
         assert_eq!(tab.attention(false, &unreported), Some(Attention::Idle));
 
         // The busy pane holding a question outranks the quiet one being idle.
