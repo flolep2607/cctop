@@ -1113,12 +1113,23 @@ fn cached_in(
 /// How long a writer waits for the file to be free before deciding it is not
 /// worth having.
 ///
-/// Long enough that the cctop that is usually mid-write is nearly always waited
-/// out, short enough that it is not worth a UI thread parked on it. The lock is
-/// only ever held for the write itself — a poll of the provider takes seconds,
-/// and holding across that would serialise every account on the machine behind
-/// the slowest one.
-const LOCK_PATIENCE: Duration = Duration::from_millis(200);
+/// As long as the request it is storing was allowed to take. A writer that
+/// gives up loses its account's entry, which costs that account a request on
+/// the next poll — so the wait is worth up to what that request costs, and the
+/// caller is a poller thread that was already prepared to wait that long on the
+/// network. It used to be 200ms, on the reasoning that the holder only does a
+/// small read and write; but six accounts released together queue behind one
+/// another, and on a loaded machine (or WSL's slower filesystem) one holder
+/// descheduled mid-write outlasted it. The writer then stood aside and its entry
+/// was lost: `accounts_stored_at_the_same_time_all_survive` failed 8 runs in
+/// 200 that way on an idle machine.
+///
+/// It stays bounded rather than blocking because the holder may be a cctop
+/// that is itself wedged — stopped with ^Z mid-write, say — and the lock is
+/// still only held for the read and the write, never across a request: a poll
+/// of the provider takes seconds, and holding across that would serialise every
+/// account on the machine behind the slowest one.
+const LOCK_PATIENCE: Duration = HTTP_TIMEOUT;
 
 /// An exclusive `flock` on the usage cache, released when this is dropped — or
 /// when the process is, since the kernel releases a lock on the last close of
@@ -1693,6 +1704,30 @@ mod tests {
             });
             assert!(matches!(again, ProviderStatus::Ok(_)), "tok-{n}: {again:?}");
         }
+    }
+
+    /// A writer outwaits a holder that is slow rather than wedged. The holder
+    /// here keeps the lock for longer than the old 200ms patience, which is what
+    /// a descheduled writer on a loaded machine looked like to the others: they
+    /// stood aside, and their accounts were never stored.
+    #[test]
+    fn a_slow_writer_is_waited_for_not_written_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let t0 = chrono::Utc::now().timestamp();
+        let held = Writer::take(&path, Duration::ZERO).expect("the lock is free");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            drop(held);
+        });
+        cached_in(&path, "tok-a", t0, || {
+            ProviderStatus::Ok(ProviderQuota::default())
+        });
+        release.join().unwrap();
+        let again = cached_in(&path, "tok-a", t0 + 60, || {
+            panic!("tok-a was not stored while another writer held the lock");
+        });
+        assert!(matches!(again, ProviderStatus::Ok(_)), "{again:?}");
     }
 
     /// The temporary file is named for the writer, not fixed, so two cctops
