@@ -1793,7 +1793,10 @@ mod tests {
         // Through `mux::attach_argv`, which in a test binary stands in a pane
         // that only says why it cannot attach; the argv proper is tested there.
         let out = attach_or_create(&argv, "cctop-claude-abc", None);
-        assert_eq!(out, crate::mux::attach_argv("cctop-claude-abc", Some((&argv, None))));
+        assert_eq!(
+            out,
+            crate::mux::attach_argv("cctop-claude-abc", Some((&argv, None)))
+        );
     }
 
     /// Resuming the same session twice must name the same rmux session, or `-A`

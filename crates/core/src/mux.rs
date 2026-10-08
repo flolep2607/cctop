@@ -925,7 +925,15 @@ mod tests {
         let argv = attach_argv_of(cctop(), "cctop-a", Some((&["claude".to_string()], None)));
         assert_eq!(
             argv,
-            ["/usr/bin/cctop", "mux", "attach", "--create", "cctop-a", "--", "claude"]
+            [
+                "/usr/bin/cctop",
+                "mux",
+                "attach",
+                "--create",
+                "cctop-a",
+                "--",
+                "claude"
+            ]
         );
         let argv = attach_argv_of(cctop(), "cctop-a", None);
         assert_eq!(argv, ["/usr/bin/cctop", "mux", "attach", "cctop-a"]);
@@ -934,7 +942,10 @@ mod tests {
         let gone = attach_argv_of(
             cctop(),
             "cctop-a",
-            Some((&["claude".to_string()], Some(Path::new("/nonexistent/gone")))),
+            Some((
+                &["claude".to_string()],
+                Some(Path::new("/nonexistent/gone")),
+            )),
         );
         assert!(!gone.contains(&"--cwd".to_string()));
     }
