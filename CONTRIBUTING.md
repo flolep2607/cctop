@@ -24,6 +24,53 @@ cargo test
 cargo publish --dry-run --workspace --allow-dirty   # what `verify / package` runs
 ```
 
+### A build cache that works across worktrees: kache
+
+Agents each work in a worktree of their own, with a `target/` of their own,
+so without a shared cache every one of them starts by compiling all ~540
+crates. [kache](https://github.com/kunobi-ninja/kache) is the `rustc` wrapper
+that shares them, locally as it does in CI (`kache-action` in
+`.github/workflows/verify.yml`):
+
+```bash
+# a release binary from github.com/kunobi-ninja/kache/releases, or:
+cargo install kache --locked
+kache init --no-shell --no-service   # writes rustc-wrapper = "kache" to ~/.cargo/config.toml
+kache doctor
+```
+
+It is set in the user-level `~/.cargo/config.toml`, never in this repository's
+`.cargo/config.toml`: there it would break the build for anyone without kache
+installed. `kache stats --last-build --root <checkout>` says what one build
+restored, and `kache explain <crate>` why a crate missed.
+
+**Why not sccache**, which this machine used before: its Rust cache key hashes
+the compile's command line raw, and that line carries the target directory
+(`--out-dir`, `-L dependency=…/target/debug/deps`, the `--extern` paths). A
+worktree's `target/` is at another path, so nothing one worktree compiled ever
+matched in the next — the same `memchr` built twice under two `CARGO_TARGET_DIR`s
+is a miss, under the same one a hit, whichever worktree runs it. sccache's
+`basedirs` rewrites C/C++ paths only, not Rust's. kache replaces the workspace,
+target and home directories with placeholders before hashing, so a second
+worktree restores the first one's output.
+
+Measured on 2026-10-09 (6 cores, load 5 to 12 from another agent building at
+the same time), `cargo test --no-run` on the same commit:
+
+| | wall time | from cache |
+|---|---|---|
+| first worktree, empty kache store | 211 s | 0 of 544 crates |
+| second, fresh worktree | 79 s | 426 of 434 crates |
+
+What still compiles in a second worktree is cctop's own: `cctop-core`'s build
+script reruns for a new checkout on purpose (see `CCTOP_CHECKOUT` in
+`crates/core/build.rs`), and test binaries that embed `CARGO_MANIFEST_DIR`
+differ per checkout. Everything from crates.io is restored.
+
+Build `--release` only when the change is about the release build: it is a
+second, separate set of every crate, so it doubles the cold build and the
+cache's size for something `cargo test` does not run.
+
 ### While iterating, run the tests that could have broken
 
 `cargo test --workspace --all-targets` is about 1570 tests, and on a warm build

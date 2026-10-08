@@ -56,6 +56,12 @@ gh issue edit <N> --add-label agent-working --remove-label agent-ready
 gh issue comment <N> --body-file <file>
 ```
 
+The new worktree has an empty `target/`, but its first build restores the
+dependencies other checkouts compiled from the shared kache store
+(`CONTRIBUTING.md`), so it costs about a minute and a half, not several. Build
+debug: `--release` is a second copy of every crate, so leave it to issues
+about the release build itself.
+
 The draft's body starts with a **Session** line, then a **Plan** — the steps
 you intend, as a checklist; "to come" is fine at first, filled in once you
 have read the code — and a **Progress** section saying what is done and what
