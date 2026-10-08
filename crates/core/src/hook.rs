@@ -45,6 +45,18 @@
 //! the same abandonable thread under the same deadline, and any failure on the
 //! way — a ledger that will not parse, a lock another hook holds, a deadline
 //! that runs out — is the ordinary silence. [`crate::advise`] has the rest.
+//!
+//! # The one hook that decides, and why it is not this one
+//!
+//! YOLO answers Claude Code's permission dialog with a decision, and that
+//! decision does not come from `cctop hook`. It comes from a second command,
+//! `cctop yolo-hook` ([`yolo_hook`]), installed as its own entry for
+//! `PermissionRequest` only, so that nothing about this command — its
+//! arguments, its settings, the state of any file — can make it decide. That
+//! one prints the allow for a session YOLO is on for, in the process it was
+//! switched on in, and is otherwise exactly as silent as this one, under the
+//! same deadline and the same exit-0 guarantee. [`crate::yolo`] has the
+//! matching rule.
 
 use std::collections::HashMap;
 use std::io::Read;

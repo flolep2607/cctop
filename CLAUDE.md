@@ -111,6 +111,16 @@ module docs of `crates/core/src/hook.rs`.
 A hook that fell through to clap would exit non-zero on every fire, so the
 `hook` dispatch in `main.rs` is never gated behind anything.
 
+One command may decide, and it is not `cctop hook`: `cctop yolo-hook`,
+installed beside it for Claude Code's `PermissionRequest` alone. It prints the
+`allow` answer for a session YOLO was switched on for, and only when the
+payload's `session_id` and the agent process that spawned it (pid and start
+time) both match what was recorded at the switch; for anything else it is the
+same silence, exit 0 and deadline as `cctop hook`. It never denies. Keep the
+exception that narrow — a new decision belongs in its own command with its own
+match, not in `cctop hook` — and see `hook::yolo_hook` and the module docs of
+`crates/core/src/yolo.rs` for why it is safe.
+
 ## A pull request title is a release note
 
 Whatever you call the PR is what users read. `release.yml` asks GitHub to
