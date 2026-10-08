@@ -1093,7 +1093,7 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
         let mut yolo = cctop_core::yolo::Auto::new(shared.actions);
         let mut rows = loader.load(plan);
         stamp(&mut rows, &reports, &mut peek, read_screen);
-        yolo.tick(&mut rows);
+        yolo.tick(&mut rows, &reports);
         let mut walked = Instant::now();
         let mut version = 0u64;
         publish(
@@ -1141,7 +1141,7 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
             stamp(&mut rows, &reports, &mut peek, read_screen);
             // After the stamp, which is what says a prompt is up: an answer
             // pressed here is a refresh tick behind the prompt at most.
-            yolo.tick(&mut rows);
+            yolo.tick(&mut rows, &reports);
             publish(
                 &shared,
                 &remotes,

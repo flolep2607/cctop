@@ -235,8 +235,8 @@ pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
 }
 
 /// Switch YOLO on or off for this session: every permission prompt it raises
-/// answered "allow", by [`crate::yolo`], until it is switched off or the
-/// session ends.
+/// answered "allow", by [`crate::yolo`], until it is switched off, the session
+/// ends, or another process takes it over.
 ///
 /// On is held to everything [`answer`] is held to, checked now rather than at
 /// the first prompt so the person is told at the switch, not left believing a
@@ -259,15 +259,25 @@ pub fn yolo(session: &Session, on: bool) -> Result<Done, Failed> {
                 ),
             ));
         }
-        if session.root_pid().is_none() {
-            return Err((409, "nothing is running this session".into()));
-        }
     }
-    match crate::yolo::set(&session.session_id, on) {
+    // The process is what the hook matches on, beside the id: see
+    // [`crate::yolo`]. A session with nothing running has no process to give
+    // the permission to.
+    let agent = match on {
+        true => match session.root_pid() {
+            Some(pid) => Some(pid),
+            None => return Err((409, "nothing is running this session".into())),
+        },
+        false => None,
+    };
+    match crate::yolo::set(&session.session_id, agent) {
         Ok(()) => done(match on {
             true => "YOLO on — every prompt in this session will be allowed",
             false => "YOLO off — prompts wait for you again",
         }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err((409, "the agent running this session has just exited".into()))
+        }
         Err(e) => Err((503, format!("could not write the YOLO switch: {e}"))),
     }
 }

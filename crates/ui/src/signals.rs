@@ -349,7 +349,7 @@ impl App {
             return false;
         }
         self.yolo_at = Some(std::time::Instant::now());
-        let changed = self.yolo.tick(&mut self.sessions);
+        let changed = self.yolo.tick(&mut self.sessions, &self.reports);
         self.needs_redraw |= changed;
         changed
     }
