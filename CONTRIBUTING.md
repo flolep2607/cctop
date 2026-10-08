@@ -321,3 +321,37 @@ agent's draft PR is always current. Enable them once per clone:
 ```bash
 git config core.hooksPath tools/git-hooks
 ```
+
+## The issue loop
+
+GitHub issues are a work queue: an issue filed from anywhere, a phone
+included, is picked up by agents — but only while a Claude Code session is
+running the loop on a machine with a checkout. Nothing on GitHub's side starts
+one. To start it, open Claude Code in the checkout and run:
+
+```text
+/loop /issues
+```
+
+With no interval the loop paces itself (see `.claude/skills/issues/SKILL.md`,
+"Under /loop"): each pass spawns solvers in the background, and their finishing
+wakes the loop again. When nothing is running and nothing is queued it looks
+again in about 20 minutes — soon enough that an issue filed from a phone is
+started within the half hour, without polling GitHub every minute for a queue
+that is usually empty. Press `Esc` to stop it. A self-paced loop is not
+restored by `claude --resume`, and like any recurring task it expires after
+seven days, so run `/loop /issues` again after either.
+
+What it picks up is decided by labels, the table in the skill:
+
+| label | meaning |
+|---|---|
+| `agent-ready` | written and waiting for a solver — the only label that starts new work |
+| `agent-working` | a solver has it, with a draft PR from `issue-<N>` |
+| `agent-question` | the solver asked on the issue and stopped; your reply resumes it |
+| `agent-pr` | the PR is ready for review; review comments send a solver back |
+
+So an issue filed by hand needs the `agent-ready` label to be worked on, and an
+unlabelled one is left alone. `/issues <one-line request>` files one with the
+issue-writer agent, which writes it up and adds the label. Merging and
+releasing stay with you: the loop never merges a PR or bumps a version.
