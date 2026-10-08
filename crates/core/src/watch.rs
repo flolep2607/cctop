@@ -20,6 +20,7 @@
 //! large enough tree can exhaust. Either way the periodic walk still runs, so the
 //! only cost is that a new session takes until the next one to appear.
 
+use crate::pricing::Provider;
 use notify::{EventKind, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -149,6 +150,19 @@ fn is_noise(path: &Path) -> bool {
 
 /// Every provider's session root that is present on this machine.
 ///
+/// Built from [`Provider::ALL`] through [`provider_roots`], whose match has no
+/// wildcard arm, so a new provider has to say what is watched for it — even if
+/// the answer, as for Windsurf, is nothing.
+fn roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Provider::ALL.into_iter().flat_map(provider_roots).collect();
+    roots.retain(|r| r.is_dir());
+    roots
+}
+
+/// The directories in which a new `provider` session arrives as a create, in
+/// every home being scanned, so a session another user starts shows up as
+/// promptly as one of this user's does.
+///
 /// Windsurf is deliberately absent, and is the one provider the periodic walk
 /// alone covers. Its sessions live inside a per-workspace sqlite database that
 /// is rewritten in place, so a new conversation arrives as a *write* to a file
@@ -157,31 +171,57 @@ fn is_noise(path: &Path) -> bool {
 /// creates and removes continuously. Watching it would cost walks all day and
 /// still miss the event it was added for. The fingerprint, which reads writes
 /// rather than creates, does cover it.
-fn roots() -> Vec<PathBuf> {
-    // Every home being scanned, so a session another user starts shows up as
-    // promptly as one of this user's does.
-    let mut roots = crate::config::claude_projects_roots();
-    roots.extend(crate::config::codex_sessions_roots());
-    roots.extend(crate::config::cursor_projects_roots());
-    roots.extend(crate::config::pi_sessions_roots());
-    roots.extend(crate::config::opencode_data_roots());
-    roots.extend(crate::config::gemini_chats_roots());
-    roots.extend(crate::config::claude_mac_roots(
-        &crate::config::CLAUDE_MAC_COWORK_ROOT,
-        "local-agent-mode-sessions",
-    ));
-    roots.extend(crate::config::claude_mac_roots(
-        &crate::config::CLAUDE_MAC_CODE_ROOT,
-        "claude-code-sessions",
-    ));
-    roots.retain(|r| r.is_dir());
-    roots
+///
+/// Devin is half the same case. Its `sessions.db` sits in the CLI directory
+/// and churns exactly as Windsurf's does, so that directory is not watched; but
+/// each session also gets its own `transcripts/<id>.json`, and a session is only
+/// listed once that file exists, so its creation is the event that matters and
+/// `transcripts/` alone is watched for it.
+fn provider_roots(provider: Provider) -> Vec<PathBuf> {
+    use crate::config;
+    match provider {
+        Provider::Claude => {
+            let mut roots = config::claude_projects_roots();
+            roots.extend(config::claude_mac_roots(
+                &config::CLAUDE_MAC_COWORK_ROOT,
+                "local-agent-mode-sessions",
+            ));
+            roots.extend(config::claude_mac_roots(
+                &config::CLAUDE_MAC_CODE_ROOT,
+                "claude-code-sessions",
+            ));
+            roots
+        }
+        Provider::Codex => config::codex_sessions_roots(),
+        Provider::Cursor => config::cursor_projects_roots(),
+        Provider::Devin => config::devin_cli_dirs()
+            .into_iter()
+            .map(|cli| cli.join("transcripts"))
+            .collect(),
+        Provider::Gemini => config::gemini_chats_roots(),
+        Provider::OpenCode => config::opencode_data_roots(),
+        Provider::Pi => config::pi_sessions_roots(),
+        Provider::Windsurf => Vec::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_wait::waits_for;
+
+    /// Devin is watched where a new session is a create — its `transcripts/`
+    /// directories — and never at the CLI directory itself, whose `sessions.db`
+    /// would fire a journal create and remove on every commit.
+    #[test]
+    fn devin_is_watched_at_its_transcripts_not_its_database() {
+        let watched = provider_roots(Provider::Devin);
+        let cli = crate::config::devin_cli_dirs();
+        assert_eq!(watched.len(), cli.len());
+        for (watched, cli) in watched.iter().zip(&cli) {
+            assert_eq!(watched, &cli.join("transcripts"));
+        }
+    }
 
     /// A watch over `dir` alone, built the way [`Watch::start`] builds one.
     fn watch_dir(dir: &Path) -> Watch {
