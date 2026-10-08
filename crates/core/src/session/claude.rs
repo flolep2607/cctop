@@ -849,12 +849,14 @@ impl Extractor {
 
         // In the person's role: not a skill's body or a slash command's
         // expansion (`isMeta`), not a summary standing in for a compacted
-        // conversation, and not a subagent's brief — in its own file, or in an
-        // older transcript marked as a sidechain of this one.
+        // conversation, not a subagent's brief — in its own file, or in an
+        // older transcript marked as a sidechain of this one — and not a
+        // message another agent sent in, which its `origin` names.
         let typed = is_main
             && item.get("isSidechain").and_then(Value::as_bool) != Some(true)
             && item.get("isMeta").and_then(Value::as_bool) != Some(true)
-            && item.get("isCompactSummary").and_then(Value::as_bool) != Some(true);
+            && item.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
+            && !crate::chat::from_someone_else(item);
         if typed {
             for text in &texts {
                 match super::effort_switch(text) {
@@ -2598,6 +2600,12 @@ mod tests {
                 r#"{"type":"user","timestamp":"2026-09-25T02:00:00.000Z","message":{"role":"user","content":"please ultracode this"}}"#.to_string(),
                 stdout("2026-09-25T03:00:00.000Z", "ultracode", r#""isMeta":true,"#),
                 stdout("2026-09-25T04:00:00.000Z", "ultracode", r#""isSidechain":true,"#),
+                // Another agent quoting the switch is not the person making it.
+                stdout(
+                    "2026-09-25T04:30:00.000Z",
+                    "ultracode",
+                    r#""origin":{"kind":"peer","from":"a0000000000000001"},"#,
+                ),
                 stdout("2026-09-25T05:00:00.000Z", "xhigh", ""),
             ],
         );
