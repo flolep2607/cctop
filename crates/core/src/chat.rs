@@ -9,7 +9,7 @@
 //!
 //! # Why this is not the extraction path
 //!
-//! [`SessionData`](cctop_core::session::SessionData) is built for the table: it is
+//! [`SessionData`](crate::session::SessionData) is built for the table: it is
 //! cached, it is loaded for every row on the machine, and it deliberately drops
 //! message text — keeping it would multiply the cache by the size of every
 //! conversation on disk to serve a panel that shows one. So this is a separate
@@ -64,9 +64,9 @@
 //! before saying anything, which for a session file large enough to matter is
 //! the whole cost of opening the page.
 
-use cctop_core::pricing::Provider;
-use cctop_core::session::{Delta, Session, devin, extract, gemini, opencode, pi};
-use cctop_core::util;
+use crate::pricing::Provider;
+use crate::session::{Delta, Session, devin, extract, gemini, opencode, pi};
+use crate::util;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -107,7 +107,7 @@ const MAX_DIFF_LINES: usize = 200;
 ///
 /// `Deserialize` because the same document is the wire format between two
 /// cctops: a remote row's conversation is this, read off an ssh pipe rather
-/// than off a transcript — see [`cctop_core::fleet`].
+/// than off a transcript — see [`crate::fleet`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     /// Whether this harness has a reader at all. False carries a `note` saying

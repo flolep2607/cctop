@@ -61,6 +61,7 @@ mod worker;
 
 pub use runloop::run;
 use share::{Opening, ShareQr};
+pub use share::{ServeRequest, Served, StartServer};
 use worker::Request;
 
 use cctop_core::cache::UiPrefs;
@@ -851,7 +852,10 @@ pub struct App {
     ///
     /// Dropping it revokes the tunnel and stops the listener, so quitting cctop
     /// takes the page with it. That is the same bargain `serve` makes.
-    pub serving: Option<cctop_serve::Serving>,
+    pub serving: Option<Served>,
+    /// How to start one: the binary's, since the server is not this crate's.
+    /// `None` in tests, which do not start servers.
+    pub start_server: Option<StartServer>,
     /// The add-account popup, while `Mode::AddAccount` is up.
     pub add_account: AddAccount,
     /// A tunnel being registered on a thread of its own.
@@ -909,7 +913,7 @@ pub struct App {
     ///
     /// Held beside the brief rather than instead of it: which of the two is
     /// used is not known until an agent has been picked, and every agent but
-    /// Claude still needs the brief. See [`cctop_serve::handoff::fork`].
+    /// Claude still needs the brief. See [`cctop_core::handoff::fork`].
     pub pending_fork: Option<std::path::PathBuf>,
     /// The harness that wrote [`pending_fork`](Self::pending_fork).
     ///
@@ -1189,6 +1193,7 @@ impl App {
             rmux_declined: false,
             rmux_installing: None,
             serving: None,
+            start_server: None,
             add_account: AddAccount::default(),
             serve_error: None,
             share_opening: None,
@@ -1358,7 +1363,7 @@ impl App {
         &mut self,
         key: String,
         before: Option<usize>,
-        result: Result<Box<cctop_serve::chat::Conversation>, String>,
+        result: Result<Box<cctop_core::chat::Conversation>, String>,
     ) {
         let Some(view) = &mut self.chat else {
             return;
@@ -1423,7 +1428,7 @@ pub struct ChatView {
     pub host: Option<cctop_core::fleet::Host>,
     /// What has been read so far. `None` while the first read is in flight;
     /// `error` says why it came back without one when it did.
-    pub conversation: Option<cctop_serve::chat::Conversation>,
+    pub conversation: Option<cctop_core::chat::Conversation>,
     /// Why the read failed, when it did.
     pub error: Option<String>,
     /// Rows scrolled back from the bottom. A scrollback's zero is the end:
@@ -1625,7 +1630,7 @@ mod tests {
         app.open_conversation();
         let key = app.chat.as_ref().expect("the view opened").session.key();
 
-        let turn = |seq: usize| cctop_serve::chat::Turn {
+        let turn = |seq: usize| cctop_core::chat::Turn {
             seq,
             role: "assistant".into(),
             kind: "message".into(),
@@ -1635,7 +1640,7 @@ mod tests {
             tools: Vec::new(),
         };
         let page = |seqs: &[usize], earlier: usize| {
-            Box::new(cctop_serve::chat::Conversation {
+            Box::new(cctop_core::chat::Conversation {
                 supported: true,
                 turns: seqs.iter().map(|s| turn(*s)).collect(),
                 earlier,

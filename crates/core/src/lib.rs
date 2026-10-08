@@ -1,6 +1,8 @@
 //! What every face of cctop reads: the sessions on this machine and how they
-//! were found, parsed, priced and cached, and the plumbing that reaches the
-//! agents behind them — hooks, the shim, rmux, injection, the sandbox.
+//! were found, parsed, priced and cached, the plumbing that reaches the agents
+//! behind them — hooks, the shim, rmux, injection, the sandbox — and what the
+//! faces show and do to a session: its conversation, report, export, handoff
+//! brief, and the actions.
 //!
 //! The terminal dashboard (`cctop-ui`) and the web server (`cctop-serve`) are
 //! built on this, and nothing here reaches up into either. Internal to cctop,
@@ -10,23 +12,32 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod access;
+/// The things the page and the dashboard do to a session rather than say about
+/// it: type at it, answer its prompt, resume it, hand it to another harness.
+pub mod actions;
 pub mod advise;
 pub mod alert;
 pub mod alias;
-pub mod answer;
 pub mod attach;
 pub mod branch;
 pub mod burn;
 pub mod cache;
 pub mod cast;
+/// The conversation reader, which the dashboard's reader, the page, `--chat`
+/// and the handoff brief all draw from.
+pub mod chat;
 pub mod clipboard;
 pub mod collide;
 pub mod config;
 pub mod convert;
 pub mod elog;
 pub mod embed;
+/// A whole conversation as markdown: `--export`, and `/api/chat/<id>/markdown`.
+pub mod export;
 pub mod fingerprint;
 pub mod fleet;
+/// The brief that hands a session's work to another harness.
+pub mod handoff;
 pub mod hook;
 pub mod inject;
 pub mod insight;
@@ -39,6 +50,8 @@ pub mod pricing;
 pub mod proc;
 pub mod quota;
 pub mod remote_fs;
+/// The per-session postmortem: `--report`, and `/api/report`.
+pub mod report;
 pub mod rmux;
 pub mod sandbox;
 pub mod screen;

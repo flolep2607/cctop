@@ -64,9 +64,10 @@ details.
 ## cctop is four crates
 
 The binary is at the root; `cctop-core`, `cctop-serve` and `cctop-ui` are under
-`crates/`, each depending only on the ones below it. The root `Cargo.toml` draws
-the graph and says why each boundary is where it is. The point is the rebuild:
-an edit to the UI recompiles the UI and the binary, not the parsers.
+`crates/`. The UI and the server each depend on core and not on each other. The
+root `Cargo.toml` draws the graph and says why each boundary is where it is.
+The point is the rebuild: an edit to the UI recompiles the UI and the binary,
+not the server and not the parsers.
 
 - From a crate above core, a module of core is `cctop_core::x`. If the item you
   want is `pub(crate)`, widen it to `pub` rather than copying it.

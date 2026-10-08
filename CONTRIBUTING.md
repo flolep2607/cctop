@@ -59,12 +59,14 @@ what sits above it:
 | --- | --- | --- |
 | `cctop` | `src/` | `main`, the command line, and the commands nothing else calls (`doctor`, `why`, `wait`, `mcp`, `recall`) |
 | `cctop-ui` | `crates/ui/` | the terminal dashboard |
-| `cctop-serve` | `crates/serve/` | the web server, and the conversation model it shares with the dashboard |
-| `cctop-core` | `crates/core/` | sessions and their parsers, the cache, pricing, config, processes, hooks, rmux, the shim |
+| `cctop-serve` | `crates/serve/` | the web server |
+| `cctop-core` | `crates/core/` | sessions and their parsers, the cache, pricing, config, processes, hooks, rmux, the shim, and what both faces read and do to a session (the conversation, report, export, handoff, actions) |
 
-Each depends only on the ones below it in the table, and the root `Cargo.toml`
-says why each boundary is where it is. Nothing in core reaches up: something
-both the dashboard and the server need belongs in core.
+The dashboard and the server each depend on core and not on each other, and
+the binary depends on all three; the root `Cargo.toml` says why each boundary
+is where it is. Nothing in core reaches up: something both faces need belongs
+in core. The dashboard starts a server to share its table through a function
+the binary hands it (`serve_for_dashboard` in `src/main.rs`).
 
 Core's guards that keep a test off the real machine — no bell on stdout, no
 copy to your clipboard, no write over your saved preferences, a runtime

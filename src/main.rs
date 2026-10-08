@@ -455,11 +455,45 @@ fn main() -> anyhow::Result<()> {
         .map(|agent| shim::host(&agent, None, ui::render::pane_size()))
         .transpose()?;
 
-    let code = ui::run(args.plan, args.delay, &args.hosts, hosted)?;
+    let code = ui::run(
+        args.plan,
+        args.delay,
+        &args.hosts,
+        hosted,
+        serve_for_dashboard,
+    )?;
     // After the UI is down, so the message is not painted over by the alternate
     // screen being restored.
     finish_trace(&args);
     std::process::exit(code)
+}
+
+/// Start the server the dashboard shares its table through.
+///
+/// Here because this is the one crate with both: the dashboard and the server
+/// are built side by side, neither depending on the other, and the dashboard
+/// asks for a server through this.
+fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> {
+    let serving = serve::start(serve::Options {
+        tunnel: request.tunnel,
+        plan: request.plan,
+        // Fed from the rows this dashboard already has. Two loaders in one
+        // process would walk the same disk twice and, worse, could disagree —
+        // a page saying one thing while the table beside it says another is
+        // the bug nobody thinks to look for.
+        scan: false,
+        hosts: request.hosts,
+        ..Default::default()
+    })?;
+    Ok(ui::Served {
+        local: serving.local.clone(),
+        public: serving.public.clone(),
+        readonly: serving.readonly.clone(),
+        actions: serving.actions,
+        // The server moves in with the closure, so dropping what the dashboard
+        // holds stops it.
+        publish: Box::new(move |sessions, quota| serving.publish_with_quota(sessions, quota)),
+    })
 }
 
 /// Write the trace, if one was asked for, and say where it went.
@@ -481,5 +515,37 @@ fn finish_trace(args: &cli::Args) {
             "cctop: could not write trace to {}: {error}",
             path.display()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// What the dashboard holds of a server it started is a real server's
+    /// links: on loopback, and carrying the token the page needs.
+    #[test]
+    fn the_dashboard_gets_a_real_servers_links() {
+        let served = super::serve_for_dashboard(cctop_ui::ServeRequest {
+            tunnel: false,
+            plan: cctop_core::pricing::Plan::Retail,
+            hosts: Vec::new(),
+        })
+        .expect("a loopback server");
+        assert!(
+            served.local.starts_with("http://127.0.0.1:"),
+            "{}",
+            served.local
+        );
+        let token = served.local.split_once("?t=").map(|(_, token)| token);
+        // 32 characters, which the dashboard's own tests stand in when they
+        // draw the panel's QR code without starting a server.
+        assert_eq!(
+            token.map(str::len),
+            Some(32),
+            "no token in {}",
+            served.local
+        );
+        assert!(served.public.is_none());
+        assert!(served.actions);
+        assert_eq!(served.best(), served.local);
     }
 }

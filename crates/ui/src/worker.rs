@@ -137,7 +137,7 @@ pub(super) enum Response {
     Chat {
         key: String,
         before: Option<usize>,
-        result: Result<Box<cctop_serve::chat::Conversation>, String>,
+        result: Result<Box<cctop_core::chat::Conversation>, String>,
     },
 }
 
@@ -573,7 +573,7 @@ pub(super) fn spawn_worker(
                                     })
                                 })
                             }
-                            None => Ok(cctop_serve::chat::build(&session, before)),
+                            None => Ok(cctop_core::chat::build(&session, before)),
                         };
                         let _ = tx.send(Response::Chat {
                             key: session.key(),

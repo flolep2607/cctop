@@ -43,12 +43,14 @@ const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 /// so `cctop claude` gets you back to your shell the way `claude` would.
 ///
 /// The three flags the UI reads are taken one by one rather than as the
-/// command line they came from: the parser is the binary's, above the UI.
+/// command line they came from: the parser is the binary's, above the UI. So is
+/// `start_server`, which is how the table is served to a browser from here.
 pub fn run(
     plan: cctop_core::pricing::Plan,
     delay: f64,
     hosts: &[String],
     hosted: Option<cctop_core::shim::Hosted>,
+    start_server: crate::StartServer,
 ) -> anyhow::Result<i32> {
     // Before anything draws, and once: the palette is read by every widget and
     // must not change under them mid-run. Before `ratatui::init` too, because
@@ -88,6 +90,7 @@ pub fn run(
 
     let mut app = App::new(plan, req_tx.clone());
     app.refresh_secs = delay;
+    app.start_server = Some(start_server);
     // With nothing to put in it, HOST is a column of one repeated word. Hidden
     // through the same mechanism the user has, so `$CCTOP_COLUMNS_HIDE` and this
     // cannot disagree about what is on screen.

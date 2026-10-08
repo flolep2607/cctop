@@ -641,9 +641,10 @@ fn get_session_context(
     };
 
     let data = loader.store().session_data(session);
-    Ok(cctop_serve::handoff::rendered(
-        &cctop_serve::handoff::build(session, Some(&data)),
-    ))
+    Ok(cctop_core::handoff::rendered(&cctop_core::handoff::build(
+        session,
+        Some(&data),
+    )))
 }
 
 /// Passages of past sessions, with the caller's own session left out.

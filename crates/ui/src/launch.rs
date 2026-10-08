@@ -47,7 +47,7 @@ pub(super) const TAB_LABEL_CHARS: usize = 24;
 /// at it.
 ///
 /// Only reached by a harness that takes no opening prompt on its command line —
-/// everything in [`handoff::opening_argv`](cctop_serve::handoff::opening_argv) is
+/// everything in [`handoff::opening_argv`](cctop_core::handoff::opening_argv) is
 /// handed the brief as an argument instead, because no delay is long enough to
 /// win that race reliably. Too short and the line is lost; too long and the user
 /// is left looking at an idle agent wondering whether the handoff worked.
@@ -164,7 +164,7 @@ impl App {
         // account) pair on this machine but the one the session is on. The
         // page's menu is the same list, so the two pickers never disagree
         // about where a session may be sent.
-        let targets = cctop_serve::handoff::targets(&session);
+        let targets = cctop_core::handoff::targets(&session);
         if targets.is_empty() {
             self.set_status(
                 "Nowhere to hand this session — no other agent or account on this machine",
@@ -179,8 +179,8 @@ impl App {
             true => self.panel_data.as_ref(),
             false => None,
         };
-        let brief = cctop_serve::handoff::build(&session, data);
-        let path = match cctop_serve::handoff::write(&brief) {
+        let brief = cctop_core::handoff::build(&session, data);
+        let path = match cctop_core::handoff::write(&brief) {
             Ok(path) => path,
             Err(error) => {
                 self.set_status(format!("Could not write the handoff brief: {error}"));
@@ -214,7 +214,7 @@ impl App {
     /// and it picks an account with `p`, which cannot leave out the one the
     /// session is already on. Each line here is an (agent, account) pair, so the
     /// account is chosen where the agent is and the session's own is absent.
-    pub(super) fn open_handoff(&mut self, targets: Vec<cctop_serve::handoff::Target>) {
+    pub(super) fn open_handoff(&mut self, targets: Vec<cctop_core::handoff::Target>) {
         self.launch_offer = targets.into_iter().map(tabs::Choice::Handoff).collect();
         self.launch_into = LaunchInto::Tab;
         self.launch_cursor = 0;
@@ -977,7 +977,7 @@ impl App {
             }
             // A Claude-to-Claude fork does not read the transcript at all, so a
             // session `convertible_session` rejects can still be copied whole.
-            _ => cctop_serve::handoff::forkable(session).map(std::path::Path::to_path_buf),
+            _ => cctop_core::handoff::forkable(session).map(std::path::Path::to_path_buf),
         }
     }
 
@@ -1007,13 +1007,13 @@ impl App {
         let transcript = self.pending_fork.clone()?;
         // `argv` may carry an `env VAR=value` prefix when a profile was chosen,
         // so the command is read off it by name rather than taken as argv[0].
-        let target = cctop_core::pricing::Provider::parse(cctop_serve::handoff::command_of(argv)?)?;
+        let target = cctop_core::pricing::Provider::parse(cctop_core::handoff::command_of(argv)?)?;
         match target {
             // Claude to Claude: a byte-for-byte copy, so it is tried first and
             // keeps everything a conversion drops.
             Provider::Claude if self.pending_provider == Provider::Claude => {
                 let config_dir = Self::store_of(target, account);
-                match cctop_serve::handoff::fork(&transcript, &config_dir) {
+                match cctop_core::handoff::fork(&transcript, &config_dir) {
                     Ok(id) => Some(Self::resume_argv(target, &id, account)),
                     Err(error) => {
                         self.set_status(format!("Could not copy the transcript: {error}"));
@@ -1026,7 +1026,7 @@ impl App {
             // rollout as written once it is in that login's store.
             Provider::Codex if self.pending_provider == Provider::Codex => {
                 let home = Self::store_of(target, account);
-                match cctop_serve::handoff::fork_codex(&transcript, &home) {
+                match cctop_core::handoff::fork_codex(&transcript, &home) {
                     Ok(id) => Some(Self::resume_argv(target, &id, account)),
                     Err(error) => {
                         self.set_status(format!("Could not copy the rollout: {error}"));
@@ -1062,7 +1062,7 @@ impl App {
     ///
     /// A copied or converted session is written for whoever resumes it, so the
     /// account picked is the one to write into — the same reason
-    /// [`cctop_serve::handoff::fork`] takes the receiving profile rather than the
+    /// [`cctop_core::handoff::fork`] takes the receiving profile rather than the
     /// conventional directory.
     fn store_of(
         target: Provider,
@@ -1191,12 +1191,12 @@ impl App {
             true => self.pending_brief.clone(),
             false => None,
         };
-        let line = brief.as_deref().map(cctop_serve::handoff::prompt_for);
+        let line = brief.as_deref().map(cctop_core::handoff::prompt_for);
         // Handed over in the argv wherever the harness takes an opening prompt;
         // `opening_argv` says why that is not the same as typing it.
         let opening = line
             .as_deref()
-            .and_then(|line| cctop_serve::handoff::opening_argv(&argv, line));
+            .and_then(|line| cctop_core::handoff::opening_argv(&argv, line));
         let argv = &argv;
         let mut pane =
             match tabs::Pane::launch(opening.as_ref().unwrap_or(argv), cwd.as_deref(), own) {
@@ -1225,7 +1225,7 @@ impl App {
         } else if carrying_conversation {
             // The agent the copy was resumed in, which a conversion makes a
             // different harness from the one handed over.
-            pane.label = cctop_serve::handoff::command_of(argv)
+            pane.label = cctop_core::handoff::command_of(argv)
                 .unwrap_or("claude")
                 .to_string();
         }

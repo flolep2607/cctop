@@ -2,8 +2,8 @@
 //!
 //! Typing a prompt at a live agent, resuming a dead one, handing one's work to a
 //! different harness, and answering which harnesses are available to hand it to.
-//! Every one of them already existed for the terminal — [`cctop_core::inject`],
-//! [`cctop_core::rmux`], [`crate::handoff`] — and none of it is reimplemented here.
+//! Every one of them already existed for the terminal — [`crate::inject`],
+//! [`crate::rmux`], [`crate::handoff`] — and none of it is reimplemented here.
 //! What this module is, is the part that has to be different because the caller
 //! is a socket rather than a keypress:
 //!
@@ -30,12 +30,8 @@
 //! directory, which is recoverable, rather than a session gone, which is not.
 //! Stopping an agent stays a terminal thing, where the confirmation prompt is.
 
-// What answering a prompt shares with every action here lives below `serve`,
-// because `yolo` answers prompts too, with no server running.
 use crate::handoff;
-pub use cctop_core::answer::{Done, Failed, answer};
-use cctop_core::answer::{done, local};
-use cctop_core::session::{Session, SessionData};
+use crate::session::{Session, SessionData};
 use serde::Serialize;
 
 /// The longest prompt that will be typed at an agent.
@@ -52,6 +48,17 @@ const MAX_PROMPT_CHARS: usize = 4000;
 /// See [`handoff::opening_argv`] for why an argument is the better path and what
 /// goes wrong on this one — the delay is a mitigation, not a fix.
 const HANDOFF_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// What happened, in the shape the page renders.
+#[derive(Debug, Serialize)]
+pub struct Done {
+    /// One sentence for the reader, whether it worked or not.
+    pub message: String,
+    /// The rmux session an action started or found, when there is one, so the
+    /// answer can tell someone at a terminal where their agent went.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rmux: Option<String>,
+}
 
 /// Where the page can reach this session's own terminal, and how far that reach
 /// goes.
@@ -79,6 +86,10 @@ pub struct Filed {
     pub path: String,
 }
 
+/// Every failure is a sentence and a status, because the page shows the sentence
+/// and the browser needs the status.
+pub type Failed = (u16, String);
+
 /// Write an image the page pasted, and give back the path to put in a prompt.
 ///
 /// The one way an image reaches an agent on a machine you are only sshed into.
@@ -92,15 +103,22 @@ pub struct Filed {
 /// is written is a real image or the request is refused, so nothing else can
 /// be deposited on the machine through a route whose name says "image".
 pub fn image(data: &str) -> Result<Filed, Failed> {
-    let Some(image) = cctop_core::clipboard::image_from_paste(data) else {
+    let Some(image) = crate::clipboard::image_from_paste(data) else {
         return Err((400, "only an image can be pasted here".into()));
     };
-    match cctop_core::clipboard::write_image(&image) {
+    match crate::clipboard::write_image(&image) {
         Ok(path) => Ok(Filed {
             path: path.display().to_string(),
         }),
         Err(e) => Err((503, format!("could not write the image here: {e}"))),
     }
+}
+
+fn done(message: impl Into<String>) -> Result<Done, Failed> {
+    Ok(Done {
+        message: message.into(),
+        rmux: None,
+    })
 }
 
 /// Type `text` at the agent driving `session`, and submit it.
@@ -139,7 +157,7 @@ pub fn send(session: &Session, text: &str) -> Result<Done, Failed> {
             "nothing is running this session — resume it first".into(),
         ));
     };
-    match cctop_core::inject::send_line(pid, text) {
+    match crate::inject::send_line(pid, text) {
         Ok(()) => done("Sent"),
         // The message names every way in, since which ones apply depends on how
         // the agent was started and that is not something the sender can see.
@@ -147,8 +165,77 @@ pub fn send(session: &Session, text: &str) -> Result<Done, Failed> {
     }
 }
 
+/// Press the key that answers the prompt this session is holding.
+///
+/// Not a line of text — the prior version of this sent the words "yes" and
+/// "no" to a permission prompt, and Claude Code reads Enter in one as picking
+/// the highlighted option — which is "Yes". So "No" allowed the tool. Each
+/// harness is pressed the key its own menu names, and only when the row says
+/// it is asking: a `1` typed into a composer is a stray character in someone's
+/// next prompt, not an answer to anything.
+///
+/// Deny is Esc everywhere, because it is the one key both menus bind to "no"
+/// whatever else they list — the number of the "No" option moves as the menu
+/// grows ("always allow", "switch to auto mode"). Allow is the first option,
+/// which is "Yes" in both and the only one that never widens what is allowed.
+pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
+    use crate::inject::Key;
+    local(session)?;
+    let allow = match choice {
+        "allow" => true,
+        "deny" => false,
+        _ => return Err((400, "an answer is `allow` or `deny`".into())),
+    };
+    if session.activity_state != crate::session::ActivityState::Asking {
+        return Err((409, "this session is not asking anything right now".into()));
+    }
+    // A question with choices is not a permission prompt: `1` there picks the
+    // first answer and Esc throws the question away. Refused here as well as
+    // never offered by the page, since a page from before this knew no better.
+    if session.asking_question {
+        return Err((
+            409,
+            "this is a question with choices, not a permission prompt — answer it in its terminal"
+                .into(),
+        ));
+    }
+    // ponytail: Claude Code and Codex only, the two whose menus were driven and
+    // checked. Gemini and OpenCode report prompts too, but pressing a guessed
+    // key at a menu that means something else by it is how "No" came to allow.
+    let key = match (session.provider, allow) {
+        (crate::pricing::Provider::Claude, true) => Key::Char('1'),
+        (crate::pricing::Provider::Codex, true) => Key::Char('y'),
+        (crate::pricing::Provider::Claude | crate::pricing::Provider::Codex, false) => Key::Escape,
+        (other, _) => {
+            return Err((
+                409,
+                format!(
+                    "cctop does not know how {} answers a prompt — answer it in its terminal",
+                    other.as_str()
+                ),
+            ));
+        }
+    };
+    let Some(pid) = session.root_pid() else {
+        return Err((
+            409,
+            "nothing is running this session — resume it first".into(),
+        ));
+    };
+    match crate::inject::press(pid, key) {
+        Ok(()) => {
+            // Every other cctop watching this session hears about the answer
+            // over the hook socket and stops asking — the agent's own next
+            // event is a while coming, and a denied turn sends none at all.
+            crate::hook::announce_answer(&session.session_id, allow);
+            done(if allow { "Allowed" } else { "Denied" })
+        }
+        Err(why) => Err((409, why)),
+    }
+}
+
 /// Switch YOLO on or off for this session: every permission prompt it raises
-/// answered "allow", by [`cctop_core::yolo`], until it is switched off or the
+/// answered "allow", by [`crate::yolo`], until it is switched off or the
 /// session ends.
 ///
 /// On is held to everything [`answer`] is held to, checked now rather than at
@@ -162,7 +249,7 @@ pub fn yolo(session: &Session, on: bool) -> Result<Done, Failed> {
         local(session)?;
         if !matches!(
             session.provider,
-            cctop_core::pricing::Provider::Claude | cctop_core::pricing::Provider::Codex
+            crate::pricing::Provider::Claude | crate::pricing::Provider::Codex
         ) {
             return Err((
                 409,
@@ -176,7 +263,7 @@ pub fn yolo(session: &Session, on: bool) -> Result<Done, Failed> {
             return Err((409, "nothing is running this session".into()));
         }
     }
-    match cctop_core::yolo::set(&session.session_id, on) {
+    match crate::yolo::set(&session.session_id, on) {
         Ok(()) => done(match on {
             true => "YOLO on — every prompt in this session will be allowed",
             false => "YOLO off — prompts wait for you again",
@@ -210,7 +297,7 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
             ),
         ));
     };
-    if !cctop_core::shim::is_command(&argv[0]) {
+    if !crate::shim::is_command(&argv[0]) {
         return Err((409, format!("{} is not installed on this machine", argv[0])));
     }
     // Resumed under the account the transcript lives in. For Codex this is the
@@ -222,8 +309,8 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     // Named after the session, so resuming it twice reattaches to the agent
     // already doing it rather than starting a rival on one transcript — which no
     // harness coordinates, and which is why the terminal asks before doing it.
-    let name = cctop_core::rmux::name_for_session(session.provider.as_str(), &session.session_id);
-    if cctop_core::rmux::exists(&name) {
+    let name = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+    if crate::rmux::exists(&name) {
         return Ok(Done {
             message: format!("Already running — attach with `rmux attach -t {name}`"),
             rmux: Some(name),
@@ -260,7 +347,7 @@ pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
     }
     let dir = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         Some(cwd) => {
-            let path = std::path::PathBuf::from(cctop_core::util::untildify(cwd));
+            let path = std::path::PathBuf::from(crate::util::untildify(cwd));
             match path.is_dir() {
                 true => Some(path),
                 false => {
@@ -271,9 +358,9 @@ pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
         // Home rather than wherever `cctop serve` was started: a new agent with
         // no stated directory belongs where the user's files are, not where
         // this server happened to be launched.
-        None => Some(cctop_core::config::HOME.clone()),
+        None => Some(crate::config::HOME.clone()),
     };
-    let name = cctop_core::rmux::free_name(agent);
+    let name = crate::rmux::free_name(agent);
     launch(&[agent.to_string()], &name, dir.as_deref())?;
     Ok(Done {
         message: format!("Started {agent} — attach with `rmux attach -t {name}`"),
@@ -289,15 +376,15 @@ pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
 /// report nothing wrong.
 fn under_profile(session: &Session, argv: Vec<String>) -> Vec<String> {
     match profile_of(session) {
-        Some(profile) => cctop_core::config::argv_under_profile(argv, profile),
+        Some(profile) => crate::config::argv_under_profile(argv, profile),
         None => argv,
     }
 }
 
 /// The profile a session was read out of, when it still exists.
-fn profile_of(session: &Session) -> Option<&'static cctop_core::config::Profile> {
+fn profile_of(session: &Session) -> Option<&'static crate::config::Profile> {
     let name = session.profile.as_deref()?;
-    cctop_core::config::profile_named(session.provider, name)
+    crate::config::profile_named(session.provider, name)
 }
 
 /// Write `session`'s brief and start `target` on it, in the same directory.
@@ -361,7 +448,7 @@ pub fn handoff(
     if let Some(copied) = codex_forked(session, &target) {
         match copied {
             Ok(done) => return Ok(done),
-            Err(reason) => cctop_core::elog::event(
+            Err(reason) => crate::elog::event(
                 "handoff",
                 "codex-fork-fallback",
                 serde_json::json!({ "account": target.account, "reason": reason }),
@@ -369,7 +456,7 @@ pub fn handoff(
         }
     }
     // Between two harnesses that keep a file of JSON lines, the same trade is
-    // available by transcode rather than by copy: `cctop_core::convert` reads one
+    // available by transcode rather than by copy: `crate::convert` reads one
     // store and writes the other, and the receiving agent resumes onto that.
     // Only reached when the copy above did not apply, so a Claude session going
     // to Claude still keeps every record the copy carries over byte for byte.
@@ -380,7 +467,7 @@ pub fn handoff(
             // handoff: the brief below is a working handoff with less of the
             // conversation in it, which is the trade `handoff` exists for.
             Err(reason) => {
-                cctop_core::elog::event(
+                crate::elog::event(
                     "handoff",
                     "convert-fallback",
                     serde_json::json!({ "agent": target.agent, "reason": reason }),
@@ -397,7 +484,7 @@ pub fn handoff(
 ///
 /// The shape every handoff falls back to, and the only one available to a
 /// harness whose store cctop cannot write — or to a pair that
-/// [`cctop_core::convert`] does not yet transcode between.
+/// [`crate::convert`] does not yet transcode between.
 fn brief_handoff(
     session: &Session,
     data: Option<&SessionData>,
@@ -415,7 +502,7 @@ fn brief_handoff(
     // an agent still asking the terminal what it can do eats part of whatever
     // is in the input queue, and a half-swallowed path looks like a whole one.
     let opening = handoff::opening_argv(&argv, &line);
-    let name = cctop_core::rmux::free_name(agent);
+    let name = crate::rmux::free_name(agent);
     launch(
         opening.as_ref().unwrap_or(&argv),
         &name,
@@ -430,8 +517,8 @@ fn brief_handoff(
         let name_for_thread = name.clone();
         std::thread::spawn(move || {
             std::thread::sleep(HANDOFF_SETTLE);
-            if let Some(pid) = cctop_core::rmux::agent_pid(&name_for_thread) {
-                let _ = cctop_core::inject::send_line(pid, &line);
+            if let Some(pid) = crate::rmux::agent_pid(&name_for_thread) {
+                let _ = crate::inject::send_line(pid, &line);
             }
         });
     }
@@ -449,10 +536,10 @@ fn brief_handoff(
 /// UI's tab for it says so.
 ///
 /// The default account writes nothing, which is what an unset option already
-/// means — see [`cctop_core::rmux::set_profile`].
+/// means — see [`crate::rmux::set_profile`].
 fn record_account(name: &str, target: &handoff::Target) {
     if let Some(account) = target.account.as_deref().filter(|a| *a != "default") {
-        cctop_core::rmux::set_profile(name, account);
+        crate::rmux::set_profile(name, account);
     }
 }
 
@@ -462,11 +549,11 @@ fn record_account(name: &str, target: &handoff::Target) {
 /// transcript on this disk to read — either way the caller has a brief to fall
 /// back on, so the distinction matters only in what gets written.
 fn converted(session: &Session, target: &handoff::Target) -> Option<Result<Done, String>> {
-    if !cctop_core::convert::convertible_session(session) {
+    if !crate::convert::convertible_session(session) {
         return None;
     }
-    let provider = cctop_core::pricing::Provider::parse(&target.agent)?;
-    if !cctop_core::convert::convertible(session.provider, provider) {
+    let provider = crate::pricing::Provider::parse(&target.agent)?;
+    if !crate::convert::convertible(session.provider, provider) {
         return None;
     }
     let transcript = session.data_file.as_deref()?;
@@ -474,7 +561,7 @@ fn converted(session: &Session, target: &handoff::Target) -> Option<Result<Done,
     // session to a work login has to write it where that login will look.
     let home = home_of(target)?;
     Some(
-        cctop_core::convert::convert(session.provider, transcript, provider, &home)
+        crate::convert::convert(session.provider, transcript, provider, &home)
             .ok_or_else(|| "the transcript could not be read or written in that format".to_string())
             .and_then(|written| resume_converted(session, &written, target)),
     )
@@ -493,33 +580,33 @@ fn home_of(target: &handoff::Target) -> Option<std::path::PathBuf> {
     if let Some(profile) = target.profile() {
         return Some(profile.dir.clone());
     }
-    Some(match cctop_core::pricing::Provider::parse(&target.agent)? {
-        cctop_core::pricing::Provider::Claude => cctop_core::config::CLAUDE_CONFIG_DIR.clone(),
-        cctop_core::pricing::Provider::Codex => cctop_core::config::CODEX_HOME.clone(),
+    Some(match crate::pricing::Provider::parse(&target.agent)? {
+        crate::pricing::Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
+        crate::pricing::Provider::Codex => crate::config::CODEX_HOME.clone(),
         _ => return None,
     })
 }
 
 /// Start the receiving agent resumed onto the converted transcript.
 ///
-/// The harness and the id both come off the [`cctop_core::convert::Converted`]
+/// The harness and the id both come off the [`crate::convert::Converted`]
 /// rather than off the request, so the agent that is started and the store the
 /// conversation was written into cannot disagree — which would resume a
 /// session that does not exist and report a handoff that did not happen.
 fn resume_converted(
     session: &Session,
-    converted: &cctop_core::convert::Converted,
+    converted: &crate::convert::Converted,
     target: &handoff::Target,
 ) -> Result<Done, String> {
     let provider = converted.provider;
     let agent = provider.as_str();
     let argv = match provider {
-        cctop_core::pricing::Provider::Claude => vec![
+        crate::pricing::Provider::Claude => vec![
             "claude".to_string(),
             "--resume".to_string(),
             converted.session_id.clone(),
         ],
-        cctop_core::pricing::Provider::Codex => vec![
+        crate::pricing::Provider::Codex => vec![
             "codex".to_string(),
             "resume".to_string(),
             converted.session_id.clone(),
@@ -527,7 +614,7 @@ fn resume_converted(
         _ => return Err("that harness has no resume command cctop knows".into()),
     };
     let argv = target.argv(argv);
-    let name = cctop_core::rmux::free_name(agent);
+    let name = crate::rmux::free_name(agent);
     // Launched from the session's own directory, which is what the converted
     // transcript recorded as its `cwd` — and both harnesses filter their resume
     // pickers on it, so launching elsewhere would start an agent that cannot
@@ -546,7 +633,7 @@ fn resume_converted(
             converted.session_id
         ),
     };
-    cctop_core::elog::event(
+    crate::elog::event(
         "handoff",
         "converted",
         serde_json::json!({
@@ -577,14 +664,13 @@ fn forked(
     transcript: &std::path::Path,
     target: &handoff::Target,
 ) -> Result<Done, Failed> {
-    let config_dir =
-        home_of(target).unwrap_or_else(|| cctop_core::config::CLAUDE_CONFIG_DIR.clone());
+    let config_dir = home_of(target).unwrap_or_else(|| crate::config::CLAUDE_CONFIG_DIR.clone());
     let id = handoff::fork(transcript, &config_dir)
         .map_err(|e| (503, format!("could not copy the transcript: {e}")))?;
     let argv = target.argv(vec!["claude".into(), "--resume".into(), id]);
     // A fresh id, so unlike a resume there is nothing to be idempotent about:
     // the copy has never been opened by anything.
-    let name = cctop_core::rmux::free_name("claude");
+    let name = crate::rmux::free_name("claude");
     launch(&argv, &name, session.work_dir().as_deref())?;
     record_account(&name, target);
     Ok(Done {
@@ -604,8 +690,8 @@ fn forked(
 /// brief rather than with a failure.
 fn codex_forked(session: &Session, target: &handoff::Target) -> Option<Result<Done, String>> {
     if target.agent != "codex"
-        || session.provider != cctop_core::pricing::Provider::Codex
-        || !cctop_core::convert::convertible_session(session)
+        || session.provider != crate::pricing::Provider::Codex
+        || !crate::convert::convertible_session(session)
     {
         return None;
     }
@@ -616,7 +702,7 @@ fn codex_forked(session: &Session, target: &handoff::Target) -> Option<Result<Do
         Err(e) => return Some(Err(e.to_string())),
     };
     let argv = target.argv(vec!["codex".into(), "resume".into(), id]);
-    let name = cctop_core::rmux::free_name("codex");
+    let name = crate::rmux::free_name("codex");
     if let Err((_, why)) = launch(&argv, &name, session.work_dir().as_deref()) {
         return Some(Err(why));
     }
@@ -644,7 +730,7 @@ pub fn agents() -> Vec<String> {
 /// is already how cctop hosts agents it did not start in a tab, so an agent
 /// started from the browser is one the terminal UI lists and can attach to.
 fn launch(argv: &[String], name: &str, cwd: Option<&std::path::Path>) -> Result<(), Failed> {
-    if !cctop_core::rmux::available() {
+    if !crate::rmux::available() {
         return Err((
             503,
             "starting an agent from the browser needs rmux, which is not \
@@ -652,13 +738,30 @@ fn launch(argv: &[String], name: &str, cwd: Option<&std::path::Path>) -> Result<
                 .into(),
         ));
     }
-    cctop_core::rmux::prepare(argv, name, cwd);
+    crate::rmux::prepare(argv, name, cwd);
     // `prepare` is best-effort by design: every failure inside it leaves the
     // session absent. That is the one thing worth checking, because a caller
     // told "started" about a session that does not exist has nowhere to go.
-    match cctop_core::rmux::exists(name) {
+    match crate::rmux::exists(name) {
         true => Ok(()),
         false => Err((503, format!("rmux would not start {}", argv[0]))),
+    }
+}
+
+/// Refuse a row that came from another machine.
+///
+/// Every action below signals a pid, opens a directory or writes a file, and all
+/// three are about *this* filesystem. See [`crate::session::Remote`].
+fn local(session: &Session) -> Result<(), Failed> {
+    match &session.remote {
+        Some(remote) => Err((
+            409,
+            format!(
+                "this session is on {} — run cctop serve there to act on it",
+                remote.host
+            ),
+        )),
+        None => Ok(()),
     }
 }
 
@@ -683,13 +786,13 @@ pub fn frontend_for(origin: &str) -> Option<String> {
 /// and `W` have in the terminal, and for the same reason: an agent on cctop's
 /// own pty is on no terminal a second viewer can be pointed at.
 ///
-/// One share per session, reused — see [`cctop_core::rmux::share_link`]. A link
+/// One share per session, reused — see [`crate::rmux::share_link`]. A link
 /// minted afresh on every ask left a row in `rmux web-share list` per page
 /// reload. Reusing it also matches what is true: there is one terminal here,
 /// however many people are looking at the page.
 ///
 /// The socket takes the road the page came by, through cctop's relay — see
-/// [`cctop_core::rmux::share_link_with`] — and a machine with no way out falls back
+/// [`crate::rmux::share_link_with`] — and a machine with no way out falls back
 /// to a loopback link rather than to nothing. Which of the two it got is in
 /// the answer, because a link that only opens on the server's own desk is not
 /// a failure the reader can see.
@@ -708,13 +811,13 @@ pub fn terminal(
             "nothing is running this session — resume it first".into(),
         ));
     };
-    let Some(name) = cctop_core::rmux::holding(pid) else {
+    let Some(name) = crate::rmux::holding(pid) else {
         return Err((
             409,
             "only an agent cctop put in a multiplexer has a terminal to show".into(),
         ));
     };
-    let (share, tunnelled) = cctop_core::rmux::share_link_with(&name, true, frontend, fresh)
+    let (share, tunnelled) = crate::rmux::share_link_with(&name, true, frontend, fresh)
         .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));
@@ -733,10 +836,10 @@ pub fn terminal(
 /// Only one of cctop's own live tabs: the name comes from a request, and an
 /// rmux session the user started themselves is not this page's to hand out.
 pub fn tab_terminal(name: &str, frontend: Option<&str>, fresh: bool) -> Result<Terminal, Failed> {
-    if !super::tabs::is_tab(&cctop_core::rmux::running(), name) {
+    if !is_tab(&crate::rmux::running(), name) {
         return Err((404, "no open tab by that name".into()));
     }
-    let (share, tunnelled) = cctop_core::rmux::share_link_with(name, true, frontend, fresh)
+    let (share, tunnelled) = crate::rmux::share_link_with(name, true, frontend, fresh)
         .map_err(|why| (409, format!("could not open that terminal: {why}")))?;
     let Some(url) = share.operator else {
         return Err((409, "the share came back without an operator link".into()));
@@ -746,6 +849,13 @@ pub fn tab_terminal(name: &str, frontend: Option<&str>, fresh: bool) -> Result<T
         tunnelled,
         name: name.to_string(),
     })
+}
+
+/// Whether `name` is one of cctop's live tabs — the only sessions a terminal
+/// may be opened on. Without this the route would mint a shell link to any
+/// rmux session on the machine, by name.
+pub fn is_tab(running: &[crate::rmux::Running], name: &str) -> bool {
+    running.iter().any(|r| r.name == name)
 }
 
 #[cfg(test)]
@@ -764,7 +874,7 @@ mod image_tests {
         png.resize(64, 0);
         let data = format!(
             "data:image/png;base64,{}",
-            cctop_core::util::b64_encode(png.as_slice())
+            crate::util::b64_encode(png.as_slice())
         );
         let filed = image(&data).expect("a PNG was refused");
         let path = std::path::PathBuf::from(&filed.path);
@@ -784,7 +894,7 @@ mod image_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cctop_core::pricing::Provider;
+    use crate::pricing::Provider;
 
     fn session() -> Session {
         Session::new(Provider::Claude, "s1".into())
@@ -799,7 +909,7 @@ mod tests {
         assert!(message.contains("not asking"), "{message}");
 
         let mut asking = session();
-        asking.activity_state = cctop_core::session::ActivityState::Asking;
+        asking.activity_state = crate::session::ActivityState::Asking;
         assert_eq!(answer(&asking, "yes").unwrap_err().0, 400);
         // Asking, answerable, and nothing to press it at — the refusal is
         // about the process, not the answer.
@@ -811,7 +921,7 @@ mod tests {
     #[test]
     fn an_unknown_harness_is_told_to_answer_in_its_terminal() {
         let mut gemini = Session::new(Provider::Gemini, "g1".into());
-        gemini.activity_state = cctop_core::session::ActivityState::Asking;
+        gemini.activity_state = crate::session::ActivityState::Asking;
         let (status, message) = answer(&gemini, "allow").unwrap_err();
         assert_eq!(status, 409);
         assert!(message.contains("its terminal"), "{message}");
@@ -822,12 +932,12 @@ mod tests {
     #[test]
     fn a_remote_prompt_is_refused_before_a_key_is_chosen() {
         let mut session = session();
-        session.remote = Some(cctop_core::session::Remote {
+        session.remote = Some(crate::session::Remote {
             host: "build-box".into(),
             branch: None,
             ..Default::default()
         });
-        session.activity_state = cctop_core::session::ActivityState::Asking;
+        session.activity_state = crate::session::ActivityState::Asking;
         let (status, message) = answer(&session, "allow").unwrap_err();
         assert_eq!(status, 409);
         assert!(message.contains("build-box"), "{message}");
@@ -837,9 +947,9 @@ mod tests {
     /// nobody has driven, nothing to press at — and off never is.
     #[test]
     fn yolo_is_held_to_what_answer_is_and_off_always_works() {
-        let _base = cctop_core::config::claim_test_runtime_base("actions-yolo");
+        let _base = crate::config::claim_test_runtime_base("actions-yolo");
         let mut remote = session();
-        remote.remote = Some(cctop_core::session::Remote {
+        remote.remote = Some(crate::session::Remote {
             host: "build-box".into(),
             branch: None,
             ..Default::default()
@@ -890,7 +1000,7 @@ mod tests {
     #[test]
     fn every_action_refuses_a_session_on_another_machine() {
         let mut session = session();
-        session.remote = Some(cctop_core::session::Remote {
+        session.remote = Some(crate::session::Remote {
             host: "build-box".into(),
             branch: None,
             ..Default::default()
@@ -921,5 +1031,13 @@ mod tests {
         let (status, message) = resume(&session).unwrap_err();
         assert_eq!(status, 409);
         assert!(message.contains("cannot be resumed"), "{message}");
+    }
+
+    #[test]
+    fn only_a_live_tab_can_be_opened() {
+        let live = vec![crate::rmux::Running::unrecorded("cctop-a")];
+        assert!(is_tab(&live, "cctop-a"));
+        assert!(!is_tab(&live, "work"), "an rmux session cctop did not open");
+        assert!(!is_tab(&live, "cctop-gone"));
     }
 }

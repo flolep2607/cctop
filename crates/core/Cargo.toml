@@ -3,7 +3,7 @@ name = "cctop-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Internal to cctop: sessions and their parsers, the cache, pricing, config, hooks and the shim. No stable API; use the cctop binary."
+description = "Internal to cctop: sessions and their parsers, the cache, pricing, config, hooks, the shim, and the conversation model both faces share. No stable API; use the cctop binary."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -54,3 +54,7 @@ tokio.workspace = true
 toml_edit.workspace = true
 ureq.workspace = true
 vt100.workspace = true
+
+[dev-dependencies]
+# The export tests read the markdown back as markdown.
+pulldown-cmark.workspace = true

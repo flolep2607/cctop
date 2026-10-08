@@ -16,8 +16,79 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 /// to be advanced by whoever happens to redraw, and the loop redraws on events
 /// that have nothing to do with this.
 pub struct Opening {
-    pub(super) rx: Receiver<Result<cctop_serve::Serving, String>>,
+    pub(super) rx: Receiver<Result<Served, String>>,
     pub(super) since: Instant,
+}
+
+/// A server the dashboard started, as the dashboard sees it: the links to hand
+/// out, and a way to show the page what the table shows.
+///
+/// The server is `cctop-serve`, which the dashboard does not depend on — the two
+/// are built side by side, so an edit to either leaves the other alone. The
+/// binary, which has both, starts one through a [`StartServer`] it hands to
+/// [`crate::run`], and the server itself lives inside `publish`: dropping this
+/// drops it, which revokes the tunnel and stops the listener.
+pub struct Served {
+    /// The loopback link, always present.
+    pub local: String,
+    /// The public one, when a tunnel was asked for and registered.
+    pub public: Option<String>,
+    /// The same page, read-only. Empty when the run has no token.
+    pub readonly: String,
+    /// Whether the page may act on sessions as well as show them.
+    pub actions: bool,
+    /// Show the page these rows and this usage reading.
+    pub publish: Publish,
+}
+
+/// How [`Served`] feeds its page, holding the server it feeds.
+pub type Publish = Box<dyn Fn(&[Session], &cctop_core::quota::Quota) + Send>;
+
+impl Served {
+    /// The link to hand somebody: the public one when there is one.
+    pub fn best(&self) -> &str {
+        self.public.as_deref().unwrap_or(&self.local)
+    }
+
+    /// Show the page these rows and this usage reading, replacing whatever it
+    /// was showing. Cheap enough for every refresh; see the server's own.
+    pub fn publish_with_quota(&self, sessions: &[Session], quota: &cctop_core::quota::Quota) {
+        (self.publish)(sessions, quota)
+    }
+}
+
+/// What the dashboard asks of a server it starts.
+pub struct ServeRequest {
+    /// Whether to put it on a trycloudflare tunnel as well as on loopback.
+    pub tunnel: bool,
+    pub plan: cctop_core::pricing::Plan,
+    /// The machines whose rows the table shows, which the page owes the same
+    /// answers.
+    pub hosts: Vec<cctop_core::fleet::Host>,
+}
+
+/// How the dashboard starts a server: given by the binary, which links both.
+pub type StartServer = fn(ServeRequest) -> anyhow::Result<Served>;
+
+/// Hand `url` to whatever this desktop opens links with.
+///
+/// Best effort by design: there is no answer worth waiting for and plenty of
+/// machines with no browser to give it to — a headless box, an ssh session, a
+/// container. `false` means nothing was launched, which the caller says on the
+/// status line so the link can be copied instead.
+///
+/// Spawned and forgotten rather than waited on: `xdg-open` on some desktops
+/// does not return until the browser it started exits, and a dashboard frozen
+/// behind somebody's Firefox is not a trade worth making.
+pub fn open_in_browser(url: &str) -> bool {
+    // `xdg-open` is what every freedesktop environment answers to.
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
 /// The spinner's alphabet, shared by everything that has to keep saying it is
@@ -150,18 +221,16 @@ impl App {
     /// half — see [`Opening`].
     pub(super) fn start_serving(&mut self, tunnel: bool) {
         self.serve_error = None;
-        let options = cctop_serve::Options {
+        let Some(start) = self.start_server else {
+            self.set_status("This dashboard has no server to start");
+            return;
+        };
+        let options = ServeRequest {
             tunnel,
             plan: self.plan,
-            // Fed from the rows this dashboard already has. Two loaders in one
-            // process would walk the same disk twice and, worse, could disagree
-            // — a page saying one thing while the table beside it says another
-            // is the bug nobody thinks to look for.
-            scan: false,
             // The dashboard's rows include the remote ones, and the serve owes
             // them the same answers — the `Host`s are how it reaches back.
             hosts: self.remote_hosts.clone(),
-            ..Default::default()
         };
         if tunnel {
             // One at a time. A second click while the first is still dialling
@@ -174,7 +243,7 @@ impl App {
                 // The receiver is gone if cctop quit while this was dialling,
                 // and the tunnel then drops here — which unregisters it, which
                 // is the right ending for a link nobody is holding.
-                let _ = tx.send(cctop_serve::start(options).map_err(|e| format!("{e}")));
+                let _ = tx.send(start(options).map_err(|e| format!("{e}")));
             });
             self.share_opening = Some(Opening {
                 rx,
@@ -183,7 +252,7 @@ impl App {
             self.set_status("Opening a tunnel to trycloudflare…");
             return;
         }
-        match cctop_serve::start(options) {
+        match start(options) {
             Ok(serving) => {
                 // Something to look at immediately: the page's first request
                 // would otherwise find the empty snapshot it was built with and
@@ -259,6 +328,21 @@ impl App {
 mod tests {
     use super::*;
     use crate::tests::test_app;
+
+    /// A loopback serve as the dashboard holds one, with the shape of link a
+    /// real one hands out — 32 hex characters of token, which is what decides
+    /// how big the panel's QR code comes out — and its token.
+    fn served() -> (Served, String) {
+        let token = "f3a9c2e17b4d0a6658e1c3b7d92f4e05".to_string();
+        let served = Served {
+            local: format!("http://127.0.0.1:7777/?t={token}"),
+            public: None,
+            readonly: "http://127.0.0.1:7777/?t=0b1e5d7a9c3f6e284d17a5c09b3f8e61".into(),
+            actions: true,
+            publish: Box::new(|_, _| {}),
+        };
+        (served, token)
+    }
     /// Both halves matter. A panel that cannot say where the page is has not
     /// answered the question it was opened to answer; a panel that prints the
     /// token puts a credential into every screenshot of it. The link is drawn
@@ -269,21 +353,9 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app();
-        let serving = cctop_serve::start(cctop_serve::Options {
-            // A port nobody asked for, so a busy one is stepped past rather
-            // than failing a test on whatever else is running here.
-            port_given: false,
-            // The panel is what is under test; scanning would walk the disk
-            // and poll the quota endpoints for a serve nobody opens.
-            scan: false,
-            ..Default::default()
-        })
-        .expect("a loopback server");
-        let token = serving
-            .local
-            .split_once("?t=")
-            .map(|(_, token)| token.to_string())
-            .expect("a tokenised link");
+        // The panel is what is under test, so the server is a stand-in with a
+        // real server's links; the binary's own test starts a real one.
+        let (serving, token) = served();
         app.serving = Some(serving);
         app.mode = Mode::Serve;
 
@@ -325,17 +397,7 @@ mod tests {
     /// panel reads `public` and nothing else of the tunnel.
     fn tunnelled_app() -> (App, String) {
         let mut app = test_app();
-        let mut serving = cctop_serve::start(cctop_serve::Options {
-            port_given: false,
-            scan: false,
-            ..Default::default()
-        })
-        .expect("a loopback server");
-        let token = serving
-            .local
-            .split_once("?t=")
-            .map(|(_, token)| token.to_string())
-            .expect("a tokenised link");
+        let (mut serving, token) = served();
         serving.public = Some(format!(
             "https://tribute-resistance-resolved-moscow.trycloudflare.com/?t={token}"
         ));

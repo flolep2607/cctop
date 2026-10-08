@@ -565,10 +565,10 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
     // The brief is built out of the tool history, which the cache does not
     // carry, so this is one of the two callers that needs a real parse.
     let data = loader.store().session_data_fresh(session);
-    let brief = cctop_serve::handoff::build(session, Some(&data));
+    let brief = cctop_core::handoff::build(session, Some(&data));
     // Printed *and* written: the record of the conversation is a file, and a
     // brief that named one it had not left would send its reader looking.
-    print!("{}", cctop_serve::handoff::rendered(&brief));
+    print!("{}", cctop_core::handoff::rendered(&brief));
     Ok(())
 }
 
@@ -920,7 +920,7 @@ pub fn run_report(
 ) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
     let data = loader.store().session_data_fresh(session);
-    let report = cctop_serve::report::build(session, &data, plan);
+    let report = cctop_core::report::build(session, &data, plan);
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
@@ -929,7 +929,7 @@ pub fn run_report(
 pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
     // Deliberately not the cache: a conversation is the text the cache drops.
-    let conversation = cctop_serve::chat::build(session, before);
+    let conversation = cctop_core::chat::build(session, before);
     println!("{}", serde_json::to_string(&conversation)?);
     Ok(())
 }
@@ -938,14 +938,14 @@ pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> any
 ///
 /// `/api/chat/<id>/markdown` on a serve, and what that route runs on a remote
 /// row's machine. The whole transcript, not the page's window: see
-/// [`cctop_serve::chat::whole`].
+/// [`cctop_core::chat::whole`].
 pub fn run_export(sessions: &[Session], which: &str, tool_output: bool) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
-    let conversation = cctop_serve::chat::whole(session);
-    let options = cctop_serve::export::Options { tool_output };
+    let conversation = cctop_core::chat::whole(session);
+    let options = cctop_core::export::Options { tool_output };
     print!(
         "{}",
-        cctop_serve::export::render(session, &conversation, options)
+        cctop_core::export::render(session, &conversation, options)
     );
     Ok(())
 }

@@ -15,7 +15,6 @@ doctest = false
 
 [dependencies]
 cctop-core.workspace = true
-cctop-serve.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 crossterm.workspace = true

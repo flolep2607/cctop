@@ -35,7 +35,7 @@
 //! output can close it early.
 
 use crate::chat::{Conversation, ToolUse, Turn};
-use cctop_core::session::Session;
+use crate::session::Session;
 
 /// What one export includes beyond the words.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -77,9 +77,9 @@ pub fn render(session: &Session, conversation: &Conversation, options: Options) 
     field(
         &mut out,
         "Directory",
-        &cctop_core::util::tildify(&session.label_source),
+        &crate::util::tildify(&session.label_source),
     );
-    if let Some(branch) = cctop_core::branch::branch_of(session) {
+    if let Some(branch) = crate::branch::branch_of(session) {
         field(&mut out, "Branch", &branch);
     }
     field(&mut out, "Session", &session.session_id);
@@ -304,7 +304,7 @@ fn one_line(text: &str) -> String {
 /// rather than the server's zone because the export is read somewhere else,
 /// often by something with no idea where the server was.
 fn when(ts: &str) -> String {
-    match cctop_core::util::parse_ts(ts) {
+    match crate::util::parse_ts(ts) {
         Some(at) => at.format("%Y-%m-%d %H:%M UTC").to_string(),
         None => ts.trim().to_string(),
     }
@@ -319,7 +319,7 @@ fn title(session: &Session, conversation: &Conversation) -> String {
         .turns
         .iter()
         .find(|turn| turn.role == "user" && !turn.text.trim().is_empty())
-        .map(|turn| cctop_core::util::truncate(&one_line(&turn.text), 80))
+        .map(|turn| crate::util::truncate(&one_line(&turn.text), 80))
         .unwrap_or_else(|| "(untitled session)".to_string())
 }
 
@@ -336,7 +336,7 @@ mod tests {
     use std::borrow::Cow;
 
     fn session() -> Session {
-        let mut s = Session::new(cctop_core::pricing::Provider::Claude, "abc123".into());
+        let mut s = Session::new(crate::pricing::Provider::Claude, "abc123".into());
         s.label_source = "/nonexistent/repo".into();
         s.title = Some("Fix the parser".into());
         s.model = "claude-opus".into();

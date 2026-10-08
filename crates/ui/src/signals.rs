@@ -327,12 +327,12 @@ impl App {
     }
 
     /// Switch YOLO for the selected row, through the same check the page's
-    /// switch goes through — see [`cctop_serve::actions::yolo`].
+    /// switch goes through — see [`cctop_core::actions::yolo`].
     pub(super) fn toggle_yolo(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let said = match cctop_serve::actions::yolo(session, session.yolo.is_none()) {
+        let said = match cctop_core::actions::yolo(session, session.yolo.is_none()) {
             Ok(done) => done.message,
             Err((_, why)) => why,
         };

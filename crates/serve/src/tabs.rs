@@ -89,13 +89,6 @@ fn short_name(name: &str) -> String {
     name.strip_prefix("cctop-").unwrap_or(name).to_string()
 }
 
-/// Whether `name` is one of cctop's live tabs — the only sessions a terminal
-/// may be opened on. Without this the route would mint a shell link to any
-/// rmux session on the machine, by name.
-pub fn is_tab(running: &[Running], name: &str) -> bool {
-    running.iter().any(|r| r.name == name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,13 +146,5 @@ mod tests {
         assert_eq!(tabs[0].state, "working");
         assert_eq!(tabs[1].session_id, None);
         assert_eq!(tabs[1].state, "idle");
-    }
-
-    #[test]
-    fn only_a_live_tab_can_be_opened() {
-        let live = vec![running("cctop-a", 1, 0)];
-        assert!(is_tab(&live, "cctop-a"));
-        assert!(!is_tab(&live, "work"), "an rmux session cctop did not open");
-        assert!(!is_tab(&live, "cctop-gone"));
     }
 }

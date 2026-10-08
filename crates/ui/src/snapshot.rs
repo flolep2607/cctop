@@ -453,7 +453,7 @@ fn row_menu() {
 /// subscription it would spend.
 #[test]
 fn handoff_picker() {
-    use cctop_serve::handoff::Target;
+    use cctop_core::handoff::Target;
     let mut app = fixture();
     let to = |agent: &str, account: Option<&str>| Target {
         agent: agent.into(),

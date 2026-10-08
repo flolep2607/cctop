@@ -69,26 +69,13 @@
 //! the tunnel the user already has (ssh, Tailscale) is still better than
 //! anything here, because it authenticates rather than merely encrypting.
 
-pub mod actions;
 /// Cross-session aggregation behind `/api/analytics` — the data the
 /// analytics page charts, built from the snapshot plus cached extractions.
 mod analytics;
-/// The conversation reader. Public to the crate because a handoff brief
-/// carries what was said as well as what was done — see [`crate::handoff`].
-pub mod chat;
 /// Routes that only exist in a build that asked for them. Not a default
 /// feature, so a released cctop contains none of this — see the module docs.
 #[cfg(feature = "debug")]
 mod debug;
-/// A whole conversation as markdown, behind `/api/chat/<id>/markdown`.
-/// Crate-visible because `cctop --export` prints the same document, and a
-/// serve answers for a remote row by running that on the row's machine.
-pub mod export;
-/// The brief that hands a session's work to another harness. Part of the
-/// server's crate rather than core's because the brief carries the
-/// conversation [`chat`] reads, and the page's handoff action is its caller as
-/// much as `--handoff` and the dashboard are.
-pub mod handoff;
 mod http;
 /// `/metrics`, the snapshot in Prometheus's text format.
 mod metrics;
@@ -97,10 +84,6 @@ mod metrics;
 /// triggers.
 mod notify;
 mod quota;
-/// The per-session postmortem behind `/api/report`. Crate-visible because
-/// `cctop --report` prints the same document — the flag exists so a serve can
-/// answer for a remote row by running it on the machine that has the file.
-pub mod report;
 mod search;
 /// The TUI's tabs, read from rmux, for `/api/tabs`.
 mod tabs;
@@ -109,12 +92,16 @@ mod term;
 /// The run's credentials, and `--token-file`, which keeps them across runs.
 mod tokens;
 
+// What the page reads and does to a session is core's, shared with the
+// dashboard and the command line: the conversation, the report, the export,
+// the handoff brief, and the actions.
 use cctop_core::fleet;
 use cctop_core::loader::Loader;
 use cctop_core::pricing::Plan;
 use cctop_core::session::Session;
 use cctop_core::tunnel;
 use cctop_core::watch::Watch;
+use cctop_core::{actions, chat, export, report};
 use http::{EventStream, Request};
 use std::collections::HashMap;
 use std::io::Write;
@@ -1595,7 +1582,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             };
             let targets = match shared.actions && access == Access::Full && session.remote.is_none()
             {
-                true => crate::handoff::targets(session),
+                true => cctop_core::handoff::targets(session),
                 false => Vec::new(),
             };
             let targets: Vec<serde_json::Value> = targets
@@ -1617,7 +1604,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         // follow input on its own. Read-only, and only for cctop's tabs.
         _ if path.starts_with("/api/window/") => {
             let name = &path["/api/window/".len()..];
-            if !tabs::is_tab(&cctop_core::rmux::running(), name) {
+            if !actions::is_tab(&cctop_core::rmux::running(), name) {
                 return http::respond_error(
                     stream,
                     Some(&request),
@@ -1820,7 +1807,7 @@ fn remote_chat(
 ///
 /// `?variant=` picks the document: `conversation` (the default) is every turn
 /// with its calls listed, `tools` adds each call's result, and `brief` is the
-/// handoff brief — the summary [`crate::handoff`] writes for exactly the
+/// handoff brief — the summary [`cctop_core::handoff`] writes for exactly the
 /// paste-into-another-agent case, offered beside the transcript because on a
 /// long session it is the one that fits.
 ///
@@ -1838,7 +1825,7 @@ fn api_chat_markdown(shared: &Shared, stream: &mut TcpStream, request: &Request,
     let markdown = match (variant, session.remote.is_some()) {
         (Some("brief"), false) => {
             let data = shared.store.session_data_fresh(session);
-            crate::handoff::build(session, Some(&data)).to_markdown()
+            cctop_core::handoff::build(session, Some(&data)).to_markdown()
         }
         (Some("brief"), true) => {
             match remote_text(shared, session, &["--handoff", &session.session_id]) {

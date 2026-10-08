@@ -23,29 +23,31 @@ homepage = "https://github.com/flolep2607/cctop"
 # cctop is one binary built from four crates, cut where the dependencies
 # already ran one way, so that an edit recompiles only what sits above it:
 #
-#   cctop (this package: main, cli, doctor, why, wait, mcp, recall)
-#     └─ cctop-ui      the terminal dashboard
-#          └─ cctop-serve   the web server, and the conversation model it
-#                           shares with the dashboard (chat, report, export,
-#                           handoff, actions)
-#               └─ cctop-core   sessions and their parsers, the cache,
-#                               pricing, config, processes, hooks, rmux and
-#                               the shim — everything both faces read
+#                 cctop   main, the command line, and the commands nothing
+#               /   |   \  else calls (doctor, why, wait, mcp, recall)
+#   cctop-ui        |    cctop-serve
+#   the terminal    |    the web server
+#   dashboard       |
+#               \   |   /
+#               cctop-core   sessions and their parsers, the cache, pricing,
+#                            config, processes, hooks, rmux, the shim, and
+#                            what both faces read and do to a session
 #
 # - **core / everything else.** Sessions, the parsers and the cache are what
 #   every surface reads, and they reach each other in every direction (the
 #   loader needs the hooks, the hooks need the sessions), so they stay one
-#   crate rather than a cut through a cycle.
-# - **serve above core.** Nothing below it serves anything. What core used to
-#   borrow from it — the tunnel, the webhook POST, answering a prompt — moved
-#   down, because each had a user with no server running.
-# - **ui above serve.** The dashboard really does use the server: it starts
-#   one to share a session, and draws the conversation serve builds. The
-#   server uses nothing of the dashboard's. An edit to ui rebuilds ui and the
-#   binary; one to serve rebuilds serve, ui and the binary; neither touches
-#   core.
+#   crate rather than a cut through a cycle. With them is what the dashboard
+#   and the page both show and do — the conversation, the report, the export,
+#   the handoff brief, the actions — because both faces use it.
+# - **ui and serve side by side.** Neither depends on the other, so an edit to
+#   one rebuilds it and the binary and nothing else, and the two compile in
+#   parallel after core. The dashboard can still start a server to share its
+#   table: the binary, which has both, hands it the function that does.
 # - **the binary on top**, holding the command line and the commands nothing
 #   else calls, so that changing a flag rebuilds only the binary.
+# - **nothing in core reaches up.** What core once borrowed from the faces
+#   above it — the git branch of a row, the screen-footer table, the clipboard,
+#   the tunnel, the webhook POST — moved down, because each had a user below.
 #
 # Every crate is published, at this one version, because `cargo install cctop`
 # builds from crates.io and a crates.io package can only depend on others

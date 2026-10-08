@@ -456,6 +456,7 @@ dependencies = [
  "flate2",
  "libc",
  "notify",
+ "pulldown-cmark",
  "ratatui",
  "rayon",
  "regex",
@@ -487,7 +488,6 @@ dependencies = [
  "dirs",
  "flate2",
  "libc",
- "pulldown-cmark",
  "rusqlite",
  "serde",
  "serde_json",
@@ -500,7 +500,6 @@ version = "0.28.2"
 dependencies = [
  "anyhow",
  "cctop-core",
- "cctop-serve",
  "chrono",
  "crossterm",
  "dirs",

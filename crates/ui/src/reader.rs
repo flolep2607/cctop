@@ -15,15 +15,15 @@
 //! turns that changed. Only a new width lays out everything again, which it
 //! has to.
 //!
-//! [`chat::build`]: cctop_serve::chat::build
+//! [`chat::build`]: cctop_core::chat::build
 
 use super::hyperlink;
 use super::markdown::Link;
 use super::share;
 use super::theme;
 use super::{App, ChatView, Mode};
+use cctop_core::chat::{Conversation, ToolUse, Turn};
 use cctop_core::session::Session;
-use cctop_serve::chat::{Conversation, ToolUse, Turn};
 use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -975,7 +975,7 @@ fn footer(view: &ChatView) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cctop_serve::chat::Conversation;
+    use cctop_core::chat::Conversation;
 
     fn turn(seq: usize, role: &'static str, text: &str) -> Turn {
         Turn {

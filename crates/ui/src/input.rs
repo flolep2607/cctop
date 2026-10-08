@@ -801,7 +801,7 @@ impl App {
                 false => self.set_status("A QR code is for the tunnel's link — t opens one"),
             },
             KeyCode::Char('o') => match self.serving.as_ref().map(|s| s.best().to_string()) {
-                Some(link) => match cctop_serve::open_in_browser(&link) {
+                Some(link) => match crate::share::open_in_browser(&link) {
                     true => self.set_status("Opening the page in your browser"),
                     false => self.set_status("No browser to open it with — y copies the link"),
                 },
@@ -1363,7 +1363,7 @@ impl App {
                         render::copy_to_clipboard(&link);
                         // Over ssh a browser opened here is on the wrong
                         // machine, so the clipboard is the whole answer.
-                        let opened = !render::over_ssh() && cctop_serve::open_in_browser(&link);
+                        let opened = !render::over_ssh() && crate::share::open_in_browser(&link);
                         self.set_status(match opened {
                             true => "Copied the sign-in link, and asked the browser to open it",
                             false => "Copied the sign-in link — paste it into your browser",
@@ -1911,7 +1911,7 @@ impl App {
             return;
         }
         if let Some(link) = self.serving.as_ref().and_then(|s| s.public.clone()) {
-            match cctop_serve::open_in_browser(&link) {
+            match crate::share::open_in_browser(&link) {
                 true => self.set_status("Opening the shared page in your browser"),
                 false => self.set_status("No browser to open it with — B then y copies the link"),
             }

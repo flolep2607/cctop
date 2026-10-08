@@ -1314,7 +1314,7 @@ pub enum Choice {
     /// account, because the launcher reads the account back off the choice —
     /// to name the tab's account, and to put a copied transcript where that
     /// account looks — and an `env` prefix is not something to parse back.
-    Handoff(cctop_serve::handoff::Target),
+    Handoff(cctop_core::handoff::Target),
 }
 
 impl Choice {
