@@ -148,13 +148,10 @@ pub fn start(port: u16, want: Want, share_front: Option<u16>) -> anyhow::Result<
     if let Some(account) = account {
         match open_account(&runtime, port, &account) {
             Ok((handle, lock)) => {
-                // Lent only with a front to send it to: a share hostname
+                // Share hostnames only with a front to send them to: one
                 // routed anywhere else would be a road nobody vetted.
-                let shares = account
-                    .share_hostname
-                    .as_deref()
-                    .zip(share_front)
-                    .map(|(host, front)| SHARES.lend(handle.routes().clone(), host, front));
+                let share = account.share_hostname.as_deref().zip(share_front);
+                let shares = Some(SHARES.lend(handle.routes().clone(), handle.hostname(), share));
                 return Ok(Tunnel {
                     url: handle.url().to_string(),
                     kind: Kind::Account,
@@ -294,6 +291,33 @@ pub fn share_origin(port: u16) -> Option<String> {
     SHARES.route(port, None)
 }
 
+/// [`share_origin`] on `host` rather than the default share hostname: an
+/// agent's own name ([`Account::share_host_for`]). Routed to the same front,
+/// which tells shares apart by the token in the link, not by the hostname.
+pub fn share_origin_at(port: u16, host: &str) -> Option<String> {
+    SHARES.route(port, Some(host))
+}
+
+/// Stop answering `host`, an agent's name that was renamed or cleared. Only
+/// a name the front answers, and never the default share hostname, which
+/// other agents' links still use.
+pub fn forget_share_host(host: &str) {
+    SHARES.forget(host);
+}
+
+/// The hostname the page is reached on over the account's tunnel right now,
+/// which a rename can move while the tunnel is up.
+pub fn page_host() -> Option<String> {
+    SHARES.page_host()
+}
+
+/// Send the page's requests on `new` from now on and stop answering `old`:
+/// a renamed dashboard, without re-registering the tunnel. Nothing when the
+/// tunnel held is not on `old`.
+pub fn move_page(old: &str, new: &str) {
+    SHARES.move_page(old, new);
+}
+
 /// The rmux listener port the share front relays the socket to, while this
 /// process lends a tunnel and a share has been routed on it.
 pub fn share_upstream() -> Option<u16> {
@@ -314,13 +338,13 @@ pub fn share_generation() -> u64 {
     SHARES.generation()
 }
 
-/// One loan: the routing table, the default share hostname, and the share
-/// front's loopback port.
+/// One loan: the routing table, the page's hostname on it, and — when there
+/// is one — the default share hostname and the share front's loopback port.
 struct Lease {
     generation: u64,
     routes: Routes,
-    host: String,
-    front: u16,
+    page: String,
+    share: Option<(String, u16)>,
 }
 
 struct Shares {
@@ -345,13 +369,13 @@ impl Shares {
         }
     }
 
-    fn lend(&'static self, routes: Routes, host: &str, front: u16) -> Lent {
+    fn lend(&'static self, routes: Routes, page: &str, share: Option<(&str, u16)>) -> Lent {
         let generation = self.bump();
         *self.locked() = Some(Lease {
             generation,
             routes,
-            host: host.to_string(),
-            front,
+            page: page.to_string(),
+            share: share.map(|(host, front)| (host.to_string(), front)),
         });
         Lent {
             shares: self,
@@ -364,8 +388,15 @@ impl Shares {
     fn route(&self, port: u16, host: Option<&str>) -> Option<String> {
         let lent = self.locked();
         let lease = lent.as_ref()?;
-        let host = host.unwrap_or(&lease.host);
-        lease.routes.insert(host, lease.front);
+        let (default, front) = lease.share.as_ref()?;
+        let host = host.unwrap_or(default);
+        // Never the page's own hostname, whatever a stored name says: that
+        // would hand the page's address to the front, and the page's links
+        // would open a terminal app instead.
+        if same_host(host, &lease.page) {
+            return None;
+        }
+        lease.routes.insert(host, *front);
         self.upstream
             .store(port, std::sync::atomic::Ordering::SeqCst);
         Some(format!("https://{host}"))
@@ -380,9 +411,45 @@ impl Shares {
     }
 
     fn is_share_host(&self, host: &str) -> bool {
-        self.locked()
-            .as_ref()
-            .is_some_and(|lease| lease.routes.port_for(host) == Some(lease.front))
+        self.locked().as_ref().is_some_and(|lease| {
+            lease
+                .share
+                .as_ref()
+                .is_some_and(|(_, front)| lease.routes.port_for(host) == Some(*front))
+        })
+    }
+
+    fn forget(&self, host: &str) {
+        let lent = self.locked();
+        let Some(Lease {
+            routes,
+            share: Some((default, front)),
+            ..
+        }) = lent.as_ref()
+        else {
+            return;
+        };
+        if !same_host(host, default) && routes.port_for(host) == Some(*front) {
+            routes.remove(host);
+        }
+    }
+
+    fn page_host(&self) -> Option<String> {
+        self.locked().as_ref().map(|lease| lease.page.clone())
+    }
+
+    fn move_page(&self, old: &str, new: &str) {
+        let mut lent = self.locked();
+        let Some(lease) = lent.as_mut() else {
+            return;
+        };
+        if !same_host(&lease.page, old) {
+            return;
+        }
+        // The new one first, so there is no moment with neither answering.
+        lease.routes.insert(new, lease.routes.primary());
+        lease.routes.remove(old);
+        lease.page = new.to_string();
     }
 
     fn generation(&self) -> u64 {
@@ -400,6 +467,12 @@ impl Shares {
         // is still a routing table.
         self.lent.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// Hostnames compare without case or a trailing dot.
+fn same_host(a: &str, b: &str) -> bool {
+    a.trim_end_matches('.')
+        .eq_ignore_ascii_case(b.trim_end_matches('.'))
 }
 
 impl Drop for Lent {
@@ -441,9 +514,76 @@ pub struct Account {
     pub tunnel_id: Option<String>,
     pub dns_record_ids: Vec<String>,
     pub api_token: Option<String>,
+    /// Agents' own share addresses, by the session id of the agent: `W` on
+    /// that agent goes out on `<label>.<zone>` instead of the default share
+    /// hostname.
+    ///
+    /// Kept here, with the account, rather than in a file of their own:
+    /// each is a DNS record cctop created on this account, and this table is
+    /// what `cctop tunnel remove` and the dashboard's disconnect read to
+    /// delete what cctop made — so a name is deleted with the account and
+    /// forgotten with it, and never outlives the one thing that can remove
+    /// its record.
+    ///
+    /// ponytail: a session deleted from history keeps its name and record
+    /// until it is renamed, cleared, or the account is removed.
+    pub share_names: std::collections::BTreeMap<String, ShareName>,
     /// Whether this came from `CCTOP_TUNNEL_TOKEN` rather than the file — and
     /// so is not cctop's to remove.
     pub from_env: bool,
+}
+
+/// One agent's share address: the DNS label under the account's zone, and
+/// the id of the record cctop created for it — the only record a rename or
+/// a removal ever deletes on its behalf.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShareName {
+    pub label: String,
+    pub record_id: Option<String>,
+}
+
+/// Why an account cannot have its addresses chosen: it was connected with a
+/// tunnel token, so cctop holds nothing that can write DNS.
+pub const TOKEN_ONLY: &str =
+    "Connected with a tunnel token — reconnect with an API token to choose addresses";
+
+impl Account {
+    /// The domain the account's hostnames are under: everything after the
+    /// page's first label, since setup only ever makes one-label names.
+    pub fn zone_name(&self) -> Option<&str> {
+        self.hostname
+            .as_deref()?
+            .split_once('.')
+            .map(|(_, zone)| zone)
+    }
+
+    /// The hostname `W` on `session_id` goes out on: its own name when it
+    /// has one, else the default share hostname.
+    pub fn share_host_for(&self, session_id: &str) -> Option<String> {
+        self.named_share_host(session_id)
+            .or_else(|| self.share_hostname.clone())
+    }
+
+    /// `session_id`'s own share hostname, when it has one.
+    pub fn named_share_host(&self, session_id: &str) -> Option<String> {
+        let name = self.share_names.get(session_id)?;
+        Some(format!("{}.{}", name.label, self.zone_name()?))
+    }
+
+    /// Whether cctop can write this account's DNS, or the sentence saying
+    /// why not.
+    pub fn can_rename(&self) -> Result<(), &'static str> {
+        let writable = !self.from_env
+            && self.api_token.is_some()
+            && self.zone_id.is_some()
+            && self.account_id.is_some()
+            && self.tunnel_id.is_some()
+            && self.zone_name().is_some();
+        match writable {
+            true => Ok(()),
+            false => Err(TOKEN_ONLY),
+        }
+    }
 }
 
 /// By hand, because a derived one prints both credentials.
@@ -458,6 +598,7 @@ impl fmt::Debug for Account {
             .field("tunnel_id", &self.tunnel_id)
             .field("dns_record_ids", &self.dns_record_ids)
             .field("api_token", &self.api_token.as_ref().map(|_| "[redacted]"))
+            .field("share_names", &self.share_names)
             .field("from_env", &self.from_env)
             .finish()
     }
@@ -525,6 +666,33 @@ fn from_table(text: &str) -> Option<Account> {
             })
             .unwrap_or_default(),
         api_token: text("api_token"),
+        share_names: table
+            .get("share_names")
+            .and_then(|v| v.as_table_like())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|(session, entry)| {
+                        let entry = entry.as_table_like()?;
+                        let field = |key: &str| {
+                            entry
+                                .get(key)
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                                .map(String::from)
+                        };
+                        Some((
+                            session.to_string(),
+                            ShareName {
+                                label: field("label")?,
+                                record_id: field("record_id"),
+                            },
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         from_env: false,
     })
 }
@@ -554,6 +722,20 @@ pub(crate) fn save_account_in(path: &Path, account: &Account) -> anyhow::Result<
         if !account.dns_record_ids.is_empty() {
             let ids: toml_edit::Array = account.dns_record_ids.iter().collect();
             table.insert("dns_record_ids", toml_edit::value(ids));
+        }
+        if !account.share_names.is_empty() {
+            let mut names = toml_edit::Table::new();
+            // `[tunnel.share_names."<id>"]` sections, not one long line.
+            names.set_implicit(true);
+            for (session, name) in &account.share_names {
+                let mut entry = toml_edit::Table::new();
+                entry.insert("label", toml_edit::value(&name.label));
+                if let Some(id) = &name.record_id {
+                    entry.insert("record_id", toml_edit::value(id));
+                }
+                names.insert(session, toml_edit::Item::Table(entry));
+            }
+            table.insert("share_names", toml_edit::Item::Table(names));
         }
         doc.insert("tunnel", toml_edit::Item::Table(table));
     })
@@ -612,6 +794,23 @@ mod tests {
             tunnel_id: Some("6ff42ae2-765d-4adf-8112-31c55c1551ef".into()),
             dns_record_ids: vec!["rec1".into(), "rec2".into()],
             api_token: Some("made-up-api-token".into()),
+            share_names: [
+                (
+                    "8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11".to_string(),
+                    ShareName {
+                        label: "myagent".into(),
+                        record_id: Some("rec3".into()),
+                    },
+                ),
+                (
+                    "rollout-2026-10-08T10-00-00-0199".to_string(),
+                    ShareName {
+                        label: "codex-one".into(),
+                        record_id: Some("rec4".into()),
+                    },
+                ),
+            ]
+            .into(),
             from_env: false,
         }
     }
@@ -628,6 +827,10 @@ mod tests {
         save_account_in(&path, &full()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my accounts"), "{text}");
+        assert!(
+            text.contains("[tunnel.share_names.8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11]"),
+            "{text}"
+        );
         assert!(text.contains("token = \"keep-me\" # a comment"), "{text}");
         assert_eq!(account_from(None, None, Some(&text)), Some(full()));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -681,6 +884,34 @@ mod tests {
         let shown = format!("{:?}", full());
         assert!(!shown.contains("made-up"), "{shown}");
         assert!(shown.contains("cctop.example.test"), "{shown}");
+        assert!(shown.contains("myagent"), "{shown}");
+    }
+
+    #[test]
+    fn an_agent_goes_out_on_its_own_name_or_the_default() {
+        let account = full();
+        assert_eq!(account.zone_name(), Some("example.test"));
+        assert_eq!(
+            account
+                .share_host_for("8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11")
+                .as_deref(),
+            Some("myagent.example.test")
+        );
+        assert_eq!(
+            account.share_host_for("unnamed").as_deref(),
+            Some("cctop-share.example.test")
+        );
+        assert_eq!(account.can_rename(), Ok(()));
+        let pasted = Account {
+            api_token: None,
+            ..full()
+        };
+        assert_eq!(pasted.can_rename(), Err(TOKEN_ONLY));
+        let env = Account {
+            from_env: true,
+            ..full()
+        };
+        assert_eq!(env.can_rename(), Err(TOKEN_ONLY));
     }
 
     #[test]
@@ -705,7 +936,11 @@ mod tests {
         let routes = Routes::new(7777);
         routes.insert("cctop.example.test", 7777);
         let before = LOCAL.generation();
-        let lent = LOCAL.lend(routes.clone(), "cctop-share.example.test", FRONT);
+        let lent = LOCAL.lend(
+            routes.clone(),
+            "cctop.example.test",
+            Some(("cctop-share.example.test", FRONT)),
+        );
         assert_ne!(LOCAL.generation(), before);
         assert_eq!(LOCAL.upstream(), None, "nothing shared yet");
         assert_eq!(
@@ -726,6 +961,37 @@ mod tests {
         LOCAL.route(4100, None);
         assert_eq!(routes.port_for("cctop-share.example.test"), Some(FRONT));
         assert_eq!(LOCAL.upstream(), Some(4100));
+
+        // An agent's own name goes to the same front, and forgetting it
+        // leaves the default alone.
+        assert_eq!(
+            LOCAL.route(4100, Some("myagent.example.test")).as_deref(),
+            Some("https://myagent.example.test")
+        );
+        assert_eq!(routes.port_for("myagent.example.test"), Some(FRONT));
+        LOCAL.forget("myagent.example.test");
+        assert_eq!(routes.port_for("myagent.example.test"), None);
+        LOCAL.forget("cctop-share.example.test");
+        LOCAL.forget("cctop.example.test");
+        assert_eq!(routes.port_for("cctop-share.example.test"), Some(FRONT));
+        assert_eq!(routes.port_for("cctop.example.test"), Some(7777));
+        // A stored name can never take the page's own hostname.
+        assert_eq!(LOCAL.route(4100, Some("CCTOP.example.test")), None);
+        assert_eq!(routes.port_for("cctop.example.test"), Some(7777));
+
+        // A renamed dashboard moves the page's route and nothing else.
+        assert_eq!(LOCAL.page_host().as_deref(), Some("cctop.example.test"));
+        LOCAL.move_page("cctop.example.test", "home.example.test");
+        assert_eq!(routes.port_for("home.example.test"), Some(7777));
+        assert_eq!(routes.port_for("cctop.example.test"), None);
+        assert_eq!(LOCAL.page_host().as_deref(), Some("home.example.test"));
+        assert_eq!(routes.port_for("cctop-share.example.test"), Some(FRONT));
+        LOCAL.move_page("cctop.example.test", "elsewhere.example.test");
+        assert_eq!(
+            routes.port_for("elsewhere.example.test"),
+            None,
+            "not on old"
+        );
 
         let held = LOCAL.generation();
         drop(lent);
