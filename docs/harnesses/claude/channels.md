@@ -34,7 +34,7 @@ Each supported channel is a plugin that requires [Bun](https://bun.sh). For a ha
       </Step>
 
       <Step title="Install the plugin">
-        In Claude Code, run:
+        Start Claude Code by running `claude` in your terminal, then enter this at its prompt:
 
         ```
         /plugin install telegram@claude-plugins-official
@@ -43,9 +43,9 @@ Each supported channel is a plugin that requires [Bun](https://bun.sh). For a ha
         If the install fails, match the message Claude Code reports:
 
         * `Marketplace "claude-plugins-official" not found`: add the marketplace with `/plugin marketplace add anthropics/claude-plugins-official`, then retry the install.
-        * The plugin is [not found in the marketplace](/docs/en/discover-plugins#install-plugins): check the plugin name.
+        * The plugin is [not found in the marketplace](/docs/en/plugins/install#install-a-plugin): check the plugin name.
 
-        When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects. Check the install summary: if it reports `Run /reload-plugins to activate.`, run that command to activate the plugin's configure command.
+        When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects. Check the install summary: if it reports `Run /reload-plugins to apply.`, see [Apply plugin changes without restarting](/docs/en/plugins/cli-reference#reload-plugins) to make the plugin's configure command available.
       </Step>
 
       <Step title="Configure your token">
@@ -112,7 +112,7 @@ Each supported channel is a plugin that requires [Bun](https://bun.sh). For a ha
       </Step>
 
       <Step title="Install the plugin">
-        In Claude Code, run:
+        Start Claude Code by running `claude` in your terminal, then enter this at its prompt:
 
         ```
         /plugin install discord@claude-plugins-official
@@ -121,9 +121,9 @@ Each supported channel is a plugin that requires [Bun](https://bun.sh). For a ha
         If the install fails, match the message Claude Code reports:
 
         * `Marketplace "claude-plugins-official" not found`: add the marketplace with `/plugin marketplace add anthropics/claude-plugins-official`, then retry the install.
-        * The plugin is [not found in the marketplace](/docs/en/discover-plugins#install-plugins): check the plugin name.
+        * The plugin is [not found in the marketplace](/docs/en/plugins/install#install-a-plugin): check the plugin name.
 
-        When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects. Check the install summary: if it reports `Run /reload-plugins to activate.`, run that command to activate the plugin's configure command.
+        When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects. Check the install summary: if it reports `Run /reload-plugins to apply.`, see [Apply plugin changes without restarting](/docs/en/plugins/cli-reference#reload-plugins) to make the plugin's configure command available.
       </Step>
 
       <Step title="Configure your token">
@@ -177,7 +177,7 @@ Each supported channel is a plugin that requires [Bun](https://bun.sh). For a ha
       </Step>
 
       <Step title="Install the plugin">
-        In Claude Code, run:
+        Start Claude Code by running `claude` in your terminal, then enter this at its prompt:
 
         ```
         /plugin install imessage@claude-plugins-official
@@ -186,9 +186,11 @@ Each supported channel is a plugin that requires [Bun](https://bun.sh). For a ha
         If the install fails, match the message Claude Code reports:
 
         * `Marketplace "claude-plugins-official" not found`: add the marketplace with `/plugin marketplace add anthropics/claude-plugins-official`, then retry the install.
-        * The plugin is [not found in the marketplace](/docs/en/discover-plugins#install-plugins): check the plugin name.
+        * The plugin is [not found in the marketplace](/docs/en/plugins/install#install-a-plugin): check the plugin name.
 
-        When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects. If the install summary reports `Run /reload-plugins to activate.`, you can skip that here, because restarting in the next step picks up the plugin.
+        When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects.
+
+        If the install summary reports `Run /reload-plugins to apply.`, you don't need to act on it here, because restarting in the next step picks up the plugin.
       </Step>
 
       <Step title="Restart with channels enabled">
@@ -232,7 +234,7 @@ To try the fakechat demo, you'll need:
 
 <Steps>
   <Step title="Install the fakechat channel plugin">
-    Start a Claude Code session and run the install command:
+    Start Claude Code by running `claude` in your terminal, then enter the install command at its prompt:
 
     ```text theme={null}
     /plugin install fakechat@claude-plugins-official
@@ -241,9 +243,11 @@ To try the fakechat demo, you'll need:
     If the install fails, match the message Claude Code reports:
 
     * `Marketplace "claude-plugins-official" not found`: add the marketplace with `/plugin marketplace add anthropics/claude-plugins-official`, then retry the install.
-    * The plugin is [not found in the marketplace](/docs/en/discover-plugins#install-plugins): check the plugin name.
+    * The plugin is [not found in the marketplace](/docs/en/plugins/install#install-a-plugin): check the plugin name.
 
-    When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects. If the install summary reports `Run /reload-plugins to activate.`, you can skip that here, because restarting in the next step picks up the plugin.
+    When the install asks for an installation scope, choose the user scope option so the plugin is available across all your projects.
+
+    If the install summary reports `Run /reload-plugins to apply.`, you don't need to act on it here, because restarting in the next step picks up the plugin.
   </Step>
 
   <Step title="Restart with the channel enabled">
@@ -303,16 +307,16 @@ Admins control availability through two [managed settings](/docs/en/settings) th
 
 In all cases, no channel runs until a user opts it in for the session with `--channels`.
 
-| Setting                 | Purpose                                                                                                                                                                                                              | When not configured                                                                                                                                                                    |
-| :---------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `channelsEnabled`       | Master switch. Must be `true` for any channel to deliver messages. Blocks all channels including the development flag when off. See [Enable channels for your organization](#enable-channels-for-your-organization). | claude.ai Team and Enterprise: channels blocked. Console: channels allowed unless your organization deploys managed settings, in which case channels are blocked until this key is set |
-| `allowedChannelPlugins` | Which plugins can register once channels are enabled. Replaces the Anthropic-maintained list when set.                                                                                                               | Anthropic default list applies                                                                                                                                                         |
+| Setting | Purpose | When not configured |
+| :- | :- | :- |
+| `channelsEnabled` | Master switch. Must be `true` for any channel to deliver messages. Blocks all channels including the development flag when off. See [Enable channels for your organization](#enable-channels-for-your-organization). | claude.ai Team and Enterprise: channels blocked. Console: channels allowed unless your organization deploys managed settings, in which case channels are blocked until this key is set |
+| `allowedChannelPlugins` | Which plugins can register once channels are enabled. Replaces the Anthropic-maintained list when set. | Anthropic default list applies |
 
 Pro and Max users without an organization skip these checks entirely: channels are available and users opt in per session with `--channels`.
 
 ### Enable channels for your organization
 
-Enable channels for your organization from [**claude.ai → Admin settings → Claude Code → Channels**](https://claude.ai/admin-settings/claude-code), which requires the Owner role, or by setting `channelsEnabled` to `true` in managed settings.
+Enable channels for your organization from [**Organization settings > Claude Code > Channels**](https://claude.ai/admin-settings/claude-code), which requires the Owner role, or by setting `channelsEnabled` to `true` in managed settings.
 
 Once enabled, users in your organization can use `--channels` to opt channel servers into individual sessions. If the setting is disabled or unset, the MCP server still connects and its tools work, but channel messages won't arrive. A startup warning tells the user to have an admin enable the setting.
 
@@ -333,7 +337,7 @@ By default, any plugin on the Anthropic-maintained allowlist can register as a c
 
 If you set an empty array, you block all channel plugins from the allowlist, but `--dangerously-load-development-channels` can still bypass that block for local testing. To block channels entirely including the development flag, leave `channelsEnabled` unset instead.
 
-This setting requires `channelsEnabled: true`. If a user passes a plugin to `--channels` that isn't on your list, Claude Code starts normally but the channel doesn't register, and the startup notice explains that the plugin isn't on the organization's approved list. If you set `MCP_PROTOCOL_NEGOTIATION` to `auto` on the v2 MCP client runtime, a channel can also fail to register because Claude Code [doesn't register a channel server that negotiates protocol revision 2026-07-28](/docs/en/mcp#push-messages-with-channels).
+This setting requires `channelsEnabled: true`. If a user passes a plugin to `--channels` that isn't on your list, Claude Code starts normally but the channel doesn't register, and the startup notice explains that the plugin isn't on the organization's approved list. On the v2 MCP client runtime, a channel can also fail to register because Claude Code [doesn't register a channel server that negotiates protocol revision 2026-07-28](/docs/en/mcp#push-messages-with-channels).
 
 ## Research preview
 
@@ -343,7 +347,7 @@ Neither `--channels` nor `--dangerously-load-development-channels` appears in `c
 
 During the preview, `--channels` only accepts plugins from an Anthropic-maintained allowlist, or from your organization's allowlist if an admin has set [`allowedChannelPlugins`](#restrict-which-channel-plugins-can-run). The channel plugins in [claude-plugins-official](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins) are the default approved set. If you pass something that isn't on the effective allowlist, Claude Code starts normally but the channel doesn't register, and the startup notice tells you why.
 
-To test a channel you're building, use `--dangerously-load-development-channels`. See [Test during the research preview](/docs/en/channels-reference#test-during-the-research-preview) for information about testing custom channels that you build.
+To test a channel you're building, pass it to `--dangerously-load-development-channels` in the `plugin:<name>@<marketplace>` or `server:<name>` form. See [Test during the research preview](/docs/en/channels-reference#test-during-the-research-preview) for information about testing custom channels that you build.
 
 Report issues or feedback on the [Claude Code GitHub repository](https://github.com/anthropics/claude-code/issues).
 
@@ -351,12 +355,12 @@ Report issues or feedback on the [Claude Code GitHub repository](https://github.
 
 Several Claude Code features connect to systems outside the terminal, each suited to a different kind of work:
 
-| Feature                                              | What it does                                                          | Good for                                                  |
-| ---------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------- |
-| [Claude Code on the web](/docs/en/claude-code-on-the-web) | Runs tasks in a fresh cloud sandbox, cloned from GitHub               | Delegating self-contained async work you check on later   |
-| [Claude in Slack](/docs/en/slack)                         | Spawns a web session from an `@Claude` mention in a channel or thread | Starting tasks directly from team conversation context    |
-| Standard [MCP server](/docs/en/mcp)                       | Claude queries it during a task; nothing is pushed to the session     | Giving Claude on-demand access to read or query a system  |
-| [Remote Control](/docs/en/remote-control)                 | You drive your local session from claude.ai or the Claude mobile app  | Steering an in-progress session while away from your desk |
+| Feature | What it does | Good for |
+| - | - | - |
+| [Cloud sessions](/docs/en/claude-code-on-the-web) | Run tasks in a fresh cloud sandbox, cloned from GitHub | Delegating self-contained async work you check on later |
+| [Claude in Slack](/docs/en/slack) | Spawns a cloud session from an `@Claude` mention in a channel or thread | Starting tasks directly from team conversation context |
+| Standard [MCP server](/docs/en/mcp) | Claude queries it during a task; nothing is pushed to the session | Giving Claude on-demand access to read or query a system |
+| [Remote Control](/docs/en/remote-control) | You drive your local session from claude.ai or the Claude mobile app | Steering an in-progress session while away from your desk |
 
 Channels fill the gap in that list by pushing events from non-Claude sources into your already-running local session.
 

@@ -82,13 +82,15 @@ Choose **Allow for this session** or **Deny**. Approvals last for the current se
 
 Apps with broad reach show an extra warning in the prompt so you know what approving them grants:
 
-| Warning                    | Applies to                                                   |
-| :------------------------- | :----------------------------------------------------------- |
+| Warning | Applies to |
+| :- | :- |
 | Equivalent to shell access | Terminal, iTerm, VS Code, Warp, and other terminals and IDEs |
-| Can read or write any file | Finder                                                       |
-| Can change system settings | System Settings                                              |
+| Can read or write any file | Finder |
+| Can change system settings | System Settings |
 
 These apps aren't blocked. The warning lets you decide whether the task warrants that level of access.
+
+Approve Finder to let Claude click the desktop, the Dock, or a Finder window.
 
 Claude's level of control also varies by app category: browsers and trading platforms are view-only, terminals and IDEs are click-only, and everything else gets full control. See [app permissions in Desktop](/docs/en/desktop#app-permissions) for the complete tier breakdown.
 
@@ -98,7 +100,7 @@ Understanding the flow helps you anticipate what Claude will do and how to inter
 
 ### One session at a time
 
-Only one session at a time can use your computer. A session takes a machine-wide lock at its first computer use action and releases it when the session exits, not when the task finishes. A second session's computer use fails with an error naming the session that holds the lock. Exit that session first.
+Only one session at a time can use your computer. A session takes a lock at its first computer use action and releases it when the session exits, not when the task finishes. A second session's computer use fails with an error naming the session that holds the lock. Exit that session first.
 
 ### Apps are hidden while Claude works
 
@@ -114,7 +116,7 @@ There is no setting to change the target size. If on-screen text or controls are
 
 ### Stop at any time
 
-When Claude acquires the lock, a macOS notification appears: "Claude is using your computer · press Esc to stop." Press `Esc` anywhere to abort the current action immediately, or press `Ctrl+C` in the terminal. Either way, Claude stops, unhides your apps, and returns control to you. The session keeps the [computer use lock](#one-session-at-a-time) until it exits.
+The first time Claude uses your computer in each turn, a macOS notification appears: "Claude is using your computer · press Esc to stop." Press `Esc` anywhere to abort the current action immediately, or press `Ctrl+C` in the terminal. Either way, Claude stops, unhides your apps, and returns control to you. The session keeps the [computer use lock](#one-session-at-a-time) until it exits.
 
 A second notification appears when Claude is done.
 
@@ -175,13 +177,13 @@ Claude controls the simulator the same way you would with a mouse. This flow app
 
 The CLI and Desktop surfaces share the same computer use engine, with a few differences:
 
-| Feature              | Desktop                                                  | CLI                             |
-| :------------------- | :------------------------------------------------------- | :------------------------------ |
-| Platforms            | macOS and Windows                                        | macOS only                      |
-| Enable               | Toggle in **Settings > General** (under **Desktop app**) | Enable `computer-use` in `/mcp` |
-| Denied apps list     | Configurable in Settings                                 | Not yet available               |
-| Auto-unhide toggle   | Optional                                                 | Always on                       |
-| Dispatch integration | Dispatch-spawned sessions can use computer use           | Not applicable                  |
+| Feature | Desktop | CLI |
+| :- | :- | :- |
+| Platforms | macOS and Windows | macOS only |
+| Enable | Toggle in **Settings > This computer > System** | Enable `computer-use` in `/mcp` |
+| Denied apps list | Configurable in Settings | Not yet available |
+| Auto-unhide toggle | Optional | Always on |
+| Dispatch integration | Dispatch-spawned sessions can use computer use | Not applicable |
 
 ## Troubleshooting
 

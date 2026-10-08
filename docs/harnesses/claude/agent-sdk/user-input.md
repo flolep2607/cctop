@@ -12,7 +12,7 @@ Claude requests user input in two situations: when it needs **permission to use 
 
 For clarifying questions, Claude generates the questions and options. Your role is to present them to users and return their selections. You can't add your own questions to this flow; if you need to ask users something yourself, do that separately in your application logic.
 
-The callback can stay pending indefinitely. Execution remains paused until your callback returns, and the SDK only cancels the wait when the query itself is cancelled. If a user might take longer to respond than your process can reasonably stay running, return the [`defer` hook decision](/docs/en/hooks#defer-a-tool-call-for-later), which lets the process exit and resume later from the persisted session.
+The callback can stay pending indefinitely. Execution remains paused until your callback returns. If a user might take longer to respond than your process can reasonably stay running, register a [`PreToolUse` hook](/docs/en/agent-sdk/hooks) that returns the [`defer` decision](/docs/en/hooks#defer-a-tool-call-for-later) instead of waiting in the callback, so the process can exit and resume later from the persisted session.
 
 This guide shows you how to detect each type of request and respond appropriately.
 
@@ -58,22 +58,24 @@ You can also use the [`PermissionRequest` hook](/docs/en/agent-sdk/hooks#availab
 
 ## Handle tool approval requests
 
-Once you've passed a `canUseTool` callback in your query options, it fires when Claude wants to use a tool that nothing earlier in the permission flow has approved. Your callback receives three arguments:
+Once you've passed a `canUseTool` callback in your query options, it fires when Claude wants to use a tool that nothing earlier in the permission flow has approved. In some configurations, such as `dontAsk` mode, Claude Code doesn't call it; the last step of [How permissions are evaluated](/docs/en/agent-sdk/permissions#how-permissions-are-evaluated) lists them and says what happens to the call instead.
 
-| Argument                            | Description                                                                                                                                                                                                                                                                                                                           |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `toolName`                          | The name of the tool Claude wants to use (e.g., `"Bash"`, `"Write"`, `"Edit"`)                                                                                                                                                                                                                                                        |
-| `input`                             | The parameters Claude is passing to the tool. Contents vary by tool.                                                                                                                                                                                                                                                                  |
+Your callback receives three arguments:
+
+| Argument | Description |
+| - | - |
+| `toolName` | The name of the tool Claude wants to use (for example, `"Bash"`, `"Write"`, `"Edit"`) |
+| `input` | The parameters Claude is passing to the tool. Contents vary by tool. |
 | `options` (TS) / `context` (Python) | Additional context including optional `suggestions` (proposed `PermissionUpdate` entries to avoid re-prompting) and a cancellation signal. In TypeScript, `signal` is an `AbortSignal`; in Python, the signal field is reserved for future use. See [`ToolPermissionContext`](/docs/en/agent-sdk/python#toolpermissioncontext) for Python. |
 
 The `input` object contains tool-specific parameters. Common examples:
 
-| Tool    | Input fields                            |
-| ------- | --------------------------------------- |
-| `Bash`  | `command`, `description`, `timeout`     |
-| `Write` | `file_path`, `content`                  |
-| `Edit`  | `file_path`, `old_string`, `new_string` |
-| `Read`  | `file_path`, `offset`, `limit`          |
+| Tool | Input fields |
+| - | - |
+| `Bash` | `command`, `description`, `timeout` |
+| `Write` | `file_path`, `content` |
+| `Edit` | `file_path`, `old_string`, `new_string` |
+| `Read` | `file_path`, `offset`, `limit` |
 
 See the SDK reference for complete input schemas: [Python](/docs/en/agent-sdk/python#tool-input%2Foutput-types) | [TypeScript](/docs/en/agent-sdk/typescript#tool-input-types).
 
@@ -198,49 +200,25 @@ The following example asks Claude to create and delete a test file. When Claude 
   ```
 </CodeGroup>
 
-<Note>
-  In Python, `can_use_tool` requires [streaming mode](/docs/en/agent-sdk/streaming-vs-single-mode). When you pass a finite message stream through `query(prompt=generator)` or `ClaudeSDKClient.connect(prompt=async_iterable)`, the SDK closes the input stream after the last message, before the permission callback can be invoked, unless a registered hook or in-process MCP server is keeping it open. The example above keeps it open with a `PreToolUse` hook that returns `{"continue_": True}`. Connecting with no prompt and sending messages through `ClaudeSDKClient.query()` keeps the stream open on its own and needs no hook.
-</Note>
-
 This example uses a `y/n` flow where any input other than `y` is treated as a denial. In practice, you might build a richer UI that lets users modify the request, provide feedback, or redirect Claude entirely. See [Respond to tool requests](#respond-to-tool-requests) for all the ways you can respond.
 
 ### Respond to tool requests
 
 Your callback returns one of two response types:
 
-| Response  | Python                                     | TypeScript                            |
-| --------- | ------------------------------------------ | ------------------------------------- |
+| Response | Python | TypeScript |
+| - | - | - |
 | **Allow** | `PermissionResultAllow(updated_input=...)` | `{ behavior: "allow", updatedInput }` |
-| **Deny**  | `PermissionResultDeny(message=...)`        | `{ behavior: "deny", message }`       |
+| **Deny** | `PermissionResultDeny(message=...)` | `{ behavior: "deny", message }` |
 
 When allowing, the tool runs with the input Claude requested unless you return a modified input, `updatedInput` in TypeScript or `updated_input` in Python. Before v2.1.207, Claude Code rejected an allow result that omitted `updatedInput` and denied the tool call with a validation error.
 
 When denying, provide a message explaining why. Claude sees this message and may adjust its approach.
 
-<CodeGroup>
-  ```python Python theme={null}
-  from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
-
-  # Allow the tool to execute
-  return PermissionResultAllow(updated_input=input_data)
-
-  # Block the tool
-  return PermissionResultDeny(message="User rejected this action")
-  ```
-
-  ```typescript TypeScript theme={null}
-  // Allow the tool to execute
-  return { behavior: "allow", updatedInput: input };
-
-  // Block the tool
-  return { behavior: "deny", message: "User rejected this action" };
-  ```
-</CodeGroup>
-
 Beyond allowing or denying, you can modify the tool's input or provide context that helps Claude adjust its approach:
 
 * **Approve**: let the tool execute as Claude requested
-* **Approve with changes**: modify the input before execution (e.g., sanitize paths, add constraints)
+* **Approve with changes**: modify the input before execution (for example, sanitize paths, add constraints)
 * **Approve and remember**: echo a suggested permission rule back so matching calls skip the prompt next time
 * **Reject**: block the tool and tell Claude why
 * **Suggest alternative**: block but guide Claude toward what the user wants instead
@@ -311,6 +289,8 @@ The `ask_user` and `askUser` helpers in the following snippets stand in for your
 
   <Tab title="Approve and remember">
     The user approves and doesn't want to be asked again for this kind of call. The third callback argument carries `suggestions`, an array of ready-made [`PermissionUpdate`](/docs/en/agent-sdk/typescript#permissionupdate) entries. Echo one back in `updatedPermissions` to apply it. A suggestion with the `localSettings` destination writes the rule to `.claude/settings.local.json` so future sessions skip the prompt for matching calls.
+
+    In TypeScript, skip the always-allow choice for a request whose options carry [`suppressAlwaysAllowRule: true`](/docs/en/agent-sdk/typescript#canusetool). The hint requires Agent SDK v0.3.268 or later, and the Python `context` doesn't carry it.
 
     The Python example requires `claude-agent-sdk` 0.1.80 or later.
 
@@ -526,10 +506,10 @@ The following steps show how to handle clarifying questions:
   <Step title="Return answers to Claude">
     Build the `answers` object as a record where each key is the `question` text and each value is the selected option's `label`:
 
-    | From the question object                                     | Use as |
-    | ------------------------------------------------------------ | ------ |
-    | `question` field (e.g., `"How should I format the output?"`) | Key    |
-    | Selected option's `label` field (e.g., `"Summary"`)          | Value  |
+    | From the question object | Use as |
+    | - | - |
+    | `question` field (for example, `"How should I format the output?"`) | Key |
+    | Selected option's `label` field (for example, `"Summary"`) | Value |
 
     For multi-select questions, pass an array of labels or join them with `", "`. If you [support free-text input](#support-free-text-input), use the user's custom text as the value.
 
@@ -566,12 +546,12 @@ The following steps show how to handle clarifying questions:
 
 The input contains Claude's generated questions in a `questions` array. Each question has these fields:
 
-| Field         | Description                                                                                                                            |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `question`    | The full question text to display                                                                                                      |
-| `header`      | Short label for the question (max 12 characters)                                                                                       |
-| `options`     | Array of 2-4 choices, each with `label` and `description`. TypeScript: optionally `preview` (see [below](#option-previews-typescript)) |
-| `multiSelect` | If `true`, users can select multiple options                                                                                           |
+| Field | Description |
+| - | - |
+| `question` | The full question text to display |
+| `header` | Short label for the question (max 12 characters) |
+| `options` | Array of 2-4 choices, each with `label` and `description`. TypeScript: optionally `preview`. See [Option previews](#option-previews-typescript). |
+| `multiSelect` | If `true`, users can select multiple options |
 
 The structure your callback receives:
 
@@ -595,11 +575,11 @@ The structure your callback receives:
 
 `toolConfig.askUserQuestion.previewFormat` adds a `preview` field to each option so your app can show a visual mockup alongside the label. Without this setting, Claude does not generate previews and the field is absent.
 
-| `previewFormat` | `preview` contains                                                                                            |
-| :-------------- | :------------------------------------------------------------------------------------------------------------ |
-| unset (default) | Field is absent. Claude does not generate previews.                                                           |
-| `"markdown"`    | ASCII art and fenced code blocks                                                                              |
-| `"html"`        | A styled `<div>` fragment (the SDK rejects `<script>`, `<style>`, and `<!DOCTYPE>` before your callback runs) |
+| `previewFormat` | `preview` contains |
+| :- | :- |
+| unset (default) | Field is absent. Claude does not generate previews. |
+| `"markdown"` | ASCII art and fenced code blocks |
+| `"html"` | A styled `<div>` fragment (the SDK rejects `<script>`, `<style>`, and `<!DOCTYPE>` before your callback runs) |
 
 The format applies to all questions in the session. Claude includes `preview` on options where a visual comparison helps (layout choices, color schemes) and omits it where one wouldn't (yes/no confirmations, text-only choices). Check for `undefined` before rendering.
 
@@ -636,15 +616,15 @@ An option with an HTML preview:
 
 Return an `answers` object mapping each question's `question` field to the selected option's `label`:
 
-| Field       | Description                                                                          |
-| ----------- | ------------------------------------------------------------------------------------ |
-| `questions` | Pass through the original questions array (required for tool processing)             |
-| `answers`   | Object where keys are question text and values are selected labels                   |
-| `response`  | Optional freeform reply the user typed instead of answering the structured questions |
+| Field | Description |
+| - | - |
+| `questions` | Pass through the original questions array (required for tool processing) |
+| `answers` | Object where keys are question text and values are selected labels |
+| `response` | Optional freeform reply the user typed instead of answering the structured questions |
 
 For multi-select questions, pass an array of labels or join them with `", "`. For per-question free text such as an "Other" option, put the user's text in `answers[question]` as shown in [Support free-text input](#support-free-text-input). Set `response` only when your UI lets the user dismiss the question card and type a general reply that isn't an answer to any specific question. When `response` is set, Claude receives "The user responded: …" instead of the per-question answer list.
 
-```json theme={null}
+```jsonc theme={null}
 {
   "questions": [
     // ...
@@ -673,7 +653,7 @@ This example handles those questions in a terminal application. Here's what happ
 
 1. **Route the request**: The `canUseTool` callback checks if the tool name is `"AskUserQuestion"` and routes to a dedicated handler
 2. **Display questions**: The handler loops through the `questions` array and prints each question with numbered options
-3. **Collect input**: The user can enter a number to select an option, or type free text directly (e.g., "jquery", "i don't know")
+3. **Collect input**: The user can enter a number to select an option, or type free text directly (for example, "jquery", "i don't know")
 4. **Map answers**: The code checks if input is numeric (uses the option's label) or free text (uses the text directly)
 5. **Return to Claude**: The response includes both the original `questions` array and the `answers` mapping
 

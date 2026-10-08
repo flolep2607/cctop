@@ -10,16 +10,16 @@ Claude Code automatically tracks Claude's file edits as you work, allowing you t
 
 ## How checkpoints work
 
-As you work with Claude, checkpointing automatically captures the state of your code before each user prompt.
+As you work with Claude, checkpointing automatically captures the state of your code before each prompt you send that starts a turn.
 
 ### Automatic tracking
 
 Claude Code tracks all changes made by its file editing tools:
 
-* Every user prompt creates a new checkpoint
+* Every prompt you send that starts a turn creates a new checkpoint
 * Claude Code keeps file snapshots for the 100 most recent checkpoints in a session. Discarding an older checkpoint deletes the snapshot files that no remaining checkpoint references, except each file's first snapshot, which the VS Code extension uses as the baseline for its session diffs.
 * Claude Code saves checkpoints with the conversation, so you can still run `/rewind` after you resume a session
-* Claude Code deletes checkpoints along with sessions after 30 days, following the [retention sweep rules](/docs/en/claude-directory#cleaned-up-automatically); change the period with [`cleanupPeriodDays`](/docs/en/settings-reference#cleanupperioddays)
+* Claude Code deletes a session's file snapshots in the [retention sweep](/docs/en/claude-directory#cleaned-up-automatically), by default about 30 days after the session last saved one. Rewinding to a checkpoint whose snapshots are gone can fail with [`No files were restored`](/docs/en/errors#no-files-were-restored). To keep snapshots longer, set [`cleanupPeriodDays`](/docs/en/settings-reference#cleanupperioddays).
 
 ### Rewind and summarize
 
@@ -29,7 +29,7 @@ Run `/rewind`, or press `Esc` twice when the prompt input is empty, to open the 
   If the prompt input contains text, double `Esc` clears it instead of opening the menu. The cleared text is saved to your input history, so press `Up` to recall it after you finish in the rewind menu.
 </Note>
 
-The rewind menu lists each prompt you sent during the session. Select the point you want to act on, then choose an action:
+The rewind menu lists the prompts you sent during the session. Select the point you want to act on, then choose an action:
 
 * **Restore code and conversation**: revert both code and conversation to that point
 * **Restore conversation**: rewind to that message while keeping current code
@@ -46,7 +46,7 @@ Choosing Summarize up to here leaves you at the end of the conversation with the
 
 #### Rewind past a cleared conversation
 
-If you ran `/clear` earlier in the same Claude Code process, the rewind menu shows an additional entry at the top of the list labeled `/resume <session-id> (previous session)`. Select it to resume the conversation that was active before `/clear` ran. The entry is available until you exit Claude Code or resume a different session, and requires Claude Code v2.1.191 or later. On earlier versions, run `/resume` and pick the previous session from the list instead.
+If you ran `/clear` earlier in the same Claude Code process, the rewind menu shows an additional entry at the top of the list labeled `/resume <session-id> (previous session)`. Select it to resume the conversation that was active before `/clear` ran. The entry is available until you exit Claude Code or resume a different session.
 
 #### Guide a summary
 
@@ -69,7 +69,7 @@ Checkpoints are particularly useful when:
 
 ### Bash command changes not tracked
 
-Checkpointing does not track files modified by bash commands. For example, if Claude Code runs:
+Checkpointing does not track files modified by Bash commands. For example, if Claude Code runs:
 
 ```bash theme={null}
 rm file.txt
@@ -89,6 +89,12 @@ A [subagent](/docs/en/sub-agents) makes edits with Claude's file editing tools, 
 ### External changes not tracked
 
 Checkpointing only tracks files that have been edited within the current session. Manual changes you make to files outside of Claude Code and edits from other concurrent sessions are normally not captured, unless they happen to modify the same files as the current session.
+
+### Messages sent mid-turn not checkpointed
+
+When a message you [queue while Claude works](/docs/en/interactive-mode#queue-messages-while-claude-works) reaches Claude within the running turn, it joins that turn instead of starting a new one. The message appears in the conversation, but Claude Code doesn't create a checkpoint for it. A queued message that Claude Code sends as part of a new turn gets a checkpoint as usual, including when several queued messages [share that turn](/docs/en/interactive-mode#when-claude-code-sends-what-you-queued).
+
+To undo the edits Claude made after such a message, rewind to the prompt that started the turn. That rewinds the whole turn, including the work Claude did before your message arrived.
 
 ### Symlinked and hard-linked paths not restored
 

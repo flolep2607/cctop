@@ -14,17 +14,17 @@ The Desktop app's **Routines** page lets you create both local scheduled tasks a
 
 Claude Code offers three ways to schedule recurring or one-off work:
 
-|                            | [Cloud](/docs/en/routines)               | [Desktop](/docs/en/desktop-scheduled-tasks) | [`/loop`](/docs/en/scheduled-tasks)      |
-| :------------------------- | :---------------------------------- | :------------------------------------- | :---------------------------------- |
-| Runs on                    | Cloud, Anthropic-managed by default | Your machine                           | Your machine                        |
-| Requires machine on        | No                                  | Yes                                    | Yes                                 |
-| Requires open session      | No                                  | No                                     | Yes                                 |
-| Persistent across restarts | Yes                                 | Yes                                    | Restored on `--resume` if unexpired |
-| Access to local files      | No (fresh clone)                    | Yes                                    | Yes                                 |
-| MCP servers                | Connectors configured per task      | [Config files](/docs/en/mcp) and connectors | Inherits from session               |
-| Permission prompts         | No (runs autonomously)              | Configurable per task                  | Inherits from session               |
-| Customizable schedule      | Via `/schedule` in the CLI          | Yes                                    | Yes                                 |
-| Minimum interval           | 1 hour                              | 1 minute                               | 1 minute                            |
+| | [Cloud](/docs/en/routines) | [Desktop](/docs/en/desktop-scheduled-tasks) | [`/loop`](/docs/en/scheduled-tasks) |
+| :- | :- | :- | :- |
+| Runs on | Cloud, Anthropic-managed by default | Your machine | Your machine |
+| Requires machine on | No | Yes | Yes |
+| Requires open session | No | No | Yes |
+| Persistent across restarts | Yes | Yes | Restored on `--resume`, with [exceptions](/docs/en/scheduled-tasks#limitations) |
+| Access to local files | No (fresh clone) | Yes | Yes |
+| MCP servers | Connectors configured per task | [Config files](/docs/en/mcp) and connectors | Inherits from session |
+| Permission prompts | No (runs autonomously) | Configurable per task | Inherits from session |
+| Customizable schedule | Via `/schedule` in the CLI | Yes | Yes |
+| Minimum interval | 1 hour | 1 minute | 1 minute |
 
 <Tip>
   Use **cloud tasks** for work that should run reliably without your machine. Use **Desktop tasks** when you need access to local files and tools. Use **`/loop`** for quick polling during a session.
@@ -36,14 +36,14 @@ Claude Code offers three ways to schedule recurring or one-off work:
 
 ## Create a scheduled task
 
-On Claude Desktop before 1.1.5368, local scheduled tasks aren't available. In the [**Code** tab](/docs/en/desktop), click **Routines** in the sidebar, then click **New routine** and choose **Local**. If **Routines** is missing from the sidebar, update the Desktop app, and check whether [routines are turned off for your organization](/docs/en/routines#routines-are-disabled-by-your-organizations-policy). Configure these fields:
+On Claude Desktop before 1.1.5368, local scheduled tasks aren't available. In the [**Code** tab](/docs/en/desktop), click **Routines** in the sidebar or in the sidebar's **More** menu, then click **New routine** and choose **Local**. Configure these fields:
 
-| Field        | Description                                                                                                                                                                                                                                                                    |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Name         | Identifier for the task. Converted to lowercase kebab-case and used as the folder name on disk. Must be unique across your tasks.                                                                                                                                              |
-| Description  | Short summary shown in the task list.                                                                                                                                                                                                                                          |
+| Field | Description |
+| - | - |
+| Name | Identifier for the task. Converted to lowercase kebab-case and used as the folder name on disk. Must be unique across your tasks. |
+| Description | Short summary shown in the task list. |
 | Instructions | What Claude should do when the task runs. Write this the same way you'd write any message in the prompt box. The instructions input includes pickers for the permission mode and model, and below it you select the working folder and whether to run in an isolated worktree. |
-| Schedule     | How often the task runs. See [schedule options](#schedule-options) below.                                                                                                                                                                                                      |
+| Schedule | How often the task runs. See [schedule options](#schedule-options) below. |
 
 A folder is required before you can save the task. If you haven't trusted that folder yet, Desktop prompts you to trust it before saving.
 
@@ -55,7 +55,7 @@ Pick a preset from the Schedule control:
 
 * **Manual**: no schedule, only runs when you click **Run now**. Useful for saving a prompt you trigger on demand
 * **Hourly**: runs every hour
-* **Daily**: shows a time picker, defaults to 9:00 AM local time
+* **Daily**: runs every day at the local time you pick
 * **Weekdays**: same as Daily but skips Saturday and Sunday
 * **Weekly**: shows a time picker and a day picker
 
@@ -67,13 +67,13 @@ Scheduled tasks run on your machine. Desktop checks the schedule every minute wh
 
 When a task fires, you get a desktop notification and a new session appears under a **Scheduled** section in the sidebar. Open it to see what Claude did, review changes, or respond to permission prompts. Claude can edit files, run commands, create commits, and open pull requests, the same as in a session you start yourself, but can't send or receive [messages between your desktop sessions](/docs/en/desktop#work-across-sessions) through the desktop app's session surface.
 
-Tasks only run while the desktop app is running and your computer is awake. If your computer sleeps through a scheduled time, the run is skipped. To prevent idle-sleep, enable **Keep computer awake** in Settings under **Desktop app → General**. Closing the laptop lid still puts it to sleep. For tasks that need to run even when your computer is off, or that should trigger on an API call or GitHub event, create a remote [routine](/docs/en/routines) instead.
+Tasks only run while the desktop app is running and your computer is awake. If your computer sleeps through a scheduled time, the run is skipped. To prevent idle-sleep, turn on **Keep computer awake** in **Settings > This computer > System**. Closing the laptop lid still puts it to sleep. For tasks that need to run even when your computer is off, or that should trigger on an API call or GitHub event, create a remote [routine](/docs/en/routines) instead.
 
 ## Missed runs
 
 When the app starts or your computer wakes, Desktop checks whether each task missed any runs in the last seven days. If it did, Desktop starts exactly one catch-up run for the most recently missed time and discards anything older. A daily task that missed six days runs once on wake. Desktop shows a notification when a catch-up run starts.
 
-Keep this in mind when writing prompts. A task scheduled for 9am might run at 11pm if your computer was asleep all day. If timing matters, add guardrails to the prompt itself, for example: "Only review today's commits. If it's after 5pm, skip the review and just post a summary of what was missed."
+Keep this in mind when writing prompts. A task scheduled for 9am might run at 11pm if your computer was asleep all day. If timing matters, add guardrails to the prompt itself, for example: "Only review today's commits. If it's after 5pm, skip the review and post a summary of what was missed."
 
 ## Permissions for scheduled tasks
 
@@ -81,7 +81,7 @@ Each task has its own permission mode, which you set when creating or editing th
 
 To avoid stalls, click **Run now** after creating a task, watch for permission prompts, and select "always allow" for each one. Future runs of that task auto-approve the same tools without prompting. You can review and revoke these approvals from the task's detail page.
 
-Connector tools [your organization set to `ask`](/docs/en/mcp#organization-controls-on-connector-tools) and MCP tools marked [`requiresUserInteraction`](/docs/en/mcp#require-approval-for-a-specific-tool) prompt on every call and don't offer an always-allow option. Runs that call these tools stall each time.
+MCP tools marked [`requiresUserInteraction`](/docs/en/mcp#require-approval-for-a-specific-tool) prompt on every call and don't offer an always-allow option. Runs that call these tools stall each time.
 
 ## Manage scheduled tasks
 

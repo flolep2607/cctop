@@ -20,14 +20,14 @@ One announcement in two formats, plus two optional variants. Pick whichever fits
 
 Work through this checklist before the announcement goes out. Each item closes a gap that otherwise turns into a launch-day support thread.
 
-| Item                                                                                             | Why it matters                                                                      |
-| ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `#claude-code` channel created and linked in the message                                         | Gives questions one place to land                                                   |
-| Install command tested on at least one machine in your environment                               | Catches proxy or firewall issues before everyone hits them at once                  |
-| Security and data-handling link ready ([Data usage](/docs/en/data-usage) or your internal equivalent) | "Where does my code go?" will be the first reply                                    |
-| One concrete first task chosen, a real bug or file in your codebase                              | Generic examples don't convert; "fix the flaky test in `auth_test.go`" does         |
-| A named owner for the channel for the first 48 hours                                             | Unanswered launch-day questions kill momentum                                       |
-| A C-suite sponsor lined up to send or co-sign the announcement                                   | Exec-sent launches consistently see higher first-week adoption than admin-sent ones |
+| Item | Why it matters |
+| - | - |
+| `#claude-code` channel created and linked in the message | Gives questions one place to land |
+| Install command tested on at least one machine in your environment | Catches proxy or firewall issues before everyone hits them at once |
+| Security and data-handling link ready ([Data usage](/docs/en/data-usage) or your internal equivalent) | "Where does my code go?" will be the first reply |
+| One concrete first task chosen, a real bug or file in your codebase | Generic examples don't convert; "fix the flaky test in `auth_test.go`" does |
+| A named owner for the channel for the first 48 hours | Unanswered launch-day questions kill momentum |
+| A C-suite sponsor lined up to send or co-sign the announcement | Exec-sent launches consistently see higher first-week adoption than admin-sent ones |
 
 ### The announcement
 
@@ -43,8 +43,7 @@ Use this as your standard org-wide rollout message. It covers what Claude Code i
     As of today you have access to Claude Code, an AI coding agent that runs in
     your terminal, reads your actual codebase, and works through real tasks end
     to end: debugging, refactors, tests, PRs. It is not autocomplete and it is
-    not a chat window. It edits files, runs your commands, and asks permission
-    before anything risky.
+    not a chat window. It edits files and runs your commands.
 
     Get running in two minutes:
 
@@ -62,9 +61,8 @@ Use this as your standard org-wide rollout message. It covers what Claude Code i
       - "Look at my working diff and tell me what's risky before I push"
 
     Where your code goes: Claude Code runs in your terminal and talks directly
-    to Anthropic's API, with no third-party servers in the loop. It asks before
-    editing files or running commands. Under our Enterprise agreement, Anthropic
-    does not use your code or prompts to train its models.
+    to Anthropic's API. On our Team or Enterprise plan, Anthropic does not use
+    your code or prompts to train its models.
     Details: https://code.claude.com/docs/en/data-usage
              https://code.claude.com/docs/en/security
 
@@ -83,21 +81,21 @@ Use this as your standard org-wide rollout message. It covers what Claude Code i
     🚀 *Claude Code is live for [team]*
 
     AI coding agent, runs in your terminal, reads your repo, does real work:
-    bugs, refactors, tests, PRs. Asks before it touches anything.
+    bugs, refactors, tests, PRs.
 
     `curl -fsSL https://claude.ai/install.sh | bash` → `cd your-repo` → `claude`
 
     *First thing to try* → run `/init`, then: "the test in [file] is flaky,
     figure out why and fix it."
 
-    🔒 Runs in your terminal, talks only to Anthropic's API. Under our
-    Enterprise plan your code and prompts are not used to train models.
+    🔒 Runs in your terminal, talks directly to Anthropic's API. On our Team or
+    Enterprise plan, your code and prompts are not used to train models.
     Data usage → https://code.claude.com/docs/en/data-usage
 
     📚 Quickstart · VS Code · Free 1-hr course
        https://code.claude.com/docs/en/quickstart
        https://code.claude.com/docs/en/vs-code
-       https://anthropic.skilljar.com/claude-code-in-action
+       https://academy.claude.com/courses/claude-code-in-action
 
     Questions → this thread. [Owner] is on point.
     ```
@@ -174,8 +172,8 @@ surprised you. That feedback decides how we roll it out to everyone else.
 [Continue with "Get running in two minutes" from the standard announcement]
 
 One extra thing for pilots: on your first multi-file change, press Shift+Tab
-until you see "plan". Claude will lay out exactly what it intends to do
-before it touches a file. It is the fastest way to calibrate how much to
+until you see "plan". Claude will lay out what it intends to do
+without editing your source. It is the fastest way to calibrate how much to
 trust it.
 ```
 
@@ -211,12 +209,15 @@ Claude Code runs on the same models as the Claude app, and you can switch
 mid-session. *Sonnet* is the workhorse default for everyday feature work,
 bugs, tests, and reviews. Reach for *Opus* on large refactors, gnarly
 debugging, or anything high-stakes. Drop to *Haiku* for quick questions,
-formatting, and mechanical edits where speed wins. *Fable 5* is the most
+formatting, and mechanical edits where speed wins.
+
+*Fable* is the most
 capable model for your hardest, longest-running tasks; it is not the
 default, so select it with `/model fable`, and note that cybersecurity and
-biology content falls back to Opus automatically. Opus 5 runs its own
-checks, so flagged cybersecurity content switches models and flagged
-biology content is refused.
+biology content falls back to Opus automatically. Opus 5.5, Sonnet 5.5, and
+Opus 5 run their own checks too: flagged content switches to an earlier model
+in the same family, except that flagged biology content on Opus 5 or Sonnet
+5.5 is refused.
 
 *Try it now:* type `/model` and pick Sonnet if you haven't already. It is
 the right default for most tasks.
@@ -224,12 +225,12 @@ the right default for most tasks.
 📖 Model configuration → https://code.claude.com/docs/en/model-config
 ```
 
-| Model   | Best for                                                                                                                                                                                                                       |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Fable 5 | The hardest, longest-running tasks. Opt-in only: select it with `/model fable`. Cybersecurity or biology content [falls back to Opus](/docs/en/model-config#automatic-model-fallback)                                               |
-| Opus    | Large-scale refactors, complex debugging, architecture decisions, high-stakes changes. On Opus 5, cybersecurity or biology content triggers [automatic model fallback or a refusal](/docs/en/model-config#automatic-model-fallback) |
-| Sonnet  | Everyday feature work, bug fixes, tests, documentation, code review. Recommended default.                                                                                                                                      |
-| Haiku   | Quick questions, formatting, mechanical edits, rapid iteration                                                                                                                                                                 |
+| Model | Best for |
+| - | - |
+| Fable | The hardest, longest-running tasks. Opt-in only: select it with `/model fable`. Cybersecurity or biology content triggers [automatic model fallback to Opus](/docs/en/model-config#automatic-model-fallback) |
+| Opus | Large-scale refactors, complex debugging, architecture decisions, high-stakes changes. On Opus 5.5 and Opus 5, cybersecurity or biology content triggers [automatic model fallback or a refusal](/docs/en/model-config#automatic-model-fallback) |
+| Sonnet | Everyday feature work, bug fixes, tests, documentation, code review. Recommended default. On Sonnet 5.5, cybersecurity or biology content triggers [automatic model fallback or a refusal](/docs/en/model-config#automatic-model-fallback) |
+| Haiku | Quick questions, formatting, mechanical edits, rapid iteration |
 
 **Quick wins to try first**
 
@@ -306,12 +307,11 @@ it to ship. You shouldn't have to pick one forever.
 `default` setting value) asks before file edits and most shell commands, *acceptEdits* lets file
 edits and common filesystem commands
 flow through while still checking before other shell commands, and *plan*
-proposes changes for your approval before anything is touched. Plan mode is
+researches and proposes changes without editing your source. Plan mode is
 the trust-builder, so start there for anything touching multiple files.
 
 *Try it now:* on your next refactor, hit Shift+Tab until you see "plan",
-then describe the change. You'll get a full proposal before a single file
-moves.
+then describe the change. You'll get a full proposal to review.
 
 📖 Permission modes → https://code.claude.com/docs/en/permissions
 ```
@@ -462,10 +462,9 @@ thing you didn't know you wanted.
 Someone on your team is going to ask "wait, where does my code go?"
 Here's the short version you can paste.
 
-Permission-first by design. Every file edit, shell command, and external
-call is gated by your approval. The CLI runs in your terminal and talks
-directly to Anthropic's API, with no third-party servers, and supports
-optional OS-level sandboxing for shell commands. Under our Enterprise plan,
+A permission mode sets which actions Claude can take without asking you
+first. The CLI runs in your terminal, talks directly to Anthropic's API,
+and supports optional OS-level sandboxing for shell commands. On a Team or Enterprise plan,
 Anthropic does not use your code or prompts to train its models.
 
 *Try it now:* save these two links for the next time the question comes up.
@@ -501,29 +500,29 @@ missing and do it on your next task. Post what changed in #claude-code.
 
 One-line replies for the questions you will be asked most.
 
-| Question                                 | Response                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Does it work in VS Code?"               | Yes. There is a VS Code extension and a JetBrains plugin with the same features, embedded in your editor. [VS Code →](/docs/en/vs-code)                                                                                                                                                                                                                                                                                |
-| "Do I have to configure anything first?" | No. Install, then run `claude` in any repo. Run `/init` once and you're set. [Quickstart →](/docs/en/quickstart)                                                                                                                                                                                                                                                                                                       |
-| "Where does my code go?"                 | The CLI runs in your terminal and sends context to Anthropic's API for inference, with no third-party servers. Under your Enterprise plan, your code and prompts are not used to train models. [Data usage →](/docs/en/data-usage)                                                                                                                                                                                     |
-| "Can it see my whole repo?"              | It reads what you give it access to. File reads inside your working directory don't prompt; permission prompts gate edits, non-read-only shell commands, and file-tool reads outside that directory. A built-in set of read-only shell commands such as `ls` and `cat` runs without prompting; restrict it with [sandbox `denyRead` rules](/docs/en/sandboxing#filesystem-isolation). [Permissions →](/docs/en/permissions) |
-| "How is this different from Copilot?"    | Copilot autocompletes lines. Claude Code is an agent that reads files, runs commands, and makes multi-file edits. [Overview →](/docs/en/overview)                                                                                                                                                                                                                                                                      |
-| "What should I try first?"               | A bug you've been putting off because it's tedious. "The test in \[file] is flaky, figure out why." [Quickstart →](/docs/en/quickstart)                                                                                                                                                                                                                                                                                |
+| Question | Response |
+| - | - |
+| "Does it work in VS Code?" | Yes. There is a VS Code extension and a JetBrains plugin with the same features, embedded in your editor. [VS Code →](/docs/en/vs-code) |
+| "Do I have to configure anything first?" | No. Install, then run `claude` in any repo. Run `/init` once and you're set. [Quickstart →](/docs/en/quickstart) |
+| "Where does my code go?" | The CLI runs in your terminal and sends context to Anthropic's API for inference. On a Team or Enterprise plan, your code and prompts are not used to train models. [Data usage →](/docs/en/data-usage) |
+| "Can it see my whole repo?" | It reads what you give it access to. File reads inside your working directory don't prompt. [Permissions →](/docs/en/permissions) |
+| "How is this different from Copilot?" | Copilot autocompletes lines. Claude Code is an agent that reads files, runs commands, and makes multi-file edits. [Overview →](/docs/en/overview) |
+| "What should I try first?" | A bug you've been putting off because it's tedious. "The test in \[file] is flaky, figure out why." [Quickstart →](/docs/en/quickstart) |
 
 ### Prompt templates
 
 Share these starter prompts with engineers who have installed but aren't sure what to ask. Each one is phrased the way it would be typed into a real session; replace the bracketed pieces with files from your own repo.
 
-| Task                 | Prompt                                                                       |
-| -------------------- | ---------------------------------------------------------------------------- |
-| Fix a bug            | "the tests in \[file] are failing, figure out why and fix it"                |
-| Understand code      | "walk me through how \[module] works, then tell me where the entry point is" |
-| Safe refactor        | "refactor \[module] to \[goal], use plan mode so I can review first"         |
-| Write tests          | "write tests for \[file] that cover the edge cases around \[scenario]"       |
-| Review before commit | "look at my working diff and tell me what looks risky"                       |
-| Open a PR            | "fix \[issue], write a conventional commit, and open a PR with a summary"    |
-| Make a skill         | "make me a /ship skill that runs tests and lint before commit"               |
-| Debug a stack trace  | "here's the stack trace, find the root cause, don't just paper over it"      |
+| Task | Prompt |
+| - | - |
+| Fix a bug | "the tests in \[file] are failing, figure out why and fix it" |
+| Understand code | "walk me through how \[module] works, then tell me where the entry point is" |
+| Safe refactor | "refactor \[module] to \[goal], use plan mode so I can review first" |
+| Write tests | "write tests for \[file] that cover the edge cases around \[scenario]" |
+| Review before commit | "look at my working diff and tell me what looks risky" |
+| Open a PR | "fix \[issue], write a conventional commit, and open a PR with a summary" |
+| Make a skill | "make me a /ship skill that runs tests and lint before commit" |
+| Debug a stack trace | "here's the stack trace, find the root cause, don't just paper over it" |
 
 <Tip>
   Claude Code ships frequently. Verify version-specific details against the [documentation home page](/docs/en/overview) before distributing internally.
