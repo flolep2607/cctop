@@ -509,8 +509,19 @@ fn main() -> anyhow::Result<()> {
 /// are built side by side, neither depending on the other, and the dashboard
 /// asks for a server through this.
 fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> {
+    // Over the account's tunnel the tokens are kept, in the file `cctop serve`
+    // keeps them in: a stable hostname with a fresh token each time is still a
+    // dead bookmark (decision 3 on #174). Elsewhere a stop still revokes every
+    // link, which is what a quick tunnel's throwaway hostname is for anyway.
+    let tokens = match request.tunnel && cctop_core::tunnel::account().is_some() {
+        true => {
+            Some(serve::tokens::load_or_create(&serve::account_token_file(), request.rotate)?.0)
+        }
+        false => None,
+    };
     let serving = serve::start(serve::Options {
         tunnel: request.tunnel,
+        tokens,
         plan: request.plan,
         // Fed from the rows this dashboard already has. Two loaders in one
         // process would walk the same disk twice and, worse, could disagree —
@@ -564,6 +575,7 @@ mod tests {
     fn the_dashboard_gets_a_real_servers_links() {
         let served = super::serve_for_dashboard(cctop_ui::ServeRequest {
             tunnel: false,
+            rotate: false,
             plan: cctop_core::pricing::Plan::Retail,
             hosts: Vec::new(),
         })

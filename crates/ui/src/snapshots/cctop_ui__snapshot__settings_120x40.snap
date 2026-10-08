@@ -40,5 +40,5 @@ expression: screen
 │  bottom_panel      Processes      * Which panel opens under the table                                                │
 │  tool_show_diff    off              Show each edit's diff under its row                                              │
 │  tool_live_only    off              Tool Activity shows this run only                                                │
-╰ 79   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 80   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

@@ -287,15 +287,14 @@ fn draw(app: &mut App, (cols, rows): (u16, u16)) -> Buffer {
 /// on screen and a diff of invisible whitespace helps nobody. The continuation
 /// cell behind a wide character has an empty symbol, so joining symbols keeps
 /// every row its true width.
+///
+/// A hyperlink is read as its label, as a screen shows it: the escape
+/// sequence and the URL behind it are the terminal's business, and a
+/// snapshot that held them would be one long line of percent-encoding.
 fn text(buffer: &Buffer) -> String {
-    let area = buffer.area;
-    (area.top()..area.bottom())
-        .map(|y| {
-            let line: String = (area.left()..area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect();
-            line.trim_end().to_string()
-        })
+    super::hyperlink::visible(buffer)
+        .lines()
+        .map(str::trim_end)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -406,6 +405,12 @@ fn settings_page() {
     app.settings_open = true;
     app.settings_filter = "alert when".into();
     snap("settings_filtered", &mut app);
+
+    // The Cloudflare account's row, which opens a popup rather than a field.
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings_filter = "cloudflare".into();
+    snap("settings_cloudflare", &mut app);
 }
 
 #[test]
@@ -617,4 +622,49 @@ fn idle_view_and_reclaim() {
     app.batch(super::BatchKind::Reclaim);
     assert_eq!(app.mode, Mode::BatchConfirm);
     snap("idle_reclaim", &mut app);
+}
+
+/// The Cloudflare popup at the steps worth a look: the link with a paste in
+/// the field (masked), the domain picker, the no-domain refusal, and done.
+/// Every token here is made up, and none of them reaches the screen.
+#[test]
+fn connect_popup() {
+    use super::connect::{Connect, Step};
+    use cctop_core::cloudflare::{Error, Zone};
+    let open = |step: Step| {
+        let mut app = fixture();
+        app.connect = Some(Connect::new(step, Mode::Serve));
+        app.mode = Mode::Connect;
+        app
+    };
+
+    let mut app = open(Step::Start {
+        method: super::connect::METHODS[0],
+        field: "made-up-api-token".into(),
+    });
+    snap("connect_link", &mut app);
+
+    let zone = |name: &str| Zone {
+        id: format!("id-{name}"),
+        name: name.to_string(),
+        account_id: "acct".to_string(),
+        active: true,
+    };
+    let mut app = open(Step::Zones {
+        token: "made-up-api-token".into(),
+        zones: vec![zone("example.com"), zone("example.org")],
+        cursor: 1,
+    });
+    snap("connect_zones", &mut app);
+
+    let mut app = open(Step::Failed {
+        message: Error::NoDomain.to_string(),
+    });
+    snap("connect_no_domain", &mut app);
+
+    let mut app = open(Step::Done {
+        hostname: Some("cctop.example.com".into()),
+        shares: true,
+    });
+    snap("connect_done", &mut app);
 }

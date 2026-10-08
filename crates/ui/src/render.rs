@@ -278,6 +278,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
             Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
             Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
+            Mode::Connect => modals::draw_connect(frame, area, app, &mut layout),
             Mode::Help => modals::draw_help(frame, area, app),
             _ => {}
         }
@@ -308,6 +309,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
             // A sign-in in progress stays on screen whichever tab is open.
             Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
+            Mode::Connect => modals::draw_connect(frame, area, app, &mut layout),
             // F1 inside a pane opens the sheet here rather than on the
             // dashboard; see `on_key_function`.
             Mode::Help => modals::draw_help(frame, area, app),
@@ -408,6 +410,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Insight => modals::draw_insight(frame, area, app),
         Mode::Conversation => super::reader::draw(frame, area, app),
         Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
+        Mode::Connect => modals::draw_connect(frame, area, app, &mut layout),
         Mode::List => {}
     }
     // Over everything, modals included: a few seconds of confirmation for a

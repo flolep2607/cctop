@@ -884,6 +884,25 @@ fn settings_lines(
         }
     }
 
+    if wanted(|r| matches!(r, Item::Cloudflare)) {
+        lines.push(Line::default());
+        lines.push(section("config.toml · [tunnel]"));
+        for (at, entry) in rows.iter().enumerate() {
+            if *entry == Item::Cloudflare {
+                let value = app.cloudflare_value();
+                let set = app.connected.is_some();
+                row(
+                    &mut lines,
+                    at,
+                    "cloudflare",
+                    value,
+                    set,
+                    super::settings::CLOUDFLARE_WHAT,
+                );
+            }
+        }
+    }
+
     if wanted(|r| matches!(r, Item::Key(_))) {
         lines.push(Line::default());
         lines.push(section("config.toml · [keys], on the session table"));
@@ -1215,6 +1234,28 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
         },
         theme::dim(),
     )));
+    // Next to `t`, because it is what makes `t`'s link one worth keeping:
+    // offered while no account is connected, and the account named once one
+    // is, since that is where `t` now goes.
+    match &app.connected {
+        None => lines.push(Line::from(Span::styled(
+            " a connect your Cloudflare account: a link that stays",
+            theme::dim(),
+        ))),
+        Some(connected) if app.serving.is_none() => lines.push(Line::from(Span::styled(
+            match &connected.hostname {
+                Some(host) => format!(" t goes to {host} · a account"),
+                None => " t goes to your Cloudflare tunnel · a account".to_string(),
+            },
+            theme::dim(),
+        ))),
+        // Its links outlive a stop, so the way to revoke them is said here.
+        Some(_) if app.serving_on_account() => lines.push(Line::from(Span::styled(
+            " r new links, revoking these · a account",
+            theme::dim(),
+        ))),
+        Some(_) => {}
+    }
 
     // Sized to the longest line, so a tunnel hostname is one line and not two,
     // and capped to the screen, where it wraps instead — into a box now tall
@@ -2860,6 +2901,333 @@ fn link_cells(screen: &vt100::Screen, link: &str) -> Vec<(u16, std::ops::Range<u
     out
 }
 
+/// The Cloudflare popup: the ways in, then a domain, a name, and what came of
+/// it — or, with an account already connected, what it is and Disconnect.
+///
+/// Laid out step by step in the add-account popup's manner, each step a short
+/// paragraph and a line of keys that are also buttons. The first step is
+/// headed by the way in it describes ([`connect::Method`]), so a second way
+/// sits beside it under its own heading without the rest moving.
+pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
+    use super::connect::Step;
+    use cctop_core::cloudflare;
+    let Some(flow) = app.connect.as_ref() else {
+        return;
+    };
+    let esc = KeyEvent::from(KeyCode::Esc);
+    let enter = KeyEvent::from(KeyCode::Enter);
+    let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    let warn = Style::default().fg(theme::colors().cost_mid);
+    let good = Style::default().fg(theme::colors().cost_low);
+    let accent = Style::default().fg(theme::colors().accent);
+    let text = |s: &str| Line::from(Span::raw(format!(" {s}")));
+    let dim = |s: &str| Line::from(Span::styled(format!(" {s}"), theme::dim()));
+    // Decided before the lines, because a sentence from Cloudflare is wrapped
+    // here to it: the box is sized by counting rows, and a paragraph's own
+    // word wrap of a long URL takes more of them than the count expects.
+    let width = 70.min(area.width.saturating_sub(4).max(24));
+    let wrap = |s: &str, indent: usize, style: Style| -> Vec<Line<'static>> {
+        let room = (width as usize).saturating_sub(3 + indent).max(8);
+        wrap_words(s, room)
+            .into_iter()
+            .map(|row| Line::from(Span::styled(format!(" {}{row}", " ".repeat(indent)), style)))
+            .collect()
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // `(what is drawn, where it goes)`, laid over the text once it is placed.
+    let mut links: Vec<(String, String)> = Vec::new();
+    let mut qr_at = None;
+    let (hint, keys): (String, Vec<(&str, KeyEvent)>) = match &flow.step {
+        Step::Start { method, field } => {
+            lines.push(text("One address of your own for t and W, so a bookmark"));
+            lines.push(text("or a phone shortcut keeps working."));
+            lines.push(Line::default());
+            match method {
+                super::connect::Method::Paste => {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {}", method.label()),
+                        theme::title(),
+                    )));
+                    lines.push(text("1. Make an API token; the link fills it in:"));
+                    let shown = "dash.cloudflare.com/profile/api-tokens";
+                    lines.push(Line::from(Span::styled(format!("    {shown}"), accent)));
+                    links.push((shown.to_string(), cloudflare::token_link()));
+                    lines.push(dim("   Tunnel · Edit, DNS · Edit, Zone · Read"));
+                    if flow.qr {
+                        qr_at = Some((lines.len(), qr::encode(&cloudflare::token_link())));
+                    }
+                    lines.push(text("2. Paste it here. A tunnel token works too."));
+                    lines.push(masked_line(field.chars().count()));
+                }
+            }
+            (
+                " [Enter] connect  [Ctrl+O] copy link  [Ctrl+Q] QR  [Esc] cancel".to_string(),
+                vec![
+                    ("[Enter]", enter),
+                    ("[Ctrl+O]", ctrl('o')),
+                    ("[Ctrl+Q]", ctrl('q')),
+                    ("[Esc]", esc),
+                ],
+            )
+        }
+        Step::Zones { zones, cursor, .. } => {
+            lines.push(text("The token works. Which domain is the tunnel on?"));
+            lines.push(Line::default());
+            for (i, zone) in zones.iter().enumerate() {
+                let here = i == *cursor;
+                let line = Line::from(Span::raw(format!(
+                    " {} {}",
+                    if here { "›" } else { " " },
+                    zone.name
+                )));
+                lines.push(match here {
+                    true => line.style(theme::selected()),
+                    false => line,
+                });
+            }
+            (
+                " [↑↓] pick  [Enter] next  [Esc] cancel".to_string(),
+                vec![("[Enter]", enter), ("[Esc]", esc)],
+            )
+        }
+        Step::Hostname { zone, field, .. } => {
+            lines.push(text(&format!("Its address: one name under {},", zone.name)));
+            lines.push(text("which Cloudflare's free certificate covers."));
+            lines.push(input_line(field));
+            lines.push(dim(&format!(
+                "  W shares go on {} beside it.",
+                cloudflare::share_hostname(field)
+            )));
+            (
+                " [Enter] create  [Esc] cancel".to_string(),
+                vec![("[Enter]", enter), ("[Esc]", esc)],
+            )
+        }
+        Step::TunnelHostname { field, .. } => {
+            lines.push(text("A tunnel token: there is nothing to create."));
+            lines.push(text("Which hostname does it serve? Left empty, it is"));
+            lines.push(text("learned when the tunnel first connects."));
+            lines.push(input_line(field));
+            (
+                " [Enter] save  [Esc] cancel".to_string(),
+                vec![("[Enter]", enter), ("[Esc]", esc)],
+            )
+        }
+        Step::Done { hostname, shares } => {
+            match hostname {
+                Some(host) => {
+                    let url = format!("https://{host}");
+                    lines.push(Line::from(vec![
+                        Span::styled(" ✓ Connected: ", good),
+                        Span::styled(url.clone(), accent),
+                    ]));
+                    links.push((url.clone(), url));
+                }
+                None => lines.push(Line::from(Span::styled(
+                    " ✓ Connected. Its address is learned when it first connects.",
+                    good,
+                ))),
+            }
+            lines.push(dim(match shares {
+                true => "t in the serve panel now uses it, and W shares too.",
+                false => "t in the serve panel now uses it.",
+            }));
+            (
+                " [s] serve on it now  [Enter] done".to_string(),
+                vec![
+                    ("[s]", KeyEvent::from(KeyCode::Char('s'))),
+                    ("[Enter]", enter),
+                ],
+            )
+        }
+        Step::Failed { message } => {
+            lines.extend(wrap(message, 0, warn));
+            lines.push(Line::default());
+            lines.push(dim("Quick tunnels still work: t in the serve panel."));
+            (
+                " [Enter] try again  [Esc] close".to_string(),
+                vec![("[Enter]", enter), ("[Esc]", esc)],
+            )
+        }
+        Step::Connected { account, confirm } => {
+            let url = account.hostname.as_ref().map(|h| format!("https://{h}"));
+            lines.push(Line::from(vec![
+                Span::raw(" Page    "),
+                match &url {
+                    Some(url) => Span::styled(url.clone(), accent),
+                    None => Span::styled("learned when it connects", theme::dim()),
+                },
+            ]));
+            if let Some(url) = url {
+                links.push((url.clone(), url));
+            }
+            if let Some(share) = &account.share_hostname {
+                lines.push(Line::from(vec![
+                    Span::raw(" Shares  "),
+                    Span::styled(format!("https://{share}"), theme::dim()),
+                ]));
+            }
+            if account.from_env {
+                lines.push(dim("From CCTOP_TUNNEL_TOKEN, not from setup."));
+            }
+            match confirm {
+                false => (
+                    " [d] disconnect  [Esc] close".to_string(),
+                    vec![("[d]", KeyEvent::from(KeyCode::Char('d'))), ("[Esc]", esc)],
+                ),
+                true => {
+                    lines.push(Line::default());
+                    match account.api_token.is_some() {
+                        true => {
+                            lines.push(Line::from(Span::styled(
+                                " Delete the tunnel and its DNS records from",
+                                warn,
+                            )));
+                            lines.push(Line::from(Span::styled(
+                                " Cloudflare, and forget it here?",
+                                warn,
+                            )));
+                        }
+                        false => {
+                            lines.push(Line::from(Span::styled(" Forget it here?", warn)));
+                            lines.push(dim("It was made in the Cloudflare dashboard, and stays."));
+                        }
+                    }
+                    if app.serving_on_account() {
+                        lines.push(dim("Serving here over it stops first."));
+                    }
+                    (
+                        " [y] disconnect  [n] keep".to_string(),
+                        vec![
+                            ("[y]", KeyEvent::from(KeyCode::Char('y'))),
+                            ("[n]", KeyEvent::from(KeyCode::Char('n'))),
+                        ],
+                    )
+                }
+            }
+        }
+        Step::Disconnected { left, made_here } => {
+            match (made_here, left.is_empty()) {
+                (true, true) => lines.push(Line::from(Span::styled(
+                    " ✓ Disconnected: the tunnel and its DNS records are gone.",
+                    good,
+                ))),
+                (false, _) => {
+                    lines.push(Line::from(Span::styled(" ✓ Forgotten.", good)));
+                    lines.push(dim("The tunnel was made in the Cloudflare dashboard;"));
+                    lines.push(dim("delete it there if you no longer want it."));
+                }
+                (true, false) => {
+                    lines.push(Line::from(Span::styled(
+                        " Forgotten, but left on Cloudflare to delete by hand:",
+                        warn,
+                    )));
+                    for item in left {
+                        lines.extend(wrap(&format!("- {item}"), 0, theme::dim()));
+                    }
+                }
+            }
+            lines.push(dim("t goes back to quick tunnels."));
+            (" [Enter] done".to_string(), vec![("[Enter]", enter)])
+        }
+    };
+    if let Some(problem) = &flow.problem {
+        lines.extend(wrap(
+            problem,
+            2,
+            Style::default().fg(theme::colors().cost_high),
+        ));
+    }
+    lines.push(Line::default());
+    // A call in flight replaces the keys: there is nothing to press but Esc,
+    // and the spinner is what says cctop has not hung.
+    let (hint, keys) = match &flow.working {
+        Some(working) => (
+            format!(" {} {}  [Esc] close", share::spinner_frame(), working.what),
+            vec![("[Esc]", esc)],
+        ),
+        None => (hint, keys),
+    };
+    lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
+
+    let room = match &qr_at {
+        Some((at, Some(qr))) => make_room_for_qr(area, width, &mut lines, *at, qr),
+        _ => None,
+    };
+    if let (Some((at, _)), None) = (&qr_at, room) {
+        lines.insert(
+            *at,
+            dim("  No room here for a QR code — try a taller terminal."),
+        );
+    }
+    let row = wrapped_rows(&lines[..lines.len() - 1], width.saturating_sub(2));
+    let title = match flow.step {
+        Step::Connected { .. } | Step::Disconnected { .. } => "Your Cloudflare account",
+        _ => "Connect your Cloudflare account",
+    };
+    let (outer, inner) = modal(frame, area, title, lines, width);
+    if let (Some((_, Some(qr))), Some(at)) = (&qr_at, room) {
+        draw_qr(frame, inner, at, qr);
+    }
+    let mut from = inner.y;
+    for (shown, url) in &links {
+        if let Some(row) = hyperlink::link_shown(frame.buffer_mut(), inner, from, shown, url) {
+            from = row + 1;
+        }
+    }
+    confirm_chips(layout, outer, inner, row, &hint, &keys);
+}
+
+/// `text` in rows of at most `width` columns, broken between words, and
+/// inside a word only where one is longer than a row — a URL, usually.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let used = row.chars().count();
+            let gap = usize::from(used > 0);
+            if used + gap + word.len() <= width {
+                if gap == 1 {
+                    row.push(' ');
+                }
+                row.extend(word);
+                break;
+            }
+            // Not on this row: on the next, unless it is longer than a whole
+            // row, which is cut at the edge and carried on below.
+            if used > 0 {
+                rows.push(std::mem::take(&mut row));
+                continue;
+            }
+            row.extend(word.drain(..width));
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// The paste field, masked: as many dots as characters, up to a line's worth,
+/// and the count — enough to see a paste landed whole, nothing to read off.
+fn masked_line(chars: usize) -> Line<'static> {
+    let (text, cursor) = input_styles();
+    let mut spans = vec![
+        Span::raw(" > "),
+        Span::styled("•".repeat(chars.min(24)), text),
+        Span::styled("█", cursor),
+    ];
+    if chars > 0 {
+        spans.push(Span::styled(format!("  {chars} characters"), theme::dim()));
+    }
+    Line::from(spans)
+}
+
 /// The add-account popup: a name field, which kind of account, then the command
 /// that makes it running in a terminal inside the popup, then what came of it.
 pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
@@ -3706,6 +4074,25 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Go to tab · needs you"), "{text}");
         assert!(text.contains("No tab by that name needs you"), "{text}");
+    }
+
+    #[test]
+    fn a_long_sentence_wraps_between_words_and_a_url_is_cut() {
+        let rows = wrap_words(
+            "Add one at https://dash.example.test/a/very/long/path then",
+            16,
+        );
+        assert_eq!(
+            rows,
+            [
+                "Add one at",
+                "https://dash.exa",
+                "mple.test/a/very",
+                "/long/path then"
+            ]
+        );
+        assert!(rows.iter().all(|r| r.chars().count() <= 16));
+        assert_eq!(wrap_words("", 10), [""]);
     }
 
     #[test]

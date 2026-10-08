@@ -91,7 +91,7 @@ mod tabs;
 /// rmux's terminal app, served here so a session page can frame it.
 mod term;
 /// The run's credentials, and `--token-file`, which keeps them across runs.
-mod tokens;
+pub mod tokens;
 
 // What the page reads and does to a session is core's, shared with the
 // dashboard and the command line: the conversation, the report, the export,
@@ -392,8 +392,8 @@ pub struct Options {
     /// after [`tokens::load_or_create`] has read or written it.
     ///
     /// Loaded by the caller rather than here so `run` can say which of the two
-    /// happened, and so the dashboard, which never passes one, keeps meaning
-    /// "stopping it revokes every link".
+    /// happened. The dashboard passes the account's when it serves over the
+    /// account's tunnel, and none otherwise.
     pub tokens: Option<tokens::Tokens>,
     /// Whether the server scans for sessions itself.
     ///
@@ -790,8 +790,8 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     // the only thing on screen.
     // A stable hostname with a fresh token every run is still a dead
     // bookmark, so a connected account keeps the tokens the way --token-file
-    // does, in a file of its own. Only for this command: the dashboard's
-    // serve is the one whose stop is meant to revoke every link.
+    // does, in a file of its own — the same one the dashboard's serve keeps
+    // them in, so a bookmark opens whichever of the two is up.
     let account_tunnel = want_tunnel && !quick_tunnel && tunnel::account().is_some();
     if account_tunnel && token_file.is_none() && !no_token {
         token_file = Some(account_token_file());
@@ -911,7 +911,7 @@ fn listen(bind: &str, port: u16, port_given: bool) -> anyhow::Result<TcpListener
 /// Where a connected account keeps `cctop serve`'s tokens between runs: what
 /// `--token-file` would name, chosen for the user. Beside the config, which is
 /// already the user's own and owner-only.
-fn account_token_file() -> std::path::PathBuf {
+pub fn account_token_file() -> std::path::PathBuf {
     cctop_core::config::config_base()
         .join("cctop")
         .join("serve-tokens")

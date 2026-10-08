@@ -307,16 +307,22 @@ the pairing code under it, for pointing a phone at; any key closes it. The code
 is the link — the panel says so — and on a terminal too small to hold it the
 panel says that instead.
 
-The link reaches this machine over cctop's own TryCloudflare quick tunnel — a
-quick one even when [your own Cloudflare account](serve.md#your-own-cloudflare-account)
-is connected, for now: carrying shares on that account's `-share` hostname is
-still to come. It is the same client `cctop serve --tunnel` uses, handed to rmux
-as `--tunnel-url` rather
-than letting it raise a second one through a provider of its own. One way out of
-the machine, opened on the first `W` of a run and closed when cctop exits. If
-the tunnel cannot be registered the share still happens and the status line says
-`this machine only` — a link that works from this browser is worth more than no
-link, and a link that silently reaches nothing is worth less than either.
+The link reaches this machine through a Cloudflare tunnel of cctop's, handed to
+rmux as `--tunnel-url` rather than letting it raise one through a provider of
+its own. With [your own Cloudflare account](serve.md#your-own-cloudflare-account)
+connected and a serve running in this cctop — `cctop serve --tunnel`, or `t` in
+the dashboard's serve panel — it is that tunnel, on the `-share` hostname setup
+made beside the page's: one tunnel, two hostnames, and no second one opened.
+The page's hostname is never used for a share, because everything there wants
+the page's token and a share link must not carry it. Stop that serve and the
+share links on the `-share` hostname stop with it; the next `W` mints a new one.
+
+Otherwise it is a TryCloudflare quick tunnel, the same client `cctop serve
+--tunnel=quick` uses: opened on the first `W` of a run and closed when cctop
+exits. If the tunnel cannot be registered the share still happens and the status
+line says `this machine only` — a link that works from this browser is worth
+more than no link, and a link that silently reaches nothing is worth less than
+either.
 
 rmux ships six tunnel providers of its own and deliberately not this one: a
 `trycloudflare.com` hostname, [its docs say](../rmux/docs/web-share.md), "can

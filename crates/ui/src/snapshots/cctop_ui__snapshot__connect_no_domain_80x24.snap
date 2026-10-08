@@ -1,0 +1,28 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Ses╭ Connect your Cloudflare account ───────────────────────────────────╮────╮
+│   L│ A stable tunnel needs a domain whose DNS is on Cloudflare, and this│    │
+│●   │ account has none. Add one at                                       │ ch…┃
+│●   │ https://dash.cloudflare.com/?to=/:account/add-site (a cheap domain │    │
+╰────│ works; DNS on Cloudflare is free), then run this again.            │────╯
+╭ Inf│                                                                    │text╮
+│Root│ Quick tunnels still work: t in the serve panel.                    │    │
+│    │                                                                    │    │
+│   4│ [Enter] try again  [Esc] close                                     │    │
+│   4╰────────────────────────────────────────────────────────────────────╯    │
+│   4290    0.3%      8.0M  bash -c npm test                                   │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share
