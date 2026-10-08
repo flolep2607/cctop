@@ -4689,9 +4689,9 @@ mod tests {
         // is not what is under test.
         let wait = DEADLINE / 10;
         // Far longer than any stall, so "still wedged" cannot come untrue
-        // while `settle` is being slow. The thread is never joined, and
-        // sleeping is all it costs.
-        let wedged = std::time::Duration::from_secs(600);
+        // while `settle` is being slow, and short enough that a `settle` which
+        // does wait it out fails in seconds rather than hanging the suite.
+        let wedged = crate::test_wait::PATIENCE;
 
         // Advice made, then a delivery that never returns.
         let (done_tx, done) = channel::<()>();
