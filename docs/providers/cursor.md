@@ -1,6 +1,6 @@
 # Cursor
 
-[← all harnesses](README.md) · parser: [`src/session/cursor.rs`](../../src/session/cursor.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/cursor.rs`](../../crates/core/src/session/cursor.rs)
 
 Cursor's native agent exports a transcript with the conversation in it and none
 of the accounting. Four of the five capability columns are blank for it, and

@@ -1,6 +1,6 @@
 # Gemini CLI
 
-[← all harnesses](README.md) · parser: [`src/session/gemini.rs`](../../src/session/gemini.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/gemini.rs`](../../crates/core/src/session/gemini.rs)
 
 Gemini records a per-turn token breakdown and never a cost, so its money column
 is inferred from published rates. Its chats also come in two on-disk shapes

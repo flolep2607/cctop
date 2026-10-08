@@ -1,0 +1,2503 @@
+//! Session discovery and the extracted-data model.
+
+pub mod claude;
+pub mod codex;
+pub mod cursor;
+pub mod devin;
+pub mod extract;
+pub mod gemini;
+pub mod opencode;
+pub mod pi;
+pub mod search;
+pub mod windsurf;
+
+use crate::pricing::Provider;
+use crate::util;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Where a session is being driven from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Surface {
+    /// A coding agent in a terminal.
+    Cli,
+    /// An agent hosted by an editor rather than a dedicated CLI process.
+    Editor,
+    /// Claude for Mac, running Claude Code locally.
+    DesktopCode,
+    /// Claude for Mac, running in a cloud VM.
+    DesktopCowork,
+}
+
+/// What a live agent is doing, inferred from the newest transcript event — or,
+/// for [`ActivityState::Asking`], reported by the agent's own hooks.
+///
+/// This deliberately captures only states that have a clear user-facing
+/// meaning.  A missing or unrecognised event remains normal work rather than
+/// guessing that the agent is stalled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActivityState {
+    #[default]
+    Working,
+    /// The turn is over and the prompt is the user's. Nobody is blocked: the
+    /// agent has said what it had to say and will sit there indefinitely.
+    WaitingForInput,
+    /// The agent is blocked on a question — a permission prompt, or an MCP
+    /// elicitation — and cannot proceed until it is answered.
+    ///
+    /// Told apart from [`ActivityState::WaitingForInput`] because the two are
+    /// worth different amounts of your attention, and a transcript cannot tell
+    /// them apart at all: a held permission prompt leaves no record, so the
+    /// newest thing written is a tool call in flight, which reads exactly like
+    /// an agent still working. Only the agent's own hooks say this outright —
+    /// see [`Signal::NeedsInput`](crate::hook::Signal::NeedsInput) and
+    /// [`App::apply_reports`](cctop_ui::App::apply_reports).
+    Asking,
+    ApiError,
+}
+
+impl Surface {
+    pub fn is_desktop(&self) -> bool {
+        matches!(self, Surface::DesktopCode | Surface::DesktopCowork)
+    }
+
+    pub fn label(&self, provider: Provider) -> &'static str {
+        match (self, provider) {
+            (Surface::Editor, Provider::Cursor) => "Cursor",
+            (Surface::DesktopCowork, _) => "Claude Cowork",
+            (Surface::DesktopCode, _) => "Claude Code",
+            (_, Provider::Claude) => "Claude",
+            (_, Provider::Codex) => "Codex",
+            (_, Provider::Cursor) => "Cursor",
+            (_, Provider::Devin) => "Devin",
+            (_, Provider::Gemini) => "Gemini",
+            (_, Provider::OpenCode) => "OpenCode",
+            (_, Provider::Pi) => "Pi",
+            (_, Provider::Windsurf) => "Windsurf",
+        }
+    }
+}
+
+/// Paths backing a Claude for Mac session, needed to delete it cleanly.
+#[derive(Debug, Clone)]
+pub struct MacMeta {
+    pub meta_path: PathBuf,
+    pub session_dir: PathBuf,
+}
+
+/// Context-window consumption for a session or subagent.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub used: u64,
+    pub max: u64,
+    /// A compaction is the newest thing in the transcript: it replaced the
+    /// window and no request has measured the new one yet, so `used` describes
+    /// the window as it stood *before* that compaction.
+    ///
+    /// Deliberately not called "compacting". The transcript cannot tell a
+    /// compaction that is still running from one the session stopped right
+    /// after, and a session that compacted and ended is not busy — only
+    /// liveness settles that, so [`Session::is_compacting`] is where the two
+    /// facts meet.
+    #[serde(default, alias = "compacting")]
+    pub compacted: bool,
+}
+
+impl ContextUsage {
+    /// Percentage of the way to auto-compaction (not of the raw window).
+    pub fn percent_to_compact(&self) -> f64 {
+        let compact_at = self.max as f64 * *crate::config::COMPACT_THRESHOLD;
+        if compact_at <= 0.0 {
+            return 0.0;
+        }
+        self.used as f64 / compact_at * 100.0
+    }
+}
+
+/// What is occupying a session's context window, split by category.
+///
+/// Two of these numbers are measured and the rest are estimated, which is the
+/// whole reason the type keeps them apart. `total` and `startup` come from the
+/// usage figures the API itself reported; every other field is inferred from how
+/// many characters the transcript holds. Nothing is scaled to make the parts add
+/// up to the window — whatever is left over is [`unaccounted`], and that gap is
+/// the honest answer to what the transcript cannot see.
+///
+/// Every field describes one and the same segment — the stretch of conversation
+/// between a start (or a compaction) and the last request that reported its
+/// size. Mixing segments is the one way this type can lie without any single
+/// number being wrong: a `total` from one side of a compaction and parts from
+/// the other differ by the whole conversation, and all of it lands in
+/// [`unaccounted`], which is meant to hold only what cannot be seen.
+///
+/// [`unaccounted`]: ContextBreakdown::unaccounted
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ContextBreakdown {
+    /// Window size at the last request, from its own usage figures. Exact.
+    pub total: u64,
+    /// The first request of the live segment: system prompt, tool schemas,
+    /// CLAUDE.md, the skills index — everything sent before the conversation
+    /// starts, plus the summary when the segment follows a compaction. Exact,
+    /// but not decomposable: the transcript never records what the harness sent.
+    pub startup: u64,
+    /// Estimated from transcript characters.
+    pub tool_output: u64,
+    pub tool_input: u64,
+    pub attachments: u64,
+    pub user_text: u64,
+    pub assistant_text: u64,
+    /// The segment begins at a compaction summary rather than at the start of
+    /// the session, so `startup` carries that summary too.
+    pub after_compaction: bool,
+    /// A compaction has since replaced this segment and no request has measured
+    /// its replacement yet, so these numbers describe the window as it stood
+    /// before that compaction — the last one anything measured.
+    pub superseded: bool,
+}
+
+/// One request's measurement of the context window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CtxPoint {
+    pub ts: String,
+    pub window: u64,
+    /// The first request of a segment that follows a compaction — where the
+    /// window dropped because the harness reclaimed it, not because the
+    /// conversation shrank.
+    #[serde(default)]
+    pub after_compaction: bool,
+}
+
+/// How many points a series keeps.
+///
+/// A long session issues thousands of requests and the chart is at most a few
+/// hundred columns wide, so the tail beyond this is detail no reader can see.
+/// It is enforced by dropping every other point once the cap is passed, which
+/// keeps the shape and the endpoints while halving the resolution — the same
+/// trade a chart makes when it draws.
+pub const MAX_CTX_POINTS: usize = 2000;
+
+/// Halve `series` in place, keeping the first and last points.
+pub fn decimate(series: &mut Vec<CtxPoint>) {
+    if series.len() <= MAX_CTX_POINTS {
+        return;
+    }
+    let last = series.pop();
+    let mut kept: Vec<CtxPoint> = series.iter().step_by(2).cloned().collect();
+    if let Some(last) = last {
+        kept.push(last);
+    }
+    *series = kept;
+}
+
+impl ContextBreakdown {
+    /// Everything the transcript could be read for, `startup` excluded.
+    pub fn estimated(&self) -> u64 {
+        self.tool_output + self.tool_input + self.attachments + self.user_text + self.assistant_text
+    }
+
+    /// The window minus everything attributed to it.
+    ///
+    /// Negative when the estimate overshoots, which happens when the harness has
+    /// dropped old tool results from the window that the transcript still holds.
+    /// Reported signed rather than clamped, because "the categories below add up
+    /// to more than the window" is information, not an error.
+    pub fn unaccounted(&self) -> i64 {
+        self.total as i64 - self.startup as i64 - self.estimated() as i64
+    }
+}
+
+/// Whether a prompt says `ultracode`, as a word of its own and in any case.
+///
+/// A word rather than a substring, so a path or identifier that merely
+/// contains it (`ultracoder`, `my_ultracode_notes`) is not a request.
+pub fn says_ultracode(text: &str) -> bool {
+    const WORD: &str = "ultracode";
+    let lower = text.to_ascii_lowercase();
+    let word_char = |c: char| c.is_alphanumeric() || c == '_';
+    lower.match_indices(WORD).any(|(at, _)| {
+        let before = lower[..at].chars().next_back();
+        let after = lower[at + WORD.len()..].chars().next();
+        !before.is_some_and(word_char) && !after.is_some_and(word_char)
+    })
+}
+
+/// Whether a line is Claude Code reporting an `/effort` switch, and if so
+/// whether the switch was into ultracode.
+///
+/// The command's own output, which Claude Code writes into the transcript in
+/// the person's role:
+///
+/// ```text
+/// <local-command-stdout>Set effort level to ultracode (this session only): …
+/// ```
+///
+/// Anchored at the start of the line, so the same words pasted into a prompt
+/// (a screenshot of a terminal, say) are not read as a switch.
+pub fn effort_switch(text: &str) -> Option<bool> {
+    let level = text
+        .trim_start()
+        .strip_prefix("<local-command-stdout>")?
+        .trim_start()
+        .strip_prefix("Set effort level to ")?;
+    let level: String = level.chars().take_while(|c| c.is_alphanumeric()).collect();
+    (!level.is_empty()).then(|| level.eq_ignore_ascii_case("ultracode"))
+}
+
+/// Keep the later of two transcript timestamps. Both are RFC 3339 in UTC as
+/// the harness wrote them, which sort as text.
+pub fn latest(held: &mut Option<String>, ts: &str) {
+    if !ts.is_empty() && held.as_deref().is_none_or(|h| h < ts) {
+        *held = Some(ts.to_string());
+    }
+}
+
+/// A discovered session plus everything annotated onto it for display.
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub provider: Provider,
+    pub surface: Surface,
+    pub session_id: String,
+    pub started_at: String,
+    pub last_active: String,
+    pub model: String,
+    /// Where the agent is hosted, when it can be inferred (for example Cursor
+    /// versus a terminal CLI). This is intentionally distinct from `model`.
+    pub harness: String,
+    /// Working directory the session was launched from.
+    pub label_source: String,
+    pub data_file: Option<PathBuf>,
+    pub title: Option<String>,
+    pub mac_meta: Option<MacMeta>,
+
+    // --- Annotated after extraction ---
+    pub abbrev_label: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub tool_count: u64,
+    /// Tool calls the transcript reported as failed. Zero for a provider that
+    /// records no outcome — see [`Session::error_rate`], which is the only
+    /// thing that should read this.
+    pub tool_errors: u64,
+    /// Compactions this session has been through, when the harness records
+    /// them. Claude Code only, so `0` elsewhere means "not said" rather than
+    /// "never happened".
+    pub compactions: u32,
+    /// When this session last went into ultracode, and last came out of it:
+    /// see [`SessionData::ultracode_at`].
+    pub ultracode_at: Option<String>,
+    pub ultracode_off_at: Option<String>,
+    /// `None` when the active plan bundles this provider's usage.
+    pub total_cost: Option<f64>,
+    /// False when the provider's transcript contains no billable usage data.
+    pub cost_available: bool,
+    /// Recorded usage has a zero total cost, as with a free model. This stays
+    /// distinct from a session that simply has not recorded any usage yet.
+    pub cost_is_free: bool,
+    /// Spend in the last 60 minutes, rolling, as of the last annotation; see
+    /// [`SessionData::cost_last_hour`]. A remote row carries its peer's figure,
+    /// which an older peer computed for the clock hour instead.
+    pub cost_hour: f64,
+    pub cost_today: f64,
+    /// `YYYY-MM-DD` -> model -> USD, shared with the extraction that built it.
+    ///
+    /// Behind an `Arc` because annotating a row runs on every refresh for every
+    /// row, and these maps are written once when the transcript is parsed and
+    /// only read from then on. Copying them was the most expensive line in the
+    /// walk — 8.5µs for a 30-day session against 0.19µs for a 1-day one — for a
+    /// hash table no reader mutates.
+    pub costs_by_day: Arc<HashMap<String, HashMap<String, f64>>>,
+    /// `YYYY-MM-DDTHH` -> model -> USD, shared the same way.
+    pub costs_by_hour: Arc<HashMap<String, HashMap<String, f64>>>,
+    pub subagents: Vec<Subagent>,
+    pub subagents_cost: f64,
+    pub context: Option<ContextUsage>,
+    pub last_tool: String,
+    pub process: Option<crate::proc::ProcInfo>,
+    /// Liveness inferred from a growing transcript when no per-session process
+    /// exists (currently Cursor native agents).
+    pub inferred_running: bool,
+    /// The session id this session's process was *started* with, which stops
+    /// being its own id the moment it is resumed.
+    ///
+    /// `claude --resume X` does not reopen X's transcript. It forks: a new file
+    /// under a new id, which records X as the id it was launched from. So the
+    /// only thing on the running process's command line is the id of a
+    /// transcript that is now finished, and matching a PID to the session whose
+    /// *name* it carries attributes the live agent to the dead conversation —
+    /// the running one then shows as stopped while a session nobody is in shows
+    /// as working. Matching on this instead follows the fork forward.
+    ///
+    /// Empty when the harness does not record one, which includes every
+    /// provider but Claude and Claude transcripts old enough to predate the
+    /// field. Callers fall back to [`session_id`](Self::session_id), which is
+    /// what this holds for a session that was never resumed.
+    pub launch_id: String,
+    /// A transcript-derived state that refines the liveness dot.
+    pub activity_state: ActivityState,
+    /// What a session in [`ActivityState::Asking`] is asking to do, when its
+    /// hook said — `Bash: rm -rf build`. `None` in every other state, so a
+    /// stale question cannot outlive the prompt it came from.
+    pub asking_for: Option<String>,
+    /// Whether what an [`ActivityState::Asking`] session holds is a question
+    /// with choices rather than a permission prompt — the difference between
+    /// a prompt Allow and Deny may answer and one where they would pick an
+    /// option or throw the question away. `false` in every other state.
+    pub asking_question: bool,
+    /// How much this session asks before it acts, when its own hooks have said.
+    ///
+    /// Read from the transcript, which Claude Code stamps with the mode on
+    /// every `user` record, and overwritten by the session's own hooks when it
+    /// has them — those are fresher, since they arrive as the turn happens
+    /// rather than after it is written down.
+    ///
+    /// `None` when neither could say: a harness that does not record it, or a
+    /// transcript whose tail holds no user record. That is deliberately not the
+    /// same as "it asks about everything", which would be a guess about the one
+    /// column whose whole job is not to guess.
+    pub permission: Option<crate::hook::Permission>,
+    /// Whether cctop allows every permission prompt this session raises, and
+    /// what it has allowed so far — see [`crate::yolo`]. `None` is the
+    /// ordinary case, a session whose prompts wait for a person.
+    ///
+    /// Stamped from the machine's shared YOLO file on every pass rather than
+    /// carried by the walk, for the reason [`Self::asking_for`] is: rows are
+    /// rebuilt from transcripts, which know nothing of it. Behind an `Arc`
+    /// because every refresh clones every row.
+    pub yolo: Option<Arc<crate::yolo::Entry>>,
+
+    /// The session this one was converted from, when cctop wrote it as a
+    /// handoff into another harness.
+    ///
+    /// The two are one piece of work rather than two, and this is what says so:
+    /// a Codex session handed to Claude and resumed carries the same id under
+    /// `claude`, so [`Session::key`] alone would report two rows about two
+    /// sessions. A row that knows it is a copy can be hidden from a list, or
+    /// shown as a continuation of the row it came from.
+    pub converted_from: Option<crate::convert::Provenance>,
+
+    /// Absolute paths this session has written recently, newest first.
+    ///
+    /// Kept on the row rather than looked up per frame because the only
+    /// question asked of it — does anyone else hold this file — is asked about
+    /// every live session at once, and [`SessionData`] is loaded for one.
+    /// Bounded by [`MAX_RECENT_WRITES`]; spelled by [`crate::collide::normalise`]
+    /// so two harnesses' spellings of one path compare equal.
+    pub recent_writes: Vec<String>,
+
+    /// How close another live session is to this one's work, as
+    /// [`crate::collide`] last measured it. `None` is the ordinary case: no
+    /// other running agent shares this repository.
+    pub conflict: Option<crate::collide::Overlap>,
+
+    /// Set when this row came from another machine over ssh, rather than from
+    /// this one's disk.
+    ///
+    /// The single test for "cctop cannot act on this": every path that signals
+    /// a process, deletes a transcript, opens a pty or reads a git directory is
+    /// about *this* filesystem, and would quietly do the wrong thing to a
+    /// same-named path if it ran for a remote row.
+    pub remote: Option<Remote>,
+
+    /// `host:path` when the agent runs here but works on another machine,
+    /// under `cctop sandbox`: its Bash calls go there over ssh and `path` is
+    /// that machine's, mounted here.
+    ///
+    /// The opposite case from [`Session::remote`]: the process, the transcript
+    /// and the pty are all this machine's, so every local action still
+    /// applies — it is the *working directory* that belongs to somewhere else.
+    /// Set from the session's own hook, which inherits `CCTOP_SANDBOX` from
+    /// the launch; see [`crate::hook::Reports::sandboxes`].
+    pub sandbox: Option<String>,
+
+    /// Which Claude profile's directory this session was read out of.
+    ///
+    /// `$CLAUDE_CONFIG_DIR` lets one user hold several logins side by side, each
+    /// with its own subscription, its own limits and its own `projects/`. cctop
+    /// reads all of them, so without this a personal session and a work one are
+    /// indistinguishable rows — the same confusion [`Session::owner`] removes
+    /// between two people, on the axis of one person with two accounts.
+    ///
+    /// `None` for every provider but Claude Code, which is the only one with the
+    /// concept. Stamped from the transcript's path in [`list_all`], the one
+    /// place every provider's rows meet.
+    pub profile: Option<String>,
+
+    /// Login name of the user whose home this session was read out of, when
+    /// that is not the user running cctop.
+    ///
+    /// Only ever set when cctop is sweeping other homes — running as root, or
+    /// told to by `$CCTOP_ALL_USERS` — so `None` on an ordinary run means
+    /// "mine" rather than "unknown". Stamped from the transcript's path in
+    /// [`list_all`], which is the one place every provider's rows meet.
+    pub owner: Option<String>,
+
+    // --- Rate tracking ---
+    pub tokens_per_min: f64,
+    pub cost_per_min: f64,
+}
+
+/// Where a row came from, when it did not come from this machine.
+#[derive(Debug, Clone, Default)]
+pub struct Remote {
+    /// The ssh target exactly as the user spelled it, which is what the HOST
+    /// column shows and what any message about the row names.
+    pub host: String,
+    /// Branch as that machine read it. Carried rather than looked up, because
+    /// the working directory is a path on *that* filesystem and reading it here
+    /// would report whatever happens to live at the same path locally.
+    pub branch: Option<String>,
+    /// How that machine's cctop stands against this one, once it has said.
+    ///
+    /// On the row rather than looked up at draw time, because the HOST cell is
+    /// drawn from the row alone — the same `render_cell` every surface uses —
+    /// and the TUI stamps it on as it merges the rows back in. `None` for a
+    /// match and for a version not yet known, which draw the same.
+    pub skew: Option<crate::fleet::Skew>,
+}
+
+/// Tool names that mean "this file was modified", across harnesses.
+///
+/// Shared because two features now turn on it — the handoff brief's file list
+/// and collision detection — and a name known to one but not the other would
+/// show a session editing a file that cctop swore nobody was editing.
+pub const EDIT_TOOLS: &[&str] = &[
+    "Edit",
+    "edit",
+    "Write",
+    "write",
+    "MultiEdit",
+    "NotebookEdit",
+    "str_replace_editor",
+    "ApplyPatch",
+    "apply_patch",
+];
+
+/// How many written paths a row carries.
+///
+/// Enough to cover what a session has open at once, and far short of every file
+/// it has ever touched: a path it wrote an hour and forty edits ago is one it
+/// has almost certainly finished with, and treating it as contested would make
+/// the warning cry wolf on any long session.
+pub const MAX_RECENT_WRITES: usize = 32;
+
+/// The paths a session wrote lately, newest first, as the transcript spelled
+/// them. The detail string an [`EDIT_TOOLS`] call records is the file it
+/// targeted, except for a patch, which records every file it touched in
+/// [`ToolDetail::paths`] — the display string names only the first.
+///
+/// Run once per extraction so the tool history itself need never be persisted.
+/// Resolving these against the session's cwd stays in [`crate::loader`], which
+/// is the layer that knows the cwd.
+///
+/// ponytail: deduplicated as written rather than as resolved, so two spellings
+/// of one file both take a slot. Costs at most a slot or two of a 32-entry list
+/// against keeping every write on disk to re-derive the list each run.
+fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<String> {
+    let mut all: Vec<&ToolDetail> = EDIT_TOOLS
+        .iter()
+        .filter_map(|name| details.get(*name))
+        .flatten()
+        .collect();
+    all.sort_by(|a, b| b.ts.cmp(&a.ts));
+
+    let mut seen = std::collections::HashSet::new();
+    all.into_iter()
+        .flat_map(|d| {
+            if d.paths.is_empty() {
+                vec![d.d.trim()]
+            } else {
+                d.paths.iter().map(|p| p.trim()).collect()
+            }
+        })
+        .filter(|p| !p.is_empty())
+        .filter(|p| seen.insert(p.to_string()))
+        .take(MAX_RECENT_WRITES)
+        .map(str::to_string)
+        .collect()
+}
+
+impl Session {
+    /// When this session went into ultracode, while it is still in it.
+    pub fn in_ultracode(&self) -> Option<&str> {
+        let on = self.ultracode_at.as_deref()?;
+        match self.ultracode_off_at.as_deref() {
+            Some(off) if off >= on => None,
+            _ => Some(on),
+        }
+    }
+
+    /// Spend in the local clock hour `now` falls in.
+    ///
+    /// Not what the table or the Cost panel show — they want the rolling
+    /// [`Session::cost_hour`]. This is for the outputs whose name already
+    /// promised the clock hour to someone reading them: `this_hour` in
+    /// `--json` and the `cctop_cost_this_hour_usd` gauge. Read from the hour
+    /// map because a remote row carries that and no minutes.
+    pub fn cost_clock_hour(&self, now: &chrono::DateTime<chrono::Utc>) -> f64 {
+        self.costs_by_hour
+            .get(&util::local_hour_key(now))
+            .map(|m| m.values().sum())
+            .unwrap_or(0.0)
+    }
+
+    pub fn new(provider: Provider, session_id: String) -> Self {
+        Session {
+            provider,
+            surface: Surface::Cli,
+            session_id,
+            started_at: String::new(),
+            last_active: String::new(),
+            model: String::new(),
+            harness: String::new(),
+            label_source: String::new(),
+            data_file: None,
+            title: None,
+            mac_meta: None,
+            abbrev_label: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_count: 0,
+            tool_errors: 0,
+            compactions: 0,
+            ultracode_at: None,
+            ultracode_off_at: None,
+            total_cost: Some(0.0),
+            cost_available: true,
+            cost_is_free: false,
+            cost_hour: 0.0,
+            cost_today: 0.0,
+            costs_by_day: Arc::default(),
+            costs_by_hour: Arc::default(),
+            subagents: Vec::new(),
+            subagents_cost: 0.0,
+            context: None,
+            last_tool: String::new(),
+            process: None,
+            inferred_running: false,
+            launch_id: String::new(),
+            activity_state: ActivityState::Working,
+            asking_for: None,
+            asking_question: false,
+            permission: None,
+            yolo: None,
+            converted_from: None,
+            recent_writes: Vec::new(),
+            conflict: None,
+            remote: None,
+            sandbox: None,
+            profile: None,
+            owner: None,
+            tokens_per_min: 0.0,
+            cost_per_min: 0.0,
+        }
+    }
+
+    /// Stable identity used as a map key across refreshes.
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.provider.as_str(), self.session_id)
+    }
+
+    /// [`Self::key`] written into a buffer the caller owns and reused, for the
+    /// passes that match every session against a map keyed by it.
+    ///
+    /// `key` itself is right almost everywhere and stays: it hands back
+    /// something the caller can keep. What it cannot do is a *lookup*, and the
+    /// sweeps that need one — the process attribution, the rate table, the tail
+    /// cache — run over every session on every refresh, so a fresh `String` per
+    /// row is a per-row allocation for a key that is thrown away a line later.
+    /// One buffer per pass turns that into one allocation however many rows
+    /// there are.
+    ///
+    /// What is left still costs: a pass that *writes* to one of those maps has
+    /// to own the key it writes. That is the minority of the calls, and for the
+    /// rate table — the only one retained across walks — it is the first
+    /// sighting of a session and never again.
+    pub fn key_into<'a>(&self, buf: &'a mut String) -> &'a str {
+        use std::fmt::Write as _;
+        buf.clear();
+        let _ = write!(buf, "{}:{}", self.provider.as_str(), self.session_id);
+        buf
+    }
+
+    /// The id a running process would name to mean this session: the one it was
+    /// launched with, or its own when it was never resumed from anything.
+    pub fn launched_as(&self) -> &str {
+        match self.launch_id.is_empty() {
+            true => &self.session_id,
+            false => &self.launch_id,
+        }
+    }
+
+    /// Share of this session's tool calls that failed, or `None` when the
+    /// harness does not record outcomes and a rate would be an invention.
+    ///
+    /// A session with no calls yet also reports `None`: nought out of nought is
+    /// not a clean run, and drawing it as `0%` puts a reassuring figure on a
+    /// session that has done nothing.
+    pub fn error_rate(&self) -> Option<f64> {
+        if !self.provider.records_tool_outcomes() || self.tool_count == 0 {
+            return None;
+        }
+        Some(self.tool_errors as f64 / self.tool_count as f64)
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.process.is_some() || self.inferred_running
+    }
+
+    /// True when this row stands for a running process rather than a
+    /// transcript: [`crate::proc::collect`] mints `_pid_<pid>` for the id of
+    /// an agent no session file claimed.
+    ///
+    /// The id names nothing a harness can look up, so anything that points a
+    /// new agent at the conversation — resume, handoff — has nothing to point
+    /// at here. The process itself is real: typing into it still means
+    /// something.
+    pub fn process_only(&self) -> bool {
+        self.session_id.starts_with("_pid_")
+    }
+
+    /// The command that reopens this session in a terminal, if its provider
+    /// has one.
+    ///
+    /// `None` is a real answer, not a gap to be filled in later: Cursor, Gemini
+    /// and Windsurf keep their conversations inside an editor or a UI of their
+    /// own, and there is no CLI invocation that picks one back up. Callers show
+    /// the transcript's path for those instead of guessing at a flag.
+    pub fn resume_argv(&self) -> Option<Vec<String>> {
+        // A `_pid_` id names a process, not a conversation — proc::collect
+        // mints it precisely because no transcript claimed the agent — so
+        // there is nothing here for `--resume` to find.
+        if self.process_only() {
+            return None;
+        }
+        let argv = match self.provider {
+            Provider::Claude => vec!["claude", "--resume", &self.session_id],
+            Provider::Codex => vec!["codex", "resume", &self.session_id],
+            Provider::Devin => vec!["devin", "--resume", &self.session_id],
+            Provider::OpenCode => vec!["opencode", "--session", &self.session_id],
+            Provider::Pi => vec!["pi", "--session", &self.session_id],
+            Provider::Cursor | Provider::Gemini | Provider::Windsurf => {
+                return None;
+            }
+        };
+        Some(argv.into_iter().map(str::to_string).collect())
+    }
+
+    /// PID of this session's live agent root, excluding briefly retained exits.
+    ///
+    /// The one process worth aiming anything at: a session's process list holds
+    /// the agent, whatever it spawned, and — for a moment after they die —
+    /// ghosts, and typing at a child or at something that has already exited is
+    /// a silent no-op rather than an error.
+    pub fn root_pid(&self) -> Option<u32> {
+        self.process
+            .as_ref()?
+            .process_list
+            .iter()
+            .find_map(|process| (process.is_root && !process.ghost).then_some(process.pid))
+    }
+
+    /// Fold what the agent's own hook last reported and what its screen shows
+    /// into the transcript's reading of it.
+    ///
+    /// The one place a row is stamped: the dashboard's `App::apply_reports` and
+    /// the refresher inside a standalone `cctop serve` both call this rather
+    /// than agree separately. The screen, when it is being read and says
+    /// something, outranks every report — it is what the agent is showing
+    /// *now*, where a hook event is what it said last: late for a permission
+    /// prompt, stale for a question already answered, absent when hooks are not
+    /// installed at all.
+    pub fn apply_reports(
+        &mut self,
+        reported: Option<&crate::hook::Reported>,
+        screened: Option<&crate::peek::Screened>,
+    ) {
+        if let Some(screened) = screened {
+            match screened.signal.activity() {
+                Some(state) => self.activity_state = state,
+                // Mid-turn on screen clears a waiting state a report left
+                // behind; an API error the transcript found stays put.
+                None if matches!(
+                    self.activity_state,
+                    ActivityState::Asking | ActivityState::WaitingForInput
+                ) =>
+                {
+                    self.activity_state = ActivityState::Working;
+                }
+                None => {}
+            }
+        }
+        if let Some(reported) = reported {
+            // Only ever set from a report. A session whose newest event did
+            // not carry the field keeps the last mode that did, because the
+            // setting has not changed just because one event was quiet about
+            // it.
+            if reported.permission.is_some() {
+                self.permission = reported.permission;
+            }
+            // The report is only allowed to say the two things the transcript
+            // cannot — see [`Signal::activity`](crate::hook::Signal::activity) —
+            // so a stale-but-not-yet-expired working claim cannot talk a row
+            // out of an API error it is genuinely sitting in. A permission
+            // prompt auto mode may still answer is not yet news: see
+            // [`Reported::is_settled`](crate::hook::Reported::is_settled). The
+            // row keeps whatever the transcript makes of it — which is
+            // "working", because that is what the agent is doing.
+            if screened.is_none()
+                && reported.is_settled()
+                && let Some(state) = reported.signal.activity()
+            {
+                self.activity_state = state;
+            }
+        }
+        self.asking_for = match self.activity_state {
+            // A prompt the screen found is still answered blind if the hook's
+            // own words exist: `Bash: rm -rf build` beats "yes or no" whatever
+            // told cctop the prompt was up.
+            ActivityState::Asking => reported
+                .filter(|r| r.signal == crate::hook::Signal::NeedsInput)
+                .and_then(|r| r.ask.clone())
+                .or_else(|| screened.and_then(|s| s.ask.clone())),
+            _ => None,
+        };
+        // Either witness is enough: the hook knows the tool, the screen sees
+        // the menu. Erring towards "question" only costs a button.
+        self.asking_question = self.activity_state == ActivityState::Asking
+            && (reported
+                .is_some_and(|r| r.signal == crate::hook::Signal::NeedsInput && r.question)
+                || screened.is_some_and(|s| s.question));
+    }
+
+    /// The working directory a resumed session should start in.
+    ///
+    /// The agent is being put back where it was, and half of what a transcript
+    /// refers to is relative to that directory. A path that no longer exists —
+    /// a deleted checkout, a session from another machine — yields `None`, so
+    /// the agent starts wherever cctop was launched rather than failing to
+    /// start at all.
+    pub fn work_dir(&self) -> Option<PathBuf> {
+        Some(PathBuf::from(&self.label_source)).filter(|dir| dir.is_dir())
+    }
+
+    /// A compaction is the newest thing in the transcript *and* something is
+    /// still there to send the request that follows it.
+    ///
+    /// Liveness is checked here rather than baked into [`ContextUsage`] because
+    /// the transcript of a session that compacted and then stopped never
+    /// changes again: a flag stored at read time would keep calling that
+    /// session busy for as long as it is listed.
+    pub fn is_compacting(&self) -> bool {
+        self.context.is_some_and(|c| c.compacted) && self.is_running()
+    }
+
+    /// Title if renamed, else the abbreviated working directory.
+    pub fn display_label(&self) -> &str {
+        self.title
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| {
+                if self.abbrev_label.is_empty() {
+                    if self.label_source.is_empty() {
+                        "unknown"
+                    } else {
+                        &self.label_source
+                    }
+                } else {
+                    &self.abbrev_label
+                }
+            })
+    }
+}
+
+/// What the newest events say about a session: what it is doing, and how much
+/// it asks before it acts.
+///
+/// Both come off the same tail, so they are read together — a second pass over
+/// the last 64KB of every transcript, on every refresh, to answer one more
+/// question would be the kind of per-tick waste `proc` was just relieved of.
+///
+/// The permission mode is only carried by Claude Code, on each `user` record,
+/// and the newest one wins: it is a setting the user can change mid-session.
+pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Permission>) {
+    let Some(file) = session.data_file.as_ref() else {
+        return (ActivityState::Working, None);
+    };
+    if session.provider == crate::pricing::Provider::OpenCode {
+        return (
+            opencode::extract_activity_state(file, &session.session_id),
+            None,
+        );
+    }
+    // Devin's transcript is one JSON document, not a line-delimited log — the
+    // per-line tail walk below would never parse a record out of it. The
+    // conversation's newest node in the database says the same thing faster.
+    if session.provider == crate::pricing::Provider::Devin {
+        return devin::live_state(session);
+    }
+    let Some(text) = crate::util::read_tail(file, 65_536) else {
+        return (ActivityState::Working, None);
+    };
+
+    // Found on the way to the state, which is why the walk is not cut short the
+    // moment the state is known: the newest record that names a mode may be
+    // older than the newest record that names a state.
+    let mut permission = None;
+    let mut state = None;
+    for line in text.lines().rev() {
+        let Ok(item) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if permission.is_none() {
+            permission = item
+                .get("permissionMode")
+                .and_then(|v| v.as_str())
+                .and_then(crate::hook::Permission::parse);
+        }
+        if state.is_some() {
+            if permission.is_some() {
+                break;
+            }
+            continue;
+        }
+        state = activity_of(session.provider, &item);
+    }
+    (state.unwrap_or(ActivityState::Working), permission)
+}
+
+/// What one record says about the session's state, or `None` if it says nothing
+/// and the walk should carry on past it.
+fn activity_of(
+    provider: crate::pricing::Provider,
+    item: &serde_json::Value,
+) -> Option<ActivityState> {
+    if is_api_error_event(item) {
+        return Some(ActivityState::ApiError);
+    }
+    if is_waiting_for_input_event(provider, item) {
+        return Some(ActivityState::WaitingForInput);
+    }
+    if is_passive_event(item) {
+        return None;
+    }
+    // The newest meaningful event was ordinary progress (a tool call, result,
+    // or stream event), so do not let an older completed answer make the row
+    // look like it is awaiting input.
+    Some(ActivityState::Working)
+}
+
+/// Token counters and turn metadata are often appended after the event that
+/// actually describes the agent's state.  Ignore them while walking backwards
+/// so a finished response is still shown as waiting for the user.
+fn is_passive_event(item: &serde_json::Value) -> bool {
+    let kind = item
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if matches!(kind, "session_meta" | "turn_context") {
+        return true;
+    }
+    kind == "event_msg"
+        && item
+            .get("payload")
+            .and_then(|p| p.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some("token_count")
+}
+
+fn is_api_error_event(item: &serde_json::Value) -> bool {
+    let kind = item
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let subtype = item
+        .get("subtype")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if matches!(kind, "error" | "api_error") || matches!(subtype, "api_error" | "error") {
+        return true;
+    }
+    let payload = item.get("payload").unwrap_or(item);
+    matches!(
+        payload.get("type").and_then(serde_json::Value::as_str),
+        Some("error" | "api_error" | "stream_error" | "turn_aborted")
+    )
+}
+
+fn is_waiting_for_input_event(
+    provider: crate::pricing::Provider,
+    item: &serde_json::Value,
+) -> bool {
+    match provider {
+        crate::pricing::Provider::Claude | crate::pricing::Provider::Cursor => {
+            if item.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+                return false;
+            }
+            let Some(blocks) = item
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                return false;
+            };
+            blocks.iter().any(|b| {
+                matches!(
+                    b.get("type").and_then(serde_json::Value::as_str),
+                    Some("tool_use" | "toolCall")
+                ) && b
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_input_request_tool)
+            })
+        }
+        crate::pricing::Provider::Codex => {
+            let payload = item.get("payload").unwrap_or(item);
+            matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("function_call" | "custom_tool_call" | "response_item")
+            ) && payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_input_request_tool)
+        }
+        crate::pricing::Provider::Pi => {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                && item
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|b| {
+                            b.get("type").and_then(serde_json::Value::as_str) == Some("toolCall")
+                                && b.get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(is_input_request_tool)
+                        })
+                    })
+        }
+        crate::pricing::Provider::Gemini => {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("gemini")
+                && item
+                    .get("toolCalls")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            call.get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(is_input_request_tool)
+                        })
+                    })
+        }
+        // OpenCode keeps no transcript to tail, and Windsurf's conversation blob
+        // is one SQLite value rewritten wholesale rather than a growing log, so
+        // neither has a "newest event" this walk could read. Devin never gets
+        // here — live_state hands it to its own database read first.
+        crate::pricing::Provider::OpenCode
+        | crate::pricing::Provider::Devin
+        | crate::pricing::Provider::Windsurf => false,
+    }
+}
+
+fn is_input_request_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "askuserquestion"
+            | "ask_user_question"
+            | "ask_user"
+            | "askuser"
+            | "question"
+            | "request_user_input"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_effort_switch_is_read_only_from_the_commands_own_output() {
+        let out = |level: &str| {
+            format!(
+                "<local-command-stdout>Set effort level to {level} (this session only): …</local-command-stdout>"
+            )
+        };
+        assert_eq!(effort_switch(&out("ultracode")), Some(true));
+        assert_eq!(effort_switch(&out("xhigh")), Some(false));
+        assert_eq!(
+            effort_switch(
+                "<local-command-stdout>Set effort level to medium (saved as your default for new sessions): …"
+            ),
+            Some(false)
+        );
+        // The same words pasted into a prompt, and a prompt about it.
+        assert_eq!(
+            effort_switch(&format!("look at this: {}", out("ultracode"))),
+            None
+        );
+        assert_eq!(effort_switch("turn ultracode off"), None);
+        assert_eq!(
+            effort_switch("<local-command-stdout>Cancelled</local-command-stdout>"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_session_leaves_ultracode_when_it_switches_away_later() {
+        let mut s = Session::new(Provider::Claude, "s".into());
+        assert_eq!(s.in_ultracode(), None);
+        s.ultracode_at = Some("2026-09-25T09:00:00.000Z".into());
+        assert_eq!(s.in_ultracode(), Some("2026-09-25T09:00:00.000Z"));
+        s.ultracode_off_at = Some("2026-09-25T09:05:00.000Z".into());
+        assert_eq!(s.in_ultracode(), None);
+        s.ultracode_at = Some("2026-09-25T09:10:00.000Z".into());
+        assert_eq!(s.in_ultracode(), Some("2026-09-25T09:10:00.000Z"));
+    }
+
+    #[test]
+    fn ultracode_is_a_word_not_a_substring() {
+        assert!(says_ultracode("ultracode"));
+        assert!(says_ultracode("Refactor the parser. ULTRACODE."));
+        assert!(says_ultracode("go (ultracode) now"));
+        assert!(!says_ultracode("ultracoder"));
+        assert!(!says_ultracode("see my_ultracode_notes.md"));
+        assert!(!says_ultracode("ultra code"));
+    }
+    use serde_json::json;
+
+    fn at(ts: &str) -> chrono::DateTime<chrono::Utc> {
+        util::parse_ts(ts).expect("valid timestamp")
+    }
+
+    /// The case that made the hour rolling: fifteen minutes of work before
+    /// midnight read as nothing two minutes after it.
+    #[test]
+    fn spend_before_the_hour_still_counts_after_it() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-10T23:47:00Z"), "m", 1.5);
+
+        assert_eq!(data.cost_last_hour(&at("2026-08-11T00:02:00Z")), 1.5);
+        // The day map still has it on the day it happened.
+        let day = util::local_date_key(&at("2026-08-10T23:47:00Z"));
+        assert_eq!(data.costs_by_day[&day]["m"], 1.5);
+    }
+
+    #[test]
+    fn spend_older_than_sixty_minutes_drops_out() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-11T09:00:30Z"), "m", 4.0); // 61 minutes back
+        data.record_cost(&at("2026-08-11T09:01:59Z"), "m", 2.0); // the minute 60 back
+        data.record_cost(&at("2026-08-11T09:02:00Z"), "m", 1.0); // 59 minutes back
+        data.record_cost(&at("2026-08-11T10:01:10Z"), "n", 0.5); // this minute
+
+        assert_eq!(data.cost_last_hour(&at("2026-08-11T10:01:30Z")), 1.5);
+        assert_eq!(data.cost_last_hour(&at("2026-08-11T12:00:00Z")), 0.0);
+    }
+
+    #[test]
+    fn finalize_keeps_a_day_of_minutes_behind_the_newest() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-10T10:00:00Z"), "m", 1.0);
+        data.record_cost(&at("2026-08-10T10:01:00Z"), "m", 1.0);
+        data.record_cost(&at("2026-08-11T10:00:00Z"), "m", 1.0);
+        data.finalize();
+
+        assert_eq!(
+            data.costs_by_minute.len(),
+            2,
+            "the minute a day back is gone"
+        );
+        // The day and hour maps are not trimmed: they are the lifetime record.
+        assert_eq!(data.costs_by_day.len(), 2);
+    }
+
+    /// A cache written before the minute map existed still loads, with the
+    /// rolling hour reading zero rather than the entry failing to parse.
+    #[test]
+    fn a_session_cached_without_minutes_still_loads() {
+        let mut value = serde_json::to_value(SessionData::default()).expect("serializes");
+        value
+            .as_object_mut()
+            .expect("an object")
+            .remove("costs_by_minute");
+        let data: SessionData = serde_json::from_value(value).expect("old shape loads");
+        assert!(data.costs_by_minute.is_empty());
+        assert_eq!(data.cost_last_hour(&chrono::Utc::now()), 0.0);
+    }
+
+    /// Integer map keys round-trip through JSON, which spells them as strings.
+    #[test]
+    fn minutes_survive_the_cache_round_trip() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-11T10:00:00Z"), "m", 0.25);
+        let text = serde_json::to_string(&data).expect("serializes");
+        let back: SessionData = serde_json::from_str(&text).expect("deserializes");
+        assert_eq!(back.costs_by_minute, data.costs_by_minute);
+    }
+
+    /// The day and hour buckets are shared with every row annotated from this
+    /// extraction, and still have to reach a cache file as the plain nested
+    /// object they always were. A change of shape here would be invisible until
+    /// every session cached by an older build failed to load.
+    #[test]
+    fn shared_cost_buckets_still_spell_themselves_as_plain_objects() {
+        let mut data = SessionData::default();
+        data.record_cost(&at("2026-08-11T10:00:00Z"), "m", 1.5);
+
+        let text = serde_json::to_string(&data).expect("serializes");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("is json");
+        // The day is whatever the host's time zone made it, so ask the data.
+        let day = data.costs_by_day.keys().next().expect("a day");
+        assert_eq!(value["costs_by_day"][day]["m"].as_f64(), Some(1.5));
+
+        let back: SessionData = serde_json::from_str(&text).expect("deserializes");
+        assert_eq!(back.costs_by_day, data.costs_by_day);
+        assert_eq!(back.costs_by_hour, data.costs_by_hour);
+    }
+
+    /// A session reached through two overlapping roots is one session. It used
+    /// to be two rows, and its cost was counted twice in every total on screen.
+    #[test]
+    fn a_session_discovered_twice_is_one_row() {
+        let at = |when: &str| {
+            let mut s = Session::new(Provider::Claude, "sid".into());
+            s.last_active = when.into();
+            s
+        };
+        let mut sessions = vec![at("2026-09-02T10:00:00Z"), at("2026-09-02T10:00:00Z")];
+        assert_eq!(dedup(&mut sessions), 1);
+        assert_eq!(sessions.len(), 1);
+
+        // Two providers may reuse an id without meaning the same session, so
+        // identity is the pair and not the id alone.
+        let mut across = vec![
+            Session::new(Provider::Claude, "sid".into()),
+            Session::new(Provider::Codex, "sid".into()),
+        ];
+        assert_eq!(dedup(&mut across), 0);
+        assert_eq!(across.len(), 2);
+    }
+
+    /// Which copy survives is not arbitrary: the Owner column is read to decide
+    /// whose session this is, and your own session labelled as somebody else's
+    /// is a worse answer than no label at all.
+    #[test]
+    fn the_copy_kept_is_this_users_own() {
+        let copy = |owner: Option<&str>, when: &str| {
+            let mut s = Session::new(Provider::Claude, "sid".into());
+            s.owner = owner.map(str::to_string);
+            s.last_active = when.into();
+            s
+        };
+
+        // Even when the other home's view of it looks fresher.
+        let mut sessions = vec![
+            copy(Some("alice"), "2026-09-02T12:00:00Z"),
+            copy(None, "2026-09-02T10:00:00Z"),
+        ];
+        assert_eq!(dedup(&mut sessions), 1);
+        assert_eq!(sessions[0].owner, None);
+
+        // Between two copies of somebody else's, the one still being written to.
+        let mut theirs = vec![
+            copy(Some("alice"), "2026-09-02T10:00:00Z"),
+            copy(Some("alice"), "2026-09-02T12:00:00Z"),
+        ];
+        assert_eq!(dedup(&mut theirs), 1);
+        assert_eq!(theirs[0].last_active, "2026-09-02T12:00:00Z");
+    }
+
+    /// Each harness spells resuming differently, and the three that cannot be
+    /// resumed from a shell must say so rather than producing a command that
+    /// looks plausible and does nothing.
+    #[test]
+    fn each_provider_resumes_the_way_its_harness_does() {
+        let argv = |provider| Session::new(provider, "sid".into()).resume_argv();
+        assert_eq!(
+            argv(Provider::Claude),
+            Some(vec!["claude".into(), "--resume".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::Codex),
+            Some(vec!["codex".into(), "resume".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::OpenCode),
+            Some(vec!["opencode".into(), "--session".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::Pi),
+            Some(vec!["pi".into(), "--session".into(), "sid".into()])
+        );
+        for provider in [Provider::Cursor, Provider::Gemini, Provider::Windsurf] {
+            assert_eq!(argv(provider), None, "{provider:?} has no resume command");
+        }
+    }
+
+    /// A `_pid_` id names a process, not a conversation — proc::collect mints
+    /// it because no transcript claimed the agent — so building `claude
+    /// --resume _pid_42` would point a harness at a session that is not there.
+    #[test]
+    fn a_process_only_row_has_no_resume_command() {
+        for provider in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::OpenCode,
+            Provider::Pi,
+        ] {
+            assert_eq!(
+                Session::new(provider, "_pid_42".into()).resume_argv(),
+                None,
+                "{provider:?} built a resume command for a synthetic id"
+            );
+        }
+    }
+
+    /// A resumed agent belongs in the directory the session ran in — but a path
+    /// that has since gone must not stop it from starting at all.
+    #[test]
+    fn a_resumed_session_only_claims_a_directory_that_exists() {
+        let mut s = Session::new(Provider::Claude, "sid".into());
+        s.label_source = "/nonexistent/gone".into();
+        assert_eq!(s.work_dir(), None);
+
+        s.label_source = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(s.work_dir(), Some(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn classifies_completed_assistant_responses_as_waiting() {
+        let claude = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "AskUserQuestion"}]}
+        });
+        assert!(is_waiting_for_input_event(Provider::Claude, &claude));
+
+        let codex = json!({
+            "type": "function_call",
+            "payload": {"name": "request_user_input"}
+        });
+        assert!(is_waiting_for_input_event(Provider::Codex, &codex));
+    }
+
+    #[test]
+    fn keeps_tool_turns_and_api_errors_distinct() {
+        let tool_turn = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Read"}]}
+        });
+        assert!(!is_waiting_for_input_event(Provider::Claude, &tool_turn));
+
+        let error = json!({"type": "system", "subtype": "api_error"});
+        assert!(is_api_error_event(&error));
+    }
+
+    #[test]
+    fn ignores_codex_token_bookkeeping_when_finding_last_state() {
+        let item = json!({
+            "type": "event_msg",
+            "payload": {"type": "token_count"}
+        });
+        assert!(is_passive_event(&item));
+    }
+
+    /// The permission mode is on Claude Code's `user` records, so it can be read
+    /// without hooks — and it is the *newest* one, because the user can change
+    /// it mid-session.
+    #[test]
+    fn the_permission_mode_comes_off_the_transcript_tail() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-permission-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","permissionMode":"default"}"#,
+                "\n",
+                r#"{"type":"user","permissionMode":"bypassPermissions"}"#,
+                "\n",
+                // Newer, but says nothing about the mode: the answer above stands.
+                r#"{"type":"assistant","message":{"content":[]}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+        let mut session = Session::new(Provider::Claude, "test".into());
+        session.data_file = Some(path.clone());
+        assert_eq!(
+            live_state(&session).1,
+            Some(crate::hook::Permission::Bypass),
+            "the newest record that names a mode wins"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // A harness that never records it says nothing, rather than guessing at
+        // the safe end.
+        std::fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n",
+        )
+        .expect("write transcript");
+        assert_eq!(live_state(&session).1, None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The rate has three answers, and two of them are `None` for reasons that
+    /// must not be confused: a harness that cannot report outcomes, and a
+    /// session that has not made a call yet. Neither is a clean run, and
+    /// drawing either as `0%` would put a reassuring figure on a row that has
+    /// earned nothing of the sort.
+    #[test]
+    fn an_error_rate_is_only_reported_where_one_can_be_measured() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        assert_eq!(s.error_rate(), None, "no calls yet is not a clean run");
+
+        s.tool_count = 40;
+        s.tool_errors = 10;
+        assert_eq!(s.error_rate(), Some(0.25));
+
+        s.tool_errors = 0;
+        assert_eq!(s.error_rate(), Some(0.0), "a clean run is a real answer");
+
+        // Pi counts its calls but records no outcome, so the same figures mean
+        // nothing there.
+        let mut quiet = Session::new(Provider::Pi, "x".into());
+        quiet.tool_count = 40;
+        assert_eq!(quiet.error_rate(), None);
+    }
+
+    #[test]
+    fn tail_state_uses_the_last_meaningful_codex_event() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-activity-state-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"function_call\",\"payload\":{\"name\":\"request_user_input\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\"}}\n"
+            ),
+        )
+        .expect("write transcript");
+        let mut session = Session::new(Provider::Codex, "test".into());
+        session.data_file = Some(path.clone());
+        assert_eq!(live_state(&session).0, ActivityState::WaitingForInput);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn detail(ts: &str, full: &str) -> ToolDetail {
+        ToolDetail {
+            d: "x".into(),
+            ts: ts.into(),
+            full: Some(full.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn finalize_caps_details_per_session_keeping_the_newest() {
+        let mut data = SessionData::default();
+        // Two tools, each within the per-tool cap, together over the session cap.
+        for tool in ["Read", "Bash"] {
+            let list = data.metrics.tool_details.entry(tool.into()).or_default();
+            for i in 0..crate::config::MAX_TOOL_DETAILS {
+                list.push(detail(&format!("2026-01-01T00:{i:04}"), "arg"));
+            }
+        }
+        data.metrics
+            .tool_details
+            .entry("Edit".into())
+            .or_default()
+            .push(detail("2027-01-01T00:00", "arg"));
+
+        data.finalize();
+        let total: usize = data.metrics.tool_details.values().map(Vec::len).sum();
+        assert_eq!(total, crate::config::MAX_SESSION_TOOL_DETAILS);
+        // The single newest call survives even though its tool is the smallest.
+        assert_eq!(data.metrics.tool_details["Edit"].len(), 1);
+        // …and what remains of a trimmed tool is its tail, not its head.
+        let read = &data.metrics.tool_details["Read"];
+        assert_eq!(
+            read.last().expect("kept details").ts,
+            format!("2026-01-01T00:{:04}", crate::config::MAX_TOOL_DETAILS - 1)
+        );
+    }
+
+    /// A Codex patch holds several files behind one display string; every one
+    /// of them has to reach the row, since an unrecorded write is one the
+    /// collision warning cannot see.
+    #[test]
+    fn recent_writes_keeps_every_file_a_patch_touched() {
+        let patch = "*** Begin Patch\n*** Update File: a.rs\n+x\n*** Add File: b.rs\n+y\n*** Delete File: c.rs\n*** End Patch";
+        let mut data = SessionData::default();
+        let (short, full) =
+            extract::tool_detail("apply_patch", &serde_json::json!({"patch": patch}));
+        extract::push_tool_detail(
+            &mut data.metrics.tool_details,
+            "apply_patch",
+            short,
+            full,
+            "2026-01-01T00:00".into(),
+            None,
+            None,
+        );
+
+        data.finalize();
+        assert_eq!(data.recent_writes, ["a.rs", "b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn finalize_bounds_the_large_string_fields() {
+        let mut data = SessionData::default();
+        let mut d = detail("2026-01-01T00:00", &"é".repeat(5_000));
+        d.delta = Some(Delta {
+            added: 1,
+            removed: 0,
+            hunks: vec!["+".repeat(5_000)],
+        });
+        data.metrics.tool_details.insert("Bash".into(), vec![d]);
+
+        data.finalize();
+        let d = &data.metrics.tool_details["Bash"][0];
+        assert_eq!(
+            d.full.as_ref().expect("full kept").chars().count(),
+            crate::config::MAX_TOOL_DETAIL_CHARS + 1 // the ellipsis
+        );
+        assert_eq!(
+            d.delta.as_ref().expect("delta kept").hunks[0]
+                .chars()
+                .count(),
+            crate::config::MAX_DIFF_LINE_CHARS + 1
+        );
+    }
+
+    #[test]
+    fn finalize_leaves_a_small_session_untouched() {
+        let mut data = SessionData::default();
+        data.metrics
+            .tool_details
+            .insert("Bash".into(), vec![detail("2026-01-01T00:00", "ls")]);
+        data.finalize();
+        assert_eq!(
+            data.metrics.tool_details["Bash"][0].full.as_deref(),
+            Some("ls")
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extracted transcript data
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Tokens {
+    #[serde(default)]
+    pub input: u64,
+    #[serde(default)]
+    pub output: u64,
+    #[serde(default)]
+    pub cache_read: u64,
+    #[serde(default)]
+    pub cache_write_5m: u64,
+    #[serde(default)]
+    pub cache_write_1h: u64,
+    // Codex-only
+    #[serde(default)]
+    pub input_total: u64,
+    #[serde(default)]
+    pub cached_input: u64,
+    #[serde(default)]
+    pub reasoning_output: u64,
+    #[serde(default)]
+    pub total: u64,
+}
+
+impl Tokens {
+    /// Everything billed as input, across both providers' shapes.
+    pub fn all_input(&self) -> u64 {
+        self.input + self.cached_input + self.cache_read + self.cache_write_5m + self.cache_write_1h
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Costs {
+    #[serde(default)]
+    pub input: f64,
+    #[serde(default)]
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write_5m: f64,
+    #[serde(default)]
+    pub cache_write_1h: f64,
+    #[serde(default)]
+    pub cached_input: f64,
+    #[serde(default)]
+    pub total: f64,
+}
+
+/// LiteLLM rates for harnesses that record a cost of their own but may not
+/// always know one.
+///
+/// A harness that supports arbitrary providers — a local proxy, a gateway, any
+/// OpenAI-compatible endpoint — has no rates for them and writes `0` into the
+/// same field it uses for a real charge. Taken at face value that reads as "this
+/// was free", so the tokens are priced here instead. Rates are memoised because
+/// a LiteLLM lookup scans the whole table while a session has one model and
+/// hundreds of messages.
+#[derive(Default)]
+pub struct FallbackRates(HashMap<String, Option<crate::pricing::GenericPricing>>);
+
+impl FallbackRates {
+    /// What `tokens` cost at LiteLLM's rates for `model`, or `None` when LiteLLM
+    /// lists no such model — which the caller has to keep distinct from free.
+    pub fn costs(&mut self, model: &str, tokens: &Tokens) -> Option<Costs> {
+        let p = (*self
+            .0
+            .entry(model.to_string())
+            .or_insert_with(|| crate::pricing::resolve_generic(model)))?;
+        let per_m = |count: u64, rate: f64| count as f64 * rate / 1e6;
+        let costs = Costs {
+            input: per_m(tokens.input, p.input),
+            // Reasoning is reported alongside output, not on top of it, so it is
+            // deliberately not billed again.
+            output: per_m(tokens.output, p.output),
+            cache_read: per_m(tokens.cache_read, p.cache_read),
+            cache_write_5m: per_m(tokens.cache_write_5m, p.cache_write),
+            cache_write_1h: per_m(tokens.cache_write_1h, p.cache_write),
+            cached_input: per_m(tokens.cached_input, p.cache_read),
+            total: 0.0,
+        };
+        Some(Costs {
+            total: costs.input
+                + costs.output
+                + costs.cache_read
+                + costs.cache_write_5m
+                + costs.cache_write_1h
+                + costs.cached_input,
+            ..costs
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelBreakdown {
+    pub model: String,
+    pub tokens: Tokens,
+    pub costs: Costs,
+    pub total: f64,
+}
+
+/// Line-level change produced by an edit, taken from the tool result's patch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Delta {
+    pub added: u32,
+    pub removed: u32,
+    /// Unified-diff lines, capped by `MAX_DIFF_LINES`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hunks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolDetail {
+    /// Truncated single-line form for the panel.
+    pub d: String,
+    pub ts: String,
+    /// Full text for the clipboard, when it differs from `d`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full: Option<String>,
+    /// Every file this call wrote, when the call itself says.
+    ///
+    /// Only a patch fills this: `apply_patch` can touch several files while
+    /// displaying as `first.rs (+2 more)`, and [`distil_recent_writes`] needs
+    /// the ones that summary drops — a file nobody records as written is a file
+    /// the collision warning cannot see. Empty everywhere else, where the
+    /// display string already names the single file the call targeted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// `tool_use` id, used to match the call to its result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Wall time from the call being issued to its result arriving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dur_ms: Option<i64>,
+    /// Tokens billed for the assistant turn that issued this call.
+    ///
+    /// Billing is per API request, not per tool call, so when one turn issues
+    /// several calls they all carry that turn's figures and `shared` records how
+    /// many. Dividing would invent precision the transcript doesn't have.
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    #[serde(default)]
+    pub shared: u8,
+    /// How much the context window grew after the turn that issued this call —
+    /// which is, in all but the awkward cases, the size of this call's result.
+    ///
+    /// The transcript never records the size of a tool result, but it records
+    /// the prompt billed for every request, and that prompt is the whole
+    /// conversation. So the growth between one request and the next, less what
+    /// the assistant itself wrote, is what the turn's results added. This is the
+    /// figure that answers "what filled the window", which the per-request
+    /// [`tokens_in`](Self::tokens_in) cannot: that one climbs all session long
+    /// and ranks calls by how late they happened.
+    ///
+    /// The awkward cases, all of which this deliberately does not try to split
+    /// apart, because the transcript cannot say how:
+    ///
+    /// - A turn that issued several calls (`shared` above) grew the window by
+    ///   all of their results together.
+    /// - Anything else that arrived between the two requests is in here too —
+    ///   a message the user typed while the agent worked, most of all.
+    ///
+    /// `None` where there is no next request to compare against, or where the
+    /// window shrank instead: a compaction, or the few hundred tokens of noise
+    /// that cache accounting moves between adjacent requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_growth: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<Delta>,
+    /// The call reported an error. Providers that do not record a per-call
+    /// outcome leave this false rather than guessing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+    /// Subagent that issued the call, or `None` for the main session. Tool
+    /// activity from subagents is interleaved into the same log, so without this
+    /// there is no way to tell who did what.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Metrics {
+    pub tool_count: u64,
+    /// Calls the transcript reported as failed, over the same population as
+    /// `tool_count` — main session and subagents together, so the two divide.
+    ///
+    /// Always zero for a provider whose transcript records no per-call outcome.
+    /// [`crate::pricing::Provider::records_tool_outcomes`] is what tells those
+    /// apart from a session that simply had no failures; without it a harness
+    /// that cannot say would read as a harness with nothing to report.
+    #[serde(default)]
+    pub tool_errors: u64,
+    pub tools: HashMap<String, u64>,
+    /// Every recorded call, with its arguments — deliberately never persisted.
+    ///
+    /// This is by far the largest thing an extraction produces: measured at
+    /// ~31 KB per session, 83% of a cache holding 2000 of them. Nothing on the
+    /// table needs it. The row wants the handful of paths in
+    /// [`SessionData::recent_writes`], which is distilled from this in
+    /// `finalize` and stored instead; the Tools panel wants all of it, but only
+    /// for the one session that is open, and that path re-parses anyway (see
+    /// [`crate::cache::Store::session_data_fresh`]).
+    ///
+    /// Persisting it cost a 124 MB cache file that had to be read in full
+    /// before the first frame, which was slower than re-parsing the transcripts
+    /// it was meant to save.
+    #[serde(skip)]
+    pub tool_details: HashMap<String, Vec<ToolDetail>>,
+    pub mcp_tool_count: u64,
+    pub mcp_tools: Vec<String>,
+    pub skill_count: u64,
+    pub skills: HashMap<String, u64>,
+    pub web_fetch_count: u64,
+    pub web_fetches: Vec<String>,
+    pub web_search_count: u64,
+    pub web_searches: Vec<String>,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+    pub api_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentStatus {
+    Running,
+    Done,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subagent {
+    pub agent_id: String,
+    #[serde(rename = "type")]
+    pub agent_type: String,
+    pub description: String,
+    pub model: String,
+    pub started_at: Option<String>,
+    pub last_active: Option<String>,
+    pub duration_ms: i64,
+    pub status: SubagentStatus,
+    pub cost: f64,
+    pub tool_count: u64,
+    pub tool_use_id: Option<String>,
+    pub context: Option<ContextUsage>,
+    /// The on-disk transcript was purged; only parent-side metadata survives.
+    pub ghost: bool,
+}
+
+/// Date -> model -> USD, the shape both a [`Session`] and the analytics
+/// document carry it in.
+pub type CostBuckets = HashMap<String, HashMap<String, f64>>;
+
+/// Serde glue that writes a shared bucket map as the plain JSON object it has
+/// always been.
+///
+/// The refcount is a memory strategy for a running process, not something a
+/// cache file records, so the serialised form is byte-for-byte what it was.
+/// Serde's own `rc` feature would also have kept the JSON, and would have been
+/// less code; it is not used because turning it on is a build-configuration
+/// change for something no reader of a cache file can see.
+pub mod arc_as_map {
+    use super::{Arc, CostBuckets};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(map: &Arc<CostBuckets>, ser: S) -> Result<S::Ok, S::Error> {
+        CostBuckets::serialize(map, ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Arc<CostBuckets>, D::Error> {
+        CostBuckets::deserialize(de).map(Arc::new)
+    }
+}
+
+/// What Claude Code loaded into a session before its conversation began, as
+/// the transcript recorded it: the skill listing, the agent listing, the MCP
+/// tools it offered, the instructions MCP servers sent, and the memory files.
+///
+/// The configuration files say what *would* load; this says what *did*. The
+/// difference is everything that makes an "unused" finding wrong — a server
+/// that was disabled, a project `.mcp.json` nobody approved, a skill added
+/// yesterday that has been offered to one session rather than to fifty. So a
+/// thing counts as available to a session only when that session's own
+/// transcript lists it, and the files on disk are read afterwards for the one
+/// question the transcript cannot answer: where to go to remove it.
+///
+/// Every size is in characters of what was spliced into the window — counted,
+/// not guessed — and only becomes tokens at the fitted rate when priced.
+///
+/// ponytail: Claude Code only, and only versions that write these listings.
+/// An MCP server whose tools load eagerly (tool search off) is listed nowhere,
+/// so it is never seen here and never reported.
+#[derive(Debug, Clone, Default)]
+pub struct Loadout {
+    /// Skill name -> characters of its entry in the skill listing.
+    pub skills: HashMap<String, u64>,
+    /// Whether any skill listing was recorded, which tells "no skills" apart
+    /// from a harness that does not say.
+    pub skills_listed: bool,
+    /// Agent type -> characters of its entry, Claude Code's built-in agents
+    /// left out: they cannot be removed, so there is nothing to report.
+    pub agents: HashMap<String, u64>,
+    pub agents_listed: bool,
+    /// MCP server, spelled as its tool names spell it (`claude_ai_Gmail`) ->
+    /// characters it put in the window: its offered tool names and whatever
+    /// instructions it sent.
+    pub mcp: HashMap<String, u64>,
+    pub mcp_listed: bool,
+    /// Memory file path -> characters: `CLAUDE.md` at every level, and the
+    /// auto-memory index.
+    pub memory: HashMap<String, u64>,
+    /// Skills the model invoked through the `Skill` tool. A slash command is
+    /// already in [`Metrics::skills`]; this is the other way in.
+    pub skills_invoked: Vec<String>,
+    /// Servers reached through the MCP resource tools, which name the server
+    /// in an argument rather than in the tool name.
+    pub mcp_resources: Vec<String>,
+    /// Distinct requests the main conversation made. Everything above is part
+    /// of the cached prefix, so it is read again on every one of them.
+    pub requests: u64,
+}
+
+/// An MCP server's name as its tool names spell it.
+///
+/// Claude Code builds `mcp__<server>__<tool>` by replacing everything outside
+/// `[A-Za-z0-9_-]` with `_`, so `claude.ai Gmail` is called as
+/// `mcp__claude_ai_Gmail__…` and `plugin:design:figma` as
+/// `mcp__plugin_design_figma__…`. Every spelling — a config key, a listing's
+/// display name, a disabled-servers entry — goes through this before two are
+/// compared, or the same server would read as three.
+pub fn mcp_server_key(name: &str) -> String {
+    name.chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect()
+}
+
+/// The server half of an `mcp__<server>__<tool>` name.
+pub fn mcp_server_of(tool: &str) -> Option<&str> {
+    let rest = tool.strip_prefix("mcp__")?;
+    let (server, _) = rest.split_once("__")?;
+    (!server.is_empty()).then_some(server)
+}
+
+impl Loadout {
+    /// Whether the transcript recorded any listing at all.
+    pub fn listed(&self) -> bool {
+        self.skills_listed || self.agents_listed || self.mcp_listed
+    }
+
+    /// Fold in one `attachment` entry from the main conversation.
+    pub fn note(&mut self, attachment: &serde_json::Value) {
+        use serde_json::Value;
+        let strs = |key: &str| -> Vec<&str> {
+            attachment
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default()
+        };
+        let grow = |map: &mut HashMap<String, u64>, name: &str, chars: u64| {
+            // The largest it was ever seen at. A listing re-sent after a
+            // compaction replaces the first one in the window; adding the two
+            // would count one entry twice.
+            let e = map.entry(name.to_string()).or_insert(0);
+            *e = (*e).max(chars);
+        };
+        match attachment.get("type").and_then(Value::as_str) {
+            Some("skill_listing") => {
+                self.skills_listed = true;
+                let content = attachment
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                for (name, chars) in listing_entries(content) {
+                    grow(&mut self.skills, name, chars);
+                }
+            }
+            Some("agent_listing_delta") => {
+                self.agents_listed = true;
+                let builtin = strs("builtInTypes");
+                for line in strs("addedLines") {
+                    if let Some((name, chars)) = listing_entries(line).next()
+                        && !builtin.contains(&name)
+                    {
+                        grow(&mut self.agents, name, chars);
+                    }
+                }
+            }
+            Some("deferred_tools_delta") => {
+                self.mcp_listed = true;
+                for tool in strs("addedNames") {
+                    if let Some(server) = mcp_server_of(tool) {
+                        let e = self.mcp.entry(server.to_string()).or_insert(0);
+                        // Names are summed, not maxed: each is its own line.
+                        *e += tool.chars().count() as u64 + 1;
+                    }
+                }
+            }
+            Some("mcp_instructions_delta") => {
+                self.mcp_listed = true;
+                for (name, block) in strs("addedNames").into_iter().zip(strs("addedBlocks")) {
+                    *self.mcp.entry(mcp_server_key(name)).or_insert(0) +=
+                        block.chars().count() as u64;
+                }
+            }
+            Some("instructions") => {
+                for file in attachment
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let path = file.get("path").and_then(Value::as_str).unwrap_or("");
+                    let chars = file
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .map_or(0, |c| c.chars().count() as u64);
+                    if !path.is_empty() {
+                        grow(&mut self.memory, path, chars);
+                    }
+                }
+            }
+            // A CLAUDE.md further down the tree, loaded when the agent first
+            // touched a file beside it.
+            Some("nested_memory") => {
+                let inner = attachment.get("content");
+                let path = attachment.get("path").and_then(Value::as_str).unwrap_or("");
+                let chars = inner
+                    .and_then(|c| c.get("content"))
+                    .and_then(Value::as_str)
+                    .map_or(0, |c| c.chars().count() as u64);
+                if !path.is_empty() {
+                    grow(&mut self.memory, path, chars);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `- name: description` entries, each with its length in characters.
+///
+/// The name ends at the first `": "` rather than the first colon, because a
+/// plugin's skills are spelled `plugin:skill`. A line that does not start an
+/// entry continues the one before it.
+fn listing_entries(content: &str) -> impl Iterator<Item = (&str, u64)> {
+    let mut out: Vec<(&str, u64)> = Vec::new();
+    for line in content.lines() {
+        let chars = line.chars().count() as u64 + 1;
+        match line.strip_prefix("- ") {
+            Some(entry) => {
+                let name = entry.split_once(": ").map_or(entry, |(n, _)| n).trim();
+                if !name.is_empty() {
+                    out.push((name, chars));
+                }
+            }
+            None => {
+                if let Some(last) = out.last_mut() {
+                    last.1 += chars;
+                }
+            }
+        }
+    }
+    out.into_iter()
+}
+
+/// Everything parsed out of a session's transcript(s).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionData {
+    pub title: Option<String>,
+    pub custom_title: Option<String>,
+    pub ai_title: Option<String>,
+    /// Latest model seen in the *main* transcript, excluding subagent sidechains.
+    pub last_model: String,
+    /// Provider-reported reasoning effort, when the transcript exposes it.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    pub models: Vec<String>,
+    pub model_breakdown: Vec<ModelBreakdown>,
+    pub tokens: Tokens,
+    pub costs: Costs,
+    /// `YYYY-MM-DD` -> model -> USD.
+    ///
+    /// Shared with every [`Session`] row annotated from this extraction, so it
+    /// is an [`Arc`] rather than a copy per row — see [`Session::costs_by_day`].
+    /// The token maps below are not, and deliberately so: nothing copies them
+    /// onto a row, so they are already shared once, by the `Arc<SessionData>`
+    /// the cache store hands out.
+    #[serde(with = "arc_as_map")]
+    pub costs_by_day: Arc<HashMap<String, HashMap<String, f64>>>,
+    /// `YYYY-MM-DDTHH` -> model -> USD.
+    #[serde(with = "arc_as_map")]
+    pub costs_by_hour: Arc<HashMap<String, HashMap<String, f64>>>,
+    /// Unix minute (seconds / 60, UTC) -> USD, across every model.
+    ///
+    /// What "the last hour" is read from. The hour map above cannot answer it:
+    /// a clock hour empties at every `:00`, so a subagent that ran at 23:47
+    /// shows nothing at 00:02 — the spend is real and the figure reads as
+    /// broken. Minutes are fine enough that a rolling 60 is 60 buckets.
+    ///
+    /// Keyed by UTC minute rather than a local key because a window measured
+    /// back from now has no use for the time zone, and so cannot be skewed by
+    /// a DST change inside it. One sum rather than per model because nothing
+    /// asks the rolling window which model spent it.
+    ///
+    /// Bounded in [`SessionData::finalize`] to the day before the newest
+    /// minute, so a long session does not carry every minute it ever had into
+    /// the cache.
+    #[serde(default)]
+    pub costs_by_minute: BTreeMap<i64, f64>,
+    /// `YYYY-MM-DD` -> model -> tokens billed that day: every input kind plus
+    /// output, the same quantities [`Tokens::all_input`] and `output` total.
+    ///
+    /// Parallel to `costs_by_day` because the cost maps cannot answer for a
+    /// session whose dollars were never recorded — a bundled plan, an unpriced
+    /// model, a provider that records no rates — while the tokens were burned
+    /// either way. Providers with no per-event usage timestamp (Cursor,
+    /// Windsurf) leave both maps empty.
+    #[serde(default)]
+    pub tokens_by_day: HashMap<String, HashMap<String, u64>>,
+    /// `YYYY-MM-DDTHH` -> same, bucketed by local hour.
+    #[serde(default)]
+    pub tokens_by_hour: HashMap<String, HashMap<String, u64>>,
+    pub metrics: Metrics,
+    /// Claude only: what the live context window is filled with. Absent for
+    /// providers whose transcripts don't report per-request usage.
+    #[serde(default)]
+    pub context_breakdown: Option<ContextBreakdown>,
+    /// The window measured at each request, oldest first.
+    ///
+    /// The breakdown says what the window holds *now*; this says how it got
+    /// there, which is the part that explains a session's cost. A window that
+    /// climbed steadily is a conversation that grew; one that jumped is a single
+    /// tool result that will do it again.
+    ///
+    /// Not persisted, for the same reason as `metrics.tool_details`: one point
+    /// per request made this 15% of the cache, and only the open session's
+    /// sparkline reads it.
+    #[serde(skip)]
+    pub context_series: Vec<CtxPoint>,
+    /// What the harness put in front of the conversation — see [`Loadout`].
+    ///
+    /// Not persisted: only `cctop optimize` reads it, and that re-parses.
+    #[serde(skip)]
+    pub loadout: Loadout,
+    /// Compactions the session has been through.
+    ///
+    /// Counted as they are seen rather than read back off `context_series`,
+    /// which is decimated past [`MAX_CTX_POINTS`] and can lose a marker, and
+    /// which records nothing at all for a compaction no request followed.
+    ///
+    /// Claude Code only, for the same reason as the breakdown above: it is the
+    /// only transcript that says a compaction happened.
+    #[serde(default)]
+    pub compactions: u32,
+    /// When the session last went into ultracode, as its transcript stamps it.
+    /// What starts the dashboard's party.
+    ///
+    /// For Claude Code, the last `/effort` switch into it: see
+    /// [`effort_switch`]. Not the word in a prompt, because a prompt saying
+    /// "turn ultracode off" says it too. For Codex, which has no effort
+    /// switch to read, a typed prompt that says the word.
+    #[serde(default)]
+    pub ultracode_at: Option<String>,
+    /// When the session last switched out of ultracode to another effort
+    /// level. Claude Code only. Later than [`SessionData::ultracode_at`] means
+    /// the session has left it, and the party it started goes home.
+    #[serde(default)]
+    pub ultracode_off_at: Option<String>,
+    /// Paths the session wrote lately, newest first, as the transcript spelled
+    /// them — [`crate::loader`] resolves them against the session's cwd.
+    ///
+    /// Distilled in `finalize` from `metrics.tool_details`, which is not
+    /// persisted. The row only ever wanted these few paths; keeping the whole
+    /// tool history on disk to re-derive them each run is what made the cache
+    /// too big to load. Bounded by [`MAX_RECENT_WRITES`].
+    #[serde(default)]
+    pub recent_writes: Vec<String>,
+    /// Whether this carries the fields `finalize` fills but the cache drops.
+    ///
+    /// False for anything deserialized, which is what tells the panel path that
+    /// a cache hit is not enough and the transcript has to be read again.
+    #[serde(skip)]
+    pub complete: bool,
+    pub subagents: Vec<Subagent>,
+    /// Codex reports per-million rates directly; surfaced in the Cost panel.
+    pub rates: Option<CodexRates>,
+    /// Set when extraction failed; the row still renders with zeroed figures.
+    pub error: Option<String>,
+}
+
+/// Keep the newest `MAX_SESSION_TOOL_DETAILS` details across all tools, and
+/// bound the string fields each one carries.
+///
+/// The per-tool cap alone lets a busy session hold thousands of details; the
+/// panel only ever shows a recent slice of them. Details are ranked by
+/// timestamp so "the newest" means newest in the session, not newest per tool —
+/// a tool used once at the very end should survive while an early flood of
+/// reads does not.
+fn trim_tool_details(details: &mut HashMap<String, Vec<ToolDetail>>) {
+    for list in details.values_mut() {
+        for d in list.iter_mut() {
+            truncate_chars(&mut d.d, crate::config::MAX_TOOL_DETAIL_CHARS);
+            if let Some(full) = d.full.as_mut() {
+                truncate_chars(full, crate::config::MAX_TOOL_DETAIL_CHARS);
+            }
+            if let Some(delta) = d.delta.as_mut() {
+                for line in delta.hunks.iter_mut() {
+                    truncate_chars(line, crate::config::MAX_DIFF_LINE_CHARS);
+                }
+            }
+        }
+    }
+
+    let total: usize = details.values().map(Vec::len).sum();
+    if total <= crate::config::MAX_SESSION_TOOL_DETAILS {
+        return;
+    }
+
+    // Rank newest-first. Within one tool the vectors are already chronological,
+    // so the index breaks ties for details sharing (or missing) a timestamp.
+    let mut ranked: Vec<(&str, usize)> = details
+        .iter()
+        .flat_map(|(name, list)| (0..list.len()).map(move |i| (name.as_str(), i)))
+        .collect();
+    ranked.sort_by(|a, b| {
+        details[b.0][b.1]
+            .ts
+            .cmp(&details[a.0][a.1].ts)
+            .then(b.1.cmp(&a.1))
+    });
+    ranked.truncate(crate::config::MAX_SESSION_TOOL_DETAILS);
+
+    let mut keep: HashMap<&str, Vec<bool>> = details
+        .iter()
+        .map(|(name, list)| (name.as_str(), vec![false; list.len()]))
+        .collect();
+    for (name, i) in ranked {
+        keep.get_mut(name).expect("name came from details")[i] = true;
+    }
+    let keep: HashMap<String, Vec<bool>> =
+        keep.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+
+    for (name, list) in details.iter_mut() {
+        let flags = &keep[name];
+        let mut i = 0;
+        list.retain(|_| {
+            i += 1;
+            flags[i - 1]
+        });
+    }
+    // A tool whose every detail was dropped would otherwise leave an empty
+    // entry that the panel renders as a tool with no calls.
+    details.retain(|_, list| !list.is_empty());
+}
+
+/// Minutes of per-minute spend kept behind a session's newest one.
+///
+/// The rolling window needs only 60 of them; a day's worth leaves room for a
+/// longer window without re-parsing, and still caps a session at 1440 entries.
+const MINUTES_KEPT: i64 = 24 * 60;
+
+/// Drop per-minute spend more than [`MINUTES_KEPT`] before the newest minute.
+///
+/// Measured from the newest record and not from now, so the trim depends only
+/// on the transcript: a cached copy and a fresh parse keep the same minutes.
+fn trim_minutes(minutes: &mut BTreeMap<i64, f64>) {
+    if let Some((&newest, _)) = minutes.last_key_value() {
+        *minutes = minutes.split_off(&(newest - MINUTES_KEPT + 1));
+    }
+}
+
+/// The unix minute `dt` falls in.
+pub(crate) fn unix_minute(dt: &chrono::DateTime<chrono::Utc>) -> i64 {
+    dt.timestamp().div_euclid(60)
+}
+
+/// Sum of per-minute spend in the rolling hour ending at `now`; see
+/// [`SessionData::cost_last_hour`].
+pub fn last_hour(minutes: &BTreeMap<i64, f64>, now: &chrono::DateTime<chrono::Utc>) -> f64 {
+    // A fold from +0.0 and not `sum`: a float sum of nothing is -0.0, which
+    // `--json` would print as such for every idle session.
+    minutes
+        .range(unix_minute(now) - 59..)
+        .fold(0.0, |total, (_, c)| total + c)
+}
+
+/// Add one priced event to the day, hour and minute maps together.
+///
+/// A free function beside [`SessionData::record_cost`] for extractors that
+/// accumulate into their own maps before building a `SessionData`.
+pub(crate) fn record_cost(
+    by_day: &mut HashMap<String, HashMap<String, f64>>,
+    by_hour: &mut HashMap<String, HashMap<String, f64>>,
+    by_minute: &mut BTreeMap<i64, f64>,
+    dt: &chrono::DateTime<chrono::Utc>,
+    model: &str,
+    cost: f64,
+) {
+    for (map, key) in [
+        (&mut *by_day, util::local_date_key(dt)),
+        (&mut *by_hour, util::local_hour_key(dt)),
+    ] {
+        *map.entry(key)
+            .or_default()
+            .entry(model.to_string())
+            .or_insert(0.0) += cost;
+    }
+    *by_minute.entry(unix_minute(dt)).or_insert(0.0) += cost;
+}
+
+/// Truncate to at most `max` characters, never mid-character.
+fn truncate_chars(s: &mut String, max: usize) {
+    if s.chars().count() <= max {
+        return;
+    }
+    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+    s.truncate(end);
+    s.push('…');
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CodexRates {
+    pub input: f64,
+    pub cached_input: f64,
+    pub output: f64,
+}
+
+impl SessionData {
+    /// Spend in the 60 minutes up to `now`, rolling.
+    ///
+    /// Rolling rather than the current clock hour: see
+    /// [`SessionData::costs_by_minute`]. The window is the minute `now` falls
+    /// in and the 59 before it, so it spans between 59 and 60 minutes of wall
+    /// time — never more, which keeps a figure labelled "last 60 min" honest.
+    /// Minutes after `now` count too: a transcript stamped by a clock slightly
+    /// ahead of this one is still spend that just happened.
+    pub fn cost_last_hour(&self, now: &chrono::DateTime<chrono::Utc>) -> f64 {
+        last_hour(&self.costs_by_minute, now)
+    }
+
+    /// Record one priced event in every time bucket at once.
+    ///
+    /// The day, hour and minute maps are three views of the same spend; filling
+    /// them from one place is what keeps "today" and "last 60 min" from
+    /// disagreeing about an event one of them forgot.
+    ///
+    /// `make_mut` rather than a plain write, because rows annotated from this
+    /// extraction share the day and hour maps. It copies only once something
+    /// else already holds one, which during extraction is nothing.
+    pub(crate) fn record_cost(
+        &mut self,
+        dt: &chrono::DateTime<chrono::Utc>,
+        model: &str,
+        cost: f64,
+    ) {
+        record_cost(
+            Arc::make_mut(&mut self.costs_by_day),
+            Arc::make_mut(&mut self.costs_by_hour),
+            &mut self.costs_by_minute,
+            dt,
+            model,
+            cost,
+        );
+    }
+
+    /// Bring freshly extracted data down to what is worth keeping.
+    ///
+    /// This runs on every extraction, before the result is either displayed or
+    /// cached, so a cached session and a re-parsed one show exactly the same
+    /// thing. Trimming only on the way to disk would be cheaper and wrong: the
+    /// Tools panel would quietly change contents the first time a session was
+    /// served from cache.
+    pub fn finalize(&mut self) {
+        trim_tool_details(&mut self.metrics.tool_details);
+        trim_minutes(&mut self.costs_by_minute);
+        self.recent_writes = distil_recent_writes(&self.metrics.tool_details);
+        self.complete = true;
+    }
+
+    /// Spend since local midnight.
+    pub fn cost_today(&self) -> f64 {
+        let today = crate::util::local_date_key(&chrono::Utc::now());
+        self.costs_by_day
+            .iter()
+            .filter(|(day, _)| day.as_str() >= today.as_str())
+            .map(|(_, m)| m.values().sum::<f64>())
+            .sum()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+/// All sessions from every known provider and surface, newest first.
+pub fn list_all() -> Vec<Session> {
+    let _span = crate::trace::span("discover");
+    let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, (windsurf, devin))))) =
+        rayon::join(
+            || rayon::join(codex::list_sessions, claude::list_sessions),
+            || {
+                rayon::join(
+                    || rayon::join(opencode::list_sessions, pi::list_sessions),
+                    || {
+                        rayon::join(cursor::list_sessions, || {
+                            rayon::join(gemini::list_sessions, || {
+                                rayon::join(windsurf::list_sessions, devin::list_sessions)
+                            })
+                        })
+                    },
+                )
+            },
+        );
+    codex.extend(claude);
+    codex.extend(opencode);
+    codex.extend(pi);
+    codex.extend(cursor);
+    codex.extend(gemini);
+    codex.extend(windsurf);
+    codex.extend(devin);
+    let mut sessions = codex;
+    // Whose row this is, decided once here rather than in seven discovery
+    // functions: the transcript's path already says it, and every provider
+    // reaches this point.
+    if !crate::config::OTHER_HOMES.is_empty() {
+        for s in &mut sessions {
+            if let Some(file) = &s.data_file {
+                s.owner = crate::config::owner_of(file).map(str::to_string);
+            }
+        }
+    }
+    // And which login it ran under, for the same reason and in the same place.
+    // Only harnesses whose config directory is relocatable per-account answer
+    // at all; for the rest the path matches no profile and the cell stays
+    // blank, because there the answer is not "default" but "the question does
+    // not apply".
+    for s in &mut sessions {
+        if let Some(file) = &s.data_file {
+            s.profile = crate::config::profile_for(file).map(str::to_string);
+        }
+    }
+    let duplicates = dedup(&mut sessions);
+    sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    if duplicates > 0 {
+        crate::trace::fact("duplicate sessions dropped", duplicates.to_string());
+    }
+    // Reported once per walk rather than accumulated, so the figure reads as
+    // "this many sessions exist" rather than that times the number of walks.
+    crate::trace::fact("sessions found", sessions.len().to_string());
+    crate::trace::fact(
+        "homes scanned",
+        format!(
+            "{} (self plus others)",
+            1 + crate::config::OTHER_HOMES.len()
+        ),
+    );
+    sessions
+}
+
+/// Drop sessions discovered more than once, keeping the best copy of each.
+///
+/// Discovery walks a list of roots per provider and concatenates the results,
+/// which assumes no two roots see the same transcript. They do. A profile
+/// directory nested inside the default one is walked by both; a home that
+/// appears at two paths — a bind mount, a symlink, `/home/x` also exported as
+/// `/export/home/x` — is scanned as two homes, because [`config::OTHER_HOMES`]
+/// dedups homes by path and a path is not an identity. Either way the same
+/// session arrives twice, and a duplicated row is not a cosmetic problem: its
+/// cost is added twice into the totals, and it is one of the sessions the `!`
+/// column would report as colliding with itself in its own checkout.
+///
+/// A session's identity is its provider and its id, which is what
+/// [`Session::key`] already builds — not its path, since the whole point is
+/// that one session has two of those.
+///
+/// Which copy to keep matters, because they are not interchangeable. This
+/// user's own home wins over another home's view of it: `owner` is what puts a
+/// name in the Owner column, and labelling your own session as somebody else's
+/// is worse than the reverse. Failing that the later `last_active` wins, on the
+/// grounds that a stale copy is a copy read through a path that stopped being
+/// written to.
+///
+/// Returns how many were dropped, which is worth a trace line: on a healthy
+/// machine it is zero, and any other number means two roots overlap.
+///
+/// ponytail: this catches a session discovered twice, not one harness mirroring
+/// another's transcript into its own directory. That would need matching on
+/// content rather than identity, and no harness cctop reads does it today.
+fn dedup(sessions: &mut Vec<Session>) -> usize {
+    let before = sessions.len();
+    let mut best: HashMap<String, usize> = HashMap::with_capacity(sessions.len());
+    let mut drop_index = vec![false; sessions.len()];
+
+    for i in 0..sessions.len() {
+        let key = sessions[i].key();
+        match best.get(&key).copied() {
+            None => {
+                best.insert(key, i);
+            }
+            Some(kept) => {
+                let (loser, winner) = match supersedes(&sessions[i], &sessions[kept]) {
+                    true => (kept, i),
+                    false => (i, kept),
+                };
+                drop_index[loser] = true;
+                best.insert(key, winner);
+            }
+        }
+    }
+
+    if before != best.len() {
+        let mut i = 0;
+        sessions.retain(|_| {
+            let keep = !drop_index[i];
+            i += 1;
+            keep
+        });
+    }
+    before - sessions.len()
+}
+
+/// Whether `a` is the copy to keep when `a` and `b` are the same session.
+fn supersedes(a: &Session, b: &Session) -> bool {
+    match (a.owner.is_none(), b.owner.is_none()) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => a.last_active > b.last_active,
+    }
+}
+
+/// The main transcript plus any subagent sidechain transcripts — including the
+/// agents a workflow ran, which are one level further down.
+///
+/// A workflow writes each of its agents to
+/// `subagents/workflows/<run>/agent-<id>.jsonl`, beside a `journal.jsonl` that
+/// records the run's own progress and is not an agent's transcript at all. So
+/// inside a run directory only `agent-` files count, while at the top level
+/// every `.jsonl` still does, as it always has. A workflow can run hundreds of
+/// agents, and before this every one of them was missing from the session's
+/// spend, its subagent list, and the mtime that says it is still working.
+pub fn transcript_files(main: &Path) -> Vec<PathBuf> {
+    let mut files = vec![main.to_path_buf()];
+    let subagents_dir = main.with_extension("").join("subagents");
+    for entry in crate::config::list_dir(&subagents_dir) {
+        if entry.ends_with(".jsonl") {
+            files.push(subagents_dir.join(entry));
+        }
+    }
+    for run in workflow_run_dirs(&subagents_dir) {
+        for entry in crate::config::list_dir(&run) {
+            if entry.starts_with("agent-") && entry.ends_with(".jsonl") {
+                files.push(run.join(entry));
+            }
+        }
+    }
+    files
+}
+
+/// Each workflow run's directory under a session's `subagents/`.
+pub fn workflow_run_dirs(subagents_dir: &Path) -> Vec<PathBuf> {
+    let workflows = subagents_dir.join("workflows");
+    crate::config::list_dir(&workflows)
+        .into_iter()
+        .map(|run| workflows.join(run))
+        .filter(|run| run.is_dir())
+        .collect()
+}
+
+/// Newest mtime across a session's transcripts.
+///
+/// A running subagent's file is appended without touching the parent, so the
+/// parent's mtime alone would make an active session look idle.
+pub fn effective_mtime_ms(session: &Session) -> u64 {
+    let Some(f) = &session.data_file else {
+        return 0;
+    };
+    match session.provider {
+        Provider::Claude => transcript_files(f)
+            .iter()
+            .map(|p| crate::config::file_mtime_ms(p))
+            .max()
+            .unwrap_or(0),
+        Provider::Codex | Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Pi => {
+            crate::config::file_mtime_ms(f)
+        }
+        // Every OpenCode session shares one WAL-backed database, as every
+        // Windsurf conversation in a workspace shares one `state.vscdb`. Using
+        // the file mtime would invalidate hundreds of unchanged sessions
+        // whenever one message lands; the per-session timestamp is the right
+        // key. Windsurf has no such timestamp of its own, so its rows fall back
+        // to the file and re-extract together — cheap, since the blob is small.
+        Provider::OpenCode | Provider::Windsurf => util::parse_ts(&session.last_active)
+            .map(|d| d.timestamp_millis().max(0) as u64)
+            .unwrap_or_else(|| crate::config::file_mtime_ms(f)),
+    }
+}

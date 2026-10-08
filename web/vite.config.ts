@@ -5,7 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
 // The whole app is built into ONE html file with every script and stylesheet
-// inlined, which cctop compiles into its binary (src/serve/assets/app.html).
+// inlined, which cctop compiles into its binary (crates/serve/src/assets/app.html).
 // One file because the server's content policy loads nothing from any URL —
 // not even its own origin — and because an installed cctop is a single binary
 // with no directory of assets beside it to lose.
@@ -13,7 +13,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   build: {
-    outDir: "../src/serve/assets/app",
+    outDir: "../crates/serve/src/assets/app",
     emptyOutDir: true,
     // Inline everything, fonts and icons included.
     assetsInlineLimit: 100_000_000,

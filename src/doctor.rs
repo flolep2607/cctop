@@ -11,15 +11,15 @@
 //! and a suggested fix attached to anything that is not fine — a diagnosis with
 //! no next step just moves the question along.
 //!
-//! It is deliberately *not* the hooks panel with more in it. [`crate::hook`]
+//! It is deliberately *not* the hooks panel with more in it. [`cctop_core::hook`]
 //! already answers "are the agents reporting", and that answer is quoted here
 //! whole rather than reimplemented; the rest of these checks have never had a
 //! home.
 
 mod parsers;
 
-use crate::config;
-use crate::pricing::Provider;
+use cctop_core::config;
+use cctop_core::pricing::Provider;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -230,7 +230,7 @@ impl Ord for Level {
 // ---------------------------------------------------------------------------
 
 fn cctop_itself() -> Section {
-    let mut checks = vec![ok("version", crate::update::current_version())];
+    let mut checks = vec![ok("version", cctop_core::update::current_version())];
 
     checks.push(match std::env::current_exe() {
         Ok(path) => ok("binary", path.display().to_string()),
@@ -248,10 +248,10 @@ fn cctop_itself() -> Section {
     // config is fine has misjudged what it is for. The advice names the route
     // this binary can actually take: a build output refuses `--update`, and a
     // cargo install is cargo's to replace.
-    if let Some(latest) = crate::update::cached_latest_version()
-        && latest != crate::update::current_version()
+    if let Some(latest) = cctop_core::update::cached_latest_version()
+        && latest != cctop_core::update::current_version()
     {
-        let route = match crate::update::built_by_cargo() {
+        let route = match cctop_core::update::built_by_cargo() {
             true => "cargo install cctop --force",
             false => "cctop --update",
         };
@@ -294,7 +294,7 @@ fn environment() -> Section {
         .collect();
     // Not an override but the lack of one, and the one here whose absence
     // makes numbers look wrong rather than missing: see `unzoned_over_ssh`.
-    if crate::util::unzoned_over_ssh().is_some() {
+    if cctop_core::util::unzoned_over_ssh().is_some() {
         checks.push(warn(
             "TZ",
             "unset over ssh, and this machine's clock is UTC: \"today\" and \"this hour\" \
@@ -334,7 +334,7 @@ pub(crate) fn sessions_root(provider: Provider) -> std::path::PathBuf {
 /// sessions: not having Windsurf installed is not a fault, and the two need to
 /// look different or every report has five red lines in it.
 fn sources() -> Section {
-    let sessions = crate::session::list_all();
+    let sessions = cctop_core::session::list_all();
     let mut checks: Vec<Check> = Provider::ALL
         .into_iter()
         .map(|provider| {
@@ -397,13 +397,13 @@ fn sources() -> Section {
 /// than like a missing download.
 ///
 /// The check *is* the load. Nothing has loaded pricing by the time doctor runs
-/// — only the interactive path does that — so asking [`crate::pricing`] whether
+/// — only the interactive path does that — so asking [`cctop_core::pricing`] whether
 /// a table is installed would report "no" every time and say nothing about
 /// whether one could be. Reading the cache is both the question and the answer.
 fn pricing() -> Section {
     let path: &Path = &config::PRICING_CACHE_FILE;
-    let fresh = crate::pricing::load_cached_pricing();
-    let loaded = crate::pricing::pricing_epoch() != 0;
+    let fresh = cctop_core::pricing::load_cached_pricing();
+    let loaded = cctop_core::pricing::pricing_epoch() != 0;
     let age = cache_age_secs(path);
 
     let checks = vec![match (loaded, fresh, age) {
@@ -412,7 +412,7 @@ fn pricing() -> Section {
             "LiteLLM table",
             format!(
                 "cached but {} old",
-                crate::util::long_duration((secs * 1000) as i64)
+                cctop_core::util::long_duration((secs * 1000) as i64)
             ),
             "the next interactive run refreshes it; \
              costs use the stale rates until then",
@@ -440,8 +440,8 @@ fn pricing() -> Section {
 /// costs what `cctop --list` does; it is saved afterwards for the same reason
 /// `--list` saves it, so the next run of anything starts warm.
 fn parsers() -> Section {
-    let mut loader = crate::loader::Loader::new();
-    let sessions = loader.load(crate::pricing::Plan::Retail);
+    let mut loader = cctop_core::loader::Loader::new();
+    let sessions = loader.load(cctop_core::pricing::Plan::Retail);
     let data: Vec<_> = sessions
         .iter()
         .map(|s| loader.store().session_data(s))
@@ -470,7 +470,7 @@ fn cache() -> Section {
 
     let bytes = dir_size(dir);
     if bytes > 0 {
-        checks.push(ok("size", crate::util::compact_bytes(bytes)));
+        checks.push(ok("size", cctop_core::util::compact_bytes(bytes)));
     }
     Section {
         title: "Cache",
@@ -480,13 +480,13 @@ fn cache() -> Section {
 
 /// The hooks report, quoted from the module that owns it.
 ///
-/// `crate::hook::status` already decides what is wrong with an install and how
+/// `cctop_core::hook::status` already decides what is wrong with an install and how
 /// to say it; restating that here would give two answers to one question. Only
 /// the severity is added, and conservatively — an uninstalled hook is a feature
 /// someone has not turned on.
 fn hooks() -> Section {
     let cwd = std::env::current_dir().ok();
-    let checks = crate::hook::status(cwd.as_deref(), None)
+    let checks = cctop_core::hook::status(cwd.as_deref(), None)
         .lines()
         .into_iter()
         .map(|(text, problem)| {
@@ -535,7 +535,7 @@ fn typing() -> Section {
                  this is what lets `s` and `a` reach a session",
             ),
         },
-        match crate::rmux::available() {
+        match cctop_core::rmux::available() {
             true => ok(
                 "rmux",
                 "available; panes survive cctop and can be typed into",
@@ -580,26 +580,26 @@ fn tiocsti_check() -> Option<Check> {
 /// no longer resolves — and none of them are visible until the table stays
 /// empty. Failing outright is right: these were asked for by name.
 fn remotes(hosts: &[String]) -> Section {
-    let checks = crate::fleet::Host::collect(hosts)
+    let checks = cctop_core::fleet::Host::collect(hosts)
         .iter()
         .map(|host| match host.poll() {
-            crate::fleet::Snapshot::Rows(rows) => {
+            cctop_core::fleet::Snapshot::Rows(rows) => {
                 let read = format!("{} session(s) via `{}`", rows.len(), host.command);
                 // A host that reads fine but runs an older cctop is the case the
                 // table used to be silent about, so doctor names the version.
                 let probe = host.probe();
                 let theirs = match &probe {
-                    crate::fleet::Probe::Version(v) => format!(", cctop {v}"),
+                    cctop_core::fleet::Probe::Version(v) => format!(", cctop {v}"),
                     _ => String::new(),
                 };
-                let local = crate::update::current_version();
-                match crate::fleet::skew(&probe, local) {
-                    Some(crate::fleet::Skew::Older(_)) => warn(
+                let local = cctop_core::update::current_version();
+                match cctop_core::fleet::skew(&probe, local) {
+                    Some(cctop_core::fleet::Skew::Older(_)) => warn(
                         host.target.clone(),
                         format!("{read}{theirs}, older than this {local}"),
                         "update it there with `cctop --update`, or from a remote row's menu",
                     ),
-                    Some(crate::fleet::Skew::Newer(_)) => warn(
+                    Some(cctop_core::fleet::Skew::Newer(_)) => warn(
                         host.target.clone(),
                         format!("{read}{theirs}, newer than this {local}"),
                         "this machine's cctop is behind: run `cctop --update` here",
@@ -607,7 +607,7 @@ fn remotes(hosts: &[String]) -> Section {
                     _ => ok(host.target.clone(), format!("{read}{theirs}")),
                 }
             }
-            crate::fleet::Snapshot::Failed(why) => {
+            cctop_core::fleet::Snapshot::Failed(why) => {
                 fail(host.target.clone(), why.clone(), remote_hint(&why))
             }
         })
@@ -685,7 +685,7 @@ fn dir_size(dir: &Path) -> u64 {
 
 /// Whether a shell startup file carries cctop's managed block.
 ///
-/// Duplicated from [`crate::alias`] rather than exported: that one is private
+/// Duplicated from [`cctop_core::alias`] rather than exported: that one is private
 /// because nothing outside the module had a reason to ask, and the marker is
 /// the stable part of the contract in any case.
 fn alias_installed() -> bool {

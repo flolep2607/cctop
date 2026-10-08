@@ -1,11 +1,10 @@
 //! Command-line parsing and the non-interactive output modes.
 
-use crate::loader::Loader;
-use crate::pricing::{Plan, Provider};
-use crate::session::Session;
-use crate::util;
+use cctop_core::loader::Loader;
+use cctop_core::pricing::{Plan, Provider};
+use cctop_core::session::Session;
+use cctop_core::util;
 use clap::Parser;
-use serde::Serialize;
 
 /// The command index printed after the options by `-h` and `--help` alike.
 ///
@@ -515,208 +514,6 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
 // --json
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-pub struct JsonAccount {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    email: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    organization: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct JsonCost {
-    available: bool,
-    /// `null` when the plan bundles this provider's usage.
-    total: Option<String>,
-    included: bool,
-    /// Recorded usage that priced at nothing, as with a free model. Distinct
-    /// from `available: false`, which is a provider that records no usage.
-    free: bool,
-    /// Spend in the current local clock hour, which is what this key has
-    /// always meant; kept so older readers and peers go on getting it.
-    this_hour: f64,
-    /// Spend in the last 60 minutes, rolling — the `$/1H` column's figure.
-    ///
-    /// A new key rather than a new meaning for `this_hour`: a peer reading an
-    /// older cctop finds this missing and falls back, where a changed meaning
-    /// would be read wrong without anything saying so.
-    last_hour: f64,
-    today: f64,
-    /// Smoothed live spend rate, USD per minute.
-    per_min: f64,
-    /// `YYYY-MM-DD` -> USD, trimmed to [`JSON_DAYS`] days.
-    ///
-    /// Present so a reader can compute the same spend windows the overview
-    /// shows rather than only a lifetime total. Trimmed because a session
-    /// running for months would otherwise carry a bucket per day of it, and no
-    /// window here looks back further.
-    by_day: std::collections::BTreeMap<String, f64>,
-    /// `YYYY-MM-DDTHH` -> USD, trimmed to [`JSON_HOURS`] hours.
-    by_hour: std::collections::BTreeMap<String, f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    breakdown: Option<crate::session::Costs>,
-}
-
-/// How far back the per-day and per-hour buckets in `--json` reach.
-///
-/// One more than the longest window anything downstream computes — the
-/// overview's calendar month and its 30-day rolling total for days, today's
-/// 24 hourly buckets for hours.
-const JSON_DAYS: usize = 31;
-const JSON_HOURS: usize = 48;
-
-/// Flatten a `key -> model -> USD` bucket map, keeping the newest `keep` keys.
-///
-/// Keys sort lexicographically in time order in both spellings cctop uses
-/// (`YYYY-MM-DD` and `YYYY-MM-DDTHH`), so "newest" is the tail of a sort.
-fn trimmed_buckets(
-    buckets: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
-    keep: usize,
-) -> std::collections::BTreeMap<String, f64> {
-    let mut keys: Vec<&String> = buckets.keys().collect();
-    keys.sort();
-    keys.iter()
-        .rev()
-        .take(keep)
-        .map(|k| ((*k).clone(), buckets[*k].values().sum()))
-        .collect()
-}
-
-#[derive(Serialize)]
-pub struct JsonTokens {
-    input: u64,
-    output: u64,
-    total: u64,
-    detail: crate::session::Tokens,
-}
-
-#[derive(Serialize)]
-pub struct JsonActivity {
-    tool_count: u64,
-    /// Calls the transcript reported as failed. Absent — rather than zero —
-    /// where the harness records no per-call outcome, since the two mean very
-    /// different things to anything totalling them up.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_errors: Option<u64>,
-    /// Compactions the session has been through. Claude Code only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    compactions: Option<u32>,
-    tools: std::collections::HashMap<String, u64>,
-    skill_count: u64,
-    skills: std::collections::HashMap<String, u64>,
-    web_fetch_count: u64,
-    web_fetches: Vec<String>,
-    web_search_count: u64,
-    web_searches: Vec<String>,
-    mcp_tool_count: u64,
-    mcp_tools: Vec<String>,
-    lines_added: u64,
-    lines_removed: u64,
-}
-
-#[derive(Serialize)]
-pub struct JsonSession {
-    provider: &'static str,
-    surface: &'static str,
-    /// What the status dot says: `working`, `waiting` for the user, or `error`
-    /// on an API failure. Independent of `running`, which is about a process.
-    state: &'static str,
-    /// What an `asking` session wants to do, when its hook or its screen said.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    asking_for: Option<String>,
-    /// Present, and true, when what an `asking` session holds is a question
-    /// with choices rather than a permission prompt: Allow and Deny do not
-    /// apply to it.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    asking_question: bool,
-    /// Present when cctop allows every permission prompt this session raises:
-    /// since when, and what it has allowed. See [`crate::yolo`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    yolo: Option<crate::yolo::Entry>,
-    session_id: String,
-    started_at: String,
-    last_active: String,
-    project: Option<String>,
-    title: Option<String>,
-    /// Login name of the user the session belongs to, when cctop is reading
-    /// every user's homes and this one is not the reader's own.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    user: Option<String>,
-    /// Which Claude profile — which `$CLAUDE_CONFIG_DIR` — the session was read
-    /// out of. Absent for every other harness, none of which has the concept.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile: Option<String>,
-    /// Where the session is working when `cctop sandbox` launched it: the
-    /// agent runs here, its commands and `path` are on `host`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sandbox: Option<JsonSandbox>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    account: Option<JsonAccount>,
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    harness: Option<String>,
-    /// Branch checked out in the working directory, read on the machine the
-    /// session is on — which is why it is carried rather than looked up by
-    /// whoever reads this.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>,
-    /// How much the session asks before it acts, when its own hooks said.
-    /// Absent for a session with no cctop hooks installed — nothing in a
-    /// transcript records this, so it cannot be inferred.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    permission: Option<&'static str>,
-    models: Vec<String>,
-    plan: &'static str,
-    running: bool,
-    /// CPU and resident memory across the session's process tree. Absent where
-    /// no per-session process exists to measure.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    process: Option<JsonProcess>,
-    cost: JsonCost,
-    tokens: JsonTokens,
-    /// Token rate per minute, smoothed the same way the `TOK/m` column is.
-    tokens_per_min: f64,
-    activity: JsonActivity,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rates: Option<crate::session::CodexRates>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    subagents: Vec<crate::session::Subagent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context: Option<crate::session::ContextUsage>,
-    /// Other running agents on this session's ground. Absent when there are
-    /// none, which is the ordinary case.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    conflict: Option<JsonConflict>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct JsonSandbox {
-    host: String,
-    path: String,
-}
-
-#[derive(Serialize)]
-pub struct JsonProcess {
-    cpu: f32,
-    memory: u64,
-    command: String,
-    /// Processes in the tree, which is what the `pids` figure in the UI counts.
-    pids: usize,
-}
-
-#[derive(Serialize)]
-pub struct JsonConflict {
-    /// `file` when a peer has written a file this session also wrote,
-    /// `directory` when they merely share a repository.
-    level: &'static str,
-    /// Session ids of the peers, not keys: an id is what every other field
-    /// here is addressed by.
-    peers: Vec<String>,
-    files: Vec<String>,
-}
-
 /// Resolve `which` to one session — a full id, an unambiguous prefix, or the
 /// empty string for the most recently active — or bail saying why.
 ///
@@ -768,10 +565,10 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
     // The brief is built out of the tool history, which the cache does not
     // carry, so this is one of the two callers that needs a real parse.
     let data = loader.store().session_data_fresh(session);
-    let brief = crate::handoff::build(session, Some(&data));
+    let brief = cctop_core::handoff::build(session, Some(&data));
     // Printed *and* written: the record of the conversation is a file, and a
     // brief that named one it had not left would send its reader looking.
-    print!("{}", crate::handoff::rendered(&brief));
+    print!("{}", cctop_core::handoff::rendered(&brief));
     Ok(())
 }
 
@@ -785,7 +582,7 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
 /// The transcript form of a handoff: where `--handoff` writes a brief for an
 /// agent to read, this writes the conversation itself in the shape the
 /// receiving harness reads back. That is worth doing only for a pair cctop can
-/// transcode between, and `crate::convert` is what knows which those are —
+/// transcode between, and `cctop_core::convert` is what knows which those are —
 /// OpenCode keeps its transcripts in SQLite, so a conversion to or from it
 /// answers "not yet" rather than half-doing it.
 pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Result<()> {
@@ -795,7 +592,7 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
     // instead. Said here rather than left to chance, because the copy shares
     // its source's id and a bare prefix matches both.
     let session = find_original(sessions, which)?;
-    if !crate::convert::convertible_session(session) {
+    if !cctop_core::convert::convertible_session(session) {
         anyhow::bail!(
             "{} has no transcript on this machine cctop can convert",
             session.provider.as_str()
@@ -808,17 +605,17 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
         Some((agent, account)) => (agent, Some(account)),
         None => (agent, None),
     };
-    let target = crate::pricing::Provider::parse(agent)
+    let target = cctop_core::pricing::Provider::parse(agent)
         .ok_or_else(|| anyhow::anyhow!("{agent} is not a harness cctop knows"))?;
     let profile = match account {
         Some(name) => Some(
-            crate::config::launchable_named(target, name).ok_or_else(|| {
+            cctop_core::config::launchable_named(target, name).ok_or_else(|| {
                 anyhow::anyhow!("{agent} has no account named '{name}' on this machine")
             })?,
         ),
         None => None,
     };
-    if !crate::convert::convertible(session.provider, target) {
+    if !cctop_core::convert::convertible(session.provider, target) {
         anyhow::bail!(
             "cctop cannot convert {} sessions into {}",
             session.provider.as_str(),
@@ -831,11 +628,13 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
         .ok_or_else(|| anyhow::anyhow!("that session has no transcript on this machine"))?;
     let home = match (profile, target) {
         (Some(profile), _) => profile.dir.clone(),
-        (None, crate::pricing::Provider::Claude) => crate::config::CLAUDE_CONFIG_DIR.clone(),
-        (None, crate::pricing::Provider::Codex) => crate::config::CODEX_HOME.clone(),
+        (None, cctop_core::pricing::Provider::Claude) => {
+            cctop_core::config::CLAUDE_CONFIG_DIR.clone()
+        }
+        (None, cctop_core::pricing::Provider::Codex) => cctop_core::config::CODEX_HOME.clone(),
         _ => anyhow::bail!("that harness has no store cctop writes into"),
     };
-    let written = crate::convert::convert(session.provider, transcript, target, &home)
+    let written = cctop_core::convert::convert(session.provider, transcript, target, &home)
         .ok_or_else(|| anyhow::anyhow!("the transcript could not be converted"))?;
     // The id, because it is usually the session's own and the receiving store
     // may be a long way from the one it came from. `--json` and the tests read
@@ -853,16 +652,16 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
 #[cfg(test)]
 mod convert_tests {
     use super::*;
-    use crate::session::Session;
+    use cctop_core::session::Session;
 
     /// A session with just enough shape for the resolution rules to act on.
-    fn session(id: &str, provider: crate::pricing::Provider, converted: bool) -> Session {
+    fn session(id: &str, provider: cctop_core::pricing::Provider, converted: bool) -> Session {
         let mut s = Session::new(provider, id.into());
         s.label_source = "/tmp/proj".into();
         s.started_at = "2026-09-28T00:00:00.000Z".into();
         s.last_active = "2026-09-28T00:00:00.000Z".into();
         if converted {
-            s.converted_from = Some(crate::convert::Provenance {
+            s.converted_from = Some(cctop_core::convert::Provenance {
                 harness: "claude".into(),
                 session_id: id.into(),
                 session_path: "/tmp/proj/source.jsonl".into(),
@@ -877,8 +676,8 @@ mod convert_tests {
     #[test]
     fn a_prefix_matching_a_session_and_a_copy_of_it_resolves_to_the_session() {
         let sessions = vec![
-            session(ID, crate::pricing::Provider::Claude, false),
-            session(ID, crate::pricing::Provider::Codex, true),
+            session(ID, cctop_core::pricing::Provider::Claude, false),
+            session(ID, cctop_core::pricing::Provider::Codex, true),
         ];
         // Without the originals-first rule this is an ambiguity error, which is
         // the wrong complaint: the user named a session, and the copy is not it.
@@ -893,7 +692,7 @@ mod convert_tests {
 
     #[test]
     fn an_id_that_is_only_a_copy_says_where_the_session_really_is() {
-        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let sessions = vec![session(ID, cctop_core::pricing::Provider::Codex, true)];
         let why = find_original(&sessions, ID).unwrap_err().to_string();
         assert!(why.contains("copy of a claude session"), "{why}");
         // Not "no session id starts with" — the id is right there.
@@ -902,18 +701,18 @@ mod convert_tests {
 
     #[test]
     fn an_id_matching_nothing_says_so_plainly() {
-        let sessions = vec![session(ID, crate::pricing::Provider::Claude, false)];
+        let sessions = vec![session(ID, cctop_core::pricing::Provider::Claude, false)];
         let why = find_original(&sessions, "zzz").unwrap_err().to_string();
         assert_eq!(why, "no session id starts with 'zzz'");
     }
 
     #[test]
     fn no_argument_takes_the_most_recent_original() {
-        let mut older = session(ID, crate::pricing::Provider::Claude, false);
+        let mut older = session(ID, cctop_core::pricing::Provider::Claude, false);
         older.last_active = "2026-09-28T00:00:00.000Z".into();
         let mut newer = session(
             "aa4ff133-cde9-470f-aaff-1fd6ac2da49e",
-            crate::pricing::Provider::Codex,
+            cctop_core::pricing::Provider::Codex,
             false,
         );
         newer.last_active = "2026-09-29T00:00:00.000Z".into();
@@ -924,7 +723,7 @@ mod convert_tests {
 
     #[test]
     fn only_copies_and_no_argument_says_rather_than_picking_one() {
-        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let sessions = vec![session(ID, cctop_core::pricing::Provider::Codex, true)];
         let why = find_original(&sessions, "").unwrap_err().to_string();
         assert!(why.contains("copy of a claude session"), "{why}");
     }
@@ -1076,7 +875,7 @@ pub fn run_statusline(sessions: &[Session]) {
 
 /// The line `run_statusline` prints, split out so the tests can read it.
 fn statusline(sessions: &[Session]) -> String {
-    use crate::session::ActivityState;
+    use cctop_core::session::ActivityState;
     let live: Vec<&Session> = sessions.iter().filter(|s| s.is_running()).collect();
     if live.is_empty() {
         return "no agents running".to_string();
@@ -1121,7 +920,7 @@ pub fn run_report(
 ) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
     let data = loader.store().session_data_fresh(session);
-    let report = crate::serve::report::build(session, &data, plan);
+    let report = cctop_core::report::build(session, &data, plan);
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
@@ -1130,7 +929,7 @@ pub fn run_report(
 pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
     // Deliberately not the cache: a conversation is the text the cache drops.
-    let conversation = crate::serve::chat::build(session, before);
+    let conversation = cctop_core::chat::build(session, before);
     println!("{}", serde_json::to_string(&conversation)?);
     Ok(())
 }
@@ -1139,14 +938,14 @@ pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> any
 ///
 /// `/api/chat/<id>/markdown` on a serve, and what that route runs on a remote
 /// row's machine. The whole transcript, not the page's window: see
-/// [`crate::serve::chat::whole`].
+/// [`cctop_core::chat::whole`].
 pub fn run_export(sessions: &[Session], which: &str, tool_output: bool) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
-    let conversation = crate::serve::chat::whole(session);
-    let options = crate::serve::export::Options { tool_output };
+    let conversation = cctop_core::chat::whole(session);
+    let options = cctop_core::export::Options { tool_output };
     print!(
         "{}",
-        crate::serve::export::render(session, &conversation, options)
+        cctop_core::export::render(session, &conversation, options)
     );
     Ok(())
 }
@@ -1158,166 +957,13 @@ pub fn run_access(sessions: &[Session], which: &str, loader: &Loader) -> anyhow:
     let data = loader.store().session_data_fresh(session);
     println!(
         "{}",
-        serde_json::to_string(&crate::access::build(session, Some(&data)))?
+        serde_json::to_string(&cctop_core::access::build(session, Some(&data)))?
     );
     Ok(())
 }
 
-/// Resolve a collision's peer keys back to the session ids the rest of the
-/// document is addressed by. A key a caller cannot look up is worse than no
-/// entry, so an unresolvable one is dropped rather than printed raw.
-fn json_conflict(sessions: &[Session], c: &crate::collide::Collision) -> JsonConflict {
-    JsonConflict {
-        level: match c.level {
-            crate::collide::Overlap::File => "file",
-            crate::collide::Overlap::Directory => "directory",
-        },
-        peers: c
-            .peers
-            .iter()
-            .filter_map(|key| sessions.iter().find(|s| &s.key() == key))
-            .map(|s| s.session_id.clone())
-            .collect(),
-        files: c.files.clone(),
-    }
-}
-
-/// Build the `--json` document for a set of sessions.
-///
-/// Split out from [`run_json`] because the same document is the wire format for
-/// two other readers now: `--host`, which parses it back off an ssh pipe, and
-/// the web dashboard, which streams it to a browser. Anything that is true of
-/// the printed JSON has to stay true of theirs, so there is one builder rather
-/// than three that drift.
-pub fn json_sessions(
-    sessions: &[Session],
-    plan: Plan,
-    store: &crate::cache::Store,
-) -> Vec<JsonSession> {
-    let claude_account = crate::quota::claude_account();
-    let codex_account = crate::quota::codex_account();
-    let collisions = crate::collide::detect(sessions);
-    let now = chrono::Utc::now();
-
-    sessions
-        .iter()
-        .map(|s| {
-            let data = store.session_data(s);
-            let m = &data.metrics;
-            let included = s.cost_available && plan.includes(s.provider);
-            // The credentials read here are this user's. Another user's
-            // session is signed in as whoever they are, and stamping the
-            // reader's own email on their row would be a wrong answer where
-            // no answer is the true one.
-            let account = match s.provider {
-                Provider::Claude if s.owner.is_none() => claude_account.as_ref(),
-                Provider::Codex if s.owner.is_none() => codex_account.as_ref(),
-                Provider::Claude | Provider::Codex => None,
-                Provider::Cursor
-                | Provider::Devin
-                | Provider::Gemini
-                | Provider::OpenCode
-                | Provider::Pi
-                | Provider::Windsurf => None,
-            }
-            .map(|a| JsonAccount {
-                email: a.email.clone(),
-                organization: a.organization.clone(),
-            });
-
-            JsonSession {
-                provider: s.provider.as_str(),
-                state: match s.activity_state {
-                    crate::session::ActivityState::Working => "working",
-                    crate::session::ActivityState::WaitingForInput => "waiting",
-                    crate::session::ActivityState::Asking => "asking",
-                    crate::session::ActivityState::ApiError => "error",
-                },
-                asking_for: s.asking_for.clone(),
-                asking_question: s.asking_question,
-                yolo: s.yolo.as_deref().cloned(),
-                surface: match s.surface {
-                    crate::session::Surface::Cli => "cli",
-                    crate::session::Surface::Editor => "editor",
-                    crate::session::Surface::DesktopCode => "desktop-code",
-                    crate::session::Surface::DesktopCowork => "desktop-cowork",
-                },
-                session_id: s.session_id.clone(),
-                started_at: s.started_at.clone(),
-                last_active: s.last_active.clone(),
-                project: (!s.label_source.is_empty()).then(|| s.label_source.clone()),
-                title: s.title.clone(),
-                user: s.owner.clone(),
-                profile: s.profile.clone(),
-                sandbox: s.sandbox.as_deref().map(|sandbox| JsonSandbox {
-                    host: crate::sandbox::host_of(sandbox).to_string(),
-                    path: sandbox
-                        .get(crate::sandbox::host_of(sandbox).len() + 1..)
-                        .unwrap_or_default()
-                        .to_string(),
-                }),
-                account,
-                model: (!s.model.is_empty()).then(|| s.model.clone()),
-                harness: (!s.harness.is_empty()).then(|| s.harness.clone()),
-                branch: crate::ui::columns::branch_of(s),
-                permission: s.permission.map(crate::hook::Permission::label),
-                models: data.models.clone(),
-                plan: plan.as_str(),
-                running: s.is_running(),
-                process: s.process.as_ref().map(|p| JsonProcess {
-                    cpu: p.cpu,
-                    memory: p.memory,
-                    command: p.command.clone(),
-                    pids: p.pids,
-                }),
-                cost: JsonCost {
-                    available: s.cost_available,
-                    total: (s.cost_available && !included).then(|| util::money(data.costs.total)),
-                    included,
-                    free: s.cost_is_free,
-                    this_hour: s.cost_clock_hour(&now),
-                    last_hour: s.cost_hour,
-                    today: s.cost_today,
-                    per_min: s.cost_per_min,
-                    by_day: trimmed_buckets(&s.costs_by_day, JSON_DAYS),
-                    by_hour: trimmed_buckets(&s.costs_by_hour, JSON_HOURS),
-                    breakdown: (s.cost_available && !included).then(|| data.costs.clone()),
-                },
-                tokens: JsonTokens {
-                    input: s.input_tokens,
-                    output: s.output_tokens,
-                    total: s.input_tokens + s.output_tokens,
-                    detail: data.tokens.clone(),
-                },
-                tokens_per_min: s.tokens_per_min,
-                activity: JsonActivity {
-                    tool_count: m.tool_count,
-                    tool_errors: s.provider.records_tool_outcomes().then_some(m.tool_errors),
-                    compactions: (s.provider == Provider::Claude).then_some(data.compactions),
-                    tools: m.tools.clone(),
-                    skill_count: m.skill_count,
-                    skills: m.skills.clone(),
-                    web_fetch_count: m.web_fetch_count,
-                    web_fetches: m.web_fetches.clone(),
-                    web_search_count: m.web_search_count,
-                    web_searches: m.web_searches.clone(),
-                    mcp_tool_count: m.mcp_tool_count,
-                    mcp_tools: m.mcp_tools.clone(),
-                    lines_added: m.lines_added,
-                    lines_removed: m.lines_removed,
-                },
-                rates: data.rates,
-                subagents: data.subagents.clone(),
-                context: s.context,
-                conflict: collisions.get(&s.key()).map(|c| json_conflict(sessions, c)),
-                error: data.error.clone(),
-            }
-        })
-        .collect()
-}
-
 pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
-    let out = json_sessions(sessions, plan, loader.store());
+    let out = cctop_core::json::sessions(sessions, plan, loader.store());
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
@@ -1326,6 +972,25 @@ pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Re
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// The binary's half of `pricing`'s every-provider check: the lists it
+    /// keeps by hand rather than by iterating the enum.
+    #[test]
+    fn every_provider_has_a_list_group_and_a_session_directory() {
+        for p in Provider::ALL {
+            let where_ = p.as_str();
+            // `--list` groups, which iterate the same list.
+            assert!(
+                list_order().any(|q| q == p),
+                "`--list` has no group for {where_}"
+            );
+            // Doctor's sources section, which names a directory per provider.
+            assert!(
+                !crate::doctor::sessions_root(p).as_os_str().is_empty(),
+                "{where_} has no session directory"
+            );
+        }
+    }
 
     #[test]
     fn cli_definition_is_valid() {
@@ -1393,9 +1058,9 @@ mod tests {
     /// nothing is running — stale rows must not count.
     #[test]
     fn the_statusline_names_live_states_and_the_burn_rate() {
-        use crate::session::ActivityState;
+        use cctop_core::session::ActivityState;
         let live = |state| {
-            let mut s = Session::new(crate::pricing::Provider::Claude, "x".into());
+            let mut s = Session::new(cctop_core::pricing::Provider::Claude, "x".into());
             s.inferred_running = true;
             s.activity_state = state;
             s
@@ -1403,7 +1068,10 @@ mod tests {
 
         assert_eq!(statusline(&[]), "no agents running");
         assert_eq!(
-            statusline(&[Session::new(crate::pricing::Provider::Claude, "x".into())]),
+            statusline(&[Session::new(
+                cctop_core::pricing::Provider::Claude,
+                "x".into()
+            )]),
             "no agents running",
             "a stale transcript is not an agent at work"
         );

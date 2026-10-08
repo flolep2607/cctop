@@ -2,7 +2,7 @@
 
 [← all harnesses](README.md)
 
-There is no trait to implement. A parser is a module in `src/session/` with a
+There is no trait to implement. A parser is a module in `crates/core/src/session/` with a
 handful of free functions, and the rest of the work is registering it at the
 places that match on `Provider` — of which there are more than you would guess,
 because most of them exist to keep an unsupported capability reading as
@@ -12,7 +12,7 @@ The order below is roughly the order in which things start working.
 
 ## 1. The provider
 
-`Provider` in [`src/pricing.rs`](../../src/pricing.rs). Add the variant, its
+`Provider` in [`crates/core/src/pricing.rs`](../../crates/core/src/pricing.rs). Add the variant, its
 `as_str` (that string is the stable key: it prefixes `Session::key`, and
 `fleet.rs` parses it back when reading another machine's rows over ssh), and
 `records_tool_outcomes`.
@@ -24,7 +24,7 @@ is `false`.
 
 ## 2. Where its data lives
 
-[`src/config.rs`](../../src/config.rs). A `LazyLock<PathBuf>` per root, reading
+[`crates/core/src/config.rs`](../../crates/core/src/config.rs). A `LazyLock<PathBuf>` per root, reading
 an environment override first and falling back to the platform convention.
 Follow the existing spelling: the override names the same directory the harness
 itself would take, so a user who has already moved their sessions does not have
@@ -36,7 +36,7 @@ a root sweep find the other users' copies too. Anything that reads the single
 
 ## 3. The parser
 
-A new `src/session/<name>.rs`. The functions the rest of the code will call:
+A new `crates/core/src/session/<name>.rs`. The functions the rest of the code will call:
 
 ```rust
 pub fn list_sessions() -> Vec<Session>;                    // discovery

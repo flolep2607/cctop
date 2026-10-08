@@ -29,9 +29,9 @@
 //! and one kept for the server's lifetime would pile up every event on the
 //! machine between calls, for a server that answers a handful of them.
 
-use crate::loader::Loader;
-use crate::pricing::Plan;
-use crate::session::Session;
+use cctop_core::loader::Loader;
+use cctop_core::pricing::Plan;
+use cctop_core::session::Session;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
@@ -513,7 +513,7 @@ fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
                 // unless cctop is reading every user's homes.
                 "user": s.owner,
                 "directory": s.label_source,
-                "branch": crate::ui::columns::branch_of(s),
+                "branch": cctop_core::branch::branch_of(s),
                 "branch_note": "the branch checked out now, not necessarily the one it worked on",
                 "running": s.is_running(),
                 "started_at": s.started_at,
@@ -564,7 +564,7 @@ fn check_conflicts(sessions: &[Session], args: &Value) -> Result<String, String>
         })
         .unwrap_or_default();
 
-    let peers = crate::collide::peers_of(sessions, directory, &files);
+    let peers = cctop_core::collide::peers_of(sessions, directory, &files);
     let contested: Vec<&str> = peers
         .iter()
         .filter(|(_, shared)| !shared.is_empty())
@@ -641,7 +641,7 @@ fn get_session_context(
     };
 
     let data = loader.store().session_data(session);
-    Ok(crate::handoff::rendered(&crate::handoff::build(
+    Ok(cctop_core::handoff::rendered(&cctop_core::handoff::build(
         session,
         Some(&data),
     )))
@@ -702,8 +702,8 @@ fn search_sessions(sessions: &[Session], args: &Value) -> Result<String, String>
         if hits.len() >= limit {
             break;
         }
-        let target = crate::session::search::Target::of(session);
-        let Some(hit) = crate::session::search::find(&target, &needle) else {
+        let target = cctop_core::session::search::Target::of(session);
+        let Some(hit) = cctop_core::session::search::find(&target, &needle) else {
             continue;
         };
         hits.push(json!({
@@ -875,7 +875,7 @@ mod tests {
     fn many_sessions(n: usize) -> Vec<Session> {
         (0..n)
             .map(|i| {
-                let mut s = Session::new(crate::pricing::Provider::Claude, format!("s{i:04}"));
+                let mut s = Session::new(cctop_core::pricing::Provider::Claude, format!("s{i:04}"));
                 s.label_source = "/tmp/proj".into();
                 s.last_active = format!("2026-09-28T00:00:{:02}.000Z", i % 60);
                 s

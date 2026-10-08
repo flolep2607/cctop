@@ -1,6 +1,6 @@
 # Windsurf
 
-[← all harnesses](README.md) · parser: [`src/session/windsurf.rs`](../../src/session/windsurf.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/windsurf.rs`](../../crates/core/src/session/windsurf.rs)
 
 The least legible of the eight, and the only page here with a standing caveat on
 its own accuracy. Windsurf is a VS Code fork, so its conversations live inside

@@ -1,6 +1,6 @@
 //! The guarantee, run the way an agent runs it.
 //!
-//! Everything in `src/hook.rs`'s own tests exercises the pieces — the envelope,
+//! Everything in `crates/core/src/hook.rs`'s own tests exercises the pieces — the envelope,
 //! the connect, the answer — and none of them runs `emit`, because `emit`
 //! installs a panic hook that turns every unwind in the test binary into a
 //! silent `exit(0)`. So the module's headline promise was asserted nowhere: that
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 /// The ceiling on one fire, past which the child is killed and the fire fails.
 ///
 /// Generous on purpose. The hook's own bound is a quarter of a second — the
-/// deadline in `src/hook.rs` — so a fire that runs into seconds is a stall, not
+/// deadline in `crates/core/src/hook.rs` — so a fire that runs into seconds is a stall, not
 /// a slow path; what this also measures is the `fork` and `exec` around it,
 /// which on a machine with several builds on it can take a while. The ceiling
 /// exists so that a stall fails rather than hangs: an unbounded wait inside the
@@ -217,7 +217,7 @@ fn the_events_that_demand_an_answer_get_the_no_op_and_nothing_else() {
 /// process exits on. What the fix changed is that the connect no longer waits at
 /// all, so the same stall cannot hold a `serve` connection thread — there are
 /// `MAX_CONNECTIONS` of those, and `--tunnel` puts them behind a URL anybody can
-/// reach. `a_wedged_cctop_does_not_hold_the_agent_up` in `src/hook.rs` is the
+/// reach. `a_wedged_cctop_does_not_hold_the_agent_up` in `crates/core/src/hook.rs` is the
 /// test that fails when the connect stops being bounded; this one is here
 /// because the guarantee is about the process, and only the process is all of it.
 #[test]

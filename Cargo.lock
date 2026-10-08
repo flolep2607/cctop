@@ -431,22 +431,33 @@ name = "cctop"
 version = "0.28.2"
 dependencies = [
  "anyhow",
- "brotli",
+ "cctop-core",
+ "cctop-serve",
+ "cctop-ui",
  "chrono",
  "clap",
+ "crossterm",
+ "libc",
+ "mimalloc",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cctop-core"
+version = "0.28.2"
+dependencies = [
+ "anyhow",
+ "chrono",
  "cloudflare-quick-tunnel",
  "crossterm",
  "dirs",
  "flate2",
- "image",
- "insta",
  "libc",
- "mimalloc",
  "notify",
  "pulldown-cmark",
- "qrcode",
  "ratatui",
- "ratatui-image",
  "rayon",
  "regex",
  "rmux-sdk",
@@ -456,14 +467,55 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "symphonia",
  "sysinfo",
- "tachyonfx",
  "tar",
  "tempfile",
- "termprofile",
  "tokenizers",
  "tokio",
+ "toml_edit",
+ "ureq",
+ "vt100",
+]
+
+[[package]]
+name = "cctop-serve"
+version = "0.28.2"
+dependencies = [
+ "anyhow",
+ "brotli",
+ "cctop-core",
+ "chrono",
+ "dirs",
+ "flate2",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "cctop-ui"
+version = "0.28.2"
+dependencies = [
+ "anyhow",
+ "cctop-core",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "image",
+ "insta",
+ "libc",
+ "pulldown-cmark",
+ "qrcode",
+ "ratatui",
+ "ratatui-image",
+ "rayon",
+ "serde_json",
+ "symphonia",
+ "tachyonfx",
+ "tempfile",
+ "termprofile",
  "toml_edit",
  "tui-qrcode",
  "tui-term",

@@ -17,9 +17,9 @@
 //! Read-only: it walks sessions and processes and prints. Nothing here can
 //! change a session, a file, or a process.
 
-use crate::loader::Loader;
-use crate::pricing::Plan;
-use crate::session::Session;
+use cctop_core::loader::Loader;
+use cctop_core::pricing::Plan;
+use cctop_core::session::Session;
 
 pub const HELP: &str = "\
 cctop why — why cctop thinks a session is running, or is not
@@ -99,7 +99,7 @@ pub fn run(argv: &[String]) -> i32 {
             println!("    matched {}", a.matched);
         }
         if !a.argv.is_empty() {
-            println!("    argv    {}", crate::util::truncate(&a.argv, 100));
+            println!("    argv    {}", cctop_core::util::truncate(&a.argv, 100));
         }
     }
 
@@ -158,7 +158,7 @@ pub fn run(argv: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::Provider;
+    use cctop_core::pricing::Provider;
 
     fn sessions() -> Vec<Session> {
         [

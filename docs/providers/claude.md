@@ -1,6 +1,6 @@
 # Claude Code
 
-[← all harnesses](README.md) · parser: [`src/session/claude.rs`](../../src/session/claude.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/claude.rs`](../../crates/core/src/session/claude.rs)
 
 The harness cctop reads most deeply, and the only one whose transcript answers
 every column. Everything else on this page is a consequence of that: the

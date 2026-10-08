@@ -1,52 +1,18 @@
-mod access;
-mod advise;
-mod alert;
-mod alias;
-mod attach;
-mod burn;
-mod cache;
-mod cast;
 mod cli;
-mod clipboard;
-mod collide;
-mod config;
-mod convert;
 mod doctor;
-mod elog;
-mod embed;
-mod fingerprint;
-mod fleet;
-mod handoff;
-mod hook;
-mod inject;
-mod insight;
-mod loader;
 mod mcp;
-mod notify;
-mod opencode;
-mod peek;
-mod pricing;
-mod proc;
-mod quota;
 mod recall;
-mod remote_fs;
-mod rmux;
-mod sandbox;
-mod serve;
-mod session;
-mod settings;
-mod shim;
-mod ssh_config;
-mod ssh_master;
-mod sshfs;
-mod trace;
-mod ui;
-mod update;
-mod util;
 mod wait;
-mod watch;
 mod why;
-mod yolo;
+
+// The commands below are dispatched from here by their module names, as they
+// were when all of cctop was this one crate.
+use cctop_core::{
+    alias, attach, burn, cache, elog, embed, hook, insight, loader, pricing, quota, sandbox,
+    settings, shim, trace, update,
+};
+use cctop_serve as serve;
+use cctop_ui as ui;
 
 use clap::Parser;
 use std::io::IsTerminal;
@@ -70,6 +36,10 @@ use std::io::IsTerminal;
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
+    // Before anything, `hook` included: a binary built by `cargo test` carries
+    // core's test guards, and this is what keeps them off. See `under_test`.
+    cctop_core::running_as_the_binary();
+
     // `cctop run <agent> …` is handled before clap so the agent's own flags are
     // never mistaken for cctop's — `cctop claude --help` must reach claude.
     //
@@ -475,17 +445,55 @@ fn main() -> anyhow::Result<()> {
     // while the network fetch is still in flight.
     pricing::load_cached_pricing();
 
+    // An agent asking what colour the terminal is gets cctop's palette, which
+    // the UI owns; before any agent is hosted, so the first query is answered.
+    shim::answer_colours_from(|| ui::theme::variant() == ui::theme::Variant::Light);
+
     // Started before the UI so a failure to launch prints as an ordinary error
     // rather than from inside the alternate screen.
     let hosted = agent
         .map(|agent| shim::host(&agent, None, ui::render::pane_size()))
         .transpose()?;
 
-    let code = ui::run(&args, hosted)?;
+    let code = ui::run(
+        args.plan,
+        args.delay,
+        &args.hosts,
+        hosted,
+        serve_for_dashboard,
+    )?;
     // After the UI is down, so the message is not painted over by the alternate
     // screen being restored.
     finish_trace(&args);
     std::process::exit(code)
+}
+
+/// Start the server the dashboard shares its table through.
+///
+/// Here because this is the one crate with both: the dashboard and the server
+/// are built side by side, neither depending on the other, and the dashboard
+/// asks for a server through this.
+fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> {
+    let serving = serve::start(serve::Options {
+        tunnel: request.tunnel,
+        plan: request.plan,
+        // Fed from the rows this dashboard already has. Two loaders in one
+        // process would walk the same disk twice and, worse, could disagree —
+        // a page saying one thing while the table beside it says another is
+        // the bug nobody thinks to look for.
+        scan: false,
+        hosts: request.hosts,
+        ..Default::default()
+    })?;
+    Ok(ui::Served {
+        local: serving.local.clone(),
+        public: serving.public.clone(),
+        readonly: serving.readonly.clone(),
+        actions: serving.actions,
+        // The server moves in with the closure, so dropping what the dashboard
+        // holds stops it.
+        publish: Box::new(move |sessions, quota| serving.publish_with_quota(sessions, quota)),
+    })
 }
 
 /// Write the trace, if one was asked for, and say where it went.
@@ -507,5 +515,37 @@ fn finish_trace(args: &cli::Args) {
             "cctop: could not write trace to {}: {error}",
             path.display()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// What the dashboard holds of a server it started is a real server's
+    /// links: on loopback, and carrying the token the page needs.
+    #[test]
+    fn the_dashboard_gets_a_real_servers_links() {
+        let served = super::serve_for_dashboard(cctop_ui::ServeRequest {
+            tunnel: false,
+            plan: cctop_core::pricing::Plan::Retail,
+            hosts: Vec::new(),
+        })
+        .expect("a loopback server");
+        assert!(
+            served.local.starts_with("http://127.0.0.1:"),
+            "{}",
+            served.local
+        );
+        let token = served.local.split_once("?t=").map(|(_, token)| token);
+        // 32 characters, which the dashboard's own tests stand in when they
+        // draw the panel's QR code without starting a server.
+        assert_eq!(
+            token.map(str::len),
+            Some(32),
+            "no token in {}",
+            served.local
+        );
+        assert!(served.public.is_none());
+        assert!(served.actions);
+        assert_eq!(served.best(), served.local);
     }
 }

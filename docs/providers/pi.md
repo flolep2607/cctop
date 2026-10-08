@@ -1,6 +1,6 @@
 # Pi
 
-[← all harnesses](README.md) · parser: [`src/session/pi.rs`](../../src/session/pi.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/pi.rs`](../../crates/core/src/session/pi.rs)
 
 The simplest of the eight to read, and the one that records its own costs most
 completely. What it does not record is anything about the context window or the

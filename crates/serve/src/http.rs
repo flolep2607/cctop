@@ -1,0 +1,1188 @@
+//! Just enough HTTP/1.1 to answer a browser, and no more.
+//!
+//! The surface cctop needs is three verbs' worth of nothing: `GET`, `HEAD`,
+//! `POST`, a path, a query string, and a body in each direction. No routing
+//! DSL, no middleware, no keep-alive negotiation. That is a few
+//! hundred lines here against a web framework and its transitive tree in
+//! `Cargo.toml` — the same bargain `mcp` took with JSON-RPC, for the
+//! same reason: a monitoring tool people `cargo install` should not pull in a
+//! runtime to draw a table.
+//!
+//! What it does take seriously is that this socket is the one part of cctop a
+//! stranger can reach. Every read is bounded and deadlined, so neither a client
+//! that sends a gigabyte of headers nor one that opens a connection and says
+//! nothing can cost more than one thread and [`MAX_HEADER_BYTES`]:
+//!
+//! - the request line and headers are read into a fixed buffer, and a request
+//!   that overruns it is answered `431` rather than grown into;
+//! - the socket carries a read *and* a write timeout, so a peer that stops
+//!   reading an SSE stream cannot pin the thread forever;
+//! - a request body is read only when the request line said `POST` and only up
+//!   to [`MAX_BODY_BYTES`], which is orders of magnitude more than the few
+//!   fields an action route takes and still nothing a peer can grow.
+//!
+//! An action route is a `POST` with a JSON body, and both halves of that are
+//! load-bearing rather than stylistic. A cross-origin form can be made to send
+//! a `GET` or a `POST` of form-encoded data without the page ever seeing the
+//! answer; it cannot set `Content-Type: application/json` without asking
+//! permission first, and this server answers no preflight. So the pairing is
+//! what stops a page in another tab from driving an agent on the strength of a
+//! token it cannot read — see [`Request::wants_json`].
+//!
+//! What it does take seriously as well is how much a page costs to load, because
+//! the road to it is often a tunnel to a phone. Three rules, applied here rather
+//! than per route:
+//!
+//! - **Every text body is compressed** for a client that offers it — brotli
+//!   first, then gzip — and a body that is the same on every request is
+//!   compressed once per run, not per request ([`Packed`]).
+//! - **A file that never changes says so.** Names with a content hash in them
+//!   are cached for a year; everything else that is fixed for a run carries an
+//!   ETag, and a browser that already holds it is answered `304` with no body.
+//! - **Anything else stays `no-store`.** Transcripts, prompts and the token
+//!   are what most routes return, and a disk cache is not where they belong.
+//!
+//! ponytail: HTTP/1.0-style connection-per-request. Keep-alive would save a
+//! handshake on a page that makes four requests and then holds one SSE stream
+//! open for an hour, which is not a saving worth the state machine.
+
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+/// The most request line and headers that will be read before giving up.
+///
+/// A browser's `GET` with cookies and a long `User-Agent` lands under 4 KiB;
+/// this is generous to that and still small enough that a malicious peer
+/// buys nothing by filling it.
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+
+/// The most request body that will be read before giving up.
+///
+/// An action body is a session id, a target and a line of prose. 64 KiB is
+/// room for a prompt someone pasted a stack trace into, and a hard stop well
+/// under what a thread can be made to hold.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// The most an image posted to the paste route may be.
+///
+/// Its own limit because it is the one route whose body is not prose: a
+/// screenshot of a wide display is a megabyte or two of PNG, half again as
+/// much in base64, and the ordinary 64 KiB would refuse every one of them. Kept
+/// to a size a thread can hold without thinking about it, and applied only to
+/// this path — every other route keeps the small bound.
+const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+
+/// The path that carries images, and so the one that may be large.
+const IMAGE_PATH: &str = "/api/act/image/";
+
+/// How long a client has to finish sending its request line and headers.
+///
+/// Deliberately short. A connection that has been accepted but has not asked
+/// for anything is either a port scan or a browser that changed its mind, and
+/// both should release the thread quickly.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a single write may block before the connection is abandoned.
+///
+/// Long-lived SSE streams are the reason this exists: a phone that goes to
+/// sleep with the dashboard open stops reading, its receive window closes, and
+/// without a deadline the writing thread would block on `write` until the
+/// process ends.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A parsed request: a method, a path, and the query string as a map.
+pub struct Request {
+    pub method: String,
+    /// Path with percent-escapes decoded and the query removed. Always begins
+    /// with `/`; see [`Request::parse`] for what it refuses.
+    pub path: String,
+    pub query: HashMap<String, String>,
+    /// The `POST` body, empty for every other method.
+    pub body: Vec<u8>,
+    /// Whether the body announced itself as JSON.
+    ///
+    /// Kept as a flag rather than the whole header map because it is the only
+    /// header anything here routes on, and it is routed on for a security
+    /// reason rather than a parsing one — see the module docs.
+    json_content_type: bool,
+    /// When the request finished parsing, so a response can say how long the
+    /// answer took without every route threading a clock through.
+    pub received: std::time::Instant,
+    /// The `Cookie` header as it arrived, empty when there was none.
+    ///
+    /// Kept whole rather than parsed into a map: one cookie is ever read off
+    /// it, and `;`-splitting at the request layer would hold a map nobody else
+    /// asks anything of.
+    cookie_header: String,
+    /// The token an `Authorization: Bearer` header carried, empty when none
+    /// did.
+    ///
+    /// A third way to present the same credential, for clients that are not a
+    /// browser following a link — a script, curl, a status board — and it keeps
+    /// the token out of the URL such a client logs and displays.
+    bearer: String,
+    /// Whether the client said it takes a gzip body.
+    accepts_gzip: bool,
+    /// Whether the client said it takes a brotli body. Browsers offer it over
+    /// https; a plain-http page on the LAN usually gets gzip.
+    accepts_br: bool,
+    /// The `If-None-Match` header as it arrived, empty when there was none —
+    /// the ETags a browser already holds a copy for.
+    if_none_match: String,
+    /// The query string as it arrived, undecoded, for the one route that
+    /// forwards a request rather than answering it: the terminal relay.
+    raw_query: String,
+    /// Every header as it arrived, in order, bounded by [`MAX_HEADER_BYTES`].
+    /// Only the terminal relay reads these — a WebSocket handshake has to be
+    /// passed on whole or the far side refuses it.
+    headers: Vec<(String, String)>,
+}
+
+impl Request {
+    /// Read and parse one request from `stream`, or return why not.
+    ///
+    /// The error is a status code and a message, already in the shape the
+    /// caller has to send back — a malformed request still deserves an answer,
+    /// and deciding what that answer is belongs next to the parsing that
+    /// rejected it.
+    pub fn parse(stream: &TcpStream) -> Result<Request, (u16, &'static str)> {
+        // Both directions, before the first read: the timeouts are the whole
+        // defence against a peer that connects and then does nothing.
+        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+
+        // `take` is the bound that matters. Without it a peer that never sends
+        // a blank line grows the buffer until the process dies, and a read
+        // timeout would not save us — a slow trickle of bytes resets it. The
+        // allowance covers a body as well, so the header half is bounded by
+        // counting bytes as they are read rather than by the reader itself.
+        let mut reader = BufReader::new(stream.take((MAX_HEADER_BYTES + MAX_IMAGE_BYTES) as u64));
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() || line.is_empty() {
+            return Err((400, "malformed request line"));
+        }
+
+        let mut parts = line.split_whitespace();
+        let method = parts.next().unwrap_or_default().to_string();
+        let target = parts.next().unwrap_or_default();
+        if method != "GET" && method != "HEAD" && method != "POST" {
+            return Err((405, "this server answers GET, HEAD and POST"));
+        }
+        if target.is_empty() {
+            return Err((400, "malformed request line"));
+        }
+
+        let (raw_path, raw_query) = match target.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (target, ""),
+        };
+        let path = percent_decode(raw_path);
+        // Refused rather than normalised. Nothing here serves a file off disk,
+        // so a `..` in a path is not a traversal — but it is also not a route
+        // that exists, and a request shaped like an attack should be answered
+        // like one rather than quietly rewritten into something that works.
+        if !path.starts_with('/') || path.contains("..") || path.contains('\0') {
+            return Err((400, "unacceptable path"));
+        }
+
+        let query = raw_query
+            .split('&')
+            .filter(|p| !p.is_empty())
+            .map(|pair| match pair.split_once('=') {
+                Some((k, v)) => (percent_decode(k), percent_decode(v)),
+                None => (percent_decode(pair), String::new()),
+            })
+            .collect();
+
+        // Headers are read to the blank line and mostly discarded: the token is
+        // a query parameter precisely so that a link is the whole credential.
+        // Two of them are kept, because a body cannot be read without knowing
+        // how long it is and must not be trusted without knowing what it claims
+        // to be. They all have to leave the socket either way, or a client that
+        // pipelines sees its next request answered with the tail of this one's
+        // headers.
+        let mut header_bytes = line.len();
+        let mut length: Option<usize> = None;
+        let mut json_content_type = false;
+        let mut cookie_header = String::new();
+        let mut bearer = String::new();
+        let mut accepts_gzip = false;
+        let mut accepts_br = false;
+        let mut if_none_match = String::new();
+        let mut headers: Vec<(String, String)> = Vec::new();
+        loop {
+            let mut header = String::new();
+            match reader.read_line(&mut header) {
+                Ok(0) => break,
+                Ok(_) if header.trim().is_empty() => break,
+                Ok(n) => {
+                    header_bytes += n;
+                    if header_bytes > MAX_HEADER_BYTES {
+                        return Err((431, "request headers too large"));
+                    }
+                    let Some((name, value)) = header.split_once(':') else {
+                        continue;
+                    };
+                    headers.push((name.trim().to_string(), value.trim().to_string()));
+                    let value = value.trim();
+                    if name.eq_ignore_ascii_case("content-length") {
+                        // A length that is not a number is not a length. Left
+                        // as `None` so the body reads as absent rather than as
+                        // whatever the digits before the junk happened to say.
+                        length = value.parse::<usize>().ok();
+                    } else if name.eq_ignore_ascii_case("content-type") {
+                        // `application/json; charset=utf-8` is the same claim as
+                        // `application/json`, and a browser sends either.
+                        json_content_type = value
+                            .split(';')
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .eq_ignore_ascii_case("application/json");
+                    } else if name.eq_ignore_ascii_case("cookie") {
+                        // A second credential channel: `?t=` opens the door
+                        // once and the page hands the cookie back, so a reload
+                        // — which has no query to present — still gets in.
+                        cookie_header = value.to_string();
+                    } else if name.eq_ignore_ascii_case("accept-encoding") {
+                        let offers = |wanted: &str| {
+                            value.split(',').any(|coding| {
+                                let mut parts = coding.split(';');
+                                let name = parts.next().unwrap_or_default().trim();
+                                // `gzip;q=0` is a refusal, not an offer.
+                                let refused = parts.any(|p| {
+                                    let q = p.trim().replace(' ', "");
+                                    q.strip_prefix("q=")
+                                        .and_then(|q| q.parse::<f32>().ok())
+                                        .is_some_and(|q| q <= 0.0)
+                                });
+                                name.eq_ignore_ascii_case(wanted) && !refused
+                            })
+                        };
+                        accepts_gzip = offers("gzip");
+                        accepts_br = offers("br");
+                    } else if name.eq_ignore_ascii_case("if-none-match") {
+                        if_none_match = value.to_string();
+                    } else if name.eq_ignore_ascii_case("authorization") {
+                        // Safe to honour on an action as well as a read: a page
+                        // on another origin can only send this header after a
+                        // CORS preflight, and an `OPTIONS` is answered 405.
+                        if let Some((scheme, token)) = value.split_once(' ')
+                            && scheme.eq_ignore_ascii_case("bearer")
+                        {
+                            bearer = token.trim().to_string();
+                        }
+                    }
+                }
+                // Hitting the `take` limit surfaces here, as does a header that
+                // is not UTF-8. Both are `431` rather than `400`: it is the
+                // size of the field, not the shape of it, that we objected to.
+                Err(_) => return Err((431, "request headers too large")),
+            }
+        }
+
+        // Only for the method that has one. A `Content-Length` on a `GET` is
+        // either a mistake or an attempt at request smuggling, and reading the
+        // bytes it names would make this server agree with the wrong one of two
+        // hops about where the next request starts.
+        let mut body = Vec::new();
+        if method == "POST" {
+            let want = length.ok_or((411, "a POST needs a Content-Length"))?;
+            let cap = match path.starts_with(IMAGE_PATH) {
+                true => MAX_IMAGE_BYTES,
+                false => MAX_BODY_BYTES,
+            };
+            if want > cap {
+                return Err((413, "request body too large"));
+            }
+            body = vec![0u8; want];
+            if reader.read_exact(&mut body).is_err() {
+                return Err((400, "request body ended early"));
+            }
+        }
+
+        Ok(Request {
+            method,
+            path,
+            query,
+            body,
+            json_content_type,
+            received: std::time::Instant::now(),
+            cookie_header,
+            bearer,
+            accepts_gzip,
+            accepts_br,
+            if_none_match,
+            raw_query: raw_query.to_string(),
+            headers,
+        })
+    }
+
+    /// Whether this is a `POST` whose body announced itself as JSON.
+    ///
+    /// The one guard that a route taking an action checks before anything else.
+    /// See the module docs for why the content type is what makes a token in a
+    /// URL safe to act on.
+    pub fn wants_json(&self) -> bool {
+        self.method == "POST" && self.json_content_type
+    }
+
+    /// The body parsed as a JSON object, or why it could not be.
+    pub fn json(&self) -> Result<serde_json::Value, (u16, &'static str)> {
+        let value: serde_json::Value =
+            serde_json::from_slice(&self.body).map_err(|_| (400, "body is not JSON"))?;
+        match value.is_object() {
+            true => Ok(value),
+            false => Err((400, "body is not a JSON object")),
+        }
+    }
+
+    /// The `t` query parameter, which is where the access token lives.
+    pub fn token(&self) -> &str {
+        self.query.get("t").map_or("", String::as_str)
+    }
+
+    /// The `Authorization: Bearer` token, or empty.
+    /// The query string as it arrived, undecoded.
+    pub fn raw_query(&self) -> &str {
+        &self.raw_query
+    }
+
+    /// Every header, in the order it arrived.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// Whether this asks to become a WebSocket.
+    pub fn is_websocket(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket"))
+    }
+
+    /// Whether a gzip body may be sent back.
+    pub fn accepts_gzip(&self) -> bool {
+        self.accepts_gzip
+    }
+
+    /// The best encoding this client takes, if it takes any.
+    fn encoding(&self) -> Option<Encoding> {
+        match (self.accepts_br, self.accepts_gzip) {
+            (true, _) => Some(Encoding::Br),
+            (false, true) => Some(Encoding::Gzip),
+            (false, false) => None,
+        }
+    }
+
+    /// Whether the browser already holds the representation tagged `etag`.
+    ///
+    /// Compared weakly, as RFC 9110 says `If-None-Match` is: a `W/` on either
+    /// side is ignored. Every tag here is weak anyway — see [`Packed`].
+    fn holds(&self, etag: &str) -> bool {
+        let bare = |t: &str| t.trim().trim_start_matches("W/").to_string();
+        let etag = bare(etag);
+        self.if_none_match
+            .split(',')
+            .any(|t| t.trim() == "*" || bare(t) == etag)
+    }
+
+    pub fn bearer(&self) -> &str {
+        &self.bearer
+    }
+
+    /// One cookie's value by name, or `None` — cookies arrive as one header
+    /// of `name=value; name=value`, and only the access token is ever asked
+    /// for, so it is picked out rather than the header being parsed into a map.
+    pub fn cookie(&self, name: &str) -> Option<&str> {
+        self.cookie_header
+            .split(';')
+            .filter_map(|pair| pair.trim().split_once('='))
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v)
+    }
+}
+
+/// Decode `%XX` escapes and `+`, leaving anything malformed as written.
+///
+/// A stray `%` in a path is far likelier to be a literal than a truncated
+/// escape, and turning it into a replacement character would make the path fail
+/// to match a route for a reason nobody could see.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The reason phrase for the statuses this server actually sends.
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        411 => "Length Required",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
+        _ => "Error",
+    }
+}
+
+/// Headers sent on every response, whatever it carries.
+///
+/// The page is entirely self-contained — its CSS and JS are inlined by the
+/// build, and it fetches nothing — so the strictest possible policy costs
+/// nothing and closes the gap where a session title, a branch name or a file
+/// path from someone's transcript is rendered as markup.
+///
+/// `frame-ancestors 'none'` and `X-Content-Type-Options` are the pair that
+/// matter beyond that: without them a page on another origin can frame this one
+/// and read what it renders, or talk a browser into sniffing a JSON response as
+/// something executable.
+///
+/// `frame-src 'self'` is the one thing these pages may frame: rmux's browser
+/// terminal, served from this origin under `/term/` (see [`super::term`]) so
+/// a session's terminal can sit inside its page. `share.rmux.io` answers with
+/// `frame-ancestors 'none'`, which is why the copy is served here at all.
+/// Nothing off this server can be framed.
+///
+/// Two same-origin exceptions carry the installable-page furniture: `img-src
+/// 'self'` for `/favicon.svg`, and `manifest-src 'self'` for
+/// `/manifest.webmanifest`, which `default-src` does not cover. `data:` stays
+/// for images a transcript paste renders inline. `font-src data:` is the app
+/// page's fonts, which are inlined into it as data URLs. None of them opens
+/// anything off this server.
+fn common_headers(out: &mut String) {
+    out.push_str(
+        "X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Content-Security-Policy: default-src 'none'; \
+         style-src 'unsafe-inline'; \
+         script-src 'unsafe-inline'; \
+         img-src 'self' data:; \
+         font-src data:; \
+         manifest-src 'self'; \
+         connect-src 'self'; \
+         frame-src 'self'; \
+         base-uri 'none'; \
+         form-action 'none'; \
+         frame-ancestors 'none'\r\n",
+    );
+}
+
+/// The policy rmux's own frontend ships with, except that cctop's page may
+/// frame it.
+///
+/// Copied from what `share.rmux.io` sends rather than loosened from cctop's:
+/// the frontend needs `'wasm-unsafe-eval'` for its crypto module and
+/// `connect-src ws: wss:` for the daemon's socket, which may be a tunnel host
+/// no policy here could name in advance. `frame-ancestors 'self'` is the one
+/// change, and the reason this route exists.
+pub const TERM_POLICY: &str = "default-src 'none'; base-uri 'none'; object-src 'none'; \
+     frame-ancestors 'self'; form-action 'none'; script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'none'; \
+     connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; \
+     media-src 'none'; frame-src 'none'";
+
+/// The `Cache-Control` of a response that must not be kept anywhere.
+///
+/// The default, because most routes return a transcript, a prompt or a page
+/// with the token in it, and a browser's disk cache is not where those belong.
+pub const NO_STORE: &str = "no-store";
+
+/// For a file whose name changes whenever its bytes do: keep it a year and
+/// never ask again. `private` because every route here is behind the token,
+/// and a shared cache — the tunnel's CDN — that kept a copy would hand it to
+/// requests the gate never saw.
+pub const IMMUTABLE: &str = "private, max-age=31536000, immutable";
+
+/// For a body that is fixed for a run but whose URL is not: the browser keeps
+/// it and asks each time whether it is still current, which an ETag answers
+/// with a `304` and no body. `private` for the same reason as [`IMMUTABLE`].
+pub const REVALIDATE: &str = "private, no-cache";
+
+/// A content coding a response can be sent in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Br,
+    Gzip,
+}
+
+impl Encoding {
+    fn header(self) -> &'static str {
+        match self {
+            Encoding::Br => "br",
+            Encoding::Gzip => "gzip",
+        }
+    }
+
+    /// `body` in this coding, or `None` when it would not be smaller — an
+    /// empty picture gains nothing from a gzip header.
+    ///
+    /// `thorough` is for a body compressed once and sent many times, where a
+    /// tenth of a second buys the last few percent; a body compressed per
+    /// request takes the fast setting, which on brotli is still smaller than
+    /// gzip's best.
+    fn pack(self, body: &[u8], thorough: bool) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(body.len() / 3);
+        match self {
+            Encoding::Br => {
+                let params = brotli::enc::BrotliEncoderParams {
+                    quality: if thorough { 9 } else { 5 },
+                    lgwin: 22,
+                    ..Default::default()
+                };
+                brotli::BrotliCompress(&mut &body[..], &mut out, &params).ok()?;
+            }
+            Encoding::Gzip => {
+                let level = match thorough {
+                    true => flate2::Compression::best(),
+                    false => flate2::Compression::default(),
+                };
+                let mut gz = flate2::write::GzEncoder::new(out, level);
+                gz.write_all(body).ok()?;
+                out = gz.finish().ok()?;
+            }
+        }
+        (out.len() < body.len()).then_some(out)
+    }
+}
+
+/// Whether a body of this type is worth compressing: text of every kind, and
+/// WebAssembly, which shrinks to a quarter. Not images other than SVG, which
+/// are compressed already.
+fn compressible(content_type: &str) -> bool {
+    let kind = content_type.split(';').next().unwrap_or_default().trim();
+    kind.starts_with("text/")
+        || matches!(
+            kind,
+            "application/json"
+                | "application/javascript"
+                | "application/wasm"
+                | "application/manifest+json"
+                | "image/svg+xml"
+        )
+}
+
+/// Bodies smaller than this go out as they are: under a packet, compression
+/// saves nothing a reader would notice and costs a header either way.
+const COMPRESS_FROM: usize = 1024;
+
+/// A body that is the same on every request — a page, a script, a picture —
+/// compressed once, the first time each encoding is asked for, and named by an
+/// ETag so a browser that holds it already is answered `304` and no body.
+///
+/// Compressed lazily rather than up front because most runs never serve most
+/// of these: the terminal bundle is only fetched once someone opens a
+/// terminal, and a run nobody opens in a browser should not spend a second of
+/// CPU at start-up on pages it will never send.
+///
+/// The ETag is weak (`W/`) because it names the content, not one encoding of
+/// it: the gzip and the brotli copy are the same page, and a browser that
+/// cached one may revalidate it against the other.
+pub struct Packed {
+    body: Vec<u8>,
+    etag: String,
+    br: OnceLock<Option<Vec<u8>>>,
+    gzip: OnceLock<Option<Vec<u8>>>,
+}
+
+impl Packed {
+    pub fn new(body: impl Into<Vec<u8>>) -> Packed {
+        let body = body.into();
+        Packed {
+            etag: etag_of(&body),
+            body,
+            br: OnceLock::new(),
+            gzip: OnceLock::new(),
+        }
+    }
+
+    /// The body in `encoding`, compressing it if this is the first ask.
+    fn encoded(&self, encoding: Encoding) -> Option<&[u8]> {
+        let slot = match encoding {
+            Encoding::Br => &self.br,
+            Encoding::Gzip => &self.gzip,
+        };
+        slot.get_or_init(|| encoding.pack(&self.body, true))
+            .as_deref()
+    }
+}
+
+/// A weak ETag naming `body`. Not a security property — a tag only ever
+/// decides whether to resend bytes the browser could ask for anyway — so a
+/// fast 64-bit hash with the length beside it is plenty.
+fn etag_of(body: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut h);
+    format!("W/\"{:x}-{:016x}\"", body.len(), h.finish())
+}
+
+/// Everything a response says beyond its status and body. One struct rather
+/// than another positional argument per header, because each route that grew
+/// one used to grow a `respond_*` function to carry it.
+struct Head<'a> {
+    content_type: &'a str,
+    cache: &'a str,
+    etag: Option<&'a str>,
+    encoding: Option<Encoding>,
+    /// Whether the body depends on `Accept-Encoding`, which a cache has to be
+    /// told or it hands a gzip body to a client that never offered gzip.
+    vary: bool,
+    extra: &'a str,
+    policy: Option<&'a str>,
+}
+
+/// Write a complete response and let the connection close.
+///
+/// `HEAD` is answered with the headers a `GET` would have carried, length
+/// included, and no body — which is what a browser preflighting a link expects,
+/// and costs one branch here rather than a route that has to know about it.
+pub fn respond(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) {
+    respond_extra(stream, request, status, content_type, body, "");
+}
+
+/// `respond`, plus headers the one route that needs them asks for — the
+/// `Set-Cookie` a page sets on first open is the only one there is.
+///
+/// A text body worth compressing is compressed here, per request, for a
+/// client that offers an encoding — every JSON route included, which on a
+/// shared machine is a table of hundreds of rows.
+pub fn respond_extra(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &str,
+) {
+    respond_fresh(stream, request, status, content_type, body, extra, NO_STORE);
+}
+
+/// A body built for this request, compressed if it is worth it, under the
+/// given `Cache-Control`.
+fn respond_fresh(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &str,
+    cache: &str,
+) {
+    let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
+    let packed = worth
+        .then(|| request.and_then(Request::encoding))
+        .flatten()
+        .and_then(|e| Some((e, e.pack(body, false)?)));
+    let head = Head {
+        content_type,
+        cache,
+        etag: None,
+        encoding: packed.as_ref().map(|(e, _)| *e),
+        vary: worth,
+        extra,
+        policy: None,
+    };
+    let sent = packed.as_ref().map_or(body, |(_, b)| b.as_slice());
+    write_response(stream, request, status, &head, sent, body.len());
+}
+
+/// A body built per request that is often the same as last time — a list
+/// polled every few seconds. Tagged with a hash of its bytes and kept by the
+/// browser under [`REVALIDATE`], so an unchanged answer goes back as a `304`
+/// with no body and the page's `fetch` sees the copy it already had.
+///
+/// Only for routes whose answer may sit in a browser's cache: nothing from a
+/// transcript.
+pub fn respond_revalidated(
+    stream: &mut TcpStream,
+    request: &Request,
+    content_type: &str,
+    body: &[u8],
+) {
+    let etag = etag_of(body);
+    if request.holds(&etag) {
+        return not_modified(stream, request, &etag, REVALIDATE, "");
+    }
+    let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
+    let packed = worth
+        .then(|| request.encoding())
+        .flatten()
+        .and_then(|e| Some((e, e.pack(body, false)?)));
+    let head = Head {
+        content_type,
+        cache: REVALIDATE,
+        etag: Some(&etag),
+        encoding: packed.as_ref().map(|(e, _)| *e),
+        vary: worth,
+        extra: "",
+        policy: None,
+    };
+    let sent = packed.as_ref().map_or(body, |(_, b)| b.as_slice());
+    write_response(stream, Some(request), 200, &head, sent, body.len());
+}
+
+/// Send a [`Packed`] body: `304` to a browser that holds it, otherwise the
+/// best encoding it takes, under `cache`. `policy` replaces the content policy
+/// for the one set of files that is not cctop's own; `extra` carries the
+/// `Set-Cookie` the app page sets, which a `304` sends too, since a reload
+/// that revalidates is still the visit the cookie was minted for.
+pub fn respond_packed(
+    stream: &mut TcpStream,
+    request: &Request,
+    content_type: &str,
+    packed: &Packed,
+    cache: &str,
+    extra: &str,
+    policy: Option<&str>,
+) {
+    if request.holds(&packed.etag) {
+        return not_modified(stream, request, &packed.etag, cache, extra);
+    }
+    let worth = compressible(content_type) && packed.body.len() >= COMPRESS_FROM;
+    let chosen = worth
+        .then(|| request.encoding())
+        .flatten()
+        .and_then(|e| Some((e, packed.encoded(e)?)));
+    let head = Head {
+        content_type,
+        cache,
+        etag: Some(&packed.etag),
+        encoding: chosen.map(|(e, _)| e),
+        vary: worth,
+        extra,
+        policy,
+    };
+    let sent = chosen.map_or(packed.body.as_slice(), |(_, b)| b);
+    write_response(stream, Some(request), 200, &head, sent, packed.body.len());
+}
+
+/// A `304`: the browser's copy is current. It repeats the validators and the
+/// cache policy, as RFC 9110 asks, so the stored copy's freshness is renewed.
+fn not_modified(stream: &mut TcpStream, request: &Request, etag: &str, cache: &str, extra: &str) {
+    let mut head = format!(
+        "HTTP/1.1 304 Not Modified\r\n\
+         Connection: close\r\n\
+         Cache-Control: {cache}\r\n\
+         ETag: {etag}\r\n\
+         Vary: Accept-Encoding\r\n"
+    );
+    head.push_str(extra);
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.flush();
+    cctop_core::elog::event(
+        "http",
+        "response",
+        serde_json::json!({
+            "method": request.method,
+            "path": request.path,
+            "status": 304,
+            "bytes": 0,
+            "ms": request.received.elapsed().as_millis() as u64,
+        }),
+    );
+}
+
+/// Put a response on the wire. `raw` is the body's size before encoding, for
+/// the log, which wants to show what compression saved.
+fn write_response(
+    stream: &mut TcpStream,
+    request: Option<&Request>,
+    status: u16,
+    head_of: &Head,
+    body: &[u8],
+    raw: usize,
+) {
+    let mut head = format!(
+        "HTTP/1.1 {status} {}\r\n\
+         Content-Type: {}\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         Cache-Control: {}\r\n",
+        reason(status),
+        head_of.content_type,
+        body.len(),
+        head_of.cache,
+    );
+    if let Some(etag) = head_of.etag {
+        head.push_str(&format!("ETag: {etag}\r\n"));
+    }
+    if let Some(encoding) = head_of.encoding {
+        head.push_str(&format!("Content-Encoding: {}\r\n", encoding.header()));
+    }
+    if head_of.vary {
+        head.push_str("Vary: Accept-Encoding\r\n");
+    }
+    match head_of.policy {
+        None => common_headers(&mut head),
+        Some(policy) => {
+            head.push_str("X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n");
+            head.push_str("Content-Security-Policy: ");
+            head.push_str(policy);
+            head.push_str("\r\n");
+        }
+    }
+    head.push_str(head_of.extra);
+    head.push_str("\r\n");
+
+    let head_only = request.is_some_and(|r| r.method == "HEAD");
+    // One write where the platform allows it: a header block and a small body
+    // in two syscalls arrive as two segments, and the browser paints the second
+    // one a round trip later.
+    let mut buf = head.into_bytes();
+    if !head_only {
+        buf.extend_from_slice(body);
+    }
+    let _ = stream.write_all(&buf);
+    let _ = stream.flush();
+
+    cctop_core::elog::event(
+        "http",
+        "response",
+        match request {
+            Some(r) => serde_json::json!({
+                "method": r.method,
+                "path": r.path,
+                "status": status,
+                "bytes": body.len(),
+                "raw": raw,
+                "ms": r.received.elapsed().as_millis() as u64,
+            }),
+            None => serde_json::json!({ "status": status, "bytes": body.len() }),
+        },
+    );
+}
+
+/// Send a plain-text error, the shape every refusal in the router takes.
+pub fn respond_error(stream: &mut TcpStream, request: Option<&Request>, status: u16, msg: &str) {
+    respond(
+        stream,
+        request,
+        status,
+        "text/plain; charset=utf-8",
+        format!("{status} {}: {msg}\n", reason(status)).as_bytes(),
+    );
+}
+
+/// An open `text/event-stream`, held for as long as the client keeps reading.
+pub struct EventStream<'a> {
+    sink: Sink<'a>,
+}
+
+/// Where an event stream's bytes go: straight to the socket, or through one
+/// gzip stream that lives as long as the connection.
+///
+/// One stream rather than an encoded body per event, because the deflate
+/// window is what pays: the second row of a session carries the same keys as
+/// the first, and every event after the first is mostly keys and ids the
+/// window has already seen. Each event ends in a sync flush, so the browser
+/// decodes it the moment it lands rather than when the next one pushes it out.
+enum Sink<'a> {
+    Plain(&'a mut TcpStream),
+    Gzip(flate2::write::GzEncoder<&'a mut TcpStream>),
+}
+
+impl Sink<'_> {
+    /// Write `bytes` as one event and push it to the client.
+    fn event(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Sink::Plain(stream) => {
+                stream.write_all(bytes)?;
+                stream.flush()
+            }
+            // `flush` on the encoder is a sync flush followed by the socket's:
+            // the deflate block is closed on a byte boundary, so everything
+            // written so far is decodable on its own.
+            Sink::Gzip(gz) => {
+                gz.write_all(bytes)?;
+                gz.flush()
+            }
+        }
+    }
+}
+
+impl<'a> EventStream<'a> {
+    /// Send the SSE preamble, or fail if the client has already gone.
+    ///
+    /// Gzip when the request offered it. Not brotli: a stream has to be
+    /// flushed per event, and gzip's sync flush is the one every browser has
+    /// decoded incrementally for as long as `EventSource` has existed.
+    pub fn open(stream: &'a mut TcpStream, request: &Request) -> std::io::Result<EventStream<'a>> {
+        let gzip = request.accepts_gzip();
+        let mut head = String::from(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/event-stream; charset=utf-8\r\n\
+             Cache-Control: no-store\r\n\
+             Connection: close\r\n\
+             Vary: Accept-Encoding\r\n",
+        );
+        if gzip {
+            head.push_str("Content-Encoding: gzip\r\n");
+        }
+        common_headers(&mut head);
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes())?;
+        stream.flush()?;
+        let sink = match gzip {
+            true => Sink::Gzip(flate2::write::GzEncoder::new(
+                stream,
+                flate2::Compression::default(),
+            )),
+            false => Sink::Plain(stream),
+        };
+        Ok(EventStream { sink })
+    }
+
+    /// Send one named event carrying `data`.
+    ///
+    /// An error here means the client is gone — a phone that locked, a tab that
+    /// closed — which is the ordinary way one of these ends rather than a
+    /// fault, so the caller's job on `Err` is to return, not to report.
+    pub fn send(&mut self, event: &str, data: &str) -> std::io::Result<()> {
+        let mut frame = format!("event: {event}\n");
+        // Every line of the payload needs its own `data:` prefix or the stream
+        // desynchronises. JSON from `to_string` holds no newlines today, which
+        // is exactly the kind of thing that stops being true quietly.
+        for line in data.split('\n') {
+            frame.push_str("data: ");
+            frame.push_str(line);
+            frame.push('\n');
+        }
+        frame.push('\n');
+        // Both halves logged: a client that went away mid-stream is the
+        // failure this stream exists to survive, and the send that failed is
+        // the only record of when it happened.
+        let sent = self.sink.event(frame.as_bytes());
+        cctop_core::elog::event(
+            "sse",
+            "send",
+            serde_json::json!({ "event": event, "bytes": frame.len(), "ok": sent.is_ok() }),
+        );
+        sent
+    }
+
+    /// Send a `ping` event: a few bytes that say the stream is still alive.
+    ///
+    /// Three readers want it. A proxy or a phone radio that drops an idle
+    /// connection needs traffic to count the stream as alive; a browser that
+    /// has gone away only surfaces as a write error once something is written
+    /// at it; and the page needs to tell a quiet stream from a dead one. That
+    /// last is why this is an event and not the comment it used to be: a
+    /// comment never reaches `EventSource`, so a stream stalled behind a tunnel
+    /// or a half-open connection looked, from the page, exactly like a table
+    /// with nothing new in it — and its prompts stayed up long after they were
+    /// answered. The data is not read; it is there because an event with an
+    /// empty data buffer is never dispatched.
+    pub fn ping(&mut self) -> std::io::Result<()> {
+        self.sink.event(b"event: ping\ndata: 1\n\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decoding_handles_escapes_and_plus() {
+        assert_eq!(percent_decode("/a%2Fb"), "/a/b");
+        assert_eq!(percent_decode("hello+world"), "hello world");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn a_truncated_escape_stays_literal() {
+        // The trailing `%2` cannot be an escape, and turning it into one would
+        // silently change the path being asked for.
+        assert_eq!(percent_decode("/x%2"), "/x%2");
+    }
+
+    #[test]
+    fn every_status_the_router_sends_has_a_reason() {
+        for status in [200, 400, 403, 404, 405, 409, 411, 413, 431, 503] {
+            assert_ne!(reason(status), "Error", "status {status} has no reason");
+        }
+    }
+
+    #[test]
+    fn the_policy_forbids_loading_anything_off_the_network() {
+        let mut headers = String::new();
+        common_headers(&mut headers);
+        assert!(headers.contains("default-src 'none'"));
+        assert!(headers.contains("frame-ancestors 'none'"));
+        assert!(headers.contains("nosniff"));
+        // The two exceptions are the installable-page furniture, both pinned
+        // to this origin: the favicon is an image and the manifest answers to
+        // no other directive.
+        assert!(headers.contains("img-src 'self'"));
+        assert!(headers.contains("manifest-src 'self'"));
+    }
+
+    /// The access cookie is one `name=value` among several — the lookup must
+    /// take the one asked for and nothing that merely shares a prefix.
+    #[test]
+    fn a_cookie_is_read_by_name() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        use std::io::Write;
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\n\
+                  Cookie: cctop_access_9999=other; cctop_access_7777=abc; theme=dark\r\n\
+                  \r\n",
+            )
+            .unwrap();
+        let req = Request::parse(&server).unwrap();
+        assert_eq!(req.cookie("cctop_access_7777"), Some("abc"));
+        assert_eq!(req.cookie("cctop_access_9999"), Some("other"));
+        assert_eq!(req.cookie("cctop_access"), None);
+        assert_eq!(req.cookie("theme"), Some("dark"));
+        assert_eq!(req.cookie("absent"), None);
+    }
+
+    /// Prometheus sends `Authorization: Bearer <token>`; the scheme is
+    /// case-insensitive by RFC 9110, and any other scheme is not a token.
+    #[test]
+    fn gzip_is_sent_only_to_a_client_that_offers_it() {
+        let parse = |header: &str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            use std::io::Write;
+            client
+                .write_all(format!("GET / HTTP/1.1\r\n{header}\r\n\r\n").as_bytes())
+                .unwrap();
+            Request::parse(&server).unwrap().accepts_gzip()
+        };
+        assert!(parse("Accept-Encoding: gzip, deflate, br"));
+        assert!(parse("accept-encoding: br;q=1.0, GZIP;q=0.5"));
+        assert!(!parse("Accept-Encoding: gzip;q=0, br"));
+        assert!(!parse("Accept-Encoding: br"));
+        assert!(!parse("X-Other: 1"));
+    }
+
+    #[test]
+    fn a_bearer_token_is_read_from_the_authorization_header() {
+        let parse = |header: &str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            use std::io::Write;
+            client
+                .write_all(format!("GET /metrics HTTP/1.1\r\n{header}\r\n\r\n").as_bytes())
+                .unwrap();
+            Request::parse(&server).unwrap().bearer().to_string()
+        };
+        assert_eq!(parse("Authorization: Bearer abc123"), "abc123");
+        assert_eq!(parse("authorization: bearer  abc123 "), "abc123");
+        assert_eq!(parse("Authorization: Basic YWJjOmRlZg=="), "");
+        assert_eq!(parse("X-Other: 1"), "");
+    }
+
+    /// A polled answer that has not changed goes back as a `304` with no
+    /// body; one that has changed, in full with its new tag.
+    #[test]
+    fn an_unchanged_poll_is_answered_304() {
+        let ask = |if_none_match: &str, body: &[u8]| -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            let extra = match if_none_match {
+                "" => String::new(),
+                tag => format!("If-None-Match: {tag}\r\n"),
+            };
+            client
+                .write_all(format!("GET /api/tabs HTTP/1.1\r\n{extra}\r\n").as_bytes())
+                .unwrap();
+            let request = Request::parse(&server).unwrap();
+            respond_revalidated(&mut server, &request, "application/json", body);
+            drop(server);
+            let mut raw = String::new();
+            client.read_to_string(&mut raw).unwrap();
+            raw
+        };
+        let first = ask("", br#"{"tabs":[]}"#);
+        assert!(first.starts_with("HTTP/1.1 200 "), "{first}");
+        assert!(
+            first.contains("Cache-Control: private, no-cache\r\n"),
+            "{first}"
+        );
+        let tag = first
+            .lines()
+            .find_map(|l| l.strip_prefix("ETag: "))
+            .expect("an ETag")
+            .to_string();
+        let again = ask(&tag, br#"{"tabs":[]}"#);
+        assert!(again.starts_with("HTTP/1.1 304 "), "{again}");
+        assert!(again.ends_with("\r\n\r\n"), "a 304 has no body: {again}");
+        // Weak and strong spellings of one tag are the same tag.
+        let strong = tag.trim_start_matches("W/");
+        assert!(ask(strong, br#"{"tabs":[]}"#).starts_with("HTTP/1.1 304 "));
+        let moved = ask(&tag, br#"{"tabs":[{"name":"x"}]}"#);
+        assert!(moved.starts_with("HTTP/1.1 200 "), "{moved}");
+        assert!(moved.ends_with(r#"{"tabs":[{"name":"x"}]}"#), "{moved}");
+    }
+
+    #[test]
+    fn brotli_is_preferred_and_a_zero_quality_is_a_refusal() {
+        let parse = |header: &str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            client
+                .write_all(format!("GET / HTTP/1.1\r\n{header}\r\n\r\n").as_bytes())
+                .unwrap();
+            Request::parse(&server).unwrap().encoding()
+        };
+        assert_eq!(
+            parse("Accept-Encoding: gzip, deflate, br, zstd"),
+            Some(Encoding::Br)
+        );
+        assert_eq!(parse("Accept-Encoding: gzip, br;q=0"), Some(Encoding::Gzip));
+        assert_eq!(parse("Accept-Encoding: gzip;q=0.0, br;q=0.000"), None);
+        assert_eq!(parse("Accept-Encoding: identity"), None);
+    }
+}

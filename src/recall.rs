@@ -10,8 +10,8 @@
 //! So this returns passages rather than sessions, and finds them in two steps.
 //!
 //! **Which sessions.** Both of the tiers search already has: the literal scan
-//! ([`crate::session::search`]), which finds a name or an error string however
-//! far apart its words are, and the topical index ([`crate::embed`]), which
+//! ([`cctop_core::session::search`]), which finds a name or an error string however
+//! far apart its words are, and the topical index ([`cctop_core::embed`]), which
 //! finds the conversation that was *about* the question when none of its words
 //! were used. Either is enough to make a session a candidate.
 //!
@@ -28,13 +28,13 @@
 //! the literal half alone, and says so.
 //!
 //! ponytail: passages come from the harnesses whose transcripts are files the
-//! topical index can read (see [`crate::embed::index::chunks_of`]). A session
+//! topical index can read (see [`cctop_core::embed::index::chunks_of`]). A session
 //! that only the literal scan can read — one kept in a database — still turns
 //! up, but as its one matching line rather than a passage.
 
-use crate::embed::index::chunks_of;
-use crate::session::Session;
-use crate::session::search::{Query, Target};
+use cctop_core::embed::index::chunks_of;
+use cctop_core::session::Session;
+use cctop_core::session::search::{Query, Target};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -115,7 +115,7 @@ struct Scored {
 /// decide the cache layout" scores chunks on `decide`, `cache` and `layout`
 /// rather than on `how` and `the`.
 fn words_of(query: &str) -> Vec<String> {
-    crate::embed::topic_of(query)
+    cctop_core::embed::topic_of(query)
         .split_whitespace()
         .map(str::to_lowercase)
         .filter(|w| w.chars().count() >= 2)
@@ -200,15 +200,18 @@ fn ranks(scored: &[Scored], score: impl Fn(&Scored) -> Option<f32>) -> HashMap<u
 /// Loading is best effort for the same reason as the dashboard's: recall must
 /// keep answering with words alone on a machine that never fetched the model,
 /// or whose cached copy is damaged.
-fn topical(targets: &[Target]) -> Option<(crate::embed::Model, crate::embed::index::Index)> {
-    if !crate::embed::fetch::present() {
+fn topical(
+    targets: &[Target],
+) -> Option<(cctop_core::embed::Model, cctop_core::embed::index::Index)> {
+    if !cctop_core::embed::fetch::present() {
         return None;
     }
-    let model = crate::embed::Model::load(&crate::embed::fetch::model_dir()).ok()?;
+    let model = cctop_core::embed::Model::load(&cctop_core::embed::fetch::model_dir()).ok()?;
     let mut index =
-        crate::embed::index::Index::load(&crate::config::EMBEDDING_INDEX_FILE).unwrap_or_default();
+        cctop_core::embed::index::Index::load(&cctop_core::config::EMBEDDING_INDEX_FILE)
+            .unwrap_or_default();
     if index.refresh(&model, targets) > 0 {
-        let _ = index.save(&crate::config::EMBEDDING_INDEX_FILE);
+        let _ = index.save(&cctop_core::config::EMBEDDING_INDEX_FILE);
     }
     Some((model, index))
 }
@@ -234,14 +237,14 @@ pub fn recall(sessions: &[Session], query: &str, limit: usize, exclude: Option<&
             .par_iter()
             .enumerate()
             .filter_map(|(i, t)| {
-                crate::session::search::find_query(t, &parsed).map(|h| (i, h.snippet))
+                cctop_core::session::search::find_query(t, &parsed).map(|h| (i, h.snippet))
             })
             .collect()
     };
     let topics = topical(&targets);
     let query_vec = topics
         .as_ref()
-        .map(|(model, _)| model.embed(&crate::embed::topic_of(query)));
+        .map(|(model, _)| model.embed(&cctop_core::embed::topic_of(query)));
     let mut candidates: Vec<usize> = literal.iter().map(|(i, _)| *i).collect();
     if let (Some((_, index)), Some(qv)) = (&topics, &query_vec) {
         for (key, _, _) in index.search(qv, TOPICAL_FLOOR, TOPICAL_SESSIONS) {
@@ -274,7 +277,7 @@ pub fn recall(sessions: &[Session], query: &str, limit: usize, exclude: Option<&
                 chunk: n,
                 words: word_hits(&text, words),
                 topic: match (model, qv) {
-                    (Some(m), Some(qv)) => Some(crate::embed::cosine(qv, &m.embed(&text))),
+                    (Some(m), Some(qv)) => Some(cctop_core::embed::cosine(qv, &m.embed(&text))),
                     _ => None,
                 },
                 text,
@@ -540,8 +543,8 @@ pub fn run(argv: &[String]) -> i32 {
         }
     }
 
-    let mut loader = crate::loader::Loader::new();
-    let sessions = loader.load(crate::pricing::Plan::Retail);
+    let mut loader = cctop_core::loader::Loader::new();
+    let sessions = loader.load(cctop_core::pricing::Plan::Retail);
     loader.store().save();
 
     if let Some((session, n)) = read {
@@ -666,7 +669,7 @@ mod tests {
             })
             .collect();
         std::fs::write(&path, body).unwrap();
-        let mut s = Session::new(crate::pricing::Provider::Claude, id.into());
+        let mut s = Session::new(cctop_core::pricing::Provider::Claude, id.into());
         s.data_file = Some(path);
         s.last_active = "2026-10-01T10:00:00Z".into();
         s

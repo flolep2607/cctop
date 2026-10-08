@@ -1,6 +1,6 @@
 # Devin
 
-[← all harnesses](README.md) · parser: [`src/session/devin.rs`](../../src/session/devin.rs)
+[← all harnesses](README.md) · parser: [`crates/core/src/session/devin.rs`](../../crates/core/src/session/devin.rs)
 
 The only harness here that keeps its conversation in **two** places: a SQLite
 database the CLI is working from, and a transcript it writes beside it for

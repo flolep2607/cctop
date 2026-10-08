@@ -1,0 +1,44 @@
+[package]
+name = "cctop-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Internal to cctop: the terminal dashboard. No stable API; use the cctop binary."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+# No doc comment in cctop is an example meant to run, and without this every
+# `cargo test` hands each crate to rustdoc again to find that out.
+doctest = false
+
+[dependencies]
+cctop-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+dirs.workspace = true
+image.workspace = true
+libc.workspace = true
+pulldown-cmark.workspace = true
+qrcode.workspace = true
+ratatui.workspace = true
+ratatui-image.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+symphonia.workspace = true
+tachyonfx.workspace = true
+tempfile.workspace = true
+termprofile.workspace = true
+toml_edit.workspace = true
+tui-qrcode.workspace = true
+tui-term.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+ureq.workspace = true
+vt100.workspace = true
+
+[dev-dependencies]
+cctop-core = { workspace = true, features = ["test-support"] }
+insta.workspace = true

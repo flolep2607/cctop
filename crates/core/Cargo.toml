@@ -1,0 +1,60 @@
+[package]
+name = "cctop-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Internal to cctop: sessions and their parsers, the cache, pricing, config, hooks, the shim, and the conversation model both faces share. No stable API; use the cctop binary."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+# Derives the session cache's version from the parser sources; see build.rs.
+build = "build.rs"
+
+[lib]
+# No doc comment in cctop is an example meant to run, and without this every
+# `cargo test` hands each crate to rustdoc again to find that out.
+doctest = false
+
+[features]
+# The server's debug routes (see cctop-serve's `debug`) set the event log's
+# level on a running process, which only those routes may do.
+debug = []
+# What core does differently under `cargo test`, for the tests of the crates
+# above it too: no bell on stdout, no copy to the developer's clipboard, no
+# write over their saved preferences, and the fixtures those tests build rows
+# with. `cfg(test)` is only true for this crate's own tests, so the crates
+# above turn this on from their dev-dependencies — which a release build never
+# reads. See `under_test` in src/lib.rs for the binary a `cargo test` builds.
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+cloudflare-quick-tunnel.workspace = true
+crossterm.workspace = true
+dirs.workspace = true
+flate2.workspace = true
+libc.workspace = true
+notify.workspace = true
+ratatui.workspace = true
+rayon.workspace = true
+regex.workspace = true
+rmux-sdk.workspace = true
+rusqlite.workspace = true
+safetensors.workspace = true
+self-replace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sysinfo.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+tokenizers.workspace = true
+tokio.workspace = true
+toml_edit.workspace = true
+ureq.workspace = true
+vt100.workspace = true
+
+[dev-dependencies]
+# The export tests read the markdown back as markdown.
+pulldown-cmark.workspace = true

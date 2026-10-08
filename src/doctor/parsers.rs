@@ -23,9 +23,9 @@
 //! installation sound".
 
 use super::{Check, Level, Section, ok, warn};
-use crate::pricing::{Listing, Provider};
-use crate::session::{ModelBreakdown, Session};
-use crate::util::{compact_tokens, with_commas};
+use cctop_core::pricing::{Listing, Provider};
+use cctop_core::session::{ModelBreakdown, Session};
+use cctop_core::util::{compact_tokens, with_commas};
 use std::collections::HashMap;
 
 /// Calls a provider must have recorded before zero failures among them is
@@ -268,7 +268,7 @@ pub(super) fn zero_cost_models<'a>(
 
 /// Say what each zero is: free, unpriced, or priced and not applied.
 ///
-/// `listing` is [`crate::pricing::listing`] in use and a fixed answer under
+/// `listing` is [`cctop_core::pricing::listing`] in use and a fixed answer under
 /// test. `table_age` says how old the LiteLLM table is, `None` when there is
 /// none loaded — in which case "unlisted" means only "not built in", and the
 /// pricing section above has already failed for the real reason.
@@ -363,7 +363,7 @@ fn display_model(model: &str) -> &str {
 /// The Parsers section: every provider's totals judged, then every zero price.
 pub(super) fn section(
     sessions: &[Session],
-    data: &[std::sync::Arc<crate::session::SessionData>],
+    data: &[std::sync::Arc<cctop_core::session::SessionData>],
 ) -> Section {
     let tallies = tally(sessions);
     let mut checks = Vec::new();
@@ -395,12 +395,17 @@ pub(super) fn section(
             .zip(data)
             .map(|(s, d)| (s, d.model_breakdown.as_slice())),
     );
-    let table_age = (crate::pricing::pricing_epoch() != 0).then(|| {
-        super::cache_age_secs(&crate::config::PRICING_CACHE_FILE)
-            .map(|secs| format!("{} old", crate::util::long_duration((secs * 1000) as i64)))
+    let table_age = (cctop_core::pricing::pricing_epoch() != 0).then(|| {
+        super::cache_age_secs(&cctop_core::config::PRICING_CACHE_FILE)
+            .map(|secs| {
+                format!(
+                    "{} old",
+                    cctop_core::util::long_duration((secs * 1000) as i64)
+                )
+            })
             .unwrap_or_else(|| "of unknown age".into())
     });
-    let priced = zero_checks(&zeros, crate::pricing::listing, table_age);
+    let priced = zero_checks(&zeros, cctop_core::pricing::listing, table_age);
     // Only where something records dollars: a machine with nothing but Cursor
     // has no prices to vouch for, and saying they are fine would be a guess.
     if !priced.iter().any(|c| c.level != Level::Ok) && sessions.iter().any(|s| s.cost_available) {
@@ -423,7 +428,7 @@ pub(super) fn section(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Costs, Tokens};
+    use cctop_core::session::{Costs, Tokens};
 
     /// `n` sessions of `provider`, each carrying the given share of the
     /// totals — what a walk hands the section, minus everything it ignores.
