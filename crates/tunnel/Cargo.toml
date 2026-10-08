@@ -1,0 +1,62 @@
+[package]
+name = "cctop-tunnel"
+# Its own version, not the release's: bumped only in a release that changes
+# this crate. The rules are in tools/release-plan.sh, which CI enforces.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Internal to cctop: puts local ports on public URLs, through a Cloudflare quick tunnel or a named tunnel on your own account, speaking the edge's protocol natively. No stable API; use the cctop binary."
+# Not the workspace's MIT alone: this began as cloudflare-quick-tunnel 0.3.1,
+# which is MIT OR Apache-2.0, and carries Apache-2.0 material from cloudflared
+# (THIRD_PARTY_NOTICES.md). Both licence texts ship with it.
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["cloudflare", "tunnel", "quic", "argotunnel"]
+categories = ["network-programming"]
+include = [
+    "src/**/*",
+    "schemas/**/*",
+    "cf-edge-roots.pem",
+    "README.md",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+[lib]
+# No doc comment in cctop is an example meant to run, and without this every
+# `cargo test` hands each crate to rustdoc again to find that out.
+doctest = false
+
+# The tunnel's own dependencies, listed here rather than under the workspace's:
+# nothing else in cctop uses them, and they are what the crate was published
+# with upstream. Already in the lock under the `[patch]` this crate replaces, so
+# moving it here added nothing to the tree.
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync"] }
+base64 = "0.22"
+bytes = "1"
+capnp = "0.20"
+capnp-futures = "0.20"
+capnp-rpc = "0.20"
+futures = "0.3"
+hickory-resolver = { version = "0.24", default-features = false, features = ["dns-over-rustls", "tokio-runtime"] }
+httparse = "1"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+rustls-native-certs = "0.7"
+rustls-pemfile = "2"
+thiserror = "1"
+tokio-util = { version = "0.7", features = ["compat"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

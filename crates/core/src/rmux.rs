@@ -411,7 +411,11 @@ fn public_origin() -> Result<String, String> {
     }
     // The first line only: the rest is advice about `--tunnel`, a flag this
     // caller never had.
-    let tunnel = crate::tunnel::start(port).map_err(|e| {
+    // A quick tunnel even when an account is connected: the account's
+    // hostname is the page's, and this listener is not the page.
+    // ponytail: shares on the account tunnel's second hostname (#180) are not
+    // done here; setup already makes that hostname's DNS record.
+    let tunnel = crate::tunnel::start(port, crate::tunnel::Want::Quick).map_err(|e| {
         format!("{e}")
             .lines()
             .next()
@@ -495,8 +499,8 @@ pub fn share_link_with(
     //
     // It used to be localhost.run, raised by rmux per share, because a
     // WebSocket through cctop's quick tunnel came back 404. That was the
-    // tunnel client dropping the upgrade (see `vendor/cloudflare-quick-tunnel`
-    // and the `[patch]` in Cargo.toml), not Cloudflare, and with it fixed the
+    // tunnel client dropping the upgrade (see `build_request_head` in
+    // `cctop-tunnel`'s proxy), not Cloudflare, and with it fixed the
     // second way out of the machine was only a second thing to drop: its ssh
     // sessions were behind most of the refused frames and slow enough to time
     // the mint out.

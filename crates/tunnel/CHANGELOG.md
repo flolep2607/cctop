@@ -4,6 +4,46 @@ All notable changes to this project will be documented here. The
 format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
+## cctop-tunnel [0.1.0]
+
+Moved into cctop's workspace as `cctop-tunnel`, from `cloudflare-quick-tunnel`
+0.3.1, which cctop had carried as a `[patch]`. The entries below this one are
+upstream's.
+
+### Added
+
+- **A provider-agnostic interface.** `Provider` opens a `Tunnel`; `Routes` map
+  public hostnames to local ports and can change while it runs. Cloudflare's
+  quick tunnel (`cloudflare::Quick`) and named tunnel (`cloudflare::Named`) are
+  the first two providers.
+- **Named tunnels.** Credentials from a dashboard tunnel token
+  (`Credentials::from_token`), with errors that never repeat the token.
+- **The configuration push.** `updateConfiguration` from the edge — on an RPC
+  stream or the control stream's bootstrap — is answered with the version
+  applied, and its ingress hostnames name a tunnel that was given none.
+- **Routing by hostname.** One tunnel carries several services; an unknown
+  hostname gets a 404.
+- `Error::Refused` for a registration the edge says not to retry: a deleted
+  tunnel or a revoked secret.
+
+### Changed
+
+- WebSockets through the tunnel: the upgrade the edge strips is put back
+  before dialling the origin (was cctop's patch on 0.3.1).
+- Shutdown unregisters promptly: the RPC system is driven while the
+  `unregisterConnection` call waits, where it used to sit out the whole grace
+  period. A stop signalled between two awaits is no longer missed.
+- `Debug` of the tunnel auth, the quick-tunnel credentials and `Credentials`
+  prints no secret.
+- The trycloudflare client's tests run against a local HTTP stand-in, not
+  `wiremock`; the edge tests run against a fake QUIC edge.
+
+### Removed
+
+- `QuickTunnelManager`/`QuickTunnelHandle`, replaced by the providers above;
+  the edge cache (`EdgeRegistry`) and the IP version filter, which nothing used;
+  the live tests that dialled the real edge.
+
 ## [0.3.1] — 2026-05-14
 
 ### Changed

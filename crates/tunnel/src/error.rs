@@ -1,11 +1,13 @@
-//! Typed error model for the quick-tunnel client. Each variant
-//! corresponds to a distinct failure mode that callers can act on
-//! independently (API rejection vs DNS gap vs handshake refused vs
-//! permanent supervisor giveup).
+//! Why a tunnel did not come up, one variant per thing a caller would say
+//! differently.
+//!
+//! None of these carries a credential. A token or a tunnel secret never goes
+//! into an error string, because error strings are what reach a terminal, a
+//! status line and the event log.
 
-use thiserror::Error;
+use thiserror::Error as ThisError;
 
-/// Business-level error returned inside the API response body when
+/// Business-level error returned inside the trycloudflare API's body when
 /// `success = false`. Mirrors cloudflared's `QuickTunnelError`.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct QuickTunnelApiError {
@@ -13,8 +15,8 @@ pub struct QuickTunnelApiError {
     pub message: String,
 }
 
-#[derive(Error, Debug)]
-pub enum TunnelError {
+#[derive(ThisError, Debug)]
+pub enum Error {
     #[error("quick-tunnel API request failed: {0}")]
     Api(#[from] reqwest::Error),
 
@@ -32,6 +34,17 @@ pub enum TunnelError {
 
     #[error("capnp-RPC RegisterConnection failed: {0}")]
     Register(String),
+
+    /// The edge answered the registration and said no, for good: the tunnel
+    /// was deleted, or its secret no longer matches. Retrying cannot help,
+    /// which is what sets it apart from [`Error::Register`].
+    #[error("the edge refused this tunnel: {0}")]
+    Refused(String),
+
+    /// A named tunnel came up but nothing said which hostname it serves: none
+    /// was configured and the edge pushed no ingress rules in time.
+    #[error("the tunnel registered, but no hostname was configured for it")]
+    NoHostname,
 
     #[error("connection lost; supervisor giving up after {0} attempts")]
     PermanentFailure(u32),

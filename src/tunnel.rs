@@ -1,0 +1,336 @@
+//! `cctop tunnel setup | status | remove`: connecting a Cloudflare account so
+//! that `--tunnel` comes up on a hostname that stays the same.
+//!
+//! The work is `cctop_core::cloudflare`'s; this is the command line around
+//! it. On a terminal it walks through the steps with the token typed
+//! invisibly. Piped, it reads one token from stdin and takes the suggestions —
+//! the first domain, the suggested name — unless `--zone` and `--hostname`
+//! say otherwise, so it can be scripted the way `cctop --add-account` can.
+//!
+//! No token is ever printed, and none is taken as an argument, where `ps` and
+//! shell history would keep it.
+
+use std::io::{BufRead, IsTerminal, Write};
+
+use cctop_core::cloudflare::{self, Api, Pasted};
+use cctop_core::tunnel::{self, Account};
+
+pub const HELP: &str = "\
+cctop tunnel — your own Cloudflare tunnel, for a link that stays the same
+
+USAGE:
+  cctop tunnel setup [--zone <DOMAIN>] [--hostname <NAME>]
+  cctop tunnel status
+  cctop tunnel remove
+
+`cctop serve --tunnel` and the dashboard's tunnel use a trycloudflare quick
+tunnel: nothing to set up, but a new address every run, no Server-Sent Events
+(which the live table is), and at most 200 requests in flight. A tunnel on
+your own free Cloudflare account has none of those limits and keeps one
+hostname. It needs a domain whose DNS is on Cloudflare.
+
+setup    Paste an API token (cctop prints a link that makes one with the three
+         permissions it needs) and pick a domain: cctop creates the tunnel and
+         its DNS records. A tunnel token from the dashboard works too. Piped,
+         one token is read from stdin.
+status   What is connected.
+remove   Delete what setup created on Cloudflare — the DNS records and the
+         tunnel, by the ids it stored, nothing else — and forget it.
+
+CCTOP_TUNNEL_TOKEN (a tunnel token) and CCTOP_TUNNEL_HOSTNAME connect a tunnel
+without a config file, for a service; they win over what setup stored.
+";
+
+pub fn run(argv: &[String]) -> anyhow::Result<i32> {
+    match argv.first().map(String::as_str) {
+        Some("setup") => setup(&argv[1..]),
+        Some("status") => Ok(status()),
+        Some("remove") => Ok(remove()),
+        Some("-h" | "--help") | None => {
+            print!("{HELP}");
+            Ok(0)
+        }
+        Some(other) => {
+            eprintln!("cctop tunnel: unknown command '{other}'\n\n{HELP}");
+            Ok(2)
+        }
+    }
+}
+
+fn status() -> i32 {
+    let Some(account) = tunnel::account() else {
+        println!(
+            "No Cloudflare account connected: --tunnel uses a quick tunnel, at a new \
+             address each run.\n`cctop tunnel setup` connects one."
+        );
+        return 0;
+    };
+    let from = match account.from_env {
+        true => "CCTOP_TUNNEL_TOKEN",
+        false => "config.toml",
+    };
+    match &account.hostname {
+        Some(host) => println!("Connected: https://{host} (from {from})"),
+        None => println!(
+            "Connected (from {from}); the hostname comes from the tunnel's configuration \
+             when it connects"
+        ),
+    }
+    if let Some(share) = &account.share_hostname {
+        println!("Share hostname: https://{share}");
+    }
+    if let Some(id) = &account.tunnel_id {
+        println!("Tunnel: {id}");
+    }
+    if tunnel::in_use(&account) {
+        println!("A cctop on this machine is serving over it now.");
+    }
+    0
+}
+
+fn remove() -> i32 {
+    let Some(account) = tunnel::account() else {
+        println!("No Cloudflare account is connected; nothing to remove.");
+        return 0;
+    };
+    if account.from_env {
+        eprintln!(
+            "cctop: that tunnel comes from CCTOP_TUNNEL_TOKEN, not from setup: unset it \
+             to stop using it. Delete the tunnel itself in the Cloudflare dashboard."
+        );
+        return 1;
+    }
+    if tunnel::in_use(&account) {
+        eprintln!(
+            "cctop: a cctop on this machine is serving over this tunnel. Stop it first, \
+             then run this again."
+        );
+        return 1;
+    }
+    let left = cloudflare::remove(&account);
+    if let Err(e) = tunnel::clear_account() {
+        eprintln!("cctop: could not update config.toml: {e}");
+        return 1;
+    }
+    match (account.api_token.is_some(), left.0.is_empty()) {
+        (false, _) => println!(
+            "Forgotten. The tunnel was made in the Cloudflare dashboard, so it is still \
+             there; delete it there if you no longer want it."
+        ),
+        (true, true) => println!("Removed: the tunnel and its DNS records are gone."),
+        (true, false) => {
+            println!("Forgotten, but these are left on Cloudflare to delete by hand:");
+            for item in &left.0 {
+                println!("  - {item}");
+            }
+        }
+    }
+    0
+}
+
+fn setup(argv: &[String]) -> anyhow::Result<i32> {
+    let mut zone_given: Option<String> = None;
+    let mut hostname_given: Option<String> = None;
+    let mut it = argv.iter();
+    while let Some(flag) = it.next() {
+        let mut value = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))
+        };
+        match flag.as_str() {
+            "--zone" => zone_given = Some(value()?),
+            "--hostname" => hostname_given = Some(value()?),
+            "-h" | "--help" => {
+                print!("{HELP}");
+                return Ok(0);
+            }
+            other => anyhow::bail!("unknown option '{other}'\n\n{HELP}"),
+        }
+    }
+    if let Some(account) = tunnel::account()
+        && !account.from_env
+    {
+        let at = account
+            .hostname
+            .as_deref()
+            .unwrap_or("its configured hostname");
+        eprintln!(
+            "cctop: a tunnel is already connected ({at}). `cctop tunnel remove` first to \
+             connect another."
+        );
+        return Ok(1);
+    }
+
+    let interactive = std::io::stdin().is_terminal();
+    let pasted = match interactive {
+        true => {
+            eprintln!(
+                "A tunnel on your own Cloudflare account keeps one hostname, so a link or a \
+                 phone shortcut keeps working.\n\n\
+                 1. Make an API token (the link fills in the permissions and the name):\n\
+                 \x20  {}\n\
+                 \x20  It needs: {}.\n\
+                 2. Paste it below. A tunnel token from the dashboard works too.\n",
+                cloudflare::token_link(),
+                cloudflare::PERMISSIONS.join(", ")
+            );
+            eprint!("Token (not shown as you paste): ");
+            read_secret()?
+        }
+        false => read_line()?,
+    };
+    if pasted.is_empty() {
+        eprintln!("cctop: no token given; nothing written.");
+        return Ok(1);
+    }
+
+    let account = match cloudflare::classify(&pasted) {
+        Pasted::Tunnel(token) => {
+            if let Err(e) = cloudflare::check_tunnel_token(&token) {
+                eprintln!("cctop: {e}");
+                return Ok(1);
+            }
+            let hostname = match (hostname_given, interactive) {
+                (Some(h), _) => Some(h),
+                (None, true) => {
+                    eprint!(
+                        "Hostname the tunnel serves (Enter to take it from the tunnel's \
+                         configuration): "
+                    );
+                    Some(read_line()?).filter(|h| !h.is_empty())
+                }
+                (None, false) => None,
+            };
+            Account {
+                token,
+                hostname,
+                ..Account::default()
+            }
+        }
+        Pasted::Api(token) => match create(&token, zone_given, hostname_given, interactive)? {
+            Some(account) => account,
+            None => return Ok(1),
+        },
+    };
+    tunnel::save_account(&account)?;
+    match &account.hostname {
+        Some(host) => eprintln!("Connected: https://{host}"),
+        None => eprintln!("Connected; the hostname is learned when the tunnel first connects."),
+    }
+    eprintln!("`cctop serve --tunnel`, and t in the dashboard's serve panel, now use it.");
+    Ok(0)
+}
+
+/// The API-token path: verify, pick a domain and a name, create. `None` after
+/// saying why on stderr.
+fn create(
+    token: &str,
+    zone_given: Option<String>,
+    hostname_given: Option<String>,
+    interactive: bool,
+) -> anyhow::Result<Option<Account>> {
+    let api = Api::new(token);
+    eprintln!("Checking the token with Cloudflare…");
+    let zones = match api
+        .verify()
+        .and_then(|()| api.zones())
+        .and_then(cloudflare::usable)
+    {
+        Ok(zones) => zones,
+        Err(e) => return Ok(refuse(&e)),
+    };
+    let zone = match zone_given {
+        Some(name) => match zones.iter().find(|z| z.name.eq_ignore_ascii_case(&name)) {
+            Some(zone) => zone.clone(),
+            None => {
+                let names: Vec<&str> = zones.iter().map(|z| z.name.as_str()).collect();
+                eprintln!(
+                    "cctop: {name} is not an active domain on this account; it has {}",
+                    names.join(", ")
+                );
+                return Ok(None);
+            }
+        },
+        None if zones.len() == 1 || !interactive => zones[0].clone(),
+        None => {
+            eprintln!("Which domain?");
+            for (i, zone) in zones.iter().enumerate() {
+                eprintln!("  {}. {}", i + 1, zone.name);
+            }
+            eprint!("Number [1]: ");
+            let answer = read_line()?;
+            let pick = match answer.is_empty() {
+                true => 0,
+                false => answer.parse::<usize>().unwrap_or(0).saturating_sub(1),
+            };
+            zones.get(pick).unwrap_or(&zones[0]).clone()
+        }
+    };
+    let machine = cloudflare::machine_label();
+    let hostname = match hostname_given {
+        Some(h) => h,
+        None => {
+            let suggested = match cloudflare::suggest_hostname(&api, &zone, &machine) {
+                Ok(name) => name,
+                Err(e) => return Ok(refuse(&e)),
+            };
+            match interactive {
+                true => {
+                    eprint!("Hostname [{suggested}]: ");
+                    Some(read_line()?)
+                        .filter(|h| !h.is_empty())
+                        .unwrap_or(suggested)
+                }
+                false => suggested,
+            }
+        }
+    };
+    eprintln!("Creating the tunnel and its DNS records…");
+    match cloudflare::create(&api, &zone, &hostname, &machine) {
+        Ok(account) => Ok(Some(account)),
+        Err(e) => Ok(refuse(&e)),
+    }
+}
+
+fn refuse(error: &cloudflare::Error) -> Option<Account> {
+    eprintln!("cctop: {error}");
+    eprintln!("Nothing was written, and --tunnel still uses a quick tunnel.");
+    None
+}
+
+fn read_line() -> anyhow::Result<String> {
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// A line from the terminal with echo off, so a pasted token is not left on
+/// screen or in a terminal's scrollback. Echo comes back however this ends.
+fn read_secret() -> anyhow::Result<String> {
+    struct Restore(libc::termios);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: tcsetattr on stdin with a termios read from it.
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+        }
+    }
+    // SAFETY: a zeroed termios is a valid out-parameter for tcgetattr.
+    let mut original: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: tcgetattr on stdin, which is a terminal (the caller checked).
+    let restore = match unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut original) } {
+        0 => {
+            let mut quiet = original;
+            quiet.c_lflag &= !libc::ECHO;
+            // SAFETY: as above, with a termios derived from the one read.
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &quiet) };
+            Some(Restore(original))
+        }
+        _ => None,
+    };
+    let line = read_line();
+    drop(restore);
+    eprintln!();
+    let _ = std::io::stderr().flush();
+    line
+}

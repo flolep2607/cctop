@@ -32,7 +32,7 @@ base=$(v cctop)
 git tag "v$base"
 next=$(awk -F. '{print $1 "." $2 "." $3 + 1}' <<<"$base")
 
-# Moves an internal crate (core, serve, ui) to $next, with its `=` pin.
+# Moves an internal crate (tunnel, core, serve, ui) to $next, with its `=` pin.
 bump() {
     sed -i "0,/^version = \".*\"/s//version = \"$next\"/" "crates/$1/Cargo.toml"
     sed -i "s/^\(cctop-$1 = .*version = \"=\)[^\"]*\"/\1$next\"/" Cargo.toml
@@ -81,6 +81,9 @@ case_ "(b) ui changed, only root bumped" 1 "::error::cctop-ui changed .*crates/u
     touch_crate ui ';' bump_root
 case_ "(c) core changed, all four bumped" 0 "publishes: cctop-core cctop-serve cctop-ui cctop$" -- \
     touch_crate core ';' bump core ';' bump serve ';' bump ui ';' bump_root
+case_ "(c2) tunnel changed, all five bumped, tunnel published first" 0 \
+    "publishes: cctop-tunnel cctop-core cctop-serve cctop-ui cctop$" -- \
+    touch_crate tunnel ';' bump tunnel ';' bump core ';' bump serve ';' bump ui ';' bump_root
 case_ "(d) core changed, only core and root bumped" 1 \
     "::error::cctop-serve changed .*depends on cctop-core" "::error::cctop-ui changed .*depends on cctop-core" -- \
     touch_crate core ';' bump core ';' bump_root

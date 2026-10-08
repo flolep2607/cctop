@@ -25,7 +25,7 @@ license = "MIT"
 repository = "https://github.com/flolep2607/cctop"
 homepage = "https://github.com/flolep2607/cctop"
 
-# cctop is one binary built from four crates, cut where the dependencies
+# cctop is one binary built from five crates, cut where the dependencies
 # already ran one way, so that an edit recompiles only what sits above it:
 #
 #                 cctop   main, the command line, and the commands nothing
@@ -37,6 +37,10 @@ homepage = "https://github.com/flolep2607/cctop"
 #               cctop-core   sessions and their parsers, the cache, pricing,
 #                            config, processes, hooks, rmux, the shim, and
 #                            what both faces read and do to a session
+#                   |
+#               cctop-tunnel   local ports on public URLs: Cloudflare's quick
+#                              and named tunnels, behind a trait any provider
+#                              can implement
 #
 # - **core / everything else.** Sessions, the parsers and the cache are what
 #   every surface reads, and they reach each other in every direction (the
@@ -50,6 +54,11 @@ homepage = "https://github.com/flolep2607/cctop"
 #   table: the binary, which has both, hands it the function that does.
 # - **the binary on top**, holding the command line and the commands nothing
 #   else calls, so that changing a flag rebuilds only the binary.
+# - **the tunnel below core**, because it knows nothing of sessions: it puts a
+#   port on a URL. Its own crate since it stopped being a `[patch]` on the
+#   published `cloudflare-quick-tunnel` — a patch never reaches `cargo install
+#   cctop`, which resolved the unpatched client and handed out share links
+#   whose WebSocket was refused. Published like the rest, so it does.
 # - **nothing in core reaches up.** What core once borrowed from the faces
 #   above it — the git branch of a row, the screen-footer table, the clipboard,
 #   the tunnel, the webhook POST — moved down, because each had a user below.
@@ -69,20 +78,22 @@ homepage = "https://github.com/flolep2607/cctop"
 #   3. an internal crate it depends on was bumped. This follows from the `=`
 #      pins: a published cctop-ui@0.28.3 requires cctop-core =0.28.3, so a
 #      cctop wanting core 0.28.4 beside it would resolve two cores and fail to
-#      build. A core change therefore bumps all four.
+#      build. A core change therefore bumps all but the tunnel,
+#      and a tunnel change bumps all five.
 #
 # `verify` enforces this on a release commit (tools/release-plan.sh check), and
 # `publish-crate` skips whatever crates.io already has.
 [workspace]
-members = ["crates/core", "crates/serve", "crates/ui"]
+members = ["crates/core", "crates/serve", "crates/tunnel", "crates/ui"]
 # Everything, so that a bare `cargo test` or `cargo clippy` at the root checks
 # what CI checks rather than only the binary.
-default-members = [".", "crates/core", "crates/serve", "crates/ui"]
+default-members = [".", "crates/core", "crates/serve", "crates/tunnel", "crates/ui"]
 resolver = "3"
 
 [workspace.dependencies]
 cctop-core = { path = "crates/core", version = "=0.28.6" }
 cctop-serve = { path = "crates/serve", version = "=0.28.6" }
+cctop-tunnel = { path = "crates/tunnel", version = "=0.1.0" }
 cctop-ui = { path = "crates/ui", version = "=0.28.6" }
 
 anyhow = "1.0.104"
@@ -92,12 +103,6 @@ libc = "0.2.189"
 mimalloc = "0.1"
 chrono = "0.4.45"
 clap = { version = "4.6.5", features = ["derive"] }
-# `cctop serve --tunnel` speaks the trycloudflare protocol itself — QUIC to the
-# edge — rather than shelling out to `cloudflared` and reading a URL off its
-# stderr, so a tunnel needs nothing installed and cctop stays one binary. tokio
-# comes with it: the tunnel's data path runs on a two-worker runtime inside this
-# process, and nothing else here is async.
-cloudflare-quick-tunnel = "0.3.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
@@ -317,20 +322,3 @@ opt-level = 3
 
 [profile.release.package.brotli]
 opt-level = 3
-
-# The quick-tunnel client, patched to carry WebSockets. Cloudflare's edge
-# strips `Upgrade`/`Connection` and marks the stream a WebSocket instead;
-# 0.3.1 never reads that mark, so it dialled the origin with a plain GET and an
-# rmux share through the tunnel came back 404. vendor/cloudflare-quick-tunnel
-# is 0.3.1 with the headers put back (search it for "cctop patch"), to drop
-# once upstream carries the same fix.
-#
-# A [patch] applies to builds of this repository — CI, the release binaries —
-# and not to `cargo install cctop` from crates.io, which resolves the published
-# 0.3.1. That matters: every terminal share leaves the machine through this
-# client now (`rmux::share_link_with`), so a crates.io build hands out share
-# links whose socket is refused at the tunnel — the page loads, the terminal
-# never connects. Loopback shares and the release binaries are unaffected.
-# Drop the patch, and that caveat, once upstream publishes the fix.
-[patch.crates-io]
-cloudflare-quick-tunnel = { path = "vendor/cloudflare-quick-tunnel" }

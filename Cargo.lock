@@ -449,8 +449,8 @@ name = "cctop-core"
 version = "0.28.6"
 dependencies = [
  "anyhow",
+ "cctop-tunnel",
  "chrono",
- "cloudflare-quick-tunnel",
  "crossterm",
  "dirs",
  "flate2",
@@ -493,6 +493,33 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "cctop-tunnel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "capnp",
+ "capnp-futures",
+ "capnp-rpc",
+ "futures",
+ "hickory-resolver",
+ "httparse",
+ "quinn",
+ "reqwest",
+ "rustls 0.23.43",
+ "rustls-native-certs",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -601,33 +628,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "cloudflare-quick-tunnel"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bytes",
- "capnp",
- "capnp-futures",
- "capnp-rpc",
- "futures",
- "hickory-resolver",
- "httparse",
- "quinn",
- "reqwest",
- "rustls 0.23.43",
- "rustls-native-certs",
- "rustls-pemfile 2.2.0",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
 
 [[package]]
 name = "color-eyre"
@@ -4072,6 +4072,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

@@ -1172,7 +1172,7 @@ impl Writer {
 /// the other is still writing into. The pid separates processes — one usage
 /// cache is shared by every cctop on the machine — and the counter separates
 /// threads inside one.
-fn temp_beside(path: &Path, extension: &str) -> PathBuf {
+pub(crate) fn temp_beside(path: &Path, extension: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let seq = WRITES.fetch_add(1, Ordering::Relaxed);
