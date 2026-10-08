@@ -117,6 +117,14 @@ jobs:
   # other commit it passes with a notice: a feature branch changes crates
   # without bumping them, and that is the normal state of things.
   #
+  # On a release commit it also runs cargo-semver-checks on each internal crate
+  # that changed, against the same crate at the tag, and fails one whose
+  # public API broke without a breaking bump: the internal requirements are
+  # carets, and that is the promise they rest on. Its version is pinned in
+  # rust-toolchain.toml, beside the toolchain whose rustdoc it reads, and read
+  # from there; a prebuilt binary, so installing it costs seconds on the
+  # commits that never run it.
+  #
   # The full history, because the comparison is against the last `v*` tag and
   # a shallow checkout has no tags.
   release-plan:
@@ -127,7 +135,16 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
       - run: rustup toolchain install
+      - id: semver-checks
+        run: echo "version=$(sed -n 's/^# cargo-semver-checks //p' rust-toolchain.toml)" >>"$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@${{ steps.semver-checks.outputs.version }}
       - run: tools/release-plan.sh check
+      - name: TEMP semver-checks smoke test (removed before review)
+        run: |
+          cargo semver-checks check-release --package cctop-ui --baseline-rev v0.29.1 --release-type minor; echo "exit $?"
+          cargo semver-checks check-release --package cctop-core --baseline-rev v0.29.0 --release-type minor; echo "exit $?"
       # The guard's own cases, in a scratch repository: cheap, and the guard is
       # otherwise only exercised for real once per release.
       - run: tools/release-plan.test.sh
