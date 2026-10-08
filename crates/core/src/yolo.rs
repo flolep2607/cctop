@@ -1003,11 +1003,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What the hook allowed is listed for the page — unless another writer
-    /// holds the file past the hook's patience, when it is left out rather
-    /// than waited for.
+    /// What the hook allowed is listed for the page.
     #[test]
-    fn the_hooks_allow_is_listed_and_never_waits_long() {
+    fn the_hooks_allow_is_listed() {
         let dir = scratch("record");
         on(&dir, "a");
         record_allowed_in(&dir, "a", Some("Bash: ls".into()), HOOK_LOCK_PATIENCE);
@@ -1017,9 +1015,42 @@ mod tests {
         let asks: Vec<_> = state.sessions["a"].allowed.iter().map(|a| &a.ask).collect();
         assert_eq!(asks, ["Bash: ls", "a permission prompt"]);
         assert!(!state.sessions.contains_key("nobody"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    /// A switch written without ever opening `yolo.lock`, so the lock a test
+    /// then takes is one no earlier descriptor can be holding.
+    ///
+    /// The reason it matters: an `flock` belongs to the open file description,
+    /// and a fork copies every descriptor the process has — `O_CLOEXEC` only
+    /// closes them at the child's exec. Any test thread spawning a process
+    /// while another test's [`update`] had the lock open gave that child a
+    /// copy, and the lock stayed taken after `update` dropped its own, until
+    /// the child exec'd. `the_hooks_allow_is_listed_and_never_waits_long` took
+    /// the lock straight after three `update`s and failed in CI on exactly
+    /// that window. A lock file nobody has opened has no copies to outlive.
+    fn switched_on_unlocked(dir: &Path, id: &str) {
+        let mut state = State::default();
+        state.sessions.insert(
+            id.into(),
+            Entry {
+                since: stamp_now(),
+                allowed: Vec::new(),
+                agent: Agent::of(me()),
+            },
+        );
+        std::fs::write(dir.join(STATE), serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(!dir.join(LOCK).exists());
+    }
+
+    /// Another writer holding the file past the hook's patience leaves the
+    /// allow out of the list rather than waited for.
+    #[test]
+    fn the_hooks_allow_never_waits_long() {
+        let dir = scratch("record-busy");
+        switched_on_unlocked(&dir, "a");
         let held = open_lock(&dir.join(LOCK)).unwrap();
-        assert!(flock(&held));
+        assert!(flock(&held), "a lock file nobody else opened was taken");
         let started = Instant::now();
         record_allowed_in(
             &dir,
@@ -1028,7 +1059,7 @@ mod tests {
             Duration::from_millis(20),
         );
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(read_state(&dir).sessions["a"].allowed.len(), 2);
+        assert!(read_state(&dir).sessions["a"].allowed.is_empty());
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
