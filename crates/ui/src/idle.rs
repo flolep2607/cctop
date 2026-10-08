@@ -393,6 +393,7 @@ mod tests {
         app.reports.hooked.insert(
             "mid".into(),
             cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal: cctop_core::hook::Signal::Acting,
                 cwd: "/x".into(),

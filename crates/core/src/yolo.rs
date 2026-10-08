@@ -276,18 +276,41 @@ fn update_within(
     std::fs::rename(&tmp, dir.join(STATE))
 }
 
+/// Who threw a switch, and about which session, for the lasting record.
+#[derive(Debug, Clone)]
+pub struct Switch {
+    pub from: crate::yolo_log::Origin,
+    /// The session's working directory, when it has one.
+    pub cwd: Option<String>,
+    /// `claude` or `codex`.
+    pub harness: Option<String>,
+}
+
 /// Switch YOLO on for `session_id` as run by the process `agent`, or off with
 /// `None`, for every cctop on the machine and for the hook.
 ///
 /// The caller decides whether the session may have it — see
 /// [`crate::actions::yolo`]. Switching on a session already on keeps its
 /// history and takes the new process: that is how a resumed session is
-/// covered again. Switching off forgets it.
-pub fn set(session_id: &str, agent: Option<u32>) -> std::io::Result<()> {
-    set_in(&dir(), session_id, agent)
+/// covered again. Switching off forgets it. Either is added to the lasting
+/// record ([`crate::yolo_log`]) once it has taken.
+pub fn set(session_id: &str, agent: Option<u32>, how: &Switch) -> std::io::Result<()> {
+    set_in(
+        &dir(),
+        &crate::yolo_log::Log::default(),
+        session_id,
+        agent,
+        how,
+    )
 }
 
-fn set_in(dir: &Path, session_id: &str, agent: Option<u32>) -> std::io::Result<()> {
+fn set_in(
+    dir: &Path,
+    log: &crate::yolo_log::Log,
+    session_id: &str,
+    agent: Option<u32>,
+    how: &Switch,
+) -> std::io::Result<()> {
     let process = match agent {
         Some(pid) => Some(Agent::of(pid).ok_or_else(|| {
             std::io::Error::new(
@@ -298,6 +321,8 @@ fn set_in(dir: &Path, session_id: &str, agent: Option<u32>) -> std::io::Result<(
         None => None,
     };
     let id = session_id.to_string();
+    // Off names no process; the one it was on for is the one to record.
+    let mut was: Option<u32> = None;
     let result = update(dir, |state| match process {
         Some(process) => {
             let entry = state.sessions.entry(id).or_insert_with(|| Entry {
@@ -307,9 +332,28 @@ fn set_in(dir: &Path, session_id: &str, agent: Option<u32>) -> std::io::Result<(
             entry.agent = Some(process);
         }
         None => {
-            state.sessions.remove(&id);
+            was = state
+                .sessions
+                .remove(&id)
+                .and_then(|e| e.agent)
+                .map(|a| a.pid);
         }
     });
+    if result.is_ok() {
+        let _ = log.append(&crate::yolo_log::Line {
+            at: crate::yolo_log::now(),
+            event: match agent {
+                Some(_) => crate::yolo_log::Event::On,
+                None => crate::yolo_log::Event::Off,
+            },
+            session: session_id.to_string(),
+            cwd: how.cwd.clone(),
+            harness: how.harness.clone(),
+            from: Some(how.from),
+            pid: agent.or(was),
+            ..Default::default()
+        });
+    }
     crate::elog::event(
         "yolo",
         if agent.is_some() { "on" } else { "off" },
@@ -432,6 +476,8 @@ pub struct Auto {
     looked: HashMap<String, Instant>,
     /// The screen reader, kept between ticks for the sweeps it caches.
     peek: Option<crate::peek::Peek>,
+    /// Where the presses and the ends are recorded for good.
+    log: crate::yolo_log::Log,
 }
 
 /// A press, as the auto-answer sees it: `Ok` when the key went in.
@@ -455,6 +501,7 @@ impl Auto {
             seen: HashMap::new(),
             looked: HashMap::new(),
             peek: None,
+            log: crate::yolo_log::Log::default(),
         }
     }
 
@@ -624,8 +671,27 @@ impl Auto {
                 .asking_for
                 .clone()
                 .unwrap_or_else(|| "a permission prompt".to_string());
+            // The record of the press, made before the press clears the
+            // row. The tool and whole input come from the observer's report
+            // of this same prompt — the same words — and from nowhere else:
+            // a row that named nothing records nothing, and no tool is
+            // guessed.
+            let call = reports
+                .report(&id)
+                .filter(|r| r.signal == crate::hook::Signal::NeedsInput)
+                .filter(|r| r.ask.is_some() && r.ask == session.asking_for)
+                .and_then(|r| r.call.clone());
+            let mut line = crate::yolo_log::Line::allow(
+                &id,
+                crate::yolo_log::Via::Key,
+                call,
+                session.asking_for.as_deref(),
+            );
+            line.cwd = Some(session.label_source.clone()).filter(|c| !c.is_empty());
+            line.harness = Some(session.provider.as_str().to_string());
             match press(session) {
                 Ok(()) => {
+                    let _ = self.log.append(&line);
                     crate::elog::event(
                         "yolo",
                         "allowed",
@@ -646,18 +712,23 @@ impl Auto {
                     ));
                     changed = true;
                 }
-                Err(why) => crate::elog::event(
-                    "yolo",
-                    "failed",
-                    serde_json::json!({ "session": id, "ask": ask, "why": why }),
-                ),
+                Err(why) => {
+                    line.ok = Some(false);
+                    line.why = Some(why.clone());
+                    let _ = self.log.append(&line);
+                    crate::elog::event(
+                        "yolo",
+                        "failed",
+                        serde_json::json!({ "session": id, "ask": ask, "why": why }),
+                    );
+                }
             }
         }
 
         let ended = self.ended(sessions);
         if !allowed.is_empty() || !ended.is_empty() {
             let result = update(&self.dir, |state| {
-                for id in &ended {
+                for (id, _) in &ended {
                     state.sessions.remove(id);
                 }
                 for (id, answer) in allowed {
@@ -667,10 +738,29 @@ impl Auto {
                 }
             });
             if !ended.is_empty() {
+                if result.is_ok() {
+                    for (id, why) in &ended {
+                        let entry = self.entries.get(id);
+                        let row = sessions.iter().find(|s| &s.session_id == id);
+                        let _ = self.log.append(&crate::yolo_log::Line {
+                            at: crate::yolo_log::now(),
+                            event: crate::yolo_log::Event::Ended,
+                            session: id.clone(),
+                            cwd: row
+                                .map(|s| s.label_source.clone())
+                                .filter(|c| !c.is_empty()),
+                            harness: row.map(|s| s.provider.as_str().to_string()),
+                            why: Some(why.to_string()),
+                            pid: entry.and_then(|e| e.agent).map(|a| a.pid),
+                            ..Default::default()
+                        });
+                    }
+                }
+                let ids: Vec<&String> = ended.iter().map(|(id, _)| id).collect();
                 crate::elog::event(
                     "yolo",
                     "ended",
-                    serde_json::json!({ "sessions": ended, "ok": result.is_ok() }),
+                    serde_json::json!({ "sessions": ids, "ok": result.is_ok() }),
                 );
             }
             changed |= self.reload();
@@ -679,20 +769,21 @@ impl Auto {
         changed
     }
 
-    /// The ids whose permission has run out: the process it was given to has
-    /// gone, or the session is no longer running here past the grace.
+    /// The ids whose permission has run out, with why: the process it was
+    /// given to has gone, or the session is no longer running here past the
+    /// grace.
     ///
     /// The process is checked outright, with no grace, because the kernel's
     /// answer does not depend on how recently this cctop walked the session.
-    fn ended(&self, sessions: &[Session]) -> Vec<String> {
+    fn ended(&self, sessions: &[Session]) -> Vec<(String, &'static str)> {
         let now = chrono::Utc::now();
         self.entries
             .iter()
-            .filter(|(id, entry)| {
+            .filter_map(|(id, entry)| {
                 let gone = !entry.agent.is_some_and(|agent| agent.is_alive());
                 let running = sessions
                     .iter()
-                    .any(|s| &s.session_id == *id && s.remote.is_none() && s.is_running());
+                    .any(|s| &s.session_id == id && s.remote.is_none() && s.is_running());
                 let old = chrono::DateTime::parse_from_rfc3339(&entry.since)
                     .map(|since| {
                         (now - since.with_timezone(&chrono::Utc))
@@ -701,9 +792,12 @@ impl Auto {
                             >= UNSEEN_GRACE
                     })
                     .unwrap_or(true);
-                gone || (!running && old)
+                match (gone, !running && old) {
+                    (true, _) => Some((id.clone(), "its process went")),
+                    (false, true) => Some((id.clone(), "the session ended")),
+                    (false, false) => None,
+                }
             })
-            .map(|(id, _)| id.clone())
             .collect()
     }
 
@@ -753,9 +847,34 @@ mod tests {
         std::process::id()
     }
 
-    /// Switch YOLO on for `id`, run by this test process.
+    /// The lasting record of a test's switch, beside it in its own scratch
+    /// directory.
+    fn log_of(dir: &Path) -> crate::yolo_log::Log {
+        crate::yolo_log::Log::at(dir.join("data"))
+    }
+
+    fn from_tui() -> Switch {
+        Switch {
+            from: crate::yolo_log::Origin::Tui,
+            cwd: Some("/w".into()),
+            harness: Some("codex".into()),
+        }
+    }
+
+    /// Switch YOLO on for `id`, run by this test process, or off.
+    fn set_at(dir: &Path, id: &str, agent: Option<u32>) -> std::io::Result<()> {
+        set_in(dir, &log_of(dir), id, agent, &from_tui())
+    }
+
     fn on(dir: &Path, id: &str) {
-        set_in(dir, id, Some(me())).unwrap();
+        set_at(dir, id, Some(me())).unwrap();
+    }
+
+    /// An `Auto` over `dir`, recording to the test's own log.
+    fn auto_in(dir: &Path, may_answer: bool) -> Auto {
+        let mut auto = Auto::in_dir(dir.to_path_buf(), may_answer);
+        auto.log = log_of(dir);
+        auto
     }
 
     /// A running local `provider` session, asking `ask`.
@@ -801,6 +920,7 @@ mod tests {
         reports.hooked.insert(
             id.into(),
             Reported {
+                call: None,
                 signal: Signal::NeedsInput,
                 cwd: "/w".into(),
                 permission: None,
@@ -873,7 +993,7 @@ mod tests {
     fn questions_and_sessions_without_yolo_are_left_alone() {
         let dir = scratch("questions");
         on(&dir, "q");
-        let mut auto = Auto::in_dir(dir.clone(), true);
+        let mut auto = auto_in(&dir, true);
         let mut question = asking("q", Some("Which framework?"));
         question.asking_question = true;
         let plain = asking("p", Some("Bash: ls"));
@@ -896,12 +1016,12 @@ mod tests {
         on(&dir, "a");
         on(&dir, "b");
         on(&dir, "c");
-        set_in(&dir, "c", None).unwrap();
+        set_at(&dir, "c", None).unwrap();
         let state = read_state(&dir);
         assert_eq!(state.sessions.keys().collect::<Vec<_>>(), ["a", "b"]);
         assert_eq!(state.sessions["a"].agent, Agent::of(me()));
 
-        let mut auto = Auto::in_dir(dir.clone(), true);
+        let mut auto = auto_in(&dir, true);
         let mut running = asking("a", None);
         quiet(&mut running);
         let stopped = Session::new(Provider::Codex, "b".into());
@@ -934,7 +1054,7 @@ mod tests {
     #[test]
     fn switching_on_records_the_agent_process() {
         let dir = scratch("agent");
-        let err = set_in(&dir, "a", Some(u32::MAX)).unwrap_err();
+        let err = set_at(&dir, "a", Some(u32::MAX)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(read_state(&dir).sessions.is_empty());
 
@@ -1003,11 +1123,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What the hook allowed is listed for the page — unless another writer
-    /// holds the file past the hook's patience, when it is left out rather
-    /// than waited for.
+    /// What the hook allowed is listed for the page.
     #[test]
-    fn the_hooks_allow_is_listed_and_never_waits_long() {
+    fn the_hooks_allow_is_listed() {
         let dir = scratch("record");
         on(&dir, "a");
         record_allowed_in(&dir, "a", Some("Bash: ls".into()), HOOK_LOCK_PATIENCE);
@@ -1017,9 +1135,42 @@ mod tests {
         let asks: Vec<_> = state.sessions["a"].allowed.iter().map(|a| &a.ask).collect();
         assert_eq!(asks, ["Bash: ls", "a permission prompt"]);
         assert!(!state.sessions.contains_key("nobody"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    /// A switch written without ever opening `yolo.lock`, so the lock a test
+    /// then takes is one no earlier descriptor can be holding.
+    ///
+    /// The reason it matters: an `flock` belongs to the open file description,
+    /// and a fork copies every descriptor the process has — `O_CLOEXEC` only
+    /// closes them at the child's exec. Any test thread spawning a process
+    /// while another test's [`update`] had the lock open gave that child a
+    /// copy, and the lock stayed taken after `update` dropped its own, until
+    /// the child exec'd. `the_hooks_allow_is_listed_and_never_waits_long` took
+    /// the lock straight after three `update`s and failed in CI on exactly
+    /// that window. A lock file nobody has opened has no copies to outlive.
+    fn switched_on_unlocked(dir: &Path, id: &str) {
+        let mut state = State::default();
+        state.sessions.insert(
+            id.into(),
+            Entry {
+                since: stamp_now(),
+                allowed: Vec::new(),
+                agent: Agent::of(me()),
+            },
+        );
+        std::fs::write(dir.join(STATE), serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(!dir.join(LOCK).exists());
+    }
+
+    /// Another writer holding the file past the hook's patience leaves the
+    /// allow out of the list rather than waited for.
+    #[test]
+    fn the_hooks_allow_never_waits_long() {
+        let dir = scratch("record-busy");
+        switched_on_unlocked(&dir, "a");
         let held = open_lock(&dir.join(LOCK)).unwrap();
-        assert!(flock(&held));
+        assert!(flock(&held), "a lock file nobody else opened was taken");
         let started = Instant::now();
         record_allowed_in(
             &dir,
@@ -1028,7 +1179,7 @@ mod tests {
             Duration::from_millis(20),
         );
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(read_state(&dir).sessions["a"].allowed.len(), 2);
+        assert!(read_state(&dir).sessions["a"].allowed.is_empty());
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1041,7 +1192,7 @@ mod tests {
     fn another_process_on_the_same_session_is_not_covered() {
         let dir = scratch("resumed");
         on(&dir, "a");
-        let mut auto = Auto::in_dir(dir.clone(), true);
+        let mut auto = auto_in(&dir, true);
         let mut resumed = asking("a", Some("Bash: ls"));
         resumed.process.as_mut().unwrap().process_list[0].pid = u32::MAX;
         let mut rows = vec![resumed];
@@ -1084,8 +1235,8 @@ mod tests {
     fn only_one_process_answers() {
         let dir = scratch("owner");
         on(&dir, "a");
-        let mut first = Auto::in_dir(dir.clone(), true);
-        let mut second = Auto::in_dir(dir.clone(), true);
+        let mut first = auto_in(&dir, true);
+        let mut second = auto_in(&dir, true);
         let mut presses = 0;
         let mut rows = vec![asking("a", Some("Bash: ls"))];
         first.tick_with(
@@ -1139,7 +1290,7 @@ mod tests {
     fn a_read_only_process_never_presses() {
         let dir = scratch("readonly");
         on(&dir, "a");
-        let mut auto = Auto::in_dir(dir.clone(), false);
+        let mut auto = auto_in(&dir, false);
         let mut rows = vec![asking("a", Some("Bash: ls"))];
         auto.tick_with(
             &mut rows,
@@ -1157,7 +1308,7 @@ mod tests {
     fn an_answer_is_recorded_and_the_prompt_comes_down() {
         let dir = scratch("answered");
         on(&dir, "a");
-        let mut auto = Auto::in_dir(dir.clone(), true);
+        let mut auto = auto_in(&dir, true);
         let mut rows = vec![asking("a", Some("Bash: cargo test"))];
         assert!(auto.tick_with(&mut rows, &silence(), &mut |_| Ok(()), &mut blind));
         assert_eq!(rows[0].activity_state, ActivityState::Working);
@@ -1175,7 +1326,7 @@ mod tests {
     fn a_claude_prompt_is_pressed_only_with_its_menu_on_screen() {
         let dir = scratch("claude-screen");
         on(&dir, "a");
-        let mut auto = Auto::in_dir(dir.clone(), true);
+        let mut auto = auto_in(&dir, true);
         let row = asking_as(Provider::Claude, "a", Some("Bash: rm -rf build"));
         let screens: [fn(&Session) -> Option<Screened>; 3] = [
             |_| None,
@@ -1240,7 +1391,7 @@ mod tests {
     fn a_claude_prompt_falls_back_to_the_key_after_the_hooks_time() {
         let dir = scratch("claude-fallback");
         on(&dir, "a");
-        let mut auto = Auto::in_dir(dir.clone(), true);
+        let mut auto = auto_in(&dir, true);
         let mut row = asking_as(Provider::Claude, "a", None);
         quiet(&mut row);
 
@@ -1289,6 +1440,111 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A key press is recorded for good: the tool and whole command from the
+    /// observer's report of the same prompt, redacted; a row whose report
+    /// does not match records its display line and no tool; a press that
+    /// failed is recorded as failed, with why.
+    #[test]
+    fn a_key_press_is_logged_with_its_call() {
+        use crate::yolo_log::{Call, Via};
+        let dir = scratch("key-log");
+        on(&dir, "a");
+        let mut auto = auto_in(&dir, true);
+        let mut reports = raised("a", Some("Bash: TOKEN=dummy make"), false, Duration::ZERO);
+        reports.hooked.get_mut("a").unwrap().call = Some(Call {
+            tool: "Bash".into(),
+            detail: Some("TOKEN=[redacted] make\nmake install".into()),
+            truncated: false,
+        });
+        let mut rows = vec![asking("a", Some("Bash: TOKEN=dummy make"))];
+        rows[0].label_source = "/w/proj".into();
+        auto.tick_with(&mut rows, &reports, &mut |_| Ok(()), &mut blind);
+
+        // The report is about another prompt now: the row's own line is all
+        // there is to record.
+        let mut rows = vec![asking("a", Some("Bash: ls"))];
+        auto.tick_with(
+            &mut rows,
+            &reports,
+            &mut |_| Err("the shim went away".into()),
+            &mut blind,
+        );
+
+        let lines: Vec<_> = log_of(&dir)
+            .read()
+            .into_iter()
+            .filter(|l| l.event == crate::yolo_log::Event::Allow)
+            .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0].via, Some(Via::Key));
+        assert_eq!(lines[0].tool.as_deref(), Some("Bash"));
+        assert_eq!(
+            lines[0].detail.as_deref(),
+            Some("TOKEN=[redacted] make\nmake install")
+        );
+        assert_eq!(lines[0].cwd.as_deref(), Some("/w/proj"));
+        assert_eq!(lines[0].harness.as_deref(), Some("codex"));
+        assert_eq!(lines[0].ok, None);
+        assert_eq!(lines[1].tool, None, "a tool was guessed");
+        assert_eq!(lines[1].detail.as_deref(), Some("Bash: ls"));
+        assert_eq!(lines[1].ok, Some(false));
+        assert_eq!(lines[1].why.as_deref(), Some("the shim went away"));
+        let raw = std::fs::read_to_string(log_of(&dir).path()).unwrap();
+        assert!(!raw.contains("dummy"), "{raw}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Switching on and off is recorded with where it came from and the
+    /// process, and so is an entry dropped because its process went.
+    #[test]
+    fn switches_and_ends_are_logged() {
+        use crate::yolo_log::{Event, Origin};
+        let dir = scratch("switch-log");
+        on(&dir, "a");
+        set_at(&dir, "a", None).unwrap();
+        on(&dir, "b");
+        // A switch that did not take is not recorded.
+        assert!(set_at(&dir, "c", Some(u32::MAX)).is_err());
+        update(&dir, |s| {
+            s.sessions
+                .get_mut("b")
+                .unwrap()
+                .agent
+                .as_mut()
+                .unwrap()
+                .start += 1;
+        })
+        .unwrap();
+        let mut auto = auto_in(&dir, true);
+        let mut row = asking("b", None);
+        quiet(&mut row);
+        auto.tick_with(
+            &mut [row],
+            &silence(),
+            &mut |_| panic!("nothing asks"),
+            &mut blind,
+        );
+
+        let lines = log_of(&dir).read();
+        let seen: Vec<_> = lines
+            .iter()
+            .map(|l| (l.event, l.session.as_str(), l.pid))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (Event::On, "a", Some(me())),
+                (Event::Off, "a", Some(me())),
+                (Event::On, "b", Some(me())),
+                (Event::Ended, "b", Some(me())),
+            ]
+        );
+        assert_eq!(lines[0].from, Some(Origin::Tui));
+        assert_eq!(lines[0].cwd.as_deref(), Some("/w"));
+        assert_eq!(lines[3].why.as_deref(), Some("its process went"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// End to end against a fake agent: a prompt that stays up for several
     /// ticks gets exactly one keypress, and the next prompt one more — pressed
     /// through `actions::answer` and the real injection path, into a socket
@@ -1313,7 +1569,7 @@ mod tests {
             keys
         };
 
-        set("e2e", Some(me())).unwrap();
+        set("e2e", Some(me()), &from_tui()).unwrap();
         let mut auto = Auto::new(true);
         let mut row = asking("e2e", Some("Bash: ls"));
         for _ in 0..4 {
