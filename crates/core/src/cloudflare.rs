@@ -1,6 +1,9 @@
 //! Connecting a Cloudflare account: what `cctop tunnel setup` and `remove` do.
 //!
-//! The user pastes one of two things, told apart by shape:
+//! There are two ways in. The user logs in through the browser and picks a
+//! domain there, and cctop receives an origin certificate holding a token, as
+//! `cloudflared tunnel login` does ([`login`]); or the user pastes one of two
+//! things, told apart by shape:
 //!
 //! - an **API token**, made from a pre-filled link with three permissions.
 //!   cctop then lists their domains, creates a tunnel, points it at a hostname
@@ -28,6 +31,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::tunnel::{Account, ShareName};
+
+pub mod login;
 
 /// Cloudflare's API.
 const API_BASE: &str = "https://api.cloudflare.com/client/v4";
@@ -76,7 +81,7 @@ pub fn token_link() -> String {
 /// Where a domain is added to Cloudflare.
 pub const ADD_SITE_LINK: &str = "https://dash.cloudflare.com/?to=/:account/add-site";
 
-fn percent_encode(text: &str) -> String {
+pub(crate) fn percent_encode(text: &str) -> String {
     text.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
@@ -100,6 +105,51 @@ impl fmt::Debug for Pasted {
             Pasted::Api(_) => f.write_str("Pasted::Api([redacted])"),
             Pasted::Tunnel(_) => f.write_str("Pasted::Tunnel([redacted])"),
         }
+    }
+}
+
+/// What an [`Api`] authenticates with. Both are API tokens; they differ in
+/// what Cloudflare lets them do, and so in which calls cctop makes with them.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Auth {
+    /// One the user made from [`token_link`] with the three permissions.
+    Pasted(String),
+    /// The one inside a browser login's certificate: what `cloudflared`
+    /// itself uses, and good for what it uses it for ([`login`]).
+    Login(String),
+}
+
+impl Auth {
+    /// Whether this came from a browser login.
+    pub fn is_login(&self) -> bool {
+        matches!(self, Auth::Login(_))
+    }
+
+    fn token(&self) -> &str {
+        match self {
+            Auth::Pasted(token) | Auth::Login(token) => token,
+        }
+    }
+}
+
+impl fmt::Debug for Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Auth::Pasted(_) => f.write_str("Auth::Pasted([redacted])"),
+            Auth::Login(_) => f.write_str("Auth::Login([redacted])"),
+        }
+    }
+}
+
+impl From<String> for Auth {
+    fn from(token: String) -> Auth {
+        Auth::Pasted(token)
+    }
+}
+
+impl From<&str> for Auth {
+    fn from(token: &str) -> Auth {
+        Auth::Pasted(token.to_string())
     }
 }
 
@@ -134,6 +184,11 @@ pub enum Error {
     ZonePending(String),
     /// A hostname that is not exactly one label under the zone.
     Hostname(String),
+    /// A browser login's token was refused a call that needs `permission`:
+    /// that token is Cloudflare's to scope, not the user's.
+    LoginRefused(&'static str),
+    /// The browser login did not complete, in a sentence of its own.
+    Login(String),
     /// Network trouble, or Cloudflare said no for its own reason.
     Api(String),
 }
@@ -163,7 +218,13 @@ impl fmt::Display for Error {
                 "{zone} is on Cloudflare but not active yet: its nameservers have not \
                  been switched to Cloudflare's. Once they are, run this again."
             ),
-            Error::Hostname(why) => f.write_str(why),
+            Error::LoginRefused(permission) => write!(
+                f,
+                "Cloudflare did not let the browser login do this (it needs \"{permission}\"). \
+                 Connect with an API token instead, made from {}",
+                token_link()
+            ),
+            Error::Login(why) | Error::Hostname(why) => f.write_str(why),
             Error::Api(message) => write!(f, "Cloudflare said: {message}"),
         }
     }
@@ -184,6 +245,9 @@ pub struct Zone {
 pub struct Api {
     base: String,
     token: String,
+    /// Whether the token came from a browser login, which changes what a
+    /// refusal means and how a hostname is routed.
+    login: bool,
     agent: ureq::Agent,
 }
 
@@ -191,6 +255,7 @@ impl fmt::Debug for Api {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Api")
             .field("base", &self.base)
+            .field("login", &self.login)
             .finish_non_exhaustive()
     }
 }
@@ -200,6 +265,25 @@ impl Api {
         Api::at(&api_base(), token)
     }
 
+    /// A client for `auth`, either kind.
+    pub fn with(auth: &Auth) -> Api {
+        Api::at(&api_base(), auth.token()).login_if(auth.is_login())
+    }
+
+    /// The same client, its token taken for a browser login's when `login`.
+    pub(crate) fn login_if(mut self, login: bool) -> Api {
+        self.login = login;
+        self
+    }
+
+    /// What it authenticates with, to store.
+    pub fn auth(&self) -> Auth {
+        match self.login {
+            true => Auth::Login(self.token.clone()),
+            false => Auth::Pasted(self.token.clone()),
+        }
+    }
+
     /// Against another base URL: a fake API in tests. Private to the crate,
     /// since a token sent to a base of someone's choosing is a token given
     /// away.
@@ -207,6 +291,7 @@ impl Api {
         Api {
             base: base.trim_end_matches('/').to_string(),
             token: token.trim().to_string(),
+            login: false,
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(HTTP_TIMEOUT))
                 // The status is read here: 401 and 403 mean different things.
@@ -261,6 +346,7 @@ impl Api {
             .unwrap_or_default();
         match status {
             401 => return Err(Error::TokenRefused),
+            403 if self.login => return Err(Error::LoginRefused(needs)),
             403 => return Err(Error::MissingPermission(needs)),
             _ => {}
         }
@@ -320,8 +406,35 @@ impl Api {
             zone.id,
             percent_encode(name)
         );
-        let result = self.call("GET", &path, None, PERMISSIONS[1])?;
-        Ok(result.as_array().is_some_and(|r| !r.is_empty()))
+        match self.call("GET", &path, None, PERMISSIONS[1]) {
+            Ok(result) => Ok(result.as_array().is_some_and(|r| !r.is_empty())),
+            // A login's token may not read DNS; its route refuses to
+            // overwrite a record anyway ([`Api::add_cname`]), so not knowing
+            // here only moves the refusal later.
+            Err(Error::LoginRefused(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The domain a browser login picked, by the id its certificate holds.
+    /// The name is the one thing about it the certificate does not say, and
+    /// reading it may be refused, so `None` is an answer: the user then types
+    /// the whole hostname, the domain included.
+    pub fn login_zone(&self, cert: &login::OriginCert) -> Option<Zone> {
+        let zone = self
+            .call(
+                "GET",
+                &format!("/zones/{}", cert.zone_id),
+                None,
+                PERMISSIONS[2],
+            )
+            .ok()?;
+        Some(Zone {
+            id: cert.zone_id.clone(),
+            name: zone["name"].as_str()?.to_string(),
+            account_id: cert.account_id.clone(),
+            active: zone["status"].as_str().is_none_or(|s| s == "active"),
+        })
     }
 
     fn create_tunnel(&self, account_id: &str, name: &str) -> Result<String, Error> {
@@ -364,16 +477,26 @@ impl Api {
             .map(|h| json!({"hostname": h, "service": "http://localhost:7777"}))
             .collect();
         ingress.push(json!({"service": "http_status:404"}));
-        self.call(
+        match self.call(
             "PUT",
             &format!("/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"),
             Some(json!({"config": {"ingress": ingress}})),
             PERMISSIONS[0],
-        )?;
-        Ok(())
+        ) {
+            // Only the dashboard reads this list; cloudflared never writes it
+            // with a login's token, so a refusal costs the display and no more.
+            Err(Error::LoginRefused(_)) => Ok(()),
+            other => other.map(drop),
+        }
     }
 
+    /// Point `name` at the tunnel, and return what to delete it by later:
+    /// the record's id, or for a login's token the hostname itself, since
+    /// its route answers with no id ([`Api::delete_record`]).
     fn add_cname(&self, zone: &Zone, name: &str, tunnel_id: &str) -> Result<String, Error> {
+        if self.login {
+            return self.route(zone, name, tunnel_id);
+        }
         let result = self.call(
             "POST",
             &format!("/zones/{}/dns_records", zone.id),
@@ -392,7 +515,53 @@ impl Api {
             .ok_or_else(|| Error::Api("the DNS record came back without an id".into()))
     }
 
-    fn delete_record(&self, zone_id: &str, record_id: &str) -> Result<(), Error> {
+    /// A hostname routed the way `cloudflared tunnel route dns` routes one —
+    /// the call a login's token is known to be good for. It never overwrites
+    /// a record (`overwrite_existing`), so a taken name is refused there.
+    fn route(&self, zone: &Zone, name: &str, tunnel_id: &str) -> Result<String, Error> {
+        let routed = self.call(
+            "PUT",
+            &format!("/zones/{}/tunnels/{tunnel_id}/routes", zone.id),
+            Some(json!({"type": "dns", "user_hostname": name, "overwrite_existing": false})),
+            PERMISSIONS[1],
+        );
+        match routed {
+            Ok(_) => Ok(name.to_string()),
+            Err(Error::Api(message)) if message.contains("already exists") => {
+                Err(Error::Hostname(format!(
+                    "{name} already has a DNS record that cctop did not make, and it will \
+                     not be overwritten. Pick another name."
+                )))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete what [`Api::add_cname`] made: by id, or — for a hostname a
+    /// login routed — the CNAME on that name that points at this tunnel and
+    /// at nothing else, found by name.
+    fn delete_record(&self, zone_id: &str, record: &str, tunnel_id: &str) -> Result<(), Error> {
+        // Record ids are hex; a hostname has dots.
+        if record.contains('.') {
+            let target = format!("{tunnel_id}.cfargotunnel.com");
+            let found = self.call(
+                "GET",
+                &format!(
+                    "/zones/{zone_id}/dns_records?name={}",
+                    percent_encode(record)
+                ),
+                None,
+                PERMISSIONS[1],
+            )?;
+            let ids = found.as_array().into_iter().flatten().filter(|r| {
+                r["type"].as_str() == Some("CNAME") && r["content"].as_str() == Some(&target)
+            });
+            for id in ids.filter_map(|r| r["id"].as_str()) {
+                self.delete_record(zone_id, id, tunnel_id)?;
+            }
+            return Ok(());
+        }
+        let record_id = record;
         self.call(
             "DELETE",
             &format!("/zones/{zone_id}/dns_records/{record_id}"),
@@ -476,6 +645,26 @@ pub fn check_hostname(hostname: &str, zone: &Zone) -> Result<String, Error> {
     }
     check_label(label)?;
     Ok(hostname)
+}
+
+/// The domain a browser login picked, when its name could not be read
+/// ([`Api::login_zone`]): taken from the hostname the user typed, everything
+/// after its first label, which is the only shape setup makes. A name on
+/// another domain is refused by Cloudflare's route, in its own words.
+pub fn login_zone_from(zone_id: &str, account_id: &str, hostname: &str) -> Result<Zone, Error> {
+    let hostname = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    match hostname.split_once('.') {
+        Some((label, domain)) if !label.is_empty() && domain.contains('.') => Ok(Zone {
+            id: zone_id.to_string(),
+            name: domain.to_string(),
+            account_id: account_id.to_string(),
+            active: true,
+        }),
+        _ => Err(Error::Hostname(format!(
+            "Type the whole address, on the domain you picked: like cctop.example.com, not \
+             {hostname}"
+        ))),
+    }
 }
 
 /// One DNS label as setup and renaming both accept it: letters, digits and
@@ -575,7 +764,7 @@ pub fn create(api: &Api, zone: &Zone, hostname: &str, machine: &str) -> Result<A
             // Best effort, newest first; the error worth reporting is the one
             // that stopped the setup.
             for record in records.iter().rev() {
-                let _ = api.delete_record(&zone.id, record);
+                let _ = api.delete_record(&zone.id, record, &tunnel_id);
             }
             let _ = api.delete_tunnel(&zone.account_id, &tunnel_id);
             return Err(e);
@@ -590,6 +779,7 @@ pub fn create(api: &Api, zone: &Zone, hostname: &str, machine: &str) -> Result<A
         tunnel_id: Some(tunnel_id),
         dns_record_ids: records,
         api_token: Some(api.token.clone()),
+        login: api.login,
         share_names: Default::default(),
         from_env: false,
     })
@@ -756,7 +946,7 @@ pub fn name_share_with(
             &refs.iter().map(String::as_str).collect::<Vec<_>>(),
         )?;
         let note = current.record_id.as_ref().and_then(|id| {
-            api.delete_record(&zone.id, id)
+            api.delete_record(&zone.id, id, &tunnel_id)
                 .err()
                 .map(|e| left_behind(old.as_deref().unwrap_or_default(), id, &e))
         });
@@ -787,11 +977,11 @@ pub fn name_share_with(
     let names = hostnames(&next);
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     if let Err(e) = api.configure(&zone.account_id, &tunnel_id, &names) {
-        let _ = api.delete_record(&zone.id, &record);
+        let _ = api.delete_record(&zone.id, &record, &tunnel_id);
         return Err(e);
     }
     let note = current.and_then(|c| c.record_id.as_ref()).and_then(|id| {
-        api.delete_record(&zone.id, id)
+        api.delete_record(&zone.id, id, &tunnel_id)
             .err()
             .map(|e| left_behind(old.as_deref().unwrap_or_default(), id, &e))
     });
@@ -847,11 +1037,11 @@ pub fn name_dashboard_with(api: &Api, account: &Account, input: &str) -> Result<
     let names = hostnames(&next);
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     if let Err(e) = api.configure(&zone.account_id, &tunnel_id, &names) {
-        let _ = api.delete_record(&zone.id, &record);
+        let _ = api.delete_record(&zone.id, &record, &tunnel_id);
         return Err(e);
     }
     let note = previous.as_ref().and_then(|id| {
-        api.delete_record(&zone.id, id)
+        api.delete_record(&zone.id, id, &tunnel_id)
             .err()
             .map(|e| left_behind(old.as_deref().unwrap_or_default(), id, &e))
     });
@@ -912,7 +1102,7 @@ fn connected() -> Result<(Account, Api), String> {
             .to_string()
     })?;
     account.can_rename()?;
-    let api = Api::new(account.api_token.as_deref().unwrap_or_default());
+    let api = Api::new(account.api_token.as_deref().unwrap_or_default()).login_if(account.login);
     Ok((account, api))
 }
 
@@ -943,7 +1133,7 @@ pub(crate) fn remove_with(account: &Account, api: impl Fn(&str) -> Api) -> Lefto
     else {
         return Leftovers(left);
     };
-    let api = api(token);
+    let api = api(token).login_if(account.login);
     if let Some(zone_id) = &account.zone_id {
         // Agents' own names too, by the ids stored with them, after setup's.
         let named = account
@@ -951,7 +1141,7 @@ pub(crate) fn remove_with(account: &Account, api: impl Fn(&str) -> Api) -> Lefto
             .values()
             .filter_map(|name| name.record_id.as_ref());
         for record in account.dns_record_ids.iter().chain(named) {
-            if let Err(e) = api.delete_record(zone_id, record) {
+            if let Err(e) = api.delete_record(zone_id, record, tunnel_id) {
                 left.push(format!("the DNS record {record} ({e})"));
             }
         }
@@ -1066,6 +1256,12 @@ pub mod fake {
                     {"id": "zone1", "name": "example.test", "status": "active", "account": {"id": "acct1"}},
                 ])),
                 ("GET", p) if p.contains("/dns_records?name=") => ok(json!([])),
+                ("GET", "/zones/zone1") => {
+                    ok(json!({"id": "zone1", "name": "example.test", "status": "active"}))
+                }
+                ("PUT", p) if p.starts_with("/zones/zone1/tunnels/") && p.ends_with("/routes") => {
+                    ok(json!({"cname": "new", "name": ""}))
+                }
                 ("POST", "/accounts/acct1/cfd_tunnel") => ok(json!({"id": TUNNEL_ID})),
                 ("GET", p) if p.ends_with("/token") => ok(json!("eyJhIjoi-made-up-tunnel-token")),
                 ("PUT", p) if p.ends_with("/configurations") => ok(json!({})),
@@ -1340,6 +1536,7 @@ mod tests {
             tunnel_id: Some(TUNNEL_ID.into()),
             dns_record_ids: vec!["rec-page".into(), "rec-share".into()],
             api_token: Some("made-up-api-token".into()),
+            login: false,
             share_names: [(
                 "other-session".to_string(),
                 ShareName {
@@ -1622,6 +1819,140 @@ mod tests {
                 &format!("DELETE /accounts/acct1/cfd_tunnel/{TUNNEL_ID}"),
             ]
         );
+    }
+
+    /// A Cloudflare that treats the token as a browser login's: tunnels and
+    /// routes, and a 403 for anything a login's token might not be allowed —
+    /// the zone's name, DNS reads and writes, the ingress list.
+    fn login_cloudflare(method: &str, path: &str, body: &str) -> (u16, Value) {
+        let refused = (
+            403,
+            json!({"success": false, "errors": [{"code": 10000, "message": "Authentication error"}]}),
+        );
+        match (method, path) {
+            (_, p) if p.contains("/dns_records") || p.ends_with("/configurations") => refused,
+            ("GET", "/zones/zone1") => refused,
+            _ => cloudflare(None)(method, path, body),
+        }
+    }
+
+    fn login_api(base: &str) -> Api {
+        Api::at(base, "made-up-login-token").login_if(true)
+    }
+
+    #[test]
+    fn a_login_routes_its_names_the_way_cloudflared_does() {
+        let (base, seen) = fake_api(login_cloudflare);
+        let api = login_api(&base);
+        let cert =
+            login::decode(login::fake::cert("zone1", "acct1", "made-up-login-token").as_bytes())
+                .unwrap();
+        // Its zone's name cannot be read here, so it comes from the hostname.
+        assert_eq!(api.login_zone(&cert), None);
+        let picked =
+            login_zone_from(&cert.zone_id, &cert.account_id, "cctop.example.test").unwrap();
+        assert_eq!(picked, zone());
+        let zone = picked;
+        assert!(login_zone_from("zone1", "acct1", "example").is_err());
+        // A DNS read it is refused is no reason to stop.
+        assert_eq!(
+            suggest_hostname(&api, &zone, "laptop").unwrap(),
+            "cctop.example.test"
+        );
+        seen.lock().unwrap().clear();
+
+        let account = create(&api, &zone, "cctop.example.test", "laptop").unwrap();
+        assert!(account.login);
+        assert_eq!(account.api_token.as_deref(), Some("made-up-login-token"));
+        assert_eq!(
+            account.dns_record_ids,
+            ["cctop.example.test", "cctop-share.example.test"]
+        );
+        let writes = writes(&seen);
+        assert_eq!(
+            writes,
+            [
+                "POST /accounts/acct1/cfd_tunnel",
+                &format!("PUT /accounts/acct1/cfd_tunnel/{TUNNEL_ID}/configurations"),
+                &format!("PUT /zones/zone1/tunnels/{TUNNEL_ID}/routes"),
+                &format!("PUT /zones/zone1/tunnels/{TUNNEL_ID}/routes"),
+            ]
+        );
+        let bodies = seen.lock().unwrap().clone();
+        let route = &bodies
+            .iter()
+            .find(|(_, p, _)| p.ends_with("/routes"))
+            .unwrap()
+            .2;
+        let route: Value = serde_json::from_str(route).unwrap();
+        assert_eq!(
+            route,
+            json!({"type": "dns", "user_hostname": "cctop.example.test", "overwrite_existing": false})
+        );
+
+        // Where the zone's name can be read, it is.
+        let (base, _) = fake_api(cloudflare(None));
+        assert_eq!(login_api(&base).login_zone(&cert), Some(zone));
+    }
+
+    #[test]
+    fn a_login_route_to_a_taken_name_is_the_taken_name_sentence() {
+        let (base, seen) = fake_api(
+            |method: &str, path: &str, body: &str| match (method, path) {
+                ("PUT", p) if p.ends_with("/routes") => (
+                    400,
+                    json!({"success": false, "errors": [{"code": 1003, "message": "Failed to add route: code: 1003, reason: An A, AAAA, or CNAME record with that host already exists."}]}),
+                ),
+                _ => login_cloudflare(method, path, body),
+            },
+        );
+        let err = create(&login_api(&base), &zone(), "cctop.example.test", "laptop").unwrap_err();
+        assert!(err.to_string().contains("will not be overwritten"), "{err}");
+        // And the tunnel made for it is gone again.
+        assert_eq!(
+            writes(&seen).last().map(String::as_str),
+            Some(format!("DELETE /accounts/acct1/cfd_tunnel/{TUNNEL_ID}").as_str())
+        );
+    }
+
+    #[test]
+    fn removing_a_login_deletes_its_records_by_name_and_only_the_tunnels() {
+        let (base, seen) = fake_api(
+            |method: &str, path: &str, body: &str| match (method, path) {
+                ("GET", p) if p.contains("?name=cctop.example.test") => ok(json!([
+                    {"id": "ours", "type": "CNAME", "content": format!("{TUNNEL_ID}.cfargotunnel.com")},
+                    {"id": "theirs", "type": "CNAME", "content": "elsewhere.example.net"},
+                ])),
+                _ => cloudflare(None)(method, path, body),
+            },
+        );
+        let account = Account {
+            token: "eyJhIjoi-made-up".into(),
+            api_token: Some("made-up-login-token".into()),
+            login: true,
+            account_id: Some("acct1".into()),
+            zone_id: Some("zone1".into()),
+            tunnel_id: Some(TUNNEL_ID.into()),
+            dns_record_ids: vec!["cctop.example.test".into()],
+            ..Account::default()
+        };
+        let left = remove_with(&account, |token| Api::at(&base, token));
+        assert_eq!(left, Leftovers::default());
+        assert_eq!(
+            writes(&seen),
+            [
+                "DELETE /zones/zone1/dns_records/ours",
+                &format!("DELETE /accounts/acct1/cfd_tunnel/{TUNNEL_ID}"),
+            ]
+        );
+
+        // A login refused DNS leaves the record named, and still deletes the
+        // tunnel; the sentence points at a pasted token, not at a permission.
+        let (base, _) = fake_api(login_cloudflare);
+        let left = remove_with(&account, |token| Api::at(&base, token));
+        assert_eq!(left.0.len(), 1, "{left:?}");
+        assert!(left.0[0].contains("cctop.example.test"), "{left:?}");
+        assert!(left.0[0].contains("browser login"), "{left:?}");
     }
 
     #[test]

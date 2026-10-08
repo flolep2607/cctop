@@ -2,7 +2,10 @@
 //! that `--tunnel` comes up on a hostname that stays the same.
 //!
 //! The work is `cctop_core::cloudflare`'s; this is the command line around
-//! it. On a terminal it walks through the steps with the token typed
+//! it. With `--browser` it logs in the way `cloudflared tunnel login` does:
+//! the authorize page opens in a browser — or, over ssh or with none to open,
+//! its address is printed to open elsewhere — and the certificate comes back
+//! here. Otherwise, on a terminal it walks through the steps with the token typed
 //! invisibly. Piped, it reads one token from stdin and takes the suggestions —
 //! the first domain, the suggested name — unless `--zone` and `--hostname`
 //! say otherwise, so it can be scripted the way `cctop --add-account` can.
@@ -12,6 +15,7 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 
+use cctop_core::cloudflare::login::Login;
 use cctop_core::cloudflare::{self, Api, Pasted};
 use cctop_core::tunnel::{self, Account};
 
@@ -19,6 +23,7 @@ pub const HELP: &str = "\
 cctop tunnel — your own Cloudflare tunnel, for a link that stays the same
 
 USAGE:
+  cctop tunnel setup --browser [--hostname <NAME>]
   cctop tunnel setup [--zone <DOMAIN>] [--hostname <NAME>]
   cctop tunnel status
   cctop tunnel remove
@@ -29,7 +34,9 @@ tunnel: nothing to set up, but a new address every run, no Server-Sent Events
 your own free Cloudflare account has none of those limits and keeps one
 hostname. It needs a domain whose DNS is on Cloudflare.
 
-setup    Paste an API token (cctop prints a link that makes one with the three
+setup    With --browser, log in to Cloudflare in the browser and pick the
+         domain there: nothing to make or paste. Over ssh, the address to
+         open is printed. Without it, paste an API token (cctop prints a link that makes one with the three
          permissions it needs) and pick a domain: cctop creates the tunnel and
          its DNS records. A tunnel token from the dashboard works too. Piped,
          one token is read from stdin.
@@ -125,12 +132,16 @@ fn remove() -> i32 {
             }
         }
     }
+    if account.login {
+        println!("{}", cloudflare::login::FORGOTTEN);
+    }
     0
 }
 
 fn setup(argv: &[String]) -> anyhow::Result<i32> {
     let mut zone_given: Option<String> = None;
     let mut hostname_given: Option<String> = None;
+    let mut browser = false;
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
         let mut value = || {
@@ -141,6 +152,7 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
         match flag.as_str() {
             "--zone" => zone_given = Some(value()?),
             "--hostname" => hostname_given = Some(value()?),
+            "--browser" => browser = true,
             "-h" | "--help" => {
                 print!("{HELP}");
                 return Ok(0);
@@ -163,6 +175,16 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
     }
 
     let interactive = std::io::stdin().is_terminal();
+    if browser {
+        if zone_given.is_some() {
+            eprintln!("cctop: with --browser the domain is picked in the browser; drop --zone.");
+            return Ok(1);
+        }
+        let Some(account) = log_in(hostname_given, interactive)? else {
+            return Ok(1);
+        };
+        return connected(&account);
+    }
     let pasted = match interactive {
         true => {
             eprintln!(
@@ -213,13 +235,100 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
             None => return Ok(1),
         },
     };
-    tunnel::save_account(&account)?;
+    connected(&account)
+}
+
+/// Store `account` and say so.
+fn connected(account: &Account) -> anyhow::Result<i32> {
+    tunnel::save_account(account)?;
     match &account.hostname {
         Some(host) => eprintln!("Connected: https://{host}"),
         None => eprintln!("Connected; the hostname is learned when the tunnel first connects."),
     }
     eprintln!("`cctop serve --tunnel`, and t in the dashboard's serve panel, now use it.");
     Ok(0)
+}
+
+/// The browser path: the login, then a name on the domain picked there, then
+/// the same creation as a pasted token's. `None` after saying why on stderr.
+fn log_in(hostname_given: Option<String>, interactive: bool) -> anyhow::Result<Option<Account>> {
+    let login = Login::new();
+    // Over ssh the browser `xdg-open` would reach is not the user's, if there
+    // is one at all; the address goes where they can see it either way, as
+    // cloudflared prints it, and the certificate is fetched from here.
+    let opened = !cctop_core::clipboard::over_ssh() && cctop_serve::open_in_browser(login.url());
+    match opened {
+        true => eprintln!(
+            "A browser should have opened Cloudflare's login at:\n\n{}\n\nIf it did not, \
+             open that address yourself. Log in and pick the domain for the tunnel.",
+            login.url()
+        ),
+        false => eprintln!(
+            "Open this address in a browser, log in to Cloudflare and pick the domain for \
+             the tunnel:\n\n{}\n\nLeave this running: the login comes back here.",
+            login.url()
+        ),
+    }
+    eprintln!("\nWaiting for the login…");
+    let cert = match login.wait(&|| false) {
+        Ok(cert) => cert,
+        Err(e) => return Ok(refuse(&e)),
+    };
+    let api = Api::with(&cert.auth());
+    let zone = api.login_zone(&cert);
+    if let Some(zone) = &zone {
+        eprintln!("Logged in: the tunnel goes on {}.", zone.name);
+    }
+    let machine = cloudflare::machine_label();
+    let (zone, hostname) = match (zone, hostname_given) {
+        (Some(zone), Some(hostname)) => (zone, hostname),
+        (Some(zone), None) => {
+            let suggested = match cloudflare::suggest_hostname(&api, &zone, &machine) {
+                Ok(name) => name,
+                Err(e) => return Ok(refuse(&e)),
+            };
+            let hostname = match interactive {
+                true => {
+                    eprint!("Hostname [{suggested}]: ");
+                    Some(read_line()?)
+                        .filter(|h| !h.is_empty())
+                        .unwrap_or(suggested)
+                }
+                false => suggested,
+            };
+            (zone, hostname)
+        }
+        // The domain's name could not be read with the login's token: the
+        // user knows it, having just picked it.
+        (None, given) => {
+            let hostname = match (given, interactive) {
+                (Some(hostname), _) => hostname,
+                (None, true) => {
+                    eprint!(
+                        "Logged in. The address for the dashboard, on the domain you picked \
+                         (like cctop.example.com): "
+                    );
+                    read_line()?
+                }
+                (None, false) => {
+                    eprintln!(
+                        "cctop: logged in, but the domain's name could not be read; pass \
+                         --hostname <NAME> on it."
+                    );
+                    return Ok(None);
+                }
+            };
+            match cloudflare::login_zone_from(&cert.zone_id, &cert.account_id, &hostname) {
+                Ok(zone) => (zone, hostname),
+                Err(e) => return Ok(refuse(&e)),
+            }
+        }
+    };
+    eprintln!("Creating the tunnel and its DNS records…");
+    match cloudflare::create(&api, &zone, &hostname, &machine) {
+        Ok(account) => Ok(Some(account)),
+        Err(e) => Ok(refuse(&e)),
+    }
 }
 
 /// The API-token path: verify, pick a domain and a name, create. `None` after
