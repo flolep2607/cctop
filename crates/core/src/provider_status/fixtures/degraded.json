@@ -1,0 +1,27 @@
+{
+  "page": {"id": "01JMBBYAC6HGF2B8F5PP4Q6ZS8", "name": "OpenAI", "url": "https://status.openai.com", "updated_at": "2026-10-08T15:07:54.000Z"},
+  "components": [
+    {"id": "g", "name": "API", "status": "degraded_performance", "group": true},
+    {"id": "r", "name": "Responses", "status": "degraded_performance", "group": false},
+    {"id": "l", "name": "Login", "status": "partial_outage", "group": false},
+    {"id": "l2", "name": "Login", "status": "partial_outage", "group": false},
+    {"id": "i", "name": "Images", "status": "operational", "group": false}
+  ],
+  "incidents": [
+    {
+      "id": "01K6Z",
+      "name": "Increased error rates",
+      "status": "monitoring",
+      "impact": "minor",
+      "created_at": "2026-10-08T14:04:37.000Z",
+      "started_at": "2026-10-08T13:55:00.000Z",
+      "components": [],
+      "incident_updates": [
+        {"status": "investigating", "body": "We are investigating.", "created_at": "2026-10-08T14:04:37.000Z"},
+        {"status": "monitoring", "body": "We have applied the\n  mitigation   and are monitoring.", "created_at": "2026-10-08T15:07:54.000Z"}
+      ]
+    }
+  ],
+  "scheduled_maintenances": [],
+  "status": {"indicator": "minor", "description": "Partial System Degradation"}
+}
