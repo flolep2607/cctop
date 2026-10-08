@@ -410,8 +410,15 @@ impl Attach {
     /// that need a pane without a shim behind it.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test() -> Self {
+        Attach::for_test_into(Box::new(std::io::sink()))
+    }
+
+    /// [`Attach::for_test`] writing what it would send the shim into `input`,
+    /// for a test that needs to see what reached the agent.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_into(input: Box<dyn Write + Send>) -> Self {
         Attach {
-            input: Box::new(std::io::sink()),
+            input,
             close: Box::new(|| {}),
             pending: std::sync::Arc::default(),
             closed: std::sync::Arc::default(),
@@ -1089,12 +1096,14 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
     // Keys, until the detach sequence. Shutting the socket down is what stops
     // the reader below, which is otherwise parked on a blocking read.
     {
+        let window = crate::settings::Settings::load().paste_debounce();
         let mut input = input.try_clone()?;
         let socket = stream.try_clone()?;
         std::thread::spawn(move || {
             let mut stdin = std::io::stdin();
             let mut buf = [0u8; 1024];
             let mut tail = Vec::new();
+            let mut pastes = crate::paste::PasteFilter::new(window, "attach");
             while let Ok(n) = stdin.read(&mut buf) {
                 // A terminal writes an escape sequence in one go, so looking for
                 // the detach key within a single read is enough.
@@ -1102,17 +1111,22 @@ fn proxy(pid: u32) -> anyhow::Result<i32> {
                     break;
                 }
                 // Verbatim except bare-motion mouse reports, which this end
-                // has no business forwarding — see `strip_hover_reports`.
+                // has no business forwarding — see `strip_hover_reports` — and
+                // a paste repeated straight after itself, see `crate::paste`.
                 let body = strip_hover_reports(&buf[..n], &mut tail);
+                let body = pastes.feed(&body, std::time::Instant::now());
                 crate::elog::bytes("attach", "stdin", "in", &body, serde_json::json!({}));
-                if !body.is_empty()
-                    && input
-                        .write_all(&frame::encode(frame::KEYS, &body))
-                        .and_then(|()| input.flush())
-                        .is_err()
+                // A paste bigger than a frame goes in several, as
+                // `send_paste` sends it: one frame past `MAX_FRAME` would
+                // desynchronise the stream.
+                if body
+                    .chunks(PASTE_CHUNK)
+                    .any(|c| input.write_all(&frame::encode(frame::KEYS, c)).is_err())
+                    || input.flush().is_err()
                 {
                     break;
                 }
+                pastes.delivered(std::time::Instant::now());
             }
             let _ = socket.shutdown(std::net::Shutdown::Both);
         });

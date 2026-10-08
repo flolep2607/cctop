@@ -899,23 +899,28 @@ fn pump_input(mut master: File) {
     let mut stdin = std::io::stdin();
     let mut buf = [0u8; 1024];
     let mut tail = Vec::new();
+    let window = crate::settings::Settings::load().paste_debounce();
+    let mut pastes = crate::paste::PasteFilter::new(window, "run");
     while let Ok(n) = stdin.read(&mut buf) {
         if n == 0 {
             break;
         }
         // Everything goes through whole except bare-motion mouse reports —
-        // see `attach::strip_hover_reports`.
-        let bytes = crate::attach::strip_hover_reports(&buf[..n], &mut tail);
+        // see `attach::strip_hover_reports` — and a paste repeated straight
+        // after itself, see `crate::paste`.
+        let stripped = crate::attach::strip_hover_reports(&buf[..n], &mut tail);
+        let bytes = pastes.feed(&stripped, std::time::Instant::now());
         crate::elog::bytes(
             "pty",
             "stdin",
             "in",
             &bytes,
-            serde_json::json!({ "dropped": n - bytes.len() }),
+            serde_json::json!({ "dropped": n - stripped.len() }),
         );
         if !bytes.is_empty() && master.write_all(&bytes).is_err() {
             break;
         }
+        pastes.delivered(std::time::Instant::now());
     }
 }
 

@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 17] = [
+pub const SETTINGS: [(&str, &str, &str); 18] = [
     (
         "theme",
         "\"auto\"",
@@ -82,6 +82,11 @@ pub const SETTINGS: [(&str, &str, &str); 17] = [
         "false",
         "Read each agent's screen in a tab for its state, over hooks",
     ),
+    (
+        "paste_debounce_ms",
+        "250",
+        "Drop a paste repeated within this many ms; 0 = off",
+    ),
     // The footer.
     (
         "footer_hide",
@@ -104,6 +109,12 @@ pub const SETTINGS: [(&str, &str, &str); 17] = [
 /// counts, short enough that yesterday's forgotten sessions do. The number
 /// [`SETTINGS`] spells for it must agree, which a test holds it to.
 pub const IDLE_AFTER_HOURS: f64 = 6.0;
+
+/// `paste_debounce_ms`'s default. Some layer between a terminal and an agent
+/// can deliver a paste twice when the machine is loaded, and nobody pastes the
+/// same text twice within a quarter of a second on purpose — see
+/// [`crate::paste`]. [`SETTINGS`] must spell the same number.
+pub const PASTE_DEBOUNCE_MS: u64 = 250;
 
 /// Every dashboard action a `[keys]` entry can rebind: its name, the key it is
 /// on by default, and what it does.
@@ -212,6 +223,9 @@ pub struct Settings {
     /// contract, and a release that rewords them goes unread until cctop
     /// catches up.
     pub read_screen: Option<bool>,
+    /// How close an identical paste must follow the last to be dropped — see
+    /// [`Settings::paste_debounce`].
+    pub paste_debounce_ms: Option<u64>,
     /// Names of footer items to leave off — badges, hints and the share corner.
     pub footer_hide: Option<String>,
     /// A static line for the footer.
@@ -291,6 +305,11 @@ impl Settings {
                         .filter(|p| *p <= 100.0)
                         .map(|v| out.alert_errors = Some(v))
                         .is_none(),
+                    "paste_debounce_ms" => item
+                        .as_integer()
+                        .and_then(|n| u64::try_from(n).ok())
+                        .map(|v| out.paste_debounce_ms = Some(v))
+                        .is_none(),
                     "alert_error_calls" => item
                         .as_integer()
                         .and_then(|n| u64::try_from(n).ok())
@@ -349,6 +368,7 @@ impl Settings {
             "alert_error_calls" => self.alert_error_calls.map(|v| v.to_string()),
             "alert_stall" => self.alert_stall.map(|v| v.to_string()),
             "idle_after" => self.idle_after.map(|v| v.to_string()),
+            "paste_debounce_ms" => self.paste_debounce_ms.map(|v| v.to_string()),
             "footer_hide" => self.footer_hide.as_ref().map(|v| format!("{v:?}")),
             "footer_note" => self.footer_note.as_ref().map(|v| format!("{v:?}")),
             "footer_command" => self.footer_command.as_ref().map(|v| format!("{v:?}")),
@@ -405,6 +425,12 @@ impl Settings {
     /// How long a live session has to have been quiet to count as idle.
     pub fn idle_after_ms(&self) -> i64 {
         (self.idle_after.unwrap_or(IDLE_AFTER_HOURS) * 3_600_000.0) as i64
+    }
+
+    /// How soon after a paste an identical one is taken for an echo and
+    /// dropped. Zero turns that off.
+    pub fn paste_debounce(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.paste_debounce_ms.unwrap_or(PASTE_DEBOUNCE_MS))
     }
 }
 
@@ -794,6 +820,24 @@ mod tests {
             assert_eq!(is_toggle(name), expected, "{name} and the parser disagree");
         }
         assert!(!is_toggle("no_such_setting"));
+    }
+
+    #[test]
+    fn paste_debounce_is_milliseconds_and_zero_is_off() {
+        let default = SETTINGS
+            .iter()
+            .find(|s| s.0 == "paste_debounce_ms")
+            .unwrap()
+            .1;
+        assert_eq!(default.parse::<u64>().unwrap(), PASTE_DEBOUNCE_MS);
+        assert_eq!(
+            Settings::default().paste_debounce(),
+            std::time::Duration::from_millis(250)
+        );
+        let off = Settings::parse("[settings]\npaste_debounce_ms = 0\n");
+        assert!(off.paste_debounce().is_zero());
+        let bad = Settings::parse("[settings]\npaste_debounce_ms = -1\n");
+        assert_eq!(bad.problems.len(), 1, "{:?}", bad.problems);
     }
 
     #[test]
