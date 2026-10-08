@@ -1,6 +1,8 @@
 [package]
 name = "cctop-serve"
-version.workspace = true
+# Its own version, not the release's: bumped only in a release that changes
+# this crate. The rules are in tools/release-plan.sh, which CI enforces.
+version = "0.28.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "Internal to cctop: the web server. No stable API; use the cctop binary."
