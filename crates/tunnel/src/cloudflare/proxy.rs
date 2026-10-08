@@ -1,6 +1,7 @@
 //! Per-request HTTP/1.1 proxy: bridge an inbound capnp-framed
-//! stream from the edge to the local TCP listener the caller
-//! wants to expose at `https://<sub>.trycloudflare.com`.
+//! stream from the edge to the local TCP listener that answers the
+//! request's hostname — [`Routes`] says which. A hostname nobody
+//! routed gets a 404 from here, without touching any local port.
 //!
 //! Two code paths share the same entry point:
 //!
@@ -16,8 +17,8 @@
 //!   responses run two concurrent byte pumps until either half
 //!   closes. The socket is dropped at the end; no pooling.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::{AsyncReadExt, AsyncWriteExt};
@@ -25,9 +26,11 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use crate::error::TunnelError;
-use crate::pool::Pool;
-use crate::stream::{
+use crate::Error;
+use crate::Routes;
+
+use super::pool::Pool;
+use super::stream::{
     self, ConnectRequest, ConnectionType, HTTP_HEADER_KEY, HTTP_HOST_KEY, HTTP_METHOD_KEY,
     HTTP_STATUS_KEY,
 };
@@ -47,19 +50,27 @@ pub const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Hard cap on the response header section.
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 
-/// Drive one inbound request stream to completion. Reads the
-/// `ConnectRequest`, dispatches by type, writes the
-/// `ConnectResponse` back, pumps the body.
-pub async fn handle_inbound_stream(
-    local_port: u16,
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+/// Drive one inbound data stream to completion: read the
+/// `ConnectRequest`, pick the local port for its hostname, write the
+/// `ConnectResponse` back, pump the body.
+pub async fn handle_inbound_stream<R, W>(
+    routes: &Routes,
+    mut reader: R,
+    mut writer: W,
     counters: StreamCounters,
     pool: Arc<Pool>,
-) -> Result<(), TunnelError> {
-    let (mut reader, mut writer) = stream::split(send, recv);
+) -> Result<(), Error>
+where
+    R: futures::io::AsyncRead + Unpin,
+    W: futures::io::AsyncWrite + Unpin,
+{
     let req = stream::read_connect_request(&mut reader).await?;
     debug!(dest = %req.dest, ty = ?req.conn_type, "inbound stream");
+    let host = request_host(&req);
+    let Some(local_port) = routes.port_for(&host) else {
+        debug!(%host, "no route for this hostname");
+        return write_not_found(&mut writer).await;
+    };
 
     match req.conn_type {
         ConnectionType::Http | ConnectionType::Websocket => {
@@ -69,6 +80,22 @@ pub async fn handle_inbound_stream(
             proxy_tcp(local_port, &req, &mut reader, &mut writer, &counters).await
         }
     }
+}
+
+/// The hostname a request was for: the `HttpHost` the edge sends, or the
+/// authority of its `dest` URL when that is missing.
+fn request_host(req: &ConnectRequest) -> String {
+    if let Some(host) = req.meta(HTTP_HOST_KEY).filter(|h| !h.is_empty()) {
+        return host.to_string();
+    }
+    let rest = req
+        .dest
+        .split_once("://")
+        .map_or(req.dest.as_str(), |(_, r)| r);
+    rest.split(['/', '?'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 // ── Request shape analysis ───────────────────────────────────────────────────
@@ -189,7 +216,7 @@ async fn proxy_http<R, W>(
     mut to_edge: W,
     counters: StreamCounters,
     pool: Arc<Pool>,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
     W: futures::io::AsyncWrite + Unpin,
@@ -197,7 +224,7 @@ where
     let req_shape = analyse_request(&request);
 
     // Acquire socket (pool hit or fresh connect).
-    let tcp = match tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, pool.acquire()).await {
+    let tcp = match tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, pool.acquire(local_port)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             warn!(error = %e, local_port, "TCP connect refused");
@@ -216,7 +243,7 @@ where
     tcp_write
         .write_all(head.as_bytes())
         .await
-        .map_err(|e| TunnelError::Internal(format!("tcp write head: {e}")))?;
+        .map_err(|e| Error::Internal(format!("tcp write head: {e}")))?;
 
     if req_shape.poolable() {
         // ── Pooled framed path ──
@@ -240,7 +267,7 @@ async fn run_pooled<R, W>(
     counters: StreamCounters,
     pool: &Pool,
     local_port: u16,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
     W: futures::io::AsyncWrite + Unpin,
@@ -250,10 +277,10 @@ where
 
     // 1. Forward request body bytes. Bound by Content-Length if
     //    present; otherwise zero bytes (GET-style).
-    if let Some(n) = req_shape.content_length {
-        if n > 0 {
-            pump_n_futures_to_tokio(&mut from_edge, &mut tcp_write, n, &in_counter).await?;
-        }
+    if let Some(n) = req_shape.content_length
+        && n > 0
+    {
+        pump_n_futures_to_tokio(&mut from_edge, &mut tcp_write, n, &in_counter).await?;
     }
     // Crucially: do NOT shutdown tcp_write. We want the socket to
     // stay available for the next request from the pool.
@@ -277,7 +304,7 @@ where
         to_edge
             .write_all(&leftover)
             .await
-            .map_err(|e| TunnelError::Internal(format!("write leftover body: {e}")))?;
+            .map_err(|e| Error::Internal(format!("write leftover body: {e}")))?;
         out_counter.fetch_add(leftover.len() as u64, Ordering::Relaxed);
     }
 
@@ -291,18 +318,17 @@ where
         to_edge
             .close()
             .await
-            .map_err(|e| TunnelError::Internal(format!("close to_edge: {e}")))?;
+            .map_err(|e| Error::Internal(format!("close to_edge: {e}")))?;
 
         // Reunite the halves to release the whole stream back to
         // the pool. quinn / tokio give us `OwnedReadHalf` +
         // `OwnedWriteHalf`; `reunite` returns the original socket.
         match tcp_read.reunite(tcp_write) {
-            Ok(socket) => pool.release(socket).await,
+            Ok(socket) => pool.release(local_port, socket).await,
             Err(e) => {
                 warn!(error = %e, "tcp halves did not reunite; dropping socket");
             }
         }
-        let _ = local_port; // touched to keep the param live for logs in future
         Ok(())
     } else {
         // 5b. Response wasn't poolable after all (no Content-Length,
@@ -314,7 +340,7 @@ where
         to_edge
             .close()
             .await
-            .map_err(|e| TunnelError::Internal(format!("close to_edge: {e}")))?;
+            .map_err(|e| Error::Internal(format!("close to_edge: {e}")))?;
         Ok(())
     }
 }
@@ -325,7 +351,7 @@ async fn run_bidi<R, W>(
     mut tcp_read: tokio::net::tcp::OwnedReadHalf,
     mut tcp_write: tokio::net::tcp::OwnedWriteHalf,
     counters: StreamCounters,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
     W: futures::io::AsyncWrite + Unpin,
@@ -339,7 +365,7 @@ where
     let edge_to_local = async {
         let _ = pump_futures_to_tokio_counted(&mut from_edge, &mut tcp_write, &in_counter).await;
         let _ = tcp_write.shutdown().await;
-        Ok::<(), TunnelError>(())
+        Ok::<(), Error>(())
     };
     let local_to_edge = async {
         let (status, headers, leftover) = read_http_response_head(&mut tcp_read).await?;
@@ -360,7 +386,7 @@ where
             to_edge
                 .write_all(&leftover)
                 .await
-                .map_err(|e| TunnelError::Internal(format!("write leftover body: {e}")))?;
+                .map_err(|e| Error::Internal(format!("write leftover body: {e}")))?;
             out_counter.fetch_add(leftover.len() as u64, Ordering::Relaxed);
         }
         pump_tokio_to_futures_counted(&mut tcp_read, &mut to_edge, &out_counter).await
@@ -371,7 +397,7 @@ where
     to_edge
         .close()
         .await
-        .map_err(|e| TunnelError::Internal(format!("close to_edge: {e}")))?;
+        .map_err(|e| Error::Internal(format!("close to_edge: {e}")))?;
     Ok(())
 }
 
@@ -457,7 +483,7 @@ fn extract_path(dest: &str) -> String {
     "/".into()
 }
 
-async fn write_error_response<W>(writer: &mut W, status: u16, msg: &str) -> Result<(), TunnelError>
+async fn write_error_response<W>(writer: &mut W, status: u16, msg: &str) -> Result<(), Error>
 where
     W: futures::io::AsyncWrite + Unpin,
 {
@@ -467,24 +493,39 @@ where
     Ok(())
 }
 
+/// A plain 404 with an empty body — a response, not a `ConnectResponse`
+/// error, which the edge would turn into a 502 of its own.
+async fn write_not_found<W>(writer: &mut W) -> Result<(), Error>
+where
+    W: futures::io::AsyncWrite + Unpin,
+{
+    let content_length = format!("{HTTP_HEADER_KEY}:Content-Length");
+    let meta = [(HTTP_STATUS_KEY, "404"), (content_length.as_str(), "0")];
+    stream::write_connect_response(writer, "", &meta).await?;
+    writer
+        .close()
+        .await
+        .map_err(|e| Error::Internal(format!("close to_edge: {e}")))
+}
+
 async fn read_http_response_head(
     tcp: &mut (impl tokio::io::AsyncRead + Unpin),
-) -> Result<(u16, Vec<(String, String)>, Vec<u8>), TunnelError> {
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Error> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 2048];
     loop {
         let n = tcp
             .read(&mut tmp)
             .await
-            .map_err(|e| TunnelError::Internal(format!("tcp read head: {e}")))?;
+            .map_err(|e| Error::Internal(format!("tcp read head: {e}")))?;
         if n == 0 {
-            return Err(TunnelError::Internal(
+            return Err(Error::Internal(
                 "local origin closed before sending response head".into(),
             ));
         }
         buf.extend_from_slice(&tmp[..n]);
         if buf.len() > MAX_HEADER_BYTES {
-            return Err(TunnelError::Internal(format!(
+            return Err(Error::Internal(format!(
                 "response header exceeds {MAX_HEADER_BYTES} bytes"
             )));
         }
@@ -492,12 +533,12 @@ async fn read_http_response_head(
         let mut resp = httparse::Response::new(&mut headers);
         match resp
             .parse(&buf)
-            .map_err(|e| TunnelError::Internal(format!("httparse: {e}")))?
+            .map_err(|e| Error::Internal(format!("httparse: {e}")))?
         {
             httparse::Status::Complete(consumed) => {
                 let status = resp
                     .code
-                    .ok_or_else(|| TunnelError::Internal("response had no status code".into()))?;
+                    .ok_or_else(|| Error::Internal("response had no status code".into()))?;
                 let pairs = resp
                     .headers
                     .iter()
@@ -522,14 +563,14 @@ async fn proxy_tcp<R, W>(
     from_edge: &mut R,
     to_edge: &mut W,
     counters: &StreamCounters,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
     W: futures::io::AsyncWrite + Unpin,
 {
     let tcp = TcpStream::connect(("127.0.0.1", local_port))
         .await
-        .map_err(|e| TunnelError::Internal(format!("tcp connect: {e}")))?;
+        .map_err(|e| Error::Internal(format!("tcp connect: {e}")))?;
     let (mut r, mut w) = tcp.into_split();
     stream::write_connect_response(to_edge, "", &[]).await?;
     let edge_to_local = pump_futures_to_tokio_counted(from_edge, &mut w, &counters.bytes_in);
@@ -544,7 +585,7 @@ async fn pump_futures_to_tokio_counted<R, W>(
     mut src: R,
     dst: &mut W,
     counter: &AtomicU64,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -554,13 +595,13 @@ where
         let n = src
             .read(&mut buf)
             .await
-            .map_err(|e| TunnelError::Internal(format!("read: {e}")))?;
+            .map_err(|e| Error::Internal(format!("read: {e}")))?;
         if n == 0 {
             break;
         }
         dst.write_all(&buf[..n])
             .await
-            .map_err(|e| TunnelError::Internal(format!("write: {e}")))?;
+            .map_err(|e| Error::Internal(format!("write: {e}")))?;
         counter.fetch_add(n as u64, Ordering::Relaxed);
     }
     Ok(())
@@ -570,7 +611,7 @@ async fn pump_tokio_to_futures_counted<R, W>(
     src: &mut R,
     dst: &mut W,
     counter: &AtomicU64,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: futures::io::AsyncWrite + Unpin,
@@ -580,13 +621,13 @@ where
         let n = src
             .read(&mut buf)
             .await
-            .map_err(|e| TunnelError::Internal(format!("read: {e}")))?;
+            .map_err(|e| Error::Internal(format!("read: {e}")))?;
         if n == 0 {
             break;
         }
         dst.write_all(&buf[..n])
             .await
-            .map_err(|e| TunnelError::Internal(format!("write: {e}")))?;
+            .map_err(|e| Error::Internal(format!("write: {e}")))?;
         counter.fetch_add(n as u64, Ordering::Relaxed);
     }
     Ok(())
@@ -599,7 +640,7 @@ async fn pump_n_futures_to_tokio<R, W>(
     dst: &mut W,
     mut n: u64,
     counter: &AtomicU64,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -610,15 +651,15 @@ where
         let read = src
             .read(&mut buf[..want])
             .await
-            .map_err(|e| TunnelError::Internal(format!("read: {e}")))?;
+            .map_err(|e| Error::Internal(format!("read: {e}")))?;
         if read == 0 {
-            return Err(TunnelError::Internal(format!(
+            return Err(Error::Internal(format!(
                 "source EOF with {n} bytes still expected"
             )));
         }
         dst.write_all(&buf[..read])
             .await
-            .map_err(|e| TunnelError::Internal(format!("write: {e}")))?;
+            .map_err(|e| Error::Internal(format!("write: {e}")))?;
         counter.fetch_add(read as u64, Ordering::Relaxed);
         n -= read as u64;
     }
@@ -632,7 +673,7 @@ async fn pump_n_tokio_to_futures<R, W>(
     dst: &mut W,
     mut n: u64,
     counter: &AtomicU64,
-) -> Result<(), TunnelError>
+) -> Result<(), Error>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: futures::io::AsyncWrite + Unpin,
@@ -643,15 +684,15 @@ where
         let read = src
             .read(&mut buf[..want])
             .await
-            .map_err(|e| TunnelError::Internal(format!("read: {e}")))?;
+            .map_err(|e| Error::Internal(format!("read: {e}")))?;
         if read == 0 {
-            return Err(TunnelError::Internal(format!(
+            return Err(Error::Internal(format!(
                 "tcp EOF with {n} bytes still expected"
             )));
         }
         dst.write_all(&buf[..read])
             .await
-            .map_err(|e| TunnelError::Internal(format!("write: {e}")))?;
+            .map_err(|e| Error::Internal(format!("write: {e}")))?;
         counter.fetch_add(read as u64, Ordering::Relaxed);
         n -= read as u64;
     }
@@ -736,14 +777,20 @@ mod tests {
             metadata: vec![
                 (HTTP_METHOD_KEY.into(), "GET".into()),
                 (HTTP_HOST_KEY.into(), "x".into()),
-                (format!("{HTTP_HEADER_KEY}:Sec-Websocket-Key"), "dGhlIHNhbXBsZQ==".into()),
+                (
+                    format!("{HTTP_HEADER_KEY}:Sec-Websocket-Key"),
+                    "dGhlIHNhbXBsZQ==".into(),
+                ),
             ],
         };
         let s = analyse_request(&req);
         assert!(s.is_upgrade);
         assert!(!s.poolable());
         let head = build_request_head(&req, s.poolable());
-        assert!(head.starts_with("GET /share?token=t HTTP/1.1\r\n"), "{head}");
+        assert!(
+            head.starts_with("GET /share?token=t HTTP/1.1\r\n"),
+            "{head}"
+        );
         assert!(head.contains("Connection: Upgrade\r\n"), "{head}");
         assert!(head.contains("Upgrade: websocket\r\n"), "{head}");
         assert!(head.contains("Sec-WebSocket-Version: 13\r\n"), "{head}");

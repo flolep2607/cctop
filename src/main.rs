@@ -2,6 +2,7 @@ mod cli;
 mod doctor;
 mod mcp;
 mod recall;
+mod tunnel;
 mod wait;
 mod why;
 
@@ -234,6 +235,15 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("sandbox") {
             std::process::exit(sandbox::run_held(&argv[2..])?);
+        }
+    }
+
+    // `cctop tunnel` alongside `serve`, whose tunnel it connects: a bare word,
+    // like the others here, and well below `hook`.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("tunnel") {
+            std::process::exit(tunnel::run(&argv[2..])?);
         }
     }
 
@@ -513,6 +523,7 @@ fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> 
     Ok(ui::Served {
         local: serving.local.clone(),
         public: serving.public.clone(),
+        tunnel_fallback: serving.tunnel_fallback.clone(),
         readonly: serving.readonly.clone(),
         actions: serving.actions,
         // The server moves in with the closure, so dropping what the dashboard

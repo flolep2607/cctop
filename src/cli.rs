@@ -68,6 +68,7 @@ Each command takes --help for the details.";
                       cctop as <account> <agent> [args…]\n       \
                       cctop sandbox <host>:<path> [claude args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
+                      cctop tunnel setup | status | remove\n       \
                       cctop optimize | compare | yield | burn | log\n       \
                       cctop yolo log [--session ID] [--since WHEN] [-n N] [--json] [-f]\n       \
                       cctop recall <query> [--read SESSION PASSAGE]\n       \

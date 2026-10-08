@@ -33,6 +33,9 @@ pub struct Served {
     pub local: String,
     /// The public one, when a tunnel was asked for and registered.
     pub public: Option<String>,
+    /// Why a quick tunnel stands in for the connected account's, when one
+    /// does.
+    pub tunnel_fallback: Option<String>,
     /// The same page, read-only. Empty when the run has no token.
     pub readonly: String,
     /// Whether the page may act on sessions as well as show them.
@@ -256,7 +259,7 @@ impl App {
                 rx,
                 since: Instant::now(),
             });
-            self.set_status("Opening a tunnel to trycloudflare…");
+            self.set_status("Opening a tunnel…");
             return;
         }
         match start(options) {
@@ -301,7 +304,12 @@ impl App {
                 // Something to look at immediately: the page's first request
                 // would otherwise find the empty snapshot it was built with.
                 serving.publish_table(&self.sessions, &self.quota, &self.outage.status);
-                self.set_status("On the internet — click the link, or B to copy it");
+                match &serving.tunnel_fallback {
+                    // Said in the status line because the link in the panel is
+                    // not the bookmarked one, and nothing else on screen says so.
+                    Some(why) => self.set_status(format!("On a quick tunnel instead: {why}")),
+                    None => self.set_status("On the internet — click the link, or B to copy it"),
+                }
                 self.serving = Some(serving);
             }
             Err(error) => {
@@ -344,6 +352,7 @@ mod tests {
         let served = Served {
             local: format!("http://127.0.0.1:7777/?t={token}"),
             public: None,
+            tunnel_fallback: None,
             readonly: "http://127.0.0.1:7777/?t=0b1e5d7a9c3f6e284d17a5c09b3f8e61".into(),
             actions: true,
             publish: Box::new(|_, _, _| {}),

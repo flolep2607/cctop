@@ -22,35 +22,15 @@
 
 use std::time::Duration;
 
-use capnp::capability::Promise;
-use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 
-// ── Stub server-side bootstrap ────────────────────────────────────────────────
-//
-// cloudflared opens the control RPC as a bidirectional channel: it
-// calls `registerConnection` outbound AND serves a `CloudflaredServer`
-// implementation back so the edge can push config / open UDP sessions.
-//
-// We don't implement those server methods (HTTP-only scope), but we
-// still need to expose a bootstrap object — otherwise the edge's
-// liveness probe (which resolves the bootstrap as part of its keep-
-// alive) fails with `no bootstrap capability` and the edge marks
-// the tunnel offline (HTTP 530 to public requests).
-//
-// Each method returns `unimplemented` by default thanks to the
-// trait's default impl, so a marker struct is all we need.
-
-struct StubCloudflaredServer;
-
-impl tunnelrpc_capnp::session_manager::Server for StubCloudflaredServer {}
-impl tunnelrpc_capnp::configuration_manager::Server for StubCloudflaredServer {}
-impl tunnelrpc_capnp::cloudflared_server::Server for StubCloudflaredServer {}
-use tokio::time::timeout;
+use std::fmt;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::error::TunnelError;
+use super::config::{ConfigServer, IngressTx};
+use crate::Error;
 use crate::tunnelrpc_capnp;
 
 /// Sentinel error string the edge returns when the same connection
@@ -63,10 +43,20 @@ pub const DUPLICATE_CONNECTION_ERROR: &str =
 pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Auth blob the edge expects. Mirror of `TunnelAuth` in the schema.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TunnelAuth {
     pub account_tag: String,
     pub tunnel_secret: Vec<u8>,
+}
+
+/// By hand, because a derived one prints the secret.
+impl fmt::Debug for TunnelAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelAuth")
+            .field("account_tag", &"[redacted]")
+            .field("tunnel_secret", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Connection options sent on register. Mirror of `ConnectionOptions`
@@ -85,10 +75,10 @@ pub struct ConnectionOptions {
 }
 
 impl ConnectionOptions {
-    /// Sensible default options to send on a brand-new quick tunnel.
-    /// Features mirror what a recent cloudflared advertises that the
-    /// edge accepts even for anonymous quick tunnels.
-    pub fn default_for_quick_tunnel(version: &str) -> Self {
+    /// The options to register with. Features mirror what a recent
+    /// cloudflared advertises; `allow_remote_config` is the one that has the
+    /// edge push a dashboard-managed tunnel's ingress rules.
+    pub fn default_for(version: &str) -> Self {
         Self {
             client_id: *Uuid::new_v4().as_bytes(),
             // Mirror cloudflared `features/features.go::defaultFeatures`
@@ -189,12 +179,13 @@ pub async fn register_connection(
     tunnel_id: Uuid,
     conn_index: u8,
     options: &ConnectionOptions,
-) -> Result<(RegistrationDetails, ControlSession), TunnelError> {
+    ingress: IngressTx,
+) -> Result<(RegistrationDetails, ControlSession), Error> {
     debug!(%tunnel_id, conn_index, "opening control stream");
     let (send, recv) = conn
         .open_bi()
         .await
-        .map_err(|e| TunnelError::Register(format!("open_bi on control stream: {e}")))?;
+        .map_err(|e| Error::Register(format!("open_bi on control stream: {e}")))?;
     // capnp-rpc's `RpcSystem` is `!Send` (internal Rc<RefCell<_>>),
     // so we can't drive it from a tokio task. Spawn a dedicated OS
     // thread with its own current-thread tokio runtime + LocalSet
@@ -204,8 +195,7 @@ pub async fn register_connection(
     // returns only when the ControlSession is dropped, signalled
     // through `shutdown_rx`, OR when the edge tears down the
     // control stream from its side.
-    let (done_tx, done_rx) =
-        tokio::sync::oneshot::channel::<Result<RegistrationDetails, TunnelError>>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<RegistrationDetails, Error>>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<ShutdownCommand>();
     let (driver_done_tx, driver_done_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -232,11 +222,15 @@ pub async fn register_connection(
                     rpc_twoparty_capnp::Side::Client,
                     Default::default(),
                 ));
-                // Expose a stub CloudflaredServer so the edge has
-                // something to resolve when it probes our bootstrap
-                // for liveness. See the type's doc comment above.
+                // cloudflared serves its own interface back on the control
+                // stream, and the edge resolves that bootstrap as part of its
+                // liveness probe: without one it reports `no bootstrap
+                // capability` and marks the tunnel offline (530s to the
+                // public). The same server answers configuration pushes on
+                // RPC streams, so it is that one, whichever road the edge
+                // takes.
                 let stub: tunnelrpc_capnp::cloudflared_server::Client =
-                    capnp_rpc::new_client(StubCloudflaredServer);
+                    capnp_rpc::new_client(ConfigServer::new(ingress));
                 let mut rpc_system = RpcSystem::new(network, Some(stub.client));
                 let server: tunnelrpc_capnp::registration_server::Client =
                     rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
@@ -258,15 +252,15 @@ pub async fn register_connection(
                 let response_promise = request.send().promise;
 
                 let call = async {
-                    let reply = response_promise.await.map_err(|e| {
-                        TunnelError::Register(format!("register_connection RPC: {e}"))
-                    })?;
+                    let reply = response_promise
+                        .await
+                        .map_err(|e| Error::Register(format!("register_connection RPC: {e}")))?;
                     let response_reader = reply
                         .get()
-                        .map_err(|e| TunnelError::Register(format!("response root: {e}")))?;
+                        .map_err(|e| Error::Register(format!("response root: {e}")))?;
                     let result = response_reader
                         .get_result()
-                        .map_err(|e| TunnelError::Register(format!("response.result: {e}")))?;
+                        .map_err(|e| Error::Register(format!("response.result: {e}")))?;
                     decode_connection_response(result)
                 };
 
@@ -293,12 +287,12 @@ pub async fn register_connection(
                         }
                         // 3. RPC system died (edge dropped stream, etc).
                         _ = &mut rpc_system => {
-                            if !sent_done {
-                                if let Some(tx) = done_tx.take() {
-                                    let _ = tx.send(Err(TunnelError::Register(
-                                        "RPC system terminated before call completed".into(),
-                                    )));
-                                }
+                            if !sent_done
+                                && let Some(tx) = done_tx.take()
+                            {
+                                let _ = tx.send(Err(Error::Register(
+                                    "RPC system terminated before call completed".into(),
+                                )));
                             }
                             break;
                         }
@@ -310,10 +304,18 @@ pub async fn register_connection(
                 // mirrors cloudflared's `GracefulShutdown` —
                 // it lets the edge stop routing requests to our
                 // POP before we tear the QUIC stream down.
-                if let Some(ShutdownCommand::Graceful(grace)) = shutdown_kind {
-                    if sent_done {
-                        let req = server.unregister_connection_request();
-                        let _ = tokio::time::timeout(grace, req.send().promise).await;
+                //
+                // The RPC system is driven alongside the call: nothing else
+                // polls it once the loop above has ended, and a call nobody
+                // carries waits out the whole grace period for an answer that
+                // cannot arrive.
+                if let Some(ShutdownCommand::Graceful(grace)) = shutdown_kind
+                    && sent_done
+                {
+                    let unregister = server.unregister_connection_request().send().promise;
+                    tokio::select! {
+                        _ = tokio::time::timeout(grace, unregister) => {}
+                        _ = &mut rpc_system => {}
                     }
                 }
 
@@ -323,14 +325,19 @@ pub async fn register_connection(
                 let _ = driver_done_tx.send(());
             });
         })
-        .map_err(|e| TunnelError::Internal(format!("spawn rpc driver thread: {e}")))?;
+        .map_err(|e| Error::Internal(format!("spawn rpc driver thread: {e}")))?;
 
     let details = tokio::time::timeout(DEFAULT_RPC_TIMEOUT, done_rx)
         .await
-        .map_err(|_| TunnelError::Register("register_connection RPC timed out".into()))?
-        .map_err(|_| TunnelError::Register("RPC driver dropped result channel".into()))??;
+        .map_err(|_| Error::Register("register_connection RPC timed out".into()))?
+        .map_err(|_| Error::Register("RPC driver dropped result channel".into()))??;
 
-    info!(uuid = %details.uuid, location = %details.location, "registered with edge");
+    info!(
+        uuid = %details.uuid,
+        location = %details.location,
+        remotely_managed = details.tunnel_is_remotely_managed,
+        "registered with edge"
+    );
 
     Ok((
         details,
@@ -355,7 +362,7 @@ fn build_register_request(
         tunnelrpc_capnp::registration_server::register_connection_params::Owned,
         tunnelrpc_capnp::registration_server::register_connection_results::Owned,
     >,
-    TunnelError,
+    Error,
 > {
     let mut request = server.register_connection_request();
     {
@@ -393,36 +400,42 @@ fn build_register_request(
 
 fn decode_connection_response(
     response: tunnelrpc_capnp::connection_response::Reader,
-) -> Result<RegistrationDetails, TunnelError> {
+) -> Result<RegistrationDetails, Error> {
     use tunnelrpc_capnp::connection_response::result::WhichReader;
     let result = response.get_result();
     match result
         .which()
-        .map_err(|e| TunnelError::Register(format!("ConnectionResponse union: {e:?}")))?
+        .map_err(|e| Error::Register(format!("ConnectionResponse union: {e:?}")))?
     {
         WhichReader::Error(err_reader) => {
-            let err = err_reader
-                .map_err(|e| TunnelError::Register(format!("ConnectionError reader: {e}")))?;
+            let err =
+                err_reader.map_err(|e| Error::Register(format!("ConnectionError reader: {e}")))?;
             let cause = err
                 .get_cause()
                 .ok()
                 .and_then(|t| t.to_string().ok())
                 .unwrap_or_else(|| "<missing cause>".into());
             if cause == DUPLICATE_CONNECTION_ERROR {
-                return Err(TunnelError::Register(format!(
+                return Err(Error::Register(format!(
                     "duplicate connection (edge already has connIndex registered): {cause}"
                 )));
             }
-            Err(TunnelError::Register(cause))
+            // The edge's own judgement of whether trying again could help. A
+            // deleted tunnel or a secret that no longer matches says no, and
+            // is worth telling apart: it needs the user, not a retry.
+            if !err.get_should_retry() {
+                return Err(Error::Refused(cause));
+            }
+            Err(Error::Register(cause))
         }
         WhichReader::ConnectionDetails(details_reader) => {
             let d = details_reader
-                .map_err(|e| TunnelError::Register(format!("ConnectionDetails reader: {e}")))?;
+                .map_err(|e| Error::Register(format!("ConnectionDetails reader: {e}")))?;
             let uuid_bytes = d
                 .get_uuid()
-                .map_err(|e| TunnelError::Register(format!("ConnectionDetails.uuid: {e}")))?;
+                .map_err(|e| Error::Register(format!("ConnectionDetails.uuid: {e}")))?;
             if uuid_bytes.len() != 16 {
-                return Err(TunnelError::Register(format!(
+                return Err(Error::Register(format!(
                     "ConnectionDetails.uuid wrong length: {}",
                     uuid_bytes.len()
                 )));
@@ -445,32 +458,28 @@ fn decode_connection_response(
     }
 }
 
-// Silence "unused" for the wrapper helpers in scaffold builds.
-#[allow(dead_code)]
-async fn drive<F: std::future::Future>(
-    f: F,
-    label: &'static str,
-) -> Result<F::Output, TunnelError> {
-    timeout(DEFAULT_RPC_TIMEOUT, f)
-        .await
-        .map_err(|_| TunnelError::Register(format!("{label} timed out")))
-}
-
-#[allow(dead_code)]
-fn _suppress_unused_promise() -> Promise<(), capnp::Error> {
-    Promise::ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn default_options_carry_features() {
-        let o = ConnectionOptions::default_for_quick_tunnel("test/0.1");
+        let o = ConnectionOptions::default_for("test/0.1");
         assert!(o.features.contains(&"serialized_headers".to_string()));
         assert_eq!(o.client_id.len(), 16);
         assert!(o.version.contains("test/0.1"));
+        assert!(o.features.contains(&"allow_remote_config".to_string()));
+    }
+
+    #[test]
+    fn auth_debug_prints_no_secret() {
+        let auth = TunnelAuth {
+            account_tag: "made-up-account".into(),
+            tunnel_secret: b"made-up-secret".to_vec(),
+        };
+        let shown = format!("{auth:?}");
+        assert!(!shown.contains("made-up"), "{shown}");
+        assert!(!shown.contains("109, 97"), "{shown}");
     }
 
     #[test]

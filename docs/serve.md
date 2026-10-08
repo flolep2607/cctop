@@ -171,7 +171,7 @@ cctop serve --tunnel
 ```
 
 ```
-cctop: opening a trycloudflare tunnel…
+cctop: opening a trycloudflare quick tunnel…
 cctop: serving on https://particular-words-here.trycloudflare.com/?t=9f3ac1de…
 cctop: also on http://127.0.0.1:7777/?t=9f3ac1de…
 cctop: read-only link — no actions: https://particular-words-here.trycloudflare.com/?t=71b02ee4…
@@ -181,7 +181,7 @@ cctop: that first link is on the public internet. Anyone who has it can read
        can read it. The tunnel ends when this process does.
 ```
 
-This needs nothing installed: cctop speaks the trycloudflare protocol itself
+This needs nothing installed: cctop speaks Cloudflare's tunnel protocol itself
 rather than shelling out to `cloudflared`, and the tunnel's data path runs inside
 the cctop process, landing on the same loopback listener a local browser uses. So
 the token, the connection cap and the request deadlines all still apply — the
@@ -211,6 +211,115 @@ managing — which is why an ssh tunnel is still the better answer here, since i
 authenticates rather than merely encrypting. `--tunnel` gets its `https://` by
 borrowing Cloudflare's certificate and Cloudflare's edge, which is a different
 trade, not a stronger one.
+
+## Your own Cloudflare account
+
+A quick tunnel is the right shape for ten minutes from a phone and the wrong one
+for anything you keep. Cloudflare documents its limits: **no Server-Sent
+Events** (the live table is one, so it works unsupported and can stall), **at
+most 200 requests in flight**, **no uptime promise**, and **a new hostname every
+run**, so a bookmark or a home-screen shortcut dies with the process.
+
+A named tunnel on your own free Cloudflare account has none of those: Server-Sent
+Events are supported, there is no request cap, and the hostname is yours and
+stays. What stays the same: Cloudflare still terminates the TLS and can read the
+traffic, cctop's token is still what opens the page, and the free plan's limits
+are a ~100 s origin response time (the live table's keepalive is 15 s, so the
+stream is fine) and 100 MB per upload.
+
+**It needs a domain whose DNS is on Cloudflare.** A tunnel is reached through a
+DNS record, so this is the one thing cctop cannot do for you. A cheap domain
+works, and DNS on Cloudflare is free; add one at
+<https://dash.cloudflare.com/?to=/:account/add-site>. Setup checks first and
+says so if you have none, and quick tunnels keep working either way.
+
+```bash
+cctop tunnel setup
+```
+
+It prints a link to Cloudflare's create-token page with the permissions and the
+name `cctop` filled in, and the three permissions in words in case the page does
+not take them:
+
+- Account · Cloudflare Tunnel · Edit
+- Zone · DNS · Edit
+- Zone · Zone · Read
+
+Paste the token (it is not shown as you type), pick a domain if you have more
+than one, and accept the suggested hostname — `cctop.<your domain>`, or
+`cctop-<machine>.<your domain>` when another machine has that one. cctop creates
+the tunnel, sets its configuration, and adds two proxied DNS records: the page's
+hostname and a `-share` one beside it for terminal shares. A name that already
+has a record cctop did not make is never overwritten, a deeper name than one
+label under the domain is refused (Cloudflare's free certificate covers
+`*.example.com`, not `a.b.example.com`), and if a step fails halfway, what was
+created is deleted again so a retry starts clean.
+
+From then on `cctop serve --tunnel`, and `t` in the dashboard's serve panel, come
+up on that hostname:
+
+```
+cctop: opening your Cloudflare tunnel…
+cctop: tokens from ~/.config/cctop/serve-tokens — links from earlier runs still work
+cctop: serving on https://cctop.example.com/?t=9f3ac1de…
+```
+
+`cctop serve` keeps its tokens across restarts once an account is connected,
+exactly as [`--token-file`](#keeping-them-across-restarts) does, in
+`~/.config/cctop/serve-tokens` — a stable hostname with a new token every run
+would still be a dead bookmark. `--rotate-token` replaces them. The dashboard's
+own serve still mints new ones each time, since stopping it is meant to revoke
+every link.
+
+`--tunnel=quick` asks for a quick tunnel even with an account connected. And if
+your tunnel cannot come up — its token revoked, the edge unreachable, or another
+cctop on this machine already serving it (two would become replicas, and
+Cloudflare would send half the requests to each) — a quick tunnel stands in, and
+cctop says why rather than hand out a different link without a word.
+
+**A tunnel token works too.** If you made a tunnel in the Cloudflare dashboard,
+paste its token (the long string under its install command, starting `eyJhIjoi`)
+instead of an API token. Nothing is created: cctop stores the token, and learns
+the hostname from the configuration Cloudflare pushes when the tunnel connects
+— or give it with `--hostname`, or in the prompt.
+
+**Without a config file**, for a service: `CCTOP_TUNNEL_TOKEN` (a tunnel token)
+and `CCTOP_TUNNEL_HOSTNAME`. They win over what setup stored. No flag takes a
+credential, so none ends up in `ps` or your shell history. Piped, `cctop tunnel
+setup` reads one token from stdin, and `--zone` and `--hostname` answer its
+questions.
+
+```bash
+cctop tunnel status     # what is connected
+cctop tunnel remove     # delete what setup made, and forget it
+```
+
+`remove` deletes only what setup created — the DNS records and the tunnel, by
+the ids it stored — then clears the `[tunnel]` table of `config.toml`. If the API
+token has been revoked since, it lists what is left for you to delete in the
+dashboard. A tunnel connected from a pasted tunnel token was made in the
+dashboard, so it is forgotten and left there. Stop any cctop serving over it
+first; `remove` refuses while one is.
+
+The tokens live in `~/.config/cctop/config.toml`, which cctop keeps at mode 600,
+beside the account tokens it already holds.
+
+### Cloudflare Access in front
+
+[Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)
+can put a login — SSO, or a one-time code by email — in front of the hostname.
+Keep cctop's token as well: Access decides *who* may reach the hostname, the
+token decides *which page*, and full versus read-only. Neither replaces the
+other.
+
+- **Put Access on the page's hostname only**, never on the `-share` one. A
+  shared terminal opens its socket from rmux's page on another site, Access's
+  cookie does not go with it, and the terminal would never connect.
+- **When the Access session expires**, the page's requests get Access's login
+  page instead of cctop's answers, and the page says it cannot reach cctop.
+  Reload it to log in again.
+- The `?t=` in the link should survive Access's login redirect; check it once
+  with your own setup.
 
 ## The token
 
@@ -299,7 +408,8 @@ these flags — the route says so with a 502 rather than an empty page.
 | `--port <PORT>` | Default `7777`. Without this flag a busy port is stepped past; with it, a busy port is an error |
 | `--no-token` | Serve with no access token. Also turns actions off — the token is what authorises one |
 | `--no-actions` | Serve the pages without the buttons: no prompts, no resuming, no handoff |
-| `--tunnel` | Also reach the page over a trycloudflare quick tunnel. Refuses `--no-token` and `--bind` |
+| `--tunnel` | Also reach the page from anywhere: over [your own Cloudflare tunnel](#your-own-cloudflare-account) when one is connected, else a trycloudflare quick tunnel. Refuses `--no-token` and `--bind` |
+| `--tunnel=quick` | A quick tunnel even when your own is connected |
 | `--plan <PLAN>` | `retail`, `max` or `included`, as elsewhere |
 | `--delay <SECS>` | Seconds between refreshes. Default `2` |
 | `--host <HOST>` | Also serve another machine's sessions. Repeatable |

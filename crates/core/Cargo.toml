@@ -2,7 +2,7 @@
 name = "cctop-core"
 # Its own version, not the release's: bumped only in a release that changes
 # this crate. The rules are in tools/release-plan.sh, which CI enforces.
-version = "0.28.5"
+version = "0.28.6"
 edition.workspace = true
 rust-version.workspace = true
 description = "Internal to cctop: sessions and their parsers, the cache, pricing, config, hooks, the shim, and the conversation model both faces share. No stable API; use the cctop binary."
@@ -30,9 +30,9 @@ debug = []
 test-support = []
 
 [dependencies]
+cctop-tunnel.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
-cloudflare-quick-tunnel.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
 flate2.workspace = true

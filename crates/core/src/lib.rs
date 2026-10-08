@@ -27,6 +27,7 @@ pub mod cast;
 /// and the handoff brief all draw from.
 pub mod chat;
 pub mod clipboard;
+pub mod cloudflare;
 pub mod collide;
 pub mod config;
 pub mod convert;
