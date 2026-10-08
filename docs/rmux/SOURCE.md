@@ -4,8 +4,13 @@ Mirrored from <https://github.com/Helvesec/rmux> (`README.md`, `CHANGELOG.md` an
 `1f4571e` on 2026-08-26 by `docs/rmux/pull.sh`.
 
 rmux is the multiplexer cctop hands every tab's agent to, and whose
-`web-share` puts an agent's terminal in a browser. cctop meets it as a command
-surface — see `src/rmux.rs`.
+`web-share` puts an agent's terminal in a browser. Its server is built into
+cctop, from the `cctop-rmux-*` crates published off the fork at
+<https://github.com/flolep2607/rmux>, and cctop talks to it over its protocol —
+see `crates/core/src/mux.rs` and `crates/core/src/rmux.rs`. Nobody has to
+install rmux for cctop. These pages describe upstream's own `rmux` command line,
+which cctop does not ship: `cctop mux attach`, `ls` and `kill-session` are the
+part of it cctop exposes, on cctop's own socket.
 
 Two things this drops. The artwork: `docs/` is mostly SVG sidebar and wordmark
 files, which outweigh the prose and say nothing about a command. And the

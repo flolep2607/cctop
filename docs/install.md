@@ -6,7 +6,9 @@ cctop runs on Linux, including WSL. It reads Linux process tables and drives
 agents over ptys and unix sockets, and there is no macOS or Windows build.
 
 cctop is a single binary. It links no system libraries and needs no runtime, so
-"installing" it means putting one file on your `PATH`.
+"installing" it means putting one file on your `PATH`. That includes the
+multiplexer its tabs' agents run in: rmux is built in, so there is no `rmux` or
+tmux to install alongside it.
 
 ## Let the script do it
 

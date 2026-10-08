@@ -535,18 +535,7 @@ fn typing() -> Section {
                  this is what lets `s` and `a` reach a session",
             ),
         },
-        match cctop_core::rmux::available() {
-            true => ok(
-                "rmux",
-                "available; panes survive cctop and can be typed into",
-            ),
-            false => warn(
-                "rmux",
-                "not installed",
-                "optional: without it cctop's tabs die with cctop, and rmux-hosted \
-                 sessions cannot be typed into",
-            ),
-        },
+        mux_check(),
     ];
 
     checks.extend(tiocsti_check());
@@ -554,6 +543,55 @@ fn typing() -> Section {
     Section {
         title: "Typing into sessions",
         checks,
+    }
+}
+
+/// cctop's own rmux daemon, which every tab's agent lives in.
+///
+/// Built in, so there is nothing to install and nothing to warn about: the
+/// line says where it is and how much it holds. No daemon is not a problem —
+/// one starts with the first tab and ends with the last agent.
+fn mux_check() -> Check {
+    let socket = match cctop_core::mux::socket() {
+        Ok(socket) => socket,
+        Err(why) => return fail("rmux", why, "set XDG_RUNTIME_DIR to a shorter directory"),
+    };
+    let mut check = match cctop_core::mux::status() {
+        Some(status) => ok(
+            "rmux",
+            format!(
+                "built in (rmux {}); {} at {}",
+                status.version,
+                plural(status.sessions, "agent session"),
+                socket.display()
+            ),
+        ),
+        None => ok(
+            "rmux",
+            format!(
+                "built in; not running — it starts with the first tab, at {}",
+                socket.display()
+            ),
+        ),
+    };
+    // Agents an older cctop left in the user's own rmux are still running
+    // there, and this cctop does not look: it never touches another daemon.
+    // Only said where there is an `rmux` to have left them in, and found on
+    // PATH rather than run, since nothing here starts an `rmux`.
+    if cctop_core::shim::is_command("rmux") {
+        check.fix = Some(
+            "agents cctop 0.31 or older started are still in your own rmux, and not \
+             shown here: `rmux ls` lists them, `rmux attach -t <name>` reaches one"
+                .into(),
+        );
+    }
+    check
+}
+
+fn plural(n: usize, what: &str) -> String {
+    match n {
+        1 => format!("1 {what}"),
+        _ => format!("{n} {what}s"),
     }
 }
 

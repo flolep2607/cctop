@@ -457,7 +457,7 @@ reach them was to remember which key pressed which one.
 | `Home`, `End` | Jump to first / last |
 | `n`, `N` | Next / previous search match (wraps) |
 | `w` | Toggle notifications (see below) |
-| `W` | Share the agent's terminal to a browser (needs rmux, see [Driving agents](driving-agents.md)) |
+| `W` | Share the agent's terminal to a browser (an agent in a cctop tab, see [Driving agents](driving-agents.md#sharing-an-agent-to-a-browser)) |
 | `b` | Jump to the session that rang last |
 | `←`, `→`, `Tab` | Move between bottom panels, `Shift+Tab` the other way |
 | `1`–`9` | Jump to a panel directly; `9` is Preview, the selected row's tab live (see [The bottom panels](panels.md#preview)) |

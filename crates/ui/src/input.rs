@@ -209,9 +209,6 @@ impl App {
             Mode::DeleteConfirm => self.on_key_delete(key),
             Mode::KillConfirm => self.on_key_kill(key),
             Mode::ResumeConfirm => self.on_key_resume(key),
-            Mode::TmuxInstall => {
-                self.rmux_install_answer(key.code == KeyCode::Char('y'));
-            }
             Mode::Serve => self.on_key_serve(key),
             Mode::QuitConfirm => self.on_key_quit(key),
             Mode::RemoteUpdateConfirm => self.on_key_remote_update(key),

@@ -1062,57 +1062,6 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App, layo
 
 const RESUME_KEYS: &str = " [y] resume anyway    [n / Esc] cancel";
 
-/// Offering to install rmux, which is what would have made the agent about to
-/// start outlive cctop.
-pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(install) = app.rmux_install.as_ref() else {
-        return;
-    };
-    let command = install.shown();
-    let mut lines = vec![
-        Line::from(Span::styled(
-            " rmux is not installed.",
-            Style::default().fg(theme::colors().cost_mid),
-        )),
-        Line::default(),
-        Line::from(Span::raw(
-            " With it, agents run inside rmux and survive cctop",
-        )),
-        Line::from(Span::raw(
-            " closing. Without it, quitting takes them with it.",
-        )),
-        Line::default(),
-        Line::from(Span::styled(
-            format!("   {}", cctop_core::util::truncate(command, 56)),
-            theme::value(),
-        )),
-    ];
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        " y to install · any other key to start without it",
-        theme::dim(),
-    )));
-    // The manager goes in the title rather than the footer: naming it inline
-    // takes that line past the 60 columns the box has, and a footer that wraps
-    // pushes itself out through the bottom border.
-    let (_, inner) = modal(
-        frame,
-        area,
-        &format!("Install rmux with {}?", install.manager),
-        lines,
-        62,
-    );
-    // The install script's URL, when that is the route, opens from where it is
-    // printed: reading a script before piping it into `sh` is the one check
-    // this prompt can make easy, and it is a click rather than a retype.
-    let url = command
-        .split_whitespace()
-        .find(|word| word.starts_with("https://"));
-    if let Some(url) = url {
-        hyperlink::link_shown(frame.buffer_mut(), inner, inner.y, url, url);
-    }
-}
-
 /// Whether this cctop is serving its table to a browser, and on what.
 ///
 /// The links are drawn as their origin and made clickable — an OSC 8 hyperlink

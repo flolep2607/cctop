@@ -330,7 +330,7 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     let name = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
     if crate::rmux::exists(&name) {
         return Ok(Done {
-            message: format!("Already running — attach with `rmux attach -t {name}`"),
+            message: format!("Already running — attach with `cctop mux attach {name}`"),
             rmux: Some(name),
         });
     }
@@ -344,7 +344,7 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
     }
     launch(&argv, &name, session.work_dir().as_deref())?;
     Ok(Done {
-        message: format!("Resumed — attach with `rmux attach -t {name}`"),
+        message: format!("Resumed — attach with `cctop mux attach {name}`"),
         rmux: Some(name),
     })
 }
@@ -381,7 +381,7 @@ pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
     let name = crate::rmux::free_name(agent);
     launch(&[agent.to_string()], &name, dir.as_deref())?;
     Ok(Done {
-        message: format!("Started {agent} — attach with `rmux attach -t {name}`"),
+        message: format!("Started {agent} — attach with `cctop mux attach {name}`"),
         rmux: Some(name),
     })
 }
@@ -431,7 +431,7 @@ pub fn launch_remote(
     let name = crate::rmux::free_name(&format!("{agent}-{host}"));
     launch(&argv, &name, Some(crate::config::HOME.as_path()))?;
     Ok(Done {
-        message: format!("Started {agent} on {host} — attach with `rmux attach -t {name}`"),
+        message: format!("Started {agent} on {host} — attach with `cctop mux attach {name}`"),
         rmux: Some(name),
     })
 }
@@ -592,7 +592,7 @@ fn brief_handoff(
     }
     Ok(Done {
         message: format!(
-            "Handed {} to {} — attach with `rmux attach -t {name}`",
+            "Handed {} to {} — attach with `cctop mux attach {name}`",
             brief.summary(),
             target.label()
         ),
@@ -713,7 +713,7 @@ fn resume_converted(
     );
     Ok(Done {
         message: format!(
-            "Handed the conversation to a new {} {note} — attach with `rmux attach -t {name}`",
+            "Handed the conversation to a new {} {note} — attach with `cctop mux attach {name}`",
             target.label()
         ),
         rmux: Some(name),
@@ -743,7 +743,7 @@ fn forked(
     record_account(&name, target);
     Ok(Done {
         message: format!(
-            "Handed the conversation to a new {} — attach with `rmux attach -t {name}`",
+            "Handed the conversation to a new {} — attach with `cctop mux attach {name}`",
             target.label()
         ),
         rmux: Some(name),
@@ -777,7 +777,7 @@ fn codex_forked(session: &Session, target: &handoff::Target) -> Option<Result<Do
     record_account(&name, target);
     Some(Ok(Done {
         message: format!(
-            "Handed the conversation to a new {} — attach with `rmux attach -t {name}`",
+            "Handed the conversation to a new {} — attach with `cctop mux attach {name}`",
             target.label()
         ),
         rmux: Some(name),
@@ -790,30 +790,17 @@ pub fn agents() -> Vec<String> {
     handoff::agents()
 }
 
-/// Put `argv` in a detached rmux session called `name`.
+/// Put `argv` in a detached session of cctop's daemon called `name`.
 ///
-/// rmux rather than a bare child process, for a reason that is not stylistic: a
-/// connection thread's children die with the request, and an agent needs a
-/// terminal to run in and to still be there afterwards. rmux provides both and
-/// is already how cctop hosts agents it did not start in a tab, so an agent
-/// started from the browser is one the terminal UI lists and can attach to.
+/// A session rather than a bare child process, for a reason that is not
+/// stylistic: a connection thread's children die with the request, and an
+/// agent needs a terminal to run in and to still be there afterwards. The
+/// daemon provides both and is how cctop hosts every agent it keeps alive, so
+/// an agent started from the browser is one the terminal UI lists and can
+/// attach to.
 fn launch(argv: &[String], name: &str, cwd: Option<&std::path::Path>) -> Result<(), Failed> {
-    if !crate::rmux::available() {
-        return Err((
-            503,
-            "starting an agent from the browser needs rmux, which is not \
-             installed — `cctop` in a terminal can do this without it"
-                .into(),
-        ));
-    }
-    crate::rmux::prepare(argv, name, cwd);
-    // `prepare` is best-effort by design: every failure inside it leaves the
-    // session absent. That is the one thing worth checking, because a caller
-    // told "started" about a session that does not exist has nowhere to go.
-    match crate::rmux::exists(name) {
-        true => Ok(()),
-        false => Err((503, format!("rmux would not start {}", argv[0]))),
-    }
+    crate::rmux::start_detached(argv, name, cwd)
+        .map_err(|why| (503, format!("could not start {}: {why}", argv[0])))
 }
 
 /// Refuse a row that came from another machine.

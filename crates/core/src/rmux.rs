@@ -5,41 +5,30 @@
 //! with it. That is the wrong bargain for a coding session. Nothing about
 //! watching sessions should require staying in the monitor.
 //!
-//! So the pane runs `rmux new-session` instead of the agent, and the agent runs
-//! inside the rmux server. What cctop hosts is then only the rmux *client* —
-//! closing the pane detaches, quitting cctop detaches, and the agent notices
-//! neither. Everything else is unchanged: it is still a process on a pty cctop
-//! can draw and type into, so [`attach`](crate::attach) and the pane machinery
-//! need to know nothing about any of this.
+//! So the agent runs in a session of cctop's own rmux daemon ([`crate::mux`]),
+//! and the pane runs `cctop mux attach` instead of the agent. What cctop hosts
+//! is then only an rmux *client* — closing the pane detaches, quitting cctop
+//! detaches, and the agent notices neither. Everything else is unchanged: it is
+//! still a process on a pty cctop can draw and type into, so
+//! [`attach`](crate::attach) and the pane machinery need to know nothing about
+//! any of this.
 //!
-//! Reattaching falls out of the same command. `new-session -A` attaches to the
+//! Reattaching falls out of the same command. `--create` attaches to the
 //! session if it exists and creates it otherwise, so reopening a tab is the same
 //! call as opening it, and the agent is found exactly where it was left —
 //! scrollback and all.
+//!
+//! Every question here goes to that one daemon, over its protocol. Nothing in
+//! this module runs an `rmux` binary, and nothing reaches the user's own rmux.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Prefix on every rmux session cctop creates.
 ///
 /// A namespace, so `cctop-*` is unambiguously ours and a user's own sessions are
 /// never adopted, reattached to, or killed by anything here.
 const PREFIX: &str = "cctop";
-
-/// The multiplexer cctop drives.
-///
-/// One name in one place, so a second hard-coded `"rmux"` cannot drift from it.
-/// cctop used to speak tmux's command surface and choose between the two with
-/// `CCTOP_MUX`; rmux reimplements that surface, so the commands here —
-/// `new-session -A`, `set-option`, `list-panes -F`, `kill-session` — are the
-/// ones tmux always took. What is no longer optional is the daemon they reach.
-///
-/// The cost of dropping the choice, said plainly because it lands on upgrade:
-/// the two keep separate daemons and separate sessions, so agents still running
-/// under a tmux server are still running and cctop simply stops being able to
-/// see them. `tmux attach -t cctop-…` reaches them, and nothing here kills one.
-pub const BIN: &str = "rmux";
 
 /// How long one exchange with the daemon may take before cctop gives up.
 ///
@@ -52,339 +41,85 @@ pub const BIN: &str = "rmux";
 /// agents is slow to answer, and giving up early costs more than waiting.
 const DAEMON_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The daemon every SDK connection cctop makes is pointed at.
-///
-/// One function, so that where cctop's agents live is decided in one place
-/// and every connection follows it (#197). Under `CCTOP_MUX=builtin` that is
-/// cctop's own daemon, at the socket [`crate::mux::socket`] computes and from
-/// nothing the user's rmux reads. Otherwise it is still the user's own rmux
-/// daemon, found the way the `rmux` CLI finds it: `RmuxEndpoint::Default` is
-/// the SDK's deferred discovery, which reads `$RMUX`/`$TMUX` and `RMUX_TMPDIR`
-/// exactly as the shell-outs below do, so the SDK and the command line keep
-/// reaching the same server.
-fn endpoint() -> Result<rmux_sdk::RmuxEndpoint, String> {
-    match crate::mux::builtin() {
-        true => crate::mux::socket().map(rmux_sdk::RmuxEndpoint::UnixSocket),
-        false => Ok(rmux_sdk::RmuxEndpoint::Default),
-    }
-}
-
-/// Run one piece of SDK work against the local daemon and wait for it.
+/// Run one piece of SDK work against cctop's daemon and wait for it.
 ///
 /// The SDK is async and cctop is not. Everything here is one short exchange
 /// with a daemon on a unix socket, so a current-thread runtime built for the
 /// call is the whole of what "async" needs to mean at this boundary — no
 /// runtime is kept, and nothing above this function learns that one existed.
+///
+/// Always to the socket [`crate::mux::socket`] computes, and only ever
+/// `connect`: what is asked here is a share of a session, which needs the
+/// daemon holding it, and the SDK's own start path would look for an `rmux`
+/// on PATH to run.
 fn on_daemon<T, F, Fut>(work: F) -> Result<T, String>
 where
     F: FnOnce(rmux_sdk::Rmux) -> Fut,
     Fut: std::future::Future<Output = rmux_sdk::Result<T>>,
 {
-    let endpoint = endpoint()?;
+    let endpoint = rmux_sdk::RmuxEndpoint::UnixSocket(crate::mux::socket()?);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("could not start a runtime for rmux: {error}"))?;
     runtime.block_on(async move {
-        let builder = rmux_sdk::Rmux::builder()
+        let rmux = rmux_sdk::Rmux::builder()
             .endpoint(endpoint)
-            .default_timeout(DAEMON_DEADLINE);
-        // Only ever `connect` on cctop's own daemon: what is asked here is a
-        // share of a session, which needs the daemon holding it, and the SDK's
-        // start path would look for an `rmux` on PATH to run. On the user's
-        // daemon, `connect_or_start` as before: the daemon is started by
-        // whichever of these runs first.
-        let rmux = match crate::mux::builtin() {
-            true => builder.connect().await,
-            false => builder.connect_or_start().await,
-        }
-        .map_err(|error| format!("{error}"))?;
+            .default_timeout(DAEMON_DEADLINE)
+            .connect()
+            .await
+            .map_err(|error| format!("{error}"))?;
         work(rmux).await.map_err(|error| format!("{error}"))
     })
 }
 
-/// Whether the multiplexer can be used at all.
+/// The command a tab's pane runs to sit on the session called `name`, creating
+/// it with `argv` in it if it is not there yet.
 ///
-/// Only that the binary exists: a server does not have to be running, since
-/// `new-session` starts one. This is checked per launch rather than cached —
-/// installing rmux while cctop runs should not require restarting it, and the
-/// cost is one `rmux -V` against a launch that spawns a terminal anyway.
-pub fn available() -> bool {
-    // cctop's own daemon is this binary, so it is always there.
-    if crate::mux::builtin() {
-        return true;
-    }
-    Command::new(BIN)
-        .arg("-V")
-        .output()
-        .is_ok_and(|out| out.status.success())
-}
-
-/// A way to put rmux on this machine, when one can be found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Install {
-    /// What to call the package manager in the offer, so the user is agreeing
-    /// to something they recognise rather than to "install rmux" in the
-    /// abstract.
-    pub manager: &'static str,
-    /// The command to run, ready for a pane.
-    pub argv: Vec<String>,
-}
-
-impl Install {
-    /// The command as it would be typed, for the modal to show.
-    ///
-    /// The argv is `sh -c <script>`, so the interesting part is the last word
-    /// and printing the whole vector would only bury it.
-    pub fn shown(&self) -> &str {
-        self.argv.last().map(String::as_str).unwrap_or_default()
-    }
-}
-
-/// The ways rmux can be put on this machine, best first: what to call each one
-/// in the offer, the command that has to exist for it to be possible, and the
-/// command that does it.
-///
-/// All three are root-free, which is why there is no `sudo` anywhere below.
-/// rmux also ships through apt and dnf, and both want a signed repository added
-/// first — three commands, a key, and a distribution name to get right. cctop
-/// offering to run that on someone's machine is offering to misconfigure a
-/// package source; the routes here install one binary and are undone by
-/// deleting it.
-///
-/// Homebrew leads because a machine that has it is a machine whose owner
-/// administers it that way. cargo is next because a cctop installed by cargo —
-/// which is most of them — already has it, and it builds the same version this
-/// was written against. The install script is last because it is the one that
-/// needs nothing, which also makes it the one with least to recommend it.
-const MANAGERS: &[(&str, &str, &str)] = &[
-    ("Homebrew", "brew", "brew install rmux"),
-    ("cargo", "cargo", "cargo install rmux --locked"),
-    (
-        "rmux.io",
-        "curl",
-        "curl -fsSL https://rmux.io/install.sh | sh",
-    ),
-];
-
-/// How cctop would install rmux here, if it can work out how.
-///
-/// `None` is the honest answer for a machine with none of the three. Offering
-/// an install that cannot run is worse than the silent fallback it would
-/// replace, since the user has then been told rmux is one keypress away and
-/// watched the keypress fail.
-///
-/// Nothing here runs anything: it only decides what *would* be run, so the
-/// decision can be shown to the user before any of it happens.
-pub fn installer() -> Option<Install> {
-    let (manager, _, command) = MANAGERS
-        .iter()
-        .find(|(_, needs, _)| crate::shim::is_command(needs))?;
-    Some(Install {
-        manager,
-        // A script rather than an argv because the last entry is a pipeline,
-        // and because a pane runs this on a pty where a shell is what reads it.
-        argv: vec!["sh".to_string(), "-c".to_string(), command.to_string()],
-    })
-}
-
-/// The command that puts `argv` in the rmux session called `name`, attaching to
-/// it instead if it is already there.
-///
-/// `-c` sets the working directory for a session being created and is ignored
-/// for one being attached to, which is the behaviour wanted in both cases: a new
+/// The working directory is for a session being created, and is not used for
+/// one being attached to, which is the behaviour wanted in both cases: a new
 /// agent starts in its project, and an existing one is not moved.
 pub fn attach_or_create(argv: &[String], name: &str, cwd: Option<&Path>) -> Vec<String> {
-    if crate::mux::builtin() {
-        return crate::mux::attach_argv(name, Some((argv, cwd)));
-    }
-    let mut out = vec![
-        BIN.to_string(),
-        "new-session".to_string(),
-        "-A".to_string(),
-        "-s".to_string(),
-        name.to_string(),
-    ];
-    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
-        out.push("-c".into());
-        out.push(dir.to_string_lossy().into_owned());
-    }
-    // `--` so an agent's own flags are never read as rmux's.
-    out.push("--".into());
-    out.extend(argv.iter().cloned());
-    out
+    crate::mux::attach_argv(name, Some((argv, cwd)))
 }
 
-/// How many lines of an agent's output a cctop-owned rmux session keeps.
+/// Create the session before the client that attaches to it.
 ///
-/// rmux reports no `history-limit` until one is set, so what a pane keeps
-/// unasked is rmux's business and not something to rely on — tmux's answer was
-/// 2000, which is a few minutes of a working agent: a pane you can scroll but
-/// not scroll *back* to anything. Naming a number is what makes the scrollback
-/// a property of cctop's sessions rather than of whatever the daemon defaults
-/// to this release. These lines cost nothing until they exist and are gone with
-/// the session.
-const HISTORY_LINES: &str = "50000";
-
-/// Create the session before the client that attaches to it, so the agent's
-/// pane is made with cctop's options already set.
-///
-/// This exists for `history-limit` alone. A pane's scrollback is allocated when
-/// the pane is *made* and never resized, so unlike `mouse` or `status` it cannot
-/// be set on a session already running the agent — [`quiet`] and [`mouse`] fix a
-/// session after the fact, and this is the one thing that has to happen before
-/// it. Hence the detour: the session is created holding a placeholder, the
-/// options are set on it, and the agent goes into a second window made after
-/// they were, which is what makes its pane new enough to have read them. Then
-/// the placeholder window goes, leaving the one-window session everything else
-/// here expects. `respawn-pane` looks like the shorter way and is not — it
-/// replaces the process and keeps the pane, scrollback and all.
-///
-/// Best effort in the strongest sense — every failure leaves the session absent
-/// or removed, and [`attach_or_create`] then creates it exactly as it did
-/// before, with rmux's own defaults. Nothing here can cost a launch, and a
-/// session that already exists is left alone: it is someone's running agent, and
-/// this would take its window out from under it.
+/// So the daemon is started, and the agent put in it, by this cctop rather
+/// than by the pane's client: the daemon is then this process's child, and a
+/// launch that fails here leaves the client's `--create` to try again and say
+/// why in the pane. Best effort for that reason, and a session that already
+/// exists is left alone: it is someone's running agent.
 pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
+    let _ = start_detached(argv, name, cwd);
+}
+
+/// Start `argv` in a new session called `name` with no client on it at all.
+///
+/// For a tab this cctop stands for without watching — see
+/// `ui::tabs::Shared` — whose agent is being replaced, and for an agent started
+/// from the browser. The session is born with cctop's options, which are the
+/// daemon's defaults (see `mux::defaults`). Starts the daemon if none is
+/// running. A session of that name already there is success.
+pub fn start_detached(argv: &[String], name: &str, cwd: Option<&Path>) -> Result<(), String> {
     crate::elog::event(
         "rmux",
         "prepare",
         serde_json::json!({ "session": name, "cmd": argv.join(" ") }),
     );
     if exists(name) {
-        return;
-    }
-    // cctop's own daemon starts every pane with cctop's options (see
-    // `mux::DEFAULTS`), so there is nothing to set before the agent and no
-    // placeholder to make: the session is created holding the agent.
-    if crate::mux::builtin() {
-        let _ = crate::mux::new_session(name, cwd, launch_env(argv), argv);
-        return;
-    }
-    let dir = cwd.filter(|d| d.is_dir()).map(|d| d.to_string_lossy());
-    let mut create: Vec<String> = ["new-session", "-d", "-P", "-F", "#{window_id}", "-s", name]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    if let Some(dir) = &dir {
-        create.extend(["-c", dir].map(str::to_string));
-    }
-    // Set on the session rather than on the command, because the command is not
-    // what runs it: a placeholder window does, and the agent is typed into that
-    // window afterwards. Everything the agent is started with therefore has to
-    // be in the session's own environment, which also covers the detached
-    // launch that hands rmux the agent as the command.
-    for pair in launch_env(argv) {
-        create.push("-e".into());
-        create.push(pair);
-    }
-    // A window running nothing is a session that ends before it can be
-    // configured, so the placeholder has to outlive the two commands after it.
-    // The day is only how long an unreachable failure would sit around.
-    create.extend(["--", "sleep", "86400"].map(str::to_string));
-    let Ok(out) = Command::new(BIN).args(&create).output() else {
-        return;
-    };
-    if !out.status.success() {
-        return;
-    }
-    let placeholder = String::from_utf8_lossy(&out.stdout).trim().to_string();
-
-    // One invocation for the three: `;` is rmux's own separator between
-    // commands, which is why these need no shell to be read as three.
-    let _ = Command::new(BIN)
-        .args(["set-option", "-t", name, "history-limit", HISTORY_LINES])
-        .args([";", "set-option", "-t", name, "mouse", "on"])
-        .args([";", "set-option", "-t", name, "status", "off"])
-        // Several cctops may hold a client on this session at once — that is
-        // what sharing tabs means. Left at rmux's default the window is sized to
-        // the *smallest* of them, so one cctop in a narrow terminal cramps the
-        // agent for everybody. `latest` sizes it to whichever client is being
-        // used, which is the one whose window is worth fitting.
-        .args([";", "set-option", "-t", name, "window-size", "latest"])
-        .output();
-
-    // Current, not background: this is the window the client is about to attach
-    // to, and the placeholder is on its way out.
-    let mut window = vec!["new-window", "-t", name];
-    if let Some(dir) = &dir {
-        window.extend(["-c", dir]);
-    }
-    window.push("--");
-    window.extend(argv.iter().map(String::as_str));
-    let made = Command::new(BIN)
-        .args(&window)
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !made {
-        // The session exists but holds a placeholder where the agent should be,
-        // and `new-session -A` would happily attach to that. Removing it puts
-        // the launch back on the path it would have taken had none of this run.
-        let _ = kill(name);
-        return;
-    }
-    // Last, so the session is never briefly windowless — killing its only window
-    // is killing the session, and with it the agent just put in the other one.
-    let _ = Command::new(BIN)
-        .args(["kill-window", "-t", &placeholder])
-        .output();
-}
-
-/// Start `argv` in a new session called `name` with no client on it at all.
-///
-/// For a tab this cctop stands for without watching — see
-/// `ui::tabs::Shared` — whose agent is being replaced. The
-/// launch path cannot be borrowed for it: that starts a client, and a client on
-/// a tab nobody here is looking at is the thing sharing tabs exists to avoid.
-///
-/// [`prepare`] first, so the session has cctop's options from its first pane
-/// just as a launched one does; it is best effort and may leave nothing
-/// behind, in which case the session is created the plain way.
-pub fn start_detached(argv: &[String], name: &str, cwd: Option<&Path>) -> Result<(), String> {
-    prepare(argv, name, cwd);
-    if exists(name) {
         return Ok(());
     }
-    if crate::mux::builtin() {
-        return crate::mux::new_session(name, cwd, launch_env(argv), argv);
-    }
-    let mut create = vec![
-        "new-session".to_string(),
-        "-d".to_string(),
-        "-s".to_string(),
-        name.to_string(),
-    ];
-    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
-        create.push("-c".into());
-        create.push(dir.to_string_lossy().into_owned());
-    }
-    create.push("--".into());
-    create.extend(argv.iter().cloned());
-    let out = Command::new(BIN)
-        .args(&create)
-        .output()
-        .map_err(|e| format!("rmux: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    crate::mux::new_session(name, cwd, launch_env(argv), argv)
 }
 
-/// The command that attaches to an existing rmux session and nothing else.
+/// The command that attaches to an existing session and nothing else.
 ///
 /// Distinct from [`attach_or_create`] so that picking an agent from the
 /// launcher which has since ended reports that, rather than silently creating
 /// an empty session wearing its name.
 pub fn attach(name: &str) -> Vec<String> {
-    if crate::mux::builtin() {
-        return crate::mux::attach_argv(name, None);
-    }
-    vec![
-        BIN.to_string(),
-        "attach-session".to_string(),
-        "-t".to_string(),
-        format!("={name}"),
-    ]
+    crate::mux::attach_argv(name, None)
 }
 
 /// One browser share of a multiplexer session.
@@ -927,13 +662,7 @@ fn sanitize(text: &str) -> String {
 
 /// Whether a rmux session by this name is alive.
 pub fn exists(name: &str) -> bool {
-    if crate::mux::builtin() {
-        return crate::mux::has_session(name);
-    }
-    Command::new(BIN)
-        .args(["has-session", "-t", &format!("={name}")])
-        .output()
-        .is_ok_and(|out| out.status.success())
+    crate::mux::has_session(name)
 }
 
 /// Whether the agent in a session asked for the mouse itself.
@@ -944,117 +673,34 @@ pub fn exists(name: &str) -> bool {
 /// is only safe while this is set: with it the click reaches the agent, and
 /// without it the menu opens over the pane with splits and kills on it.
 pub fn mouse_wanted(name: &str) -> bool {
-    // `mouse_any_flag` is a pane format, which neither `display-message -t` nor
-    // `list-panes -t` will resolve against a session name — and the `=` exact
-    // target the rest of this module uses is rejected there outright. Asking
-    // every pane and matching the name here is the form that answers at all.
+    // `mouse_any_flag` is a pane format, which `display-message` will not
+    // resolve against a session name. Asking every pane and matching the name
+    // here is the form that answers at all.
     const FORMAT: &str = "#{session_name} #{mouse_any_flag}";
-    let listing = match crate::mux::builtin() {
-        true => crate::mux::list_all_panes(FORMAT).unwrap_or_default(),
-        false => match Command::new(BIN)
-            .args(["list-panes", "-a", "-F", FORMAT])
-            .output()
-        {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-            Err(_) => return false,
-        },
-    };
+    let listing = crate::mux::list_all_panes(FORMAT).unwrap_or_default();
     let want = format!("{name} 1");
     listing.lines().any(|line| line == want)
 }
 
-/// End a rmux session, taking the agent inside it with it.
+/// End a session, taking the agent inside it with it.
 ///
-/// The `=` prefix makes the target an exact name rather than a prefix match —
-/// without it, killing `cctop-claude` would also kill `cctop-claude-2`.
+/// By exact name: the protocol's session target is a name, not a prefix, so
+/// killing `cctop-claude` never takes `cctop-claude-2` with it.
 pub fn kill(name: &str) -> Result<(), String> {
-    if crate::mux::builtin() {
-        let killed = crate::mux::kill_session(name);
-        crate::elog::event(
-            "rmux",
-            "kill",
-            serde_json::json!({ "session": name, "ok": killed.is_ok() }),
-        );
-        return killed;
-    }
-    let out = Command::new(BIN)
-        .args(["kill-session", "-t", &format!("={name}")])
-        .output()
-        .map_err(|e| format!("rmux: {e}"))?;
+    let killed = crate::mux::kill_session(name);
     crate::elog::event(
         "rmux",
         "kill",
-        serde_json::json!({ "session": name, "ok": out.status.success() }),
+        serde_json::json!({ "session": name, "ok": killed.is_ok() }),
     );
-    if out.status.success() {
-        return Ok(());
-    }
-    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    killed
 }
 
-/// Turn off the status bar in one of cctop's own rmux sessions.
-///
-/// Two reasons, and the second is the one that matters. A cctop pane already has
-/// a border with the agent's name on it and a footer under it, so rmux's bar is a
-/// row of duplicate chrome inside someone else's frame.
-///
-/// More importantly it carries a clock, which rmux repaints every
-/// `status-interval` — 15 seconds by default and 1 second in plenty of configs.
-/// A pane's fallback idleness test is "has the screen stopped changing", so a
-/// ticking clock is indistinguishable from an agent still working: with a
-/// one-second interval no rmux-backed pane could ever go quiet, and the fallback
-/// silently reported every abandoned agent as busy forever.
-///
-/// Scoped to the one session, so a user's own sessions and their global settings
-/// are untouched. Best effort: a bar that stays on is cosmetic plus a weaker
-/// fallback, and never worth failing a launch over.
-pub fn quiet(name: &str) {
-    // cctop's own daemon has all three as its defaults (`mux::DEFAULTS`), and
-    // nothing is ever set server-wide on a daemon that is not cctop's.
-    if crate::mux::builtin() {
-        return;
-    }
-    // `=`, like every other target in this module. tmux rejected an exact-match
-    // prefix on `set-option` outright ("no such session: =cctop-x") and this
-    // was the one call that had to go without it; rmux takes it, so the
-    // weaker form — a bare name, which rmux prefix-matches — is no longer the
-    // only option here.
-    let _ = Command::new(BIN)
-        .args(["set-option", "-t", &format!("={name}"), "status", "off"])
-        .output();
-    // Let the agent's own notifications out. A harness that wants a desktop
-    // notification wraps it in rmux's passthrough sequence, and rmux swallows
-    // that unless told otherwise — so the OSC 9 an agent sends when it is
-    // blocked never reached the pane's parser, where cctop now listens for it.
-    // The bell always got through; this is the half that says what about.
-    //
-    // A pane option, not a session one, and set here rather than in [`prepare`]:
-    // a pane inherits its options from the global set when it is made, so there
-    // is nothing to configure until the agent's own pane exists. Best effort
-    // like the rest — rmux before 3.3 has no such option and rejects it, which
-    // costs a process and leaves the pane exactly as it was.
-    let _ = Command::new("rmux")
-        .args(["set-option", "-p", "-t", name, "allow-passthrough", "on"])
-        .output();
-    // And let the agent copy out. `set-clipboard` defaults to `external`,
-    // which rmux reads as *clipboard writes from inside a pane are dropped* —
-    // so a copy in Claude Code went nowhere until this. Server-scoped rather
-    // than session: rmux stores the option globally whichever target names it,
-    // so `-s` says honestly what `-t` would do anyway.
-    let _ = Command::new(BIN)
-        .args(["set-option", "-s", "set-clipboard", "on"])
-        .output();
-}
-
-/// Set one of the `@cctop_*` options on cctop's own daemon, when that is the
-/// daemon in use. Whether it was, so the caller knows not to go on to the
-/// user's: the record is best effort either way, like everything it records.
-fn recorded(name: &str, option: &str, value: &str) -> bool {
-    if !crate::mux::builtin() {
-        return false;
-    }
+/// Set one of the `@cctop_*` options on a session. Best effort, like
+/// everything it records: a record that failed to save is a tab that falls
+/// back to what it would have shown without it.
+fn record(name: &str, option: &str, value: &str) {
     let _ = crate::mux::set_session_option(name, option, value);
-    true
 }
 
 /// What the agent is started with beyond its argv, as `VAR=value` pairs.
@@ -1076,12 +722,7 @@ fn launch_env(argv: &[String]) -> Vec<String> {
 /// Best effort, like every other option set here: a tab named after its session
 /// is worse than one named properly, and better than a launch that failed.
 pub fn set_label(name: &str, label: &str) {
-    if recorded(name, "@cctop_label", label) {
-        return;
-    }
-    let _ = Command::new("rmux")
-        .args(["set-option", "-t", name, "@cctop_label", label])
-        .output();
+    record(name, "@cctop_label", label);
 }
 
 /// Record which account the agent in `name` was started under.
@@ -1093,12 +734,7 @@ pub fn set_label(name: &str, label: &str) {
 /// the account a border reports would fall back to whichever one cctop itself
 /// would have used. The default profile writes nothing: unset is what it means.
 pub fn set_profile(name: &str, profile: &str) {
-    if recorded(name, "@cctop_profile", profile) {
-        return;
-    }
-    let _ = Command::new("rmux")
-        .args(["set-option", "-t", name, "@cctop_profile", profile])
-        .output();
+    record(name, "@cctop_profile", profile);
 }
 
 /// What the agent in a session last reported about itself, recorded on the
@@ -1163,25 +799,14 @@ pub fn now_secs() -> u64 {
 /// It is deliberately cctop that writes this and not `cctop hook`. The hook
 /// runs inside the agent's own process tree, many times a minute, under a
 /// deadline it must never miss — see the module docs in
-/// [`hook`](crate::hook) — and `rmux set-option` is a process spawn plus a
-/// round trip to the daemon. Doing it here costs the same information one
-/// subprocess per *change of state*, on cctop's time rather than the agent's.
+/// [`hook`](crate::hook) — and setting an option is a round trip to the
+/// daemon. Doing it here costs the same information one exchange per *change
+/// of state*, on cctop's time rather than the agent's.
 ///
 /// Best effort, like its neighbours: a state that failed to save is a tab that
 /// falls back to guessing at its screen, which is where it was before.
 pub fn set_state(name: &str, signal: crate::hook::Signal) {
-    if recorded(name, "@cctop_state", &State::encode(signal, now_secs())) {
-        return;
-    }
-    let _ = Command::new(BIN)
-        .args([
-            "set-option",
-            "-t",
-            &format!("={name}"),
-            "@cctop_state",
-            &State::encode(signal, now_secs()),
-        ])
-        .output();
+    record(name, "@cctop_state", &State::encode(signal, now_secs()));
 }
 
 /// Record where this session's tab sits in the bar.
@@ -1196,12 +821,7 @@ pub fn set_state(name: &str, signal: crate::hook::Signal) {
 /// Best effort, like its neighbours: an order that failed to save is a bar in
 /// the old arrangement, not a broken one.
 pub fn set_order(name: &str, order: usize) {
-    if recorded(name, "@cctop_order", &order.to_string()) {
-        return;
-    }
-    let _ = Command::new(BIN)
-        .args(["set-option", "-t", name, "@cctop_order", &order.to_string()])
-        .output();
+    record(name, "@cctop_order", &order.to_string());
 }
 
 /// Record the tab's colour on the session, by name — "amber", not an index, so
@@ -1215,18 +835,7 @@ pub fn set_order(name: &str, order: usize) {
 /// Best effort, like its neighbours: a colour that failed to save is a tab in
 /// the default ink, not a broken one.
 pub fn set_color(name: &str, color: &str) {
-    if recorded(name, "@cctop_color", color) {
-        return;
-    }
-    let _ = Command::new(BIN)
-        .args([
-            "set-option",
-            "-t",
-            &format!("={name}"),
-            "@cctop_color",
-            color,
-        ])
-        .output();
+    record(name, "@cctop_color", color);
 }
 
 /// Record on the session that it is a pane of a tab led by another session.
@@ -1243,12 +852,7 @@ pub fn set_color(name: &str, color: &str) {
 ///
 /// Best effort, like its neighbours.
 pub fn set_tab(name: &str, tab: &str) {
-    if recorded(name, "@cctop_tab", tab) {
-        return;
-    }
-    let _ = Command::new(BIN)
-        .args(["set-option", "-t", &format!("={name}"), "@cctop_tab", tab])
-        .output();
+    record(name, "@cctop_tab", tab);
 }
 
 /// Record this session's place among its tab's panes.
@@ -1257,18 +861,7 @@ pub fn set_tab(name: &str, tab: &str) {
 /// that can be written to — it is the leading session, and writing its position
 /// there would record the *tab's* position rather than this pane's.
 pub fn set_pane(name: &str, pane: usize) {
-    if recorded(name, "@cctop_pane", &pane.to_string()) {
-        return;
-    }
-    let _ = Command::new(BIN)
-        .args([
-            "set-option",
-            "-t",
-            &format!("={name}"),
-            "@cctop_pane",
-            &pane.to_string(),
-        ])
-        .output();
+    record(name, "@cctop_pane", &pane.to_string());
 }
 
 /// Record how the tab lays its panes out, on every one of them.
@@ -1279,12 +872,7 @@ pub fn set_pane(name: &str, pane: usize) {
 pub fn set_axis(names: &[&str], axis: Axis) {
     let word = axis.as_str();
     for name in names {
-        if recorded(name, "@cctop_axis", word) {
-            continue;
-        }
-        let _ = Command::new(BIN)
-            .args(["set-option", "-t", &format!("={name}"), "@cctop_axis", word])
-            .output();
+        record(name, "@cctop_axis", word);
     }
 }
 
@@ -1313,106 +901,42 @@ fn in_tab_order(newest_first: Vec<Running>) -> Vec<Running> {
     out
 }
 
-/// Let the wheel scroll one of cctop's own rmux sessions.
-///
-/// Without this a rmux-backed pane cannot be scrolled at all. rmux is on the
-/// alternate screen, so the scrollback of whatever terminal cctop is running in
-/// holds none of the agent's output, and the history that does hold it is
-/// reachable only from copy-mode — which, with `mouse` off, only a prefix key
-/// opens. Turning it on makes the wheel enter copy-mode and scroll, the way it
-/// does in every terminal without rmux in the way.
-///
-/// Scoped to the one session and best effort, for the same reasons as
-/// [`quiet`]: a user's own sessions keep their own setting, and a pane that
-/// cannot be scrolled is not worth failing a launch over.
-///
-/// rmux keeps no history for a pane on the alternate screen, so this does
-/// nothing for an agent that draws there — Claude writes to the normal buffer
-/// and scrolls, but an agent that takes the alternate screen has nothing behind
-/// it to scroll back to, under rmux or anywhere else.
-pub fn mouse(name: &str) {
-    // On by default in cctop's own daemon (`mux::DEFAULTS`).
-    if crate::mux::builtin() {
-        return;
-    }
-    // Same reason as `quiet` for the bare name: `set-option` rejects `=`.
-    let _ = Command::new(BIN)
-        .args(["set-option", "-t", name, "mouse", "on"])
-        .output();
-}
-
-/// Let PageUp, PageDown, Home and End scroll one of cctop's rmux sessions, as
-/// [`mouse`] lets the wheel. Returns whether the key was spent on scrolling.
+/// Let PageUp, PageDown, Home and End scroll one of cctop's sessions, as the
+/// wheel does (`mouse on`, see `mux::defaults`). Returns whether the key was
+/// spent on scrolling.
 ///
 /// Only for an agent on the normal screen, which is Claude outside fullscreen:
-/// one on the alternate screen has no history here (see [`mouse`]) and binds
-/// these keys to its own scrolling, so they go to it untouched.
+/// rmux keeps no history for a pane on the alternate screen, and an agent that
+/// draws there binds these keys to its own scrolling, so they go to it
+/// untouched.
 ///
 /// PageUp enters copy-mode with `-e`, so paging back down past the bottom
 /// leaves it again on its own — and once in copy-mode, PageUp and PageDown are
 /// its own keys, so forwarding them is what scrolls. Home enters it too, at
 /// the top of the history. End is the composer's while nothing is scrolled
 /// back, and only in copy-mode means the live screen.
-///
-/// Asking rmux costs a process per key, which these keys can afford.
 pub fn scroll_key(name: &str, code: crossterm::event::KeyCode) -> bool {
+    use crate::mux::Scroll;
     use crossterm::event::KeyCode;
-    if crate::mux::builtin() {
-        use crate::mux::Scroll;
-        let Some(state) = crate::mux::display(name, "#{alternate_on} #{pane_in_mode}") else {
-            return false;
-        };
-        let scrolled = match state.trim() {
-            "0 0" => false,
-            "0 1" => true,
-            _ => return false,
-        };
-        let how = match (code, scrolled) {
-            (KeyCode::PageUp, false) => Scroll::PageUp,
-            (KeyCode::Home, false) => {
-                return crate::mux::scroll(name, Scroll::Enter)
-                    && crate::mux::scroll(name, Scroll::Command("history-top"));
-            }
-            (KeyCode::Home, true) => Scroll::Command("history-top"),
-            (KeyCode::End, true) => Scroll::Command("cancel"),
-            _ => return false,
-        };
-        return crate::mux::scroll(name, how);
-    }
-    // Pane commands want the trailing colon: `=name` alone is a pane-less
-    // target and rmux rejects it.
-    let target = format!("={name}:");
-    // The target straight after the command: display-message's format is its
-    // trailing argument, and a flag after it would be read as more message.
-    let run = |args: &[&str]| {
-        Command::new(BIN)
-            .arg(args[0])
-            .args(["-t", &target])
-            .args(&args[1..])
-            .output()
-    };
-    let Ok(out) = run(&["display-message", "-p", "#{alternate_on} #{pane_in_mode}"]) else {
+    let Some(state) = crate::mux::display(name, "#{alternate_on} #{pane_in_mode}") else {
         return false;
     };
-    let (alternate, scrolled) = match String::from_utf8_lossy(&out.stdout).trim() {
-        "0 0" => (false, false),
-        "0 1" => (false, true),
-        _ => (true, false),
-    };
-    if alternate {
-        return false;
-    }
-    let args: &[&str] = match (code, scrolled) {
-        (KeyCode::PageUp, false) => &["copy-mode", "-eu"],
-        (KeyCode::Home, false) => {
-            return run(&["copy-mode", "-e"]).is_ok_and(|out| out.status.success())
-                && run(&["send-keys", "-X", "history-top"]).is_ok_and(|out| out.status.success());
-        }
-        (KeyCode::Home, true) => &["send-keys", "-X", "history-top"],
-        (KeyCode::End, true) => &["send-keys", "-X", "cancel"],
+    let scrolled = match state.trim() {
+        "0 0" => false,
+        "0 1" => true,
         _ => return false,
     };
-    run(args).is_ok_and(|out| out.status.success())
+    let how = match (code, scrolled) {
+        (KeyCode::PageUp, false) => Scroll::PageUp,
+        (KeyCode::Home, false) => {
+            return crate::mux::scroll(name, Scroll::Enter)
+                && crate::mux::scroll(name, Scroll::Command("history-top"));
+        }
+        (KeyCode::Home, true) => Scroll::Command("history-top"),
+        (KeyCode::End, true) => Scroll::Command("cancel"),
+        _ => return false,
+    };
+    crate::mux::scroll(name, how)
 }
 
 /// One cctop-owned rmux session, and the agent living in it.
@@ -1646,25 +1170,10 @@ impl Axis {
 pub fn running() -> Vec<Running> {
     // One call for all of it. Every field below resolves in a pane's context —
     // rmux looks up the session a pane belongs to — so asking per session would
-    // be a subprocess each for the same answer.
+    // be a request each for the same answer.
     const FORMAT: &str = "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{window_width}\t#{window_height}";
-    let listing = match crate::mux::builtin() {
-        // No daemon running: no sessions, not an error.
-        true => crate::mux::list_all_panes(FORMAT).unwrap_or_default(),
-        false => {
-            let Ok(out) = Command::new(BIN)
-                .args(["list-panes", "-a", "-F", FORMAT])
-                .output()
-            else {
-                return Vec::new();
-            };
-            if !out.status.success() {
-                // No server running: no sessions, not an error.
-                return Vec::new();
-            }
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
-    };
+    // No daemon running: no sessions, not an error.
+    let listing = crate::mux::list_all_panes(FORMAT).unwrap_or_default();
 
     let prefix = format!("{PREFIX}-");
     let mut found: Vec<(u64, Running)> = Vec::new();
@@ -1750,18 +1259,7 @@ pub fn running() -> Vec<Running> {
 /// client may have resized; see [`Running::window`].
 pub fn window_size(name: &str) -> Option<(u16, u16)> {
     const FORMAT: &str = "#{window_width} #{window_height}";
-    let text = match crate::mux::builtin() {
-        true => crate::mux::display(name, FORMAT)?,
-        false => {
-            // Pane commands want the trailing colon; see `scroll_key`.
-            let target = format!("={name}:");
-            let out = Command::new(BIN)
-                .args(["display-message", "-t", &target, "-p", FORMAT])
-                .output()
-                .ok()?;
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
-    };
+    let text = crate::mux::display(name, FORMAT)?;
     let mut parts = text.split_whitespace().map(|v| v.parse::<u16>().ok());
     parts.next().flatten().zip(parts.next().flatten())
 }
@@ -1774,18 +1272,7 @@ pub fn window_size(name: &str) -> Option<(u16, u16)> {
 /// has rather than one the page would have to measure off its own drawing.
 pub fn clients(name: &str) -> Vec<(bool, u16, u16)> {
     const FORMAT: &str = "#{client_tty}\t#{client_width}\t#{client_height}";
-    let listing = match crate::mux::builtin() {
-        true => crate::mux::list_clients(name, FORMAT).unwrap_or_default(),
-        false => {
-            let Ok(out) = Command::new(BIN)
-                .args(["list-clients", "-t", &format!("={name}"), "-F", FORMAT])
-                .output()
-            else {
-                return Vec::new();
-            };
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
-    };
+    let listing = crate::mux::list_clients(name, FORMAT).unwrap_or_default();
     listing
         .lines()
         .filter_map(|line| {
@@ -1808,27 +1295,11 @@ pub fn sessions() -> Vec<String> {
 /// Targeted rather than a scan of [`running`], because this is asked per pane
 /// and the answer for one session should not cost a listing of them all.
 pub fn agent_pid(name: &str) -> Option<u32> {
-    // The `=` that makes a target exact everywhere else in this module is a
-    // parse error to `list-panes` under rmux ("can't find pane: =cctop-…"),
-    // and the bare name it does accept prefix-matches — `cctop-claude-abc`
-    // finds `cctop-claude-abc-2` when the first is gone. So the name comes back
-    // in the format and is checked here: exact by answer rather than by syntax,
-    // which is also the version that cannot be undone by either daemon
-    // changing its mind about `=`.
+    // The name comes back in the format and is checked here: exact by answer
+    // rather than by syntax, so a session that ended and a neighbour whose
+    // name extends it can never be confused.
     const FORMAT: &str = "#{session_name}\t#{pane_pid}";
-    let listing = match crate::mux::builtin() {
-        true => crate::mux::list_panes(name, FORMAT)?,
-        false => {
-            let out = Command::new(BIN)
-                .args(["list-panes", "-t", name, "-F", FORMAT])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
-    };
+    let listing = crate::mux::list_panes(name, FORMAT)?;
     // First pane again: see [`running`].
     listing
         .lines()
@@ -1871,30 +1342,11 @@ pub struct Capture {
 
 /// Capture the screen of the session called `name`. See [`Capture`].
 ///
-/// Two commands, because the first is what makes the second exact: a bare
-/// session name prefix-matches (see [`agent_pid`]), so the session is checked by
-/// its answer and the capture then targets the pane by its `%id`, which cannot
-/// land on a neighbour.
+/// Two requests: the first finds the session's first pane and its size, and the
+/// second captures that pane by its `session:window.pane` target.
 pub fn capture(name: &str) -> Option<Capture> {
-    // The second field names the pane for the capture: `%id` to the `rmux`
-    // command line, `session:window.pane` to the typed protocol, whose pane
-    // targets are that.
-    const FORMAT: &str = "#{session_name}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
-    const TYPED: &str = "#{session_name}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
-    let builtin = crate::mux::builtin();
-    let listing = match builtin {
-        true => crate::mux::list_panes(name, TYPED)?,
-        false => {
-            let out = Command::new(BIN)
-                .args(["list-panes", "-t", name, "-F", FORMAT])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
-    };
+    const FORMAT: &str = "#{session_name}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
+    let listing = crate::mux::list_panes(name, FORMAT)?;
     let fields: Vec<&str> = listing
         .lines()
         .map(|line| line.split('\t').collect::<Vec<_>>())
@@ -1905,19 +1357,7 @@ pub fn capture(name: &str) -> Option<Capture> {
         "0" => None,
         _ => Some((num(5)?, num(4)?)),
     };
-    let screen = match builtin {
-        true => crate::mux::capture(&crate::mux::pane_target(fields[1])?, true, false)?,
-        false => {
-            let out = Command::new(BIN)
-                .args(["capture-pane", "-p", "-e", "-t", fields[1]])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            out.stdout
-        }
-    };
+    let screen = crate::mux::capture(&crate::mux::pane_target(fields[1])?, true, false)?;
     Some(Capture {
         cols,
         rows,
@@ -2308,7 +1748,7 @@ mod tests {
         // A fresh trycloudflare name can take a while to resolve everywhere,
         // which is a fact about DNS, not about the upgrade.
         for _ in 0..30 {
-            let out = Command::new("curl")
+            let out = std::process::Command::new("curl")
                 .args(["-sS", "--http1.1", "-o", "/dev/null", "-w", "%{http_code}"])
                 .args(["--max-time", "5"])
                 .args(["-H", "Connection: Upgrade", "-H", "Upgrade: websocket"])
@@ -2341,50 +1781,22 @@ mod tests {
     use super::*;
     use crate::test_wait::{PATIENCE, wait_asking, wait_every};
 
-    /// Whatever is offered has to be runnable as offered. An install the user
-    /// accepts and then watches fail on a missing `sudo`, or on a script that
-    /// was never a command, is worse than never having offered.
-    #[test]
-    fn an_offered_install_is_a_command_that_could_run() {
-        let Some(install) = installer() else {
-            return;
-        };
-        assert_eq!(install.argv[0], "sh");
-        assert_eq!(install.argv[1], "-c");
-        assert_eq!(install.shown(), install.argv[2]);
-        assert!(install.shown().contains("rmux"));
-        if let Some(rest) = install.shown().strip_prefix("sudo ") {
-            assert!(crate::shim::is_command("sudo"));
-            // Only the leading command is elevated, so a second one after `&&`
-            // needs its own sudo. apt is the entry where this matters.
-            assert!(!rest.contains("&& apt-get install") || rest.contains("&& sudo"));
-        }
-    }
-
-    /// The wrapped command has to attach-or-create by exact name, start in the
-    /// project, and keep the agent's own flags away from rmux.
+    /// The pane's command attaches-or-creates by exact name, through this
+    /// binary, with the agent's own flags after `--` where the client cannot
+    /// claim them.
     #[test]
     fn the_wrapper_attaches_or_creates_and_passes_the_agent_through() {
         let argv: Vec<String> = ["claude", "--resume", "abc"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let dir = std::env::temp_dir();
-        let out = attach_or_create(&argv, "cctop-claude-abc", Some(&dir));
-
+        // Through `mux::attach_argv`, which in a test binary stands in a pane
+        // that only says why it cannot attach; the argv proper is tested there.
+        let out = attach_or_create(&argv, "cctop-claude-abc", None);
         assert_eq!(
-            &out[..5],
-            &["rmux", "new-session", "-A", "-s", "cctop-claude-abc"]
+            out,
+            crate::mux::attach_argv("cctop-claude-abc", Some((&argv, None)))
         );
-        // The agent's flags come after `--`, so rmux cannot claim them.
-        let sep = out.iter().position(|a| a == "--").expect("separator");
-        assert_eq!(&out[sep + 1..], &argv[..]);
-        assert!(out.contains(&"-c".to_string()));
-
-        // A directory that is not there is left off rather than failing the
-        // spawn, matching what the pty path does with a stale cwd.
-        let gone = attach_or_create(&argv, "n", Some(Path::new("/nonexistent/gone")));
-        assert!(!gone.contains(&"-c".to_string()));
     }
 
     /// Resuming the same session twice must name the same rmux session, or `-A`
@@ -2486,9 +1898,8 @@ mod tests {
         // agent that cctop put in rmux rather than telling the user cctop never
         // started it.
         let back = pid.and_then(holding);
-        // Quieting the session is best effort, but it has to actually land: the
-        // status bar it removes is what made an idle pane look busy forever.
-        quiet(&ours);
+        // The status bar is off from the daemon's defaults: it is what made an
+        // idle pane look busy forever.
         let status = crate::mux::display(&ours, "#{status}").map(|out| out.trim().to_string());
         for name in [&ours, &theirs] {
             end_session(name);
@@ -2594,8 +2005,9 @@ mod tests {
     }
 
     /// A pane's scrollback is fixed when the pane is made, so the only proof
-    /// [`prepare`] works is a real session reporting what its pane actually got
-    /// — the option can read back as set while the pane still holds rmux's 2000.
+    /// the daemon's defaults reach it is a real session reporting what its
+    /// pane actually got — the option can read back as set while the pane
+    /// still holds rmux's 2000.
     #[test]
     fn a_prepared_session_holds_the_agent_with_room_to_scroll_back() {
         let _daemon = crate::mux::TestDaemon::new(
@@ -2623,17 +2035,12 @@ mod tests {
 
         assert_eq!(
             history.as_deref(),
-            Some(HISTORY_LINES),
+            Some(crate::mux::HISTORY_LINES),
             "the agent's pane kept rmux's default scrollback"
         );
         assert_eq!(mouse.as_deref(), Some("1"), "the wheel would do nothing");
-        // The placeholder is gone: a second window would leave the agent sharing
-        // a session with a `sleep`, and every lookup here assumes the one pane.
-        assert_eq!(
-            windows.as_deref(),
-            Some("1"),
-            "placeholder window left over"
-        );
+        // One window, holding the agent: every lookup here assumes the one pane.
+        assert_eq!(windows.as_deref(), Some("1"), "a second window appeared");
         assert!(agent.is_some_and(|p| p > 0), "no agent in the session");
     }
 
