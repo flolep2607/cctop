@@ -49,12 +49,16 @@ only compares against the committed files and never writes new ones.
 
 ## Run only the tests your change can break
 
-`cargo test --all-targets` is about 1500 tests: 58 seconds of wall time for about 11
-seconds of CPU. Nearly all of that is waiting — `thread::sleep`, real ptys,
-real subprocesses — which means it is both slow and *load-sensitive*: two of
-those tests assert wall-clock margins, so several lanes running the suite at
-once turn them red for reasons unrelated to anyone's change. On a busy machine a
-full-suite failure is not evidence until you have re-run it alone.
+`cargo test --workspace --all-targets` is about 1570 tests, and on a warm build
+it takes about 5 seconds of wall time for 6 seconds of CPU (6 cores, already
+loaded to about 4 by other lanes, median of seven runs). It used to be a minute
+of mostly `thread::sleep`; the sleeps are now waits on the condition itself
+(`cctop_core::test_wait`), so what is left is the real ptys and subprocesses,
+and the slowest binaries take about a second each. No test asserts a tight
+wall-clock margin any more: the few that check `elapsed()` bound something
+meant to be instant by fifty times what it needs. A full-suite failure on a busy
+machine is still not evidence until you have re-run it alone — fork-heavy tests
+share one process, and a race between them is not your change.
 
 While working, run `tools/targeted-test.sh`, which maps changed files to the
 tests that cover them (`crates/ui/src/filter.rs` → `-p cctop-ui filter::`), and
