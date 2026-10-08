@@ -286,9 +286,9 @@ Three traps the script guards, each of which produced a wrong picture first:
 
 ## Agents' git hooks
 
-`tools/git-hooks` holds two hooks that act only inside a Claude Code session
+`tools/git-hooks` holds three hooks that act only inside a Claude Code session
 (`CLAUDECODE=1`) and leave a person's commits alone: one adds the co-author
-line to an agent's commit, the other pushes each commit in the background on a
+line to an agent's commit, the other two push each commit (and each merge) in the background on a
 branch that already tracks the remote (never `main`, never mid-rebase), so an
 agent's draft PR is always current. Enable them once per clone:
 
