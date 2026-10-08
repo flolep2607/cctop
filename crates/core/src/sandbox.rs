@@ -2049,10 +2049,20 @@ mod tests {
     #[test]
     fn the_shell_shim_passes_its_arguments_through() {
         let shim = write_shell_shim(Path::new("/bin/echo")).expect("shim");
-        let out = Command::new(&shim)
-            .args(["-c", "it's one arg"])
-            .output()
-            .expect("run");
+        // The shim is written by this process, so a test forking while it was
+        // open can hold it busy until that child execs (see
+        // `write_executable`). The sandbox execs it long after; here the
+        // retry waits out that child, which is milliseconds at most.
+        let mut tries = 0;
+        let out = loop {
+            match Command::new(&shim).args(["-c", "it's one arg"]).output() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                run => break run.expect("run"),
+            }
+        };
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             "--sandbox-shell -c it's one arg\n"
