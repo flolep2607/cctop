@@ -146,7 +146,7 @@ fn draw_qr(frame: &mut Frame, inner: Rect, row: u16, qr: &qr::Qr) {
 /// The titles are more than a word — the help's carry its filter and the
 /// build, which have to stay put on the border while the page under them
 /// scrolls — so each line keeps its own alignment.
-fn scrollable_modal_titled(
+pub(super) fn scrollable_modal_titled(
     frame: &mut Frame,
     area: Rect,
     titles: Vec<Line<'static>>,
@@ -431,6 +431,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("{optimize}", "What was spent and not got back"),
         item("{compare}", "How each model did on the work you gave it"),
         item("{hooks}  F8", "Agent integration: what reports to cctop"),
+        item(
+            "{provider_status}",
+            "Provider status: does an outage explain the errors",
+        ),
         item("{refresh}  F5", "Refresh now"),
         gap(),
         section("Environment"),

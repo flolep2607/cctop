@@ -71,6 +71,8 @@ pub fn run(
         });
     }
     spawn_quota_poller(res_tx.clone());
+    let outage_recheck = std::sync::Arc::default();
+    super::outage::spawn_poller(res_tx.clone(), std::sync::Arc::clone(&outage_recheck));
     let hosts = cctop_core::fleet::Host::collect(hosts);
     for host in &hosts {
         spawn_host_poller(host.clone(), res_tx.clone());
@@ -89,6 +91,8 @@ pub fn run(
     }
 
     let mut app = App::new(plan, req_tx.clone());
+    // The flag the panel sets to ask the poller for a recheck now.
+    app.outage.recheck = outage_recheck;
     app.refresh_secs = delay;
     app.start_server = Some(start_server);
     // With nothing to put in it, HOST is a column of one repeated word. Hidden
@@ -588,6 +592,10 @@ fn event_loop(
                     // The poller has just written whatever this reading added,
                     // so this is the one moment the log is known to have moved.
                     app.burn = cctop_core::burn::Log::load();
+                    app.needs_redraw = true;
+                }
+                Ok(Response::ProviderStatus(page, status)) => {
+                    app.outage.status.set(page, *status);
                     app.needs_redraw = true;
                 }
                 Ok(Response::Location(answer)) => app.got_location(answer),
