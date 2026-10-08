@@ -201,6 +201,15 @@ fn why_not(error: &cctop_tunnel::Error) -> String {
     }
 }
 
+/// Whether a cctop on this machine is connected as `account`'s tunnel right
+/// now — so that removing it would pull it out from under that process.
+pub fn in_use(account: &Account) -> bool {
+    match Credentials::from_token(&account.token) {
+        Ok(credentials) => claim(&credentials).is_none(),
+        Err(_) => false,
+    }
+}
+
 /// Become the one connector of this tunnel on this machine, or `None` when
 /// another process already is.
 fn claim(credentials: &Credentials) -> Option<File> {

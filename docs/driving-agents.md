@@ -307,8 +307,11 @@ the pairing code under it, for pointing a phone at; any key closes it. The code
 is the link — the panel says so — and on a terminal too small to hold it the
 panel says that instead.
 
-The link reaches this machine over cctop's own TryCloudflare quick tunnel, the
-same kind `cctop serve --tunnel` opens, handed to rmux as `--tunnel-url` rather
+The link reaches this machine over cctop's own TryCloudflare quick tunnel — a
+quick one even when [your own Cloudflare account](serve.md#your-own-cloudflare-account)
+is connected, for now: carrying shares on that account's `-share` hostname is
+still to come. It is the same client `cctop serve --tunnel` uses, handed to rmux
+as `--tunnel-url` rather
 than letting it raise a second one through a provider of its own. One way out of
 the machine, opened on the first `W` of a run and closed when cctop exits. If
 the tunnel cannot be registered the share still happens and the status line says

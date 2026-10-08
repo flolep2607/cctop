@@ -2,6 +2,7 @@ mod cli;
 mod doctor;
 mod mcp;
 mod recall;
+mod tunnel;
 mod wait;
 mod why;
 
@@ -234,6 +235,15 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("sandbox") {
             std::process::exit(sandbox::run_held(&argv[2..])?);
+        }
+    }
+
+    // `cctop tunnel` alongside `serve`, whose tunnel it connects: a bare word,
+    // like the others here, and well below `hook`.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("tunnel") {
+            std::process::exit(tunnel::run(&argv[2..])?);
         }
     }
 
