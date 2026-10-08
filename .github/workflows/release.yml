@@ -234,10 +234,26 @@ jobs:
           # normally builds each again before uploading; skip that redundant
           # verification on this fresh runner.
           #
-          # `--workspace` publishes cctop-core, cctop-serve, cctop-ui and then
-          # cctop, each after the ones it depends on, waiting for every one to
-          # show in the index before the next goes up. They share one version,
-          # so a release is all four or it is not finished: a run that fails
-          # part-way is re-run with the published ones left out (`-p` the
-          # rest), since crates.io refuses a version it already has.
-          cargo publish --workspace --locked --no-verify
+          # Each crate has its own version and a release bumps only the ones
+          # that changed (`verify / release-plan` checked that), so the rest
+          # are already on crates.io at the version they have. Which ones is
+          # decided here, from the index, before anything is published —
+          # never by reading cargo's "already exists" — so that every real
+          # failure (auth, a 429, packaging) still fails the job. The same
+          # skip makes a run that failed part-way safe to re-run unchanged.
+          #
+          # The list comes in dependency order (cctop-core, then -serve and
+          # -ui, then cctop), and cargo waits for each to show in the index
+          # before the next goes up.
+          #
+          # An assignment rather than `mapfile < <(...)`, whose exit status
+          # bash drops: an index the script could not read must stop here,
+          # not read as "nothing left to publish".
+          list=$(tools/release-plan.sh unpublished)
+          if [ -z "$list" ]; then
+            echo "::notice::every crate is on crates.io at its version already; nothing to publish"
+            exit 0
+          fi
+          mapfile -t crates <<<"$list"
+          echo "publishing: ${crates[*]}"
+          cargo publish --locked --no-verify "${crates[@]/#/-p=}"

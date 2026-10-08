@@ -91,6 +91,11 @@ jobs:
   # workspace, because the binary can only be installed from crates.io if the
   # crates it is built from are there too; `--workspace` packages them in
   # dependency order against a local copy of the ones not yet published.
+  #
+  # Crates a release leaves at a version crates.io already has are packaged
+  # too: in a dry run cargo only warns "already exists on crates.io index" and
+  # carries on, so this stays one command. What proves those unchanged crates
+  # is `release-plan` below — unchanged since the tag means what crates.io has.
   package:
     runs-on: ubuntu-24.04
     steps:
@@ -104,6 +109,28 @@ jobs:
           pr-comment: false
           runtime-dir: ${{ runner.temp }}/kache
       - run: cargo publish --dry-run --workspace
+
+  # Each internal crate has its own version, and a release bumps exactly the
+  # ones that changed since the last tag (the rules are in the script). On a
+  # commit that bumps the root — a release — this fails naming any crate that
+  # changed but kept its version, or was bumped with nothing changed. On any
+  # other commit it passes with a notice: a feature branch changes crates
+  # without bumping them, and that is the normal state of things.
+  #
+  # The full history, because the comparison is against the last `v*` tag and
+  # a shallow checkout has no tags.
+  release-plan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - run: rustup toolchain install
+      - run: tools/release-plan.sh check
+      # The guard's own cases, in a scratch repository: cheap, and the guard is
+      # otherwise only exercised for real once per release.
+      - run: tools/release-plan.test.sh
 
   # The web UI's built page is committed (crates/serve/src/assets/app/index.html) so
   # that `cargo install` needs no Node. This rebuilds it from web/ and fails if
