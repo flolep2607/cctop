@@ -4,7 +4,7 @@ Things found while researching that are not themselves research: real defects,
 gaps and inaccuracies noticed in passing. Each one says where it came from, so
 a reader can judge how well it was verified.
 
-Nothing here has been acted on unless it says so.
+Each item now says where it stands, as of a triage against main on 2026-10-09.
 
 ---
 
@@ -14,6 +14,8 @@ Found by reading all seven parsers in `src/session/` closely enough to
 document them.
 
 ### 1. Codex `apply_patch` loses every file after the first
+
+**Status 2026-10-09: fixed** by 889b094; `ToolDetail::paths` holds every file a patch touched.
 
 `distil_recent_writes` recovers only the first file of a multi-file patch. The
 `!` collision column is built from recent writes, so a Codex session holding
@@ -28,6 +30,8 @@ incomplete.
 
 ### 2. `docs/costs.md` overstates what "reported" means
 
+**Status 2026-10-09: fixed** by b1e9e7a (`docs/costs.md` explains a $0.00 cost against spent tokens).
+
 The page says OpenCode's and Pi's costs are read directly from the harness.
 True, but incomplete: both harnesses write `cost: 0` for a provider they have
 no rates for, and cctop falls back to LiteLLM when it sees a zero cost against
@@ -38,6 +42,8 @@ One sentence fixes it. Left alone during the docs work only to avoid three
 agents editing at once.
 
 ### 3. Windsurf's parser has never met a Windsurf install
+
+**Status 2026-10-09: still open.** Needs someone with a Windsurf install and `sqlite3`; the `ponytail:` in `crates/core/src/session/windsurf.rs` and `docs/providers/windsurf.md` still mark the keys as guesses. No agent can settle it.
 
 `src/session/windsurf.rs` carries a `ponytail:` saying it was written against
 the documented `ItemTable` layout rather than a live database. The settings key
@@ -50,6 +56,8 @@ person with a Windsurf install and `sqlite3` to close.
 
 ### 4. Two capability-table cells are conditional, not absolute
 
+**Status 2026-10-09: covered** by the provider pages (`docs/providers/opencode.md`, `docs/providers/windsurf.md`).
+
 Not contradictions — the README table is accurate — but neither cell is
 unconditional, and both are now explained on their provider page:
 
@@ -59,6 +67,8 @@ unconditional, and both are now explained on their provider page:
 - **Windsurf `Tools ✓`** is provisional, for the reason above.
 
 ### 5. `README.md` should link the new directory
+
+**Status 2026-10-09: fixed** by bb83dbb.
 
 The "Two directories of other people's documentation" paragraph is the natural
 place, and the capability table's pointer to the cost page could point at
@@ -100,6 +110,8 @@ establish, and that a future change could quietly break.
 
 ### 6. `watch::roots()` omits Gemini and Windsurf
 
+**Status 2026-10-09: fixed** — Gemini by b3cabfb; Windsurf left out on purpose (see `watch.rs`), the fingerprint covers it. Checking this found Devin missing from both: #189.
+
 `src/watch.rs:131` builds its watch list from Claude, Codex, Cursor, Pi,
 OpenCode and the two Claude-for-Mac roots. Gemini CLI and Windsurf are not in
 it, so a session started in either appears only on the next periodic walk and
@@ -116,10 +128,14 @@ the cache correct.
 
 ### 7. `$CCTOP_SETTLE_MS` is undocumented
 
+**Status 2026-10-09: fixed** by b1e9e7a (`--delay` help and `cctop doctor`).
+
 It joins the other `CCTOP_*` knobs and should be listed beside them in
 `src/cli.rs`'s help.
 
 ### 8. `Session` does not derive `Serialize`
+
+**Status 2026-10-09: still true, deliberately not done** — nothing needs a saved snapshot yet.
 
 Nor do `ProcInfo`, `Remote`, `MacMeta` or `Subagent`. That is what stops the
 fingerprint snapshot from being persisted to disk and reused *across* processes,
@@ -133,6 +149,8 @@ a loop.
 ## From cutting 0.10.0 and 0.11.0 (2026-09-02, 2026-09-03)
 
 ### 9. Every release publishes its commit trailers as release notes
+
+**Status 2026-10-09: fixed** by f67b359 (`release.yml` strips trailers with `git interpret-trailers --parse`).
 
 `release.yml` takes the release notes from the `chore: release` commit's body
 with `git log --format=%b`, which includes **trailers**. Commits in this
