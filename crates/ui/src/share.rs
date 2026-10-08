@@ -37,12 +37,13 @@ pub struct Served {
     pub readonly: String,
     /// Whether the page may act on sessions as well as show them.
     pub actions: bool,
-    /// Show the page these rows and this usage reading.
+    /// Show the page these rows, this usage reading and these status pages.
     pub publish: Publish,
 }
 
 /// How [`Served`] feeds its page, holding the server it feeds.
-pub type Publish = Box<dyn Fn(&[Session], &cctop_core::quota::Quota) + Send>;
+pub type Publish =
+    Box<dyn Fn(&[Session], &cctop_core::quota::Quota, &cctop_core::provider_status::Status) + Send>;
 
 impl Served {
     /// The link to hand somebody: the public one when there is one.
@@ -50,10 +51,16 @@ impl Served {
         self.public.as_deref().unwrap_or(&self.local)
     }
 
-    /// Show the page these rows and this usage reading, replacing whatever it
-    /// was showing. Cheap enough for every refresh; see the server's own.
-    pub fn publish_with_quota(&self, sessions: &[Session], quota: &cctop_core::quota::Quota) {
-        (self.publish)(sessions, quota)
+    /// Show the page these rows, this usage reading and these status pages,
+    /// replacing whatever it was showing. Cheap enough for every refresh; see
+    /// the server's own.
+    pub fn publish_table(
+        &self,
+        sessions: &[Session],
+        quota: &cctop_core::quota::Quota,
+        provider_status: &cctop_core::provider_status::Status,
+    ) {
+        (self.publish)(sessions, quota, provider_status)
     }
 }
 
@@ -257,7 +264,7 @@ impl App {
                 // Something to look at immediately: the page's first request
                 // would otherwise find the empty snapshot it was built with and
                 // report a machine with no sessions on it.
-                serving.publish_with_quota(&self.sessions, &self.quota);
+                serving.publish_table(&self.sessions, &self.quota, &self.outage.status);
                 let where_to = match serving.public.is_some() {
                     true => "on the internet",
                     false => "on this machine",
@@ -293,7 +300,7 @@ impl App {
             Ok(serving) => {
                 // Something to look at immediately: the page's first request
                 // would otherwise find the empty snapshot it was built with.
-                serving.publish_with_quota(&self.sessions, &self.quota);
+                serving.publish_table(&self.sessions, &self.quota, &self.outage.status);
                 self.set_status("On the internet — click the link, or B to copy it");
                 self.serving = Some(serving);
             }
@@ -319,7 +326,7 @@ impl App {
     /// browser update when the table does.
     pub(super) fn feed_serving(&self) {
         if let Some(serving) = &self.serving {
-            serving.publish_with_quota(&self.sessions, &self.quota);
+            serving.publish_table(&self.sessions, &self.quota, &self.outage.status);
         }
     }
 }
@@ -339,7 +346,7 @@ mod tests {
             public: None,
             readonly: "http://127.0.0.1:7777/?t=0b1e5d7a9c3f6e284d17a5c09b3f8e61".into(),
             actions: true,
-            publish: Box::new(|_, _| {}),
+            publish: Box::new(|_, _, _| {}),
         };
         (served, token)
     }

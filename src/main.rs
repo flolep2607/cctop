@@ -507,7 +507,9 @@ fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> 
         actions: serving.actions,
         // The server moves in with the closure, so dropping what the dashboard
         // holds stops it.
-        publish: Box::new(move |sessions, quota| serving.publish_with_quota(sessions, quota)),
+        publish: Box::new(move |sessions, quota, provider_status| {
+            serving.publish_table(sessions, quota, provider_status)
+        }),
     })
 }
 

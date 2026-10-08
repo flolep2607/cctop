@@ -25,11 +25,16 @@
 //! reproducing them used to mean a headless browser rewriting responses, or
 //! unplugging something and being quick. Now it is a `curl`.
 //!
+//! **A stand-in vendor** — `/api/debug/provider-status?anthropic=major` puts a
+//! fixture where a status page's answer goes, and pins it so the poller does
+//! not put the real one back. The outage line and its dialog can only be seen
+//! during an outage otherwise, which is not something to wait for.
+//!
 //! **Live event log** — `/api/debug/log?level=io` turns `CCTOP_LOG` on for the
 //! running server, which is the one process the variable cannot reach after
 //! the fact. `GET` alone reports the level and the file it writes.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::http::{self, Request};
 use super::{Shared, current};
@@ -41,6 +46,15 @@ use std::net::TcpStream;
 /// read on every request, and a debug switch is not worth a lock. `0` is off,
 /// which is what a build that never calls `arm` leaves it at.
 static FAULT: AtomicU8 = AtomicU8::new(0);
+
+/// Set once a stand-in status page has been injected; see
+/// [`provider_status_pinned`].
+static STATUS_PINNED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the status pages are a stand-in the poller must leave alone.
+pub fn provider_status_pinned() -> bool {
+    STATUS_PINNED.load(Ordering::Relaxed)
+}
 
 const OFF: u8 = 0;
 const BAD_GATEWAY: u8 = 1;
@@ -184,6 +198,41 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                 request,
                 &serde_json::json!({ "fault": fault_name(armed) }),
             );
+            true
+        }
+        "provider-status" => {
+            use cctop_core::provider_status::{Page, PageStatus, fixtures, parse};
+            let mut status = super::lock_provider_status(shared);
+            for page in Page::ALL {
+                let Some(word) = request.query.get(page.label().to_lowercase().as_str()) else {
+                    continue;
+                };
+                let stand_in = match word.as_str() {
+                    "operational" => parse(fixtures::OPERATIONAL),
+                    "degraded" => parse(fixtures::DEGRADED),
+                    "major" => parse(fixtures::MAJOR),
+                    "unreachable" => PageStatus::Unavailable("connection refused".into()),
+                    "pending" => PageStatus::Pending,
+                    _ => {
+                        drop(status);
+                        http::respond_error(
+                            stream,
+                            Some(request),
+                            400,
+                            "each page must be one of: operational, degraded, major, unreachable, pending",
+                        );
+                        return true;
+                    }
+                };
+                status.set(page, stand_in);
+                STATUS_PINNED.store(true, Ordering::Relaxed);
+            }
+            let body = serde_json::json!({
+                "pinned": provider_status_pinned(),
+                "status": &*status,
+            });
+            drop(status);
+            json(stream, request, &body);
             true
         }
         // Turn the event log on for a process that was not started with it —
