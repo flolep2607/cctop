@@ -139,6 +139,13 @@ place of the old one. That is not true of any later moment, which is why an
 update that becomes available while cctop is running waits for the next start
 rather than interrupting the one you are in.
 
+A release counts once its binary for your machine is attached, so cctop never
+offers one it cannot fetch yet. It installs a given version over a given binary
+at most once: if that version is installed and the old one still starts, it says
+so on each start instead of downloading again. Each update it attempts leaves a
+line in `update.log` in the cache directory, which is the thing to attach to a
+report about one that went wrong.
+
 To start on the version you already have, pass `--no-auto-update`. To stop it
 happening at all, set `"auto_update": false` in `ui-prefs.json` under your cache
 directory (`~/.cache/cctop`); `cctop --update` still works whenever you want
