@@ -65,10 +65,12 @@ tests that cover them (`crates/ui/src/filter.rs` → `-p cctop-ui filter::`), an
 saves the full suite for one final run on its own. `CONTRIBUTING.md` has the
 details.
 
-## cctop is four crates
+## cctop is five crates
 
-The binary is at the root; `cctop-core`, `cctop-serve` and `cctop-ui` are under
-`crates/`. The UI and the server each depend on core and not on each other. The
+The binary is at the root; `cctop-core`, `cctop-serve`, `cctop-ui` and
+`cctop-tunnel` are under `crates/`. The UI and the server each depend on core
+and not on each other; `cctop-tunnel` sits below core and knows nothing of
+cctop, so its `Provider` interface can take tunnels other than Cloudflare's. The
 root `Cargo.toml` draws the graph and says why each boundary is where it is.
 The point is the rebuild: an edit to the UI recompiles the UI and the binary,
 not the server and not the parsers.
@@ -83,11 +85,11 @@ not the server and not the parsers.
   `cfg(any(test, feature = "test-support"))`; their dev-dependencies turn the
   feature on. See `under_test` for why the binary still behaves as cctop.
 - Each crate has its own version. The root `cctop`'s is the release version
-  (`[workspace.package]` in the root `Cargo.toml`); cctop-core, -serve and -ui
+  (`[workspace.package]` in the root `Cargo.toml`); cctop-core, -serve, -ui and -tunnel
   carry theirs in `crates/*/Cargo.toml`, with `=` pins on them in the root's
   `[workspace.dependencies]`. A release bumps the root, and an internal crate
   only if it changed since the last tag — its files, its packaged manifest, or
-  an internal crate it depends on (so a core change bumps all four). Each bump
+  an internal crate it depends on (so a core change bumps everything above it). Each bump
   is its `version` line, its pin and `Cargo.lock`; `tools/bump.sh` does it, and
   `verify / release-plan` fails a release that got it wrong.
 
