@@ -111,6 +111,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `cctop mux`: cctop's own rmux daemon (#197), and the client a tab's
+    // pane runs to sit on one of its sessions. After `hook` and the sandbox
+    // words, which must answer before anything else, and before clap and any
+    // TUI setup: the daemon is a long-lived server, not a command line, and
+    // the attach client owns the terminal it is started on.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("mux")) {
+        let argv: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(cctop_core::mux::main(&argv));
+    }
+
     // Piped into `head`, `jq` or `less` that stops reading early, every
     // `println!` in the non-interactive commands panics on the closed pipe and
     // prints a backtrace hint under output that was otherwise fine — `-l`,

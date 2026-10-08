@@ -211,7 +211,13 @@ toml_edit = "0.25.13"
 # crates carry fixes upstream has not merged and will host the daemon cctop
 # builds in (#197). The dependency keeps the name `rmux-sdk`, and the crate
 # keeps its library name, so the code still says `rmux_sdk::`.
-rmux-sdk = { package = "cctop-rmux-sdk", version = "0.10.0" }
+rmux-sdk = { package = "cctop-rmux-sdk", version = "0.10.1" }
+# The rest of the fork that cctop's own daemon (`cctop mux`, #197) is made of:
+# the server itself, the attach client a tab's pane runs, and the protocol both
+# speak. The server keeps its `web` feature, which is the browser share.
+rmux-client = { package = "cctop-rmux-client", version = "0.10.0" }
+rmux-proto = { package = "cctop-rmux-proto", version = "0.10.0" }
+rmux-server = { package = "cctop-rmux-server", version = "0.10.0" }
 safetensors = "0.6"
 # Pure Rust, and deliberately without `onig`: oniguruma is C and `esaxx-rs` is
 # C++, and a C++ toolchain is the one dependency class the musl release does not
