@@ -2322,9 +2322,18 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::sync::mpsc::channel;
 
+    /// A test app whose paste window is a minute, so two pastes a test makes
+    /// back to back fall inside it however loaded the machine is.
+    fn slow_paste_app() -> App {
+        let mut app = test_app();
+        app.settings =
+            cctop_core::settings::Settings::parse("[settings]\npaste_debounce_ms = 60000\n");
+        app
+    }
+
     #[test]
     fn the_same_paste_twice_at_once_is_one_paste() {
-        let mut app = test_app();
+        let mut app = slow_paste_app();
         app.mode = Mode::Help;
         app.on_paste("abc");
         app.on_paste("abc");
@@ -2342,7 +2351,7 @@ mod tests {
     /// second was meant.
     #[test]
     fn a_key_between_two_identical_pastes_keeps_both() {
-        let mut app = test_app();
+        let mut app = slow_paste_app();
         app.mode = Mode::Help;
         app.on_paste("abc");
         app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -2367,7 +2376,7 @@ mod tests {
         let sink = Sink(std::sync::Arc::default());
         let mut pane = crate::tabs::Pane::for_test("claude");
         pane.view = cctop_core::attach::Attach::for_test_into(Box::new(sink.clone()));
-        let mut app = test_app();
+        let mut app = slow_paste_app();
         app.tabs = vec![crate::tabs::Tab::new(pane)];
         app.tab = 1;
         let paste = "Draft PR: open a draft PR as soon as the first commit is pushed";
