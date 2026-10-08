@@ -235,6 +235,25 @@ works, and DNS on Cloudflare is free; add one at
 <https://dash.cloudflare.com/?to=/:account/add-site>. Setup checks first and
 says so if you have none, and quick tunnels keep working either way.
 
+The quickest way is to log in through the browser, the way `cloudflared tunnel
+login` does:
+
+```bash
+cctop tunnel setup --browser
+```
+
+Cloudflare's login page opens; log in and pick the domain for the tunnel there.
+Over ssh, or with no browser on the machine, the address is printed instead —
+open it in any browser, and leave cctop running: the login comes back to it.
+Cloudflare hands cctop a certificate with an API token in it, cctop keeps only
+that token (owner-only, in `config.toml`, never logged), and goes on as below
+to the hostname. That token is made for tunnels: cctop routes the hostnames the
+way `cloudflared tunnel route dns` does, and `cctop tunnel remove` deletes the
+tunnel and its records but cannot revoke the token itself — that is done on
+your profile's API Tokens page, which `remove` points at.
+
+Or make a token yourself and paste it:
+
 ```bash
 cctop tunnel setup
 ```
@@ -275,7 +294,10 @@ opens whichever of the two is running; `r` in its panel serves on new tokens,
 which revokes every link handed out before.
 
 **From the dashboard**, the same setup is a popup: `a` in the serve panel (`B`),
-or the `cloudflare` row in Settings. It shows the link (`Ctrl+O` copies it,
+or the `cloudflare` row in Settings. It opens on **Log in with browser**, which
+opens the login page — or, over ssh, shows its address with `Ctrl+O` to copy it
+and a QR code — and waits for it; `Tab` moves to **Paste a token**, which shows
+the link (`Ctrl+O` copies it,
 `Ctrl+Q` draws it as a QR code), takes the paste in a masked field, asks for the
 domain when there is more than one and offers the hostname, then offers to start
 serving on it. With an account connected, the same popup shows it and
