@@ -242,25 +242,28 @@ cargo publish --dry-run --allow-dirty
 
 ## The multiplexer
 
-cctop drives **rmux**, not tmux (since 0.8 — `crates/core/src/rmux.rs`). tmux still appears
-here because the *driver* uses it as a terminal to run cctop in; the two are
-unrelated, and cctop cannot see the driver's tmux server at all.
+cctop's agents live in **its own rmux daemon**, built into the binary
+(`crates/core/src/mux.rs`, `cctop mux …`), not in any `rmux` or tmux you run.
+tmux still appears here because the *driver* uses it as a terminal to run cctop
+in; the two are unrelated, and cctop cannot see the driver's tmux server at all.
+Nothing in cctop spawns an `rmux` binary.
 
 - **Each of its tests has a daemon of its own.** `mux::TestDaemon` runs
-  cctop's built-in daemon in the test process on a short private socket and
-  turns `CCTOP_MUX=builtin` on for that test's thread, so the tests that need
-  a real server never meet each other or the operator's rmux. Killing a
-  daemon's last session still stops it; `TestDaemon` starts it again when the
-  test asks for another session.
-- **`CCTOP_MUX=builtin`** drives cctop's own daemon (`cctop mux`) instead of
-  rmux. Exported when running `driver.sh`, it is passed to the app with a
-  private `XDG_RUNTIME_DIR` under `$CCTOP_SHOTS/../rmux/xdg`, so the socket is
-  the driver's own, and `down` ends its sessions. `cctop mux ls` with that
+  cctop's built-in daemon in the test process on a short private socket, which
+  `mux::socket` names on that test's thread, so the tests that need a real
+  server never meet each other or the operator's daemon. Killing a daemon's
+  last session still stops it; `TestDaemon` starts it again when the test asks
+  for another session. A test binary never runs itself as `cctop mux`: without
+  a `TestDaemon`, starting the daemon fails and a pane's attach client cannot
+  spawn.
+- **The driver's daemon is private.** `driver.sh` gives the app an
+  `XDG_RUNTIME_DIR` under `$CCTOP_SHOTS/../rmux/xdg`, so the socket is the
+  driver's own, and `down` ends its sessions. `cctop mux ls` with that
   `XDG_RUNTIME_DIR` lists them.
 - **Check rmux's behaviour, don't infer it from tmux.** They differ in ways that
   compile fine: `list-panes -t =NAME` is a parse error under rmux while every
-  other target takes the `=`, and a bare name prefix-matches. `rmux -L probe
-  new-session -d -s x -- sleep 60` on a private socket is a cheap way to ask.
+  other target takes the `=`, and a bare name prefix-matches. A test on a
+  `mux::TestDaemon` is the cheap way to ask, and asks the daemon cctop ships.
 - **An rmux pane exports five env vars** — `RMUX`, `RMUX_PANE`, `TMUX`,
   `TMUX_PANE`, `TMUX_PROGRAM` — and `new-session -A` refuses to nest under any
   of them. `crates/core/src/shim.rs` strips all five.
@@ -287,35 +290,16 @@ unrelated, and cctop cannot see the driver's tmux server at all.
   `HOME=/tmp/x tmux new-session … cctop` silently gives cctop the real `$HOME` —
   it reads the operator's sessions and you never notice. Use `-e HOME=…`, as
   the driver does.
-- **The driver's own server is not invisible to cctop, despite being "tmux".**
-  rmux installs a shim so `tmux` *is* `rmux` (`which tmux` →
-  `…/rmux-shim-*/tmux` → `~/.cargo/bin/rmux`, the same binary), and this
-  driver's `tmux -L cctopdrv` is therefore an rmux server on a private socket.
-  A pane in it exports `RMUX`/`TMUX` naming that socket, so a cctop launched
-  there queries *it* for the `cctop-*` sessions: no tabs in the bar, and
-  `set-option` on a real session answering "can't find session". `up --spawn`
-  unsets all four variables for exactly this reason. Anything that tests tab
-  adoption, tab order, or the rmux options cctop writes has to go through
-  `--spawn` — or be tested against the real daemon in `crates/core/src/rmux.rs`, as
-  `an_order_written_onto_a_session_survives_in_it` is.
-- **Agents cctop starts go to a private rmux daemon** (`RMUX_TMPDIR` under
-  `$CCTOP_SHOTS/../rmux`), which `down` kills. Before this, a resumed fixture
-  session landed on the operator's real daemon and outlived the driver. The
-  two gotchas below about real sessions now apply only with
+- **Agents cctop starts go to a private daemon** (`XDG_RUNTIME_DIR` under
+  `$CCTOP_SHOTS/../rmux/xdg`), whose sessions `down` ends. Before this, a
+  resumed fixture session landed on the operator's real daemon and outlived the
+  driver. The gotcha below about real sessions applies only with
   `CCTOP_DRIVE_REAL_RMUX=1`, the opt-in for testing against them.
-- **cctop adopts every cctop-owned `rmux` session on the machine as a tab.**
-  In `--spawn` mode the driver's own server is out of the way, but the
-  operator's real sessions are not: one lands in tab 2 displayed and
-  *typeable*, and inside a pane only the function keys stay cctop's, so a stray
-  `Down` goes to that agent. The driver sends F12 on startup for that reason.
-  If the machine has live `cctop-*` rmux sessions, expect them.
-- **The launcher cannot start an agent from inside a multiplexer.** cctop runs
-  `rmux new-session -A`, which refuses to nest under a `$RMUX`/`$TMUX` it can
-  see; the status line says `Started codex …` and no session appears. cctop's
-  own pty shim strips both pairs plus `TMUX_PROGRAM`, so an agent it launches is
-  clean — what is not clean is a cctop the driver started *inside* tmux, which
-  is why `up --spawn` runs it through a wrapper that unsets `TMUX`. Any session
-  that wrapper starts outlives the driver, on the rmux daemon.
+- **cctop adopts every session of its daemon as a tab.** With
+  `CCTOP_DRIVE_REAL_RMUX=1` that is the operator's real cctop daemon: one lands
+  in tab 2 displayed and *typeable*, and inside a pane only the function keys
+  stay cctop's, so a stray `Down` goes to that agent. The driver sends F12 on
+  startup for that reason.
 - **`CI=1` skips the first-run prompt** that offers to write shell aliases into
   `~/.zshrc` and `~/.bashrc` (`src/main.rs:254`). Without it the app waits on
   stdin for `y`/`n` behind the alias question and never draws. Never run

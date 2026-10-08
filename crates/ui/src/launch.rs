@@ -365,13 +365,11 @@ impl App {
             return;
         }
 
-        let Some(own) = self.own_preferring_rmux(Deferred::Resume, || rmux.clone()) else {
-            return;
-        };
+        let own = tabs::Own::Mux(rmux.clone());
         // Reattaching is not resuming: the agent was never gone, so saying
         // "resumed" would misdescribe what just happened.
         let verb = match &own {
-            tabs::Own::Tmux(name) if cctop_core::rmux::exists(name) => "Reattached to",
+            tabs::Own::Mux(name) if cctop_core::rmux::exists(name) => "Reattached to",
             _ => "Resumed",
         };
         self.open_tab(
@@ -668,11 +666,10 @@ impl App {
             return Restart::Failed(format!("Could not stop {label}: {error}"));
         }
 
-        // Where it lives stays what it was. A pane on cctop's own pty was the
-        // user's choice, or rmux was not there, and neither is a reason to ask
-        // about installing it now.
+        // Where it lives stays what it was: a pane on cctop's own pty was put
+        // there on purpose.
         let own = match on_rmux {
-            true => tabs::Own::Tmux(resumed.clone()),
+            true => tabs::Own::Mux(resumed.clone()),
             false => tabs::Own::Cctop,
         };
         let mut new = match tabs::Pane::launch(&argv, cwd.as_deref(), own) {
@@ -736,8 +733,6 @@ impl App {
                 "Stopped {label}, but could not start it again: {error}"
             ));
         }
-        cctop_core::rmux::quiet(&resumed);
-        cctop_core::rmux::mouse(&resumed);
         cctop_core::rmux::set_label(&resumed, &label);
         if let Some(profile) = &profile {
             cctop_core::rmux::set_profile(&resumed, profile);
@@ -758,119 +753,6 @@ impl App {
         self.save_tab_order();
         self.tabs[at].restarted = Some(Instant::now());
         Restart::Done(label)
-    }
-
-    /// Where the agent about to start should live, offering to install rmux if
-    /// that is the only reason it would not be rmux-backed.
-    ///
-    /// `None` means the question is on screen and the caller must stop. The
-    /// launch is not held anywhere in the meantime — [`Deferred`] records only
-    /// which of the two entry points to run again once there is an answer.
-    ///
-    /// The silent fallback is kept for every machine where the question cannot
-    /// be usefully asked — no package manager, or no way to reach root. rmux is
-    /// how this is *better*, not how it works, and such a machine gets exactly
-    /// the behaviour cctop had before rather than a complaint about a program
-    /// the user never asked for. The offer exists for the machine where the
-    /// fallback would instead quietly cost the user a feature one keypress away.
-    pub(super) fn own_preferring_rmux(
-        &mut self,
-        deferred: Deferred,
-        name: impl FnOnce() -> String,
-    ) -> Option<tabs::Own> {
-        if cctop_core::rmux::available() {
-            return Some(tabs::Own::Tmux(name()));
-        }
-        // Asked in this order so that installing rmux in another window still
-        // works: `available` above is the live check, and neither a previous
-        // "no" nor a running install is consulted until it has said no.
-        if self.rmux_declined || self.rmux_installing.is_some() {
-            return Some(tabs::Own::Cctop);
-        }
-        // No package manager to offer means there is nothing to ask about, so
-        // this is the plain fallback rather than a refusal: `?` here would
-        // return `None`, which the caller reads as "the launch is waiting on an
-        // answer" — and no answer would ever come, so the tab never opened.
-        let Some(install) = cctop_core::rmux::installer() else {
-            return Some(tabs::Own::Cctop);
-        };
-        self.rmux_install = Some(install);
-        self.rmux_deferred = Some(deferred);
-        self.mode = Mode::TmuxInstall;
-        self.needs_redraw = true;
-        None
-    }
-
-    /// Answer the rmux offer: run the install in a pane, or give up on rmux for
-    /// this run and start the agent on cctop's own pty.
-    pub(super) fn rmux_install_answer(&mut self, install: bool) {
-        self.mode = Mode::List;
-        let Some(offer) = self.rmux_install.take() else {
-            return;
-        };
-        if !install {
-            self.rmux_declined = true;
-            self.run_deferred_launch();
-            return;
-        }
-        // In a pane, not a subprocess: `sudo` wants a password, and a pane is a
-        // pty the user can type it into. It also puts the package manager's
-        // output somewhere it can be read, which is the difference between a
-        // failed install and a tab that closed for no stated reason.
-        match tabs::Pane::launch(&offer.argv, None, tabs::Own::Cctop) {
-            Ok(pane) => {
-                self.rmux_installing = Some(pane.pid);
-                self.tabs.push(tabs::Tab::new(pane));
-                self.go_to_tab(self.tabs.len());
-                self.set_status(format!("Installing rmux with {}", offer.manager));
-            }
-            Err(error) => {
-                self.set_status(format!("Could not run the install: {error}"));
-                self.rmux_declined = true;
-                self.run_deferred_launch();
-            }
-        }
-    }
-
-    /// Watch a running install to whichever of its two ends it reaches.
-    ///
-    /// Called from the poll loop after panes are reaped, so "the pane is gone"
-    /// is already true here rather than true one tick later.
-    pub(super) fn poll_rmux_install(&mut self) {
-        let Some(pid) = self.rmux_installing else {
-            return;
-        };
-        if cctop_core::rmux::available() {
-            self.rmux_installing = None;
-            self.set_status("rmux installed");
-            self.run_deferred_launch();
-            return;
-        }
-        // The pane is gone and rmux is still not here: the install failed, or
-        // the user closed it. Either way the launch has waited long enough, and
-        // it goes where it would have gone had nothing been offered.
-        let open = self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.panes.iter())
-            .any(|pane| pane.pid == pid);
-        if !open {
-            self.rmux_installing = None;
-            self.rmux_declined = true;
-            if self.rmux_deferred.is_some() {
-                self.set_status("rmux was not installed — starting without it");
-            }
-            self.run_deferred_launch();
-        }
-    }
-
-    /// Re-run whichever launch stopped to ask about rmux.
-    pub(super) fn run_deferred_launch(&mut self) {
-        match self.rmux_deferred.take() {
-            Some(Deferred::Resume) => self.resume_now(),
-            Some(Deferred::Launch) => self.launch_selected(),
-            None => {}
-        }
     }
 
     /// Open `config.toml` in `$VISUAL` / `$EDITOR` in a tab of its own, the
@@ -1140,26 +1022,17 @@ impl App {
             // argv here only names the tab.
             tabs::Choice::Waiting(agent) => (
                 vec![choice.label()],
-                tabs::Own::TmuxExisting(agent.name.clone()),
+                tabs::Own::MuxExisting(agent.name.clone()),
             ),
             // A fresh agent has no identity to be idempotent about — two
             // `claude` tabs are two agents — so this takes the next free name
             // rather than a derived one.
             tabs::Choice::Start(argv) => {
-                let own = self.own_preferring_rmux(Deferred::Launch, || {
-                    cctop_core::rmux::free_name(&tabs::label_of(argv))
-                });
-                // The offer went up instead. This runs again from the top when
-                // it is answered, and the launcher's snapshot is still here to
-                // run it from.
-                let Some(own) = own else { return };
+                let own = tabs::Own::Mux(cctop_core::rmux::free_name(&tabs::label_of(argv)));
                 (self.with_profile(argv.clone()), own)
             }
             tabs::Choice::Handoff(target) => {
-                let own = self.own_preferring_rmux(Deferred::Launch, || {
-                    cctop_core::rmux::free_name(&target.agent)
-                });
-                let Some(own) = own else { return };
+                let own = tabs::Own::Mux(cctop_core::rmux::free_name(&target.agent));
                 (target.argv(vec![target.agent.clone()]), own)
             }
         };
@@ -1343,7 +1216,7 @@ impl App {
                 NewTab {
                     cwd: None,
                     what: &label,
-                    own: tabs::Own::TmuxExisting(name),
+                    own: tabs::Own::MuxExisting(name),
                     verb: "Attached to",
                     resumed: Some(resumed),
                     // Already a bare agent name, so the command names it right.
@@ -1539,8 +1412,8 @@ mod tests {
         assert!(bad.contains("not a valid branch name"), "{bad}");
         assert!(!repo.join(".claude/escape").exists());
     }
-    /// Regression: the "already open" guard asked only about `rmux`, which is
-    /// `None` on every pane when rmux is not installed — so `R` on a session
+    /// Regression: the "already open" guard asked only about `rmux`, which was
+    /// `None` on every pane when rmux was not installed — so `R` on a session
     /// already resumed in a tab started a second agent on the one transcript,
     /// and being stopped, it did so without even the confirmation.
     /// A window onto an agent cctop did not start is refused, and left open:
@@ -1732,73 +1605,6 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
-    }
-
-    /// The three ways the ownership decision can go, since only one of them is
-    /// new: rmux present is unchanged, rmux absent and uninstallable is the old
-    /// silent fallback, and only rmux absent but installable stops to ask.
-    #[test]
-    fn ownership_asks_only_when_rmux_could_actually_be_installed() {
-        let mut app = test_app();
-        let own = app.own_preferring_rmux(Deferred::Launch, || "cctop-x".into());
-        match (cctop_core::rmux::available(), cctop_core::rmux::installer()) {
-            (true, _) => assert!(matches!(own, Some(tabs::Own::Tmux(_)))),
-            (false, Some(_)) => {
-                assert!(own.is_none(), "the launch waits for the answer");
-                assert_eq!(app.mode, Mode::TmuxInstall);
-            }
-            (false, None) => assert!(matches!(own, Some(tabs::Own::Cctop))),
-        }
-    }
-
-    /// One "no" holds for the run. Asking again on the next tab would make
-    /// declining cost more than accepting, which is not offering a choice.
-    #[test]
-    fn a_declined_offer_is_not_made_again() {
-        let mut app = test_app();
-        app.rmux_declined = true;
-        let own = app.own_preferring_rmux(Deferred::Launch, || "cctop-x".into());
-        assert!(own.is_some(), "the launch goes ahead without asking");
-        assert_ne!(app.mode, Mode::TmuxInstall);
-    }
-
-    /// Declining still starts the agent — the offer interrupted a launch, and
-    /// saying no to rmux is not saying no to the agent.
-    #[test]
-    fn declining_the_offer_releases_the_launch() {
-        let mut app = test_app();
-        app.mode = Mode::TmuxInstall;
-        app.rmux_install = Some(cctop_core::rmux::Install {
-            manager: "apt",
-            argv: vec!["sh".into(), "-c".into(), "apt-get install -y rmux".into()],
-        });
-        app.rmux_deferred = Some(Deferred::Launch);
-
-        app.rmux_install_answer(false);
-
-        assert!(app.rmux_declined);
-        assert!(app.rmux_install.is_none());
-        assert!(
-            app.rmux_deferred.is_none(),
-            "the launch was run, not dropped"
-        );
-        assert_eq!(app.mode, Mode::List);
-    }
-
-    /// The failure that would otherwise be invisible: an install that ends
-    /// without rmux — it errored, or the user closed the tab — leaves a launch
-    /// waiting on a pane that no longer exists.
-    #[test]
-    fn an_install_that_ends_without_rmux_releases_the_launch() {
-        let mut app = test_app();
-        // A pid no pane has, standing in for the install tab having gone.
-        app.rmux_installing = Some(u32::MAX);
-        app.rmux_deferred = Some(Deferred::Launch);
-
-        app.poll_rmux_install();
-
-        assert!(app.rmux_installing.is_none());
-        assert!(app.rmux_deferred.is_none());
     }
 
     /// was about to start.

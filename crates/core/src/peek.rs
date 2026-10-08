@@ -18,7 +18,6 @@
 //! screen go still; a snapshot has no history to hold still against, and a
 //! transcript already reads a finished turn well enough on its own.
 
-use std::process::Command;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// What one read of an agent's screen found.
@@ -165,25 +164,13 @@ fn shim_screen(pid: u32) -> Option<Vec<String>> {
     Some(screen.rows(0, cols).collect())
 }
 
-/// The visible screen of a rmux target — a `%id`, or `session:window.pane` on
-/// cctop's own daemon (see `inject::list_panes`) — as text rows.
+/// The visible screen of a pane of cctop's daemon, named `session:window.pane`
+/// (see `inject::list_panes`), as text rows.
 ///
-/// `-p` prints rather than captures to a buffer, and `-J` keeps a wrapped line
-/// one line so a footer hint cannot split mid-phrase on a narrow pane.
+/// Wrapped lines joined, so a footer hint cannot split mid-phrase on a narrow
+/// pane.
 fn capture(target: &str) -> Option<Vec<String>> {
-    let screen = match crate::mux::builtin() {
-        true => crate::mux::capture(&crate::mux::pane_target(target)?, false, true)?,
-        false => {
-            let out = Command::new(crate::rmux::BIN)
-                .args(["capture-pane", "-p", "-J", "-t", target])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            out.stdout
-        }
-    };
+    let screen = crate::mux::capture(&crate::mux::pane_target(target)?, false, true)?;
     Some(
         String::from_utf8_lossy(&screen)
             .lines()

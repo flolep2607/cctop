@@ -395,7 +395,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::DeleteBlocked => modals::draw_delete_blocked(frame, area, app, &mut layout),
         Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app, &mut layout),
         Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app, &mut layout),
-        Mode::TmuxInstall => modals::draw_rmux_install(frame, area, app),
         Mode::Serve => modals::draw_serve(frame, area, app, &mut layout),
         Mode::ShareQr => modals::draw_share_qr(frame, area, app, &mut layout),
         Mode::RenameAddress => modals::draw_address(frame, area, app, &mut layout),

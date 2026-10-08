@@ -9,7 +9,8 @@
 //!
 //! 1. [`shim`](crate::shim) — cctop does, because the agent was started by
 //!    `cctop run`. Works anywhere, needs no privileges.
-//! 2. rmux — the server does, and `send-keys` asks it politely.
+//! 2. rmux — cctop's own daemon ([`crate::mux`]) does, because the agent is in
+//!    one of cctop's tabs, and `send-keys` asks it politely.
 //! 3. `TIOCSTI` — nobody has to: the kernel pushes a byte into the slave's own
 //!    input queue. Needs root for a foreign tty and `dev.tty.legacy_tiocsti=1`,
 //!    both off by default, and it's the one path that reaches sessions started
@@ -19,7 +20,6 @@
 //! *current* window and zellij's `write-chars` its *focused* pane, neither
 //! targetable from a PID — add when someone asks.
 
-use std::process::Command;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// What a real Enter key sends on a pty in raw mode. A `\n` is read as Enter by
@@ -124,7 +124,7 @@ fn deliver(pid: u32, input: Input) -> Result<(), String> {
     );
     Err(format!(
         "no way to type into session {pid}: start the agent with `cctop run <agent>` \
-         or inside rmux, or run cctop as root with dev.tty.legacy_tiocsti=1"
+         or in a cctop tab, or run cctop as root with dev.tty.legacy_tiocsti=1"
     ))
 }
 
@@ -280,45 +280,23 @@ fn send(pane: &str, text: &str) -> Result<(), String> {
 }
 
 /// `send-keys` to one pane: `key` typed as text when `literal`, else read as
-/// the name of a key.
-///
-/// To cctop's own daemon through its protocol, where [`list_panes`] named the
-/// pane `session:window.pane`; to the user's with the `rmux` command line.
+/// the name of a key. The pane is named `session:window.pane`, as
+/// [`list_panes`] names it.
 fn keys(pane: &str, key: &str, literal: bool) -> Result<(), String> {
-    if crate::mux::builtin() {
-        let target = crate::mux::pane_target(pane).ok_or_else(|| format!("no pane {pane}"))?;
-        return crate::mux::send_keys(&target, key, literal);
-    }
-    match literal {
-        true => rmux(&["send-keys", "-t", pane, "-l", "--", key]),
-        false => rmux(&["send-keys", "-t", pane, key]),
-    }
+    let target = crate::mux::pane_target(pane).ok_or_else(|| format!("no pane {pane}"))?;
+    crate::mux::send_keys(&target, key, literal)
 }
 
-/// Every pane on the server as `(pane_pid, pane_id)`.
+/// Every pane of cctop's daemon as `(pane_pid, pane)`.
 ///
-/// `None` when rmux isn't installed or no server is running — both mean "this
-/// session isn't in a pane", which is the caller's only question.
+/// `None` when no daemon is running, which means "this session isn't in a
+/// pane" — the caller's only question.
+///
+/// Only cctop's own daemon: an agent in one of the user's own rmux panes is
+/// theirs, and is reached through `cctop run`'s shim or TIOCSTI instead (#197).
 pub(crate) fn list_panes() -> Option<Vec<(u32, String)>> {
-    // Only cctop's own daemon under `CCTOP_MUX=builtin`: an agent in one of the
-    // user's own rmux panes is theirs, and reached through `cctop run`'s shim
-    // or TIOCSTI instead (#197). Panes are named as the typed protocol names
-    // them there, `session:window.pane`.
-    let listing = match crate::mux::builtin() {
-        true => {
-            crate::mux::list_all_panes("#{pane_pid} #{session_name}:#{window_index}.#{pane_index}")?
-        }
-        false => {
-            let out = Command::new(crate::rmux::BIN)
-                .args(["list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
-    };
+    let listing =
+        crate::mux::list_all_panes("#{pane_pid} #{session_name}:#{window_index}.#{pane_index}")?;
     Some(
         listing
             .lines()
@@ -328,22 +306,6 @@ pub(crate) fn list_panes() -> Option<Vec<(u32, String)>> {
             })
             .collect(),
     )
-}
-
-fn rmux(args: &[&str]) -> Result<(), String> {
-    let out = Command::new(crate::rmux::BIN)
-        .args(args)
-        .output()
-        .map_err(|e| format!("rmux: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    Err(if err.is_empty() {
-        "rmux rejected the keys".into()
-    } else {
-        err
-    })
 }
 
 #[cfg(test)]
@@ -399,7 +361,7 @@ mod tests {
     /// list, since reproducing it against the real server means doing it again.
     #[test]
     fn the_walk_stops_before_it_reaches_cctops_own_terminal() {
-        let mut child = Command::new("sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("spawn a child to walk up from");
@@ -491,7 +453,9 @@ mod tests {
                 .map(|p| p.pid().as_u32())
         });
 
-        let pane = reader.and_then(pane_for);
+        // Asked until it answers: under a loaded suite the daemon can be slow
+        // to list a pane whose process the scan above already saw.
+        let pane = reader.and_then(|reader| wait_asking(|| pane_for(reader)));
         // Wait for the input to arrive *before* tearing the session down. Killing
         // it first destroys the child mid-read, discarding the very thing under
         // test — which is why this passed locally and failed on a loaded runner.

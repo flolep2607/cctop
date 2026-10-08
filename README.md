@@ -33,7 +33,9 @@ alongside it.
   cause one agent to overwrite a file the other still holds. The `!` column
   warns you first.
 - **Terminals.** A tab is a real terminal you can type into, split and drag.
-  `Alt+b` jumps to whichever agent is waiting on you.
+  `Alt+b` jumps to whichever agent is waiting on you. Its agent runs in cctop's
+  own rmux, built in, so it keeps running after you quit and is back in its tab
+  next time.
 
 ## Installation
 

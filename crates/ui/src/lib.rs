@@ -133,8 +133,6 @@ pub enum Mode {
     /// The selected session's conversation, read-only — what the report page
     /// shows in a browser, over the table. `i` on a row, or Enter's menu.
     Conversation,
-    /// Offering to install rmux, a launch having found it missing.
-    TmuxInstall,
     /// Naming or painting a workspace tab, opened by right-clicking it or
     /// with `Alt+r`.
     RenameTab,
@@ -198,21 +196,6 @@ pub struct AddAccount {
     pub link: Option<String>,
     /// How it ended: the saved account's name, or what went wrong.
     pub outcome: Option<Result<String, String>>,
-}
-
-/// A launch that stopped to ask about rmux, and how to pick it up again.
-///
-/// The launch is re-run from the top rather than resumed mid-way, because
-/// answering the question changes the first thing it decides — where the agent
-/// is going to live. Both entry points derive everything they need from state
-/// the modal does not touch (the table selection, the launcher's snapshot), so
-/// running them twice starts one agent, not two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Deferred {
-    /// [`App::resume_selected`], stopped at the ownership decision.
-    Resume,
-    /// [`App::launch_selected`], stopped at the same place.
-    Launch,
 }
 
 /// Where the agent picked in `Mode::Launch` ends up.
@@ -845,18 +828,6 @@ pub struct App {
     /// Splits retain their tab's directory; a handoff deliberately overrides
     /// this with the source session's project.
     pub launch_cwd: Option<std::path::PathBuf>,
-    /// The install the rmux offer is currently showing, so the modal draws the
-    /// command that will actually run rather than working it out again.
-    pub rmux_install: Option<cctop_core::rmux::Install>,
-    /// The launch waiting on the rmux question, or on the install it started.
-    pub rmux_deferred: Option<Deferred>,
-    /// Whether the offer has been turned down. One "no" holds for the run:
-    /// asking again on the next tab would make declining rmux cost more than
-    /// accepting it, which is a way of not really offering a choice.
-    ///
-    /// Not persisted — a decision about this machine belongs in whether rmux is
-    /// installed on it, and cctop already reads that directly.
-    pub rmux_declined: bool,
     /// The server this cctop is running, when it is running one.
     ///
     /// `cctop serve` is the same server with nobody watching the terminal it
@@ -919,12 +890,6 @@ pub struct App {
     /// somebody has to read, and a status line that has since been overwritten
     /// by a refresh is not where they can read it.
     pub serve_error: Option<String>,
-    /// The pane running the install, while one is running.
-    ///
-    /// Watched for two endings: rmux appearing, which releases the deferred
-    /// launch into a rmux-backed pane, and the pane going away without it,
-    /// which means the install failed and the launch should stop waiting.
-    pub rmux_installing: Option<u32>,
     /// A handoff brief waiting for the agent the launcher is about to start.
     ///
     /// Held across the launcher rather than typed at the moment `H` is pressed,
@@ -1211,10 +1176,6 @@ impl App {
             ssh_states: HashMap::new(),
             launch_cwd_checking: None,
             launch_remote: None,
-            rmux_install: None,
-            rmux_deferred: None,
-            rmux_declined: false,
-            rmux_installing: None,
             serving: None,
             start_server: None,
             add_account: AddAccount::default(),

@@ -547,11 +547,7 @@ impl App {
             }
         };
         let host = target.host.clone();
-        let Some(own) = self.own_preferring_rmux(Deferred::Launch, || {
-            cctop_core::rmux::free_name(&format!("{agent}-{host}"))
-        }) else {
-            return;
-        };
+        let own = tabs::Own::Mux(cctop_core::rmux::free_name(&format!("{agent}-{host}")));
         let mut pane = match tabs::Pane::launch(&argv, None, own) {
             Ok(pane) => pane,
             Err(error) => {
