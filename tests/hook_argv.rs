@@ -9,11 +9,22 @@ use std::os::unix::ffi::OsStringExt;
 use std::process::Command;
 
 fn cctop(args: &[OsString]) -> std::process::Output {
+    // The spawned binary is cctop proper, not a test, so the redirects core
+    // applies under test do not reach it: its sockets, cache and settings are
+    // wherever the environment says, which has to be somewhere of this test's.
+    let dir = std::env::temp_dir().join(format!("cctop-hook-argv-{}", std::process::id()));
+    for sub in ["run", "home", "cache"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
     Command::new(env!("CARGO_BIN_EXE_cctop"))
         .args(args)
         // Nothing of the developer's own configuration in the answer: the hook
         // reads the socket directory and, with `warn_agents`, a ledger.
         .env("CCTOP_LOG", "off")
+        .env("XDG_RUNTIME_DIR", dir.join("run"))
+        .env("HOME", dir.join("home"))
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .expect("the binary is built")
 }

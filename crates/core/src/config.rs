@@ -761,7 +761,24 @@ pub static CLAUDE_MAC_CODE_ROOT: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     })
 });
 
-pub static CACHE_DIR: LazyLock<PathBuf> = LazyLock::new(|| cache_base().join("cctop"));
+/// Everything cctop may delete and rebuild: the cost cache, the pricing table,
+/// the topical index and the model it was built with, preferences, logs.
+///
+/// A test gets a directory of its process's own instead. The real one is the
+/// developer's, and tests did write it: `cctop recall`'s end-to-end test loaded
+/// the fetched 30 MB model from it — the slowest test of a cold run, and only
+/// on machines that had fetched one — and then saved its three fixture sessions
+/// over the real `embeddings.bin`. Guarding each writer, as [`UiPrefs::save`]
+/// does, misses the next one; one redirect here covers every path below.
+///
+/// [`UiPrefs::save`]: crate::cache::UiPrefs::save
+pub static CACHE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    #[cfg(any(test, feature = "test-support"))]
+    if crate::under_test() {
+        return std::env::temp_dir().join(format!("cctop-cache-{}", std::process::id()));
+    }
+    cache_base().join("cctop")
+});
 
 pub static COST_CACHE_FILE: LazyLock<PathBuf> = LazyLock::new(|| CACHE_DIR.join("cost-cache.json"));
 pub static PRICING_CACHE_FILE: LazyLock<PathBuf> =
@@ -1366,6 +1383,25 @@ pub fn mtime_ms_of(meta: &std::fs::Metadata) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// The cache every writer below `CACHE_DIR` uses is not the developer's.
+    /// Asked of the derived paths too, since those are what the writers name.
+    #[test]
+    fn a_test_never_writes_the_real_cache() {
+        let real = super::cache_base().join("cctop");
+        for path in [
+            &*super::CACHE_DIR,
+            &*super::EMBEDDING_INDEX_FILE,
+            &*super::EMBEDDING_MODEL_DIR,
+            &*super::COST_CACHE_FILE,
+            &*super::PRICING_CACHE_FILE,
+            &*super::UI_PREFS_FILE,
+            &*super::BURN_LOG_FILE,
+        ] {
+            assert!(!path.starts_with(&real), "{} is the real cache", path.display());
+            assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+        }
+    }
 
     /// A profile is a directory with credentials in it. The nested `.claude` a
     /// profile can end up containing is the same login, not a second one, so
