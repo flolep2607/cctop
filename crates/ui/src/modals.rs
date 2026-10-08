@@ -1193,7 +1193,7 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(opening) = &app.share_opening {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            format!(" {} Opening a tunnel to trycloudflare…", opening.frame()),
+            format!(" {} Opening a tunnel…", opening.frame()),
             Style::default().fg(theme::colors().cost_mid),
         )));
     }

@@ -513,6 +513,7 @@ fn serve_for_dashboard(request: ui::ServeRequest) -> anyhow::Result<ui::Served> 
     Ok(ui::Served {
         local: serving.local.clone(),
         public: serving.public.clone(),
+        tunnel_fallback: serving.tunnel_fallback.clone(),
         readonly: serving.readonly.clone(),
         actions: serving.actions,
         // The server moves in with the closure, so dropping what the dashboard

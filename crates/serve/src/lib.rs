@@ -318,10 +318,15 @@ OPTIONS:
                    what authorises an action, this also turns actions off
   --no-actions     Serve the pages without the buttons: no prompts, no resuming,
                    no handing a session to another agent
-  --tunnel         Also reach the page from anywhere, over a trycloudflare quick
-                   tunnel. Needs nothing installed, lasts as long as this
-                   process, and puts the link on the public internet — so the
-                   token is what stands between it and your agents
+  --tunnel         Also reach the page from anywhere: over your own Cloudflare
+                   tunnel when one is connected (`cctop tunnel setup`), at a
+                   hostname that stays the same, else over a trycloudflare
+                   quick tunnel at a new one each run. Needs nothing installed,
+                   lasts as long as this process, and puts the link on the
+                   public internet — so the token is what stands between it
+                   and your agents. With your own tunnel the tokens are kept
+                   across restarts, as --token-file does, so a bookmark works
+  --tunnel=quick   A quick tunnel even when your own is connected
   --plan <PLAN>    Billing plan for cost figures: retail, max, or included
                    [default: retail]
   --delay <SECS>   Seconds between refreshes [default: 2]
@@ -364,6 +369,8 @@ pub struct Options {
     pub no_token: bool,
     pub no_actions: bool,
     pub tunnel: bool,
+    /// With `tunnel`: a quick tunnel even when an account is connected.
+    pub quick_tunnel: bool,
     pub plan: Plan,
     pub delay: Duration,
     /// The machines whose sessions this serve shows, already parsed.
@@ -403,6 +410,7 @@ impl Default for Options {
             no_token: false,
             no_actions: false,
             tunnel: false,
+            quick_tunnel: false,
             plan: Plan::Retail,
             delay: Duration::from_secs(2),
             hosts: Vec::new(),
@@ -423,6 +431,9 @@ pub struct Serving {
     pub local: String,
     /// The public one, when a tunnel was asked for and registered.
     pub public: Option<String>,
+    /// Why a quick tunnel stands in for the account's, when one does — to be
+    /// said wherever the link is, since it is not the link that was expected.
+    pub tunnel_fallback: Option<String>,
     /// The same page, read-only: every route answers but the ones that act.
     ///
     /// Carries the run's second token, on whichever origin is the one to hand
@@ -544,9 +555,10 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
     let actions = !options.no_actions && !options.no_token;
     // Started before anything is announced, so the link works when it is read,
     // and before the accept loop because there is nothing to reach yet.
-    let tunnel = match options.tunnel {
-        true => Some(tunnel::start(addr.port())?),
-        false => None,
+    let tunnel = match (options.tunnel, options.quick_tunnel) {
+        (true, true) => Some(tunnel::start(addr.port(), tunnel::Want::Quick)?),
+        (true, false) => Some(tunnel::start(addr.port(), tunnel::Want::Auto)?),
+        (false, _) => None,
     };
 
     // The origin a notification's link is built on: the tunnel's when there is
@@ -630,6 +642,11 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             "token": !token.is_empty(),
             "actions": actions,
             "tunnel": options.tunnel,
+            "tunnel_kind": tunnel.as_ref().map(|t| match t.kind {
+                tunnel::Kind::Quick => "quick",
+                tunnel::Kind::Account => "account",
+            }),
+            "tunnel_fallback": tunnel.as_ref().is_some_and(|t| t.fallback.is_some()),
             "notify": shared.notify.is_some(),
         }),
     );
@@ -651,6 +668,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
     Ok(Serving {
         local: format!("http://127.0.0.1:{}/{query}", addr.port()),
         public: tunnel.as_ref().map(|t| format!("{}/{query}", t.url)),
+        tunnel_fallback: tunnel.as_ref().and_then(|t| t.fallback.clone()),
         readonly: readonly_link,
         actions,
         shared,
@@ -700,6 +718,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     let mut no_token = false;
     let mut no_actions = false;
     let mut want_tunnel = false;
+    let mut quick_tunnel = false;
     let mut plan = Plan::Retail;
     let mut delay = Duration::from_secs(2);
     let mut hosts: Vec<String> = Vec::new();
@@ -731,6 +750,10 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
             "--no-token" => no_token = true,
             "--no-actions" => no_actions = true,
             "--tunnel" => want_tunnel = true,
+            "--tunnel=quick" => {
+                want_tunnel = true;
+                quick_tunnel = true;
+            }
             "--plan" => {
                 let given = value()?;
                 plan = Plan::parse(&given).ok_or_else(|| {
@@ -760,6 +783,14 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     // [`tunnel::start`] for why that one must not print.
     // Before the listener, so a refused file costs no socket and the reason is
     // the only thing on screen.
+    // A stable hostname with a fresh token every run is still a dead
+    // bookmark, so a connected account keeps the tokens the way --token-file
+    // does, in a file of its own. Only for this command: the dashboard's
+    // serve is the one whose stop is meant to revoke every link.
+    let account_tunnel = want_tunnel && !quick_tunnel && tunnel::account().is_some();
+    if account_tunnel && token_file.is_none() && !no_token {
+        token_file = Some(account_token_file());
+    }
     let tokens = match &token_file {
         // `start` refuses this too; asked here first so the answer is the
         // contradiction, not whatever was wrong with the file.
@@ -789,7 +820,10 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         None => None,
     };
     if want_tunnel {
-        eprintln!("cctop: opening a trycloudflare tunnel…");
+        match account_tunnel {
+            true => eprintln!("cctop: opening your Cloudflare tunnel…"),
+            false => eprintln!("cctop: opening a trycloudflare quick tunnel…"),
+        }
         let _ = std::io::stderr().flush();
     }
     let serving = start(Options {
@@ -799,6 +833,7 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         no_token,
         no_actions,
         tunnel: want_tunnel,
+        quick_tunnel,
         plan,
         delay,
         hosts: fleet::Host::collect(&hosts),
@@ -865,6 +900,15 @@ fn listen(bind: &str, port: u16, port_given: bool) -> anyhow::Result<TcpListener
     }
 }
 
+/// Where a connected account keeps `cctop serve`'s tokens between runs: what
+/// `--token-file` would name, chosen for the user. Beside the config, which is
+/// already the user's own and owner-only.
+fn account_token_file() -> std::path::PathBuf {
+    cctop_core::config::config_base()
+        .join("cctop")
+        .join("serve-tokens")
+}
+
 /// Why this `--tunnel` is refused, if it is.
 ///
 /// Both refusals are combinations that read as one wish and mean another, and
@@ -915,6 +959,12 @@ fn tunnel_objection(want_tunnel: bool, loopback: bool, no_token: bool) -> Option
 /// loopback one is still the right link from this machine. What follows both is
 /// the sentence that matters — that the first link is a way in, not a view.
 fn announce(serving: &Serving, bind: &str, no_token: bool) {
+    if let Some(why) = &serving.tunnel_fallback {
+        eprintln!(
+            "cctop: {why}. Serving over a quick tunnel instead, at an address \
+             that changes every run."
+        );
+    }
     if let Some(public) = &serving.public {
         eprintln!("cctop: serving on {public}");
         eprintln!("cctop: also on {}", serving.local);

@@ -389,6 +389,11 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         Rule::new(&["xox"], r"\bxox[abposr]-[A-Za-z0-9-]{8,}", "[redacted]"),
         Rule::new(&["akia"], r"\bAKIA[0-9A-Z]{16}", "[redacted]"),
         Rule::new(&["glpat-"], r"\bglpat-[A-Za-z0-9_-]{16,}", "[redacted]"),
+        // A Cloudflare tunnel token: base64 of `{"a":"…`, whatever its length
+        // and wherever a `/` would break it into runs too short for the
+        // length rule below. A Cloudflare API token is 40 characters of
+        // letters, digits, `_` and `-`, which that rule already takes.
+        Rule::new(&["eyjhijoi"], r"\beyJhIjoi[A-Za-z0-9+/_=-]*", "[redacted]"),
     ]
 });
 
@@ -858,6 +863,20 @@ mod tests {
 
     /// Redacting what was already redacted changes nothing, so a detail that
     /// was cleaned in the hook can be cleaned again when it is written.
+    #[test]
+    fn cloudflare_credentials_are_redacted() {
+        // Made up here: a tunnel token is base64 of JSON, short enough with a
+        // `/` in it that no run reaches the length rule.
+        let tunnel = "eyJhIjoiYWJj/In0=";
+        let api = "Abcdefghij0123456789_-Abcdefghij01234567";
+        for secret in [tunnel, api] {
+            let line = format!("cctop tunnel setup <<< {secret}");
+            let out = redact(&line);
+            assert!(!out.contains(secret), "{out}");
+            assert!(out.contains("[redacted]"), "{out}");
+        }
+    }
+
     #[test]
     fn redaction_is_idempotent() {
         let once =

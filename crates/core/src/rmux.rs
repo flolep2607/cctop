@@ -411,7 +411,11 @@ fn public_origin() -> Result<String, String> {
     }
     // The first line only: the rest is advice about `--tunnel`, a flag this
     // caller never had.
-    let tunnel = crate::tunnel::start(port).map_err(|e| {
+    // A quick tunnel even when an account is connected: the account's
+    // hostname is the page's, and this listener is not the page.
+    // ponytail: shares on the account tunnel's second hostname are issue #174's
+    // last part, not done here.
+    let tunnel = crate::tunnel::start(port, crate::tunnel::Want::Quick).map_err(|e| {
         format!("{e}")
             .lines()
             .next()
