@@ -24,7 +24,7 @@ debug = []
 # write over their saved preferences, and the fixtures those tests build rows
 # with. `cfg(test)` is only true for this crate's own tests, so the crates
 # above turn this on from their dev-dependencies — which a release build never
-# reads.
+# reads. See `under_test` in src/lib.rs for the binary a `cargo test` builds.
 test-support = []
 
 [dependencies]

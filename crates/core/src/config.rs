@@ -76,7 +76,9 @@ fn cache_base() -> PathBuf {
 /// unusable runtime directory is treated as an absent one.
 pub fn runtime_base() -> PathBuf {
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(dir) = test_runtime_base() {
+    if crate::under_test()
+        && let Some(dir) = test_runtime_base()
+    {
         return dir;
     }
     own_dir(dirs::runtime_dir())

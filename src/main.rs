@@ -36,6 +36,10 @@ use std::io::IsTerminal;
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
+    // Before anything, `hook` included: a binary built by `cargo test` carries
+    // core's test guards, and this is what keeps them off. See `under_test`.
+    cctop_core::running_as_the_binary();
+
     // `cctop run <agent> …` is handled before clap so the agent's own flags are
     // never mistaken for cctop's — `cctop claude --help` must reach claude.
     //

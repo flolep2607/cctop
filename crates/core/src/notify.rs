@@ -461,14 +461,14 @@ pub(crate) fn ring(text: &str) {
     // and leaves escape sequences among the results. What would have been
     // written is kept instead, so a test can count the bells.
     #[cfg(any(test, feature = "test-support"))]
-    RUNG.with(|rung| rung.borrow_mut().push(text.to_string()));
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
-        use std::io::Write;
-        let mut out = std::io::stdout();
-        let _ = write!(out, "\x07\x1b]9;{}\x07", sanitize(text));
-        let _ = out.flush();
+    if crate::under_test() {
+        RUNG.with(|rung| rung.borrow_mut().push(text.to_string()));
+        return;
     }
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x07\x1b]9;{}\x07", sanitize(text));
+    let _ = out.flush();
 }
 
 /// Strip what would end the OSC string early.
@@ -476,7 +476,6 @@ pub(crate) fn ring(text: &str) {
 /// The text carries a session label, which is a directory name the user chose.
 /// A BEL in it would terminate the notification and hand the remainder to the
 /// terminal as commands; an ESC would do worse.
-#[cfg_attr(feature = "test-support", allow(dead_code))]
 fn sanitize(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }

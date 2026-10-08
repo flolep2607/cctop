@@ -815,7 +815,7 @@ impl UiPrefs {
         // Every key a test presses that changes a preference ends here, and
         // `CACHE_DIR` is the developer's real one: the suite was overwriting
         // their `ui-prefs.json` with defaults on every run.
-        if cfg!(any(test, feature = "test-support")) {
+        if crate::under_test() {
             return;
         }
         let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
