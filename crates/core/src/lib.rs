@@ -53,6 +53,7 @@ pub mod proc;
 pub mod provider_status;
 pub mod quota;
 pub mod remote_fs;
+pub mod remote_launch;
 /// The per-session postmortem: `--report`, and `/api/report`.
 pub mod report;
 pub mod rmux;

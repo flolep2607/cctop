@@ -85,6 +85,7 @@ mod metrics;
 mod notify;
 mod quota;
 mod search;
+mod ssh;
 /// The TUI's tabs, read from rmux, for `/api/tabs`.
 mod tabs;
 /// rmux's terminal app, served here so a session page can frame it.
@@ -274,6 +275,9 @@ struct Shared {
     /// Present even when `scan` is off: a dashboard-hosted serve still owes
     /// its remote rows an answer.
     hosts: HashMap<String, fleet::Host>,
+    /// The web launcher's ssh: what it may connect to and what it learned.
+    /// Reached only past `may_act` — see [`ssh`].
+    ssh: ssh::Reach,
 }
 
 /// One publish of the whole table.
@@ -603,6 +607,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             .iter()
             .map(|host| (host.target.clone(), host.clone()))
             .collect(),
+        ssh: ssh::Reach::ssh(),
     });
 
     let remotes = Arc::new(Mutex::new(Remotes::default()));
@@ -843,6 +848,9 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         scan: true,
     })?;
     announce(&serving, &bind, no_token);
+    // The masters the web launcher connected to are given back on the way
+    // out, as the dashboard gives back its own.
+    ssh::release_on_signal();
 
     // Nothing left to do on this thread: the accept loop has its own. Parking
     // rather than returning is what keeps the process — and with it the tunnel
@@ -1646,9 +1654,18 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         // all. The page asks once and hides the controls it cannot use, rather
         // than offering buttons that answer 404.
         "/api/agents" => {
+            let agents = actions::agents();
+            // Which of them cannot go to an ssh host, and the sentence that
+            // says so, for the launcher to grey out once a host is typed.
+            let local_only: serde_json::Map<String, serde_json::Value> = agents
+                .iter()
+                .filter(|a| cctop_core::sandbox::reach(a) == cctop_core::sandbox::Reach::Local)
+                .map(|a| (a.clone(), cctop_core::sandbox::local_only(a).into()))
+                .collect();
             let body = serde_json::json!({
                 "actions": shared.actions && access == Access::Full,
-                "agents": actions::agents(),
+                "agents": agents,
+                "local_only": local_only,
             });
             http::respond(
                 stream,
@@ -1670,10 +1687,34 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             let cwd = body.get("cwd").and_then(serde_json::Value::as_str);
-            match actions::launch_agent(agent, cwd) {
+            // `host:path` is a folder on an ssh host, read as the terminal's
+            // field reads it.
+            let launched = match cwd.map(cctop_core::remote_launch::parse) {
+                Some(cctop_core::remote_launch::Typed::Remote { host, path }) => {
+                    actions::launch_remote(agent, host, path, || {
+                        ssh::launch_problem(&shared.ssh, host, path)
+                    })
+                }
+                _ => actions::launch_agent(agent, cwd),
+            };
+            match launched {
                 Ok(done) => json(stream, &request, &done),
                 Err((status, why)) => http::respond_error(stream, Some(&request), status, &why),
             }
+        }
+        // The web launcher's hosts, completion and folder check: ssh started
+        // by a request, so the full token only — see [`ssh`].
+        _ if path.starts_with("/api/ssh/") => {
+            let Some(body) = may_act(shared, stream, &request, access) else {
+                return;
+            };
+            ssh::route(
+                &shared.ssh,
+                stream,
+                &request,
+                &path["/api/ssh/".len()..],
+                &body,
+            );
         }
         _ if path.starts_with("/session/") => app_page(shared, stream, &request, access),
         // A popped-out terminal: the same app, drawing only the terminal.
@@ -3023,6 +3064,7 @@ mod tests {
             topics: Mutex::new(search::Topics::default()),
             notify: None,
             hosts: HashMap::new(),
+            ssh: ssh::Reach::nowhere(),
         }
     }
 
@@ -3276,6 +3318,166 @@ mod tests {
             ),
         );
         assert!(act.contains(" 403 "), "{act}");
+    }
+
+    /// A JSON POST to `target` carrying `token`, and the raw response.
+    fn post_json(shared: &Shared, target: &str, token: &str, body: &str) -> String {
+        response_of(
+            shared,
+            "POST",
+            target,
+            &format!(
+                "Authorization: Bearer {token}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    }
+
+    /// The web launcher's ssh routes start ssh connections and name internal
+    /// hosts, so they are the full token's alone: a read-only link and a
+    /// `--no-actions` serve are refused before anything is connected to, and
+    /// only a JSON POST is taken. The stand-in host counts its connects, which
+    /// is how "refused before ssh" is proved rather than assumed.
+    #[test]
+    fn the_ssh_routes_answer_the_full_token_only() {
+        for route in ["/api/ssh/hosts", "/api/ssh/complete", "/api/ssh/check"] {
+            let body = r#"{"host":"devbox","path":"~"}"#;
+            let (_home, reach, connects) = ssh::local_host(true);
+            let guarded = Shared {
+                ssh: reach,
+                ..shared("full", "view")
+            };
+            let full = post_json(&guarded, route, "full", body);
+            assert!(full.starts_with("HTTP/1.1 200 "), "{route}: {full}");
+            let view = post_json(&guarded, route, "view", body);
+            assert!(view.starts_with("HTTP/1.1 403 "), "{route}: {view}");
+            assert!(!view.contains("devbox"), "{route}: {view}");
+            let get = status_of(&guarded, "GET", route, &bearer_line("full"));
+            assert!(get.contains(" 405 "), "{route}: {get}");
+            let before = *connects.lock().expect("count");
+
+            let (_home, reach, quiet) = ssh::local_host(true);
+            let no_actions = Shared {
+                ssh: reach,
+                actions: false,
+                ..shared("full", "view")
+            };
+            let refused = post_json(&no_actions, route, "full", body);
+            assert!(refused.starts_with("HTTP/1.1 403 "), "{route}: {refused}");
+            assert_eq!(*quiet.lock().expect("count"), 0, "{route}");
+            // The read-only and GET requests above connected to nothing more.
+            assert!(before <= 1, "{route}: {before}");
+        }
+        // The read-only token cannot launch on a host either.
+        let guarded = shared("full", "view");
+        let launch = post_json(
+            &guarded,
+            "/api/launch",
+            "view",
+            r#"{"agent":"claude","cwd":"devbox:~"}"#,
+        );
+        assert!(launch.starts_with("HTTP/1.1 403 "), "{launch}");
+    }
+
+    fn bearer_line(token: &str) -> String {
+        format!("Authorization: Bearer {token}\r\n")
+    }
+
+    /// Completion and the folder check, against a host that is a local `sh`
+    /// in a temporary home.
+    #[test]
+    fn a_remote_folder_completes_and_is_checked_before_launch() {
+        let (home, reach, _) = ssh::local_host(true);
+        for dir in ["api", "apt", "docs"] {
+            std::fs::create_dir(home.path().join(dir)).expect("mkdir");
+        }
+        let guarded = Shared {
+            ssh: reach,
+            ..shared("full", "view")
+        };
+        let body_of = |raw: String| -> serde_json::Value {
+            let (_, body) = raw.split_once("\r\n\r\n").expect("a body");
+            serde_json::from_str(body).expect("json")
+        };
+        let hosts = body_of(post_json(&guarded, "/api/ssh/hosts", "full", "{}"));
+        assert_eq!(hosts["hosts"][0]["name"], "devbox");
+        assert_eq!(hosts["hosts"][0]["aliases"][0], "dev");
+
+        let done = body_of(post_json(
+            &guarded,
+            "/api/ssh/complete",
+            "full",
+            r#"{"host":"devbox","path":"~/ap"}"#,
+        ));
+        assert_eq!(done["ready"], true);
+        let paths: Vec<&str> = done["hits"]
+            .as_array()
+            .expect("hits")
+            .iter()
+            .map(|h| h["path"].as_str().expect("path"))
+            .collect();
+        assert_eq!(paths, ["~/api", "~/apt"]);
+
+        let fine = body_of(post_json(
+            &guarded,
+            "/api/ssh/check",
+            "full",
+            r#"{"host":"devbox","path":"~/docs"}"#,
+        ));
+        assert_eq!(fine["problem"], serde_json::Value::Null);
+        let gone = body_of(post_json(
+            &guarded,
+            "/api/ssh/check",
+            "full",
+            r#"{"host":"devbox","path":"~/gone"}"#,
+        ));
+        assert_eq!(gone["problem"], "does not exist on the host");
+
+        // An option dressed as a host never reaches ssh.
+        let option = post_json(
+            &guarded,
+            "/api/ssh/complete",
+            "full",
+            r#"{"host":"-oProxyCommand=touch /tmp/x","path":"~"}"#,
+        );
+        assert!(option.starts_with("HTTP/1.1 400 "), "{option}");
+        // A launch is judged on its agent before the host is asked anything:
+        // a request naming nothing cctop would run connects nowhere.
+        let (_home, reach, connects) = ssh::local_host(true);
+        let fresh = Shared {
+            ssh: reach,
+            ..shared("full", "view")
+        };
+        let launch = post_json(
+            &fresh,
+            "/api/launch",
+            "full",
+            r#"{"agent":"sh -c id","cwd":"devbox:~"}"#,
+        );
+        assert!(launch.starts_with("HTTP/1.1 400 "), "{launch}");
+        assert_eq!(*connects.lock().expect("count"), 0);
+    }
+
+    /// A host that would ask for a password is an answer, not an error: the
+    /// page shows it offline with why, and the launch goes ahead to ask there.
+    #[test]
+    fn a_host_that_would_prompt_is_reported_offline() {
+        let (_home, reach, _) = ssh::local_host(false);
+        let guarded = Shared {
+            ssh: reach,
+            ..shared("full", "view")
+        };
+        let raw = post_json(
+            &guarded,
+            "/api/ssh/complete",
+            "full",
+            r#"{"host":"devbox","path":"~"}"#,
+        );
+        assert!(raw.starts_with("HTTP/1.1 200 "), "{raw}");
+        assert!(raw.contains(r#""ready":false"#), "{raw}");
+        assert!(raw.contains("needs a password or key prompt"), "{raw}");
+        assert!(raw.contains(r#""prompt":true"#), "{raw}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
-import { Bell, BellOff, ExternalLink, FileSearch, Play, Plus, RotateCw, Search, SendHorizontal, SquareTerminal, X } from "lucide-react";
+import { Bell, BellOff, ExternalLink, FileSearch, Play, RotateCw, Search, SendHorizontal, SquareTerminal, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { act, ask, getJson } from "@/lib/api";
@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AppShell } from "@/components/app-shell";
 import { StateDot } from "@/components/status";
 import { dotOfTab } from "@/lib/status";
@@ -21,6 +20,7 @@ import type { Session, Tab } from "@/lib/types";
 import { SessionRow, WantingRow } from "./rows";
 import { Quota } from "./quota";
 import { ProviderStatus } from "./provider-status";
+import { Launcher } from "./launcher";
 
 type Sort = "recent" | "cost" | "tokens" | "context";
 // Every order is descending: each is a "which is the most" question.
@@ -552,78 +552,5 @@ function BulkBar({ picked, byId, onClear }: { picked: Set<string>; byId: Map<str
         </form>
       )}
     </div>
-  );
-}
-
-// Starting a fresh agent from the page — the TUI's launcher, carried to the
-// one place a phone can reach. Only where this run can act.
-function Launcher() {
-  const [agents, setAgents] = useState<string[]>([]);
-  const [open, setOpen] = useState(false);
-  const [agent, setAgent] = useState("");
-  const [cwd, setCwd] = useState("");
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (!CAN_ACT) return;
-    getJson<{ agents?: string[]; actions?: boolean }>("/api/agents").then((r) => {
-      if (r.actions === false) return;
-      setAgents(r.agents ?? []);
-      setAgent((r.agents ?? [])[0] ?? "");
-    }, () => {});
-  }, []);
-  if (!agents.length) return null;
-  const start = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      const res = await ask("/api/launch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent, cwd: cwd.trim() }) });
-      const done = await res.json().catch(() => ({}));
-      toast.success(done.message || "Started");
-      setOpen(false);
-    } catch (err) {
-      toast.error(String((err as Error).message || err));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <>
-      <Button size="sm" onClick={() => setOpen(true)}>
-        <Plus /> New agent
-      </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="sm:max-w-md">
-          <form onSubmit={start} className="grid gap-4">
-            <DialogHeader>
-              <DialogTitle>Start an agent</DialogTitle>
-              <DialogDescription>In cctop's multiplexer, so it shows up as a tab and in the workspace.</DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-1.5">
-              <label className="text-sm font-medium" htmlFor="launch-agent">Agent</label>
-              <Select value={agent} onValueChange={setAgent}>
-                <SelectTrigger id="launch-agent" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {agents.map((a) => (
-                    <SelectItem key={a} value={a}>{a}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-1.5">
-              <label className="text-sm font-medium" htmlFor="launch-cwd">Directory</label>
-              <Input id="launch-cwd" value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~ (the default)" spellCheck={false} autoComplete="off" />
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={busy || !agent}>
-                <Play /> Start
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-    </>
   );
 }
