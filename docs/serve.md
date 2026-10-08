@@ -87,7 +87,9 @@ it does not scan for sessions. The dashboard already walks them several times a
 second, so the page is fed from the rows on screen — one pass over the disk
 instead of two, and no way for the page and the table beside it to disagree.
 
-Stopping it, or quitting cctop, revokes every link handed out. A tunnel lasts
+Stopping it, or quitting cctop, revokes every link handed out — unless it is on
+[your own Cloudflare account](#your-own-cloudflare-account)'s tunnel, whose
+links come back with the next serve until `r` replaces them. A tunnel lasts
 exactly as long as the cctop that opened it.
 
 ## Why you would want it
@@ -268,8 +270,16 @@ cctop: serving on https://cctop.example.com/?t=9f3ac1de…
 exactly as [`--token-file`](#keeping-them-across-restarts) does, in
 `~/.config/cctop/serve-tokens` — a stable hostname with a new token every run
 would still be a dead bookmark. `--rotate-token` replaces them. The dashboard's
-own serve still mints new ones each time, since stopping it is meant to revoke
-every link.
+serve keeps them too when it is on your tunnel, in the same file, so a bookmark
+opens whichever of the two is running; `r` in its panel serves on new tokens,
+which revokes every link handed out before.
+
+**From the dashboard**, the same setup is a popup: `a` in the serve panel (`B`),
+or the `cloudflare` row in Settings. It shows the link (`Ctrl+O` copies it,
+`Ctrl+Q` draws it as a QR code), takes the paste in a masked field, asks for the
+domain when there is more than one and offers the hostname, then offers to start
+serving on it. With an account connected, the same popup shows it and
+disconnects it, which deletes what setup made, as `cctop tunnel remove` does.
 
 While that serve runs, terminal shares (`W` in the dashboard) ride the same
 tunnel on the `-share` hostname instead of opening a quick tunnel of their own —
@@ -382,8 +392,10 @@ Each refusal says so and names the way out. **Rotating** is
 mint new tokens and revoke every link built on the old ones. The directories above the file are not checked, so put it somewhere only
 you can write.
 
-The dashboard's `B` never reads a token file: stopping that serve still revokes
-every link it handed out.
+The dashboard's `B` reads no token file of yours: stopping that serve revokes
+every link it handed out — except over your own Cloudflare tunnel, where it keeps
+its tokens as described [above](#your-own-cloudflare-account) and `r` revokes
+them.
 
 ## Several machines at once
 

@@ -1249,6 +1249,11 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
             },
             theme::dim(),
         ))),
+        // Its links outlive a stop, so the way to revoke them is said here.
+        Some(_) if app.serving_on_account() => lines.push(Line::from(Span::styled(
+            " r new links, revoking these · a account",
+            theme::dim(),
+        ))),
         Some(_) => {}
     }
 

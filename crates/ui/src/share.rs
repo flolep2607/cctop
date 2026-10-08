@@ -69,8 +69,13 @@ impl Served {
 
 /// What the dashboard asks of a server it starts.
 pub struct ServeRequest {
-    /// Whether to put it on a trycloudflare tunnel as well as on loopback.
+    /// Whether to put it on a tunnel as well as on loopback: the connected
+    /// Cloudflare account's, or a quick one.
     pub tunnel: bool,
+    /// Over the account's tunnel, the tokens are kept across restarts (see
+    /// `cctop serve`'s account token file); this replaces them first, which
+    /// revokes every link built on the old ones.
+    pub rotate: bool,
     pub plan: cctop_core::pricing::Plan,
     /// The machines whose rows the table shows, which the page owes the same
     /// answers.
@@ -230,6 +235,22 @@ impl App {
     /// than a state the rest of the code has to know about. The edge is the slow
     /// half — see [`Opening`].
     pub(super) fn start_serving(&mut self, tunnel: bool) {
+        self.start_serving_with(tunnel, false);
+    }
+
+    /// `r` in the panel: serve on the account's tunnel with new tokens, which
+    /// is how links that outlive a stop are revoked. Restarts a serve that is
+    /// up, since its links are the ones being revoked.
+    pub(super) fn serve_on_new_links(&mut self) {
+        if self.connected.is_none() {
+            self.set_status("Links are new on every serve until an account is connected — a");
+            return;
+        }
+        self.stop_serving();
+        self.start_serving_with(true, true);
+    }
+
+    fn start_serving_with(&mut self, tunnel: bool, rotate: bool) {
         self.serve_error = None;
         let Some(start) = self.start_server else {
             self.set_status("This dashboard has no server to start");
@@ -237,6 +258,7 @@ impl App {
         };
         let options = ServeRequest {
             tunnel,
+            rotate,
             plan: self.plan,
             // The dashboard's rows include the remote ones, and the serve owes
             // them the same answers — the `Host`s are how it reaches back.
@@ -320,10 +342,16 @@ impl App {
         true
     }
 
-    /// Stop serving, which un-mints every link handed out.
+    /// Stop serving. The links stop answering; over the account's tunnel
+    /// they answer again on the next serve, since its tokens are kept, and
+    /// `r` is what revokes them.
     pub(super) fn stop_serving(&mut self) {
+        let kept = self.serving_on_account();
         if self.serving.take().is_some() {
-            self.set_status("Stopped serving — the links no longer answer");
+            self.set_status(match kept {
+                true => "Stopped serving — the links work again when you serve; r revokes them",
+                false => "Stopped serving — the links no longer answer",
+            });
         }
     }
 

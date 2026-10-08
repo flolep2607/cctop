@@ -802,6 +802,7 @@ impl App {
             KeyCode::Char('t') => self.start_serving(true),
             KeyCode::Char('x') => self.stop_serving(),
             KeyCode::Char('a') => self.open_connect(Mode::Serve),
+            KeyCode::Char('r') => self.serve_on_new_links(),
             // Only a tunnel's link is worth a code: the loopback one is the
             // link a phone cannot open.
             KeyCode::Char('c') => match self.serving.as_ref().is_some_and(|s| s.public.is_some()) {
