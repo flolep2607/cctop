@@ -484,10 +484,21 @@ fn bridge_port() -> u16 {
 /// sniffed like anything else — a listener on the port is a local process
 /// saying "clipboard", not proof of one.
 fn image_over_bridge(dest: &Path, port: u16) -> Attempt {
+    image_over_bridge_within(dest, port, Duration::from_millis(200))
+}
+
+/// [`image_over_bridge`] with the connect deadline given.
+///
+/// 200 ms is right for a paste gesture and wrong for a test: it is wall time,
+/// and a loaded machine can keep the connecting thread, or the softirq that
+/// finishes a loopback handshake, off the CPU for longer than that. The test
+/// of the bridge's answers then saw a listener that was there as `Missing`,
+/// once in 170 runs of the suite with every core busy.
+fn image_over_bridge_within(dest: &Path, port: u16, deadline: Duration) -> Attempt {
     use std::io::Read;
     use std::net::TcpStream;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) else {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, deadline) else {
         return Attempt::Missing;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
@@ -1092,22 +1103,34 @@ mod tests {
     /// to say "clipboard asked, nothing on it".
     #[test]
     fn the_bridges_three_answers_are_distinct() {
+        // A listener that is there is never `Missing`, however long the
+        // machine takes to connect to it; see [`image_over_bridge_within`].
+        const PATIENT: Duration = Duration::from_secs(10);
         let dir = tempfile::tempdir().expect("tempdir");
         let dest = dir.path().join("paste.png");
         let png = fake(PNG_MAGIC);
 
         let port = bridge(png.clone());
-        assert!(matches!(image_over_bridge(&dest, port), Attempt::Wrote));
+        assert!(matches!(
+            image_over_bridge_within(&dest, port, PATIENT),
+            Attempt::Wrote
+        ));
         assert_eq!(std::fs::read(&dest).expect("written"), png);
 
         // Answered, and the clipboard held no image.
         let port = bridge(Vec::new());
-        assert!(matches!(image_over_bridge(&dest, port), Attempt::Empty));
+        assert!(matches!(
+            image_over_bridge_within(&dest, port, PATIENT),
+            Attempt::Empty
+        ));
 
         // Answered, but not with an image — a listener claiming to be the
         // bridge is still just bytes to be sniffed.
         let port = bridge(b"not an image, whatever the port says".to_vec());
-        assert!(matches!(image_over_bridge(&dest, port), Attempt::Empty));
+        assert!(matches!(
+            image_over_bridge_within(&dest, port, PATIENT),
+            Attempt::Empty
+        ));
 
         // A port whose listener has gone away is refusal, not emptiness.
         //
