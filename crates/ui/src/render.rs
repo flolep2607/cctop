@@ -3705,29 +3705,27 @@ mod tests {
         app: &mut App,
         want: &[(u16, u16)],
     ) -> bool {
-        for _ in 0..50 {
+        let sized = cctop_core::test_wait::waits_for(|| {
             terminal
                 .draw(|frame| {
                     draw(frame, app);
                 })
                 .expect("draw");
-            let sized = app.tabs.iter_mut().any(|tab| {
+            app.tabs.iter_mut().any(|tab| {
                 tab.pump();
                 tab.panes.len() == want.len()
                     && tab.panes.iter().zip(want).all(|(p, w)| p.view.size == *w)
-            });
-            if sized {
-                // One more frame, so what is asserted was drawn at the final size.
-                terminal
-                    .draw(|frame| {
-                        draw(frame, app);
-                    })
-                    .expect("draw");
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            })
+        });
+        if sized {
+            // One more frame, so what is asserted was drawn at the final size.
+            terminal
+                .draw(|frame| {
+                    draw(frame, app);
+                })
+                .expect("draw");
         }
-        false
+        sized
     }
 
     /// Draw until `text` appears on the screen, or the budget runs out.
@@ -3746,7 +3744,7 @@ mod tests {
         app: &mut App,
         text: &str,
     ) -> bool {
-        for _ in 0..50 {
+        cctop_core::test_wait::waits_for(|| {
             app.tabs.iter_mut().for_each(|tab| {
                 tab.pump();
             });
@@ -3756,15 +3754,10 @@ mod tests {
                 })
                 .expect("draw");
             let area = terminal.backend().buffer().area;
-            if screen(terminal, area.width, area.height)
+            screen(terminal, area.width, area.height)
                 .iter()
                 .any(|row| row.contains(text))
-            {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        false
+        })
     }
 
     /// The way in has to be on screen before anyone has used it: with no tabs

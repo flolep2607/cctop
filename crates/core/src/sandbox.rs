@@ -2607,24 +2607,16 @@ mod tests {
             .expect("spawn");
         // The sleep itself, whose argv is its path and then `30`.
         let sleeping = || holding(&format!("{token}\0"));
-        let started = Instant::now();
-        while sleeping().is_empty() {
-            assert!(started.elapsed() < Duration::from_secs(10), "never started");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        crate::test_wait::eventually_true("the command to start", || !sleeping().is_empty());
         // What dying looks like from the far side: the channel's stdin closes.
         drop(child.stdin.take());
-        let started = Instant::now();
-        loop {
-            if child.try_wait().expect("wait").is_some() && holding(&token).is_empty() {
-                break;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the command outlived its channel: {:?}",
-                holding(&token)
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let gone = crate::test_wait::waits_for(|| {
+            child.try_wait().expect("wait").is_some() && holding(&token).is_empty()
+        });
+        assert!(
+            gone,
+            "the command outlived its channel: {:?}",
+            holding(&token)
+        );
     }
 }

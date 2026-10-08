@@ -12,7 +12,8 @@
 //! reads as a *decision*, and a stdout that has to stay empty.
 
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -28,17 +29,10 @@ use std::time::{Duration, Instant};
 /// build that never finishes.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// How long the wedged fixture's filler may make no new connection before that
-/// counts as it being blocked rather than slow. Only used to build the fixture,
-/// and only on a machine whose `SOMAXCONN` is large enough that filling it is
-/// not instant.
-const QUIET: Duration = Duration::from_millis(500);
-
 /// The one answer that is not silence, spelled exactly as `answer_for` spells
-/// it. Compared rather than parsed because there is no JSON in an integration
-/// test's reach — the crate is a binary, so only `[dev-dependencies]` are
-/// visible — and because this line is short enough that equality says more than
-/// a parser would.
+/// it. Compared rather than parsed because this line is short enough that
+/// equality says more than a parser would: a parse would also pass a line
+/// that carried a second field.
 const NO_OP: &str = r#"{"continue": true}"#;
 
 /// One `cctop hook` fire, finished.
@@ -226,47 +220,23 @@ fn a_hook_whose_cctop_has_stopped_accepting_still_returns() {
     let hooks = hooks(&dir);
     std::fs::create_dir_all(&hooks).unwrap();
     let path = hooks.join("1-0000000000000000001.sock");
-    let _listener = UnixListener::bind(&path).expect("bind");
-
-    // Fill the queue and stay there. The thread blocks on the connect that has
-    // no room left, holding every connection it made — dropping those would
-    // drain the queue and unfill the fixture. It reports each connection, which
-    // is how the test below can tell a full queue from a slow machine.
-    let (queued_tx, queued_rx) = std::sync::mpsc::channel::<()>();
-    let filler = std::thread::spawn({
-        let path = path.clone();
-        move || {
-            let mut queued = Vec::new();
-            while let Ok(stream) = UnixStream::connect(&path) {
-                queued.push(stream);
-                if queued_tx.send(()).is_err() {
-                    break;
-                }
-            }
-            queued
-        }
-    });
-    queued_rx
-        .recv_timeout(PATIENCE)
-        .expect("the filler reached the listener at all");
-    // Wedged is not a number of connections, it is the filler going quiet: the
-    // connect with no room left is where it stops. `UnixListener::bind` listens
-    // on `SOMAXCONN`, which is 128 on some machines and 4096 on others, so
-    // guessing a count would be guessing the machine rather than the fixture.
-    // Several windows in a row, because one quiet window on a loaded machine
-    // only says the filler was descheduled.
-    let mut windows = 0;
-    while windows < 3 {
-        windows = if queued_rx.recv_timeout(QUIET).is_ok() {
-            0
-        } else {
-            windows + 1
-        };
-    }
-    assert!(
-        !filler.is_finished(),
-        "the filler gave up rather than blocking"
+    let listener = UnixListener::bind(&path).expect("bind");
+    // `bind` listens on `SOMAXCONN`, 4096 here and 128 elsewhere, and the
+    // fixture holds every connection it makes; listening again on the same
+    // socket is how Linux takes a new backlog, and one is plenty.
+    // SAFETY: the listener's own descriptor, which it keeps owning.
+    assert_eq!(
+        unsafe { libc::listen(listener.as_raw_fd(), 1) },
+        0,
+        "listen"
     );
+
+    // Fill the queue and know it is full: a non-blocking connect that finds no
+    // room is refused with EAGAIN rather than left waiting, so the kernel says
+    // when the fixture is done instead of a quiet second on the clock. Held
+    // until the end, because dropping them would drain the queue.
+    let held = cctop_core::test_wait::fill_queue(&path);
+    assert!(!held.is_empty(), "the fixture never reached the listener");
 
     let fired = fire(
         &dir,
@@ -286,9 +256,7 @@ fn a_hook_whose_cctop_has_stopped_accepting_still_returns() {
         "the hook deleted a live cctop's socket because it would not answer"
     );
 
-    // Releasing the filler needs the listener, so it is deliberately not joined:
-    // the thread is still inside the connect that has no room, and closing the
-    // listener above on the way out is what lets it go.
-    drop(filler);
+    drop(held);
+    drop(listener);
     let _ = std::fs::remove_dir_all(&dir);
 }
