@@ -14,6 +14,10 @@ fragment carries everything the frontend needs, and terminal traffic still runs
 end to end between this code in the browser and the rmux daemon — cctop serves
 the page, never the terminal.
 
+It is also what a connected account's share hostname serves at its root, so a
+`W` link reads `https://<share host>/#…` (`share_host.rs`). There it is the only
+page on a listener with no other route, and no token of cctop's ever reaches it.
+
 ## Why a pinned copy, not a proxy
 
 Served from cctop's origin, this code runs with the same privileges as cctop's
